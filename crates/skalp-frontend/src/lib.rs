@@ -15,6 +15,7 @@ pub mod typeck;
 pub mod parser;
 pub mod semantic;
 pub mod hir;
+pub mod hir_builder;
 
 pub use lexer::Lexer;
 pub use parser::Parser;

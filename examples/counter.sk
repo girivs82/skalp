@@ -1,79 +1,21 @@
-// Simple up-down counter example in SKALP
+// Simple counter example in SKALP
 
 entity Counter {
-    in clk: logic<'main>
-    in reset: logic<'main>
-    in up: logic<'main>
-    in enable: logic<'main>
-    out count: logic<'main>[8]
-} with intent {
-    throughput: 100MHz,
-    latency: 1_cycle,
-    optimization: balanced(speed: 0.7, area: 0.3)
+    in clk: clock
+    in reset: reset
+    out count: nat[8]
 }
 
 impl Counter {
-    signal internal_count: logic<'main>[8];
+    signal counter: nat[8] = 0
 
-    always_ff (posedge clk) {
-        if reset {
-            internal_count <= 8'h00;
-        } else if enable {
-            if up {
-                internal_count <= internal_count + 1;
-            } else {
-                internal_count <= internal_count - 1;
-            }
+    on(clk.rise) {
+        if (reset) {
+            counter <= 0
+        } else {
+            counter <= counter + 1
         }
     }
 
-    // Continuous assignment
-    count = internal_count;
-}
-
-// Test bench
-entity CounterTest {
-    signal clk: logic<'test>;
-    signal reset: logic<'test>;
-    signal up: logic<'test>;
-    signal enable: logic<'test>;
-    signal count: logic<'test>[8];
-
-    // Instantiate DUT
-    Counter dut {
-        .clk(clk),
-        .reset(reset),
-        .up(up),
-        .enable(enable),
-        .count(count)
-    };
-
-    initial {
-        // Initialize signals
-        clk = 0;
-        reset = 1;
-        up = 1;
-        enable = 0;
-
-        // Clock generation
-        loop {
-            #5ns clk = !clk;
-        }
-    }
-
-    initial {
-        // Test sequence
-        #10ns reset = 0;
-        #10ns enable = 1;
-        
-        // Count up for 10 cycles
-        #100ns up = 0;
-        
-        // Count down for 5 cycles
-        #50ns enable = 0;
-        
-        // Finish simulation
-        #20ns;
-        assert count == 8'd5 : "Final count should be 5";
-    }
+    count = counter
 }
