@@ -247,6 +247,12 @@ impl HirToMir {
             hir::HirStatement::Block(stmts) => {
                 Some(Statement::Block(self.convert_statements(stmts)))
             }
+            hir::HirStatement::Flow(_flow_stmt) => {
+                // Flow statements represent pipeline stages
+                // For now, treat them as sequential blocks
+                // TODO: Implement proper pipeline transformation
+                None
+            }
         }
     }
 

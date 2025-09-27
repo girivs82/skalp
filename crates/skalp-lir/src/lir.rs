@@ -29,7 +29,7 @@ pub struct Gate {
 }
 
 /// Types of hardware gates
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GateType {
     And,
     Or,

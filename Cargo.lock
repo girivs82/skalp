@@ -1515,6 +1515,7 @@ dependencies = [
  "indexmap",
  "petgraph",
  "serde",
+ "skalp-mir",
  "thiserror",
 ]
 
@@ -1526,7 +1527,6 @@ dependencies = [
  "petgraph",
  "serde",
  "skalp-frontend",
- "skalp-lir",
  "thiserror",
 ]
 

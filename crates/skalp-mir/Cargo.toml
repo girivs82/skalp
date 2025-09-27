@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 skalp-frontend = { path = "../skalp-frontend" }
-skalp-lir = { path = "../skalp-lir" }
 petgraph = "0.6"
 indexmap = "2.0"
 thiserror = "1.0"

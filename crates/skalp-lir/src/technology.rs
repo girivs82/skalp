@@ -3,6 +3,28 @@
 use serde::{Deserialize, Serialize};
 use crate::primitives::{Primitive, PrimitiveInfo};
 
+/// Technology definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Technology {
+    /// Technology name
+    pub name: String,
+    /// Technology kind
+    pub kind: TechnologyKind,
+    /// Process node size in nanometers
+    pub process_nm: u32,
+}
+
+/// Kind of technology target
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TechnologyKind {
+    /// FPGA target
+    FPGA,
+    /// ASIC standard cell
+    ASIC,
+    /// Generic technology
+    Generic,
+}
+
 /// Technology library definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TechnologyLibrary {
