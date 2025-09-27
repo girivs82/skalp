@@ -123,7 +123,10 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::VAR_KW) => self.parse_variable_decl(),
                 Some(SyntaxKind::CONST_KW) => self.parse_constant_decl(),
                 Some(SyntaxKind::ON_KW) => self.parse_event_block(),
-                Some(SyntaxKind::IDENT) => self.parse_assignment_stmt(),
+                Some(SyntaxKind::IDENT) => {
+                    // Could be an assignment or start of another construct
+                    self.parse_assignment_or_statement();
+                }
                 Some(SyntaxKind::R_BRACE) => break,
                 _ => {
                     self.error_and_bump("expected implementation item");
@@ -272,6 +275,13 @@ impl<'a> ParseState<'a> {
         }
 
         self.finish_node();
+    }
+
+    /// Parse assignment or other statement starting with identifier
+    fn parse_assignment_or_statement(&mut self) {
+        // For now, just parse as assignment
+        // In the future, we could look ahead to determine the statement type
+        self.parse_assignment_stmt();
     }
 
     /// Parse assignment statement

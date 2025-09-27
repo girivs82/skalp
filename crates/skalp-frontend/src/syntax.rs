@@ -252,10 +252,9 @@ impl SyntaxKind {
     pub fn is_operator(self) -> bool {
         matches!(
             self,
-            NON_BLOCKING_ASSIGN
-                | BLOCKING_ASSIGN
-                | ASSIGN
-                | EQ
+            // Assignment operators are not binary operators in expressions
+            // NON_BLOCKING_ASSIGN | BLOCKING_ASSIGN | ASSIGN
+            EQ
                 | NEQ
                 | LT
                 | GT

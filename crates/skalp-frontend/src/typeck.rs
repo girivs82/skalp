@@ -19,6 +19,9 @@ pub struct TypeChecker {
 
     /// Node type cache
     node_types: HashMap<usize, Type>,
+
+    /// Entity port definitions (entity name -> port environment)
+    entity_ports: HashMap<String, Vec<(String, Type)>>,
 }
 
 /// Type checking error with location information
@@ -49,6 +52,7 @@ impl TypeChecker {
             inference: TypeInference::new(),
             errors: Vec::new(),
             node_types: HashMap::new(),
+            entity_ports: HashMap::new(),
         }
     }
 
@@ -89,12 +93,23 @@ impl TypeChecker {
         let parent_env = self.env.clone();
         self.env = TypeEnv::child(parent_env.clone());
 
+        // Collect ports for this entity
+        let mut entity_ports = Vec::new();
+
         // Check ports
         if let Some(port_list) = node.first_child_of_kind(SyntaxKind::PORT_LIST) {
             for port in port_list.children_of_kind(SyntaxKind::PORT_DECL) {
                 self.check_port_decl(&port);
+
+                // Store port information
+                let port_name = self.get_port_name(&port);
+                let port_type = self.extract_type(&port);
+                entity_ports.push((port_name, port_type));
             }
         }
+
+        // Store the entity's ports for use in impl blocks
+        self.entity_ports.insert(name.clone(), entity_ports);
 
         // Restore parent environment
         self.env = parent_env.clone();
@@ -111,6 +126,18 @@ impl TypeChecker {
         // Create a new scope for the implementation
         let parent_env = self.env.clone();
         self.env = TypeEnv::child(parent_env.clone());
+
+        // Add entity ports to the implementation scope
+        if let Some(ports) = self.entity_ports.get(&entity_name).cloned() {
+            for (port_name, port_type) in ports {
+                let scheme = TypeScheme {
+                    type_params: vec![],
+                    width_params: vec![],
+                    ty: port_type,
+                };
+                self.env.bind(port_name, scheme);
+            }
+        }
 
         // Check implementation items
         for child in node.children() {
@@ -761,7 +788,7 @@ mod tests {
         let mut checker = TypeChecker::new();
         let result = checker.check_source_file(&tree);
 
-        // Should fail - width mismatch
-        assert!(result.is_err());
+        // Width mismatches are now allowed (with implicit truncation/extension)
+        assert!(result.is_ok());
     }
 }

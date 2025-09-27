@@ -84,6 +84,14 @@ fn test_complete_pipeline() {
 
     // Build HIR
     let hir_result = build_hir(&tree);
+
+    // Debug print any errors
+    if let Err(ref errors) = hir_result {
+        for err in errors {
+            eprintln!("HIR Error: {}", err.message);
+        }
+    }
+
     assert!(hir_result.is_ok());
 
     let hir = hir_result.unwrap();
@@ -134,3 +142,4 @@ fn test_error_recovery() {
     // Should still produce a tree despite the error
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
 }
+

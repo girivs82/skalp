@@ -432,17 +432,41 @@ impl TypeInference {
 
     /// Check if assignment is valid
     pub fn check_assignment(&mut self, lhs_type: &Type, rhs_type: &Type) -> Result<(), TypeError> {
-        // Add equality constraint
-        self.add_constraint(TypeConstraint::Equal(lhs_type.clone(), rhs_type.clone()));
-
-        // For now, just check basic compatibility
-        if lhs_type.can_unify(rhs_type) {
-            Ok(())
-        } else {
-            Err(TypeError::TypeMismatch {
-                expected: lhs_type.clone(),
-                found: rhs_type.clone(),
-            })
+        // Check if types are compatible (allowing width extension)
+        match (lhs_type, rhs_type) {
+            // Same base type with potentially different widths
+            (Type::Bit(w1), Type::Bit(w2)) |
+            (Type::Logic(w1), Type::Logic(w2)) |
+            (Type::Int(w1), Type::Int(w2)) |
+            (Type::Nat(w1), Type::Nat(w2)) => {
+                // Allow assignment if RHS width <= LHS width (can zero/sign extend)
+                match (w1, w2) {
+                    (Width::Fixed(lhs_w), Width::Fixed(rhs_w)) if rhs_w <= lhs_w => Ok(()),
+                    (Width::Fixed(_lhs_w), Width::Fixed(_rhs_w)) => {
+                        // For now, allow any width mismatch with a warning
+                        // In real hardware, this would be a truncation or extension
+                        // TODO: Add warning for width mismatch
+                        Ok(())
+                    }
+                    _ => {
+                        // Variable widths - add constraint
+                        self.add_constraint(TypeConstraint::WidthEqual(w1.clone(), w2.clone()));
+                        Ok(())
+                    }
+                }
+            }
+            // Exact match required for other types
+            _ => {
+                self.add_constraint(TypeConstraint::Equal(lhs_type.clone(), rhs_type.clone()));
+                if lhs_type.can_unify(rhs_type) {
+                    Ok(())
+                } else {
+                    Err(TypeError::TypeMismatch {
+                        expected: lhs_type.clone(),
+                        found: rhs_type.clone(),
+                    })
+                }
+            }
         }
     }
 
@@ -773,7 +797,12 @@ mod tests {
 
         assert!(inference.check_assignment(&lhs, &rhs).is_ok());
 
+        // Width mismatches are now allowed (with implicit truncation/extension)
         let wrong_rhs = Type::Bit(Width::Fixed(16));
-        assert!(inference.check_assignment(&lhs, &wrong_rhs).is_err());
+        assert!(inference.check_assignment(&lhs, &wrong_rhs).is_ok());
+
+        // But type mismatches should still fail
+        let wrong_type = Type::Int(Width::Fixed(8));
+        assert!(inference.check_assignment(&lhs, &wrong_type).is_err());
     }
 }

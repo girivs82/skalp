@@ -30,6 +30,9 @@ pub struct HirBuilderContext {
 
     /// Errors collected during HIR building
     errors: Vec<HirError>,
+
+    /// Built entities (for accessing ports during impl building)
+    built_entities: HashMap<String, HirEntity>,
 }
 
 /// Symbol table for name resolution
@@ -80,6 +83,7 @@ impl HirBuilderContext {
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
+            built_entities: HashMap::new(),
         }
     }
 
@@ -102,6 +106,8 @@ impl HirBuilderContext {
             match child.kind() {
                 SyntaxKind::ENTITY_DECL => {
                     if let Some(entity) = self.build_entity(&child) {
+                        // Store entity for later access by implementations
+                        self.built_entities.insert(entity.name.clone(), entity.clone());
                         hir.entities.push(entity);
                     }
                 }
@@ -199,8 +205,15 @@ impl HirBuilderContext {
         // Look up entity ID
         let entity = *self.symbols.entities.get(&entity_name)?;
 
-        // Enter new scope
+        // Enter new scope and add ports to symbol table
         self.symbols.enter_scope();
+
+        // Get the built entity and add its ports to the current scope
+        if let Some(built_entity) = self.built_entities.get(&entity_name) {
+            for port in &built_entity.ports {
+                self.symbols.add_to_scope(&port.name, SymbolId::Port(port.id));
+            }
+        }
 
         let mut signals = Vec::new();
         let mut variables = Vec::new();
@@ -489,6 +502,11 @@ impl HirBuilderContext {
                 // Look up symbol
                 if let Some(symbol) = self.symbols.lookup(&name) {
                     match symbol {
+                        SymbolId::Port(id) => {
+                            // For ports, we create a special port L-value
+                            // For now, treat it as a signal
+                            Some(HirLValue::Signal(SignalId(id.0)))
+                        }
                         SymbolId::Signal(id) => Some(HirLValue::Signal(*id)),
                         SymbolId::Variable(id) => Some(HirLValue::Variable(*id)),
                         _ => None,
@@ -568,6 +586,10 @@ impl HirBuilderContext {
         // Look up symbol
         if let Some(symbol) = self.symbols.lookup(&name) {
             match symbol {
+                SymbolId::Port(id) => {
+                    // For ports in expressions, treat as signals
+                    Some(HirExpression::Signal(SignalId(id.0)))
+                }
                 SymbolId::Signal(id) => Some(HirExpression::Signal(*id)),
                 SymbolId::Variable(id) => Some(HirExpression::Variable(*id)),
                 SymbolId::Constant(id) => Some(HirExpression::Constant(*id)),
