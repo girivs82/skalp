@@ -205,6 +205,7 @@ pub enum HirStatement {
     Assignment(HirAssignment),
     If(HirIfStatement),
     Match(HirMatchStatement),
+    Flow(HirFlowStatement),
     Block(Vec<HirStatement>),
 }
 
@@ -235,6 +236,31 @@ pub struct HirMatchArm {
     pub pattern: HirPattern,
     /// Statements
     pub statements: Vec<HirStatement>,
+}
+
+/// Flow statement in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirFlowStatement {
+    /// Pipeline stages
+    pub pipeline: HirFlowPipeline,
+}
+
+/// Flow pipeline in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirFlowPipeline {
+    /// Starting stage
+    pub start: HirPipelineStage,
+    /// Subsequent stages
+    pub stages: Vec<HirPipelineStage>,
+}
+
+/// Pipeline stage in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirPipelineStage {
+    /// Expression stage
+    Expression(HirExpression),
+    /// Block stage with statements
+    Block(Vec<HirStatement>),
 }
 
 /// Expressions in HIR

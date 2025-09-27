@@ -24,6 +24,10 @@ pub enum Item {
     Intent(IntentDecl),
     /// Requirement specification
     Requirement(RequirementDecl),
+    /// Trait definition
+    Trait(TraitDef),
+    /// Trait implementation
+    TraitImpl(TraitImpl),
 }
 
 /// Entity declaration
@@ -190,6 +194,8 @@ pub enum Statement {
     If(IfStatement),
     /// Match statement
     Match(MatchStatement),
+    /// Flow statement
+    Flow(FlowStatement),
     /// Block statement
     Block(BlockStatement),
 }
@@ -227,6 +233,35 @@ pub struct MatchArm {
     pub body: Statement,
     /// Span in source code
     pub span: std::ops::Range<usize>,
+}
+
+/// Flow statement for pipelined designs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowStatement {
+    /// Pipeline stages connected by |> operators
+    pub pipeline: FlowPipeline,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Flow pipeline with stages
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowPipeline {
+    /// Starting expression or stage
+    pub start: PipelineStage,
+    /// Subsequent stages connected by |>
+    pub stages: Vec<PipelineStage>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Pipeline stage - can be an expression or a block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PipelineStage {
+    /// Simple expression
+    Expression(Expression),
+    /// Block of statements
+    Block(BlockStatement),
 }
 
 /// Block statement
@@ -492,4 +527,158 @@ pub enum VerificationMethod {
     FormalVerification,
     Testing,
     Review,
+}
+
+/// Trait definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitDef {
+    /// Trait name
+    pub name: String,
+    /// Generic parameters
+    pub generics: Vec<Generic>,
+    /// Super traits
+    pub super_traits: Vec<String>,
+    /// Trait items
+    pub items: Vec<TraitItem>,
+    /// Where clause
+    pub where_clause: Option<WhereClause>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Trait implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitImpl {
+    /// Trait name
+    pub trait_name: String,
+    /// Target type (entity or type being implemented for)
+    pub target: String,
+    /// Generic parameters
+    pub generics: Vec<Generic>,
+    /// Implementation items
+    pub items: Vec<TraitImplItem>,
+    /// Where clause
+    pub where_clause: Option<WhereClause>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Items in a trait definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TraitItem {
+    /// Method declaration (without body)
+    Method(TraitMethod),
+    /// Associated type
+    Type(TraitType),
+    /// Associated constant
+    Const(TraitConst),
+}
+
+/// Trait method declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitMethod {
+    /// Method name
+    pub name: String,
+    /// Parameters
+    pub params: Vec<(String, Type)>,
+    /// Return type
+    pub return_type: Option<Type>,
+    /// Default implementation
+    pub default_impl: Option<Vec<Statement>>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Trait associated type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitType {
+    /// Type name
+    pub name: String,
+    /// Bounds on the type
+    pub bounds: Vec<String>,
+    /// Default type
+    pub default: Option<Type>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Trait associated constant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitConst {
+    /// Constant name
+    pub name: String,
+    /// Constant type
+    pub const_type: Type,
+    /// Default value
+    pub default: Option<Expression>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Items in a trait implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TraitImplItem {
+    /// Method implementation
+    Method(TraitImplMethod),
+    /// Associated type definition
+    Type(TraitImplType),
+    /// Associated constant definition
+    Const(TraitImplConst),
+}
+
+/// Method implementation in a trait
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitImplMethod {
+    /// Method name
+    pub name: String,
+    /// Parameters
+    pub params: Vec<(String, Type)>,
+    /// Return type
+    pub return_type: Option<Type>,
+    /// Method body
+    pub body: Vec<Statement>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Associated type implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitImplType {
+    /// Type name
+    pub name: String,
+    /// Type value
+    pub value: Type,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Associated constant implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitImplConst {
+    /// Constant name
+    pub name: String,
+    /// Constant value
+    pub value: Expression,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Where clause for generic constraints
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhereClause {
+    /// Predicates in the where clause
+    pub predicates: Vec<WherePredicate>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Predicate in a where clause
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WherePredicate {
+    /// Type being constrained
+    pub type_param: String,
+    /// Trait bounds
+    pub bounds: Vec<String>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
 }

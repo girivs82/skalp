@@ -143,3 +143,185 @@ fn test_error_recovery() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
 }
 
+#[test]
+fn test_match_expression_parsing() {
+    let source = r#"
+        entity Decoder {
+            in select: nat[2]
+            out output: nat[4]
+        }
+
+        impl Decoder {
+            match select {
+                0 -> output = 1,
+                1 -> output = 2,
+                2 -> output = 4,
+                _ -> output = 0,
+            }
+        }
+    "#;
+
+    // Parse
+    let tree = parse(source);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+
+    // Should find the match statement in the syntax tree
+    let mut found_match = false;
+    fn find_match_stmt(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::MATCH_STMT {
+            return true;
+        }
+        for child in node.children() {
+            if find_match_stmt(&child) {
+                return true;
+            }
+        }
+        false
+    }
+    found_match = find_match_stmt(&tree);
+    assert!(found_match, "Match statement not found in parsed tree");
+
+    // Build HIR
+    let hir_result = build_hir(&tree);
+
+    // Debug print any errors
+    if let Err(ref errors) = hir_result {
+        for err in errors {
+            eprintln!("HIR Error: {}", err.message);
+        }
+    }
+
+    assert!(hir_result.is_ok());
+    let hir = hir_result.unwrap();
+
+    // Check HIR contains match statement
+    assert_eq!(hir.entities.len(), 1);
+    assert_eq!(hir.implementations.len(), 1);
+
+    // TODO: Add more specific checks for match statement HIR structure
+}
+
+#[test]
+fn test_pattern_matching_types() {
+    let source = r#"
+        entity PatternTest {
+            in input: nat[4]
+            out result: bit
+        }
+
+        impl PatternTest {
+            match input {
+                0b1010 -> result = 1,
+                0x0F -> result = 1,
+                15 -> result = 1,
+                x -> result = 0,
+            }
+        }
+    "#;
+
+    // Parse
+    let tree = parse(source);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+
+    // Build HIR - should handle different literal patterns
+    let hir_result = build_hir(&tree);
+
+    if let Err(ref errors) = hir_result {
+        for err in errors {
+            eprintln!("HIR Error: {}", err.message);
+        }
+    }
+
+    // Should successfully parse different pattern types
+    assert!(hir_result.is_ok());
+}
+
+#[test]
+fn test_flow_block_parsing() {
+    let source = r#"
+        entity Pipeline {
+            in data_in: nat[8]
+            out data_out: nat[8]
+        }
+
+        impl Pipeline {
+            flow {
+                data_in |> stage1 |> stage2 |> data_out
+            }
+        }
+    "#;
+
+    // Parse
+    let tree = parse(source);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+
+    // Should find the flow statement in the syntax tree
+    let mut found_flow = false;
+    fn find_flow_stmt(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::FLOW_STMT {
+            return true;
+        }
+        for child in node.children() {
+            if find_flow_stmt(&child) {
+                return true;
+            }
+        }
+        false
+    }
+    found_flow = find_flow_stmt(&tree);
+    assert!(found_flow, "Flow statement not found in parsed tree");
+
+    // Build HIR
+    let hir_result = build_hir(&tree);
+
+    // Debug print any errors
+    if let Err(ref errors) = hir_result {
+        for err in errors {
+            eprintln!("HIR Error: {}", err.message);
+        }
+    }
+
+    assert!(hir_result.is_ok());
+    let hir = hir_result.unwrap();
+
+    // Check HIR contains flow statement
+    assert_eq!(hir.entities.len(), 1);
+    assert_eq!(hir.implementations.len(), 1);
+}
+
+#[test]
+fn test_flow_block_with_stages() {
+    let source = r#"
+        entity ComplexPipeline {
+            in input: nat[16]
+            out output: nat[16]
+        }
+
+        impl ComplexPipeline {
+            flow {
+                input
+                |> { decode_result = decode(input) }
+                |> { exec_result = execute(decode_result) }
+                |> { output = writeback(exec_result) }
+            }
+        }
+    "#;
+
+
+    // Parse
+    let tree = parse(source);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+
+    // Build HIR - should handle block stages in pipeline
+    let hir_result = build_hir(&tree);
+
+    if let Err(ref errors) = hir_result {
+        for err in errors {
+            eprintln!("HIR Error: {}", err.message);
+        }
+    }
+
+    // Should successfully parse flow blocks with complex stages
+    assert!(hir_result.is_ok());
+}
+

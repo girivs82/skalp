@@ -24,12 +24,24 @@ pub enum SyntaxKind {
     IF_KW,
     ELSE_KW,
     MATCH_KW,
+    FLOW_KW,
     WITH_KW,
     INTENT_KW,
     PROTOCOL_KW,
     REQUIREMENT_KW,
     ASYNC_KW,
     AWAIT_KW,
+    TRAIT_KW,
+    FOR_KW,
+    TYPE_KW,
+    WHERE_KW,
+    TIMING_KW,
+    POWER_KW,
+    AREA_KW,
+    THROUGHPUT_KW,
+    LATENCY_KW,
+    MINIMIZE_KW,
+    MAXIMIZE_KW,
 
     // Type keywords
     BIT_KW,
@@ -114,6 +126,8 @@ pub enum SyntaxKind {
     PROTOCOL_DECL,
     INTENT_DECL,
     REQUIREMENT_DECL,
+    TRAIT_DEF,
+    TRAIT_IMPL,
 
     // Entity parts
     PORT_LIST,
@@ -136,6 +150,11 @@ pub enum SyntaxKind {
     IF_STMT,
     MATCH_STMT,
     BLOCK_STMT,
+    FLOW_STMT,
+
+    // Flow pipeline
+    FLOW_PIPELINE,
+    PIPELINE_STAGE,
 
     // Expressions
     LITERAL_EXPR,
@@ -190,6 +209,17 @@ pub enum SyntaxKind {
     ARG_LIST,
     ARG,
 
+    // Trait parts
+    TRAIT_ITEM_LIST,
+    TRAIT_ITEM,
+    TRAIT_METHOD,
+    TRAIT_CONST,
+    TRAIT_TYPE,
+    TRAIT_BOUND_LIST,
+    TRAIT_BOUND,
+    WHERE_CLAUSE,
+    WHERE_PREDICATE,
+
     // Miscellaneous
     NAME,
     NAME_REF,
@@ -233,6 +263,10 @@ impl SyntaxKind {
                 | REQUIREMENT_KW
                 | ASYNC_KW
                 | AWAIT_KW
+                | TRAIT_KW
+                | FOR_KW
+                | TYPE_KW
+                | WHERE_KW
                 | BIT_KW
                 | LOGIC_KW
                 | INT_KW
@@ -274,7 +308,8 @@ impl SyntaxKind {
                 | PIPE_PIPE
                 | SHL
                 | SHR
-                | PIPELINE
+                // Note: PIPELINE (|>) is not a binary expression operator
+                // It's only used in flow statements
                 | ARROW
                 | LEFT_ARROW
         )
@@ -406,12 +441,24 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::If => IF_KW,
             Token::Else => ELSE_KW,
             Token::Match => MATCH_KW,
+            Token::Flow => FLOW_KW,
             Token::With => WITH_KW,
             Token::Intent => INTENT_KW,
             Token::Protocol => PROTOCOL_KW,
             Token::Requirement => REQUIREMENT_KW,
             Token::Async => ASYNC_KW,
             Token::Await => AWAIT_KW,
+            Token::Trait => TRAIT_KW,
+            Token::For => FOR_KW,
+            Token::Type => TYPE_KW,
+            Token::Where => WHERE_KW,
+            Token::Timing => TIMING_KW,
+            Token::Power => POWER_KW,
+            Token::Area => AREA_KW,
+            Token::Throughput => THROUGHPUT_KW,
+            Token::Latency => LATENCY_KW,
+            Token::Minimize => MINIMIZE_KW,
+            Token::Maximize => MAXIMIZE_KW,
 
             Token::Bit => BIT_KW,
             Token::Logic => LOGIC_KW,

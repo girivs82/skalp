@@ -48,6 +48,9 @@ pub enum Token {
     #[token("match")]
     Match,
 
+    #[token("flow")]
+    Flow,
+
     #[token("with")]
     With,
 
@@ -65,6 +68,40 @@ pub enum Token {
 
     #[token("await")]
     Await,
+
+    #[token("trait")]
+    Trait,
+
+    #[token("for")]
+    For,
+
+    #[token("type")]
+    Type,
+
+    #[token("where")]
+    Where,
+
+    // Intent-related keywords
+    #[token("timing")]
+    Timing,
+
+    #[token("power")]
+    Power,
+
+    #[token("area")]
+    Area,
+
+    #[token("throughput")]
+    Throughput,
+
+    #[token("latency")]
+    Latency,
+
+    #[token("minimize")]
+    Minimize,
+
+    #[token("maximize")]
+    Maximize,
 
     // Type keywords
     #[token("bit")]
@@ -265,13 +302,13 @@ impl fmt::Display for Token {
 }
 
 /// Parse binary literal (0b1010 -> 10)
-fn parse_binary(input: &str) -> Option<u64> {
+pub fn parse_binary(input: &str) -> Option<u64> {
     let without_prefix = &input[2..]; // Remove "0b"
     u64::from_str_radix(without_prefix, 2).ok()
 }
 
 /// Parse hex literal (0xFF -> 255)
-fn parse_hex(input: &str) -> Option<u64> {
+pub fn parse_hex(input: &str) -> Option<u64> {
     let without_prefix = &input[2..]; // Remove "0x"
     u64::from_str_radix(without_prefix, 16).ok()
 }

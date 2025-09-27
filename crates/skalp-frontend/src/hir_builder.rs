@@ -3,6 +3,7 @@
 //! Transforms the syntax tree into HIR (High-level Intermediate Representation)
 
 use crate::hir::*;
+use crate::lexer::{parse_binary, parse_hex};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt, SyntaxToken};
 use crate::types::{Type, Width};
 use crate::typeck::TypeChecker;
@@ -412,6 +413,11 @@ impl HirBuilderContext {
                         statements.push(HirStatement::Match(match_stmt));
                     }
                 }
+                SyntaxKind::FLOW_STMT => {
+                    if let Some(flow_stmt) = self.build_flow_statement(&child) {
+                        statements.push(HirStatement::Flow(flow_stmt));
+                    }
+                }
                 SyntaxKind::BLOCK_STMT => {
                     let block_stmts = self.build_statements(&child);
                     statements.push(HirStatement::Block(block_stmts));
@@ -421,6 +427,46 @@ impl HirBuilderContext {
         }
 
         statements
+    }
+
+    /// Build single statement
+    fn build_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
+        match node.kind() {
+            SyntaxKind::ASSIGNMENT_STMT => {
+                let assignment_type = self.determine_assignment_type(node);
+                if let Some(assignment) = self.build_assignment(node, assignment_type) {
+                    Some(HirStatement::Assignment(assignment))
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::IF_STMT => {
+                if let Some(if_stmt) = self.build_if_statement(node) {
+                    Some(HirStatement::If(if_stmt))
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::MATCH_STMT => {
+                if let Some(match_stmt) = self.build_match_statement(node) {
+                    Some(HirStatement::Match(match_stmt))
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::FLOW_STMT => {
+                if let Some(flow_stmt) = self.build_flow_statement(node) {
+                    Some(HirStatement::Flow(flow_stmt))
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::BLOCK_STMT => {
+                let block_stmts = self.build_statements(node);
+                Some(HirStatement::Block(block_stmts))
+            }
+            _ => None,
+        }
     }
 
     /// Build assignment
@@ -490,13 +536,186 @@ impl HirBuilderContext {
                 SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR))
             .and_then(|n| self.build_expression(&n))?;
 
-        // Build match arms
-        let arms = Vec::new(); // TODO: Implement match arm parsing
+        // Build match arms from MATCH_ARM_LIST
+        let mut arms = Vec::new();
+        if let Some(arm_list) = node.children().find(|n| n.kind() == SyntaxKind::MATCH_ARM_LIST) {
+            for arm_node in arm_list.children().filter(|n| n.kind() == SyntaxKind::MATCH_ARM) {
+                if let Some(arm) = self.build_match_arm(&arm_node) {
+                    arms.push(arm);
+                }
+            }
+        }
 
         Some(HirMatchStatement {
             expr,
             arms,
         })
+    }
+
+    /// Build match arm
+    fn build_match_arm(&mut self, node: &SyntaxNode) -> Option<HirMatchArm> {
+        // Find pattern
+        let pattern = node.children()
+            .find(|n| matches!(n.kind(),
+                SyntaxKind::LITERAL_PATTERN | SyntaxKind::IDENT_PATTERN |
+                SyntaxKind::WILDCARD_PATTERN | SyntaxKind::TUPLE_PATTERN))
+            .and_then(|n| self.build_pattern(&n))?;
+
+        // Find statements (after the arrow)
+        let mut statements = Vec::new();
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::ASSIGNMENT_STMT | SyntaxKind::IF_STMT |
+                SyntaxKind::MATCH_STMT | SyntaxKind::BLOCK_STMT => {
+                    if let Some(stmt) = self.build_statement(&child) {
+                        statements.push(stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Some(HirMatchArm {
+            pattern,
+            statements,
+        })
+    }
+
+    /// Build flow statement
+    fn build_flow_statement(&mut self, node: &SyntaxNode) -> Option<HirFlowStatement> {
+        // Find the flow pipeline
+        let pipeline = node.children()
+            .find(|n| n.kind() == SyntaxKind::FLOW_PIPELINE)
+            .and_then(|n| self.build_flow_pipeline(&n))?;
+
+        Some(HirFlowStatement {
+            pipeline,
+        })
+    }
+
+    /// Build flow pipeline
+    fn build_flow_pipeline(&mut self, node: &SyntaxNode) -> Option<HirFlowPipeline> {
+        // Find all pipeline stages
+        let stage_nodes: Vec<_> = node.children()
+            .filter(|n| n.kind() == SyntaxKind::PIPELINE_STAGE)
+            .collect();
+
+        if stage_nodes.is_empty() {
+            return None;
+        }
+
+        // Build the first stage
+        let start = self.build_pipeline_stage(&stage_nodes[0])?;
+
+        // Build remaining stages
+        let mut stages = Vec::new();
+        for stage_node in stage_nodes.iter().skip(1) {
+            if let Some(stage) = self.build_pipeline_stage(stage_node) {
+                stages.push(stage);
+            }
+        }
+
+        Some(HirFlowPipeline {
+            start,
+            stages,
+        })
+    }
+
+    /// Build pipeline stage
+    fn build_pipeline_stage(&mut self, node: &SyntaxNode) -> Option<HirPipelineStage> {
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::BLOCK_STMT => {
+                    let statements = self.build_statements(&child);
+                    return Some(HirPipelineStage::Block(statements));
+                }
+                SyntaxKind::LITERAL_EXPR | SyntaxKind::IDENT_EXPR |
+                SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR |
+                SyntaxKind::FIELD_EXPR | SyntaxKind::INDEX_EXPR => {
+                    if let Some(expr) = self.build_expression(&child) {
+                        return Some(HirPipelineStage::Expression(expr));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Build pattern
+    fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
+        match node.kind() {
+            SyntaxKind::LITERAL_PATTERN => {
+                // Find literal child
+                let literal_node = node.children()
+                    .find(|n| matches!(n.kind(),
+                        SyntaxKind::INT_LITERAL | SyntaxKind::BIN_LITERAL |
+                        SyntaxKind::HEX_LITERAL | SyntaxKind::STRING_LITERAL))?;
+                let literal = self.build_literal_for_pattern(&literal_node)?;
+                Some(HirPattern::Literal(literal))
+            }
+            SyntaxKind::IDENT_PATTERN => {
+                // Get identifier name
+                let name = node.first_token_of_kind(SyntaxKind::IDENT)
+                    .map(|t| t.text().to_string())?;
+                Some(HirPattern::Variable(name))
+            }
+            SyntaxKind::WILDCARD_PATTERN => {
+                Some(HirPattern::Wildcard)
+            }
+            SyntaxKind::TUPLE_PATTERN => {
+                // Build patterns for tuple elements
+                let mut patterns = Vec::new();
+                for child in node.children() {
+                    if matches!(child.kind(),
+                        SyntaxKind::LITERAL_PATTERN | SyntaxKind::IDENT_PATTERN |
+                        SyntaxKind::WILDCARD_PATTERN | SyntaxKind::TUPLE_PATTERN) {
+                        if let Some(pattern) = self.build_pattern(&child) {
+                            patterns.push(pattern);
+                        }
+                    }
+                }
+                Some(HirPattern::Tuple(patterns))
+            }
+            _ => None,
+        }
+    }
+
+    /// Build literal for pattern matching
+    fn build_literal_for_pattern(&mut self, node: &SyntaxNode) -> Option<HirLiteral> {
+        if let Some(token) = node.first_child_or_token() {
+            match token.kind() {
+                SyntaxKind::INT_LITERAL => {
+                    let text = token.as_token().map(|t| t.text())?;
+                    let value = text.parse::<u64>().ok()?;
+                    Some(HirLiteral::Integer(value))
+                }
+                SyntaxKind::BIN_LITERAL => {
+                    let text = token.as_token().map(|t| t.text())?;
+                    let value = parse_binary(text)?;
+                    // Convert to bit vector
+                    let bits = format!("{:b}", value)
+                        .chars()
+                        .map(|c| c == '1')
+                        .collect();
+                    Some(HirLiteral::BitVector(bits))
+                }
+                SyntaxKind::HEX_LITERAL => {
+                    let text = token.as_token().map(|t| t.text())?;
+                    let value = parse_hex(text)?;
+                    Some(HirLiteral::Integer(value))
+                }
+                SyntaxKind::STRING_LITERAL => {
+                    let text = token.as_token().map(|t| t.text())?;
+                    // Remove quotes
+                    let s = text.trim_start_matches('"').trim_end_matches('"').to_string();
+                    Some(HirLiteral::String(s))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
     }
 
     /// Build L-value expression
@@ -559,7 +778,7 @@ impl HirBuilderContext {
                 }
                 SyntaxKind::BIN_LITERAL => {
                     let text = token.as_token().map(|t| t.text())?;
-                    let value = parse_bin_literal(text);
+                    let value = parse_binary(text)?;
                     // Convert to bit vector
                     let bits = format!("{:b}", value)
                         .chars()
@@ -569,7 +788,7 @@ impl HirBuilderContext {
                 }
                 SyntaxKind::HEX_LITERAL => {
                     let text = token.as_token().map(|t| t.text())?;
-                    let value = parse_hex_literal(text);
+                    let value = parse_hex(text)?;
                     Some(HirExpression::Literal(HirLiteral::Integer(value)))
                 }
                 SyntaxKind::STRING_LITERAL => {

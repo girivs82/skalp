@@ -52,6 +52,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::PROTOCOL_KW) => self.parse_protocol_decl(),
                 Some(SyntaxKind::INTENT_KW) => self.parse_intent_decl(),
                 Some(SyntaxKind::REQUIREMENT_KW) => self.parse_requirement_decl(),
+                Some(SyntaxKind::TRAIT_KW) => self.parse_trait_def(),
                 _ => {
                     // Unknown item - consume token as error and continue
                     self.error_and_bump("expected top-level item");
@@ -92,10 +93,54 @@ impl<'a> ParseState<'a> {
 
     /// Parse implementation block
     fn parse_impl_block(&mut self) {
+        // Start the node first
         self.start_node(SyntaxKind::IMPL_BLOCK);
 
         // 'impl' keyword
         self.expect(SyntaxKind::IMPL_KW);
+
+        // Look ahead to determine if this is a trait impl
+        // After consuming 'impl', position 0 is the next token
+        // Check if we have: <trait> for <type>
+        let is_trait_impl = {
+            let mut found_for = false;
+            let mut lookahead = 0;
+
+            // Look for 'for' keyword within the next few tokens
+            // Pattern: IDENT [<generics>] FOR IDENT
+            if self.peek_kind(0) == Some(SyntaxKind::IDENT) {
+                lookahead = 1;
+
+                // Skip generic parameters if present
+                if self.peek_kind(lookahead) == Some(SyntaxKind::LT) {
+                    // Simple skip - just look for 'for' keyword
+                    while lookahead < 10 && self.peek_kind(lookahead).is_some() {
+                        if self.peek_kind(lookahead) == Some(SyntaxKind::FOR_KW) {
+                            found_for = true;
+                            break;
+                        }
+                        lookahead += 1;
+                    }
+                } else if self.peek_kind(lookahead) == Some(SyntaxKind::FOR_KW) {
+                    found_for = true;
+                }
+            }
+            found_for
+        };
+
+        // Close the IMPL_BLOCK node and start the appropriate node type
+        self.finish_node();
+
+        if is_trait_impl {
+            self.parse_trait_impl_after_keyword();
+        } else {
+            self.parse_entity_impl_after_keyword();
+        }
+    }
+
+    /// Parse regular entity implementation after 'impl' keyword
+    fn parse_entity_impl_after_keyword(&mut self) {
+        self.start_node(SyntaxKind::IMPL_BLOCK);
 
         // Entity name
         self.expect(SyntaxKind::IDENT);
@@ -113,6 +158,42 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse trait implementation after 'impl' keyword
+    fn parse_trait_impl_after_keyword(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_IMPL);
+
+        // Trait name
+        self.expect(SyntaxKind::IDENT);
+
+        // Optional generic parameters for trait
+        if self.at(SyntaxKind::LT) {
+            self.parse_generic_params();
+        }
+
+        // 'for' keyword
+        self.expect(SyntaxKind::FOR_KW);
+
+        // Target type
+        self.expect(SyntaxKind::IDENT);
+
+        // Optional generic parameters for target
+        if self.at(SyntaxKind::LT) {
+            self.parse_generic_params();
+        }
+
+        // Optional where clause
+        if self.at(SyntaxKind::WHERE_KW) {
+            self.parse_where_clause();
+        }
+
+        // Implementation body
+        self.expect(SyntaxKind::L_BRACE);
+        self.parse_trait_impl_body();
+        self.expect(SyntaxKind::R_BRACE);
+
+        self.finish_node();
+    }
+
     /// Parse implementation body
     fn parse_impl_body(&mut self) {
         while !self.at(SyntaxKind::R_BRACE) && !self.is_at_end() {
@@ -123,6 +204,8 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::VAR_KW) => self.parse_variable_decl(),
                 Some(SyntaxKind::CONST_KW) => self.parse_constant_decl(),
                 Some(SyntaxKind::ON_KW) => self.parse_event_block(),
+                Some(SyntaxKind::MATCH_KW) => self.parse_match_statement(),
+                Some(SyntaxKind::FLOW_KW) => self.parse_flow_statement(),
                 Some(SyntaxKind::IDENT) => {
                     // Could be an assignment or start of another construct
                     self.parse_assignment_or_statement();
@@ -318,7 +401,8 @@ impl<'a> ParseState<'a> {
             match self.current_kind() {
                 Some(SyntaxKind::IF_KW) => self.parse_if_statement(),
                 Some(SyntaxKind::MATCH_KW) => self.parse_match_statement(),
-                Some(SyntaxKind::IDENT) => self.parse_assignment_stmt(),
+                Some(SyntaxKind::FLOW_KW) => self.parse_flow_statement(),
+                Some(SyntaxKind::IDENT) => self.parse_assignment_or_statement(),
                 Some(SyntaxKind::L_BRACE) => self.parse_block_statement(),
                 Some(SyntaxKind::R_BRACE) => break,
                 _ => {
@@ -351,7 +435,7 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
-    /// Parse match statement (stub for now)
+    /// Parse match statement
     fn parse_match_statement(&mut self) {
         self.start_node(SyntaxKind::MATCH_STMT);
 
@@ -359,9 +443,144 @@ impl<'a> ParseState<'a> {
         self.parse_expression();
         self.expect(SyntaxKind::L_BRACE);
 
-        // TODO: Parse match arms
+        // Parse match arms
+        self.start_node(SyntaxKind::MATCH_ARM_LIST);
+        while !self.at(SyntaxKind::R_BRACE) && !self.is_at_end() {
+            self.parse_match_arm();
+        }
+        self.finish_node();
 
         self.expect(SyntaxKind::R_BRACE);
+
+        self.finish_node();
+    }
+
+    /// Parse a single match arm
+    fn parse_match_arm(&mut self) {
+        self.start_node(SyntaxKind::MATCH_ARM);
+
+        // Parse pattern
+        self.parse_pattern();
+
+        // Expect arrow (=>)
+        self.expect(SyntaxKind::ARROW);
+
+        // Parse arm body (statement or block)
+        if self.at(SyntaxKind::L_BRACE) {
+            self.parse_block_statement();
+        } else {
+            self.parse_assignment_or_statement();
+        }
+
+        // Optional comma
+        if self.at(SyntaxKind::COMMA) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a pattern
+    fn parse_pattern(&mut self) {
+        match self.current_kind() {
+            Some(SyntaxKind::IDENT) => {
+                // Check if it's a wildcard pattern (_) or identifier pattern
+                if let Some(text) = self.current_text() {
+                    if text == "_" {
+                        // Wildcard pattern
+                        self.start_node(SyntaxKind::WILDCARD_PATTERN);
+                        self.bump();
+                        self.finish_node();
+                    } else {
+                        // Identifier pattern
+                        self.start_node(SyntaxKind::IDENT_PATTERN);
+                        self.bump();
+                        self.finish_node();
+                    }
+                } else {
+                    // Fallback to identifier pattern
+                    self.start_node(SyntaxKind::IDENT_PATTERN);
+                    self.bump();
+                    self.finish_node();
+                }
+            }
+            Some(SyntaxKind::INT_LITERAL) | Some(SyntaxKind::BIN_LITERAL) |
+            Some(SyntaxKind::HEX_LITERAL) | Some(SyntaxKind::STRING_LITERAL) => {
+                // Literal pattern
+                self.start_node(SyntaxKind::LITERAL_PATTERN);
+                self.bump(); // consume the literal token
+                self.finish_node();
+            }
+            Some(SyntaxKind::L_PAREN) => {
+                // Tuple pattern
+                self.start_node(SyntaxKind::TUPLE_PATTERN);
+                self.bump(); // (
+
+                // Parse comma-separated patterns
+                if !self.at(SyntaxKind::R_PAREN) {
+                    self.parse_pattern();
+                    while self.at(SyntaxKind::COMMA) {
+                        self.bump();
+                        if !self.at(SyntaxKind::R_PAREN) {
+                            self.parse_pattern();
+                        }
+                    }
+                }
+
+                self.expect(SyntaxKind::R_PAREN);
+                self.finish_node();
+            }
+            _ => {
+                // Error recovery - treat as wildcard
+                self.start_node(SyntaxKind::WILDCARD_PATTERN);
+                self.error("Expected pattern");
+                self.finish_node();
+            }
+        }
+    }
+
+    /// Parse flow statement
+    fn parse_flow_statement(&mut self) {
+        self.start_node(SyntaxKind::FLOW_STMT);
+
+        self.expect(SyntaxKind::FLOW_KW);
+        self.expect(SyntaxKind::L_BRACE);
+
+        // Parse the pipeline
+        self.parse_flow_pipeline();
+
+        self.expect(SyntaxKind::R_BRACE);
+
+        self.finish_node();
+    }
+
+    /// Parse flow pipeline with |> operators
+    fn parse_flow_pipeline(&mut self) {
+        self.start_node(SyntaxKind::FLOW_PIPELINE);
+
+        // Parse the first stage
+        self.parse_pipeline_stage();
+
+        // Parse subsequent stages connected by |>
+        while self.at(SyntaxKind::PIPELINE) {
+            self.bump(); // consume |>
+            self.parse_pipeline_stage();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a single pipeline stage
+    fn parse_pipeline_stage(&mut self) {
+        self.start_node(SyntaxKind::PIPELINE_STAGE);
+
+        if self.at(SyntaxKind::L_BRACE) {
+            // Block stage
+            self.parse_block_statement();
+        } else {
+            // Expression stage
+            self.parse_expression();
+        }
 
         self.finish_node();
     }
@@ -377,15 +596,77 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
-    /// Parse intent declaration (stub)
+    /// Parse intent declaration
     fn parse_intent_decl(&mut self) {
         self.start_node(SyntaxKind::INTENT_DECL);
         self.expect(SyntaxKind::INTENT_KW);
+
+        // Intent name
         self.expect(SyntaxKind::IDENT);
+
+        // Optional for clause (intent MyIntent for EntityName)
+        if self.at(SyntaxKind::FOR_KW) {
+            self.bump();
+            self.expect(SyntaxKind::IDENT);
+        }
+
         self.expect(SyntaxKind::L_BRACE);
-        // TODO: Parse intent constraints
+
+        // Parse intent constraints
+        self.parse_intent_constraints();
+
         self.expect(SyntaxKind::R_BRACE);
         self.finish_node();
+    }
+
+    /// Parse intent constraints
+    fn parse_intent_constraints(&mut self) {
+        self.start_node(SyntaxKind::INTENT_CONSTRAINT_LIST);
+
+        while !self.at(SyntaxKind::R_BRACE) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::R_BRACE) {
+                break;
+            }
+
+            // Parse constraint keyword (timing, power, area, throughput, latency)
+            if self.current_kind() == Some(SyntaxKind::IDENT) {
+                self.parse_intent_constraint();
+            } else {
+                self.error_and_bump("expected intent constraint");
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse single intent constraint
+    fn parse_intent_constraint(&mut self) {
+        self.start_node(SyntaxKind::INTENT_CONSTRAINT);
+
+        // Constraint type (timing, power, area, etc.)
+        self.expect(SyntaxKind::IDENT);
+
+        // Colon
+        self.expect(SyntaxKind::COLON);
+
+        // Constraint expression
+        self.parse_constraint_expression();
+
+        self.finish_node();
+    }
+
+    /// Parse constraint expression
+    fn parse_constraint_expression(&mut self) {
+        // For now, parse as a simple expression
+        // Could be: "< 100MHz", "minimize", "< 1000 LUTs", etc.
+        self.parse_expression();
+
+        // Optional units or additional info
+        while self.current_kind() == Some(SyntaxKind::IDENT) {
+            self.bump();
+        }
     }
 
     /// Parse requirement declaration (stub)
@@ -396,6 +677,291 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::L_BRACE);
         // TODO: Parse requirement details
         self.expect(SyntaxKind::R_BRACE);
+        self.finish_node();
+    }
+
+    /// Parse trait definition
+    fn parse_trait_def(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_DEF);
+
+        // 'trait' keyword
+        self.expect(SyntaxKind::TRAIT_KW);
+
+        // Trait name
+        self.expect(SyntaxKind::IDENT);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::LT) {
+            self.parse_generic_params();
+        }
+
+        // Optional super traits
+        if self.at(SyntaxKind::COLON) {
+            self.bump();
+            self.parse_trait_bound_list();
+        }
+
+        // Optional where clause
+        if self.at(SyntaxKind::WHERE_KW) {
+            self.parse_where_clause();
+        }
+
+        // Trait body
+        self.expect(SyntaxKind::L_BRACE);
+        self.parse_trait_body();
+        self.expect(SyntaxKind::R_BRACE);
+
+        self.finish_node();
+    }
+
+    /// Parse trait body
+    fn parse_trait_body(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_ITEM_LIST);
+
+        while !self.at(SyntaxKind::R_BRACE) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::TYPE_KW) => self.parse_trait_type(),
+                Some(SyntaxKind::CONST_KW) => self.parse_trait_const(),
+                Some(SyntaxKind::IDENT) => self.parse_trait_method(),
+                Some(SyntaxKind::R_BRACE) => break,
+                _ => {
+                    self.error_and_bump("expected trait item");
+                }
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse trait associated type
+    fn parse_trait_type(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_TYPE);
+
+        self.expect(SyntaxKind::TYPE_KW);
+        self.expect(SyntaxKind::IDENT);
+
+        // Optional bounds
+        if self.at(SyntaxKind::COLON) {
+            self.bump();
+            self.parse_trait_bound_list();
+        }
+
+        // Optional default type
+        if self.at(SyntaxKind::ASSIGN) {
+            self.bump();
+            self.parse_type();
+        }
+
+        self.expect(SyntaxKind::SEMICOLON);
+        self.finish_node();
+    }
+
+    /// Parse trait associated constant
+    fn parse_trait_const(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_CONST);
+
+        self.expect(SyntaxKind::CONST_KW);
+        self.expect(SyntaxKind::IDENT);
+        self.expect(SyntaxKind::COLON);
+        self.parse_type();
+
+        // Optional default value
+        if self.at(SyntaxKind::ASSIGN) {
+            self.bump();
+            self.parse_expression();
+        }
+
+        self.expect(SyntaxKind::SEMICOLON);
+        self.finish_node();
+    }
+
+    /// Parse trait method
+    fn parse_trait_method(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_METHOD);
+
+        // Method name
+        self.expect(SyntaxKind::IDENT);
+
+        // Parameters
+        self.expect(SyntaxKind::L_PAREN);
+        // TODO: Parse parameter list
+        self.expect(SyntaxKind::R_PAREN);
+
+        // Optional return type
+        if self.at(SyntaxKind::ARROW) {
+            self.bump();
+            self.parse_type();
+        }
+
+        // Default implementation or semicolon
+        if self.at(SyntaxKind::L_BRACE) {
+            self.parse_block_statement();
+        } else {
+            self.expect(SyntaxKind::SEMICOLON);
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse trait bounds list
+    fn parse_trait_bound_list(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_BOUND_LIST);
+
+        self.parse_trait_bound();
+
+        while self.at(SyntaxKind::PLUS) {
+            self.bump();
+            self.parse_trait_bound();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse single trait bound
+    fn parse_trait_bound(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_BOUND);
+        self.expect(SyntaxKind::IDENT);
+
+        // Optional generic arguments
+        if self.at(SyntaxKind::LT) {
+            self.parse_generic_args();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse where clause
+    fn parse_where_clause(&mut self) {
+        self.start_node(SyntaxKind::WHERE_CLAUSE);
+
+        self.expect(SyntaxKind::WHERE_KW);
+
+        self.parse_where_predicate();
+
+        while self.at(SyntaxKind::COMMA) {
+            self.bump();
+            self.parse_where_predicate();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse where predicate
+    fn parse_where_predicate(&mut self) {
+        self.start_node(SyntaxKind::WHERE_PREDICATE);
+
+        // Type parameter
+        self.expect(SyntaxKind::IDENT);
+
+        // Colon and bounds
+        self.expect(SyntaxKind::COLON);
+        self.parse_trait_bound_list();
+
+        self.finish_node();
+    }
+
+    /// Parse trait implementation body
+    fn parse_trait_impl_body(&mut self) {
+        while !self.at(SyntaxKind::R_BRACE) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::TYPE_KW) => self.parse_trait_impl_type(),
+                Some(SyntaxKind::CONST_KW) => self.parse_trait_impl_const(),
+                Some(SyntaxKind::IDENT) => self.parse_trait_impl_method(),
+                Some(SyntaxKind::R_BRACE) => break,
+                _ => {
+                    self.error_and_bump("expected trait implementation item");
+                }
+            }
+        }
+    }
+
+    /// Parse trait implementation type
+    fn parse_trait_impl_type(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_TYPE);
+
+        self.expect(SyntaxKind::TYPE_KW);
+        self.expect(SyntaxKind::IDENT);
+        self.expect(SyntaxKind::ASSIGN);
+        self.parse_type();
+        self.expect(SyntaxKind::SEMICOLON);
+
+        self.finish_node();
+    }
+
+    /// Parse trait implementation const
+    fn parse_trait_impl_const(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_CONST);
+
+        self.expect(SyntaxKind::CONST_KW);
+        self.expect(SyntaxKind::IDENT);
+        self.expect(SyntaxKind::COLON);
+        self.parse_type();
+        self.expect(SyntaxKind::ASSIGN);
+        self.parse_expression();
+        self.expect(SyntaxKind::SEMICOLON);
+
+        self.finish_node();
+    }
+
+    /// Parse trait implementation method
+    fn parse_trait_impl_method(&mut self) {
+        self.start_node(SyntaxKind::TRAIT_METHOD);
+
+        // Method name
+        self.expect(SyntaxKind::IDENT);
+
+        // Parameters
+        self.expect(SyntaxKind::L_PAREN);
+        // TODO: Parse parameter list properly
+        self.expect(SyntaxKind::R_PAREN);
+
+        // Optional return type
+        if self.at(SyntaxKind::ARROW) {
+            self.bump();
+            self.parse_type();
+        }
+
+        // Method body
+        self.parse_block_statement();
+
+        self.finish_node();
+    }
+
+    /// Parse generic arguments
+    fn parse_generic_args(&mut self) {
+        self.start_node(SyntaxKind::ARG_LIST);
+        self.expect(SyntaxKind::LT);
+
+        if !self.at(SyntaxKind::GT) {
+            self.parse_type_or_const_arg();
+
+            while self.at(SyntaxKind::COMMA) {
+                self.bump(); // consume comma
+                self.parse_type_or_const_arg();
+            }
+        }
+
+        self.expect(SyntaxKind::GT);
+        self.finish_node();
+    }
+
+    /// Parse a type or const argument
+    fn parse_type_or_const_arg(&mut self) {
+        self.start_node(SyntaxKind::ARG);
+
+        // Check if it's a literal (const argument)
+        if self.current_kind().map_or(false, |k| k.is_literal()) {
+            self.parse_expression();
+        }
+        // Otherwise parse as type
+        else {
+            self.parse_type();
+        }
+
         self.finish_node();
     }
 
@@ -466,8 +1032,44 @@ impl<'a> ParseState<'a> {
     fn parse_generic_params(&mut self) {
         self.start_node(SyntaxKind::GENERIC_PARAM_LIST);
         self.expect(SyntaxKind::LT);
-        // TODO: Parse actual generic parameters
+
+        if !self.at(SyntaxKind::GT) {
+            self.parse_generic_param();
+
+            while self.at(SyntaxKind::COMMA) {
+                self.bump(); // consume comma
+                self.parse_generic_param();
+            }
+        }
+
         self.expect(SyntaxKind::GT);
+        self.finish_node();
+    }
+
+    /// Parse a single generic parameter
+    fn parse_generic_param(&mut self) {
+        self.start_node(SyntaxKind::GENERIC_PARAM);
+
+        // Check if it's a const parameter (const N: nat[32])
+        if self.at(SyntaxKind::CONST_KW) {
+            self.bump(); // consume 'const'
+            self.expect(SyntaxKind::IDENT); // parameter name
+            self.expect(SyntaxKind::COLON);
+            self.parse_type(); // parameter type
+        }
+        // Check if it's a type parameter with bounds (T: Trait)
+        else if self.current_kind() == Some(SyntaxKind::IDENT) {
+            self.bump(); // consume identifier
+
+            // Optional type bounds
+            if self.at(SyntaxKind::COLON) {
+                self.bump();
+                self.parse_trait_bound_list();
+            }
+        } else {
+            self.error("expected generic parameter");
+        }
+
         self.finish_node();
     }
 
@@ -553,9 +1155,25 @@ impl<'a> ParseState<'a> {
         self.tokens.get(self.current)
     }
 
+    /// Get current token text
+    fn current_text(&self) -> Option<&str> {
+        self.current_token()
+            .map(|token| &self.source[token.span.clone()])
+    }
+
     /// Check if at end of input
     fn is_at_end(&self) -> bool {
         self.current >= self.tokens.len()
+    }
+
+    /// Peek at a token without consuming it
+    fn peek_kind(&self, offset: usize) -> Option<SyntaxKind> {
+        let index = self.current + offset;
+        if index < self.tokens.len() {
+            Some(SyntaxKind::from(self.tokens[index].token.clone()))
+        } else {
+            None
+        }
     }
 
     /// Check if current token is of given kind
