@@ -1,0 +1,23 @@
+[package]
+name = "skalp-safety"
+version = "0.1.0"
+edition = "2021"
+description = "ISO 26262 safety features for SKALP hardware synthesis"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+indexmap = { version = "2.0", features = ["serde"] }
+petgraph = { version = "0.6", features = ["serde"] }
+skalp-mir = { path = "../skalp-mir" }
+skalp-frontend = { path = "../skalp-frontend" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[features]
+default = []
+fmeda = []
