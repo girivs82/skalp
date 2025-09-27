@@ -8,6 +8,8 @@
 
 pub mod ast;
 pub mod lexer;
+pub mod syntax;
+pub mod parse;
 pub mod parser;
 pub mod semantic;
 pub mod hir;
