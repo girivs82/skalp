@@ -1,0 +1,45 @@
+// Examples of different reset event variations
+
+// Active-high reset counter
+entity ActiveHighResetCounter {
+    in clk: clock
+    in reset: reset  // Active high
+    out count: bit[8]
+}
+
+impl ActiveHighResetCounter {
+    signal count_reg: bit[8] = 0
+
+    // Combined clock and reset sensitivity
+    on(clk.rise, reset.active) {
+        if (reset) {
+            count_reg <= 0
+        } else {
+            count_reg <= count_reg + 1
+        }
+    }
+
+    count = count_reg
+}
+
+// Active-low reset counter
+entity ActiveLowResetCounter {
+    in clk: clock
+    in reset_n: reset  // Active low
+    out count: bit[8]
+}
+
+impl ActiveLowResetCounter {
+    signal count_reg: bit[8] = 0
+
+    // Separate reset event block for inactive edge
+    on(reset_n.inactive) {
+        count_reg <= 0
+    }
+
+    on(clk.rise) {
+        count_reg <= count_reg + 1
+    }
+
+    count = count_reg
+}

@@ -1,0 +1,12 @@
+// Simple 8-bit adder in SKALP
+
+entity Adder {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[9]  // 9 bits to handle overflow
+}
+
+impl Adder {
+    // Continuous assignment for combinational logic
+    sum = a + b
+}

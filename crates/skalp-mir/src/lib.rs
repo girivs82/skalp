@@ -1,14 +1,33 @@
 //! SKALP MIR - Mid-level Intermediate Representation
 //!
 //! This crate handles:
-//! - Architecture-aware transformations
+//! - HIR to MIR transformation
+//! - Process generation (always blocks)
 //! - Optimization passes
-//! - Timing analysis and constraint propagation
-//! - Resource allocation
+//! - Preparation for code generation
 
 pub mod mir;
+pub mod transform;
 pub mod optimize;
 pub mod timing;
-pub mod transform;
+pub mod hir_to_mir;
+pub mod codegen;
+pub mod compiler;
 
-pub use mir::Mir;
+// Re-export main types
+pub use mir::{
+    Mir, Module, ModuleId,
+    Port, PortId, PortDirection,
+    Signal, SignalId, Variable, VariableId,
+    DataType, Process, ProcessId, ProcessKind,
+    SensitivityList, EdgeSensitivity, EdgeType,
+    Block, Statement, Assignment, AssignmentKind,
+    LValue, Expression, Value,
+    BinaryOp, UnaryOp, ReduceOp,
+    IfStatement, CaseStatement, LoopStatement,
+    ContinuousAssign, ModuleInstance,
+};
+pub use hir_to_mir::HirToMir;
+pub use compiler::{MirCompiler, OptimizationLevel, compile_hir_to_verilog, compile_hir_to_verilog_optimized};
+pub use optimize::{OptimizationPass, DeadCodeElimination, ConstantFolding};
+pub use codegen::SystemVerilogGenerator;

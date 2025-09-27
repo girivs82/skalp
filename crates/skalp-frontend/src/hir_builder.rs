@@ -263,6 +263,7 @@ impl HirBuilderContext {
             constants,
             event_blocks,
             assignments,
+            instances: vec![], // TODO: Parse instance declarations
         })
     }
 

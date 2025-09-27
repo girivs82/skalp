@@ -1,0 +1,56 @@
+// Simple FIFO buffer in SKALP
+
+entity FIFO {
+    in clk: clock
+    in reset: reset
+    in write_en: bit
+    in read_en: bit
+    in data_in: bit[8]
+    out data_out: bit[8]
+    out full: bit
+    out empty: bit
+}
+
+impl FIFO {
+    // FIFO depth parameter
+    const DEPTH: nat = 16
+
+    // Storage
+    signal memory: bit[8][DEPTH]
+
+    // Pointers
+    signal write_ptr: bit[4] = 0
+    signal read_ptr: bit[4] = 0
+    signal count: bit[5] = 0
+
+    // Write process
+    on(clk.rise) {
+        if (reset) {
+            write_ptr <= 0
+            read_ptr <= 0
+            count <= 0
+        } else {
+            // Handle write
+            if (write_en && !full) {
+                memory[write_ptr] <= data_in
+                write_ptr <= write_ptr + 1
+                if (!read_en) {
+                    count <= count + 1
+                }
+            }
+
+            // Handle read
+            if (read_en && !empty) {
+                read_ptr <= read_ptr + 1
+                if (!write_en) {
+                    count <= count - 1
+                }
+            }
+        }
+    }
+
+    // Output assignments
+    data_out = memory[read_ptr]
+    full = (count == DEPTH)
+    empty = (count == 0)
+}

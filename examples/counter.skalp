@@ -1,0 +1,24 @@
+// Counter example in SKALP
+
+entity Counter {
+    in clk: clock
+    in reset: reset
+    in enable: bit
+    out count: bit[8]
+}
+
+impl Counter {
+    signal counter_reg: bit[8] = 0
+
+    on(clk.rise) {
+        if (reset) {
+            counter_reg <= 0
+        } else {
+            if (enable) {
+                counter_reg <= counter_reg + 1
+            }
+        }
+    }
+
+    count = counter_reg
+}

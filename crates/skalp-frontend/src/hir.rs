@@ -51,6 +51,30 @@ pub struct HirImplementation {
     pub event_blocks: Vec<HirEventBlock>,
     /// Assignments
     pub assignments: Vec<HirAssignment>,
+    /// Module instances
+    pub instances: Vec<HirInstance>,
+}
+
+/// Module instance in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirInstance {
+    /// Instance identifier
+    pub id: InstanceId,
+    /// Instance name
+    pub name: String,
+    /// Entity to instantiate
+    pub entity: EntityId,
+    /// Port connections
+    pub connections: Vec<HirConnection>,
+}
+
+/// Port connection in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirConnection {
+    /// Port name
+    pub port: String,
+    /// Connected expression
+    pub expr: HirExpression,
 }
 
 /// Port in HIR
@@ -139,6 +163,8 @@ pub enum HirEdgeType {
     Rising,
     Falling,
     Both,
+    Active,    // For reset.active (active level)
+    Inactive,  // For reset.inactive (inactive level)
 }
 
 /// Assignment in HIR
@@ -444,6 +470,10 @@ pub struct IntentId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequirementId(pub u32);
+
+/// Instance identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InstanceId(pub u32);
 
 /// HIR builder for converting AST to HIR
 pub struct HirBuilder {

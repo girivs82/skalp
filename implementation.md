@@ -34,22 +34,24 @@
 
 ---
 
-### Phase 1: Foundation (Weeks 1-4)
+### Phase 1: Foundation (Weeks 1-4) ✅ COMPLETE
 **Goal:** Lexer, parser, and basic type system
 
 **Deliverable:** Can parse simple SKALP entities and check types
 
 **Tasks:**
-- [ ] Implement lexer for SKALP tokens
-- [ ] Design AST structure
-- [ ] Implement parser using nom or pest
-- [ ] Basic type system (bit, logic, int, nat)
-- [ ] Error reporting with spans
-- [ ] Parse simple entity declarations
+- ✅ Implement lexer for SKALP tokens (Logos)
+- ✅ Design AST structure (Rowan-based syntax tree)
+- ✅ Implement parser using Rowan
+- ✅ Basic type system (bit, logic, int, nat, clock, reset)
+- ✅ Error reporting with spans
+- ✅ Parse simple entity declarations
+- ✅ HIR generation with symbol resolution
+- ✅ Type checker with entity port support
 
-**Success Test:** Parse and type-check a simple counter entity
+**Success Test:** ✅ Parse and type-check a simple counter entity
 
-**Duration:** 4 weeks
+**Duration:** 4 weeks (Completed Nov 27, 2024)
 
 ---
 
@@ -236,8 +238,8 @@
 ## 📝 PHASE TRACKING
 
 - ✅ **Phase 0** - Planning & Architecture - COMPLETE
-- [ ] **Phase 1** - Foundation - ⏳ Not Started
-- [ ] **Phase 2** - Core Language - ⏳ Not Started
+- ✅ **Phase 1** - Foundation - COMPLETE (Nov 27, 2024)
+- [ ] **Phase 2** - Core Language - ⏳ Ready to Start
 - [ ] **Phase 3** - Clock Domains - ⏳ Not Started
 - [ ] **Phase 4** - GPU Simulation - ⏳ Not Started
 - [ ] **Phase 5** - Advanced Features - ⏳ Not Started
@@ -247,8 +249,8 @@
 - [ ] **Phase 9** - Backends - ⏳ Not Started
 - [ ] **Phase 10** - Polish - ⏳ Not Started
 
-**Current Phase:** Ready to begin Phase 1
-**Next Milestone:** Lexer/Parser working (Week 4)
+**Current Phase:** Phase 2 - Core Language
+**Next Milestone:** SystemVerilog codegen (Week 8)
 
 ---
 
@@ -259,16 +261,25 @@
 - **Sept 26, 2024:** Simulation architecture, safety features
 - **Sept 27, 2024:** Finalized specs, created GitHub repo
 
+### Phase 1: Foundation
+- **Nov 27, 2024:** Completed all Phase 1 milestones
+  - Implemented Logos lexer with full token support
+  - Built Rowan parser with error recovery
+  - Created type system with inference engine
+  - Implemented HIR generation with symbol resolution
+  - Fixed type checker to handle entity ports in impl blocks
+  - All 29 tests passing (23 unit + 6 integration)
+
 ---
 
 ## 🚀 NEXT STEPS
 
-With Phase 0 complete, we're ready to begin Phase 1: Foundation
-1. Set up parser framework (nom or pest)
-2. Define token types
-3. Implement lexer
-4. Create AST structures
-5. Build initial parser
+With Phase 1 complete, we're ready to begin Phase 2: Core Language
+1. Implement MIR (Mid-level IR) from HIR
+2. Handle entity instantiation and port mapping
+3. Implement `on(clock.rise)` event blocks
+4. Distinguish signal vs variable semantics
+5. Generate basic SystemVerilog code
 
 ---
 

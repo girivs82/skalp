@@ -1,0 +1,27 @@
+// Counter with asynchronous reset using reset event syntax
+
+entity AsyncResetCounter {
+    in clk: clock
+    in reset: reset
+    in enable: bit
+    out count: bit[8]
+}
+
+impl AsyncResetCounter {
+    signal count_reg: bit[8] = 0
+
+    // Main counting logic on clock edge
+    on(clk.rise) {
+        if (enable) {
+            count_reg <= count_reg + 1
+        }
+    }
+
+    // Asynchronous reset using reset event
+    on(reset.active) {
+        count_reg <= 0
+    }
+
+    // Output assignment
+    count = count_reg
+}

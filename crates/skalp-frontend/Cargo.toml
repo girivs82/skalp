@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-skalp-mir = { path = "../skalp-mir" }
 logos = "0.14"
 rowan = "0.15"
 codespan-reporting = "0.11"

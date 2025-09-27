@@ -1,197 +1,409 @@
 //! MIR - Mid-level Intermediate Representation
 //!
-//! Architecture-aware representation with optimization opportunities
+//! This represents hardware designs at a level suitable for:
+//! - SystemVerilog code generation
+//! - Optimization passes
+//! - Simulation preparation
+//!
+//! MIR is lower-level than HIR but still hardware-agnostic
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Mid-level Intermediate Representation
+/// Mid-level Intermediate Representation for a design
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mir {
+    /// Design name
+    pub name: String,
+    /// Top-level modules
+    pub modules: Vec<Module>,
+}
+
+/// A hardware module (corresponds to entity in SKALP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Module {
+    /// Module identifier
+    pub id: ModuleId,
     /// Module name
     pub name: String,
-    /// Operations in the design
-    pub operations: Vec<Operation>,
-    /// Data flow graph
-    pub dataflow: DataFlowGraph,
-    /// Resource constraints
-    pub constraints: ResourceConstraints,
+    /// Input/output ports
+    pub ports: Vec<Port>,
+    /// Internal signals
+    pub signals: Vec<Signal>,
+    /// Variables (for procedural blocks)
+    pub variables: Vec<Variable>,
+    /// Process blocks (always blocks in Verilog)
+    pub processes: Vec<Process>,
+    /// Continuous assignments
+    pub assignments: Vec<ContinuousAssign>,
+    /// Module instances (hierarchy)
+    pub instances: Vec<ModuleInstance>,
 }
 
-/// Hardware operation in MIR
+/// Module identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModuleId(pub u32);
+
+/// Port of a module
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Operation {
-    /// Operation identifier
-    pub id: String,
-    /// Operation type
-    pub op_type: OperationType,
-    /// Input operands
-    pub inputs: Vec<Operand>,
-    /// Output operands
-    pub outputs: Vec<Operand>,
-    /// Scheduling information
-    pub schedule: Option<ScheduleInfo>,
+pub struct Port {
+    /// Port identifier
+    pub id: PortId,
+    /// Port name
+    pub name: String,
+    /// Port direction
+    pub direction: PortDirection,
+    /// Port type
+    pub port_type: DataType,
 }
 
-/// Types of operations in MIR
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OperationType {
-    /// Arithmetic operations
-    Add,
-    Sub,
-    Mul,
-    Div,
-    /// Logic operations
-    And,
-    Or,
-    Not,
-    Xor,
-    /// Comparison operations
-    Equal,
-    Less,
-    Greater,
-    /// Memory operations
-    Load,
-    Store,
-    /// Control flow
-    Branch,
-    Merge,
-    /// Register operations
-    RegisterRead,
-    RegisterWrite,
+/// Port identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PortId(pub u32);
+
+/// Port direction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortDirection {
+    Input,
+    Output,
+    InOut,
 }
 
-/// Operand in MIR operations
+/// Internal signal in a module
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Operand {
-    /// Operand identifier
-    pub id: String,
-    /// Data type
-    pub data_type: DataType,
-    /// Value (for constants)
-    pub value: Option<u64>,
+pub struct Signal {
+    /// Signal identifier
+    pub id: SignalId,
+    /// Signal name
+    pub name: String,
+    /// Signal type
+    pub signal_type: DataType,
+    /// Initial value (if any)
+    pub initial: Option<Value>,
 }
+
+/// Signal identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SignalId(pub u32);
+
+/// Variable (for procedural context)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Variable {
+    /// Variable identifier
+    pub id: VariableId,
+    /// Variable name
+    pub name: String,
+    /// Variable type
+    pub var_type: DataType,
+    /// Initial value
+    pub initial: Option<Value>,
+}
+
+/// Variable identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VariableId(pub u32);
 
 /// Data types in MIR
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataType {
+    /// Bit vector (synthesis-friendly)
     Bit(usize),
+    /// Logic vector (4-state for simulation)
     Logic(usize),
+    /// Signed integer
     Int(usize),
+    /// Unsigned natural
     Nat(usize),
+    /// Clock signal
     Clock,
-    Reset,
+    /// Reset signal
+    Reset { active_high: bool },
+    /// Event type
+    Event,
 }
 
-/// Data flow graph representation
+/// Process block (maps to always block)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataFlowGraph {
-    /// Nodes in the graph
-    pub nodes: Vec<DataFlowNode>,
-    /// Edges between nodes
-    pub edges: Vec<DataFlowEdge>,
+pub struct Process {
+    /// Process identifier
+    pub id: ProcessId,
+    /// Process kind
+    pub kind: ProcessKind,
+    /// Sensitivity list
+    pub sensitivity: SensitivityList,
+    /// Process body
+    pub body: Block,
 }
 
-/// Node in data flow graph
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataFlowNode {
-    /// Node identifier
-    pub id: String,
-    /// Associated operation
-    pub operation: String,
-    /// Node properties
-    pub properties: NodeProperties,
+/// Process identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessId(pub u32);
+
+/// Kind of process
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessKind {
+    /// Sequential logic (always_ff)
+    Sequential,
+    /// Combinational logic (always_comb)
+    Combinational,
+    /// General process (always)
+    General,
 }
 
-/// Edge in data flow graph
+/// Sensitivity list for a process
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataFlowEdge {
-    /// Source node
-    pub from: String,
-    /// Destination node
-    pub to: String,
-    /// Data carried on this edge
-    pub data: String,
+pub enum SensitivityList {
+    /// Edge-triggered (posedge/negedge)
+    Edge(Vec<EdgeSensitivity>),
+    /// Level-sensitive (combinational)
+    Level(Vec<LValue>),
+    /// Always (continuous)
+    Always,
 }
 
-/// Properties of a data flow node
+/// Edge sensitivity
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeProperties {
-    /// Execution latency
-    pub latency: u32,
-    /// Resource requirements
-    pub resources: Vec<ResourceRequirement>,
-    /// Power consumption
-    pub power: f64,
+pub struct EdgeSensitivity {
+    /// Signal to monitor
+    pub signal: LValue,
+    /// Edge type
+    pub edge: EdgeType,
 }
 
-/// Resource requirement
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceRequirement {
-    /// Resource type
-    pub resource_type: ResourceType,
-    /// Amount required
-    pub amount: u32,
+/// Edge type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EdgeType {
+    Rising,
+    Falling,
+    Both,
+    Active,    // For reset active level
+    Inactive,  // For reset inactive level
 }
 
-/// Types of hardware resources
+/// Block of statements
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ResourceType {
-    Adder,
-    Multiplier,
-    Memory,
-    Register,
-    LogicBlock,
+pub struct Block {
+    /// Statements in the block
+    pub statements: Vec<Statement>,
 }
 
-/// Resource constraints for the design
+/// Statement in a process
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceConstraints {
-    /// Available resources
-    pub available: Vec<ResourceRequirement>,
-    /// Timing constraints
-    pub timing: TimingConstraints,
+pub enum Statement {
+    /// Assignment statement
+    Assignment(Assignment),
+    /// Conditional statement
+    If(IfStatement),
+    /// Case/match statement
+    Case(CaseStatement),
+    /// Block of statements
+    Block(Block),
+    /// Loop statement
+    Loop(LoopStatement),
 }
 
-/// Timing constraints
+/// Assignment in a process
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimingConstraints {
-    /// Clock period (picoseconds)
-    pub clock_period: u32,
-    /// Setup time requirements
-    pub setup_time: u32,
-    /// Hold time requirements
-    pub hold_time: u32,
+pub struct Assignment {
+    /// Left-hand side
+    pub lhs: LValue,
+    /// Right-hand side expression
+    pub rhs: Expression,
+    /// Assignment kind
+    pub kind: AssignmentKind,
 }
 
-/// Scheduling information for an operation
+/// Assignment kind
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssignmentKind {
+    /// Non-blocking assignment (<=)
+    NonBlocking,
+    /// Blocking assignment (:= or =)
+    Blocking,
+}
+
+/// Left-hand value (assignable)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduleInfo {
-    /// Clock cycle when operation starts
-    pub start_cycle: u32,
-    /// Clock cycle when operation completes
-    pub end_cycle: u32,
-    /// Assigned resource
-    pub resource: Option<String>,
+pub enum LValue {
+    /// Port reference
+    Port(PortId),
+    /// Signal reference
+    Signal(SignalId),
+    /// Variable reference
+    Variable(VariableId),
+    /// Bit selection
+    BitSelect { base: Box<LValue>, index: Box<Expression> },
+    /// Range selection
+    RangeSelect { base: Box<LValue>, high: Box<Expression>, low: Box<Expression> },
+    /// Concatenation
+    Concat(Vec<LValue>),
+}
+
+/// Expression (right-hand side)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Expression {
+    /// Literal value
+    Literal(Value),
+    /// LValue reference
+    Ref(LValue),
+    /// Binary operation
+    Binary { op: BinaryOp, left: Box<Expression>, right: Box<Expression> },
+    /// Unary operation
+    Unary { op: UnaryOp, operand: Box<Expression> },
+    /// Conditional expression (ternary)
+    Conditional { cond: Box<Expression>, then_expr: Box<Expression>, else_expr: Box<Expression> },
+    /// Concatenation
+    Concat(Vec<Expression>),
+    /// Replication
+    Replicate { count: Box<Expression>, value: Box<Expression> },
+    /// Function call
+    FunctionCall { name: String, args: Vec<Expression> },
+}
+
+/// Literal value
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Value {
+    /// Integer literal
+    Integer(i64),
+    /// Bit vector literal
+    BitVector { width: usize, value: u64 },
+    /// String literal
+    String(String),
+    /// High impedance
+    HighZ,
+    /// Unknown/undefined
+    Unknown,
+}
+
+/// Binary operators
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BinaryOp {
+    // Arithmetic
+    Add, Sub, Mul, Div, Mod,
+    // Logical
+    And, Or, Xor,
+    // Comparison
+    Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual,
+    // Bitwise
+    BitwiseAnd, BitwiseOr, BitwiseXor,
+    // Shift
+    LeftShift, RightShift,
+    // Logical (boolean)
+    LogicalAnd, LogicalOr,
+}
+
+/// Unary operators
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnaryOp {
+    Not,
+    BitwiseNot,
+    Negate,
+    Reduce(ReduceOp),
+}
+
+/// Reduction operators
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReduceOp {
+    And, Or, Xor, Nand, Nor, Xnor,
+}
+
+/// If statement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IfStatement {
+    /// Condition
+    pub condition: Expression,
+    /// Then branch
+    pub then_block: Block,
+    /// Else branch (optional)
+    pub else_block: Option<Block>,
+}
+
+/// Case statement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseStatement {
+    /// Expression to match
+    pub expr: Expression,
+    /// Case items
+    pub items: Vec<CaseItem>,
+    /// Default case
+    pub default: Option<Block>,
+}
+
+/// Case item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseItem {
+    /// Values to match
+    pub values: Vec<Expression>,
+    /// Block to execute
+    pub block: Block,
+}
+
+/// Loop statement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LoopStatement {
+    /// For loop
+    For {
+        init: Box<Assignment>,
+        condition: Expression,
+        update: Box<Assignment>,
+        body: Block,
+    },
+    /// While loop
+    While {
+        condition: Expression,
+        body: Block,
+    },
+}
+
+/// Continuous assignment (outside processes)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContinuousAssign {
+    /// Left-hand side
+    pub lhs: LValue,
+    /// Right-hand side
+    pub rhs: Expression,
+}
+
+/// Module instance (hierarchy)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleInstance {
+    /// Instance name
+    pub name: String,
+    /// Module to instantiate
+    pub module: ModuleId,
+    /// Port connections
+    pub connections: HashMap<String, Expression>,
+    /// Generic/parameter overrides
+    pub parameters: HashMap<String, Value>,
 }
 
 impl Mir {
-    /// Create a new empty MIR
+    /// Create a new MIR
     pub fn new(name: String) -> Self {
         Self {
             name,
-            operations: Vec::new(),
-            dataflow: DataFlowGraph {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-            },
-            constraints: ResourceConstraints {
-                available: Vec::new(),
-                timing: TimingConstraints {
-                    clock_period: 1000, // 1ns default
-                    setup_time: 100,
-                    hold_time: 50,
-                },
-            },
+            modules: Vec::new(),
+        }
+    }
+
+    /// Add a module to the MIR
+    pub fn add_module(&mut self, module: Module) {
+        self.modules.push(module);
+    }
+}
+
+impl Module {
+    /// Create a new module
+    pub fn new(id: ModuleId, name: String) -> Self {
+        Self {
+            id,
+            name,
+            ports: Vec::new(),
+            signals: Vec::new(),
+            variables: Vec::new(),
+            processes: Vec::new(),
+            assignments: Vec::new(),
+            instances: Vec::new(),
         }
     }
 }
