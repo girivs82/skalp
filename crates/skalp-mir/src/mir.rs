@@ -26,6 +26,8 @@ pub struct Module {
     pub id: ModuleId,
     /// Module name
     pub name: String,
+    /// Generic parameters
+    pub parameters: Vec<GenericParameter>,
     /// Input/output ports
     pub ports: Vec<Port>,
     /// Internal signals
@@ -38,6 +40,8 @@ pub struct Module {
     pub assignments: Vec<ContinuousAssign>,
     /// Module instances (hierarchy)
     pub instances: Vec<ModuleInstance>,
+    /// Clock domains in this module
+    pub clock_domains: Vec<ClockDomain>,
 }
 
 /// Module identifier
@@ -114,12 +118,40 @@ pub enum DataType {
     Int(usize),
     /// Unsigned natural
     Nat(usize),
-    /// Clock signal
-    Clock,
-    /// Reset signal
-    Reset { active_high: bool },
+    /// Clock signal with optional domain
+    Clock {
+        domain: Option<ClockDomainId>,
+    },
+    /// Reset signal with optional domain
+    Reset {
+        active_high: bool,
+        domain: Option<ClockDomainId>,
+    },
     /// Event type
     Event,
+    /// Struct type
+    Struct(Box<StructType>),
+    /// Enum type
+    Enum(Box<EnumType>),
+    /// Union type
+    Union(Box<UnionType>),
+}
+
+/// Clock domain identifier in MIR
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClockDomainId(pub u32);
+
+/// Clock domain information in MIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClockDomain {
+    /// Domain identifier
+    pub id: ClockDomainId,
+    /// Domain name
+    pub name: String,
+    /// Clock signal for this domain
+    pub clock_signal: Option<SignalId>,
+    /// Reset signal for this domain
+    pub reset_signal: Option<SignalId>,
 }
 
 /// Process block (maps to always block)
@@ -261,7 +293,7 @@ pub enum Expression {
 }
 
 /// Literal value
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     /// Integer literal
     Integer(i64),
@@ -364,6 +396,81 @@ pub struct ContinuousAssign {
     pub rhs: Expression,
 }
 
+/// Generic parameter definition in MIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericParameter {
+    /// Parameter name
+    pub name: String,
+    /// Parameter type
+    pub param_type: GenericParameterType,
+    /// Default value (if any)
+    pub default: Option<Value>,
+}
+
+/// Types of generic parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GenericParameterType {
+    /// Type parameter
+    Type,
+    /// Constant parameter with specified type
+    Const(DataType),
+    /// Width parameter (integer)
+    Width,
+    /// Clock domain parameter
+    ClockDomain,
+}
+
+/// Struct type definition in MIR
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructType {
+    /// Struct name
+    pub name: String,
+    /// Struct fields
+    pub fields: Vec<StructField>,
+    /// Whether this is a packed struct (affects layout)
+    pub packed: bool,
+}
+
+/// Struct field in MIR
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructField {
+    /// Field name
+    pub name: String,
+    /// Field type
+    pub field_type: DataType,
+}
+
+/// Enum type definition in MIR
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnumType {
+    /// Enum name
+    pub name: String,
+    /// Enum variants
+    pub variants: Vec<EnumVariant>,
+    /// Base type for enum values
+    pub base_type: DataType,
+}
+
+/// Enum variant in MIR
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnumVariant {
+    /// Variant name
+    pub name: String,
+    /// Variant value (optional, auto-assigned if None)
+    pub value: Option<Value>,
+}
+
+/// Union type definition in MIR
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnionType {
+    /// Union name
+    pub name: String,
+    /// Union fields (all share the same memory)
+    pub fields: Vec<StructField>,
+    /// Whether this is a packed union
+    pub packed: bool,
+}
+
 /// Module instance (hierarchy)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleInstance {
@@ -398,12 +505,14 @@ impl Module {
         Self {
             id,
             name,
+            parameters: Vec::new(),
             ports: Vec::new(),
             signals: Vec::new(),
             variables: Vec::new(),
             processes: Vec::new(),
             assignments: Vec::new(),
             instances: Vec::new(),
+            clock_domains: Vec::new(),
         }
     }
 }

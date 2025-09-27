@@ -20,18 +20,19 @@ fn create_counter_with_reset_event() -> Hir {
         id: EntityId(1),
         name: "ResetCounter".to_string(),
         generics: vec![],
+        clock_domains: vec![],
         ports: vec![
             HirPort {
                 id: PortId(1),
                 name: "clk".to_string(),
                 direction: HirPortDirection::Input,
-                port_type: HirType::Clock,
+                port_type: HirType::Clock(None),
             },
             HirPort {
                 id: PortId(2),
                 name: "reset".to_string(),
                 direction: HirPortDirection::Input,
-                port_type: HirType::Reset,
+                port_type: HirType::Reset(None),
             },
             HirPort {
                 id: PortId(3),
@@ -130,18 +131,19 @@ fn create_combined_clock_reset_event() -> Hir {
         id: EntityId(1),
         name: "CombinedCounter".to_string(),
         generics: vec![],
+        clock_domains: vec![],
         ports: vec![
             HirPort {
                 id: PortId(1),
                 name: "clk".to_string(),
                 direction: HirPortDirection::Input,
-                port_type: HirType::Clock,
+                port_type: HirType::Clock(None),
             },
             HirPort {
                 id: PortId(2),
                 name: "reset".to_string(),
                 direction: HirPortDirection::Input,
-                port_type: HirType::Reset,
+                port_type: HirType::Reset(None),
             },
             HirPort {
                 id: PortId(3),

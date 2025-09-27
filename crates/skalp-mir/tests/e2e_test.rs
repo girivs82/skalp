@@ -19,18 +19,19 @@ fn create_counter_hir() -> Hir {
         id: EntityId(1),
         name: "counter".to_string(),
         generics: vec![],
+        clock_domains: vec![],
         ports: vec![
             HirPort {
                 id: PortId(1),
                 name: "clk".to_string(),
                 direction: HirPortDirection::Input,
-                port_type: HirType::Clock,
+                port_type: HirType::Clock(None),
             },
             HirPort {
                 id: PortId(2),
                 name: "rst".to_string(),
                 direction: HirPortDirection::Input,
-                port_type: HirType::Reset,
+                port_type: HirType::Reset(None),
             },
             HirPort {
                 id: PortId(3),

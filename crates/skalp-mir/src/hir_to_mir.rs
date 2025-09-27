@@ -19,6 +19,8 @@ pub struct HirToMir {
     next_variable_id: u32,
     /// Next process ID
     next_process_id: u32,
+    /// Next clock domain ID
+    next_clock_domain_id: u32,
     /// Entity to module ID mapping
     entity_map: HashMap<hir::EntityId, ModuleId>,
     /// Port ID mapping (HIR to MIR)
@@ -27,6 +29,8 @@ pub struct HirToMir {
     signal_map: HashMap<hir::SignalId, SignalId>,
     /// Variable ID mapping (HIR to MIR)
     variable_map: HashMap<hir::VariableId, VariableId>,
+    /// Clock domain ID mapping (HIR to MIR)
+    clock_domain_map: HashMap<hir::ClockDomainId, ClockDomainId>,
 }
 
 impl HirToMir {
@@ -38,10 +42,12 @@ impl HirToMir {
             next_signal_id: 0,
             next_variable_id: 0,
             next_process_id: 0,
+            next_clock_domain_id: 0,
             entity_map: HashMap::new(),
             port_map: HashMap::new(),
             signal_map: HashMap::new(),
             variable_map: HashMap::new(),
+            clock_domain_map: HashMap::new(),
         }
     }
 
@@ -55,6 +61,16 @@ impl HirToMir {
             self.entity_map.insert(entity.id, module_id);
 
             let mut module = Module::new(module_id, entity.name.clone());
+
+            // Convert generic parameters
+            for hir_generic in &entity.generics {
+                let parameter = GenericParameter {
+                    name: hir_generic.name.clone(),
+                    param_type: self.convert_generic_type(&hir_generic.param_type),
+                    default: None, // TODO: Handle default values
+                };
+                module.parameters.push(parameter);
+            }
 
             // Convert ports
             for hir_port in &entity.ports {
@@ -494,16 +510,28 @@ impl HirToMir {
     }
 
     /// Convert HIR type to MIR data type
-    fn convert_type(&self, hir_type: &hir::HirType) -> DataType {
+    fn convert_type(&mut self, hir_type: &hir::HirType) -> DataType {
         match hir_type {
             hir::HirType::Bit(width) => DataType::Bit(*width as usize),
             hir::HirType::Logic(width) => DataType::Logic(*width as usize),
             hir::HirType::Int(width) => DataType::Int(*width as usize),
             hir::HirType::Nat(width) => DataType::Nat(*width as usize),
-            hir::HirType::Clock => DataType::Clock,
-            hir::HirType::Reset => DataType::Reset { active_high: true },
+            hir::HirType::Clock(domain) => DataType::Clock {
+                domain: domain.map(|id| ClockDomainId(id.0)),
+            },
+            hir::HirType::Reset(domain) => DataType::Reset {
+                active_high: true,
+                domain: domain.map(|id| ClockDomainId(id.0)),
+            },
             hir::HirType::Event => DataType::Event,
-            _ => DataType::Bit(1), // Default fallback
+            hir::HirType::Array(inner_type, _size) => {
+                // TODO: Implement proper array support
+                self.convert_type(inner_type)
+            },
+            hir::HirType::Custom(_name) => DataType::Bit(1), // TODO: Resolve custom types
+            hir::HirType::Struct(struct_type) => DataType::Struct(Box::new(self.convert_struct_type(struct_type))),
+            hir::HirType::Enum(enum_type) => DataType::Enum(Box::new(self.convert_enum_type(enum_type))),
+            hir::HirType::Union(union_type) => DataType::Union(Box::new(self.convert_union_type(union_type))),
         }
     }
 
@@ -528,6 +556,66 @@ impl HirToMir {
     }
 
     // ID generation methods
+    /// Convert HIR generic type to MIR generic parameter type
+    fn convert_generic_type(&mut self, hir_type: &hir::HirGenericType) -> GenericParameterType {
+        match hir_type {
+            hir::HirGenericType::Type => GenericParameterType::Type,
+            hir::HirGenericType::Const(hir_data_type) => {
+                GenericParameterType::Const(self.convert_type(hir_data_type))
+            },
+            hir::HirGenericType::Width => GenericParameterType::Width,
+            hir::HirGenericType::ClockDomain => GenericParameterType::ClockDomain,
+        }
+    }
+
+    /// Convert HIR struct type to MIR struct type
+    fn convert_struct_type(&mut self, hir_struct: &hir::HirStructType) -> StructType {
+        let fields = hir_struct.fields.iter()
+            .map(|field| StructField {
+                name: field.name.clone(),
+                field_type: self.convert_type(&field.field_type),
+            })
+            .collect();
+
+        StructType {
+            name: hir_struct.name.clone(),
+            fields,
+            packed: hir_struct.packed,
+        }
+    }
+
+    /// Convert HIR enum type to MIR enum type
+    fn convert_enum_type(&mut self, hir_enum: &hir::HirEnumType) -> EnumType {
+        let variants = hir_enum.variants.iter()
+            .map(|variant| EnumVariant {
+                name: variant.name.clone(),
+                value: variant.value.as_ref().and_then(|expr| self.convert_literal_expr(expr)),
+            })
+            .collect();
+
+        EnumType {
+            name: hir_enum.name.clone(),
+            variants,
+            base_type: self.convert_type(&*hir_enum.base_type),
+        }
+    }
+
+    /// Convert HIR union type to MIR union type
+    fn convert_union_type(&mut self, hir_union: &hir::HirUnionType) -> UnionType {
+        let fields = hir_union.fields.iter()
+            .map(|field| StructField {
+                name: field.name.clone(),
+                field_type: self.convert_type(&field.field_type),
+            })
+            .collect();
+
+        UnionType {
+            name: hir_union.name.clone(),
+            fields,
+            packed: hir_union.packed,
+        }
+    }
+
     fn next_module_id(&mut self) -> ModuleId {
         let id = ModuleId(self.next_module_id);
         self.next_module_id += 1;

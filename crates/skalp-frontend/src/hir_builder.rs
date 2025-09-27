@@ -21,6 +21,8 @@ pub struct HirBuilderContext {
     next_protocol_id: u32,
     next_intent_id: u32,
     next_requirement_id: u32,
+    next_instance_id: u32,
+    next_clock_domain_id: u32,
 
     /// Symbol table for name resolution
     symbols: SymbolTable,
@@ -44,6 +46,7 @@ struct SymbolTable {
     signals: HashMap<String, SignalId>,
     variables: HashMap<String, VariableId>,
     constants: HashMap<String, ConstantId>,
+    clock_domains: HashMap<String, ClockDomainId>,
 
     /// Current scope for nested lookups
     scopes: Vec<HashMap<String, SymbolId>>,
@@ -80,6 +83,8 @@ impl HirBuilderContext {
             next_protocol_id: 0,
             next_intent_id: 0,
             next_requirement_id: 0,
+            next_instance_id: 0,
+            next_clock_domain_id: 0,
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
@@ -168,6 +173,7 @@ impl HirBuilderContext {
             name,
             ports,
             generics,
+            clock_domains: Vec::new(),  // TODO: Parse clock domain parameters
         })
     }
 
@@ -871,6 +877,7 @@ impl SymbolTable {
             signals: HashMap::new(),
             variables: HashMap::new(),
             constants: HashMap::new(),
+            clock_domains: HashMap::new(),
             scopes: vec![HashMap::new()], // Start with global scope
         }
     }

@@ -34,6 +34,8 @@ pub struct HirEntity {
     pub ports: Vec<HirPort>,
     /// Generic parameters
     pub generics: Vec<HirGeneric>,
+    /// Clock domain parameters
+    pub clock_domains: Vec<HirClockDomain>,
 }
 
 /// Implementation in HIR
@@ -325,11 +327,14 @@ pub enum HirType {
     Logic(u32),
     Int(u32),
     Nat(u32),
-    Clock,
-    Reset,
+    Clock(Option<ClockDomainId>),   // Clock with optional domain
+    Reset(Option<ClockDomainId>),   // Reset with optional domain
     Event,
     Array(Box<HirType>, u32),
     Custom(String),
+    Struct(HirStructType),
+    Enum(Box<HirEnumType>),
+    Union(HirUnionType),
 }
 
 /// Patterns in HIR
@@ -356,6 +361,67 @@ pub enum HirGenericType {
     Type,
     Const(HirType),
     Width,
+    ClockDomain,  // Clock domain lifetime parameter
+}
+
+/// Clock domain in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirClockDomain {
+    /// Clock domain identifier
+    pub id: ClockDomainId,
+    /// Clock domain name (e.g., 'clk)
+    pub name: String,
+}
+
+/// Struct type in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirStructType {
+    /// Struct name
+    pub name: String,
+    /// Struct fields
+    pub fields: Vec<HirStructField>,
+    /// Packing mode
+    pub packed: bool,
+}
+
+/// Struct field in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirStructField {
+    /// Field name
+    pub name: String,
+    /// Field type
+    pub field_type: HirType,
+}
+
+/// Enum type in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirEnumType {
+    /// Enum name
+    pub name: String,
+    /// Enum variants
+    pub variants: Vec<HirEnumVariant>,
+    /// Base type for enum values
+    pub base_type: Box<HirType>,
+}
+
+/// Enum variant in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirEnumVariant {
+    /// Variant name
+    pub name: String,
+    /// Variant value (optional)
+    pub value: Option<HirExpression>,
+}
+
+/// Union type in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirUnionType {
+    /// Union name
+    pub name: String,
+    /// Union fields
+    pub fields: Vec<HirStructField>,
+    /// Packing mode
+    pub packed: bool,
 }
 
 /// Protocol in HIR
@@ -475,6 +541,10 @@ pub struct RequirementId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InstanceId(pub u32);
 
+/// Clock domain identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClockDomainId(pub u32);
+
 /// HIR builder for converting AST to HIR
 pub struct HirBuilder {
     /// Next entity ID
@@ -497,6 +567,10 @@ pub struct HirBuilder {
     next_intent_id: u32,
     /// Next requirement ID
     next_requirement_id: u32,
+    /// Next instance ID
+    next_instance_id: u32,
+    /// Next clock domain ID
+    next_clock_domain_id: u32,
 }
 
 impl HirBuilder {
@@ -513,6 +587,8 @@ impl HirBuilder {
             next_protocol_id: 0,
             next_intent_id: 0,
             next_requirement_id: 0,
+            next_instance_id: 0,
+            next_clock_domain_id: 0,
         }
     }
 
@@ -547,6 +623,20 @@ impl HirBuilder {
     fn next_signal_id(&mut self) -> SignalId {
         let id = SignalId(self.next_signal_id);
         self.next_signal_id += 1;
+        id
+    }
+
+    /// Generate next instance ID
+    fn next_instance_id(&mut self) -> InstanceId {
+        let id = InstanceId(self.next_instance_id);
+        self.next_instance_id += 1;
+        id
+    }
+
+    /// Generate next clock domain ID
+    fn next_clock_domain_id(&mut self) -> ClockDomainId {
+        let id = ClockDomainId(self.next_clock_domain_id);
+        self.next_clock_domain_id += 1;
         id
     }
 }

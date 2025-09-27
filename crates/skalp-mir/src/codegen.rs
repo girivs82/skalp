@@ -341,10 +341,51 @@ impl SystemVerilogGenerator {
             }
             DataType::Int(width) => format!("int [{}:0]", width - 1),
             DataType::Nat(width) => format!("logic [{}:0]", width - 1),
-            DataType::Clock => "wire".to_string(),
+            DataType::Clock { .. } => "wire".to_string(),
             DataType::Reset { .. } => "wire".to_string(),
             DataType::Event => "event".to_string(),
+            DataType::Struct(struct_type) => {
+                if struct_type.packed {
+                    format!("packed struct {{{}}}", self.format_struct_fields(&struct_type.fields))
+                } else {
+                    format!("struct {{{}}}", self.format_struct_fields(&struct_type.fields))
+                }
+            },
+            DataType::Enum(enum_type) => {
+                format!("enum {} {{{}}}",
+                    self.format_data_type(&enum_type.base_type),
+                    self.format_enum_variants(&enum_type.variants))
+            },
+            DataType::Union(union_type) => {
+                if union_type.packed {
+                    format!("packed union {{{}}}", self.format_struct_fields(&union_type.fields))
+                } else {
+                    format!("union {{{}}}", self.format_struct_fields(&union_type.fields))
+                }
+            },
         }
+    }
+
+    /// Format struct fields for SystemVerilog
+    fn format_struct_fields(&self, fields: &[StructField]) -> String {
+        fields.iter()
+            .map(|field| format!("{} {};", self.format_data_type(&field.field_type), field.name))
+            .collect::<Vec<String>>()
+            .join(" ")
+    }
+
+    /// Format enum variants for SystemVerilog
+    fn format_enum_variants(&self, variants: &[EnumVariant]) -> String {
+        variants.iter()
+            .map(|variant| {
+                if let Some(value) = &variant.value {
+                    format!("{} = {}", variant.name, self.format_value(value))
+                } else {
+                    variant.name.clone()
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(", ")
     }
 
     /// Format lvalue
