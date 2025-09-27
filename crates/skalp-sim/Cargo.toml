@@ -1,0 +1,15 @@
+[package]
+name = "skalp-sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skalp-lir = { path = "../skalp-lir" }
+petgraph = "0.6"
+bitvec = "1.0"
+thiserror = "1.0"
+
+# GPU simulation support (Metal on macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.27"
+objc = "0.2"

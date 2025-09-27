@@ -1,0 +1,81 @@
+[package]
+name = "skalp"
+version = "0.1.0"
+edition = "2021"
+authors = ["SKALP Contributors"]
+description = "Intent-driven hardware synthesis language and compiler"
+license = "MIT"
+repository = "https://github.com/skalp-lang/skalp"
+keywords = ["hardware", "synthesis", "fpga", "hdl", "hls"]
+categories = ["development-tools", "hardware-support"]
+
+[dependencies]
+# Core dependencies
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Parsing and AST
+logos = "0.14"  # Lexer generator
+chumsky = "0.9"  # Parser combinator
+arrowhead = "0.1"  # Error reporting
+
+# Data structures
+petgraph = "0.6"  # Graph algorithms for netlist
+indexmap = "2.0"  # Order-preserving maps
+bitvec = "1.0"  # Bit manipulation
+
+# CLI and configuration
+clap = { version = "4.0", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Diagnostics and logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+colored = "2.0"
+
+# Code generation
+indoc = "2.0"  # Indented string literals
+
+# Testing and benchmarking
+proptest = { version = "1.0", optional = true }
+criterion = { version = "0.5", optional = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+insta = "1.34"  # Snapshot testing
+
+[features]
+default = []
+test-utils = ["proptest"]
+bench = ["criterion"]
+
+# GPU simulation support (Metal on macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.27"
+objc = "0.2"
+cocoa = "0.25"
+
+[[bin]]
+name = "skalp"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[workspace]
+members = [
+    "crates/skalp-frontend",
+    "crates/skalp-mir",
+    "crates/skalp-lir",
+    "crates/skalp-codegen",
+    "crates/skalp-sim",
+    "crates/skalp-place-route",
+]

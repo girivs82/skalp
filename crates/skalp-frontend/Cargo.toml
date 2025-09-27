@@ -1,0 +1,12 @@
+[package]
+name = "skalp-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skalp-mir = { path = "../skalp-mir" }
+logos = "0.14"
+chumsky = "0.9"
+arrowhead = "0.1"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }

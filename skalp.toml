@@ -1,0 +1,57 @@
+# SKALP Project Configuration
+
+[project]
+name = "skalp"
+version = "0.1.0"
+authors = ["SKALP Contributors"]
+
+# Default compilation target
+[build]
+default_target = "sv"  # systemverilog, vhdl, verilog
+output_dir = "build"
+
+# Simulation settings
+[simulation]
+engine = "gpu"  # gpu (Metal on macOS)
+default_duration = "1ms"
+granularity = "cone"  # cone-level simulation
+
+# FPGA targets for full flow
+[targets.ice40-hx8k]
+device = "iCE40HX8K"
+package = "CT256"
+full_flow = true
+
+[targets.ice40-up5k]
+device = "iCE40UP5K"
+package = "SG48"
+full_flow = true
+
+# Place & Route settings
+[placement]
+algorithm = "analytical"  # analytical, simulated_annealing, force_directed
+effort = "high"
+seed = 42
+
+[routing]
+algorithm = "pathfinder"  # pathfinder, astar, maze
+iterations = 50
+timing_driven = true
+
+# Bitstream generation
+[bitstream]
+compress = true
+add_crc = true
+verify_after_program = true
+
+# Optimization settings
+[optimization]
+level = "balanced"  # speed, area, power, balanced
+pipeline_aggressive = false
+unroll_loops = true
+
+# Timing constraints
+[timing]
+default_clock_period = "10ns"
+setup_margin = "0.2ns"
+hold_margin = "0.1ns"

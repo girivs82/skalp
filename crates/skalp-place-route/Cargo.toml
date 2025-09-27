@@ -1,0 +1,11 @@
+[package]
+name = "skalp-place-route"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skalp-lir = { path = "../skalp-lir" }
+petgraph = "0.6"
+indexmap = "2.0"
+thiserror = "1.0"
+rayon = "1.7"  # Parallel processing

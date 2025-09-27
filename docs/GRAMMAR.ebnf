@@ -1,0 +1,339 @@
+(* SKALP Formal Grammar Specification *)
+(* Extended Backus-Naur Form (EBNF) *)
+(* Version 1.0 *)
+
+(* ============================================ *)
+(*                 Top Level                    *)
+(* ============================================ *)
+
+program = { pragma | import | type_def | constant | entity | impl | protocol | package } ;
+
+(* ============================================ *)
+(*              Lexical Elements                *)
+(* ============================================ *)
+
+identifier = letter { letter | digit | "_" } ;
+type_identifier = upper_letter { letter | digit | "_" } ;
+lifetime = "'" identifier ;
+
+letter = upper_letter | lower_letter ;
+upper_letter = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" 
+             | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" 
+             | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+lower_letter = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" 
+             | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" 
+             | "u" | "v" | "w" | "x" | "y" | "z" ;
+digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+hex_digit = digit | "A" | "B" | "C" | "D" | "E" | "F" 
+                  | "a" | "b" | "c" | "d" | "e" | "f" ;
+bin_digit = "0" | "1" ;
+
+(* Numbers *)
+integer_literal = decimal_literal | hex_literal | bin_literal | oct_literal ;
+decimal_literal = digit { digit | "_" } ;
+hex_literal = "0x" hex_digit { hex_digit | "_" } ;
+bin_literal = "0b" bin_digit { bin_digit | "_" } ;
+oct_literal = "0o" digit { digit | "_" } ;
+
+float_literal = digit { digit } "." digit { digit } [ "e" [ "+" | "-" ] digit { digit } ] ;
+
+(* Strings *)
+string_literal = '"' { string_char } '"' ;
+string_char = ? any character except '"' and '\' ? | escape_sequence ;
+escape_sequence = "\\" ( '"' | "\\" | "n" | "r" | "t" | "0" ) ;
+
+(* Comments *)
+comment = line_comment | block_comment ;
+line_comment = "//" { ? any character except newline ? } ;
+block_comment = "/*" { ? any character ? } "*/" ;
+
+(* ============================================ *)
+(*                  Pragmas                     *)
+(* ============================================ *)
+
+pragma = "#[" pragma_content "]" ;
+pragma_content = identifier [ "(" pragma_args ")" ] ;
+pragma_args = pragma_arg { "," pragma_arg } ;
+pragma_arg = identifier "=" literal ;
+
+(* ============================================ *)
+(*                  Imports                     *)
+(* ============================================ *)
+
+import = "use" import_path [ "as" identifier ] ";" ;
+import_path = identifier { "::" identifier } [ "::" ( "*" | "{" import_list "}" ) ] ;
+import_list = identifier { "," identifier } ;
+
+(* ============================================ *)
+(*                   Types                      *)
+(* ============================================ *)
+
+type = basic_type | array_type | struct_type | enum_type | stream_type | protocol_type ;
+
+basic_type = logic_type | wire_type | reg_type | signed_type | unsigned_type 
+           | integer_type | real_type | time_type | bool_type ;
+
+logic_type = "logic" [ lifetime ] [ width ] ;
+wire_type = "wire" [ lifetime ] [ width ] ;
+reg_type = "reg" [ lifetime ] [ width ] ;
+signed_type = "signed" [ width ] ;
+unsigned_type = "unsigned" [ width ] ;
+integer_type = "int" | "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" ;
+real_type = "real" | "f32" | "f64" ;
+time_type = "time" ;
+bool_type = "bool" ;
+
+width = "[" expression "]" | "[" expression ":" expression "]" ;
+
+array_type = type "[" expression { "," expression } "]" ;
+
+struct_type = "struct" [ lifetime ] "{" struct_fields "}" ;
+struct_fields = struct_field { "," struct_field } [ "," ] ;
+struct_field = identifier ":" type ;
+
+enum_type = "enum" [ width ] "{" enum_variants "}" ;
+enum_variants = enum_variant { "," enum_variant } [ "," ] ;
+enum_variant = identifier [ "=" expression ] ;
+
+stream_type = "stream" [ lifetime ] "[" expression "]" ;
+
+protocol_type = identifier [ "<" lifetime ">" ] ;
+
+(* Type definitions *)
+type_def = "type" type_identifier [ generic_params ] "=" type ";" ;
+
+generic_params = "<" generic_param { "," generic_param } ">" ;
+generic_param = lifetime | type_identifier [ ":" trait_bounds ] ;
+trait_bounds = trait_bound { "+" trait_bound } ;
+trait_bound = identifier [ "<" generic_args ">" ] ;
+generic_args = generic_arg { "," generic_arg } ;
+generic_arg = lifetime | type | expression ;
+
+(* ============================================ *)
+(*                 Constants                    *)
+(* ============================================ *)
+
+constant = "const" identifier ":" type "=" expression ";" ;
+
+(* ============================================ *)
+(*                  Entities                    *)
+(* ============================================ *)
+
+entity = "entity" identifier [ generic_params ] "{" entity_body "}" [ "with" intent_block ] ;
+
+entity_body = { port_declaration | signal_declaration | parameter } ;
+
+port_declaration = port_direction identifier ":" port_type ;
+port_direction = "in" | "out" | "inout" ;
+port_type = type | protocol_type | stream_type ;
+
+signal_declaration = "signal" identifier ":" type [ "=" expression ] ";" ;
+
+parameter = "param" identifier ":" type [ "=" expression ] ";" ;
+
+intent_block = "intent" "{" intent_specs "}" ;
+intent_specs = intent_spec { "," intent_spec } [ "," ] ;
+intent_spec = intent_key ":" intent_value ;
+intent_key = "throughput" | "latency" | "area" | "power" | "architecture" 
+           | "optimization" | "pipeline" | "unroll" | identifier ;
+intent_value = expression | identifier | intent_func ;
+intent_func = identifier "(" intent_args ")" ;
+intent_args = intent_arg { "," intent_arg } ;
+intent_arg = identifier ":" expression ;
+
+(* ============================================ *)
+(*               Implementation                 *)
+(* ============================================ *)
+
+impl = "impl" [ generic_params ] identifier [ "for" type ] "{" impl_body "}" ;
+
+impl_body = { function | process | flow | always_block | initial_block | method } ;
+
+(* Functions *)
+function = [ "pure" ] "fn" identifier [ generic_params ] "(" [ parameters ] ")" 
+          [ "->" type ] ( ";" | block ) ;
+
+parameters = parameter_decl { "," parameter_decl } ;
+parameter_decl = identifier ":" type ;
+
+(* Processes *)
+process = "process" [ "(" sensitivity_list ")" ] block ;
+sensitivity_list = sensitivity { "," sensitivity } ;
+sensitivity = "posedge" identifier | "negedge" identifier | identifier ;
+
+(* Flow blocks *)
+flow = "flow" [ identifier ] "{" flow_statements "}" ;
+flow_statements = flow_statement { flow_statement } ;
+flow_statement = identifier "=" flow_expression ";" ;
+
+flow_expression = flow_term { flow_operator flow_term } ;
+flow_term = identifier | flow_call | "(" flow_expression ")" ;
+flow_operator = "|>" | "||" | "<>" | ">>" | "<<" ;
+flow_call = identifier "(" [ flow_args ] ")" ;
+flow_args = flow_arg { "," flow_arg } ;
+flow_arg = expression | identifier ;
+
+(* Always blocks *)
+always_block = "always" [ "_ff" | "_comb" | "_latch" ] [ "(" sensitivity_list ")" ] block ;
+
+(* Initial blocks *)
+initial_block = "initial" block ;
+
+(* Methods *)
+method = "method" identifier [ generic_params ] "(" [ parameters ] ")" 
+        [ "->" type ] block ;
+
+(* ============================================ *)
+(*                 Protocols                    *)
+(* ============================================ *)
+
+protocol = "protocol" identifier [ generic_params ] "{" protocol_body "}" ;
+
+protocol_body = { protocol_signal | protocol_rule | protocol_method } ;
+
+protocol_signal = signal_role identifier ":" type ";" ;
+signal_role = "master" | "slave" | "required" | "provided" ;
+
+protocol_rule = "rule" identifier ":" rule_expression ";" ;
+rule_expression = temporal_expression | boolean_expression ;
+
+protocol_method = "fn" identifier "(" [ parameters ] ")" [ "->" type ] ";" ;
+
+(* ============================================ *)
+(*                 Packages                     *)
+(* ============================================ *)
+
+package = "package" identifier "{" { package_item } "}" ;
+package_item = type_def | constant | function | entity | impl | protocol ;
+
+(* ============================================ *)
+(*                Statements                    *)
+(* ============================================ *)
+
+statement = assignment | if_statement | case_statement | match_statement 
+          | for_loop | while_loop | loop_statement | break_statement 
+          | continue_statement | return_statement | assert_statement 
+          | assume_statement | cover_statement | block | expression_statement ;
+
+assignment = lvalue assignment_op expression ";" ;
+lvalue = identifier { selector } ;
+selector = "[" expression "]" | "[" expression ":" expression "]" | "." identifier ;
+assignment_op = "=" | "<=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" 
+              | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+
+if_statement = "if" expression block [ "else" ( if_statement | block ) ] ;
+
+case_statement = "case" expression "{" case_items "}" ;
+case_items = case_item { case_item } [ default_item ] ;
+case_item = expression_list "=>" statement ;
+default_item = "default" "=>" statement ;
+expression_list = expression { "," expression } ;
+
+match_statement = "match" expression "{" match_arms "}" ;
+match_arms = match_arm { match_arm } ;
+match_arm = pattern "=>" ( expression | block ) [ "," ] ;
+
+pattern = literal_pattern | identifier_pattern | wildcard_pattern 
+        | tuple_pattern | struct_pattern | enum_pattern | range_pattern ;
+literal_pattern = literal ;
+identifier_pattern = identifier [ "@" pattern ] ;
+wildcard_pattern = "_" ;
+tuple_pattern = "(" [ pattern { "," pattern } ] ")" ;
+struct_pattern = type_identifier "{" [ field_patterns ] "}" ;
+field_patterns = field_pattern { "," field_pattern } [ "," ".." ] ;
+field_pattern = identifier [ ":" pattern ] ;
+enum_pattern = type_identifier "::" identifier [ "(" [ pattern { "," pattern } ] ")" ] ;
+range_pattern = expression ".." [ "=" ] expression ;
+
+for_loop = "for" identifier "in" expression block ;
+while_loop = "while" expression block ;
+loop_statement = "loop" block ;
+
+break_statement = "break" [ expression ] ";" ;
+continue_statement = "continue" ";" ;
+return_statement = "return" [ expression ] ";" ;
+
+assert_statement = "assert" expression [ ":" string_literal ] ";" ;
+assume_statement = "assume" expression [ ":" string_literal ] ";" ;
+cover_statement = "cover" expression [ ":" string_literal ] ";" ;
+
+expression_statement = expression ";" ;
+
+block = "{" { statement } "}" ;
+
+(* ============================================ *)
+(*               Expressions                    *)
+(* ============================================ *)
+
+expression = primary_expression { binary_operator primary_expression } ;
+
+primary_expression = literal | identifier | "(" expression ")" 
+                   | unary_expression | call_expression | index_expression 
+                   | field_expression | cast_expression | if_expression 
+                   | array_expression | struct_expression | range_expression
+                   | temporal_expression ;
+
+literal = integer_literal | float_literal | string_literal | bool_literal 
+        | time_literal | bit_literal ;
+
+bool_literal = "true" | "false" ;
+time_literal = integer_literal time_unit ;
+time_unit = "ps" | "ns" | "us" | "ms" | "s" ;
+bit_literal = integer_literal "'" ( "b" bin_digit { bin_digit } 
+                                   | "h" hex_digit { hex_digit }
+                                   | "d" digit { digit } ) ;
+
+unary_expression = unary_operator primary_expression ;
+unary_operator = "!" | "~" | "-" | "+" | "&" | "|" | "^" | "~&" | "~|" | "~^" ;
+
+binary_operator = "&&" | "||" | "==" | "!=" | "<" | "<=" | ">" | ">=" 
+                | "+" | "-" | "*" | "/" | "%" | "**" 
+                | "&" | "|" | "^" | "<<" | ">>" | "<<<" | ">>>" ;
+
+call_expression = identifier [ generic_args ] "(" [ arguments ] ")" ;
+arguments = expression { "," expression } ;
+
+index_expression = primary_expression "[" expression "]" ;
+field_expression = primary_expression "." identifier ;
+
+cast_expression = expression "as" type ;
+
+if_expression = "if" expression block "else" block ;
+
+array_expression = "[" [ expression { "," expression } ] "]" ;
+
+struct_expression = type_identifier "{" [ field_inits ] "}" ;
+field_inits = field_init { "," field_init } [ "," ] ;
+field_init = identifier ":" expression ;
+
+range_expression = expression ".." [ "=" ] expression ;
+
+(* ============================================ *)
+(*            Temporal Expressions              *)
+(* ============================================ *)
+
+temporal_expression = sequence | property ;
+
+sequence = sequence_expr { sequence_operator sequence_expr } ;
+sequence_expr = expression | "(" sequence ")" | sequence_repetition ;
+sequence_operator = "##" integer_literal | "##" "[" range "]" | "##" "[*]" | "##" "[+]" ;
+sequence_repetition = sequence_expr "[*" range "]" | sequence_expr "[+]" | sequence_expr "[*]" ;
+range = expression [ ":" expression ] ;
+
+property = implication | sequence ;
+implication = antecedent implication_operator consequent ;
+antecedent = sequence ;
+consequent = sequence | property ;
+implication_operator = "|->" | "|=>" ;
+
+(* ============================================ *)
+(*             Timing Constraints               *)
+(* ============================================ *)
+
+timing_constraint = "timing" "{" timing_specs "}" ;
+timing_specs = timing_spec { timing_spec } ;
+timing_spec = constraint_type ":" timing_value ";" ;
+constraint_type = "setup" | "hold" | "period" | "pulse_width" 
+                | "recovery" | "removal" | "skew" ;
+timing_value = time_literal | identifier | timing_expression ;
+timing_expression = "from" identifier "to" identifier ":" time_literal ;
