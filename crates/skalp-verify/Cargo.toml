@@ -1,0 +1,22 @@
+[package]
+name = "skalp-verify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skalp-frontend = { path = "../skalp-frontend" }
+skalp-mir = { path = "../skalp-mir" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+indexmap = "2.0"
+petgraph = "0.6"
+
+# For formal verification
+z3 = { version = "0.12", optional = true }
+
+[features]
+default = []
+formal = ["z3"]
+
+[dev-dependencies]
+tempfile = "3.0"
