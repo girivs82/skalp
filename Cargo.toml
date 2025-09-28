@@ -77,5 +77,8 @@ members = [
     "crates/skalp-lir",
     "crates/skalp-codegen",
     "crates/skalp-sim",
-    "crates/skalp-place-route", "crates/skalp-verify", "crates/skalp-safety",
+    "crates/skalp-place-route",
+    "crates/skalp-verify",
+    "crates/skalp-safety",
+    "crates/skalp-backends",
 ]
