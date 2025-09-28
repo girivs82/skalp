@@ -170,7 +170,7 @@ impl FpgaBackend {
 impl Backend for FpgaBackend {
     async fn synthesize(
         &self,
-        lir: &crate::mock_lir::Design,
+        lir: &skalp_lir::LirDesign,
         config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temporary directory for synthesis
@@ -219,6 +219,22 @@ impl Backend for FpgaBackend {
             FpgaTarget::Xilinx7Series { .. } => Ok("Vivado".to_string()),
             FpgaTarget::CycloneV { .. } => Ok("Quartus".to_string()),
         }
+    }
+
+    fn name(&self) -> &str {
+        "fpga"
+    }
+
+    fn supported_devices(&self) -> Vec<String> {
+        vec![
+            "ice40hx1k".to_string(),
+            "xc7a35t".to_string(),
+            "cyclonev".to_string(),
+        ]
+    }
+
+    fn validate_design(&self, _lir: &skalp_lir::LirDesign) -> BackendResult<()> {
+        Ok(())
     }
 }
 

@@ -1,0 +1,28 @@
+[package]
+name = "skalp-testing"
+version = "0.1.0"
+edition = "2021"
+authors = ["SKALP Team"]
+description = "Property-based testing framework for SKALP hardware designs"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+skalp-frontend = { path = "../skalp-frontend" }
+skalp-lir = { path = "../skalp-lir" }
+skalp-sim = { path = "../skalp-sim" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.8"
+proptest = { version = "1.0", optional = true }
+quickcheck = { version = "1.0", optional = true }
+arbitrary = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+log = "0.4"
+
+[features]
+default = ["proptest-framework"]
+proptest-framework = ["proptest"]
+quickcheck-framework = ["quickcheck"]
+
+[dev-dependencies]
+tokio-test = "0.4"

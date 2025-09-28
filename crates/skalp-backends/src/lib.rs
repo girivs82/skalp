@@ -69,6 +69,9 @@ pub mod asic;
 pub mod timing;
 pub mod power;
 pub mod constraints;
+pub mod xilinx;
+pub mod intel;
+pub mod verilog;
 
 /// Backend-specific errors
 #[derive(Error, Debug)]
@@ -87,6 +90,12 @@ pub enum BackendError {
     IoError(#[from] std::io::Error),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
+    #[error("Tool not found: {0}")]
+    ToolNotFound(String),
+    #[error("Tool execution failed: {0}")]
+    ToolFailed(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Result type for backend operations
@@ -372,7 +381,7 @@ pub trait Backend {
     /// Synthesize a design from LIR
     async fn synthesize(
         &self,
-        lir: &mock_lir::Design,
+        lir: &skalp_lir::LirDesign,
         config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults>;
 
@@ -384,6 +393,15 @@ pub trait Backend {
 
     /// Get tool version information
     fn tool_version(&self) -> BackendResult<String>;
+
+    /// Get backend name
+    fn name(&self) -> &str;
+
+    /// Get supported devices
+    fn supported_devices(&self) -> Vec<String>;
+
+    /// Validate design for backend
+    fn validate_design(&self, lir: &skalp_lir::LirDesign) -> BackendResult<()>;
 }
 
 /// Backend factory for creating appropriate backend instances

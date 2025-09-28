@@ -15,6 +15,41 @@ pub struct Lir {
     pub nets: Vec<Net>,
 }
 
+/// Complete LIR design with multiple modules
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirDesign {
+    /// Design name
+    pub name: String,
+    /// Modules in the design
+    pub modules: Vec<LirModule>,
+}
+
+/// LIR module representation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirModule {
+    /// Module name
+    pub name: String,
+    /// Signals in the module
+    pub signals: Vec<LirSignal>,
+    /// Gates in the module
+    pub gates: Vec<Gate>,
+    /// Nets connecting gates
+    pub nets: Vec<Net>,
+}
+
+/// LIR signal representation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirSignal {
+    /// Signal name
+    pub name: String,
+    /// Signal type
+    pub signal_type: String,
+    /// Whether this is an input signal
+    pub is_input: bool,
+    /// Whether this is a register
+    pub is_register: bool,
+}
+
 /// Hardware gate representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gate {
@@ -41,6 +76,23 @@ pub enum GateType {
     Buffer,
     DFF,
     Latch,
+}
+
+impl std::fmt::Display for GateType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GateType::And => write!(f, "AND"),
+            GateType::Or => write!(f, "OR"),
+            GateType::Not => write!(f, "NOT"),
+            GateType::Nand => write!(f, "NAND"),
+            GateType::Nor => write!(f, "NOR"),
+            GateType::Xor => write!(f, "XOR"),
+            GateType::Xnor => write!(f, "XNOR"),
+            GateType::Buffer => write!(f, "BUF"),
+            GateType::DFF => write!(f, "DFF"),
+            GateType::Latch => write!(f, "LATCH"),
+        }
+    }
 }
 
 /// Hardware net (wire)

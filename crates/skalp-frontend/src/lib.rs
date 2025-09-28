@@ -16,6 +16,8 @@ pub mod parser;
 pub mod semantic;
 pub mod hir;
 pub mod hir_builder;
+pub mod generics;
+pub mod macros;
 
 pub use lexer::Lexer;
 pub use parser::Parser;

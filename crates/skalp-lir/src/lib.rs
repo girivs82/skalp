@@ -18,7 +18,7 @@ pub mod tech_mapping;
 pub mod technology;
 pub mod timing;
 
-pub use lir::{Gate, GateType, Lir, Net};
+pub use lir::{Gate, GateType, Lir, Net, LirDesign, LirModule, LirSignal};
 pub use mir_to_lir::transform_mir_to_lir;
 pub use optimization::{OptimizationPipeline, OptimizationResult};
 pub use netlist::Netlist;

@@ -1,0 +1,25 @@
+[package]
+name = "skalp-incremental"
+version = "0.1.0"
+edition = "2021"
+authors = ["SKALP Team"]
+description = "Incremental build system for SKALP"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+skalp-frontend = { path = "../skalp-frontend" }
+skalp-mir = { path = "../skalp-mir" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+sha2 = "0.10"
+walkdir = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "5.0"
+lru = "0.12"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3.0"
+tokio-test = "0.4"

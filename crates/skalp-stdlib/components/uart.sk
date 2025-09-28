@@ -1,0 +1,192 @@
+// UART (Universal Asynchronous Receiver-Transmitter)
+// Simple UART with configurable baud rate
+
+@intent("serial_communication")
+entity UART<const CLK_FREQ: nat = 50000000, const BAUD_RATE: nat = 115200> {
+    in clk: clock;
+    in rst: reset(active_high);
+
+    // Transmitter interface
+    in tx_valid: bit;
+    in tx_data: bit<8>;
+    out tx_ready: bit;
+    out tx_serial: bit;
+
+    // Receiver interface
+    in rx_serial: bit;
+    out rx_valid: bit;
+    out rx_data: bit<8>;
+    out rx_error: bit;  // Framing error
+}
+
+impl UART<const CLK_FREQ: nat, const BAUD_RATE: nat> {
+    const CLKS_PER_BIT: nat = CLK_FREQ / BAUD_RATE;
+
+    // Transmitter state machine
+    enum TxState {
+        IDLE,
+        START_BIT,
+        DATA_BITS,
+        STOP_BIT
+    }
+
+    signal tx_state: TxState;
+    signal tx_clk_count: nat<$clog2(CLKS_PER_BIT)>;
+    signal tx_bit_index: nat<3>;
+    signal tx_data_reg: bit<8>;
+
+    // Receiver state machine
+    enum RxState {
+        IDLE,
+        START_BIT,
+        DATA_BITS,
+        STOP_BIT
+    }
+
+    signal rx_state: RxState;
+    signal rx_clk_count: nat<$clog2(CLKS_PER_BIT)>;
+    signal rx_bit_index: nat<3>;
+    signal rx_data_reg: bit<8>;
+    signal rx_serial_sync: bit<2>;  // Synchronizer
+
+    // Synchronize RX input
+    on(clk.rise) {
+        rx_serial_sync <= {rx_serial_sync[0], rx_serial};
+    }
+
+    // Transmitter logic
+    on(rst.active) {
+        tx_state <= TxState::IDLE;
+        tx_serial <= 1;
+        tx_ready <= 1;
+        tx_clk_count <= 0;
+        tx_bit_index <= 0;
+    }
+
+    on(clk.rise) {
+        match tx_state {
+            TxState::IDLE => {
+                tx_serial <= 1;
+                tx_ready <= 1;
+                tx_clk_count <= 0;
+                tx_bit_index <= 0;
+
+                if tx_valid {
+                    tx_data_reg <= tx_data;
+                    tx_state <= TxState::START_BIT;
+                    tx_ready <= 0;
+                }
+            }
+
+            TxState::START_BIT => {
+                tx_serial <= 0;  // Start bit is 0
+
+                if tx_clk_count < CLKS_PER_BIT - 1 {
+                    tx_clk_count <= tx_clk_count + 1;
+                } else {
+                    tx_clk_count <= 0;
+                    tx_state <= TxState::DATA_BITS;
+                }
+            }
+
+            TxState::DATA_BITS => {
+                tx_serial <= tx_data_reg[tx_bit_index];
+
+                if tx_clk_count < CLKS_PER_BIT - 1 {
+                    tx_clk_count <= tx_clk_count + 1;
+                } else {
+                    tx_clk_count <= 0;
+
+                    if tx_bit_index < 7 {
+                        tx_bit_index <= tx_bit_index + 1;
+                    } else {
+                        tx_bit_index <= 0;
+                        tx_state <= TxState::STOP_BIT;
+                    }
+                }
+            }
+
+            TxState::STOP_BIT => {
+                tx_serial <= 1;  // Stop bit is 1
+
+                if tx_clk_count < CLKS_PER_BIT - 1 {
+                    tx_clk_count <= tx_clk_count + 1;
+                } else {
+                    tx_clk_count <= 0;
+                    tx_state <= TxState::IDLE;
+                    tx_ready <= 1;
+                }
+            }
+        }
+    }
+
+    // Receiver logic
+    on(rst.active) {
+        rx_state <= RxState::IDLE;
+        rx_valid <= 0;
+        rx_error <= 0;
+        rx_clk_count <= 0;
+        rx_bit_index <= 0;
+    }
+
+    on(clk.rise) {
+        match rx_state {
+            RxState::IDLE => {
+                rx_valid <= 0;
+                rx_clk_count <= 0;
+                rx_bit_index <= 0;
+
+                // Detect start bit (falling edge)
+                if rx_serial_sync[1] == 0 {
+                    rx_state <= RxState::START_BIT;
+                }
+            }
+
+            RxState::START_BIT => {
+                // Sample in the middle of the bit period
+                if rx_clk_count == (CLKS_PER_BIT - 1) / 2 {
+                    if rx_serial_sync[1] == 0 {
+                        // Valid start bit
+                        rx_clk_count <= 0;
+                        rx_state <= RxState::DATA_BITS;
+                    } else {
+                        // False start bit
+                        rx_state <= RxState::IDLE;
+                    }
+                } else {
+                    rx_clk_count <= rx_clk_count + 1;
+                }
+            }
+
+            RxState::DATA_BITS => {
+                if rx_clk_count < CLKS_PER_BIT - 1 {
+                    rx_clk_count <= rx_clk_count + 1;
+                } else {
+                    rx_clk_count <= 0;
+                    rx_data_reg[rx_bit_index] <= rx_serial_sync[1];
+
+                    if rx_bit_index < 7 {
+                        rx_bit_index <= rx_bit_index + 1;
+                    } else {
+                        rx_bit_index <= 0;
+                        rx_state <= RxState::STOP_BIT;
+                    }
+                }
+            }
+
+            RxState::STOP_BIT => {
+                if rx_clk_count < CLKS_PER_BIT - 1 {
+                    rx_clk_count <= rx_clk_count + 1;
+                } else {
+                    rx_clk_count <= 0;
+                    rx_state <= RxState::IDLE;
+                    rx_valid <= 1;
+                    rx_data <= rx_data_reg;
+
+                    // Check for framing error (stop bit should be 1)
+                    rx_error <= !rx_serial_sync[1];
+                }
+            }
+        }
+    }
+}

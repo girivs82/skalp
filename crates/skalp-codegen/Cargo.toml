@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+skalp-mir = { path = "../skalp-mir" }
 skalp-lir = { path = "../skalp-lir" }
 indoc = "2.0"
 thiserror = "1.0"

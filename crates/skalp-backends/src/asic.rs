@@ -68,100 +68,14 @@ impl AsicBackend {
     }
 
     /// Convert LIR to structural Verilog for ASIC synthesis
-    async fn lir_to_structural_verilog(&self, lir: &crate::mock_lir::Design) -> BackendResult<String> {
+    async fn lir_to_structural_verilog(&self, lir: &skalp_lir::LirDesign) -> BackendResult<String> {
         // Generate structural Verilog from LIR - more detailed than FPGA version
         let mut verilog = String::new();
 
-        // Module header with timing annotations
-        verilog.push_str(&format!("`timescale 1ns/1ps\n\nmodule {} (\n", lir.name));
-
-        // Port declarations with drive strengths
-        let mut port_decls = Vec::new();
-        for port in &lir.ports {
-            let direction = match port.direction {
-                crate::mock_lir::PortDirection::Input => "input",
-                crate::mock_lir::PortDirection::Output => "output",
-                crate::mock_lir::PortDirection::Inout => "inout",
-            };
-
-            let width_spec = if port.width > 1 {
-                format!("[{}:0] ", port.width - 1)
-            } else {
-                String::new()
-            };
-
-            port_decls.push(format!("    {} {}{}", direction, width_spec, port.name));
-        }
-        verilog.push_str(&port_decls.join(",\n"));
-        verilog.push_str("\n);\n\n");
-
-        // Wire declarations with load annotations
-        for wire in &lir.wires {
-            let width_spec = if wire.width > 1 {
-                format!("[{}:0] ", wire.width - 1)
-            } else {
-                String::new()
-            };
-            verilog.push_str(&format!("wire {}{};  // {} (load: ~0.1pF)\n",
-                width_spec, wire.name, wire.source));
-        }
-        verilog.push_str("\n");
-
-        // Standard cell instantiations instead of behavioral code
-        for gate in &lir.gates {
-            match &gate.gate_type {
-                crate::mock_lir::GateType::And => {
-                    let cell_name = if gate.inputs.len() == 2 { "AND2_X1" } else { "AND3_X1" };
-                    verilog.push_str(&format!("{} U{} (.A({}), .B({}), .Y({}));\n",
-                        cell_name, gate.id, gate.inputs[0], gate.inputs[1], gate.outputs[0]));
-                }
-                crate::mock_lir::GateType::Or => {
-                    let cell_name = if gate.inputs.len() == 2 { "OR2_X1" } else { "OR3_X1" };
-                    verilog.push_str(&format!("{} U{} (.A({}), .B({}), .Y({}));\n",
-                        cell_name, gate.id, gate.inputs[0], gate.inputs[1], gate.outputs[0]));
-                }
-                crate::mock_lir::GateType::Not => {
-                    verilog.push_str(&format!("INV_X1 U{} (.A({}), .Y({}));\n",
-                        gate.id, gate.inputs[0], gate.outputs[0]));
-                }
-                crate::mock_lir::GateType::Xor => {
-                    verilog.push_str(&format!("XOR2_X1 U{} (.A({}), .B({}), .Y({}));\n",
-                        gate.id, gate.inputs[0], gate.inputs[1], gate.outputs[0]));
-                }
-                crate::mock_lir::GateType::Mux => {
-                    if gate.inputs.len() >= 3 {
-                        verilog.push_str(&format!("MUX2_X1 U{} (.A({}), .B({}), .S({}), .Y({}));\n",
-                            gate.id, gate.inputs[1], gate.inputs[2], gate.inputs[0], gate.outputs[0]));
-                    }
-                }
-                crate::mock_lir::GateType::FlipFlop => {
-                    if gate.inputs.len() > 2 {
-                        // With reset
-                        verilog.push_str(&format!("DFFR_X1 U{} (.D({}), .CK({}), .RN({}), .Q({}));\n",
-                            gate.id, gate.inputs[0], gate.inputs[1], gate.inputs[2], gate.outputs[0]));
-                    } else {
-                        // Without reset
-                        verilog.push_str(&format!("DFF_X1 U{} (.D({}), .CK({}), .Q({}));\n",
-                            gate.id, gate.inputs[0], gate.inputs[1], gate.outputs[0]));
-                    }
-                }
-                crate::mock_lir::GateType::Constant => {
-                    if let Some(value) = gate.parameters.get("value") {
-                        if value == "1'b0" {
-                            verilog.push_str(&format!("TIELO_X1 U{} (.Y({}));\n", gate.id, gate.outputs[0]));
-                        } else {
-                            verilog.push_str(&format!("TIEHI_X1 U{} (.Y({}));\n", gate.id, gate.outputs[0]));
-                        }
-                    }
-                }
-                _ => {
-                    verilog.push_str(&format!("// Unsupported gate type: {:?}\n", gate.gate_type));
-                }
-            }
+        // Use the Verilog generation utility
+        crate::verilog::generate_verilog(&lir.modules[0])
         }
 
-        verilog.push_str("\nendmodule\n");
-        Ok(verilog)
     }
 
     /// Run ASIC synthesis flow
@@ -184,7 +98,7 @@ impl AsicBackend {
 impl Backend for AsicBackend {
     async fn synthesize(
         &self,
-        lir: &crate::mock_lir::Design,
+        lir: &skalp_lir::LirDesign,
         config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temporary directory for synthesis
@@ -233,6 +147,22 @@ impl Backend for AsicBackend {
             AsicTarget::FreePdk45 => Ok("FreePDK45 + OpenROAD".to_string()),
             AsicTarget::Sky130 => Ok("SkyWater 130nm + OpenROAD".to_string()),
         }
+    }
+
+    fn name(&self) -> &str {
+        "asic"
+    }
+
+    fn supported_devices(&self) -> Vec<String> {
+        vec![
+            "freepdk45".to_string(),
+            "sky130".to_string(),
+            "generic".to_string(),
+        ]
+    }
+
+    fn validate_design(&self, _lir: &skalp_lir::LirDesign) -> BackendResult<()> {
+        Ok(())
     }
 }
 

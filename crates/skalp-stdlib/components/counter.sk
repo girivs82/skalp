@@ -1,0 +1,56 @@
+// Parameterized Counter Component
+// A generic up/down counter with configurable width
+
+@intent("general_purpose")
+entity Counter<const WIDTH: nat = 8> {
+    in clk: clock;
+    in rst: reset(active_high);
+    in enable: bit;
+    in up_down: bit;  // 1 for up, 0 for down
+    in load: bit;
+    in load_value: bit<WIDTH>;
+    out count: bit<WIDTH>;
+    out overflow: bit;
+    out underflow: bit;
+}
+
+impl Counter<const WIDTH: nat> {
+    signal next_count: bit<WIDTH>;
+    signal max_value: bit<WIDTH> = (1 << WIDTH) - 1;
+
+    on(rst.active) {
+        count <= 0;
+        overflow <= 0;
+        underflow <= 0;
+    }
+
+    on(clk.rise) {
+        if load {
+            count <= load_value;
+            overflow <= 0;
+            underflow <= 0;
+        } else if enable {
+            if up_down {
+                // Counting up
+                if count == max_value {
+                    count <= 0;
+                    overflow <= 1;
+                } else {
+                    count <= count + 1;
+                    overflow <= 0;
+                }
+                underflow <= 0;
+            } else {
+                // Counting down
+                if count == 0 {
+                    count <= max_value;
+                    underflow <= 1;
+                } else {
+                    count <= count - 1;
+                    underflow <= 0;
+                }
+                overflow <= 0;
+            }
+        }
+    }
+}

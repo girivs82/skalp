@@ -1,0 +1,28 @@
+[package]
+name = "skalp-formal"
+version = "0.1.0"
+edition = "2021"
+authors = ["SKALP Team"]
+description = "Formal verification and model checking for SKALP"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+skalp-frontend = { path = "../skalp-frontend" }
+skalp-lir = { path = "../skalp-lir" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+tempfile = "3.0"
+log = "0.4"
+bitvec = "1.0"
+z3 = { version = "0.12", optional = true }
+boolector = { version = "0.4", optional = true }
+
+[features]
+default = []
+z3-solver = ["z3"]
+boolector-solver = ["boolector"]
+yices = []
+
+[dev-dependencies]
+tokio-test = "0.4"

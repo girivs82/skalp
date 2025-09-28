@@ -1,0 +1,26 @@
+[package]
+name = "skalp-parallel"
+version = "0.1.0"
+edition = "2021"
+authors = ["SKALP Team"]
+description = "Parallel compilation engine for SKALP"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+skalp-frontend = { path = "../skalp-frontend" }
+skalp-mir = { path = "../skalp-mir" }
+skalp-backends = { path = "../skalp-backends" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+dashmap = "5.0"
+crossbeam = "0.8"
+rayon = "1.8"
+petgraph = "0.6"
+log = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+num_cpus = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"

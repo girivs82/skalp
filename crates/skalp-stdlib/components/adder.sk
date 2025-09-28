@@ -1,0 +1,38 @@
+// Parameterized Adder/Subtractor
+// Configurable width arithmetic unit with overflow detection
+
+@intent("arithmetic")
+entity Adder<const WIDTH: nat = 8> {
+    in a: bit<WIDTH>;
+    in b: bit<WIDTH>;
+    in subtract: bit;     // 0 for add, 1 for subtract
+    in carry_in: bit;
+
+    out result: bit<WIDTH>;
+    out carry_out: bit;
+    out overflow: bit;    // Signed overflow
+}
+
+impl Adder<const WIDTH: nat> {
+    signal b_effective: bit<WIDTH>;
+    signal carry_effective: bit;
+    signal sum: bit<WIDTH+1>;
+
+    // For subtraction, invert B and add 1 (via carry_in)
+    b_effective = subtract ? ~b : b;
+    carry_effective = subtract ? !carry_in : carry_in;
+
+    // Perform addition with carry
+    sum = {0, a} + {0, b_effective} + {0, carry_effective};
+
+    // Outputs
+    result = sum[WIDTH-1:0];
+    carry_out = sum[WIDTH];
+
+    // Overflow detection for signed arithmetic
+    // Overflow occurs when:
+    // - Adding two positive numbers yields negative
+    // - Adding two negative numbers yields positive
+    overflow = (a[WIDTH-1] == b_effective[WIDTH-1]) &&
+               (result[WIDTH-1] != a[WIDTH-1]);
+}

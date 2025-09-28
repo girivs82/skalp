@@ -12,6 +12,8 @@ pub mod fmea;
 pub mod mechanisms;
 pub mod metrics;
 pub mod power_domains;
+pub mod do254;
+pub mod iec61508;
 
 /// Safety-related errors
 #[derive(Error, Debug)]

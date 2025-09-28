@@ -1,0 +1,13 @@
+[package]
+name = "skalp-stdlib"
+version = "0.1.0"
+edition = "2021"
+description = "Standard library components for SKALP"
+
+[dependencies]
+# No dependencies - this is just SKALP source files
+
+[features]
+default = []
+simulation = []
+synthesis = []

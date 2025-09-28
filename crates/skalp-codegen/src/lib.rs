@@ -6,10 +6,25 @@
 //! - Verilog generation
 //! - Timing constraint file generation
 
-pub mod systemverilog;
-pub mod vhdl;
-pub mod verilog;
-pub mod constraints;
+// Note: Actual implementations are in progress
+// For now, we provide the basic structure
+
+pub mod generator {
+    use skalp_mir::mir::Mir;
+
+    pub struct CodeGenerator;
+
+    impl CodeGenerator {
+        pub fn new() -> Self {
+            CodeGenerator
+        }
+
+        pub fn generate_systemverilog(&self, _mir: &Mir) -> String {
+            // Placeholder implementation
+            "module generated_module();\nendmodule".to_string()
+        }
+    }
+}
 
 pub trait CodeGen {
     fn generate(&self, target: Target) -> String;

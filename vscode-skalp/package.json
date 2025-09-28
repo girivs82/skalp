@@ -1,0 +1,74 @@
+{
+    "name": "skalp",
+    "displayName": "SKALP Language Support",
+    "description": "Language support for SKALP hardware description language",
+    "version": "0.1.0",
+    "publisher": "skalp-lang",
+    "engines": {
+        "vscode": "^1.74.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "activationEvents": [
+        "onLanguage:skalp"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "languages": [
+            {
+                "id": "skalp",
+                "aliases": [
+                    "SKALP",
+                    "skalp"
+                ],
+                "extensions": [
+                    ".sk",
+                    ".skalp"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "skalp",
+                "scopeName": "source.skalp",
+                "path": "./syntaxes/skalp.tmLanguage.json"
+            }
+        ],
+        "configuration": {
+            "type": "object",
+            "title": "SKALP",
+            "properties": {
+                "skalp.serverPath": {
+                    "type": "string",
+                    "default": "skalp-lsp",
+                    "description": "Path to the SKALP language server executable"
+                },
+                "skalp.trace.server": {
+                    "type": "string",
+                    "enum": [
+                        "off",
+                        "messages",
+                        "verbose"
+                    ],
+                    "default": "off",
+                    "description": "Traces the communication between VS Code and the SKALP language server"
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./"
+    },
+    "dependencies": {
+        "vscode-languageclient": "^8.0.0"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.74.0",
+        "@types/node": "^18.0.0",
+        "typescript": "^4.9.0"
+    }
+}

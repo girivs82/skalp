@@ -1,0 +1,71 @@
+// Parameterized Pipelined Multiplier
+// Configurable width multiplier with optional pipelining
+
+@intent("high_throughput")
+entity Multiplier<const WIDTH: nat = 16, const PIPELINE_STAGES: nat = 3> {
+    in clk: clock;
+    in rst: reset(active_high);
+
+    in a: bit<WIDTH>;
+    in b: bit<WIDTH>;
+    in valid_in: bit;
+
+    out product: bit<WIDTH*2>;
+    out valid_out: bit;
+}
+
+impl Multiplier<const WIDTH: nat, const PIPELINE_STAGES: nat> {
+    // Pipeline registers
+    signal pipe_a: array<bit<WIDTH>, PIPELINE_STAGES>;
+    signal pipe_b: array<bit<WIDTH>, PIPELINE_STAGES>;
+    signal pipe_valid: array<bit, PIPELINE_STAGES>;
+    signal partial_products: array<bit<WIDTH*2>, PIPELINE_STAGES>;
+
+    // Combinational multiplier output
+    signal mult_result: bit<WIDTH*2>;
+
+    // Simple combinational multiply
+    mult_result = {0[WIDTH], a} * {0[WIDTH], b};
+
+    on(rst.active) {
+        for i in 0..PIPELINE_STAGES {
+            pipe_valid[i] <= 0;
+            partial_products[i] <= 0;
+        }
+        valid_out <= 0;
+    }
+
+    on(clk.rise) {
+        if PIPELINE_STAGES == 0 {
+            // No pipelining - combinational
+            product <= mult_result;
+            valid_out <= valid_in;
+        } else {
+            // First stage
+            pipe_a[0] <= a;
+            pipe_b[0] <= b;
+            pipe_valid[0] <= valid_in;
+
+            // Intermediate stages
+            for i in 1..PIPELINE_STAGES {
+                pipe_a[i] <= pipe_a[i-1];
+                pipe_b[i] <= pipe_b[i-1];
+                pipe_valid[i] <= pipe_valid[i-1];
+            }
+
+            // Compute partial products at different stages
+            // This is a simplified model - real implementation would
+            // distribute the multiplication across stages
+            partial_products[PIPELINE_STAGES-1] <=
+                {0[WIDTH], pipe_a[PIPELINE_STAGES-1]} *
+                {0[WIDTH], pipe_b[PIPELINE_STAGES-1]};
+
+            // Output stage
+            product <= partial_products[PIPELINE_STAGES-1];
+            valid_out <= pipe_valid[PIPELINE_STAGES-1];
+        }
+    }
+
+    // Performance assertion
+    assert property (valid_in |-> ##PIPELINE_STAGES valid_out);
+}

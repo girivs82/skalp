@@ -410,6 +410,12 @@ pub enum Type {
     Array(Box<Type>, u32),
     /// Custom type
     Custom(String),
+    /// Named type (for generics)
+    Named(String),
+    /// Generic type with arguments
+    Generic(String, Vec<Type>),
+    /// Const value type
+    Const(i64),
 }
 
 /// Generic parameter
