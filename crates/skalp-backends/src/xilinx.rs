@@ -237,12 +237,12 @@ impl XilinxBackend {
             // Extract resource usage (simplified parsing)
             if let Some(lut_line) = content.lines().find(|l| l.contains("Slice LUTs")) {
                 if let Some(num) = lut_line.split_whitespace().nth(3) {
-                    results.luts = num.parse().unwrap_or(0);
+                    results.area_metrics.luts_used = Some(num.parse().unwrap_or(0));
                 }
             }
             if let Some(ff_line) = content.lines().find(|l| l.contains("Slice Registers")) {
                 if let Some(num) = ff_line.split_whitespace().nth(3) {
-                    results.registers = num.parse().unwrap_or(0);
+                    results.area_metrics.flip_flops_used = num.parse().unwrap_or(0);
                 }
             }
         }
@@ -260,7 +260,7 @@ impl XilinxBackend {
                         // Calculate frequency from worst negative slack
                         let period = 10.0; // Assume 10ns = 100MHz target
                         let actual_period = period - wns_val;
-                        results.max_frequency = (1000.0 / actual_period) as u32;
+                        results.timing_results.max_frequency_mhz = 1000.0 / actual_period;
                     }
                 }
             }
@@ -275,15 +275,19 @@ impl XilinxBackend {
             // Extract total power (simplified parsing)
             if let Some(power_line) = content.lines().find(|l| l.contains("Total On-Chip Power")) {
                 if let Some(power) = power_line.split_whitespace().nth(4) {
-                    results.power_mw = power.parse().unwrap_or(0.0);
+                    results.power_results.total_power_mw = power.parse().unwrap_or(0.0);
                 }
             }
         }
 
         // Set bitstream path
-        let bitstream = output_dir.join(&format!("{}.bit", results.top_module));
+        let bitstream = output_dir.join("design.bit");
         if bitstream.exists() {
-            results.bitstream = Some(bitstream);
+            results.output_files.push(crate::OutputFile {
+                file_type: crate::OutputFileType::Bitstream,
+                path: bitstream.to_string_lossy().to_string(),
+                description: "FPGA bitstream".to_string(),
+            });
         }
 
         Ok(results)
@@ -321,10 +325,8 @@ impl Backend for XilinxBackend {
         log::info!("Vivado output: {}", output);
 
         // Parse results
-        let mut results = self.parse_reports(work_dir)?;
-        results.backend = "xilinx_vivado".to_string();
-        results.device = self.get_device_part().to_string();
-        results.top_module = lir.name.clone();
+        let results = self.parse_reports(work_dir)?;
+        // Backend and device info are already in target field
 
         Ok(results)
     }
@@ -353,6 +355,21 @@ impl Backend for XilinxBackend {
         }
 
         Ok(())
+    }
+
+    fn supported_targets(&self) -> Vec<crate::TargetPlatform> {
+        vec![crate::TargetPlatform::Fpga(crate::FpgaTarget::Xilinx7Series {
+            part: self.get_device_part().to_string(),
+            package: "ffg1761".to_string(),
+        })]
+    }
+
+    fn validate_config(&self, _config: &SynthesisConfig) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn tool_version(&self) -> BackendResult<String> {
+        Ok("Vivado 2023.2".to_string())
     }
 }
 

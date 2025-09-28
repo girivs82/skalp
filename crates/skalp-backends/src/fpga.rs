@@ -57,44 +57,19 @@ impl FpgaBackend {
     }
 
     /// Convert LIR to Verilog for FPGA synthesis
-    async fn lir_to_verilog(&self, lir: &crate::mock_lir::Design) -> BackendResult<String> {
-        // Generate SystemVerilog from LIR
+    async fn lir_to_verilog(&self, lir: &skalp_lir::LirDesign) -> BackendResult<String> {
+        // Generate Verilog from LIR
+        // For now, just generate from the first module
+        if let Some(module) = lir.modules.first() {
+            crate::verilog::generate_verilog(module)
+        } else {
+            // Generate a simple stub module
+            Ok(format!("module {} ();\nendmodule\n", lir.name))
+        }
+    }
+
+    async fn lir_to_verilog_old(&self, lir: &crate::mock_lir::Design) -> BackendResult<String> {
         let mut verilog = String::new();
-
-        // Module header
-        verilog.push_str(&format!("module {} (\n", lir.name));
-
-        // Port declarations
-        let mut port_decls = Vec::new();
-        for port in &lir.ports {
-            let direction = match port.direction {
-                crate::mock_lir::PortDirection::Input => "input",
-                crate::mock_lir::PortDirection::Output => "output",
-                crate::mock_lir::PortDirection::Inout => "inout",
-            };
-
-            let width_spec = if port.width > 1 {
-                format!("[{}:0] ", port.width - 1)
-            } else {
-                String::new()
-            };
-
-            port_decls.push(format!("    {} {}{}", direction, width_spec, port.name));
-        }
-        verilog.push_str(&port_decls.join(",\n"));
-        verilog.push_str("\n);\n\n");
-
-        // Wire declarations
-        for wire in &lir.wires {
-            let width_spec = if wire.width > 1 {
-                format!("[{}:0] ", wire.width - 1)
-            } else {
-                String::new()
-            };
-            verilog.push_str(&format!("wire {}{};  // {}\n", width_spec, wire.name, wire.source));
-        }
-        verilog.push_str("\n");
-
         // Gate instantiations
         for gate in &lir.gates {
             match &gate.gate_type {

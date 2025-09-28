@@ -108,6 +108,12 @@ pub enum TargetPlatform {
     Asic(AsicTarget),
 }
 
+impl Default for TargetPlatform {
+    fn default() -> Self {
+        TargetPlatform::Fpga(FpgaTarget::default())
+    }
+}
+
 /// FPGA target families
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FpgaTarget {
@@ -126,6 +132,15 @@ pub enum FpgaTarget {
         part: String,
         package: String,
     },
+}
+
+impl Default for FpgaTarget {
+    fn default() -> Self {
+        FpgaTarget::Ice40 {
+            part: "iCE40HX1K".to_string(),
+            package: "TQ144".to_string(),
+        }
+    }
 }
 
 /// ASIC target processes
@@ -232,7 +247,7 @@ pub struct PowerConstraints {
 }
 
 /// Synthesis results
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SynthesisResults {
     /// Synthesis success status
     pub success: bool,
@@ -251,7 +266,7 @@ pub struct SynthesisResults {
 }
 
 /// Area utilization metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AreaMetrics {
     /// Total LUTs used (FPGA)
     pub luts_used: Option<u32>,
@@ -268,7 +283,7 @@ pub struct AreaMetrics {
 }
 
 /// Timing analysis results
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TimingResults {
     /// Maximum frequency achievable
     pub max_frequency_mhz: f64,
@@ -283,7 +298,7 @@ pub struct TimingResults {
 }
 
 /// Timing violation details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TimingViolation {
     /// Source register/port
     pub from: String,
@@ -298,7 +313,7 @@ pub struct TimingViolation {
 }
 
 /// Timing slack summary
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TimingSlack {
     /// Worst negative slack
     pub worst_negative_slack_ns: f64,
@@ -309,7 +324,7 @@ pub struct TimingSlack {
 }
 
 /// Power analysis results
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PowerResults {
     /// Total power consumption in mW
     pub total_power_mw: f64,

@@ -8,7 +8,7 @@ pub struct ClockGenerator {
 }
 
 impl TestGenerator for ClockGenerator {
-    fn generate(&self, _rng: &mut dyn rand::Rng) -> TestingResult<Stimulus> {
+    fn generate(&self, _rng: &mut rand::rngs::StdRng) -> TestingResult<Stimulus> {
         Ok(Stimulus::Clock {
             period_ns: self.period_ns,
             duty_cycle: self.duty_cycle,
@@ -23,7 +23,7 @@ pub struct RandomGenerator {
 }
 
 impl TestGenerator for RandomGenerator {
-    fn generate(&self, rng: &mut dyn rand::Rng) -> TestingResult<Stimulus> {
+    fn generate(&self, _rng: &mut rand::rngs::StdRng) -> TestingResult<Stimulus> {
         Ok(Stimulus::Random {
             min: self.min,
             max: self.max,

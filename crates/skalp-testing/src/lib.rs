@@ -168,18 +168,19 @@ impl PropertyTester {
         Ok(results)
     }
 
-    fn create_rng(&self) -> Box<dyn rand::Rng> {
+    fn create_rng(&self) -> rand::rngs::StdRng {
+        use rand::SeedableRng;
         if let Some(seed) = self.config.seed {
-            Box::new(rand::rngs::StdRng::seed_from_u64(seed))
+            rand::rngs::StdRng::seed_from_u64(seed)
         } else {
-            Box::new(rand::thread_rng())
+            rand::rngs::StdRng::from_entropy()
         }
     }
 
     fn generate_test_case(
         &self,
         design: &LirDesign,
-        rng: &mut Box<dyn rand::Rng>,
+        rng: &mut rand::rngs::StdRng,
     ) -> TestingResult<TestCase> {
         let mut test_case = TestCase::new();
 
@@ -348,7 +349,7 @@ impl TestResults {
 
 /// Test generator trait
 pub trait TestGenerator {
-    fn generate(&self, rng: &mut dyn rand::Rng) -> TestingResult<Stimulus>;
+    fn generate(&self, rng: &mut rand::rngs::StdRng) -> TestingResult<Stimulus>;
 }
 
 #[cfg(test)]

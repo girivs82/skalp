@@ -258,7 +258,7 @@ impl IntelBackend {
             if let Some(alm_line) = content.lines().find(|l| l.contains("Logic utilization")) {
                 if let Some(usage) = alm_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.luts = num.replace(",", "").parse().unwrap_or(0);
+                        results.area_metrics.luts_used = Some(num.replace(",", "").parse().unwrap_or(0));
                     }
                 }
             }
@@ -266,7 +266,7 @@ impl IntelBackend {
             if let Some(reg_line) = content.lines().find(|l| l.contains("Dedicated logic registers")) {
                 if let Some(usage) = reg_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.registers = num.replace(",", "").parse().unwrap_or(0);
+                        results.area_metrics.flip_flops_used = num.replace(",", "").parse().unwrap_or(0);
                     }
                 }
             }
@@ -274,7 +274,7 @@ impl IntelBackend {
             if let Some(bram_line) = content.lines().find(|l| l.contains("Memory blocks")) {
                 if let Some(usage) = bram_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.brams = num.replace(",", "").parse().unwrap_or(0);
+                        results.area_metrics.block_ram_used = Some(num.replace(",", "").parse().unwrap_or(0));
                     }
                 }
             }
@@ -282,7 +282,7 @@ impl IntelBackend {
             if let Some(dsp_line) = content.lines().find(|l| l.contains("DSP blocks")) {
                 if let Some(usage) = dsp_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.dsps = num.replace(",", "").parse().unwrap_or(0);
+                        results.area_metrics.dsp_slices_used = Some(num.replace(",", "").parse().unwrap_or(0));
                     }
                 }
             }
@@ -302,7 +302,7 @@ impl IntelBackend {
                 if let Some(freq) = fmax_line.split_whitespace()
                     .find(|s| s.contains("MHz"))
                     .and_then(|s| s.replace("MHz", "").parse::<f64>().ok()) {
-                    results.max_frequency = freq as u32;
+                    results.timing_results.max_frequency_mhz = freq;
                 }
             }
         }
@@ -321,7 +321,7 @@ impl IntelBackend {
                 if let Some(power) = power_line.split_whitespace()
                     .find(|s| s.contains("mW"))
                     .and_then(|s| s.replace("mW", "").parse::<f64>().ok()) {
-                    results.power_mw = power;
+                    results.power_results.total_power_mw = power;
                 }
             }
         }
@@ -332,12 +332,14 @@ impl IntelBackend {
             .join(format!("{}.sof", project_name));
 
         if sof_file.exists() {
-            results.bitstream = Some(sof_file);
+            results.output_files.push(crate::OutputFile {
+                file_type: crate::OutputFileType::Bitstream,
+                path: sof_file.to_string_lossy().to_string(),
+                description: "FPGA bitstream".to_string(),
+            });
         }
 
-        results.backend = "intel_quartus".to_string();
-        results.device = self.get_device_info().1.to_string();
-        results.top_module = project_name.to_string();
+        // Backend and device info are already in target field
 
         Ok(results)
     }
@@ -423,6 +425,21 @@ impl Backend for IntelBackend {
         }
 
         Ok(())
+    }
+
+    fn supported_targets(&self) -> Vec<crate::TargetPlatform> {
+        vec![crate::TargetPlatform::Fpga(crate::FpgaTarget::CycloneV {
+            part: self.get_device_info().1.to_string(),
+            package: "F896C6".to_string(),
+        })]
+    }
+
+    fn validate_config(&self, _config: &SynthesisConfig) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn tool_version(&self) -> BackendResult<String> {
+        Ok("Quartus Prime 23.1".to_string())
     }
 }
 
