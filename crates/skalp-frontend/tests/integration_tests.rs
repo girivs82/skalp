@@ -168,7 +168,7 @@ fn test_match_expression_parsing() {
     // Should find the match statement in the syntax tree
     let mut found_match = false;
     fn find_match_stmt(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::MATCH_STMT {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::MatchStmt {
             return true;
         }
         for child in node.children() {

@@ -264,12 +264,12 @@ mod tests {
     #[test]
     fn test_type_substitution() {
         let mut sub = TypeSubstitution::new();
-        sub.bind_type("T".to_string(), Type::Bit(8));
+        sub.bind_type("T".to_string(), Type::Bit(Some(8)));
 
         let generic = Type::Named("T".to_string());
         let result = sub.apply(&generic);
 
-        assert!(matches!(result, Type::Bit(8)));
+        assert!(matches!(result, Type::Bit(Some(8))));
     }
 
     #[test]
@@ -277,7 +277,7 @@ mod tests {
         let mut inf = TypeInference::new();
         inf.constrain_equal(
             Type::Named("T".to_string()),
-            Type::Bit(16)
+            Type::Bit(Some(16))
         );
 
         let substitution = inf.solve().unwrap();
@@ -298,8 +298,8 @@ mod tests {
         ];
 
         let type_args = vec![
-            Type::Bit(8),
-            Type::Bit(32),
+            Type::Bit(Some(8)),
+            Type::Bit(Some(32)),
         ];
 
         let inst = Instantiator::new(generics, type_args);

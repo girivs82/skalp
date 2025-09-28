@@ -19,7 +19,7 @@ fn test_generic_entity_definition() {
     // Should find generic parameters
     let mut found_generics = false;
     fn find_generic_params(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::GENERIC_PARAM_LIST {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::GenericParamList {
             return true;
         }
         for child in node.children() {

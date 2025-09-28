@@ -35,7 +35,7 @@ fn test_basic_intent_declaration() {
     // Should find intent constraints
     let mut found_constraints = false;
     fn find_constraints(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::INTENT_CONSTRAINT_LIST {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentConstraintList {
             return true;
         }
         for child in node.children() {

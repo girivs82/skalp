@@ -128,7 +128,7 @@ impl GpuSimRuntime {
             cones: cone_result.cones,
             shaders,
             metal_backend,
-            state: Arc::new(RwLock::new(SimState::new())),
+            state: Arc::new(RwLock::new(SimState::new(0))), // Initialize with 0 signals, will be updated
             event_queue: Arc::new(RwLock::new(EventQueue::new())),
             cmd_sender,
             cmd_receiver: Arc::new(RwLock::new(cmd_receiver)),
@@ -308,7 +308,7 @@ impl GpuSimRuntime {
         // Gather input signal values
         let mut input_data = Vec::new();
         for &signal_id in &cone.inputs {
-            if let Some(_signal_value) = state.get_signal(signal_id.0) {
+            if let Some(_signal_value) = state.get_signal_value(SirSignalId(signal_id.0)) {
                 // Convert BitVec to bytes (simplified)
                 input_data.extend_from_slice(&[0u8; 4]); // Placeholder
             }
@@ -325,7 +325,7 @@ impl GpuSimRuntime {
         for &signal_id in &cone.outputs {
             // Would parse actual output data here
             let dummy_value = bitvec::prelude::BitVec::new();
-            state.set_signal(signal_id.0, dummy_value);
+            state.set_signal_value(SirSignalId(signal_id.0), dummy_value);
         }
 
         Ok(())

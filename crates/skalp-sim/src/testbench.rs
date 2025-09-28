@@ -237,7 +237,7 @@ impl GpuTestbench {
         let cpu_start = Instant::now();
 
         // Simplified CPU simulation - would use a proper CPU simulator
-        let state = SimState::new();
+        let state = SimState::new(0); // Initialize with 0 signals
         let cycles = self.config.max_cycles;
 
         // Simulate CPU execution time (much slower than GPU)

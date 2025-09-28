@@ -8,7 +8,8 @@
       "Bash(cargo check:*)",
       "Bash(cargo clippy:*)",
       "Bash(git add:*)",
-      "Bash(cargo fix:*)"
+      "Bash(cargo fix:*)",
+      "Bash(./target/debug/skalp:*)"
     ],
     "deny": [],
     "ask": []

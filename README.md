@@ -52,18 +52,29 @@ impl Accelerator {
 ## Installation
 
 ```bash
-# Coming soon
-cargo install skalp
+# Build from source
+git clone https://github.com/skalp-lang/skalp
+cd skalp
+cargo build --release
 
 # Create a new project
-skalp new my_design
+./target/release/skalp new my_design
 cd my_design
 
-# Write your design
-edit src/main.sk
+# The project comes with an example counter design
+cat src/main.sk
 
-# Build to SystemVerilog
-skalp build --target sv
+# Build to SystemVerilog (default)
+../target/release/skalp build
+
+# Build to VHDL
+../target/release/skalp build --target vhdl
+
+# Simulate the design
+../target/release/skalp sim build/design.lir --duration 1000
+
+# Synthesize for iCE40 FPGA
+../target/release/skalp synth src/main.sk --device ice40-hx8k
 ```
 
 ## File Extensions
@@ -101,17 +112,22 @@ SKALP embodies the Sanskrit concept of Sankalpana - the power of conception and 
 
 ## Current Status
 
-SKALP is currently in early development. We have completed:
+SKALP has reached its first major milestone with a working compiler implementation:
 
 - ✅ Language design and specification (complete)
 - ✅ Compiler architecture design (complete)
 - ✅ Full flow architecture for open FPGAs (complete)
 - ✅ Formal grammar specification (complete)
 - ✅ Rust project structure setup (complete)
-- 🚧 Building the compiler implementation (in progress)
+- ✅ CLI binary implementation (complete)
+- ✅ Basic compilation pipeline (complete)
+- ✅ Multi-target code generation (SystemVerilog, VHDL, Verilog)
+- ✅ Project scaffolding and examples (complete)
+- 🚧 GPU simulation engine (placeholder implementation)
+- 🚧 FPGA/ASIC synthesis backends (placeholder implementation)
 - 📋 Standard library development (planned)
-- 📋 iCE40 backend implementation (planned)
-- 📋 Place & route engine (planned)
+- 📋 Full synthesis backend integration (planned)
+- 📋 Property-based testing framework (planned)
 
 ## Project Structure
 

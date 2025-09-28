@@ -1,0 +1,17 @@
+// Parameterized adder example
+// Demonstrates generic parameters and combinational logic
+
+entity Adder<WIDTH: nat = 8> {
+    in a: bit[WIDTH]
+    in b: bit[WIDTH]
+    in carry_in: bit
+    out sum: bit[WIDTH]
+    out carry_out: bit
+}
+
+impl Adder {
+    // Full adder logic
+    let result = a + b + carry_in
+    sum = result[WIDTH-1:0]
+    carry_out = result[WIDTH]
+}

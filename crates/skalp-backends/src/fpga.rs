@@ -238,6 +238,7 @@ pub fn available_fpga_targets() -> Vec<TargetPlatform> {
 mod tests {
     use super::*;
     use crate::{OptimizationGoals, OptimizationTarget};
+    use std::collections::HashMap;
 
     #[test]
     fn test_fpga_config_default() {

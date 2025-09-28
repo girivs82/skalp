@@ -854,15 +854,44 @@ impl HirBuilderContext {
     }
 
     /// Build field expression
-    fn build_field_expr(&mut self, _node: &SyntaxNode) -> Option<HirExpression> {
-        // TODO: Implement field access
-        None
+    fn build_field_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Get base expression and field name
+        let children: Vec<_> = node.children().collect();
+        if children.is_empty() {
+            return None;
+        }
+
+        let base = Box::new(self.build_expression(&children[0])?);
+
+        // Find the field name (identifier after dot)
+        let field_name = node.children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        Some(HirExpression::FieldAccess {
+            base,
+            field: field_name,
+        })
     }
 
     /// Build index expression
-    fn build_index_expr(&mut self, _node: &SyntaxNode) -> Option<HirExpression> {
-        // TODO: Implement array indexing
-        None
+    fn build_index_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        let children: Vec<_> = node.children().collect();
+        if children.len() < 2 {
+            return None;
+        }
+
+        let base = Box::new(self.build_expression(&children[0])?);
+        let index = Box::new(self.build_expression(&children[1])?);
+
+        // Check if it's a range access [start:end]
+        if children.len() >= 3 {
+            let end = Box::new(self.build_expression(&children[2])?);
+            Some(HirExpression::Range(base, index, end))
+        } else {
+            Some(HirExpression::Index(base, index))
+        }
     }
 
     /// Build protocol (stub)
@@ -1121,6 +1150,244 @@ fn parse_bin_literal(text: &str) -> u64 {
 fn parse_hex_literal(text: &str) -> u64 {
     let without_prefix = text.strip_prefix("0x").unwrap_or(text);
     u64::from_str_radix(without_prefix, 16).unwrap_or(0)
+}
+
+impl HirBuilderContext {
+    /// Build trait definition
+    fn build_trait_def(&mut self, node: &SyntaxNode) -> Option<HirTraitDefinition> {
+        let name = self.extract_name(node)?;
+
+        // Parse generic parameters
+        let generics = if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
+            self.parse_generic_params(&generic_list)
+        } else {
+            Vec::new()
+        };
+
+        // Parse trait items
+        let mut methods = Vec::new();
+        let mut associated_types = Vec::new();
+        let mut associated_constants = Vec::new();
+
+        if let Some(trait_items) = node.first_child_of_kind(SyntaxKind::TraitItemList) {
+            for item in trait_items.children() {
+                match item.kind() {
+                    SyntaxKind::TraitMethod => {
+                        if let Some(method) = self.build_trait_method(&item) {
+                            methods.push(method);
+                        }
+                    }
+                    SyntaxKind::TraitType => {
+                        if let Some(assoc_type) = self.build_trait_associated_type(&item) {
+                            associated_types.push(assoc_type);
+                        }
+                    }
+                    SyntaxKind::TraitConst => {
+                        if let Some(assoc_const) = self.build_trait_associated_const(&item) {
+                            associated_constants.push(assoc_const);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Some(HirTraitDefinition {
+            name,
+            generics,
+            methods,
+            associated_types,
+            associated_constants,
+        })
+    }
+
+    /// Build trait implementation
+    fn build_trait_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitImplementation> {
+        // Extract trait name and target type
+        let children: Vec<_> = node.children().collect();
+        if children.len() < 2 {
+            return None;
+        }
+
+        let trait_name = self.extract_name(&children[0])?;
+        let target_type = self.extract_name(&children[1])?;
+
+        // Look up target entity
+        let target_entity = *self.symbols.entities.get(&target_type)?;
+
+        // Parse implementation items
+        let mut method_implementations = Vec::new();
+        let mut type_implementations = Vec::new();
+        let mut const_implementations = Vec::new();
+
+        if let Some(trait_items) = node.first_child_of_kind(SyntaxKind::TraitItemList) {
+            for item in trait_items.children() {
+                match item.kind() {
+                    SyntaxKind::TraitMethod => {
+                        if let Some(method_impl) = self.build_trait_method_impl(&item) {
+                            method_implementations.push(method_impl);
+                        }
+                    }
+                    SyntaxKind::TraitType => {
+                        if let Some(type_impl) = self.build_trait_type_impl(&item) {
+                            type_implementations.push(type_impl);
+                        }
+                    }
+                    SyntaxKind::TraitConst => {
+                        if let Some(const_impl) = self.build_trait_const_impl(&item) {
+                            const_implementations.push(const_impl);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Some(HirTraitImplementation {
+            trait_name,
+            target_entity,
+            method_implementations,
+            type_implementations,
+            const_implementations,
+        })
+    }
+
+    /// Parse generic parameters from list
+    fn parse_generic_params(&mut self, node: &SyntaxNode) -> Vec<HirGeneric> {
+        let mut generics = Vec::new();
+
+        for param_node in node.children_of_kind(SyntaxKind::GenericParam) {
+            if let Some(generic) = self.build_generic_param(&param_node) {
+                generics.push(generic);
+            }
+        }
+
+        generics
+    }
+
+    /// Build generic parameter
+    fn build_generic_param(&mut self, node: &SyntaxNode) -> Option<HirGeneric> {
+        // Check if it's a const parameter
+        if node.first_token_of_kind(SyntaxKind::ConstKw).is_some() {
+            // const N: nat[32] style parameter
+            let name = node.children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .find(|t| t.kind() == SyntaxKind::Ident)
+                .map(|t| t.text().to_string())?;
+
+            let param_type = self.extract_hir_type(node);
+
+            Some(HirGeneric {
+                name,
+                param_type: HirGenericType::Const(param_type),
+            })
+        } else {
+            // Regular type parameter
+            let name = node.first_token_of_kind(SyntaxKind::Ident)
+                .map(|t| t.text().to_string())?;
+
+            Some(HirGeneric {
+                name,
+                param_type: HirGenericType::Type,
+            })
+        }
+    }
+
+    /// Build trait method
+    fn build_trait_method(&mut self, node: &SyntaxNode) -> Option<HirTraitMethod> {
+        let name = self.extract_name(node)?;
+
+        // Parse parameters
+        let parameters = self.parse_method_parameters(node);
+
+        // Parse return type
+        let return_type = if node.first_token_of_kind(SyntaxKind::Arrow).is_some() {
+            Some(self.extract_hir_type(node))
+        } else {
+            None
+        };
+
+        // Check if it has a default implementation
+        let default_implementation = if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
+            Some(self.build_statements(&block))
+        } else {
+            None
+        };
+
+        Some(HirTraitMethod {
+            name,
+            parameters,
+            return_type,
+            default_implementation,
+        })
+    }
+
+    /// Parse method parameters
+    fn parse_method_parameters(&mut self, _node: &SyntaxNode) -> Vec<HirParameter> {
+        // TODO: Parse parameter list properly
+        Vec::new()
+    }
+
+    /// Build trait associated type
+    fn build_trait_associated_type(&mut self, node: &SyntaxNode) -> Option<HirTraitAssociatedType> {
+        let name = self.extract_name(node)?;
+
+        // Parse bounds and default type
+        let bounds = Vec::new(); // TODO: Parse trait bounds
+        let default_type = None; // TODO: Parse default type
+
+        Some(HirTraitAssociatedType {
+            name,
+            bounds,
+            default_type,
+        })
+    }
+
+    /// Build trait associated constant
+    fn build_trait_associated_const(&mut self, node: &SyntaxNode) -> Option<HirTraitAssociatedConst> {
+        let name = self.extract_name(node)?;
+        let const_type = self.extract_hir_type(node);
+
+        // Parse default value if present
+        let default_value = self.find_initial_value_expr(node);
+
+        Some(HirTraitAssociatedConst {
+            name,
+            const_type,
+            default_value,
+        })
+    }
+
+    /// Build trait method implementation
+    fn build_trait_method_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitMethodImpl> {
+        let name = self.extract_name(node)?;
+        let body = if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
+            self.build_statements(&block)
+        } else {
+            Vec::new()
+        };
+
+        Some(HirTraitMethodImpl { name, body })
+    }
+
+    /// Build trait type implementation
+    fn build_trait_type_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitTypeImpl> {
+        let name = self.extract_name(node)?;
+        let implementation = self.extract_hir_type(node);
+
+        Some(HirTraitTypeImpl {
+            name,
+            implementation,
+        })
+    }
+
+    /// Build trait const implementation
+    fn build_trait_const_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitConstImpl> {
+        let name = self.extract_name(node)?;
+        let value = self.find_initial_value_expr(node)?;
+
+        Some(HirTraitConstImpl { name, value })
+    }
 }
 
 impl Default for HirBuilderContext {

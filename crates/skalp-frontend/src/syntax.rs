@@ -164,6 +164,7 @@ pub enum SyntaxKind {
     FieldExpr,
     IndexExpr,
     ParenExpr,
+    ArrayLiteral,
 
     // Types
     TypeAnnotation,
@@ -175,6 +176,7 @@ pub enum SyntaxKind {
     ResetType,
     EventType,
     ArrayType,
+    TupleType,
     CustomType,
 
     // Type parts
@@ -207,6 +209,8 @@ pub enum SyntaxKind {
     // Arguments
     ArgList,
     Arg,
+    Parameter,
+    ParameterList,
 
     // Trait parts
     TraitItemList,

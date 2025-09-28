@@ -3,7 +3,7 @@
 //! This module implements the type checker that operates on the syntax tree
 
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
-use crate::types::{Type, Width, TypeEnv, TypeInference, TypeError, TypeScheme, ResetPolarity};
+use crate::types::{Type, Width, TypeEnv, TypeInference, TypeError, TypeScheme, ResetPolarity, StructType};
 use std::collections::HashMap;
 
 /// Type checker for SKALP
@@ -379,7 +379,101 @@ impl TypeChecker {
 
     /// Check match statement
     fn check_match_stmt(&mut self, node: &SyntaxNode) {
-        // TODO: Implement match statement checking
+        // Get expression being matched
+        let expr_type = if let Some(expr_node) = node.children().find(|n|
+            matches!(n.kind(),
+                SyntaxKind::LiteralExpr |
+                SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr |
+                SyntaxKind::UnaryExpr)
+        ) {
+            self.check_expression(&expr_node)
+        } else {
+            Type::Error
+        };
+
+        // Check match arms
+        if let Some(arm_list) = node.children().find(|n| n.kind() == SyntaxKind::MatchArmList) {
+            for arm in arm_list.children().filter(|n| n.kind() == SyntaxKind::MatchArm) {
+                self.check_match_arm(&arm, &expr_type);
+            }
+        }
+    }
+
+    /// Check match arm
+    fn check_match_arm(&mut self, node: &SyntaxNode, match_expr_type: &Type) {
+        // Check pattern matches the expression type
+        if let Some(pattern_node) = node.children().find(|n|
+            matches!(n.kind(),
+                SyntaxKind::LiteralPattern |
+                SyntaxKind::IdentPattern |
+                SyntaxKind::WildcardPattern |
+                SyntaxKind::TuplePattern)
+        ) {
+            let pattern_type = self.check_pattern(&pattern_node);
+
+            // Ensure pattern type matches expression type
+            if let Err(e) = self.inference.check_assignment(match_expr_type, &pattern_type) {
+                self.errors.push(TypeCheckError {
+                    error: e,
+                    location: None,
+                });
+            }
+        }
+
+        // Check arm body in new scope (for pattern variables)
+        let parent_env = self.env.clone();
+        self.env = TypeEnv::child(parent_env.clone());
+
+        // TODO: Add pattern variables to scope
+
+        // Check statements in arm
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::AssignmentStmt => self.check_assignment_stmt(&child),
+                SyntaxKind::IfStmt => self.check_if_stmt(&child),
+                SyntaxKind::MatchStmt => self.check_match_stmt(&child),
+                SyntaxKind::BlockStmt => self.check_block_stmt(&child),
+                _ => {}
+            }
+        }
+
+        // Restore parent scope
+        self.env = parent_env;
+    }
+
+    /// Check pattern and return its type
+    fn check_pattern(&mut self, node: &SyntaxNode) -> Type {
+        match node.kind() {
+            SyntaxKind::LiteralPattern => {
+                // Find the literal and check its type
+                if let Some(literal_child) = node.children().find(|n|
+                    matches!(n.kind(),
+                        SyntaxKind::IntLiteral |
+                        SyntaxKind::BinLiteral |
+                        SyntaxKind::HexLiteral |
+                        SyntaxKind::StringLiteral)
+                ) {
+                    self.check_literal_expr(&literal_child)
+                } else {
+                    Type::Error
+                }
+            }
+            SyntaxKind::IdentPattern => {
+                // For now, assume it matches any type (pattern variable)
+                // In a real implementation, we'd need to track pattern variables
+                self.inference.fresh_type_var()
+            }
+            SyntaxKind::WildcardPattern => {
+                // Wildcard matches any type
+                self.inference.fresh_type_var()
+            }
+            SyntaxKind::TuplePattern => {
+                // TODO: Implement tuple pattern checking
+                Type::Error
+            }
+            _ => Type::Error,
+        }
     }
 
     /// Check expression and return its type
@@ -734,6 +828,149 @@ impl Default for TypeChecker {
     }
 }
 
+/// Additional helper methods for type checking
+impl TypeChecker {
+    /// Check function call expression
+    fn check_call_expr(&mut self, node: &SyntaxNode) -> Type {
+        // Get function name
+        let func_name = if let Some(ident) = node.first_token_of_kind(SyntaxKind::Ident) {
+            ident.text().to_string()
+        } else {
+            return Type::Error;
+        };
+
+        // Check if it's a built-in function
+        match func_name.as_str() {
+            "resize" => {
+                // resize(value, new_width) - changes width of bit vector
+                Type::Bit(Width::Unknown) // Result type depends on arguments
+            }
+            "concat" => {
+                // concat(a, b) - concatenates bit vectors
+                Type::Bit(Width::Unknown) // Result width is sum of operand widths
+            }
+            "replicate" => {
+                // replicate(value, count) - replicates a value
+                Type::Bit(Width::Unknown)
+            }
+            _ => {
+                // Look up user-defined function
+                if let Some(scheme) = self.env.lookup(&func_name) {
+                    scheme.ty.clone()
+                } else {
+                    self.errors.push(TypeCheckError {
+                        error: TypeError::UndefinedVariable(func_name),
+                        location: None,
+                    });
+                    Type::Error
+                }
+            }
+        }
+    }
+
+    /// Check array/struct field access
+    fn check_field_access(&mut self, base_type: &Type, field_name: &str) -> Type {
+        match base_type {
+            Type::Struct(struct_type) => {
+                // Look up field in struct
+                for field in &struct_type.fields {
+                    if field.name == field_name {
+                        return field.field_type.clone();
+                    }
+                }
+                self.errors.push(TypeCheckError {
+                    error: TypeError::UndefinedVariable(format!("field {}", field_name)),
+                    location: None,
+                });
+                Type::Error
+            }
+            Type::Protocol(protocol_name) => {
+                // For protocols, field access might reference signals
+                // This would need protocol definitions to be tracked
+                Type::Unknown // Placeholder
+            }
+            _ => {
+                self.errors.push(TypeCheckError {
+                    error: TypeError::TypeMismatch {
+                        expected: Type::Struct(StructType {
+                            name: "struct".to_string(),
+                            fields: vec![],
+                        }),
+                        found: base_type.clone(),
+                    },
+                    location: None,
+                });
+                Type::Error
+            }
+        }
+    }
+
+    /// Check array indexing
+    fn check_array_index(&mut self, base_type: &Type, index_type: &Type) -> Type {
+        // Index must be an integer type
+        if !index_type.is_numeric() {
+            self.errors.push(TypeCheckError {
+                error: TypeError::NotNumeric(index_type.clone()),
+                location: None,
+            });
+        }
+
+        match base_type {
+            Type::Array { element_type, .. } => {
+                (**element_type).clone()
+            }
+            Type::Bit(_) | Type::Logic(_) => {
+                // Bit indexing returns a single bit
+                Type::Bit(Width::Fixed(1))
+            }
+            _ => {
+                self.errors.push(TypeCheckError {
+                    error: TypeError::TypeMismatch {
+                        expected: Type::Array {
+                            element_type: Box::new(Type::Unknown),
+                            size: 0,
+                        },
+                        found: base_type.clone(),
+                    },
+                    location: None,
+                });
+                Type::Error
+            }
+        }
+    }
+
+    /// Check bit range access [high:low]
+    fn check_bit_range(&mut self, base_type: &Type, high_type: &Type, low_type: &Type) -> Type {
+        // Range indices must be integers
+        if !high_type.is_numeric() || !low_type.is_numeric() {
+            self.errors.push(TypeCheckError {
+                error: TypeError::NotNumeric(if !high_type.is_numeric() { high_type.clone() } else { low_type.clone() }),
+                location: None,
+            });
+        }
+
+        match base_type {
+            Type::Bit(width) | Type::Logic(width) => {
+                // Calculate result width (would need constant evaluation in real implementation)
+                match width {
+                    Width::Fixed(_) => Type::Bit(Width::Unknown), // Would need to calculate actual width
+                    _ => Type::Bit(Width::Unknown),
+                }
+            }
+            _ => {
+                self.errors.push(TypeCheckError {
+                    error: TypeError::TypeMismatch {
+                        expected: Type::Bit(Width::Unknown),
+                        found: base_type.clone(),
+                    },
+                    location: None,
+                });
+                Type::Error
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,6 +1024,63 @@ mod tests {
         let result = checker.check_source_file(&tree);
 
         // Width mismatches are now allowed (with implicit truncation/extension)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_type_check_match_statement() {
+        let source = r#"
+            impl Test {
+                signal value: nat[4] = 0
+                signal output: bit[1] = 0
+
+                match value {
+                    0 => output = 0
+                    _ => output = 1
+                }
+            }
+        "#;
+
+        let tree = parse(source);
+        let mut checker = TypeChecker::new();
+        let result = checker.check_source_file(&tree);
+
+        // Should pass basic type checking
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_type_check_binary_operations() {
+        let source = r#"
+            impl Test {
+                signal a: nat[8] = 10
+                signal b: nat[8] = 20
+                signal result: nat[8] = 0
+
+                result = a + b
+            }
+        "#;
+
+        let tree = parse(source);
+        let mut checker = TypeChecker::new();
+        let result = checker.check_source_file(&tree);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_type_check_clock_entity() {
+        let source = r#"
+            entity ClockTest {
+                in clk: clock
+                out data: bit[8]
+            }
+        "#;
+
+        let tree = parse(source);
+        let mut checker = TypeChecker::new();
+        let result = checker.check_source_file(&tree);
+
         assert!(result.is_ok());
     }
 }

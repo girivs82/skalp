@@ -1,0 +1,73 @@
+// SPI Master controller example
+// Demonstrates state machines and protocol implementation
+
+entity SpiMaster {
+    in clk: clock
+    in reset: reset
+
+    // Control interface
+    in start: bit
+    in data_in: bit[8]
+    out data_out: bit[8]
+    out ready: bit
+
+    // SPI interface
+    out sclk: bit
+    out mosi: bit
+    in miso: bit
+    out cs: bit
+}
+
+impl SpiMaster {
+    // State machine
+    enum State {
+        Idle,
+        Transfer(bit[3])  // Bit counter
+    }
+
+    signal state: State = State::Idle
+    signal shift_reg: bit[8] = 0
+    signal bit_count: bit[3] = 0
+    signal sclk_reg: bit = 0
+
+    on(clk.rise) {
+        if (reset.active) {
+            state <= State::Idle
+            shift_reg <= 0
+            bit_count <= 0
+            sclk_reg <= 0
+        } else {
+            match state {
+                State::Idle => {
+                    if (start) {
+                        state <= State::Transfer(0)
+                        shift_reg <= data_in
+                        bit_count <= 0
+                        sclk_reg <= 0
+                    }
+                }
+
+                State::Transfer(count) => {
+                    sclk_reg <= !sclk_reg
+
+                    if (sclk_reg) {  // Rising edge of SCLK
+                        shift_reg <= {shift_reg[6:0], miso}
+                    } else {  // Falling edge of SCLK
+                        if (count == 7) {
+                            state <= State::Idle
+                        } else {
+                            state <= State::Transfer(count + 1)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Output assignments
+    ready = (state == State::Idle)
+    data_out = shift_reg
+    sclk = sclk_reg
+    mosi = shift_reg[7]
+    cs = (state != State::Idle)
+}

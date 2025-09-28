@@ -20,6 +20,10 @@ pub struct Hir {
     pub intents: Vec<HirIntent>,
     /// Requirements
     pub requirements: Vec<HirRequirement>,
+    /// Trait definitions
+    pub trait_definitions: Vec<HirTraitDefinition>,
+    /// Trait implementations
+    pub trait_implementations: Vec<HirTraitImplementation>,
 }
 
 /// Entity in HIR
@@ -274,6 +278,10 @@ pub enum HirExpression {
     Call(HirCallExpr),
     Index(Box<HirExpression>, Box<HirExpression>),
     Range(Box<HirExpression>, Box<HirExpression>, Box<HirExpression>),
+    FieldAccess {
+        base: Box<HirExpression>,
+        field: String,
+    },
 }
 
 /// Literals in HIR
@@ -627,6 +635,8 @@ impl HirBuilder {
             protocols: Vec::new(),
             intents: Vec::new(),
             requirements: Vec::new(),
+            trait_definitions: Vec::new(),
+            trait_implementations: Vec::new(),
         }
     }
 
@@ -682,6 +692,111 @@ impl Hir {
             protocols: Vec::new(),
             intents: Vec::new(),
             requirements: Vec::new(),
+            trait_definitions: Vec::new(),
+            trait_implementations: Vec::new(),
         }
     }
+}
+
+/// Trait definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitDefinition {
+    /// Trait name
+    pub name: String,
+    /// Generic parameters
+    pub generics: Vec<HirGeneric>,
+    /// Trait methods
+    pub methods: Vec<HirTraitMethod>,
+    /// Associated types
+    pub associated_types: Vec<HirTraitAssociatedType>,
+    /// Associated constants
+    pub associated_constants: Vec<HirTraitAssociatedConst>,
+}
+
+/// Trait implementation in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitImplementation {
+    /// Trait name being implemented
+    pub trait_name: String,
+    /// Target entity
+    pub target_entity: EntityId,
+    /// Method implementations
+    pub method_implementations: Vec<HirTraitMethodImpl>,
+    /// Type implementations
+    pub type_implementations: Vec<HirTraitTypeImpl>,
+    /// Constant implementations
+    pub const_implementations: Vec<HirTraitConstImpl>,
+}
+
+/// Trait method definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitMethod {
+    /// Method name
+    pub name: String,
+    /// Method parameters
+    pub parameters: Vec<HirParameter>,
+    /// Return type
+    pub return_type: Option<HirType>,
+    /// Default implementation
+    pub default_implementation: Option<Vec<HirStatement>>,
+}
+
+/// Method parameter
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirParameter {
+    /// Parameter name
+    pub name: String,
+    /// Parameter type
+    pub param_type: HirType,
+    /// Default value
+    pub default_value: Option<HirExpression>,
+}
+
+/// Trait associated type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitAssociatedType {
+    /// Type name
+    pub name: String,
+    /// Type bounds
+    pub bounds: Vec<String>,
+    /// Default type
+    pub default_type: Option<HirType>,
+}
+
+/// Trait associated constant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitAssociatedConst {
+    /// Constant name
+    pub name: String,
+    /// Constant type
+    pub const_type: HirType,
+    /// Default value
+    pub default_value: Option<HirExpression>,
+}
+
+/// Trait method implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitMethodImpl {
+    /// Method name
+    pub name: String,
+    /// Implementation body
+    pub body: Vec<HirStatement>,
+}
+
+/// Trait type implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitTypeImpl {
+    /// Type name
+    pub name: String,
+    /// Type implementation
+    pub implementation: HirType,
+}
+
+/// Trait constant implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraitConstImpl {
+    /// Constant name
+    pub name: String,
+    /// Constant value
+    pub value: HirExpression,
 }

@@ -435,6 +435,11 @@ impl HirToMir {
                     low: Box::new(low_expr),
                 }))
             }
+            hir::HirExpression::FieldAccess { base, field: _ } => {
+                // Convert field access to base expression for now
+                // TODO: Implement proper struct field access in MIR
+                self.convert_expression(base)
+            }
         }
     }
 

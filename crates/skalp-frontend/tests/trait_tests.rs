@@ -110,7 +110,7 @@ fn test_trait_with_where_clause() {
     // Should parse where clauses
     let mut found_where_clause = false;
     fn find_where_clause(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::WHERE_CLAUSE {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::WhereClause {
             return true;
         }
         for child in node.children() {
@@ -147,7 +147,7 @@ fn test_trait_with_super_traits() {
     // Should parse trait bounds
     let mut found_trait_bounds = false;
     fn find_trait_bounds(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::TRAIT_BOUND_LIST {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitBoundList {
             return true;
         }
         for child in node.children() {

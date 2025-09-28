@@ -261,10 +261,21 @@ impl TestCase {
 /// Stimulus for a signal
 #[derive(Debug, Clone)]
 pub enum Stimulus {
+    /// Single value
+    Value {
+        value: u64,
+        width: usize,
+    },
     /// Constant value
     Constant(u64),
     /// Sequence of values over time
     Sequence(Vec<u64>),
+    /// Pattern-based stimulus
+    Pattern {
+        values: Vec<u64>,
+        width: usize,
+        repeat_count: Option<usize>,
+    },
     /// Random values with constraints
     Random {
         min: u64,
@@ -275,6 +286,13 @@ pub enum Stimulus {
     Clock {
         period_ns: u64,
         duty_cycle: f64,
+    },
+    /// Bus transaction
+    Transaction {
+        transaction_type: generators::TransactionType,
+        address: u64,
+        data: Option<u64>,
+        burst_length: Option<usize>,
     },
 }
 

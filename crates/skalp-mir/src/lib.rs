@@ -36,3 +36,29 @@ pub use compiler::{MirCompiler, OptimizationLevel, compile_hir_to_verilog, compi
 pub use optimize::{OptimizationPass, DeadCodeElimination, ConstantFolding};
 pub use codegen::SystemVerilogGenerator;
 pub use cdc_analysis::{CdcAnalyzer, CdcViolation, CdcViolationType, CdcSeverity};
+
+use skalp_frontend::Hir;
+use anyhow::Result;
+
+/// Lower HIR to MIR
+pub fn lower_to_mir(hir: &Hir) -> Result<Mir> {
+    // Simplified lowering - would be more complex in production
+    let mut mir = Mir::new(hir.name.clone());
+
+    // Create a basic module for now
+    let module = Module {
+        id: ModuleId(0),
+        name: "main".to_string(),
+        parameters: Vec::new(),
+        ports: Vec::new(),
+        signals: Vec::new(),
+        variables: Vec::new(),
+        processes: Vec::new(),
+        assignments: Vec::new(),
+        instances: Vec::new(),
+        clock_domains: Vec::new(),
+    };
+
+    mir.add_module(module);
+    Ok(mir)
+}

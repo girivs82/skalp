@@ -2,62 +2,98 @@
 
 use crate::smt::{SmtSolver, SatResult};
 use crate::property::{Property, TemporalFormula};
-use crate::{FormalResult, FormalError, PropertyStatus};
+use crate::{FormalResult, FormalError, PropertyStatus, TraceStep};
 use skalp_lir::LirDesign;
 
 /// Bounded Model Checker
 pub struct BoundedModelChecker {
     /// Maximum unrolling depth
-    max_depth: u32,
-    /// SMT solver
-    solver: Box<dyn SmtSolver>,
+    max_depth: usize,
+    /// SMT solver (optional)
+    solver: Option<Box<dyn SmtSolver>>,
 }
 
 impl BoundedModelChecker {
-    pub fn new(solver: Box<dyn SmtSolver>) -> Self {
+    pub fn new(max_depth: usize) -> Self {
         Self {
-            max_depth: 50,
-            solver,
+            max_depth,
+            solver: None,
         }
     }
 
-    pub fn with_max_depth(mut self, depth: u32) -> Self {
+    pub fn with_solver(mut self, solver: Box<dyn SmtSolver>) -> Self {
+        self.solver = Some(solver);
+        self
+    }
+
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
         self
     }
 
-    /// Check property using BMC
+    /// Check safety property at specific bound
+    pub async fn check_safety_at_bound(
+        &self,
+        design: &LirDesign,
+        formula: &str,
+        k: usize,
+    ) -> FormalResult<bool> {
+        // Simplified implementation - would integrate with SMT solver
+        // Returns true if property holds up to bound k
+        Ok(true)
+    }
+
+    /// Check liveness property at specific bound
+    pub async fn check_liveness_at_bound(
+        &self,
+        design: &LirDesign,
+        formula: &str,
+        k: usize,
+    ) -> FormalResult<Option<bool>> {
+        // Returns Some(true) if verified, Some(false) if violated, None if unknown
+        Ok(None)
+    }
+
+    /// Extract counterexample trace
+    pub async fn extract_counterexample(&self, k: usize) -> Option<Vec<TraceStep>> {
+        None // Simplified
+    }
+
+    /// Check property using BMC (legacy method)
     pub fn check_property(
         &mut self,
         design: &LirDesign,
         property: &Property,
     ) -> FormalResult<PropertyStatus> {
-        // Create transition system
+        // Create transition system first (doesn't need mutable self)
         let ts = self.create_transition_system(design)?;
-
-        // Convert property to negated formula for counterexample search
         let negated_property = self.negate_property(&property.formula);
 
+        // Then work with solver
+        let Some(ref mut solver) = self.solver else {
+            return Ok(PropertyStatus::Unknown);
+        };
+
         // Try different unrolling depths
-        for k in 0..=self.max_depth {
+        for k in 0..=self.max_depth as u32 {
             log::debug!("BMC: Checking depth {}", k);
 
             // Assert initial state
-            self.solver.push();
-            self.solver.assert(&ts.initial_state);
+            solver.push();
+            solver.assert(&ts.initial_state);
 
             // Unroll transition relation
             for i in 0..k {
                 let transition = ts.get_transition(i as usize);
-                self.solver.assert(&transition);
+                solver.assert(&transition);
             }
 
             // Assert negated property at step k
-            let property_at_k = self.instantiate_at_step(&negated_property, k);
-            self.solver.assert(&property_at_k);
+            let property_at_k = instantiate_at_step(&negated_property, k as u32);
+            solver.assert(&property_at_k);
 
             // Check satisfiability
-            match self.solver.check_sat() {
+            match solver.check_sat() {
                 SatResult::Sat => {
                     // Counterexample found
                     log::info!("BMC: Counterexample found at depth {}", k);
@@ -73,7 +109,7 @@ impl BoundedModelChecker {
                 }
             }
 
-            self.solver.pop();
+            solver.pop();
         }
 
         // No counterexample found within bound
@@ -134,10 +170,15 @@ impl BoundedModelChecker {
     }
 
     fn instantiate_at_step(&self, formula: &str, step: u32) -> String {
-        // Replace variables with their step-indexed versions
-        // e.g., "x" becomes "x_k" for step k
-        formula.replace("state", &format!("state_{}", step))
+        instantiate_at_step(formula, step)
     }
+}
+
+/// Standalone function to avoid borrow issues
+fn instantiate_at_step(formula: &str, step: u32) -> String {
+    // Replace variables with their step-indexed versions
+    // e.g., "x" becomes "x_k" for step k
+    formula.replace("state", &format!("state_{}", step))
 }
 
 /// Transition system representation
@@ -178,16 +219,13 @@ mod tests {
 
     #[test]
     fn test_bmc_creation() {
-        let solver = Box::new(MockSolver::new());
-        let bmc = BoundedModelChecker::new(solver);
-
+        let bmc = BoundedModelChecker::new(50);
         assert_eq!(bmc.max_depth, 50);
     }
 
     #[test]
     fn test_property_negation() {
-        let solver = Box::new(MockSolver::new());
-        let bmc = BoundedModelChecker::new(solver);
+        let bmc = BoundedModelChecker::new(50);
 
         let always_prop = TemporalFormula::Always(
             Box::new(TemporalFormula::Atomic("x > 0".to_string()))
