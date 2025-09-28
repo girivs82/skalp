@@ -3,7 +3,7 @@
 use crate::smt::{SmtSolver, SatResult};
 use crate::property::{Property, TemporalFormula};
 use crate::{FormalResult, FormalError, PropertyStatus};
-use skalp_mir::lir::LirDesign;
+use skalp_lir::LirDesign;
 
 /// Bounded Model Checker
 pub struct BoundedModelChecker {
@@ -48,7 +48,7 @@ impl BoundedModelChecker {
 
             // Unroll transition relation
             for i in 0..k {
-                let transition = ts.get_transition(i);
+                let transition = ts.get_transition(i as usize);
                 self.solver.assert(&transition);
             }
 

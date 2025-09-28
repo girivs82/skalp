@@ -1,7 +1,6 @@
 //! Tests for intent parsing and propagation
 
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir_builder::build_hir;
 
 #[test]
 fn test_basic_intent_declaration() {
@@ -15,12 +14,12 @@ fn test_basic_intent_declaration() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find intent declaration
     let mut found_intent = false;
     fn find_intent_decl(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::INTENT_DECL {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentDecl {
             return true;
         }
         for child in node.children() {
@@ -73,12 +72,12 @@ fn test_intent_for_entity() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse intent with 'for' clause
     let mut found_intent = false;
     fn find_intent(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::INTENT_DECL {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentDecl {
             return true;
         }
         for child in node.children() {
@@ -114,13 +113,13 @@ fn test_optimization_intents() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse multiple intents with different optimization goals
     let mut intent_count = 0;
     fn count_intents(node: &skalp_frontend::syntax::SyntaxNode) -> usize {
         let mut count = 0;
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::INTENT_DECL {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentDecl {
             count = 1;
         }
         for child in node.children() {
@@ -146,7 +145,7 @@ fn test_complex_intent_expressions() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should handle complex constraint expressions with units and operators
     let mut found_constraints = false;
@@ -186,7 +185,7 @@ fn test_intent_with_generic_entity() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should handle intents for generic entities
 }
@@ -230,7 +229,7 @@ fn test_hierarchical_intents() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should support hierarchical intent propagation
 }

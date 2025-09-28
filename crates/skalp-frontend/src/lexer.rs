@@ -364,7 +364,7 @@ impl<'a> Lexer<'a> {
     /// Get the next token with position
     pub fn next_token(&mut self) -> Option<TokenWithPos> {
         self.inner.next().map(|result| {
-            let token = result.unwrap_or_else(|_| {
+            let token = result.unwrap_or({
                 // Handle error tokens properly in Logos 0.13+
                 Token::Unknown
             });

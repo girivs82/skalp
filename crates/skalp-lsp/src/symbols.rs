@@ -120,7 +120,7 @@ fn parse_entity_symbol(line: &str, line_num: usize) -> Option<SymbolInformation>
     if trimmed.starts_with("entity ") {
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.len() >= 2 {
-            let name = parts[1].trim_end_matches(|c| c == '{' || c == '<');
+            let name = parts[1].trim_end_matches(['{', '<']);
             return Some(SymbolInformation {
                 name: name.to_string(),
                 kind: SymbolKind::CLASS,
@@ -325,7 +325,7 @@ fn is_definition_of(word: &str, line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ropey::Rope;
+    
 
     #[test]
     fn test_parse_entity_symbol() {

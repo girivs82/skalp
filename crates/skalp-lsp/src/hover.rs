@@ -67,36 +67,31 @@ fn is_word_char(c: &char) -> bool {
 fn generate_hover_content(word: &str) -> Option<String> {
     match word {
         // Keywords
-        "entity" => Some(format!(
-            "## entity\n\n\
+        "entity" => Some("## entity\n\n\
             Defines a hardware entity (module) in SKALP.\n\n\
             ### Syntax\n\
             ```skalp\n\
-            entity MyEntity {{\n\
+            entity MyEntity {\n\
                 in clk: clock;\n\
                 in data: bit<8>;\n\
                 out result: bit<8>;\n\
-            }}\n\
-            ```"
-        )),
+            }\n\
+            ```".to_string()),
 
-        "impl" => Some(format!(
-            "## impl\n\n\
+        "impl" => Some("## impl\n\n\
             Implementation block for an entity.\n\n\
             ### Syntax\n\
             ```skalp\n\
-            impl MyEntity {{\n\
+            impl MyEntity {\n\
                 signal internal: bit<8>;\n\
                 \n\
-                on(clk.rise) {{\n\
+                on(clk.rise) {\n\
                     result <= data + 1;\n\
-                }}\n\
-            }}\n\
-            ```"
-        )),
+                }\n\
+            }\n\
+            ```".to_string()),
 
-        "on" => Some(format!(
-            "## on\n\n\
+        "on" => Some("## on\n\n\
             Event-driven block that executes on specific events.\n\n\
             ### Common Events\n\
             - `clock.rise` - Rising edge of clock\n\
@@ -105,50 +100,42 @@ fn generate_hover_content(word: &str) -> Option<String> {
             - `reset.inactive` - Reset signal inactive\n\n\
             ### Example\n\
             ```skalp\n\
-            on(clk.rise) {{\n\
+            on(clk.rise) {\n\
                 counter <= counter + 1;\n\
-            }}\n\
-            ```"
-        )),
+            }\n\
+            ```".to_string()),
 
-        "signal" => Some(format!(
-            "## signal\n\n\
+        "signal" => Some("## signal\n\n\
             Declares an internal signal within an entity.\n\n\
             ### Syntax\n\
             ```skalp\n\
             signal name: type;\n\
             signal counter: nat<8> = 0;\n\
-            ```"
-        )),
+            ```".to_string()),
 
-        "protocol" => Some(format!(
-            "## protocol\n\n\
+        "protocol" => Some("## protocol\n\n\
             Defines a communication protocol interface.\n\n\
             ### Syntax\n\
             ```skalp\n\
-            protocol AXI4 {{\n\
+            protocol AXI4 {\n\
                 signal valid: bit;\n\
                 signal ready: bit;\n\
                 signal data: bit<32>;\n\
-            }}\n\
-            ```"
-        )),
+            }\n\
+            ```".to_string()),
 
-        "match" => Some(format!(
-            "## match\n\n\
+        "match" => Some("## match\n\n\
             Pattern matching for conditional logic.\n\n\
             ### Syntax\n\
             ```skalp\n\
-            match state {{\n\
+            match state {\n\
                 IDLE => next_state = START;\n\
                 START => next_state = PROCESS;\n\
                 _ => next_state = IDLE;\n\
-            }}\n\
-            ```"
-        )),
+            }\n\
+            ```".to_string()),
 
-        "assert" => Some(format!(
-            "## assert\n\n\
+        "assert" => Some("## assert\n\n\
             Assertion for verification and validation.\n\n\
             ### Types\n\
             - Immediate assertions: Check conditions instantly\n\
@@ -157,80 +144,65 @@ fn generate_hover_content(word: &str) -> Option<String> {
             ```skalp\n\
             assert data != 0;\n\
             assert property (req |-> ##[1:3] ack);\n\
-            ```"
-        )),
+            ```".to_string()),
 
-        "intent" => Some(format!(
-            "## @intent\n\n\
+        "intent" => Some("## @intent\n\n\
             Design intent annotation for optimization hints.\n\n\
             ### Syntax\n\
             ```skalp\n\
             @intent(\"low_power\")\n\
             @intent(\"high_performance\")\n\
             @intent(\"minimize_area\")\n\
-            ```"
-        )),
+            ```".to_string()),
 
         // Types
-        "bit" => Some(format!(
-            "## bit\n\n\
+        "bit" => Some("## bit\n\n\
             Single bit type (0 or 1).\n\n\
             ### Bit Vector\n\
             ```skalp\n\
             bit<8>  // 8-bit vector\n\
             bit<32> // 32-bit vector\n\
-            ```"
-        )),
+            ```".to_string()),
 
-        "logic" => Some(format!(
-            "## logic\n\n\
+        "logic" => Some("## logic\n\n\
             4-state logic type (0, 1, X, Z).\n\n\
             ### Logic Vector\n\
             ```skalp\n\
             logic<8>  // 8-bit logic vector\n\
             logic<32> // 32-bit logic vector\n\
-            ```"
-        )),
+            ```".to_string()),
 
-        "int" => Some(format!(
-            "## int\n\n\
+        "int" => Some("## int\n\n\
             Signed integer type.\n\n\
             ### Syntax\n\
             ```skalp\n\
             int<8>  // 8-bit signed integer (-128 to 127)\n\
             int<32> // 32-bit signed integer\n\
-            ```"
-        )),
+            ```".to_string()),
 
-        "nat" => Some(format!(
-            "## nat\n\n\
+        "nat" => Some("## nat\n\n\
             Natural number (unsigned integer) type.\n\n\
             ### Syntax\n\
             ```skalp\n\
             nat<8>  // 8-bit unsigned (0 to 255)\n\
             nat<32> // 32-bit unsigned\n\
-            ```"
-        )),
+            ```".to_string()),
 
-        "clock" => Some(format!(
-            "## clock\n\n\
+        "clock" => Some("## clock\n\n\
             Clock signal type with domain safety.\n\n\
             ### Clock Domains\n\
             ```skalp\n\
             in clk: clock<'sys>;\n\
             in clk_fast: clock<'fast>;\n\
-            ```"
-        )),
+            ```".to_string()),
 
-        "reset" => Some(format!(
-            "## reset\n\n\
+        "reset" => Some("## reset\n\n\
             Reset signal type with polarity.\n\n\
             ### Example\n\
             ```skalp\n\
             in rst_n: reset(active_low);\n\
             in rst: reset(active_high);\n\
-            ```"
-        )),
+            ```".to_string()),
 
         _ => None,
     }

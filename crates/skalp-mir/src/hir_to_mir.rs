@@ -602,7 +602,7 @@ impl HirToMir {
         EnumType {
             name: hir_enum.name.clone(),
             variants,
-            base_type: self.convert_type(&*hir_enum.base_type),
+            base_type: self.convert_type(&hir_enum.base_type),
         }
     }
 

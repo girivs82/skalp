@@ -7,8 +7,8 @@
 //! - Flattening hierarchies for GPU workgroups
 
 use crate::sir::*;
-use skalp_mir::{Mir, Module, DataType, Process, Statement, Assignment, Expression, LValue, Value};
-use skalp_mir::{SensitivityList, EdgeType as MirEdgeType, AssignmentKind, BinaryOp as MirBinaryOp};
+use skalp_mir::{Mir, Module, DataType, Process, Statement, Expression, LValue, Value};
+use skalp_mir::{SensitivityList, EdgeType as MirEdgeType, BinaryOp as MirBinaryOp};
 use skalp_mir::{UnaryOp as MirUnaryOp, ReduceOp as MirReduceOp, Block};
 use std::collections::HashMap;
 use bitvec::prelude::*;

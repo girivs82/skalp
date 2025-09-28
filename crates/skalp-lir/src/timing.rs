@@ -2,8 +2,7 @@
 //!
 //! Static timing analysis (STA) for gate-level netlists
 
-use crate::lir::{Gate, GateType, Lir, Net};
-use crate::primitives::DelayInfo;
+use crate::lir::{GateType, Lir};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Timing node in the timing graph

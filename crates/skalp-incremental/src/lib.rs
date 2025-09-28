@@ -187,10 +187,10 @@ impl IncrementalBuilder {
             log::info!("Rebuilding target: {}", target);
 
             let target_results = self.build_target_from_scratch(&target).await?;
-            results.merge(target_results);
 
-            // Update cache immediately
+            // Update cache before merging (which moves the value)
             self.cache.store_build_results(&target, &target_results)?;
+            results.merge(target_results);
         }
 
         Ok(results)

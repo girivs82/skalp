@@ -1,7 +1,6 @@
 //! Tests for generic entities and type parameters
 
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir_builder::build_hir;
 
 #[test]
 fn test_generic_entity_definition() {
@@ -15,7 +14,7 @@ fn test_generic_entity_definition() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find generic parameters
     let mut found_generics = false;
@@ -56,7 +55,7 @@ fn test_generic_entity_instantiation() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Look for generic instantiation in implementation
     // The parsing should handle Buffer<nat[8], 16> correctly
@@ -82,7 +81,7 @@ fn test_generic_entity_with_constraints() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse generic parameters with trait bounds
     let mut found_trait_bound = false;
@@ -129,7 +128,7 @@ fn test_const_generic_parameters() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find const generic parameters
     let mut found_const_param = false;
@@ -190,7 +189,7 @@ fn test_type_parameter_inference() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Check that generic instantiation is parsed
     // Looking for Mux<nat[32]>
@@ -221,7 +220,7 @@ fn test_nested_generics() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should handle nested generic instantiations
 }

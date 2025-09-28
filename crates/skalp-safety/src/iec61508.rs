@@ -1,6 +1,6 @@
 //! IEC 61508 industrial safety compliance framework
 
-use crate::{SafetyError, SafetyResult};
+use crate::SafetyResult;
 use serde::{Deserialize, Serialize};
 
 /// IEC 61508 Safety Integrity Levels

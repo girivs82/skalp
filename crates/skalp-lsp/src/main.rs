@@ -4,7 +4,6 @@
 //! It can be run as a standalone server or integrated into editors like VS Code.
 
 use skalp_lsp::create_lsp_service;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower_lsp::Server;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;

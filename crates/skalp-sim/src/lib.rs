@@ -31,7 +31,7 @@ mod tests {
         let mut mir = Mir::new("test_counter".to_string());
 
         // Create a simple module with basic structure
-        let mut module = Module {
+        let module = Module {
             id: ModuleId(0),
             name: "counter_module".to_string(),
             parameters: Vec::new(),

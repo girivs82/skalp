@@ -661,7 +661,7 @@ impl FmeaGenerator {
     /// Analyze functions from entities and intents
     fn analyze_functions(&self, entities: &[Entity], intents: &[Intent]) -> Result<FunctionalAnalysis, FmeaError> {
         let mut functions = vec![];
-        let mut dependencies = HashMap::new();
+        let dependencies = HashMap::new();
 
         // Create functions from intents
         for intent in intents {
@@ -1033,7 +1033,7 @@ impl Default for FmeaSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_frontend::hir::{HirPort, HirPortDirection, HirType};
+    
 
     #[test]
     fn test_asil_determination() {

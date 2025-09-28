@@ -12,7 +12,7 @@ fn test_parse_counter_example() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Check we have entity and impl
     let children: Vec<_> = tree.children().collect();
@@ -76,7 +76,7 @@ fn test_complete_pipeline() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Type check
     let mut checker = TypeChecker::new();
@@ -140,7 +140,7 @@ fn test_error_recovery() {
 
     let tree = parse(source);
     // Should still produce a tree despite the error
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn test_match_expression_parsing() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find the match statement in the syntax tree
     let mut found_match = false;
@@ -221,7 +221,7 @@ fn test_pattern_matching_types() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Build HIR - should handle different literal patterns
     let hir_result = build_hir(&tree);
@@ -253,7 +253,7 @@ fn test_flow_block_parsing() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find the flow statement in the syntax tree
     let mut found_flow = false;
@@ -310,7 +310,7 @@ fn test_flow_block_with_stages() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Build HIR - should handle block stages in pipeline
     let hir_result = build_hir(&tree);

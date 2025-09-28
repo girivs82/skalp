@@ -4,12 +4,11 @@
 //! Supports multiple power domains with controlled cross-domain communication.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use uuid::Uuid;
+use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use crate::asil::AsilLevel;
-use petgraph::{Graph, Direction};
-use petgraph::graph::{NodeIndex, EdgeIndex};
+use petgraph::Graph;
+use petgraph::graph::NodeIndex;
 
 /// Power domain management system
 #[derive(Debug, Clone)]
@@ -1119,7 +1118,7 @@ mod tests {
     fn test_power_state_change() {
         let mut manager = PowerDomainManager::new();
 
-        let mut domain = PowerDomain {
+        let domain = PowerDomain {
             id: "test_domain".to_string(),
             name: "Test Domain".to_string(),
             domain_type: PowerDomainType::Performance,

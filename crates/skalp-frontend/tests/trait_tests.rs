@@ -1,7 +1,6 @@
 //! Tests for trait definitions and implementations
 
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir_builder::build_hir;
 
 #[test]
 fn test_trait_definition() {
@@ -17,12 +16,12 @@ fn test_trait_definition() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find the trait definition
     let mut found_trait = false;
     fn find_trait_def(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::TRAIT_DEF {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitDef {
             return true;
         }
         for child in node.children() {
@@ -61,13 +60,13 @@ fn test_trait_implementation() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
 
     // Should find both trait definition and implementation
     let mut found_trait_impl = false;
     fn find_trait_impl(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::TRAIT_IMPL {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitImpl {
             return true;
         }
         for child in node.children() {
@@ -106,7 +105,7 @@ fn test_trait_with_where_clause() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse where clauses
     let mut found_where_clause = false;
@@ -143,7 +142,7 @@ fn test_trait_with_super_traits() {
 
     // Parse
     let tree = parse(source);
-    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SOURCE_FILE);
+    assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse trait bounds
     let mut found_trait_bounds = false;

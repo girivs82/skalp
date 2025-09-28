@@ -232,7 +232,7 @@ impl XilinxBackend {
         let util_report = output_dir.join("utilization.rpt");
         if util_report.exists() {
             let content = fs::read_to_string(&util_report)
-                .map_err(|e| BackendError::Io(e))?;
+                .map_err(|e| BackendError::IoError(e))?;
 
             // Extract resource usage (simplified parsing)
             if let Some(lut_line) = content.lines().find(|l| l.contains("Slice LUTs")) {
@@ -251,7 +251,7 @@ impl XilinxBackend {
         let timing_report = output_dir.join("timing.rpt");
         if timing_report.exists() {
             let content = fs::read_to_string(&timing_report)
-                .map_err(|e| BackendError::Io(e))?;
+                .map_err(|e| BackendError::IoError(e))?;
 
             // Extract max frequency (simplified parsing)
             if let Some(wns_line) = content.lines().find(|l| l.contains("WNS(ns)")) {
@@ -270,7 +270,7 @@ impl XilinxBackend {
         let power_report = output_dir.join("power.rpt");
         if power_report.exists() {
             let content = fs::read_to_string(&power_report)
-                .map_err(|e| BackendError::Io(e))?;
+                .map_err(|e| BackendError::IoError(e))?;
 
             // Extract total power (simplified parsing)
             if let Some(power_line) = content.lines().find(|l| l.contains("Total On-Chip Power")) {
@@ -299,7 +299,7 @@ impl Backend for XilinxBackend {
     ) -> BackendResult<SynthesisResults> {
         // Create temp directory for synthesis
         let temp_dir = TempDir::new()
-            .map_err(|e| BackendError::Io(e))?;
+            .map_err(|e| BackendError::IoError(e))?;
         let work_dir = temp_dir.path();
 
         // Generate Verilog files
@@ -307,14 +307,14 @@ impl Backend for XilinxBackend {
             let verilog = crate::verilog::generate_verilog(module)?;
             let file_path = work_dir.join(&format!("{}.v", module.name));
             fs::write(&file_path, verilog)
-                .map_err(|e| BackendError::Io(e))?;
+                .map_err(|e| BackendError::IoError(e))?;
         }
 
         // Generate TCL script
         let tcl_content = self.generate_tcl(lir, work_dir)?;
         let tcl_file = work_dir.join("synthesis.tcl");
         fs::write(&tcl_file, tcl_content)
-            .map_err(|e| BackendError::Io(e))?;
+            .map_err(|e| BackendError::IoError(e))?;
 
         // Run Vivado
         let output = self.run_vivado(&tcl_file).await?;

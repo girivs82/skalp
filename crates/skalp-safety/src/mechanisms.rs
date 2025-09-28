@@ -5,10 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use crate::asil::AsilLevel;
-use skalp_mir::mir::{Expression, Value};
+use skalp_mir::mir::Expression;
 
 /// Safety mechanism types according to ISO 26262
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

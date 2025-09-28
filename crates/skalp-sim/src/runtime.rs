@@ -3,11 +3,11 @@
 //! Coordinates execution between CPU (sequential logic, control) and GPU (combinational logic)
 //! using Tokio for async coordination and Metal for GPU compute.
 
-use crate::sir::{Sir, SirModule, SirSignalId};
-use crate::cone::{CombinationalCone, ConeExtractor, ConeExtractionResult, ConeId};
+use crate::sir::{Sir, SirSignalId};
+use crate::cone::{CombinationalCone, ConeExtractor, ConeId};
 use crate::shader::{MetalShaderGenerator, ShaderGenerationResult};
 use crate::state::SimState;
-use crate::event::{EventQueue, SimEvent, EventData};
+use crate::event::EventQueue;
 use crate::metal::MetalBackend;
 
 use std::collections::HashMap;
@@ -233,7 +233,7 @@ impl GpuSimRuntime {
             // clock edge detection and register update logic
 
             // For now, just mark that we processed sequential logic
-            let mut metrics = self.metrics.write().await;
+            let metrics = self.metrics.write().await;
             // Sequential logic is "free" in terms of GPU metrics
         }
 

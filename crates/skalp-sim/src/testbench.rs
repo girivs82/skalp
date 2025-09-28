@@ -3,8 +3,7 @@
 //! Provides a high-level interface for running hardware simulations on GPU,
 //! including waveform generation, performance analysis, and result validation.
 
-use crate::sir::Sir;
-use crate::runtime::{GpuSimRuntime, SimulationResult, SimCommand};
+use crate::runtime::{GpuSimRuntime, SimulationResult};
 use crate::state::SimState;
 use skalp_mir::Mir;
 use crate::mir_to_sir::MirToSir;
@@ -238,7 +237,7 @@ impl GpuTestbench {
         let cpu_start = Instant::now();
 
         // Simplified CPU simulation - would use a proper CPU simulator
-        let mut state = SimState::new();
+        let state = SimState::new();
         let cycles = self.config.max_cycles;
 
         // Simulate CPU execution time (much slower than GPU)

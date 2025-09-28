@@ -1,6 +1,6 @@
 //! Generic type system and polymorphic instantiation
 
-use crate::ast::{Generic, GenericKind, Type, Expression};
+use crate::ast::{Generic, GenericKind, Type};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -55,7 +55,7 @@ impl TypeSubstitution {
                 }
             }
             Type::Array(elem, size) => {
-                Type::Array(Box::new(self.apply(elem)), size.clone())
+                Type::Array(Box::new(self.apply(elem)), *size)
             }
             Type::Generic(base, args) => {
                 Type::Generic(
@@ -84,6 +84,12 @@ enum Constraint {
     Subtype(Type, Type),
     /// Trait bound constraint
     TraitBound(String, String), // type param, trait name
+}
+
+impl Default for TypeInference {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TypeInference {
@@ -163,7 +169,7 @@ impl TypeInference {
 
     fn is_type_param(&self, name: &str) -> bool {
         // Check if name is a known type parameter
-        name.chars().next().map_or(false, |c| c.is_uppercase())
+        name.chars().next().is_some_and(|c| c.is_uppercase())
     }
 
     fn is_subtype(&self, _sub: &Type, _sup: &Type) -> bool {

@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use crate::asil::{AsilLevel, VerificationMethod};
 

@@ -3,10 +3,9 @@
 //! Identifies groups of combinational logic that can be executed in parallel
 //! on GPU compute shaders. This analysis is critical for GPU simulation performance.
 
-use crate::sir::{Sir, SirModule, CombinationalBlock, SirSignal, SirSignalId, CombBlockId};
-use std::collections::{HashMap, HashSet, VecDeque};
-use petgraph::{Graph, Direction};
-use petgraph::graph::NodeIndex;
+use crate::sir::{SirModule, CombinationalBlock, SirSignalId, CombBlockId};
+use std::collections::{HashMap, HashSet};
+use petgraph::Graph;
 
 /// A combinational cone - a group of logic blocks that can execute together
 #[derive(Debug, Clone)]

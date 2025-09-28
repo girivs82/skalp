@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
-use crate::asil::{AsilLevel, HardwareMetrics};
+use crate::asil::AsilLevel;
 use crate::fmea::{FmeaAnalysis, FailureClass};
 use crate::mechanisms::{SafetyMechanism, MechanismType};
 

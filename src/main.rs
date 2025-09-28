@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tracing_subscriber;
 
 /// SKALP - Intent-driven hardware synthesis
 #[derive(Parser)]
@@ -115,17 +114,17 @@ fn main() -> Result<()> {
             // TODO: Implement project creation
         }
 
-        Commands::Build { source, target, output } => {
+        Commands::Build { source: _, target, output: _ } => {
             println!("Building design to {}", target);
             // TODO: Implement build pipeline
         }
 
-        Commands::Sim { design, duration } => {
+        Commands::Sim { design, duration: _ } => {
             println!("Simulating design: {:?}", design);
             // TODO: Implement GPU simulation
         }
 
-        Commands::Synth { source, device, full_flow } => {
+        Commands::Synth { source: _, device, full_flow } => {
             println!("Synthesizing for {}", device);
             if full_flow {
                 println!("Running full flow: place, route, bitstream");
@@ -133,12 +132,12 @@ fn main() -> Result<()> {
             // TODO: Implement synthesis
         }
 
-        Commands::Program { bitstream, interface, verify } => {
+        Commands::Program { bitstream: _, interface, verify: _ } => {
             println!("Programming device via {}", interface);
             // TODO: Implement device programming
         }
 
-        Commands::Fmt { files, check } => {
+        Commands::Fmt { files: _, check } => {
             if check {
                 println!("Checking formatting");
             } else {
@@ -147,7 +146,7 @@ fn main() -> Result<()> {
             // TODO: Implement formatter
         }
 
-        Commands::Test { filter } => {
+        Commands::Test { filter: _ } => {
             println!("Running tests");
             // TODO: Implement test runner
         }

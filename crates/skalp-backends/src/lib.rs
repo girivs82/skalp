@@ -86,8 +86,6 @@ pub enum BackendError {
     PowerError(String),
     #[error("Tool execution error: {0}")]
     ToolError(String),
-    #[error("File I/O error: {0}")]
-    IoError(#[from] std::io::Error),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
     #[error("Tool not found: {0}")]
@@ -95,7 +93,7 @@ pub enum BackendError {
     #[error("Tool execution failed: {0}")]
     ToolFailed(String),
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    IoError(#[from] std::io::Error),
 }
 
 /// Result type for backend operations

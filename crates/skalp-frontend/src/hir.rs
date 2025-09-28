@@ -4,7 +4,6 @@
 
 use crate::ast::SourceFile;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// High-level Intermediate Representation
 #[derive(Debug, Clone, Serialize, Deserialize)]

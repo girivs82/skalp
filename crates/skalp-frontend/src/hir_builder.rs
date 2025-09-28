@@ -4,8 +4,7 @@
 
 use crate::hir::*;
 use crate::lexer::{parse_binary, parse_hex};
-use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt, SyntaxToken};
-use crate::types::{Type, Width};
+use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
 use std::collections::HashMap;
 
@@ -110,29 +109,29 @@ impl HirBuilderContext {
         // Build HIR from source file
         for child in root.children() {
             match child.kind() {
-                SyntaxKind::ENTITY_DECL => {
+                SyntaxKind::EntityDecl => {
                     if let Some(entity) = self.build_entity(&child) {
                         // Store entity for later access by implementations
                         self.built_entities.insert(entity.name.clone(), entity.clone());
                         hir.entities.push(entity);
                     }
                 }
-                SyntaxKind::IMPL_BLOCK => {
+                SyntaxKind::ImplBlock => {
                     if let Some(implementation) = self.build_implementation(&child) {
                         hir.implementations.push(implementation);
                     }
                 }
-                SyntaxKind::PROTOCOL_DECL => {
+                SyntaxKind::ProtocolDecl => {
                     if let Some(protocol) = self.build_protocol(&child) {
                         hir.protocols.push(protocol);
                     }
                 }
-                SyntaxKind::INTENT_DECL => {
+                SyntaxKind::IntentDecl => {
                     if let Some(intent) = self.build_intent(&child) {
                         hir.intents.push(intent);
                     }
                 }
-                SyntaxKind::REQUIREMENT_DECL => {
+                SyntaxKind::RequirementDecl => {
                     if let Some(requirement) = self.build_requirement(&child) {
                         hir.requirements.push(requirement);
                     }
@@ -158,8 +157,8 @@ impl HirBuilderContext {
 
         // Build ports
         let mut ports = Vec::new();
-        if let Some(port_list) = node.first_child_of_kind(SyntaxKind::PORT_LIST) {
-            for port_node in port_list.children_of_kind(SyntaxKind::PORT_DECL) {
+        if let Some(port_list) = node.first_child_of_kind(SyntaxKind::PortList) {
+            for port_node in port_list.children_of_kind(SyntaxKind::PortDecl) {
                 if let Some(port) = self.build_port(&port_node) {
                     ports.push(port);
                 }
@@ -184,7 +183,7 @@ impl HirBuilderContext {
         let name = self.extract_name(node)?;
 
         // Get direction
-        let direction = if let Some(dir_node) = node.first_child_of_kind(SyntaxKind::PORT_DIRECTION) {
+        let direction = if let Some(dir_node) = node.first_child_of_kind(SyntaxKind::PortDirection) {
             self.extract_port_direction(&dir_node)
         } else {
             HirPortDirection::Input // Default
@@ -231,27 +230,27 @@ impl HirBuilderContext {
         // Build implementation items
         for child in node.children() {
             match child.kind() {
-                SyntaxKind::SIGNAL_DECL => {
+                SyntaxKind::SignalDecl => {
                     if let Some(signal) = self.build_signal(&child) {
                         signals.push(signal);
                     }
                 }
-                SyntaxKind::VARIABLE_DECL => {
+                SyntaxKind::VariableDecl => {
                     if let Some(variable) = self.build_variable(&child) {
                         variables.push(variable);
                     }
                 }
-                SyntaxKind::CONSTANT_DECL => {
+                SyntaxKind::ConstantDecl => {
                     if let Some(constant) = self.build_constant(&child) {
                         constants.push(constant);
                     }
                 }
-                SyntaxKind::EVENT_BLOCK => {
+                SyntaxKind::EventBlock => {
                     if let Some(block) = self.build_event_block(&child) {
                         event_blocks.push(block);
                     }
                 }
-                SyntaxKind::ASSIGNMENT_STMT => {
+                SyntaxKind::AssignmentStmt => {
                     if let Some(assignment) = self.build_assignment(&child, HirAssignmentType::Combinational) {
                         assignments.push(assignment);
                     }
@@ -343,8 +342,8 @@ impl HirBuilderContext {
 
         // Build triggers
         let mut triggers = Vec::new();
-        if let Some(trigger_list) = node.first_child_of_kind(SyntaxKind::EVENT_TRIGGER_LIST) {
-            for trigger_node in trigger_list.children_of_kind(SyntaxKind::EVENT_TRIGGER) {
+        if let Some(trigger_list) = node.first_child_of_kind(SyntaxKind::EventTriggerList) {
+            for trigger_node in trigger_list.children_of_kind(SyntaxKind::EventTrigger) {
                 if let Some(trigger) = self.build_event_trigger(&trigger_node) {
                     triggers.push(trigger);
                 }
@@ -353,7 +352,7 @@ impl HirBuilderContext {
 
         // Build statements
         let mut statements = Vec::new();
-        if let Some(block) = node.first_child_of_kind(SyntaxKind::BLOCK_STMT) {
+        if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
             statements = self.build_statements(&block);
         }
 
@@ -367,7 +366,7 @@ impl HirBuilderContext {
     /// Build event trigger
     fn build_event_trigger(&mut self, node: &SyntaxNode) -> Option<HirEventTrigger> {
         // Get signal name
-        let signal_name = node.first_token_of_kind(SyntaxKind::IDENT)
+        let signal_name = node.first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
         // Look up signal ID
@@ -378,7 +377,7 @@ impl HirBuilderContext {
             })?;
 
         // Get edge type
-        let edge = if let Some(edge_node) = node.first_child_of_kind(SyntaxKind::EDGE_TYPE) {
+        let edge = if let Some(edge_node) = node.first_child_of_kind(SyntaxKind::EdgeType) {
             self.extract_edge_type(&edge_node)
         } else {
             HirEdgeType::Rising // Default
@@ -396,29 +395,29 @@ impl HirBuilderContext {
 
         for child in node.children() {
             match child.kind() {
-                SyntaxKind::ASSIGNMENT_STMT => {
+                SyntaxKind::AssignmentStmt => {
                     // Determine assignment type from operator
                     let assignment_type = self.determine_assignment_type(&child);
                     if let Some(assignment) = self.build_assignment(&child, assignment_type) {
                         statements.push(HirStatement::Assignment(assignment));
                     }
                 }
-                SyntaxKind::IF_STMT => {
+                SyntaxKind::IfStmt => {
                     if let Some(if_stmt) = self.build_if_statement(&child) {
                         statements.push(HirStatement::If(if_stmt));
                     }
                 }
-                SyntaxKind::MATCH_STMT => {
+                SyntaxKind::MatchStmt => {
                     if let Some(match_stmt) = self.build_match_statement(&child) {
                         statements.push(HirStatement::Match(match_stmt));
                     }
                 }
-                SyntaxKind::FLOW_STMT => {
+                SyntaxKind::FlowStmt => {
                     if let Some(flow_stmt) = self.build_flow_statement(&child) {
                         statements.push(HirStatement::Flow(flow_stmt));
                     }
                 }
-                SyntaxKind::BLOCK_STMT => {
+                SyntaxKind::BlockStmt => {
                     let block_stmts = self.build_statements(&child);
                     statements.push(HirStatement::Block(block_stmts));
                 }
@@ -432,36 +431,20 @@ impl HirBuilderContext {
     /// Build single statement
     fn build_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
         match node.kind() {
-            SyntaxKind::ASSIGNMENT_STMT => {
+            SyntaxKind::AssignmentStmt => {
                 let assignment_type = self.determine_assignment_type(node);
-                if let Some(assignment) = self.build_assignment(node, assignment_type) {
-                    Some(HirStatement::Assignment(assignment))
-                } else {
-                    None
-                }
+                self.build_assignment(node, assignment_type).map(HirStatement::Assignment)
             }
-            SyntaxKind::IF_STMT => {
-                if let Some(if_stmt) = self.build_if_statement(node) {
-                    Some(HirStatement::If(if_stmt))
-                } else {
-                    None
-                }
+            SyntaxKind::IfStmt => {
+                self.build_if_statement(node).map(HirStatement::If)
             }
-            SyntaxKind::MATCH_STMT => {
-                if let Some(match_stmt) = self.build_match_statement(node) {
-                    Some(HirStatement::Match(match_stmt))
-                } else {
-                    None
-                }
+            SyntaxKind::MatchStmt => {
+                self.build_match_statement(node).map(HirStatement::Match)
             }
-            SyntaxKind::FLOW_STMT => {
-                if let Some(flow_stmt) = self.build_flow_statement(node) {
-                    Some(HirStatement::Flow(flow_stmt))
-                } else {
-                    None
-                }
+            SyntaxKind::FlowStmt => {
+                self.build_flow_statement(node).map(HirStatement::Flow)
             }
-            SyntaxKind::BLOCK_STMT => {
+            SyntaxKind::BlockStmt => {
                 let block_stmts = self.build_statements(node);
                 Some(HirStatement::Block(block_stmts))
             }
@@ -476,9 +459,9 @@ impl HirBuilderContext {
         // Get LHS and RHS expressions
         let exprs: Vec<_> = node.children()
             .filter(|n| matches!(n.kind(),
-                SyntaxKind::LITERAL_EXPR | SyntaxKind::IDENT_EXPR |
-                SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR |
-                SyntaxKind::FIELD_EXPR | SyntaxKind::INDEX_EXPR))
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr))
             .collect();
 
         if exprs.len() < 2 {
@@ -501,12 +484,12 @@ impl HirBuilderContext {
         // Get condition expression
         let condition = node.children()
             .find(|n| matches!(n.kind(),
-                SyntaxKind::LITERAL_EXPR | SyntaxKind::IDENT_EXPR |
-                SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR))
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr))
             .and_then(|n| self.build_expression(&n))?;
 
         // Get then and else blocks
-        let blocks: Vec<_> = node.children_of_kind(SyntaxKind::BLOCK_STMT);
+        let blocks: Vec<_> = node.children_of_kind(SyntaxKind::BlockStmt);
 
         let then_statements = if !blocks.is_empty() {
             self.build_statements(&blocks[0])
@@ -532,14 +515,14 @@ impl HirBuilderContext {
         // Get expression being matched
         let expr = node.children()
             .find(|n| matches!(n.kind(),
-                SyntaxKind::LITERAL_EXPR | SyntaxKind::IDENT_EXPR |
-                SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR))
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr))
             .and_then(|n| self.build_expression(&n))?;
 
         // Build match arms from MATCH_ARM_LIST
         let mut arms = Vec::new();
-        if let Some(arm_list) = node.children().find(|n| n.kind() == SyntaxKind::MATCH_ARM_LIST) {
-            for arm_node in arm_list.children().filter(|n| n.kind() == SyntaxKind::MATCH_ARM) {
+        if let Some(arm_list) = node.children().find(|n| n.kind() == SyntaxKind::MatchArmList) {
+            for arm_node in arm_list.children().filter(|n| n.kind() == SyntaxKind::MatchArm) {
                 if let Some(arm) = self.build_match_arm(&arm_node) {
                     arms.push(arm);
                 }
@@ -557,16 +540,16 @@ impl HirBuilderContext {
         // Find pattern
         let pattern = node.children()
             .find(|n| matches!(n.kind(),
-                SyntaxKind::LITERAL_PATTERN | SyntaxKind::IDENT_PATTERN |
-                SyntaxKind::WILDCARD_PATTERN | SyntaxKind::TUPLE_PATTERN))
+                SyntaxKind::LiteralPattern | SyntaxKind::IdentPattern |
+                SyntaxKind::WildcardPattern | SyntaxKind::TuplePattern))
             .and_then(|n| self.build_pattern(&n))?;
 
         // Find statements (after the arrow)
         let mut statements = Vec::new();
         for child in node.children() {
             match child.kind() {
-                SyntaxKind::ASSIGNMENT_STMT | SyntaxKind::IF_STMT |
-                SyntaxKind::MATCH_STMT | SyntaxKind::BLOCK_STMT => {
+                SyntaxKind::AssignmentStmt | SyntaxKind::IfStmt |
+                SyntaxKind::MatchStmt | SyntaxKind::BlockStmt => {
                     if let Some(stmt) = self.build_statement(&child) {
                         statements.push(stmt);
                     }
@@ -585,7 +568,7 @@ impl HirBuilderContext {
     fn build_flow_statement(&mut self, node: &SyntaxNode) -> Option<HirFlowStatement> {
         // Find the flow pipeline
         let pipeline = node.children()
-            .find(|n| n.kind() == SyntaxKind::FLOW_PIPELINE)
+            .find(|n| n.kind() == SyntaxKind::FlowPipeline)
             .and_then(|n| self.build_flow_pipeline(&n))?;
 
         Some(HirFlowStatement {
@@ -597,7 +580,7 @@ impl HirBuilderContext {
     fn build_flow_pipeline(&mut self, node: &SyntaxNode) -> Option<HirFlowPipeline> {
         // Find all pipeline stages
         let stage_nodes: Vec<_> = node.children()
-            .filter(|n| n.kind() == SyntaxKind::PIPELINE_STAGE)
+            .filter(|n| n.kind() == SyntaxKind::PipelineStage)
             .collect();
 
         if stage_nodes.is_empty() {
@@ -625,13 +608,13 @@ impl HirBuilderContext {
     fn build_pipeline_stage(&mut self, node: &SyntaxNode) -> Option<HirPipelineStage> {
         for child in node.children() {
             match child.kind() {
-                SyntaxKind::BLOCK_STMT => {
+                SyntaxKind::BlockStmt => {
                     let statements = self.build_statements(&child);
                     return Some(HirPipelineStage::Block(statements));
                 }
-                SyntaxKind::LITERAL_EXPR | SyntaxKind::IDENT_EXPR |
-                SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR |
-                SyntaxKind::FIELD_EXPR | SyntaxKind::INDEX_EXPR => {
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr => {
                     if let Some(expr) = self.build_expression(&child) {
                         return Some(HirPipelineStage::Expression(expr));
                     }
@@ -645,31 +628,31 @@ impl HirBuilderContext {
     /// Build pattern
     fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
         match node.kind() {
-            SyntaxKind::LITERAL_PATTERN => {
+            SyntaxKind::LiteralPattern => {
                 // Find literal child
                 let literal_node = node.children()
                     .find(|n| matches!(n.kind(),
-                        SyntaxKind::INT_LITERAL | SyntaxKind::BIN_LITERAL |
-                        SyntaxKind::HEX_LITERAL | SyntaxKind::STRING_LITERAL))?;
+                        SyntaxKind::IntLiteral | SyntaxKind::BinLiteral |
+                        SyntaxKind::HexLiteral | SyntaxKind::StringLiteral))?;
                 let literal = self.build_literal_for_pattern(&literal_node)?;
                 Some(HirPattern::Literal(literal))
             }
-            SyntaxKind::IDENT_PATTERN => {
+            SyntaxKind::IdentPattern => {
                 // Get identifier name
-                let name = node.first_token_of_kind(SyntaxKind::IDENT)
+                let name = node.first_token_of_kind(SyntaxKind::Ident)
                     .map(|t| t.text().to_string())?;
                 Some(HirPattern::Variable(name))
             }
-            SyntaxKind::WILDCARD_PATTERN => {
+            SyntaxKind::WildcardPattern => {
                 Some(HirPattern::Wildcard)
             }
-            SyntaxKind::TUPLE_PATTERN => {
+            SyntaxKind::TuplePattern => {
                 // Build patterns for tuple elements
                 let mut patterns = Vec::new();
                 for child in node.children() {
                     if matches!(child.kind(),
-                        SyntaxKind::LITERAL_PATTERN | SyntaxKind::IDENT_PATTERN |
-                        SyntaxKind::WILDCARD_PATTERN | SyntaxKind::TUPLE_PATTERN) {
+                        SyntaxKind::LiteralPattern | SyntaxKind::IdentPattern |
+                        SyntaxKind::WildcardPattern | SyntaxKind::TuplePattern) {
                         if let Some(pattern) = self.build_pattern(&child) {
                             patterns.push(pattern);
                         }
@@ -685,12 +668,12 @@ impl HirBuilderContext {
     fn build_literal_for_pattern(&mut self, node: &SyntaxNode) -> Option<HirLiteral> {
         if let Some(token) = node.first_child_or_token() {
             match token.kind() {
-                SyntaxKind::INT_LITERAL => {
+                SyntaxKind::IntLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = text.parse::<u64>().ok()?;
                     Some(HirLiteral::Integer(value))
                 }
-                SyntaxKind::BIN_LITERAL => {
+                SyntaxKind::BinLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = parse_binary(text)?;
                     // Convert to bit vector
@@ -700,12 +683,12 @@ impl HirBuilderContext {
                         .collect();
                     Some(HirLiteral::BitVector(bits))
                 }
-                SyntaxKind::HEX_LITERAL => {
+                SyntaxKind::HexLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = parse_hex(text)?;
                     Some(HirLiteral::Integer(value))
                 }
-                SyntaxKind::STRING_LITERAL => {
+                SyntaxKind::StringLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     // Remove quotes
                     let s = text.trim_start_matches('"').trim_end_matches('"').to_string();
@@ -721,8 +704,8 @@ impl HirBuilderContext {
     /// Build L-value expression
     fn build_lvalue(&mut self, node: &SyntaxNode) -> Option<HirLValue> {
         match node.kind() {
-            SyntaxKind::IDENT_EXPR => {
-                let name = node.first_token_of_kind(SyntaxKind::IDENT)
+            SyntaxKind::IdentExpr => {
+                let name = node.first_token_of_kind(SyntaxKind::Ident)
                     .map(|t| t.text().to_string())?;
 
                 // Look up symbol
@@ -749,18 +732,18 @@ impl HirBuilderContext {
     /// Build expression
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         match node.kind() {
-            SyntaxKind::LITERAL_EXPR => self.build_literal_expr(node),
-            SyntaxKind::IDENT_EXPR => self.build_ident_expr(node),
-            SyntaxKind::BINARY_EXPR => self.build_binary_expr(node),
-            SyntaxKind::UNARY_EXPR => self.build_unary_expr(node),
-            SyntaxKind::FIELD_EXPR => self.build_field_expr(node),
-            SyntaxKind::INDEX_EXPR => self.build_index_expr(node),
-            SyntaxKind::PAREN_EXPR => {
+            SyntaxKind::LiteralExpr => self.build_literal_expr(node),
+            SyntaxKind::IdentExpr => self.build_ident_expr(node),
+            SyntaxKind::BinaryExpr => self.build_binary_expr(node),
+            SyntaxKind::UnaryExpr => self.build_unary_expr(node),
+            SyntaxKind::FieldExpr => self.build_field_expr(node),
+            SyntaxKind::IndexExpr => self.build_index_expr(node),
+            SyntaxKind::ParenExpr => {
                 // Unwrap parentheses
                 node.children()
                     .find(|n| matches!(n.kind(),
-                        SyntaxKind::LITERAL_EXPR | SyntaxKind::IDENT_EXPR |
-                        SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR))
+                        SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr))
                     .and_then(|n| self.build_expression(&n))
             }
             _ => None,
@@ -771,12 +754,12 @@ impl HirBuilderContext {
     fn build_literal_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         if let Some(token) = node.first_child_or_token() {
             match token.kind() {
-                SyntaxKind::INT_LITERAL => {
+                SyntaxKind::IntLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = text.parse::<u64>().ok()?;
                     Some(HirExpression::Literal(HirLiteral::Integer(value)))
                 }
-                SyntaxKind::BIN_LITERAL => {
+                SyntaxKind::BinLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = parse_binary(text)?;
                     // Convert to bit vector
@@ -786,12 +769,12 @@ impl HirBuilderContext {
                         .collect();
                     Some(HirExpression::Literal(HirLiteral::BitVector(bits)))
                 }
-                SyntaxKind::HEX_LITERAL => {
+                SyntaxKind::HexLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = parse_hex(text)?;
                     Some(HirExpression::Literal(HirLiteral::Integer(value)))
                 }
-                SyntaxKind::STRING_LITERAL => {
+                SyntaxKind::StringLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     // Remove quotes
                     let s = text.trim_start_matches('"').trim_end_matches('"').to_string();
@@ -806,7 +789,7 @@ impl HirBuilderContext {
 
     /// Build identifier expression
     fn build_ident_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        let name = node.first_token_of_kind(SyntaxKind::IDENT)
+        let name = node.first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
         // Look up symbol
@@ -861,7 +844,7 @@ impl HirBuilderContext {
         // Get operator
         let op = node.children_with_tokens()
             .filter_map(|elem| elem.into_token())
-            .find(|t| matches!(t.kind(), SyntaxKind::BANG | SyntaxKind::TILDE | SyntaxKind::MINUS))
+            .find(|t| matches!(t.kind(), SyntaxKind::Bang | SyntaxKind::Tilde | SyntaxKind::Minus))
             .and_then(|t| self.token_to_unary_op(t.kind()))?;
 
         Some(HirExpression::Unary(HirUnaryExpr {
@@ -926,17 +909,17 @@ impl HirBuilderContext {
     fn extract_name(&self, node: &SyntaxNode) -> Option<String> {
         node.children_with_tokens()
             .filter_map(|elem| elem.into_token())
-            .find(|t| t.kind() == SyntaxKind::IDENT)
+            .find(|t| t.kind() == SyntaxKind::Ident)
             .map(|t| t.text().to_string())
     }
 
     /// Extract port direction
     fn extract_port_direction(&self, node: &SyntaxNode) -> HirPortDirection {
-        if node.first_token_of_kind(SyntaxKind::IN_KW).is_some() {
+        if node.first_token_of_kind(SyntaxKind::InKw).is_some() {
             HirPortDirection::Input
-        } else if node.first_token_of_kind(SyntaxKind::OUT_KW).is_some() {
+        } else if node.first_token_of_kind(SyntaxKind::OutKw).is_some() {
             HirPortDirection::Output
-        } else if node.first_token_of_kind(SyntaxKind::INOUT_KW).is_some() {
+        } else if node.first_token_of_kind(SyntaxKind::InoutKw).is_some() {
             HirPortDirection::Bidirectional
         } else {
             HirPortDirection::Input
@@ -945,11 +928,11 @@ impl HirBuilderContext {
 
     /// Extract edge type
     fn extract_edge_type(&self, node: &SyntaxNode) -> HirEdgeType {
-        if node.first_token_of_kind(SyntaxKind::RISE_KW).is_some() {
+        if node.first_token_of_kind(SyntaxKind::RiseKw).is_some() {
             HirEdgeType::Rising
-        } else if node.first_token_of_kind(SyntaxKind::FALL_KW).is_some() {
+        } else if node.first_token_of_kind(SyntaxKind::FallKw).is_some() {
             HirEdgeType::Falling
-        } else if node.first_token_of_kind(SyntaxKind::EDGE_KW).is_some() {
+        } else if node.first_token_of_kind(SyntaxKind::EdgeKw).is_some() {
             HirEdgeType::Both
         } else {
             HirEdgeType::Rising
@@ -971,7 +954,7 @@ impl HirBuilderContext {
                 return self.build_expression(&child);
             }
             if child.children_with_tokens()
-                .any(|e| e.kind() == SyntaxKind::ASSIGN) {
+                .any(|e| e.kind() == SyntaxKind::Assign) {
                 found_assign = true;
             }
         }
@@ -981,10 +964,10 @@ impl HirBuilderContext {
     /// Determine assignment type from operator
     fn determine_assignment_type(&self, node: &SyntaxNode) -> HirAssignmentType {
         if node.children_with_tokens()
-            .any(|e| e.kind() == SyntaxKind::NON_BLOCKING_ASSIGN) {
+            .any(|e| e.kind() == SyntaxKind::NonBlockingAssign) {
             HirAssignmentType::NonBlocking
         } else if node.children_with_tokens()
-            .any(|e| e.kind() == SyntaxKind::BLOCKING_ASSIGN) {
+            .any(|e| e.kind() == SyntaxKind::BlockingAssign) {
             HirAssignmentType::Blocking
         } else {
             HirAssignmentType::Combinational
@@ -994,24 +977,24 @@ impl HirBuilderContext {
     /// Convert token to binary operator
     fn token_to_binary_op(&self, kind: SyntaxKind) -> Option<HirBinaryOp> {
         match kind {
-            SyntaxKind::PLUS => Some(HirBinaryOp::Add),
-            SyntaxKind::MINUS => Some(HirBinaryOp::Sub),
-            SyntaxKind::STAR => Some(HirBinaryOp::Mul),
-            SyntaxKind::SLASH => Some(HirBinaryOp::Div),
-            SyntaxKind::PERCENT => Some(HirBinaryOp::Mod),
-            SyntaxKind::AMP => Some(HirBinaryOp::And),
-            SyntaxKind::PIPE => Some(HirBinaryOp::Or),
-            SyntaxKind::CARET => Some(HirBinaryOp::Xor),
-            SyntaxKind::EQ => Some(HirBinaryOp::Equal),
-            SyntaxKind::NEQ => Some(HirBinaryOp::NotEqual),
-            SyntaxKind::LT => Some(HirBinaryOp::Less),
-            SyntaxKind::LE => Some(HirBinaryOp::LessEqual),
-            SyntaxKind::GT => Some(HirBinaryOp::Greater),
-            SyntaxKind::GE => Some(HirBinaryOp::GreaterEqual),
-            SyntaxKind::AMP_AMP => Some(HirBinaryOp::LogicalAnd),
-            SyntaxKind::PIPE_PIPE => Some(HirBinaryOp::LogicalOr),
-            SyntaxKind::SHL => Some(HirBinaryOp::LeftShift),
-            SyntaxKind::SHR => Some(HirBinaryOp::RightShift),
+            SyntaxKind::Plus => Some(HirBinaryOp::Add),
+            SyntaxKind::Minus => Some(HirBinaryOp::Sub),
+            SyntaxKind::Star => Some(HirBinaryOp::Mul),
+            SyntaxKind::Slash => Some(HirBinaryOp::Div),
+            SyntaxKind::Percent => Some(HirBinaryOp::Mod),
+            SyntaxKind::Amp => Some(HirBinaryOp::And),
+            SyntaxKind::Pipe => Some(HirBinaryOp::Or),
+            SyntaxKind::Caret => Some(HirBinaryOp::Xor),
+            SyntaxKind::Eq => Some(HirBinaryOp::Equal),
+            SyntaxKind::Neq => Some(HirBinaryOp::NotEqual),
+            SyntaxKind::Lt => Some(HirBinaryOp::Less),
+            SyntaxKind::Le => Some(HirBinaryOp::LessEqual),
+            SyntaxKind::Gt => Some(HirBinaryOp::Greater),
+            SyntaxKind::Ge => Some(HirBinaryOp::GreaterEqual),
+            SyntaxKind::AmpAmp => Some(HirBinaryOp::LogicalAnd),
+            SyntaxKind::PipePipe => Some(HirBinaryOp::LogicalOr),
+            SyntaxKind::Shl => Some(HirBinaryOp::LeftShift),
+            SyntaxKind::Shr => Some(HirBinaryOp::RightShift),
             _ => None,
         }
     }
@@ -1019,9 +1002,9 @@ impl HirBuilderContext {
     /// Convert token to unary operator
     fn token_to_unary_op(&self, kind: SyntaxKind) -> Option<HirUnaryOp> {
         match kind {
-            SyntaxKind::BANG => Some(HirUnaryOp::Not),
-            SyntaxKind::MINUS => Some(HirUnaryOp::Negate),
-            SyntaxKind::TILDE => Some(HirUnaryOp::BitwiseNot),
+            SyntaxKind::Bang => Some(HirUnaryOp::Not),
+            SyntaxKind::Minus => Some(HirUnaryOp::Negate),
+            SyntaxKind::Tilde => Some(HirUnaryOp::BitwiseNot),
             _ => None,
         }
     }

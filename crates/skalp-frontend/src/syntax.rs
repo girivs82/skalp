@@ -2,7 +2,6 @@
 //!
 //! This module defines the syntax kinds and tree structure for the SKALP language
 
-use logos::Logos;
 
 /// Syntax kinds for SKALP language
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -11,225 +10,225 @@ pub enum SyntaxKind {
     // === Tokens (Terminal nodes) ===
 
     // Keywords
-    ENTITY_KW,
-    IMPL_KW,
-    IN_KW,
-    OUT_KW,
-    INOUT_KW,
-    SIGNAL_KW,
-    VAR_KW,
-    LET_KW,
-    CONST_KW,
-    ON_KW,
-    IF_KW,
-    ELSE_KW,
-    MATCH_KW,
-    FLOW_KW,
-    WITH_KW,
-    INTENT_KW,
-    PROTOCOL_KW,
-    REQUIREMENT_KW,
-    ASYNC_KW,
-    AWAIT_KW,
-    TRAIT_KW,
-    FOR_KW,
-    TYPE_KW,
-    WHERE_KW,
-    TIMING_KW,
-    POWER_KW,
-    AREA_KW,
-    THROUGHPUT_KW,
-    LATENCY_KW,
-    MINIMIZE_KW,
-    MAXIMIZE_KW,
+    EntityKw,
+    ImplKw,
+    InKw,
+    OutKw,
+    InoutKw,
+    SignalKw,
+    VarKw,
+    LetKw,
+    ConstKw,
+    OnKw,
+    IfKw,
+    ElseKw,
+    MatchKw,
+    FlowKw,
+    WithKw,
+    IntentKw,
+    ProtocolKw,
+    RequirementKw,
+    AsyncKw,
+    AwaitKw,
+    TraitKw,
+    ForKw,
+    TypeKw,
+    WhereKw,
+    TimingKw,
+    PowerKw,
+    AreaKw,
+    ThroughputKw,
+    LatencyKw,
+    MinimizeKw,
+    MaximizeKw,
 
     // Type keywords
-    BIT_KW,
-    LOGIC_KW,
-    INT_KW,
-    NAT_KW,
-    FIXED_KW,
-    CLOCK_KW,
-    RESET_KW,
-    EVENT_KW,
-    STREAM_KW,
+    BitKw,
+    LogicKw,
+    IntKw,
+    NatKw,
+    FixedKw,
+    ClockKw,
+    ResetKw,
+    EventKw,
+    StreamKw,
 
     // Special keywords
-    RISE_KW,
-    FALL_KW,
-    EDGE_KW,
+    RiseKw,
+    FallKw,
+    EdgeKw,
 
     // Literals
-    IDENT,
-    INT_LITERAL,
-    BIN_LITERAL,
-    HEX_LITERAL,
-    STRING_LITERAL,
+    Ident,
+    IntLiteral,
+    BinLiteral,
+    HexLiteral,
+    StringLiteral,
 
     // Operators
-    NON_BLOCKING_ASSIGN, // <=
-    BLOCKING_ASSIGN,     // :=
-    ASSIGN,              // =
-    EQ,                  // ==
-    NEQ,                 // !=
-    LT,                  // <
-    GT,                  // >
-    LE,                  // <=
-    GE,                  // >=
-    PLUS,                // +
-    MINUS,               // -
-    STAR,                // *
-    SLASH,               // /
-    PERCENT,             // %
-    AMP,                 // &
-    PIPE,                // |
-    CARET,               // ^
-    BANG,                // !
-    TILDE,               // ~
-    AMP_AMP,             // &&
-    PIPE_PIPE,           // ||
-    SHL,                 // <<
-    SHR,                 // >>
-    PIPELINE,            // |>
-    ARROW,               // ->
-    LEFT_ARROW,          // <-
+    NonBlockingAssign, // <=
+    BlockingAssign,     // :=
+    Assign,              // =
+    Eq,                  // ==
+    Neq,                 // !=
+    Lt,                  // <
+    Gt,                  // >
+    Le,                  // <=
+    Ge,                  // >=
+    Plus,                // +
+    Minus,               // -
+    Star,                // *
+    Slash,               // /
+    Percent,             // %
+    Amp,                 // &
+    Pipe,                // |
+    Caret,               // ^
+    Bang,                // !
+    Tilde,               // ~
+    AmpAmp,             // &&
+    PipePipe,           // ||
+    Shl,                 // <<
+    Shr,                 // >>
+    Pipeline,            // |>
+    Arrow,               // ->
+    LeftArrow,          // <-
 
     // Delimiters
-    L_PAREN,             // (
-    R_PAREN,             // )
-    L_BRACKET,           // [
-    R_BRACKET,           // ]
-    L_BRACE,             // {
-    R_BRACE,             // }
-    COMMA,               // ,
-    SEMICOLON,           // ;
-    COLON,               // :
-    DOT,                 // .
-    QUESTION,            // ?
-    APOSTROPHE,          // '
+    LParen,             // (
+    RParen,             // )
+    LBracket,           // [
+    RBracket,           // ]
+    LBrace,             // {
+    RBrace,             // }
+    Comma,               // ,
+    Semicolon,           // ;
+    Colon,               // :
+    Dot,                 // .
+    Question,            // ?
+    Apostrophe,          // '
 
     // Trivia
-    WHITESPACE,
-    COMMENT,
+    Whitespace,
+    Comment,
 
     // Error
-    ERROR,
+    Error,
 
     // === Non-terminal nodes ===
 
     // Top level
-    SOURCE_FILE,
+    SourceFile,
 
     // Items
-    ENTITY_DECL,
-    IMPL_BLOCK,
-    PROTOCOL_DECL,
-    INTENT_DECL,
-    REQUIREMENT_DECL,
-    TRAIT_DEF,
-    TRAIT_IMPL,
+    EntityDecl,
+    ImplBlock,
+    ProtocolDecl,
+    IntentDecl,
+    RequirementDecl,
+    TraitDef,
+    TraitImpl,
 
     // Entity parts
-    PORT_LIST,
-    PORT_DECL,
-    PORT_DIRECTION,
+    PortList,
+    PortDecl,
+    PortDirection,
 
     // Implementation parts
-    SIGNAL_DECL,
-    VARIABLE_DECL,
-    CONSTANT_DECL,
-    EVENT_BLOCK,
+    SignalDecl,
+    VariableDecl,
+    ConstantDecl,
+    EventBlock,
 
     // Event parts
-    EVENT_TRIGGER_LIST,
-    EVENT_TRIGGER,
-    EDGE_TYPE,
+    EventTriggerList,
+    EventTrigger,
+    EdgeType,
 
     // Statements
-    ASSIGNMENT_STMT,
-    IF_STMT,
-    MATCH_STMT,
-    BLOCK_STMT,
-    FLOW_STMT,
+    AssignmentStmt,
+    IfStmt,
+    MatchStmt,
+    BlockStmt,
+    FlowStmt,
 
     // Flow pipeline
-    FLOW_PIPELINE,
-    PIPELINE_STAGE,
+    FlowPipeline,
+    PipelineStage,
 
     // Expressions
-    LITERAL_EXPR,
-    IDENT_EXPR,
-    BINARY_EXPR,
-    UNARY_EXPR,
-    CALL_EXPR,
-    FIELD_EXPR,
-    INDEX_EXPR,
-    PAREN_EXPR,
+    LiteralExpr,
+    IdentExpr,
+    BinaryExpr,
+    UnaryExpr,
+    CallExpr,
+    FieldExpr,
+    IndexExpr,
+    ParenExpr,
 
     // Types
-    TYPE_ANNOTATION,
-    BIT_TYPE,
-    LOGIC_TYPE,
-    INT_TYPE,
-    NAT_TYPE,
-    CLOCK_TYPE,
-    RESET_TYPE,
-    EVENT_TYPE,
-    ARRAY_TYPE,
-    CUSTOM_TYPE,
+    TypeAnnotation,
+    BitType,
+    LogicType,
+    IntType,
+    NatType,
+    ClockType,
+    ResetType,
+    EventType,
+    ArrayType,
+    CustomType,
 
     // Type parts
-    WIDTH_SPEC,
-    TYPE_PARAMS,
+    WidthSpec,
+    TypeParams,
 
     // Patterns
-    LITERAL_PATTERN,
-    IDENT_PATTERN,
-    WILDCARD_PATTERN,
-    TUPLE_PATTERN,
+    LiteralPattern,
+    IdentPattern,
+    WildcardPattern,
+    TuplePattern,
 
     // Match parts
-    MATCH_ARM_LIST,
-    MATCH_ARM,
+    MatchArmList,
+    MatchArm,
 
     // Protocol parts
-    PROTOCOL_SIGNAL_LIST,
-    PROTOCOL_SIGNAL,
-    PROTOCOL_DIRECTION,
+    ProtocolSignalList,
+    ProtocolSignal,
+    ProtocolDirection,
 
     // Intent parts
-    INTENT_CONSTRAINT_LIST,
-    INTENT_CONSTRAINT,
+    IntentConstraintList,
+    IntentConstraint,
 
     // Generic parameters
-    GENERIC_PARAM_LIST,
-    GENERIC_PARAM,
+    GenericParamList,
+    GenericParam,
 
     // Arguments
-    ARG_LIST,
-    ARG,
+    ArgList,
+    Arg,
 
     // Trait parts
-    TRAIT_ITEM_LIST,
-    TRAIT_ITEM,
-    TRAIT_METHOD,
-    TRAIT_CONST,
-    TRAIT_TYPE,
-    TRAIT_BOUND_LIST,
-    TRAIT_BOUND,
-    WHERE_CLAUSE,
-    WHERE_PREDICATE,
+    TraitItemList,
+    TraitItem,
+    TraitMethod,
+    TraitConst,
+    TraitType,
+    TraitBoundList,
+    TraitBound,
+    WhereClause,
+    WherePredicate,
 
     // Miscellaneous
-    NAME,
-    NAME_REF,
-    PATH,
-    PATH_SEGMENT,
-    ATTRIBUTE,
-    VISIBILITY,
+    Name,
+    NameRef,
+    Path,
+    PathSegment,
+    Attribute,
+    Visibility,
 
     // Placeholder for the end
-    __LAST,
+    __Last,
 }
 
 use SyntaxKind::*;
@@ -237,48 +236,48 @@ use SyntaxKind::*;
 impl SyntaxKind {
     /// Check if this is a trivia token (whitespace or comment)
     pub fn is_trivia(self) -> bool {
-        matches!(self, WHITESPACE | COMMENT)
+        matches!(self, Whitespace | Comment)
     }
 
     /// Check if this is a keyword
     pub fn is_keyword(self) -> bool {
         matches!(
             self,
-            ENTITY_KW
-                | IMPL_KW
-                | IN_KW
-                | OUT_KW
-                | INOUT_KW
-                | SIGNAL_KW
-                | VAR_KW
-                | LET_KW
-                | CONST_KW
-                | ON_KW
-                | IF_KW
-                | ELSE_KW
-                | MATCH_KW
-                | WITH_KW
-                | INTENT_KW
-                | PROTOCOL_KW
-                | REQUIREMENT_KW
-                | ASYNC_KW
-                | AWAIT_KW
-                | TRAIT_KW
-                | FOR_KW
-                | TYPE_KW
-                | WHERE_KW
-                | BIT_KW
-                | LOGIC_KW
-                | INT_KW
-                | NAT_KW
-                | FIXED_KW
-                | CLOCK_KW
-                | RESET_KW
-                | EVENT_KW
-                | STREAM_KW
-                | RISE_KW
-                | FALL_KW
-                | EDGE_KW
+            EntityKw
+                | ImplKw
+                | InKw
+                | OutKw
+                | InoutKw
+                | SignalKw
+                | VarKw
+                | LetKw
+                | ConstKw
+                | OnKw
+                | IfKw
+                | ElseKw
+                | MatchKw
+                | WithKw
+                | IntentKw
+                | ProtocolKw
+                | RequirementKw
+                | AsyncKw
+                | AwaitKw
+                | TraitKw
+                | ForKw
+                | TypeKw
+                | WhereKw
+                | BitKw
+                | LogicKw
+                | IntKw
+                | NatKw
+                | FixedKw
+                | ClockKw
+                | ResetKw
+                | EventKw
+                | StreamKw
+                | RiseKw
+                | FallKw
+                | EdgeKw
         )
     }
 
@@ -287,31 +286,31 @@ impl SyntaxKind {
         matches!(
             self,
             // Assignment operators are not binary operators in expressions
-            // NON_BLOCKING_ASSIGN | BLOCKING_ASSIGN | ASSIGN
-            EQ
-                | NEQ
-                | LT
-                | GT
-                | LE
-                | GE
-                | PLUS
-                | MINUS
-                | STAR
-                | SLASH
-                | PERCENT
-                | AMP
-                | PIPE
-                | CARET
-                | BANG
-                | TILDE
-                | AMP_AMP
-                | PIPE_PIPE
-                | SHL
-                | SHR
-                // Note: PIPELINE (|>) is not a binary expression operator
+            // NonBlockingAssign | BlockingAssign | Assign
+            Eq
+                | Neq
+                | Lt
+                | Gt
+                | Le
+                | Ge
+                | Plus
+                | Minus
+                | Star
+                | Slash
+                | Percent
+                | Amp
+                | Pipe
+                | Caret
+                | Bang
+                | Tilde
+                | AmpAmp
+                | PipePipe
+                | Shl
+                | Shr
+                // Note: Pipeline (|>) is not a binary expression operator
                 // It's only used in flow statements
-                | ARROW
-                | LEFT_ARROW
+                | Arrow
+                | LeftArrow
         )
     }
 
@@ -319,103 +318,103 @@ impl SyntaxKind {
     pub fn is_literal(self) -> bool {
         matches!(
             self,
-            INT_LITERAL | BIN_LITERAL | HEX_LITERAL | STRING_LITERAL
+            IntLiteral | BinLiteral | HexLiteral | StringLiteral
         )
     }
 
     /// Get a human-readable description of this syntax kind
     pub fn description(self) -> &'static str {
         match self {
-            ENTITY_KW => "'entity'",
-            IMPL_KW => "'impl'",
-            IN_KW => "'in'",
-            OUT_KW => "'out'",
-            INOUT_KW => "'inout'",
-            SIGNAL_KW => "'signal'",
-            VAR_KW => "'var'",
-            LET_KW => "'let'",
-            CONST_KW => "'const'",
-            ON_KW => "'on'",
-            IF_KW => "'if'",
-            ELSE_KW => "'else'",
-            MATCH_KW => "'match'",
-            WITH_KW => "'with'",
-            INTENT_KW => "'intent'",
-            PROTOCOL_KW => "'protocol'",
-            REQUIREMENT_KW => "'requirement'",
-            ASYNC_KW => "'async'",
-            AWAIT_KW => "'await'",
+            EntityKw => "'entity'",
+            ImplKw => "'impl'",
+            InKw => "'in'",
+            OutKw => "'out'",
+            InoutKw => "'inout'",
+            SignalKw => "'signal'",
+            VarKw => "'var'",
+            LetKw => "'let'",
+            ConstKw => "'const'",
+            OnKw => "'on'",
+            IfKw => "'if'",
+            ElseKw => "'else'",
+            MatchKw => "'match'",
+            WithKw => "'with'",
+            IntentKw => "'intent'",
+            ProtocolKw => "'protocol'",
+            RequirementKw => "'requirement'",
+            AsyncKw => "'async'",
+            AwaitKw => "'await'",
 
-            BIT_KW => "'bit'",
-            LOGIC_KW => "'logic'",
-            INT_KW => "'int'",
-            NAT_KW => "'nat'",
-            FIXED_KW => "'fixed'",
-            CLOCK_KW => "'clock'",
-            RESET_KW => "'reset'",
-            EVENT_KW => "'event'",
-            STREAM_KW => "'stream'",
+            BitKw => "'bit'",
+            LogicKw => "'logic'",
+            IntKw => "'int'",
+            NatKw => "'nat'",
+            FixedKw => "'fixed'",
+            ClockKw => "'clock'",
+            ResetKw => "'reset'",
+            EventKw => "'event'",
+            StreamKw => "'stream'",
 
-            RISE_KW => "'rise'",
-            FALL_KW => "'fall'",
-            EDGE_KW => "'edge'",
+            RiseKw => "'rise'",
+            FallKw => "'fall'",
+            EdgeKw => "'edge'",
 
-            IDENT => "identifier",
-            INT_LITERAL => "integer literal",
-            BIN_LITERAL => "binary literal",
-            HEX_LITERAL => "hexadecimal literal",
-            STRING_LITERAL => "string literal",
+            Ident => "identifier",
+            IntLiteral => "integer literal",
+            BinLiteral => "binary literal",
+            HexLiteral => "hexadecimal literal",
+            StringLiteral => "string literal",
 
-            NON_BLOCKING_ASSIGN => "'<='",
-            BLOCKING_ASSIGN => "':='",
-            ASSIGN => "'='",
-            EQ => "'=='",
-            NEQ => "'!='",
-            LT => "'<'",
-            GT => "'>'",
-            LE => "'<='",
-            GE => "'>='",
-            PLUS => "'+'",
-            MINUS => "'-'",
-            STAR => "'*'",
-            SLASH => "'/'",
-            PERCENT => "'%'",
-            AMP => "'&'",
-            PIPE => "'|'",
-            CARET => "'^'",
-            BANG => "'!'",
-            TILDE => "'~'",
-            AMP_AMP => "'&&'",
-            PIPE_PIPE => "'||'",
-            SHL => "'<<'",
-            SHR => "'>>'",
-            PIPELINE => "'|>'",
-            ARROW => "'->'",
-            LEFT_ARROW => "'<-'",
+            NonBlockingAssign => "'<='",
+            BlockingAssign => "':='",
+            Assign => "'='",
+            Eq => "'=='",
+            Neq => "'!='",
+            Lt => "'<'",
+            Gt => "'>'",
+            Le => "'<='",
+            Ge => "'>='",
+            Plus => "'+'",
+            Minus => "'-'",
+            Star => "'*'",
+            Slash => "'/'",
+            Percent => "'%'",
+            Amp => "'&'",
+            Pipe => "'|'",
+            Caret => "'^'",
+            Bang => "'!'",
+            Tilde => "'~'",
+            AmpAmp => "'&&'",
+            PipePipe => "'||'",
+            Shl => "'<<'",
+            Shr => "'>>'",
+            Pipeline => "'|>'",
+            Arrow => "'->'",
+            LeftArrow => "'<-'",
 
-            L_PAREN => "'('",
-            R_PAREN => "')'",
-            L_BRACKET => "'['",
-            R_BRACKET => "']'",
-            L_BRACE => "'{'",
-            R_BRACE => "'}'",
-            COMMA => "','",
-            SEMICOLON => "';'",
-            COLON => "':'",
-            DOT => "'.'",
-            QUESTION => "'?'",
-            APOSTROPHE => "'''",
+            LParen => "'('",
+            RParen => "')'",
+            LBracket => "'['",
+            RBracket => "']'",
+            LBrace => "'{'",
+            RBrace => "'}'",
+            Comma => "','",
+            Semicolon => "';'",
+            Colon => "':'",
+            Dot => "'.'",
+            Question => "'?'",
+            Apostrophe => "'''",
 
-            WHITESPACE => "whitespace",
-            COMMENT => "comment",
-            ERROR => "error",
+            Whitespace => "whitespace",
+            Comment => "comment",
+            Error => "error",
 
-            SOURCE_FILE => "source file",
-            ENTITY_DECL => "entity declaration",
-            IMPL_BLOCK => "implementation block",
-            PROTOCOL_DECL => "protocol declaration",
-            INTENT_DECL => "intent declaration",
-            REQUIREMENT_DECL => "requirement declaration",
+            SourceFile => "source file",
+            EntityDecl => "entity declaration",
+            ImplBlock => "implementation block",
+            ProtocolDecl => "protocol declaration",
+            IntentDecl => "intent declaration",
+            RequirementDecl => "requirement declaration",
 
             _ => "unknown",
         }
@@ -428,99 +427,99 @@ impl From<crate::lexer::Token> for SyntaxKind {
         use crate::lexer::Token;
 
         match token {
-            Token::Entity => ENTITY_KW,
-            Token::Impl => IMPL_KW,
-            Token::In => IN_KW,
-            Token::Out => OUT_KW,
-            Token::Inout => INOUT_KW,
-            Token::Signal => SIGNAL_KW,
-            Token::Var => VAR_KW,
-            Token::Let => LET_KW,
-            Token::Const => CONST_KW,
-            Token::On => ON_KW,
-            Token::If => IF_KW,
-            Token::Else => ELSE_KW,
-            Token::Match => MATCH_KW,
-            Token::Flow => FLOW_KW,
-            Token::With => WITH_KW,
-            Token::Intent => INTENT_KW,
-            Token::Protocol => PROTOCOL_KW,
-            Token::Requirement => REQUIREMENT_KW,
-            Token::Async => ASYNC_KW,
-            Token::Await => AWAIT_KW,
-            Token::Trait => TRAIT_KW,
-            Token::For => FOR_KW,
-            Token::Type => TYPE_KW,
-            Token::Where => WHERE_KW,
-            Token::Timing => TIMING_KW,
-            Token::Power => POWER_KW,
-            Token::Area => AREA_KW,
-            Token::Throughput => THROUGHPUT_KW,
-            Token::Latency => LATENCY_KW,
-            Token::Minimize => MINIMIZE_KW,
-            Token::Maximize => MAXIMIZE_KW,
+            Token::Entity => EntityKw,
+            Token::Impl => ImplKw,
+            Token::In => InKw,
+            Token::Out => OutKw,
+            Token::Inout => InoutKw,
+            Token::Signal => SignalKw,
+            Token::Var => VarKw,
+            Token::Let => LetKw,
+            Token::Const => ConstKw,
+            Token::On => OnKw,
+            Token::If => IfKw,
+            Token::Else => ElseKw,
+            Token::Match => MatchKw,
+            Token::Flow => FlowKw,
+            Token::With => WithKw,
+            Token::Intent => IntentKw,
+            Token::Protocol => ProtocolKw,
+            Token::Requirement => RequirementKw,
+            Token::Async => AsyncKw,
+            Token::Await => AwaitKw,
+            Token::Trait => TraitKw,
+            Token::For => ForKw,
+            Token::Type => TypeKw,
+            Token::Where => WhereKw,
+            Token::Timing => TimingKw,
+            Token::Power => PowerKw,
+            Token::Area => AreaKw,
+            Token::Throughput => ThroughputKw,
+            Token::Latency => LatencyKw,
+            Token::Minimize => MinimizeKw,
+            Token::Maximize => MaximizeKw,
 
-            Token::Bit => BIT_KW,
-            Token::Logic => LOGIC_KW,
-            Token::Int => INT_KW,
-            Token::Nat => NAT_KW,
-            Token::Fixed => FIXED_KW,
-            Token::Clock => CLOCK_KW,
-            Token::Reset => RESET_KW,
-            Token::Event => EVENT_KW,
-            Token::Stream => STREAM_KW,
+            Token::Bit => BitKw,
+            Token::Logic => LogicKw,
+            Token::Int => IntKw,
+            Token::Nat => NatKw,
+            Token::Fixed => FixedKw,
+            Token::Clock => ClockKw,
+            Token::Reset => ResetKw,
+            Token::Event => EventKw,
+            Token::Stream => StreamKw,
 
-            Token::Rise => RISE_KW,
-            Token::Fall => FALL_KW,
-            Token::Edge => EDGE_KW,
+            Token::Rise => RiseKw,
+            Token::Fall => FallKw,
+            Token::Edge => EdgeKw,
 
-            Token::Identifier(_) => IDENT,
-            Token::DecimalLiteral(_) => INT_LITERAL,
-            Token::BinaryLiteral(_) => BIN_LITERAL,
-            Token::HexLiteral(_) => HEX_LITERAL,
-            Token::StringLiteral(_) => STRING_LITERAL,
+            Token::Identifier(_) => Ident,
+            Token::DecimalLiteral(_) => IntLiteral,
+            Token::BinaryLiteral(_) => BinLiteral,
+            Token::HexLiteral(_) => HexLiteral,
+            Token::StringLiteral(_) => StringLiteral,
 
-            Token::NonBlockingAssign => NON_BLOCKING_ASSIGN,
-            Token::BlockingAssign => BLOCKING_ASSIGN,
-            Token::Assign => ASSIGN,
-            Token::Equal => EQ,
-            Token::NotEqual => NEQ,
-            Token::Less => LT,
-            Token::Greater => GT,
-            Token::LessEqual => LE,
-            Token::GreaterEqual => GE,
-            Token::Plus => PLUS,
-            Token::Minus => MINUS,
-            Token::Star => STAR,
-            Token::Slash => SLASH,
-            Token::Percent => PERCENT,
-            Token::Ampersand => AMP,
-            Token::Pipe => PIPE,
-            Token::Caret => CARET,
-            Token::Bang => BANG,
-            Token::Tilde => TILDE,
-            Token::LogicalAnd => AMP_AMP,
-            Token::LogicalOr => PIPE_PIPE,
-            Token::LeftShift => SHL,
-            Token::RightShift => SHR,
-            Token::Pipeline => PIPELINE,
-            Token::Arrow => ARROW,
-            Token::LeftArrow => LEFT_ARROW,
+            Token::NonBlockingAssign => NonBlockingAssign,
+            Token::BlockingAssign => BlockingAssign,
+            Token::Assign => Assign,
+            Token::Equal => Eq,
+            Token::NotEqual => Neq,
+            Token::Less => Lt,
+            Token::Greater => Gt,
+            Token::LessEqual => Le,
+            Token::GreaterEqual => Ge,
+            Token::Plus => Plus,
+            Token::Minus => Minus,
+            Token::Star => Star,
+            Token::Slash => Slash,
+            Token::Percent => Percent,
+            Token::Ampersand => Amp,
+            Token::Pipe => Pipe,
+            Token::Caret => Caret,
+            Token::Bang => Bang,
+            Token::Tilde => Tilde,
+            Token::LogicalAnd => AmpAmp,
+            Token::LogicalOr => PipePipe,
+            Token::LeftShift => Shl,
+            Token::RightShift => Shr,
+            Token::Pipeline => Pipeline,
+            Token::Arrow => Arrow,
+            Token::LeftArrow => LeftArrow,
 
-            Token::LeftParen => L_PAREN,
-            Token::RightParen => R_PAREN,
-            Token::LeftBracket => L_BRACKET,
-            Token::RightBracket => R_BRACKET,
-            Token::LeftBrace => L_BRACE,
-            Token::RightBrace => R_BRACE,
-            Token::Comma => COMMA,
-            Token::Semicolon => SEMICOLON,
-            Token::Colon => COLON,
-            Token::Dot => DOT,
-            Token::Question => QUESTION,
-            Token::Apostrophe => APOSTROPHE,
+            Token::LeftParen => LParen,
+            Token::RightParen => RParen,
+            Token::LeftBracket => LBracket,
+            Token::RightBracket => RBracket,
+            Token::LeftBrace => LBrace,
+            Token::RightBrace => RBrace,
+            Token::Comma => Comma,
+            Token::Semicolon => Semicolon,
+            Token::Colon => Colon,
+            Token::Dot => Dot,
+            Token::Question => Question,
+            Token::Apostrophe => Apostrophe,
 
-            Token::Unknown => ERROR,
+            Token::Unknown => Error,
         }
     }
 }
@@ -533,7 +532,7 @@ impl rowan::Language for SkalplLanguage {
     type Kind = SyntaxKind;
 
     fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
-        assert!(raw.0 <= (__LAST as u16));
+        assert!(raw.0 <= (__Last as u16));
         unsafe { std::mem::transmute::<u16, SyntaxKind>(raw.0) }
     }
 

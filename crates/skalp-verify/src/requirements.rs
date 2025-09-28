@@ -433,8 +433,8 @@ impl RequirementTracker {
     pub fn generate_traceability_report(&self) -> TraceabilityReport {
         let mut orphan_requirements = Vec::new();
         let mut untested_requirements = Vec::new();
-        let mut unlinked_properties = HashSet::new();
-        let mut unlinked_tests = HashSet::new();
+        let unlinked_properties = HashSet::new();
+        let unlinked_tests = HashSet::new();
 
         for req in self.requirements.values() {
             if req.parent.is_none() && req.children.is_empty() {

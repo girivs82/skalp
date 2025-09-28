@@ -2,7 +2,7 @@
 //!
 //! Various optimization techniques for gate-level netlists
 
-use crate::lir::{Gate, GateType, Lir, Net};
+use crate::lir::{Gate, GateType, Lir};
 use std::collections::{HashMap, HashSet};
 
 /// Optimization pass trait
@@ -92,7 +92,7 @@ impl ConstantFolding {
     fn evaluate_constant_gate(&self, gate: &Gate, constants: &HashMap<String, bool>) -> Option<bool> {
         match gate.gate_type {
             GateType::And => {
-                let mut result = true;
+                let result = true;
                 for input in &gate.inputs {
                     if input == "tie_low" || constants.get(input) == Some(&false) {
                         return Some(false); // AND with 0 is always 0
@@ -104,7 +104,7 @@ impl ConstantFolding {
                 Some(result)
             }
             GateType::Or => {
-                let mut result = false;
+                let result = false;
                 for input in &gate.inputs {
                     if input == "tie_high" || constants.get(input) == Some(&true) {
                         return Some(true); // OR with 1 is always 1

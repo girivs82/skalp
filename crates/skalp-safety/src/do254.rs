@@ -1,6 +1,6 @@
 //! DO-254 aerospace safety compliance framework
 
-use crate::{SafetyError, SafetyResult};
+use crate::SafetyResult;
 use serde::{Deserialize, Serialize};
 
 /// DO-254 design assurance levels for aerospace systems

@@ -3,7 +3,7 @@
 //! Supports both immediate (procedural) and concurrent (temporal) assertions
 
 use serde::{Deserialize, Serialize};
-use skalp_mir::mir::{Expression, Module};
+use skalp_mir::mir::Expression;
 
 /// Assertion in the design
 #[derive(Debug, Clone, Serialize, Deserialize)]

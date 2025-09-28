@@ -4,7 +4,7 @@
 //! parallel execution of digital logic on GPU.
 
 use crate::sir::{SirExpression, SirOperation, BinaryOp, UnaryOp, ReduceOp, CombinationalBlock, SirSignalId};
-use crate::cone::{CombinationalCone, ConeId};
+use crate::cone::CombinationalCone;
 use std::collections::HashMap;
 use std::fmt::Write;
 

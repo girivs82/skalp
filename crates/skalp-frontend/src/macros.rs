@@ -109,6 +109,12 @@ pub struct MacroExpander {
     max_depth: usize,
 }
 
+impl Default for MacroExpander {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MacroExpander {
     pub fn new() -> Self {
         let mut expander = Self {
@@ -427,6 +433,12 @@ pub struct HygienicExpander {
     base: MacroExpander,
     /// Scope counter for hygiene
     scope_counter: usize,
+}
+
+impl Default for HygienicExpander {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HygienicExpander {

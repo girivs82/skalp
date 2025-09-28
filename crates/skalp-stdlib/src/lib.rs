@@ -32,7 +32,7 @@ mod tests {
     #[test]
     fn test_components_available() {
         let components = get_components();
-        assert!(components.len() > 0);
+        assert!(!components.is_empty());
         assert!(components.iter().any(|(name, _)| *name == "counter"));
         assert!(components.iter().any(|(name, _)| *name == "fifo"));
     }

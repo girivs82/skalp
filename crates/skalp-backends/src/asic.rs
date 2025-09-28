@@ -70,12 +70,8 @@ impl AsicBackend {
     /// Convert LIR to structural Verilog for ASIC synthesis
     async fn lir_to_structural_verilog(&self, lir: &skalp_lir::LirDesign) -> BackendResult<String> {
         // Generate structural Verilog from LIR - more detailed than FPGA version
-        let mut verilog = String::new();
-
         // Use the Verilog generation utility
         crate::verilog::generate_verilog(&lir.modules[0])
-        }
-
     }
 
     /// Run ASIC synthesis flow
