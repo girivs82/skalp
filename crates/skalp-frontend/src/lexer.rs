@@ -81,6 +81,54 @@ pub enum Token {
     #[token("where")]
     Where,
 
+    #[token("fn")]
+    Fn,
+
+    #[token("return")]
+    Return,
+
+    #[token("break")]
+    Break,
+
+    #[token("continue")]
+    Continue,
+
+    #[token("loop")]
+    Loop,
+
+    #[token("while")]
+    While,
+
+    #[token("pub")]
+    Pub,
+
+    #[token("mod")]
+    Mod,
+
+    #[token("use")]
+    Use,
+
+    #[token("crate")]
+    Crate,
+
+    #[token("super")]
+    Super,
+
+    #[token("self")]
+    SelfKeyword,
+
+    #[token("Self")]
+    SelfType,
+
+    #[token("static")]
+    Static,
+
+    #[token("mut")]
+    Mut,
+
+    #[token("ref")]
+    Ref,
+
     // Intent-related keywords
     #[token("timing")]
     Timing,
@@ -141,18 +189,85 @@ pub enum Token {
     #[token("edge")]
     Edge,
 
+    #[token("posedge")]
+    Posedge,
+
+    #[token("negedge")]
+    Negedge,
+
+    #[token("always")]
+    Always,
+
+    #[token("initial")]
+    Initial,
+
+    #[token("final")]
+    Final,
+
+    #[token("fork")]
+    Fork,
+
+    #[token("join")]
+    Join,
+
+    #[token("disable")]
+    Disable,
+
+    #[token("wait")]
+    Wait,
+
+    #[token("assign")]
+    AssignKeyword,
+
+    #[token("force")]
+    Force,
+
+    #[token("release")]
+    Release,
+
+    // Safety and verification keywords
+    #[token("assert")]
+    Assert,
+
+    #[token("assume")]
+    Assume,
+
+    #[token("cover")]
+    Cover,
+
+    #[token("property")]
+    Property,
+
+    #[token("sequence")]
+    Sequence,
+
+    #[token("eventually")]
+    Eventually,
+
+    #[token("always_ff")]
+    AlwaysFF,
+
+    #[token("always_comb")]
+    AlwaysComb,
+
+    #[token("unique")]
+    Unique,
+
+    #[token("priority")]
+    Priority,
+
     // Identifiers and literals
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_owned())]
     Identifier(String),
 
-    // Number literals
-    #[regex(r"0b[01]+", |lex| parse_binary(lex.slice()))]
+    // Number literals with underscore support
+    #[regex(r"0b[01_]+", |lex| parse_binary(lex.slice()))]
     BinaryLiteral(u64),
 
-    #[regex(r"0x[0-9a-fA-F]+", |lex| parse_hex(lex.slice()))]
+    #[regex(r"0x[0-9a-fA-F_]+", |lex| parse_hex(lex.slice()))]
     HexLiteral(u64),
 
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<u64>().ok())]
+    #[regex(r"[0-9][0-9_]*", |lex| parse_decimal(lex.slice()))]
     DecimalLiteral(u64),
 
     // String literals
@@ -280,8 +395,8 @@ pub enum Token {
     #[regex(r"//[^\n]*", logos::skip)]
     #[regex(r"/\*([^*]|\*+[^*/])*\*+/", logos::skip)]
 
-    // Placeholder for unknown tokens - Logos 0.13+ handles errors differently
-    Unknown,
+    // Error token for unknown/invalid input
+    Error,
 }
 
 impl fmt::Display for Token {
@@ -301,16 +416,24 @@ impl fmt::Display for Token {
     }
 }
 
-/// Parse binary literal (0b1010 -> 10)
+/// Parse binary literal (0b1010 -> 10) with underscore support
 pub fn parse_binary(input: &str) -> Option<u64> {
     let without_prefix = &input[2..]; // Remove "0b"
-    u64::from_str_radix(without_prefix, 2).ok()
+    let without_underscores = without_prefix.replace('_', "");
+    u64::from_str_radix(&without_underscores, 2).ok()
 }
 
-/// Parse hex literal (0xFF -> 255)
+/// Parse hex literal (0xFF -> 255) with underscore support
 pub fn parse_hex(input: &str) -> Option<u64> {
     let without_prefix = &input[2..]; // Remove "0x"
-    u64::from_str_radix(without_prefix, 16).ok()
+    let without_underscores = without_prefix.replace('_', "");
+    u64::from_str_radix(&without_underscores, 16).ok()
+}
+
+/// Parse decimal literal (1_000_000 -> 1000000) with underscore support
+pub fn parse_decimal(input: &str) -> Option<u64> {
+    let without_underscores = input.replace('_', "");
+    without_underscores.parse::<u64>().ok()
 }
 
 /// Parse string literal (remove quotes and handle escapes)
@@ -364,10 +487,7 @@ impl<'a> Lexer<'a> {
     /// Get the next token with position
     pub fn next_token(&mut self) -> Option<TokenWithPos> {
         self.inner.next().map(|result| {
-            let token = result.unwrap_or({
-                // Handle error tokens properly in Logos 0.13+
-                Token::Unknown
-            });
+            let token = result.unwrap_or(Token::Error);
             let span = self.inner.span();
             TokenWithPos { token, span }
         })
@@ -487,5 +607,81 @@ entity Counter {
             Token::Rise,
             Token::RightParen,
         ]);
+    }
+
+    #[test]
+    fn test_underscore_numbers() {
+        let mut lexer = Lexer::new("1_000_000 0xFF_FF 0b1010_1010");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        assert_eq!(tokens, vec![
+            Token::DecimalLiteral(1_000_000),
+            Token::HexLiteral(0xFFFF),
+            Token::BinaryLiteral(0b10101010),
+        ]);
+    }
+
+    #[test]
+    fn test_advanced_keywords() {
+        let mut lexer = Lexer::new("intent requirement protocol assert property always_ff");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        assert_eq!(tokens, vec![
+            Token::Intent,
+            Token::Requirement,
+            Token::Protocol,
+            Token::Assert,
+            Token::Property,
+            Token::AlwaysFF,
+        ]);
+    }
+
+    #[test]
+    fn test_safety_keywords() {
+        let mut lexer = Lexer::new("assert assume cover property sequence eventually");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        assert_eq!(tokens, vec![
+            Token::Assert,
+            Token::Assume,
+            Token::Cover,
+            Token::Property,
+            Token::Sequence,
+            Token::Eventually,
+        ]);
+    }
+
+    #[test]
+    fn test_complete_intent_block() {
+        let source = r#"
+        intent {
+            throughput: 100M_samples_per_sec,
+            latency: minimize,
+            power: 10mW
+        }
+        "#;
+
+        let mut lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        // Should contain all intent-related tokens
+        assert!(tokens.contains(&Token::Intent));
+        assert!(tokens.contains(&Token::Throughput));
+        assert!(tokens.contains(&Token::Latency));
+        assert!(tokens.contains(&Token::Minimize));
+        assert!(tokens.contains(&Token::Power));
+    }
+
+    #[test]
+    fn test_error_recovery() {
+        let mut lexer = Lexer::new("entity @ invalid $ Counter");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        // Should handle errors gracefully
+        assert_eq!(tokens[0], Token::Entity);
+        assert_eq!(tokens[1], Token::Error); // @
+        assert_eq!(tokens[2], Token::Identifier("invalid".to_string()));
+        assert_eq!(tokens[3], Token::Error); // $
+        assert_eq!(tokens[4], Token::Identifier("Counter".to_string()));
     }
 }
