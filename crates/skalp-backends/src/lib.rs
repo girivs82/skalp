@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP Hardware Backends
 //!
 //! This crate provides hardware synthesis backends for SKALP designs,

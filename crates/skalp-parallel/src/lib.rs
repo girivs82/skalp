@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! Parallel compilation engine for SKALP
 //!
 //! This crate provides:
@@ -131,7 +132,7 @@ impl ParallelEngine {
         log::info!("Starting parallel compilation of: {}", design_path);
 
         // Create compilation pipeline
-        let mut pipeline = pipeline::CompilationPipeline::new(design_path.to_string());
+        let pipeline = pipeline::CompilationPipeline::new(design_path.to_string());
 
         // Build task dependency graph
         let task_graph = pipeline.build_task_graph()?;
@@ -140,7 +141,7 @@ impl ParallelEngine {
         let completion_handle = self.scheduler.submit_graph(task_graph).await?;
 
         // Wait for completion
-        let results = completion_handle.await?;
+        let results = completion_handle.wait().await?;
 
         log::info!("Parallel compilation completed for: {}", design_path);
 

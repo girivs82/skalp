@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! Property-based testing framework for SKALP hardware designs
 //!
 //! This crate provides:
@@ -194,7 +195,7 @@ impl PropertyTester {
                             format!("No generator for signal type: {}", signal.signal_type)
                         ))?;
 
-                    let stimulus = generator.generate(rng.as_mut())?;
+                    let stimulus = generator.generate(rng)?;
                     test_case.add_stimulus(signal.name.clone(), stimulus);
                 }
             }

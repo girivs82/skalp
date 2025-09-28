@@ -3,12 +3,10 @@
 //! Provides synthesis support for ASIC targets using standard cell libraries.
 
 use crate::{
-    Backend, BackendError, BackendResult, AsicTarget, LogLevel, LogMessage, SynthesisConfig,
-    SynthesisResults, TargetPlatform, AreaMetrics, TimingResults, PowerResults, OutputFile,
-    OutputFileType,
+    Backend, BackendError, BackendResult, AsicTarget, SynthesisConfig,
+    SynthesisResults, TargetPlatform,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 use tempfile::TempDir;
 

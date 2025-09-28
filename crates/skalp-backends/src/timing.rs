@@ -2,7 +2,7 @@
 //!
 //! Provides timing analysis capabilities and constraint handling for both FPGA and ASIC flows.
 
-use crate::{BackendResult, TimingConstraint, TimingResults, TimingViolation, TimingSlack};
+use crate::{BackendResult, TimingConstraint, TimingResults, TimingSlack};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

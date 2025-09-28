@@ -2,7 +2,7 @@
 //!
 //! Implements synthesis for the open-source SkyWater 130nm process.
 
-use crate::{BackendResult, SynthesisResults, LogMessage, LogLevel};
+use crate::{BackendResult, SynthesisResults};
 use crate::asic::AsicConfig;
 use std::path::Path;
 

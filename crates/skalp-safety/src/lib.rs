@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! # SKALP Safety Framework
 //!
 //! ISO 26262 functional safety implementation for SKALP hardware synthesis.

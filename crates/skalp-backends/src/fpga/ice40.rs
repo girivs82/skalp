@@ -4,8 +4,8 @@
 //! Yosys synthesis tool and nextpnr place-and-route tool.
 
 use crate::{
-    BackendError, BackendResult, SynthesisResults, AreaMetrics, TimingResults, PowerResults,
-    OutputFile, OutputFileType, LogMessage, LogLevel, TimingViolation, TimingSlack,
+    BackendResult, SynthesisResults, AreaMetrics, TimingResults, PowerResults,
+    OutputFile, OutputFileType, LogMessage, LogLevel, TimingSlack,
 };
 use crate::fpga::FpgaConfig;
 use std::path::Path;

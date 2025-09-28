@@ -1,3 +1,5 @@
+#![allow(unused_variables)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

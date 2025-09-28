@@ -12,7 +12,7 @@ use tokio::time::{Duration, Instant};
 /// Test SIR generation for a 32-bit counter design
 #[tokio::test]
 async fn test_counter_sir_generation() {
-    let mut mir = create_counter_mir(32);
+    let mir = create_counter_mir(32);
     let mut transformer = MirToSir::new();
     let sir = transformer.transform(&mir);
 
@@ -33,7 +33,7 @@ async fn test_counter_sir_generation() {
 /// Test SIR generation for an adder design
 #[tokio::test]
 async fn test_adder_sir_generation() {
-    let mut mir = create_adder_mir(16);
+    let mir = create_adder_mir(16);
     let mut transformer = MirToSir::new();
     let sir = transformer.transform(&mir);
 
@@ -48,7 +48,7 @@ async fn test_adder_sir_generation() {
 /// Test SIR generation for a FIFO design
 #[tokio::test]
 async fn test_fifo_sir_generation() {
-    let mut mir = create_fifo_mir(8, 16); // 8-bit data, 16-deep
+    let mir = create_fifo_mir(8, 16); // 8-bit data, 16-deep
     let mut transformer = MirToSir::new();
     let sir = transformer.transform(&mir);
 

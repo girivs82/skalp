@@ -2,7 +2,7 @@
 //!
 //! Implements synthesis for the FreePDK45 open-source process.
 
-use crate::{BackendResult, SynthesisResults, LogMessage, LogLevel};
+use crate::{BackendResult, SynthesisResults};
 use crate::asic::AsicConfig;
 use std::path::Path;
 

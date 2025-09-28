@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! Incremental build system for SKALP
 //!
 //! This crate provides:
@@ -12,7 +13,7 @@ pub mod fingerprint;
 pub mod builder;
 
 use thiserror::Error;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 

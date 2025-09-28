@@ -104,13 +104,11 @@ impl<'a> ParseState<'a> {
         // Check if we have: <trait> for <type>
         let is_trait_impl = {
             let mut found_for = false;
-            let mut lookahead = 0;
+            let mut lookahead = 1;
 
             // Look for 'for' keyword within the next few tokens
             // Pattern: IDENT [<generics>] FOR IDENT
             if self.peek_kind(0) == Some(SyntaxKind::Ident) {
-                lookahead = 1;
-
                 // Skip generic parameters if present
                 if self.peek_kind(lookahead) == Some(SyntaxKind::Lt) {
                     // Simple skip - just look for 'for' keyword

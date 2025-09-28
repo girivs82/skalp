@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP LIR - Low-level Intermediate Representation
 //!
 //! This crate handles:

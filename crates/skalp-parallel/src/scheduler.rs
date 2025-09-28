@@ -50,7 +50,7 @@ pub struct TaskGraph {
 pub struct CompletionHandle {}
 
 impl CompletionHandle {
-    pub async fn await(self) -> ParallelResult<crate::pipeline::CompilationResults> {
+    pub async fn wait(self) -> ParallelResult<crate::pipeline::CompilationResults> {
         Ok(crate::pipeline::CompilationResults::default())
     }
 }

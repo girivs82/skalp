@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP Simulation Engine
 //!
 //! GPU-accelerated simulation using Metal on macOS.

@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP Frontend - Lexer, Parser, and AST
 //!
 //! This crate handles:

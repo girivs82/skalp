@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP Verification Framework
 //!
 //! This crate provides verification capabilities including:

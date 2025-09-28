@@ -3,15 +3,11 @@
 //! Provides synthesis support for various FPGA families including iCE40, Xilinx, and Intel.
 
 use crate::{
-    Backend, BackendError, BackendResult, FpgaTarget, LogLevel, LogMessage, SynthesisConfig,
-    SynthesisResults, TargetPlatform, AreaMetrics, TimingResults, PowerResults, OutputFile,
-    OutputFileType, TimingViolation, TimingSlack,
+    Backend, BackendError, BackendResult, FpgaTarget, SynthesisConfig,
+    SynthesisResults, TargetPlatform,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
-use tokio::process::Command;
 use tempfile::TempDir;
 
 pub mod ice40;

@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! Formal verification and model checking for SKALP
 //!
 //! This crate provides:

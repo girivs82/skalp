@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP Place & Route for Open FPGAs
 //!
 //! This crate handles:

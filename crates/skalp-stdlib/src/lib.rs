@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP Standard Library
 //!
 //! This crate contains the SKALP source files for standard library components.
