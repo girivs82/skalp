@@ -1,0 +1,16 @@
+// Test SKALP file with stream types
+entity StreamProcessor {
+    in data_in: stream<bit[32]>
+    out data_out: stream<bit[16]>
+    in clk: clock
+}
+
+impl StreamProcessor {
+    signal buffer: stream<bit[32]>
+
+    on(clk.rise) {
+        // Stream processing logic
+        buffer <= data_in
+        data_out <= buffer  // Implicit width conversion would be caught by type checker
+    }
+}

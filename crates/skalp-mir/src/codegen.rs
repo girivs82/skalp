@@ -363,6 +363,30 @@ impl SystemVerilogGenerator {
                     format!("union {{{}}}", self.format_struct_fields(&union_type.fields))
                 }
             },
+            DataType::Array(element_type, size) => {
+                format!("{} [0:{}]", self.format_data_type(element_type), size - 1)
+            },
+            // Parametric types use parameter name in width spec
+            DataType::BitParam { param, default } => {
+                if *default == 1 {
+                    "wire".to_string()
+                } else {
+                    format!("wire [{}-1:0]", param)
+                }
+            }
+            DataType::LogicParam { param, default } => {
+                if *default == 1 {
+                    "logic".to_string()
+                } else {
+                    format!("logic [{}-1:0]", param)
+                }
+            }
+            DataType::IntParam { param, default } => {
+                format!("int [{}-1:0]", param)
+            }
+            DataType::NatParam { param, default } => {
+                format!("logic [{}-1:0]", param)
+            }
         }
     }
 

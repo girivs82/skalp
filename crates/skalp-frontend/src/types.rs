@@ -51,6 +51,9 @@ pub enum Type {
     /// Protocol type
     Protocol(String),
 
+    /// Entity type (for references to entities)
+    Entity(EntityType),
+
     /// Generic type parameter
     TypeParam(String),
 
@@ -146,6 +149,38 @@ pub struct EnumVariant {
 
     /// Optional payload type
     pub payload: Option<Type>,
+}
+
+/// Entity type definition
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntityType {
+    /// Entity name
+    pub name: String,
+
+    /// Input ports
+    pub inputs: Vec<PortType>,
+
+    /// Output ports
+    pub outputs: Vec<PortType>,
+
+    /// Inout ports
+    pub inouts: Vec<PortType>,
+
+    /// Generic parameters
+    pub type_params: Vec<String>,
+
+    /// Width parameters
+    pub width_params: Vec<String>,
+}
+
+/// Port type definition
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PortType {
+    /// Port name
+    pub name: String,
+
+    /// Port type
+    pub port_type: Type,
 }
 
 /// Type scheme for polymorphic types
@@ -611,6 +646,9 @@ pub enum TypeError {
     /// Undefined variable
     UndefinedVariable(String),
 
+    /// Duplicate definition
+    DuplicateDefinition(String),
+
     /// Undefined type
     UndefinedType(String),
 
@@ -648,6 +686,7 @@ impl fmt::Display for Type {
             Type::Struct(s) => write!(f, "{}", s.name),
             Type::Enum(e) => write!(f, "{}", e.name),
             Type::Protocol(p) => write!(f, "protocol {}", p),
+            Type::Entity(e) => write!(f, "entity {}", e.name),
             Type::TypeParam(p) => write!(f, "{}", p),
             Type::TypeVar(id) => write!(f, "?t{}", id.0),
             Type::Unknown => write!(f, "?"),
@@ -690,6 +729,9 @@ impl fmt::Display for TypeError {
             }
             TypeError::UndefinedVariable(name) => {
                 write!(f, "Undefined variable: {}", name)
+            }
+            TypeError::DuplicateDefinition(name) => {
+                write!(f, "Duplicate definition: {}", name)
             }
             TypeError::UndefinedType(name) => {
                 write!(f, "Undefined type: {}", name)

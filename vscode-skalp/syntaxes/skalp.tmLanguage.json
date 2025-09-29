@@ -41,20 +41,40 @@
         "keywords": {
             "patterns": [
                 {
+                    "name": "keyword.declaration.entity.skalp",
+                    "match": "\\b(entity|impl|signal|var|const|in|out|inout)\\b"
+                },
+                {
                     "name": "keyword.control.skalp",
-                    "match": "\\b(if|else|match|for|while|return|break|continue)\\b"
+                    "match": "\\b(on|if|else|match|for)\\b"
                 },
                 {
-                    "name": "keyword.declaration.skalp",
-                    "match": "\\b(entity|impl|protocol|trait|type|const|let|var|signal)\\b"
+                    "name": "keyword.declaration.type.skalp",
+                    "match": "\\b(type|struct|enum)\\b"
                 },
                 {
-                    "name": "keyword.other.skalp",
-                    "match": "\\b(in|out|inout|on|with|where|as|async|await|flow|intent|requirement)\\b"
+                    "name": "keyword.declaration.trait.skalp",
+                    "match": "\\b(trait|protocol|where|self|Self)\\b"
                 },
                 {
                     "name": "keyword.event.skalp",
-                    "match": "\\b(rise|fall|edge|active|inactive)\\b"
+                    "match": "\\b(rise|fall)\\b"
+                },
+                {
+                    "name": "keyword.intent.skalp",
+                    "match": "\\b(intent|flow|requirement)\\b"
+                },
+                {
+                    "name": "keyword.async.skalp",
+                    "match": "\\b(async|await|fn|return|let)\\b"
+                },
+                {
+                    "name": "keyword.module.skalp",
+                    "match": "\\b(use|mod|pub|with)\\b"
+                },
+                {
+                    "name": "keyword.other.skalp",
+                    "match": "\\b(as|assert)\\b"
                 }
             ]
         },
@@ -62,7 +82,7 @@
             "patterns": [
                 {
                     "name": "storage.type.primitive.skalp",
-                    "match": "\\b(bit|logic|int|nat|fixed|clock|reset|event|stream)\\b"
+                    "match": "\\b(bit|clock|reset|stream)\\b"
                 },
                 {
                     "name": "storage.type.generic.skalp",

@@ -258,7 +258,7 @@ fn test_flow_block_parsing() {
     // Should find the flow statement in the syntax tree
     let mut found_flow = false;
     fn find_flow_stmt(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::FLOW_STMT {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::FlowStmt {
             return true;
         }
         for child in node.children() {

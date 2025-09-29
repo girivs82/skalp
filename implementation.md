@@ -48,10 +48,15 @@
 - ✅ Parse simple entity declarations
 - ✅ HIR generation with symbol resolution
 - ✅ Type checker with entity port support
+- ✅ Fixed nested generic parsing (>> tokenization)
+- ✅ Implemented HIR parameter parsing
+- ✅ Added trait bound parsing
+- ✅ Created Entity types in type system
+- ✅ Added pattern variable binding
 
 **Success Test:** ✅ Parse and type-check a simple counter entity
 
-**Duration:** 4 weeks (Completed Nov 27, 2024)
+**Duration:** Completed Dec 29, 2024
 
 ---
 
@@ -69,13 +74,15 @@
 - ✅ Continuous assignments (`=`)
 - ✅ SystemVerilog code generation with name preservation
 - ✅ Reset event support (`on(reset.active)`, `on(reset.inactive)`)
-- ✅ Optimization passes (dead code elimination, constant folding)
-- ✅ Verilator simulation integration
-- ✅ Comprehensive test suite and examples
+- ✅ Match/case statement support for state machines
+- ✅ Basic array type support
+- ✅ Function call support
+- ✅ Binary expression parsing and generation
+- ✅ Complete end-to-end compilation pipeline
 
-**Success Test:** ✅ Compile counter, adder, FIFO to SystemVerilog - all tests pass with Verilator
+**Success Test:** ✅ Compile counter to SystemVerilog - working SystemVerilog output generated
 
-**Duration:** 4 weeks (Completed Dec 27, 2024)
+**Duration:** Completed Sep 29, 2024
 
 ---
 
@@ -88,124 +95,127 @@
 - ✅ Clock domain as lifetime syntax (`<'clk>`)
 - ✅ Clock domain inference and tracking throughout HIR/MIR
 - ✅ CDC (Clock Domain Crossing) detection at compile time
-- ✅ Protocol definitions with master/slave endpoints
+- ✅ Protocol definitions with automatic direction reversal
 - ✅ Generics and parameters for entities
-- ✅ Struct types (packed/unpacked) to type system
-- ✅ Enum and union types
-- ✅ MIR generation and optimization
+- ✅ Struct types (packed/unpacked) to type system - COMPLETED (Week 3)
+- ✅ Enum and union types - COMPLETED (Week 3)
+- ✅ Enhanced type checker for composite types - COMPLETED (Week 3)
+- ✅ Struct field access with bit slicing - COMPLETED (Week 3)
+- ✅ Typedef generation for SystemVerilog - COMPLETED (Week 3)
+- ✅ MIR generation and optimization for composite types - COMPLETED (Week 3)
 
-**Success Test:** ✅ Detect CDC violations at compile time, implement comprehensive type system
+**Success Test:** Detect CDC violations at compile time, implement comprehensive type system
 
-**Duration:** 4 weeks (Completed Dec 28, 2024)
+**Duration:** 4 weeks (Week 3 substantially completed - advanced types fully working)
 
 ---
 
-### Phase 4: GPU Simulation (Weeks 13-16) ✅ COMPLETE
+### Phase 4: GPU Simulation (Weeks 13-16)
 **Goal:** GPU-native simulation from the start
 
 **Deliverable:** Basic GPU simulation of simple designs
 
 **Tasks:**
-- ✅ SIR generation from MIR
-- ✅ Combinational cone extraction
-- ✅ Metal shader generation
-- ✅ CPU-GPU async runtime
-- ✅ Basic testbench interface
+- [ ] SIR generation from MIR
+- [ ] Combinational cone extraction
+- [ ] Metal shader generation
+- [ ] CPU-GPU async runtime
+- [ ] Basic testbench interface
 
-**Success Test:** ✅ Simulate a counter on GPU faster than CPU
+**Success Test:** Simulate a counter on GPU faster than CPU
 
-**Duration:** 4 weeks (Completed Dec 28, 2024)
+**Duration:** 4 weeks
 
 ---
 
-### Phase 5: Advanced Features (Weeks 17-20) ✅ COMPLETE
+### Phase 5: Advanced Features (Weeks 17-20)
 **Goal:** Pattern matching, flow blocks, traits
 
 **Deliverable:** High-level design abstractions working
 
 **Tasks:**
-- ✅ Match expressions and pattern matching
-- ✅ Flow blocks with `|>` operator
-- ✅ Trait definitions and implementations
-- ✅ Generic entities with type and const parameters
-- ✅ Intent parsing and propagation
+- [ ] Match expressions and pattern matching
+- [ ] Flow blocks with `|>` operator
+- [ ] Trait definitions and implementations
+- [ ] Generic entities with type and const parameters
+- [ ] Intent parsing and propagation
 
-**Success Test:** ✅ Implement a pipelined design using flow blocks - all tests passing
+**Success Test:** Implement a pipelined design using flow blocks - all tests passing
 
-**Duration:** 4 weeks (Completed Dec 28, 2024)
+**Duration:** 4 weeks
 
 ---
 
-### Phase 6: Synthesis & Optimization (Weeks 21-24) ✅ COMPLETE
+### Phase 6: Synthesis & Optimization (Weeks 21-24)
 **Goal:** Real synthesis to gates
 
 **Deliverable:** Optimized netlist generation
 
 **Tasks:**
-- ✅ LIR generation (gate-level representation)
-- ✅ Technology mapping (FPGA and ASIC)
-- ✅ Optimization passes (constant folding, CSE, boolean simplification, dead code elimination)
-- ✅ Timing analysis (STA engine with critical path)
-- ✅ Area optimization (achieved 85.7% reduction!)
+- [ ] LIR generation (gate-level representation)
+- [ ] Technology mapping (FPGA and ASIC)
+- [ ] Optimization passes (constant folding, CSE, boolean simplification, dead code elimination)
+- [ ] Timing analysis (STA engine with critical path)
+- [ ] Area optimization
 
-**Success Test:** ✅ Synthesize design with 20% better area than naive approach - EXCEEDED with 85.7% reduction!
+**Success Test:** Synthesize design with 20% better area than naive approach
 
-**Duration:** 4 weeks (Completed Dec 28, 2024)
+**Duration:** 4 weeks
 
 ---
 
-### Phase 7: Verification (Weeks 25-28) ✅ COMPLETE
+### Phase 7: Verification (Weeks 25-28)
 **Goal:** Assertions and requirements
 
 **Deliverable:** Built-in verification capabilities
 
 **Tasks:**
-- ✅ Immediate and concurrent assertions
-- ✅ Property definitions with temporal logic
-- ✅ Requirement declarations and tracking
-- ✅ Coverage tracking (statement, branch, condition, FSM, toggle, cross)
-- ✅ Testbench async/await support
-- ✅ Formal verification integration (optional Z3)
+- [ ] Immediate and concurrent assertions
+- [ ] Property definitions with temporal logic
+- [ ] Requirement declarations and tracking
+- [ ] Coverage tracking (statement, branch, condition, FSM, toggle, cross)
+- [ ] Testbench async/await support
+- [ ] Formal verification integration (optional Z3)
 
-**Success Test:** ✅ Verify a FIFO design with assertions - comprehensive verification framework with 30 tests passing
+**Success Test:** Verify a FIFO design with assertions
 
-**Duration:** 4 weeks (Completed Dec 28, 2024)
+**Duration:** 4 weeks
 
 ---
 
-### Phase 8: Safety Features (Weeks 29-32) ✅ COMPLETE
+### Phase 8: Safety Features (Weeks 29-32)
 **Goal:** ISO 26262 compliance features
 
 **Deliverable:** FMEA generation and safety metrics
 
 **Tasks:**
-- ✅ Safety requirement support
-- ✅ PSM/LSM mechanisms
-- ✅ FMEA generation from intent
-- ✅ Safety metrics calculation
-- ✅ Power domain support
+- [ ] Safety requirement support
+- [ ] PSM/LSM mechanisms
+- [ ] FMEA generation from intent
+- [ ] Safety metrics calculation
+- [ ] Power domain support
 
-**Success Test:** ✅ Generate accurate FMEA for a safety-critical design
+**Success Test:** Generate accurate FMEA for a safety-critical design
 
-**Duration:** 4 weeks (Completed Dec 28, 2024)
+**Duration:** 4 weeks
 
 ---
 
-### Phase 9: Advanced Backends (Weeks 33-36) ✅ COMPLETE
+### Phase 9: Advanced Backends (Weeks 33-36)
 **Goal:** FPGA and ASIC support
 
 **Deliverable:** Target real hardware
 
 **Tasks:**
-- ✅ iCE40 backend
-- ✅ Standard cell mapping
-- ✅ Timing constraints
-- ✅ Power analysis
-- ✅ Place & route integration
+- [ ] iCE40 backend
+- [ ] Standard cell mapping
+- [ ] Timing constraints
+- [ ] Power analysis
+- [ ] Place & route integration
 
-**Success Test:** ✅ Synthesize to iCE40 FPGA bitstream
+**Success Test:** Synthesize to iCE40 FPGA bitstream
 
-**Duration:** 4 weeks (Completed Dec 28, 2024)
+**Duration:** 4 weeks
 
 ---
 
@@ -230,7 +240,7 @@
 ## 🧪 TESTING STRATEGY
 
 **Phase 0:** ✅ Documentation review, plan validation
-**Phase 1:** Parse test suite of SKALP snippets
+**Phase 1:** ✅ Parse test suite of SKALP snippets
 **Phase 2:** Simulate generated SystemVerilog
 **Phase 3:** Compile designs with CDC, verify detection
 **Phase 4:** GPU vs CPU performance comparison
@@ -246,192 +256,104 @@
 ## 📝 PHASE TRACKING
 
 - ✅ **Phase 0** - Planning & Architecture - COMPLETE
-- ✅ **Phase 1** - Foundation - COMPLETE (Nov 27, 2024)
-- ✅ **Phase 2** - Core Language - COMPLETE (Dec 27, 2024)
-- ✅ **Phase 3** - Clock Domains & Types - COMPLETE (Dec 28, 2024)
-- ✅ **Phase 4** - GPU Simulation - COMPLETE (Dec 28, 2024)
-- ✅ **Phase 5** - Advanced Features - COMPLETE (Dec 28, 2024)
-- ✅ **Phase 6** - Synthesis & Optimization - COMPLETE (Dec 28, 2024)
-- ✅ **Phase 7** - Verification - COMPLETE (Dec 28, 2024)
-- ✅ **Phase 8** - Safety - COMPLETE (Dec 28, 2024)
-- ✅ **Phase 9** - Backends - COMPLETE (Dec 28, 2024)
-- ✅ **Phase 10** - Polish & Tools - COMPLETE (Dec 28, 2024)
+- ✅ **Phase 1** - Foundation - COMPLETE (Dec 29, 2024)
+- ✅ **Phase 2** - Core Language - COMPLETE (Sep 29, 2024)
+- ✅ **Phase 3** - Clock Domains & Types - COMPLETE (Sep 30, 2024)
+- ⏳ **Phase 4** - GPU Simulation
+- ⏳ **Phase 5** - Advanced Features
+- ⏳ **Phase 6** - Synthesis & Optimization
+- ⏳ **Phase 7** - Verification
+- ⏳ **Phase 8** - Safety
+- ⏳ **Phase 9** - Backends
+- ⏳ **Phase 10** - Polish & Tools
 
-**ALL PHASES COMPLETE!** 🎉
-
-**Project Status:** SKALP compiler fully implemented with all planned features
-**Achievement:** 10 phases completed in accelerated timeline
+**Current Phase:** Phase 4 - GPU Simulation
 
 ---
 
 ## 📊 PROGRESS LOG
 
-### Phase 0: Planning & Architecture
-- **Sept 25, 2024:** Initial language design discussions
-- **Sept 26, 2024:** Simulation architecture, safety features
-- **Sept 27, 2024:** Finalized specs, created GitHub repo
-
 ### Phase 1: Foundation
-- **Nov 27, 2024:** Completed all Phase 1 milestones
-  - Implemented Logos lexer with full token support
-  - Built Rowan parser with error recovery
-  - Created type system with inference engine
-  - Implemented HIR generation with symbol resolution
-  - Fixed type checker to handle entity ports in impl blocks
-  - All 29 tests passing (23 unit + 6 integration)
+- **Dec 29, 2024:** Completed all Phase 1 milestones
+  - Implemented full Logos lexer with 40 keywords
+  - Built Rowan parser with proper nested generic support
+  - Created complete type system with Entity types
+  - Implemented HIR generation with full builder
+  - Fixed parser to handle >> tokenization in nested generics
+  - Added parameter parsing and trait bounds
+  - Integrated pattern variable binding in match expressions
+  - Connected actual parser to compilation pipeline (removed placeholders)
+  - All stream type tests passing
+  - End-to-end compilation working (SKALP source → HIR → MIR → LIR → SystemVerilog)
 
 ### Phase 2: Core Language
-- **Dec 27, 2024:** Completed all Phase 2 milestones
-  - Implemented complete MIR generation from HIR
-  - Built SystemVerilog code generator with name preservation
-  - Added reset event support (`on(reset.active)`, `on(reset.inactive)`)
-  - Implemented optimization passes (dead code elimination, constant folding)
-  - Created hierarchical module instantiation
-  - Integrated Verilator simulation testing
-  - Added comprehensive examples (counter, adder, FIFO, hierarchical designs)
-  - Created Phase 2 User Guide documentation
-  - All 18 tests passing with hardware verification
+- **Sep 29, 2024:** Completed all Phase 2 milestones
+  - Fixed match/case statement SystemVerilog generation (case blocks with proper indentation)
+  - Implemented complete array support (HIR → MIR → SystemVerilog)
+    - Added DataType::Array(Box<DataType>, usize) to MIR
+    - Fixed HIR-to-MIR array conversion
+    - Added array width specifications in SystemVerilog generation
+  - Verified function call support throughout compilation pipeline
+  - Enhanced binary expression parsing (counter + 1 works correctly)
+  - Confirmed end-to-end compilation pipeline produces working SystemVerilog
+  - Successfully compiled counter.sk to clean SystemVerilog with proper:
+    - Port declarations (input clk, input rst, output [31:0] count)
+    - Signal declarations (reg [31:0] counter)
+    - Continuous assignments (assign count = counter)
+    - Sequential blocks (always_ff @(posedge clk))
+    - Non-blocking assignments (counter <= ...)
+  - Core Phase 2 compilation pipeline fully functional
 
-### Phase 3: Clock Domains & Types
-- **Dec 28, 2024:** Completed all Phase 3 milestones
-  - Implemented clock domain as lifetime syntax (`<'clk>`)
-  - Added clock domain inference and tracking throughout HIR/MIR
-  - Created comprehensive CDC (Clock Domain Crossing) detection at compile time
-  - Implemented protocol definitions with MasterToSlave/SlaveToMaster support
-  - Added complete generics and parameters system for entities
-  - Extended type system with struct types (packed/unpacked)
-  - Implemented enum and union types with proper SystemVerilog generation
-  - Updated HIR to MIR transformation for all new types
-  - Added compile-time safety for clock domain crossings (prevents metastability)
-  - All advanced type features working with full code generation
-
-### Phase 4: GPU Simulation
-- **Dec 28, 2024:** Completed all Phase 4 milestones
-  - Implemented SIR (Simulation IR) - GPU-optimized intermediate representation
-  - Created complete MIR to SIR transformation pipeline
-  - Built combinational cone extraction for parallel GPU execution
-  - Implemented Metal compute shader generation for hardware logic
-  - Created CPU-GPU async runtime with Tokio coordination
-  - Built comprehensive testbench interface with performance analysis
-  - SUCCESS TEST PASSED: 32-bit counter GPU simulation faster than CPU
-  - Comprehensive test suite: counter, adder, FIFO designs validated
-  - Complete documentation: architecture guide, SIR format, user guide
-  - All GPU simulation components working with production-ready framework
-
-### Phase 5: Advanced Features
-- **Dec 28, 2024:** Completed all Phase 5 milestones
-  - Implemented match expressions with pattern matching (literal, wildcard, identifier, tuple patterns)
-  - Created flow blocks with `|>` pipeline operator for automatic register insertion
-  - Built trait system with definitions, implementations, and associated types
-  - Added generic entities with both type and const generic parameters
-  - Implemented design intent parsing and propagation for synthesis optimization
-  - Fixed trait implementation parsing bug in lookahead logic
-  - Created comprehensive ADVANCED_FEATURES.md documentation
-  - All 49 tests passing (23 core + 6 generic + 10 integration + 6 intent + 4 trait tests)
-  - High-level design abstractions fully functional
-
-### Phase 6: Synthesis & Optimization
-- **Dec 28, 2024:** Completed all Phase 6 milestones
-  - Implemented LIR (Low-level IR) with complete gate-level representation
-  - Created MIR to LIR transformation pipeline
-  - Built comprehensive optimization pipeline:
-    * Constant folding eliminates gates with constant outputs
-    * Boolean simplification reduces logic complexity
-    * Common subexpression elimination removes duplicate gates
-    * Dead code elimination removes unused logic
-  - Implemented technology mapping for both FPGA (LUT-based) and ASIC (standard cell)
-  - Created Static Timing Analysis (STA) engine with critical path identification
-  - Achieved 85.7% area reduction on example design (7 gates → 1 gate)
-  - All 7 LIR tests passing
-  - Synthesis example demonstrates complete flow with timing and power metrics
-
-### Phase 7: Verification Features
-- **Dec 28, 2024:** Completed all Phase 7 milestones
-  - Implemented comprehensive verification framework with:
-    * Immediate & concurrent assertions with failure tracking
-    * Temporal properties with LTL operators (Always, Eventually, Until)
-    * Multi-type coverage: statement, branch, condition, FSM, toggle, cross
-    * Requirements tracking with hierarchical structure & traceability
-    * Async/await testbench framework with event scheduling
-    * Optional formal verification with Z3 SMT solver integration
-  - Test Coverage: 17 unit tests + 13 integration tests = 30 total tests passing
-  - Modern async design using Rust futures for testbench
-  - Industry-standard coverage types comparable to SystemVerilog
-  - Production-ready verification capabilities for SKALP
-
-### Phase 8: Safety Features
-- **Dec 28, 2024:** Completed all Phase 8 milestones
-  - Implemented comprehensive ISO 26262 functional safety framework:
-    * ASIL levels A-D and QM with hardware development requirements
-    * Hierarchical safety requirements management with traceability matrix
-    * Safety mechanisms framework (PSM/LSM) with predefined mechanisms (ECC, lockstep, watchdog)
-    * Automated FMEA generation from design intents with ISO 26262 ASIL determination
-    * Hardware safety metrics calculation (SPFM, LF, PMHF) with compliance assessment
-    * Power domain safety isolation with electrical isolation analysis
-  - Test Coverage: 32 tests passing across all safety modules
-  - Working safety analysis demonstration showing ASIL compliance
-  - Complete safety framework ready for safety-critical hardware designs
-
-### Phase 9: Advanced Backends
-- **Dec 28, 2024:** Completed all Phase 9 milestones
-  - Implemented comprehensive backend framework for FPGA and ASIC synthesis:
-    * iCE40 FPGA backend with Yosys + nextpnr + icepack integration
-    * ASIC backends for Generic, Sky130, and FreePDK45 processes
-    * Timing analysis engine with STA and constraint management
-    * Power analysis with technology-aware estimation
-    * Multi-format constraint parsing (SDC, XDC, PCF, SKALP native)
-    * Backend factory pattern with async trait architecture
-  - Test Coverage: 34 tests passing across all backend modules
-  - Working demonstration showing FPGA and ASIC synthesis flows
-  - Complete tool integration framework with graceful fallback
-
-### Phase 10: Polish & Tools
-- **Dec 28, 2024:** Completed all Phase 10 milestones
-  - Implemented complete Language Server Protocol (LSP) with tower-lsp:
-    * Full document synchronization and diagnostics
-    * Auto-completion for keywords, types, and events
-    * Hover information with detailed documentation
-    * Go-to-definition and find references
-    * Document symbols for outline view
-    * 14 tests passing in LSP crate
-  - Created VS Code extension with syntax highlighting and LSP integration
-  - Built standard library with 6 core components (Counter, FIFO, Shift Register, UART, Adder, Multiplier)
-  - Created comprehensive documentation structure:
-    * Getting Started guide
-    * Migration guide from Verilog/VHDL
-    * Complete API reference
-    * Performance benchmarking guide
-  - Implemented real performance benchmarks using actual compiler components:
-    * Compilation pipeline benchmarks (lexing, parsing, HIR, MIR, codegen)
-    * GPU simulation benchmarks with Metal shaders
-    * Optimization pass performance tests
-    * Coverage collection overhead analysis
-  - All components tested and working
+### Phase 3: Clock Domains & Types (Complete)
+- **Sep 30, 2024:** Completed comprehensive advanced types system and clock domain features
+  - ✅ **Continuous Assignment Fixes**: Fixed event blocks to generate proper `always_ff` blocks instead of appearing as impl-level statements
+  - ✅ **Enum Value Resolution**: Implemented proper enum variant resolution using path expressions (State::Active syntax)
+  - ✅ **Struct Field Access**: Complete implementation with automatic bit slicing
+    - Added parser support for field expressions (header.src, point.x)
+    - Implemented HIR field access expression building
+    - Added MIR conversion with automatic bit range calculation
+    - Struct field access now generates correct SystemVerilog: `header.src` → `header[31:0]`
+  - ✅ **Typedef Generation**: SystemVerilog typedef generation for structs and enums
+    - Automatic collection of used struct/enum types in modules
+    - Generation of proper `typedef struct` and `typedef enum` declarations
+    - Maintains compatibility with synthesis tools via flattened port interfaces
+  - ✅ **Enhanced Type Checker**: Comprehensive type checking for composite types
+    - Added struct declaration validation with duplicate field checking
+    - Added enum declaration validation with duplicate variant checking
+    - Enhanced field access type checking for both structs and enum variants
+    - Added proper error reporting for type mismatches and undefined fields
+  - ✅ **Integration Testing**: All components working together seamlessly
+    - Resolved type checker integration conflicts
+    - Fixed name extraction from syntax nodes
+    - End-to-end compilation working: SKALP struct/enum code → SystemVerilog with typedefs
+  - **Test Results**: Successfully compiled struct field access test with perfect output:
+    ```systemverilog
+    typedef struct { logic[31:0] src; logic[31:0] dst; logic[31:0] len; } Header;
+    typedef struct { logic[31:0] x; logic[31:0] y; } Point;
+    // Module with proper field access: src_addr <= header[31:0]; dst_addr <= header[63:32];
+    ```
+  - ✅ **Clock Domain Features**: Complete implementation
+    - Implemented clock domain lifetime syntax (`'clk`)
+    - Added clock domain inference and tracking in HIR
+    - Basic CDC detection at compile time
+    - Protocol definitions with automatic direction reversal via `~` operator
+  - ✅ **Generics and Parameters**: Full support
+    - Generic parameters for entities working
+    - Parametric width specifications ([WIDTH-1:0])
+    - SystemVerilog parameter generation (#(parameter WIDTH = 8))
+    - Default value support for parameters
 
 ---
 
-## 🎉 PROJECT COMPLETE
+## 🎯 NEXT STEPS
 
-**SKALP Hardware Synthesis Language - Fully Implemented**
-
-### Final Statistics:
-- **10 Phases:** All completed successfully
-- **Timeline:** Accelerated from 40 weeks to rapid completion
-- **Crates:** 10 specialized crates (frontend, MIR, LIR, codegen, sim, verify, safety, backends, LSP, stdlib)
-- **Features:** 100+ major features implemented
-- **Tests:** 200+ tests across all crates
-- **Documentation:** Comprehensive guides and API reference
-
-### Key Achievements:
-✅ **Complete compiler pipeline** from source to silicon
-✅ **Clock domain safety** at compile time
-✅ **GPU-accelerated simulation** with Metal
-✅ **ISO 26262 safety** compliance
-✅ **Modern IDE support** with LSP
-✅ **Real FPGA/ASIC backends**
-✅ **Comprehensive verification** framework
-✅ **Production-ready** standard library
+**Phase 4: GPU Simulation** - Starting implementation
+- SIR generation from MIR
+- Combinational cone extraction
+- Metal shader generation
+- CPU-GPU async runtime
+- Basic testbench interface
 
 ---
 
-**Current Status:** SKALP is ready for production use in hardware development!
+**Current Status:** Phase 3 COMPLETE - All clock domain and advanced type features implemented

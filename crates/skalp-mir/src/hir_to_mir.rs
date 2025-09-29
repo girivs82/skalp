@@ -8,7 +8,7 @@ use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
 
 /// HIR to MIR transformer
-pub struct HirToMir {
+pub struct HirToMir<'hir> {
     /// Next module ID
     next_module_id: u32,
     /// Next port ID
@@ -31,9 +31,11 @@ pub struct HirToMir {
     variable_map: HashMap<hir::VariableId, VariableId>,
     /// Clock domain ID mapping (HIR to MIR)
     clock_domain_map: HashMap<hir::ClockDomainId, ClockDomainId>,
+    /// Reference to HIR for type resolution
+    hir: Option<&'hir Hir>,
 }
 
-impl HirToMir {
+impl<'hir> HirToMir<'hir> {
     /// Create a new transformer
     pub fn new() -> Self {
         Self {
@@ -48,11 +50,13 @@ impl HirToMir {
             signal_map: HashMap::new(),
             variable_map: HashMap::new(),
             clock_domain_map: HashMap::new(),
+            hir: None,
         }
     }
 
     /// Transform HIR to MIR
-    pub fn transform(&mut self, hir: &Hir) -> Mir {
+    pub fn transform(&mut self, hir: &'hir Hir) -> Mir {
+        self.hir = Some(hir);
         let mut mir = Mir::new(hir.name.clone());
 
         // First pass: create modules for entities
@@ -67,7 +71,8 @@ impl HirToMir {
                 let parameter = GenericParameter {
                     name: hir_generic.name.clone(),
                     param_type: self.convert_generic_type(&hir_generic.param_type),
-                    default: None, // TODO: Handle default values
+                    default: hir_generic.default_value.as_ref()
+                        .and_then(|expr| self.convert_literal_expr(expr)),
                 };
                 module.parameters.push(parameter);
             }
@@ -105,6 +110,7 @@ impl HirToMir {
                             signal_type: self.convert_type(&hir_signal.signal_type),
                             initial: hir_signal.initial_value.as_ref()
                                 .and_then(|expr| self.convert_literal_expr(expr)),
+                            clock_domain: hir_signal.clock_domain.map(|id| ClockDomainId(id.0)),
                         };
                         module.signals.push(signal);
                     }
@@ -178,18 +184,36 @@ impl HirToMir {
         let mut is_sequential = false;
 
         for trigger in &block.triggers {
+            // Convert the signal reference to an LValue
+            let signal_lvalue = match &trigger.signal {
+                hir::HirEventSignal::Port(port_id) => {
+                    if let Some(&mir_port_id) = self.port_map.get(port_id) {
+                        LValue::Port(mir_port_id)
+                    } else {
+                        continue;
+                    }
+                }
+                hir::HirEventSignal::Signal(signal_id) => {
+                    if let Some(&mir_signal_id) = self.signal_map.get(signal_id) {
+                        LValue::Signal(mir_signal_id)
+                    } else {
+                        continue;
+                    }
+                }
+            };
+
             // Check if it's a clock edge or reset
             match &trigger.edge {
                 hir::HirEdgeType::Rising | hir::HirEdgeType::Falling => {
                     is_sequential = true;
                     edges.push(EdgeSensitivity {
-                        signal: self.convert_lvalue_from_signal(trigger.signal),
+                        signal: signal_lvalue,
                         edge: self.convert_edge_type(&trigger.edge),
                     });
                 }
                 hir::HirEdgeType::Both => {
                     edges.push(EdgeSensitivity {
-                        signal: self.convert_lvalue_from_signal(trigger.signal),
+                        signal: signal_lvalue,
                         edge: EdgeType::Both,
                     });
                 }
@@ -197,7 +221,7 @@ impl HirToMir {
                     // Reset events are typically asynchronous and make the process sequential
                     is_sequential = true;
                     edges.push(EdgeSensitivity {
-                        signal: self.convert_lvalue_from_signal(trigger.signal),
+                        signal: signal_lvalue,
                         edge: self.convert_edge_type(&trigger.edge),
                     });
                 }
@@ -226,6 +250,7 @@ impl HirToMir {
         for hir_stmt in hir_stmts {
             if let Some(stmt) = self.convert_statement(hir_stmt) {
                 statements.push(stmt);
+            } else {
             }
         }
 
@@ -239,7 +264,8 @@ impl HirToMir {
                 self.convert_assignment(assign).map(Statement::Assignment)
             }
             hir::HirStatement::If(if_stmt) => {
-                self.convert_if_statement(if_stmt).map(Statement::If)
+                let result = self.convert_if_statement(if_stmt).map(Statement::If);
+                result
             }
             hir::HirStatement::Match(match_stmt) => {
                 self.convert_match_statement(match_stmt).map(Statement::Case)
@@ -351,12 +377,15 @@ impl HirToMir {
 
     /// Convert HIR lvalue to MIR
     fn convert_lvalue(&mut self, lval: &hir::HirLValue) -> Option<LValue> {
-        match lval {
+        let result = match lval {
             hir::HirLValue::Signal(id) => {
                 self.signal_map.get(id).map(|&id| LValue::Signal(id))
             }
             hir::HirLValue::Variable(id) => {
                 self.variable_map.get(id).map(|&id| LValue::Variable(id))
+            }
+            hir::HirLValue::Port(id) => {
+                self.port_map.get(id).map(|&id| LValue::Port(id))
             }
             hir::HirLValue::Index(base, index) => {
                 let base = Box::new(self.convert_lvalue(base)?);
@@ -369,18 +398,10 @@ impl HirToMir {
                 let low = Box::new(self.convert_expression(low)?);
                 Some(LValue::RangeSelect { base, high, low })
             }
-        }
+        };
+        result
     }
 
-    /// Convert signal ID to lvalue
-    fn convert_lvalue_from_signal(&self, signal_id: hir::SignalId) -> LValue {
-        if let Some(&mir_id) = self.signal_map.get(&signal_id) {
-            LValue::Signal(mir_id)
-        } else {
-            // Fallback - shouldn't happen
-            LValue::Signal(SignalId(0))
-        }
-    }
 
     /// Convert HIR expression to MIR
     fn convert_expression(&mut self, expr: &hir::HirExpression) -> Option<Expression> {
@@ -389,8 +410,19 @@ impl HirToMir {
                 self.convert_literal(lit).map(Expression::Literal)
             }
             hir::HirExpression::Signal(id) => {
-                self.signal_map.get(id)
-                    .map(|&id| Expression::Ref(LValue::Signal(id)))
+                // First try signal_map
+                if let Some(&signal_id) = self.signal_map.get(id) {
+                    Some(Expression::Ref(LValue::Signal(signal_id)))
+                } else {
+                    // If not found in signals, check if it's a port masquerading as a signal
+                    // (due to HIR builder converting ports to signals in expressions)
+                    let hir_port_id = hir::PortId(id.0);
+                    if let Some(&mir_port_id) = self.port_map.get(&hir_port_id) {
+                        Some(Expression::Ref(LValue::Port(mir_port_id)))
+                    } else {
+                        None
+                    }
+                }
             }
             hir::HirExpression::Variable(id) => {
                 self.variable_map.get(id)
@@ -435,10 +467,14 @@ impl HirToMir {
                     low: Box::new(low_expr),
                 }))
             }
-            hir::HirExpression::FieldAccess { base, field: _ } => {
-                // Convert field access to base expression for now
-                // TODO: Implement proper struct field access in MIR
-                self.convert_expression(base)
+            hir::HirExpression::FieldAccess { base, field } => {
+                // Convert struct field access to bit slice (range select)
+                let result = self.convert_field_access(base, field);
+                result
+            }
+            hir::HirExpression::EnumVariant { enum_type, variant } => {
+                // Look up the enum variant value
+                self.resolve_enum_variant_value(enum_type, variant)
             }
         }
     }
@@ -535,14 +571,44 @@ impl HirToMir {
                 domain: domain.map(|id| ClockDomainId(id.0)),
             },
             hir::HirType::Event => DataType::Event,
-            hir::HirType::Array(inner_type, _size) => {
-                // TODO: Implement proper array support
+            hir::HirType::Stream(inner_type) => {
+                // Stream types include implicit handshaking signals
+                // For now, convert to the inner type
+                // TODO: Add proper stream protocol support in MIR
                 self.convert_type(inner_type)
+            },
+            hir::HirType::Array(inner_type, size) => {
+                DataType::Array(Box::new(self.convert_type(inner_type)), *size as usize)
             },
             hir::HirType::Custom(_name) => DataType::Bit(1), // TODO: Resolve custom types
             hir::HirType::Struct(struct_type) => DataType::Struct(Box::new(self.convert_struct_type(struct_type))),
             hir::HirType::Enum(enum_type) => DataType::Enum(Box::new(self.convert_enum_type(enum_type))),
             hir::HirType::Union(union_type) => DataType::Union(Box::new(self.convert_union_type(union_type))),
+            // Parametric types - preserve parameter name and default
+            hir::HirType::BitParam(param_name) => {
+                DataType::BitParam {
+                    param: param_name.clone(),
+                    default: 8
+                }
+            },
+            hir::HirType::LogicParam(param_name) => {
+                DataType::LogicParam {
+                    param: param_name.clone(),
+                    default: 8
+                }
+            },
+            hir::HirType::IntParam(param_name) => {
+                DataType::IntParam {
+                    param: param_name.clone(),
+                    default: 32
+                }
+            },
+            hir::HirType::NatParam(param_name) => {
+                DataType::NatParam {
+                    param: param_name.clone(),
+                    default: 32
+                }
+            },
         }
     }
 
@@ -552,6 +618,7 @@ impl HirToMir {
             hir::HirPortDirection::Input => PortDirection::Input,
             hir::HirPortDirection::Output => PortDirection::Output,
             hir::HirPortDirection::Bidirectional => PortDirection::InOut,
+            hir::HirPortDirection::Protocol => PortDirection::InOut, // Protocols are bidirectional by nature
         }
     }
 
@@ -627,6 +694,237 @@ impl HirToMir {
         }
     }
 
+    /// Convert struct field access to bit slice
+    fn convert_field_access(&mut self, base: &hir::HirExpression, field_name: &str) -> Option<Expression> {
+
+        // Convert the base expression to an LValue
+        let base_lval = match base {
+            hir::HirExpression::Signal(id) => {
+                if let Some(signal_id) = self.signal_map.get(id) {
+                    LValue::Signal(*signal_id)
+                } else {
+                    // Maybe this "signal" is actually a port that's represented as a signal in HIR
+                    if let Some(port_id) = self.port_map.values().find(|&&pid| {
+                        // Check if this signal ID corresponds to a port
+                        // This is a heuristic - we may need a better mapping
+                        pid.0 == id.0  // Compare the underlying numeric IDs
+                    }) {
+                        LValue::Port(*port_id)
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            hir::HirExpression::Variable(id) => {
+                let var_id = *self.variable_map.get(id)?;
+                LValue::Variable(var_id)
+            }
+            _ => {
+                return None;
+            }
+        };
+
+        // Get the type of the base expression to find field offset
+        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
+
+        // Create bit slice expressions
+        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+
+        Some(Expression::Ref(LValue::RangeSelect {
+            base: Box::new(base_lval),
+            high: Box::new(high_expr),
+            low: Box::new(low_expr),
+        }))
+    }
+
+    /// Get the bit range for a struct field
+    fn get_field_bit_range(&self, base: &hir::HirExpression, field_name: &str) -> Option<(usize, usize)> {
+        // Get the struct type from the base expression
+        let struct_type = self.get_expression_struct_type(base)?;
+
+        // Calculate field offset
+        let mut current_offset = 0;
+        for field in &struct_type.fields {
+            let field_width = self.get_hir_type_width(&field.field_type);
+            if field.name == field_name {
+                // Found the field - return its bit range
+                let high_bit = current_offset + field_width - 1;
+                let low_bit = current_offset;
+                return Some((high_bit, low_bit));
+            }
+            current_offset += field_width;
+        }
+        None // Field not found
+    }
+
+    /// Get the struct type of an expression
+    fn get_expression_struct_type(&self, expr: &hir::HirExpression) -> Option<&hir::HirStructType> {
+        let hir = self.hir?;
+
+        match expr {
+            hir::HirExpression::Signal(id) => {
+                // Find the signal in implementations
+                for impl_block in &hir.implementations {
+                    for signal in &impl_block.signals {
+                        if signal.id == *id {
+                            if let hir::HirType::Struct(ref struct_type) = &signal.signal_type {
+                                return Some(struct_type);
+                            }
+                        }
+                    }
+                }
+
+                // If not found as signal, check if it's actually a port
+                for entity in &hir.entities {
+                    for port in &entity.ports {
+                        // Compare based on the numeric ID (this is a heuristic)
+                        if port.id.0 == id.0 {
+                            if let hir::HirType::Struct(ref struct_type) = &port.port_type {
+                                return Some(struct_type);
+                            }
+                        }
+                    }
+                }
+            }
+            // Note: Port access will be added when we understand how ports are referenced
+            hir::HirExpression::Variable(id) => {
+                // Find the variable in implementations
+                for impl_block in &hir.implementations {
+                    for variable in &impl_block.variables {
+                        if variable.id == *id {
+                            if let hir::HirType::Struct(ref struct_type) = &variable.var_type {
+                                return Some(struct_type);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Get the width in bits of a HIR type
+    fn get_hir_type_width(&self, hir_type: &hir::HirType) -> usize {
+        match hir_type {
+            hir::HirType::Bit(width) => *width as usize,
+            hir::HirType::Logic(width) => *width as usize,
+            hir::HirType::Int(width) => *width as usize,
+            hir::HirType::Nat(width) => *width as usize,
+            hir::HirType::Clock(_) => 1,
+            hir::HirType::Reset(_) => 1,
+            hir::HirType::Event => 0,
+            hir::HirType::Struct(struct_type) => {
+                let mut total_width = 0;
+                for field in &struct_type.fields {
+                    total_width += self.get_hir_type_width(&field.field_type);
+                }
+                total_width
+            }
+            hir::HirType::Enum(enum_type) => self.get_hir_type_width(&enum_type.base_type),
+            hir::HirType::Union(union_type) => {
+                // Union width is the maximum of all field widths
+                union_type.fields.iter()
+                    .map(|field| self.get_hir_type_width(&field.field_type))
+                    .max()
+                    .unwrap_or(0)
+            }
+            hir::HirType::Array(element_type, size) => {
+                self.get_hir_type_width(element_type) * (*size as usize)
+            }
+            hir::HirType::Stream(element_type) => {
+                // Stream types don't have a defined width in hardware
+                self.get_hir_type_width(element_type)
+            }
+            hir::HirType::Custom(_) => {
+                // Custom types default to 32 bits
+                32
+            }
+            // Parametric types - use default widths
+            hir::HirType::BitParam(_) => 8,   // Default bit width
+            hir::HirType::LogicParam(_) => 8, // Default logic width
+            hir::HirType::IntParam(_) => 32,  // Default int width
+            hir::HirType::NatParam(_) => 32,  // Default nat width
+        }
+    }
+
+    /// Resolve enum variant to its integer value
+    fn resolve_enum_variant_value(&self, enum_type: &str, variant: &str) -> Option<Expression> {
+        // Find the enum type in the HIR
+        let hir = self.hir?;
+
+        // Look through all entities and implementations to find the enum type
+        for entity in &hir.entities {
+            for port in &entity.ports {
+                if let hir::HirType::Enum(ref enum_def) = &port.port_type {
+                    if enum_def.name == enum_type {
+                        return self.find_variant_value(&enum_def, variant);
+                    }
+                }
+            }
+        }
+
+        for impl_block in &hir.implementations {
+            for signal in &impl_block.signals {
+                if let hir::HirType::Enum(ref enum_def) = &signal.signal_type {
+                    if enum_def.name == enum_type {
+                        return self.find_variant_value(&enum_def, variant);
+                    }
+                }
+            }
+        }
+
+        // If not found, return default value 0
+        Some(Expression::Literal(Value::Integer(0)))
+    }
+
+    /// Find the value of a specific variant in an enum
+    fn find_variant_value(&self, enum_def: &hir::HirEnumType, variant: &str) -> Option<Expression> {
+        for (index, enum_variant) in enum_def.variants.iter().enumerate() {
+            if enum_variant.name == variant {
+                // If the variant has an explicit value, use it
+                if let Some(ref value_expr) = enum_variant.value {
+                    if let Some(value) = self.convert_literal_expr_immutable(value_expr) {
+                        return Some(Expression::Literal(value));
+                    }
+                }
+                // Otherwise, use the index
+                return Some(Expression::Literal(Value::Integer(index as i64)));
+            }
+        }
+        // Variant not found, return 0
+        Some(Expression::Literal(Value::Integer(0)))
+    }
+
+    /// Convert literal expression (immutable version)
+    fn convert_literal_expr_immutable(&self, expr: &hir::HirExpression) -> Option<Value> {
+        if let hir::HirExpression::Literal(lit) = expr {
+            self.convert_literal_immutable(lit)
+        } else {
+            None
+        }
+    }
+
+    /// Convert literal (immutable version)
+    fn convert_literal_immutable(&self, lit: &hir::HirLiteral) -> Option<Value> {
+        match lit {
+            hir::HirLiteral::Integer(val) => Some(Value::Integer(*val as i64)),
+            hir::HirLiteral::Boolean(b) => Some(Value::Integer(if *b { 1 } else { 0 })),
+            hir::HirLiteral::String(s) => Some(Value::String(s.clone())),
+            hir::HirLiteral::BitVector(bits) => {
+                // Convert bit vector to integer
+                let mut value = 0i64;
+                for (i, bit) in bits.iter().enumerate() {
+                    if *bit {
+                        value |= 1 << i;
+                    }
+                }
+                Some(Value::Integer(value))
+            }
+        }
+    }
+
     fn next_module_id(&mut self) -> ModuleId {
         let id = ModuleId(self.next_module_id);
         self.next_module_id += 1;
@@ -658,7 +956,7 @@ impl HirToMir {
     }
 }
 
-impl Default for HirToMir {
+impl<'hir> Default for HirToMir<'hir> {
     fn default() -> Self {
         Self::new()
     }

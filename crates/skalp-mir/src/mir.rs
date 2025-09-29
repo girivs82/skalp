@@ -84,6 +84,8 @@ pub struct Signal {
     pub signal_type: DataType,
     /// Initial value (if any)
     pub initial: Option<Value>,
+    /// Clock domain this signal belongs to (for CDC analysis)
+    pub clock_domain: Option<ClockDomainId>,
 }
 
 /// Signal identifier
@@ -135,6 +137,16 @@ pub enum DataType {
     Enum(Box<EnumType>),
     /// Union type
     Union(Box<UnionType>),
+    /// Array type
+    Array(Box<DataType>, usize),
+    /// Bit vector with parametric width
+    BitParam { param: String, default: usize },
+    /// Logic vector with parametric width
+    LogicParam { param: String, default: usize },
+    /// Signed integer with parametric width
+    IntParam { param: String, default: usize },
+    /// Unsigned natural with parametric width
+    NatParam { param: String, default: usize },
 }
 
 /// Clock domain identifier in MIR

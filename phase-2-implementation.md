@@ -12,8 +12,9 @@
 
 ### Week 1: MIR Generation
 **Core Work:**
-- [ ] Design MIR (Mid-level IR) data structures
-- [ ] Implement HIR to MIR transformation
+- [x] Design MIR (Mid-level IR) data structures - DONE (already exists)
+- [x] Implement HIR to MIR transformation - DONE (working, generates modules)
+- [ ] Fix MIR to LIR port-to-signal conversion (HIGH PRIORITY)
 - [ ] Handle entity instantiation in MIR
 - [ ] Support port mapping and connections
 - [ ] Create MIR validation and debugging
@@ -116,7 +117,11 @@ This should generate valid SystemVerilog that simulates correctly and counts fro
 
 **Daily Log:**
 ```
-[Date] - [What got done] - [Any blockers]
+[Dec 29, 2024] - Phase 1 completed. Started Phase 2:
+  - Found that HIR→MIR is partially working (generates 1 module with 3 ports)
+  - Identified issue: MIR→LIR not converting ports to signals properly
+  - SystemVerilog generation produces minimal output due to missing signals
+  - Next: Fix MIR→LIR port conversion
 ```
 
 **Week 1 Goals:**

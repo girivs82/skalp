@@ -66,20 +66,59 @@ This specification uses the following notation:
 
 ### 2.1 Keywords
 
+SKALP uses a minimal set of 40 keywords, each with a specific purpose:
+
 ```
-entity impl var signal let const type trait protocol flow
-fn match if else elif for while loop break continue return
-in out inout clock reset event stream burst bit logic int nat
-fixed enum struct assert assume cover prove
-with intent on when rise fall edge always eventually
-use package import export pub priv mut self Self
-requirement async await
+// Core Hardware Description (11)
+entity impl signal var const
+in out inout on if else
+
+// Type System (7)
+bit clock reset type stream
+struct enum
+
+// Traits and Generics (5)
+trait protocol where self Self
+
+// Event Control (2)
+rise fall
+
+// Control Flow (2)
+match for
+
+// Design Intent (3)
+intent flow requirement
+
+// Testbench Only (5)
+async await fn return let
+
+// Type Conversion (1)
+as
+
+// Module System (4)
+use mod pub with
+
+// Verification (1)
+assert
 ```
 
-Note:
-- Only **one new keyword** (`requirement`) added for safety features
-- `async`/`await` are used ONLY in testbenches (non-synthesizable), never in hardware description
-- For hardware async reset, use OR notation: `on(clock.rise | reset.rise)`
+#### Design Rationale for Keyword Choices:
+
+**Excluded Keywords and Why:**
+- `logic` - SKALP uses 2-state (`bit`) only for performance. X/Z states are modeled as randomized 0/1
+- `edge` - Redundant; use `rise | fall` for both edges
+- `elif` - Use `else if` instead
+- `loop`, `while`, `break`, `continue` - Not synthesizable; use bounded `for` loops
+- `mut`, `ref`, `static` - Memory management concepts not applicable to hardware
+- `package`, `import`, `export`, `priv` - Use simpler `mod`/`use` system
+- `always`, `eventually` - Temporal operators belong in assertions, not as keywords
+- `assume`, `cover`, `prove` - Start with just `assert`; add others if needed
+
+**Key Distinctions:**
+- `signal` vs `var`: Signals are hardware wires/registers, vars are procedural variables
+- `let` vs `var` (testbench): `let` for immutable bindings, `var` for mutable
+- `assert` vs `requirement`: Assertions are runtime checks, requirements are formal contracts
+- `async`/`await`: Only for testbenches, never in synthesizable hardware
 
 ### 2.2 Identifiers
 
@@ -122,46 +161,112 @@ identifier = [a-zA-Z_][a-zA-Z0-9_]*
 ### 3.1 Primitive Types
 
 ```rust
-// Bit types
+// Bit types (2-state only for performance)
 bit         // Single bit (0 or 1)
 bit[N]      // N-bit vector
-logic       // 4-state logic (0, 1, X, Z)
-logic[N]    // N-bit 4-state vector
+// Note: No 4-state logic. X is modeled as randomized 0/1,
+//       Z (tristate) is modeled as what receivers would see
 
 // Integer types
 int[N]      // N-bit signed integer
 nat[N]      // N-bit unsigned integer
-int[N..M]   // Ranged integer
-nat[N..M]   // Ranged natural
 
-// Fixed-point types
-fixed[I.F]  // I integer bits, F fractional bits
+// Special hardware types
+clock       // Clock signal (enables edge detection)
+reset       // Reset signal (active high/low)
 
-// Special types
-event       // Clock or trigger event
-void        // No value
+// Stream type for flow control
+stream<T>   // Stream with implicit handshaking
 ```
 
 ### 3.2 Composite Types
 
+#### Structures (Data Grouping)
+Structures group related data. When used in entity ports, ALL fields inherit the port's direction.
+
 ```rust
-// Arrays
-type Matrix = int[8][4][4]  // 3D array
-
-// Structures
-struct Packet {
-    header: bit[16],
-    payload: bit[8][64],
-    crc: bit[32]
+struct Instruction {
+    opcode: bit[6],
+    rs: bit[5],
+    rt: bit[5],
+    rd: bit[5],
+    shamt: bit[5],
+    funct: bit[6]
 }
 
-// Enumerations
-enum State: bit[2] {
-    Idle = 0b00,
-    Active = 0b01,
-    Wait = 0b10,
-    Done = 0b11
+entity Decoder {
+    in insn: Instruction,    // ALL fields are inputs
+    out alu_op: bit[4]
 }
+```
+
+#### Enumerations (Named Values)
+Enumerations provide named constants for state machines and opcodes.
+
+```rust
+enum State {
+    IDLE = 0b00,
+    READ = 0b01,
+    WRITE = 0b10,
+    ERROR = 0b11
+}
+
+entity FSM {
+    signal state: State;
+
+    on(clk.rise) {
+        match state {
+            State::IDLE => { /* ... */ }
+            State::READ => { /* ... */ }
+        }
+    }
+}
+```
+
+#### Type Aliases
+Type aliases improve readability without creating new types.
+
+```rust
+type Word = bit[32];
+type Address = bit[32];
+type CacheLine = struct {
+    tag: bit[20],
+    data: bit[512],
+    valid: bit,
+    dirty: bit
+}
+```
+
+### 3.3 Protocols (Bidirectional Interfaces)
+
+Protocols define interfaces with mixed signal directions. Unlike structs, protocols specify the direction for each signal.
+
+```rust
+protocol AXIStream {
+    out data: bit[32],
+    out valid: bit,
+    in ready: bit,
+    out last: bit
+}
+```
+
+#### Protocol Flipping
+
+The `~` operator flips ALL signal directions in a protocol. This allows defining a protocol from one perspective and using it from both sides.
+
+```rust
+entity Producer {
+    port axi: AXIStream      // Uses protocol as defined
+}
+
+entity Consumer {
+    port axi: ~AXIStream     // Flips all directions
+    // data, valid, last become inputs
+    // ready becomes output
+}
+```
+
+**Key Design Principle:** Protocols are defined from ONE perspective (chosen by the protocol author). Users apply `~` when they need the opposite perspective. There is no "standard" perspective - the protocol author decides what's most natural for their documentation.
 
 // Algebraic Data Types
 enum Instruction {

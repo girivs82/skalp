@@ -86,7 +86,7 @@ fn test_generic_entity_with_constraints() {
     // Should parse generic parameters with trait bounds
     let mut found_trait_bound = false;
     fn find_trait_bound(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::TRAIT_BOUND {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitBound {
             return true;
         }
         for child in node.children() {
@@ -134,11 +134,11 @@ fn test_const_generic_parameters() {
     let mut found_const_param = false;
     fn check_for_const(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         // Check if this is a generic parameter node
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::GENERIC_PARAM {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::GenericParam {
             // Look for const keyword in children
             for token in node.children_with_tokens() {
                 if let Some(t) = token.as_token() {
-                    if t.kind() == skalp_frontend::syntax::SyntaxKind::CONST_KW {
+                    if t.kind() == skalp_frontend::syntax::SyntaxKind::ConstKw {
                         return true;
                     }
                 }

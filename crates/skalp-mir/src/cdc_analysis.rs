@@ -1,470 +1,382 @@
 //! Clock Domain Crossing (CDC) Analysis
 //!
-//! This module provides compile-time detection of Clock Domain Crossing violations
-//! which are a major source of metastability issues in digital designs.
+//! This module provides compile-time detection of potentially unsafe clock domain crossings.
+//! CDC violations occur when signals from different clock domains are used together without
+//! proper synchronization, which can lead to metastability and data corruption.
 
-use crate::mir::*;
+use crate::mir::{Module, Signal, Process, Statement, Expression, LValue, ClockDomainId};
 use std::collections::{HashMap, HashSet};
+use serde::{Serialize, Deserialize};
 
-/// CDC violation types
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CdcViolationType {
-    /// Signal crosses from one clock domain to another without synchronization
-    UnsynchronizedCrossing {
-        source_domain: ClockDomainId,
-        target_domain: ClockDomainId,
-        signal_name: String,
-    },
-    /// Multiple signals from different domains converge
-    MultiDomainConvergence {
-        domains: Vec<ClockDomainId>,
-        target_signal: String,
-    },
-    /// Reset crossing without proper handling
-    ResetCrossing {
-        reset_domain: ClockDomainId,
-        target_domain: ClockDomainId,
-    },
+/// CDC violation severity levels
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CdcSeverity {
+    /// Critical violations that will cause design failures
+    Critical,
+    /// Warnings about potentially unsafe patterns
+    Warning,
+    /// Informational notices about clock domain usage
+    Info,
 }
 
-/// CDC violation report
-#[derive(Debug, Clone)]
+/// Types of CDC violations
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CdcViolationType {
+    /// Direct assignment from one clock domain to another
+    DirectCrossing,
+    /// Combinational logic mixing multiple clock domains
+    CombinationalMixing,
+    /// Asynchronous reset crossing clock domains
+    AsyncResetCrossing,
+    /// Clock domain mismatch in arithmetic operations
+    ArithmeticMixing,
+}
+
+/// A detected CDC violation
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcViolation {
     /// Type of violation
     pub violation_type: CdcViolationType,
-    /// Location in the design
-    pub location: ViolationLocation,
     /// Severity level
     pub severity: CdcSeverity,
-    /// Suggested fix
-    pub suggestion: String,
+    /// Human-readable description
+    pub description: String,
+    /// Source clock domain
+    pub source_domain: Option<ClockDomainId>,
+    /// Target clock domain
+    pub target_domain: Option<ClockDomainId>,
+    /// Location information (for future use)
+    pub location: Option<String>,
 }
 
-/// Location where CDC violation occurs
-#[derive(Debug, Clone)]
-pub struct ViolationLocation {
-    /// Module where violation occurs
-    pub module_name: String,
-    /// Process or assignment where violation is detected
-    pub process_name: Option<String>,
-    /// Line information (if available)
-    pub line: Option<u32>,
-}
-
-/// CDC violation severity
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CdcSeverity {
-    /// Information - potential issue but may be intentional
-    Info,
-    /// Warning - likely issue that should be reviewed
-    Warning,
-    /// Error - definite violation that must be fixed
-    Error,
-    /// Critical - violation that could cause system failure
-    Critical,
-}
-
-/// CDC analyzer
+/// CDC Analyzer for detecting clock domain crossing violations
 pub struct CdcAnalyzer {
-    /// Violations found during analysis
-    violations: Vec<CdcViolation>,
-    /// Signal to clock domain mapping
-    signal_domains: HashMap<SignalId, ClockDomainId>,
-    /// Process to clock domain mapping
-    process_domains: HashMap<ProcessId, ClockDomainId>,
+    /// Clock domain assignments for each signal
+    signal_domains: HashMap<crate::mir::SignalId, ClockDomainId>,
+    /// Clock domain assignments for each port
+    port_domains: HashMap<crate::mir::PortId, ClockDomainId>,
 }
 
 impl CdcAnalyzer {
     /// Create a new CDC analyzer
     pub fn new() -> Self {
         Self {
-            violations: Vec::new(),
             signal_domains: HashMap::new(),
-            process_domains: HashMap::new(),
+            port_domains: HashMap::new(),
         }
     }
 
-    /// Analyze MIR for CDC violations
-    pub fn analyze(&mut self, mir: &Mir) -> Vec<CdcViolation> {
-        self.violations.clear();
-        self.signal_domains.clear();
-        self.process_domains.clear();
+    /// Analyze a module for CDC violations
+    pub fn analyze_module(&mut self, module: &Module) -> Vec<CdcViolation> {
+        let mut violations = Vec::new();
 
-        // Analyze each module
-        for module in &mir.modules {
-            self.analyze_module(module);
+
+        // First, collect all clock domain information from signals
+        self.collect_clock_domains(module);
+
+
+        // Analyze each process for CDC violations
+        for (i, process) in module.processes.iter().enumerate() {
+            let process_violations = self.analyze_process(process, module);
+            violations.extend(process_violations);
         }
 
-        self.violations.clone()
+        // Analyze continuous assignments
+        for (i, continuous_assign) in module.assignments.iter().enumerate() {
+            let assign_violations = self.analyze_continuous_assign(continuous_assign, module);
+            violations.extend(assign_violations);
+        }
+
+        violations
     }
 
-    /// Analyze a single module for CDC violations
-    fn analyze_module(&mut self, module: &Module) {
-        // Build clock domain mapping for signals
-        self.build_signal_domain_mapping(module);
-
-        // Build clock domain mapping for processes
-        self.build_process_domain_mapping(module);
-
-        // Check for CDC violations in processes
-        for process in &module.processes {
-            self.analyze_process(module, process);
-        }
-
-        // Check for CDC violations in continuous assignments
-        for assignment in &module.assignments {
-            self.analyze_continuous_assignment(module, assignment);
-        }
-    }
-
-    /// Build mapping of signals to their clock domains
-    fn build_signal_domain_mapping(&mut self, module: &Module) {
-        // Map clock and reset signals to their domains
+    /// Collect clock domain information from signals and ports
+    fn collect_clock_domains(&mut self, module: &Module) {
+        // Collect signal clock domains
         for signal in &module.signals {
-            if let Some(domain) = self.extract_signal_domain(&signal.signal_type) {
+            if let Some(domain) = signal.clock_domain {
                 self.signal_domains.insert(signal.id, domain);
             }
         }
 
-        // Map port signals to their domains
+        // Infer port clock domains from their types
         for port in &module.ports {
-            if let Some(domain) = self.extract_signal_domain(&port.port_type) {
-                // Convert PortId to SignalId for domain tracking
-                // This is a simplification - in real implementation we'd need proper mapping
-                let signal_id = SignalId(port.id.0);
-                self.signal_domains.insert(signal_id, domain);
+            if let Some(domain) = self.infer_port_clock_domain(port) {
+                self.port_domains.insert(port.id, domain);
             }
         }
     }
 
-    /// Extract clock domain from a data type
-    fn extract_signal_domain(&self, data_type: &DataType) -> Option<ClockDomainId> {
-        match data_type {
+    /// Infer clock domain for a port based on its type
+    fn infer_port_clock_domain(&self, port: &crate::mir::Port) -> Option<ClockDomainId> {
+        use crate::mir::DataType;
+        match &port.port_type {
             DataType::Clock { domain } => *domain,
             DataType::Reset { domain, .. } => *domain,
             _ => None,
         }
     }
 
-    /// Build mapping of processes to their clock domains
-    fn build_process_domain_mapping(&mut self, module: &Module) {
-        for process in &module.processes {
-            if let Some(domain) = self.infer_process_domain(process) {
-                self.process_domains.insert(process.id, domain);
-            }
-        }
+    /// Analyze a process for CDC violations
+    fn analyze_process(&self, process: &Process, module: &Module) -> Vec<CdcViolation> {
+        let mut violations = Vec::new();
+
+        // Get the clock domain for this process based on its sensitivity list
+        let process_domain = self.get_process_clock_domain(process);
+
+        // Analyze all statements in the process
+        violations.extend(self.analyze_statements(&process.body.statements, process_domain, module));
+
+        violations
     }
 
-    /// Infer the clock domain of a process from its sensitivity list
-    fn infer_process_domain(&self, process: &Process) -> Option<ClockDomainId> {
+    /// Get the clock domain for a process based on its sensitivity list
+    fn get_process_clock_domain(&self, process: &Process) -> Option<ClockDomainId> {
+        use crate::mir::SensitivityList;
+
+        // Look at the sensitivity list to determine the clock domain
         match &process.sensitivity {
-            SensitivityList::Edge(edges) => {
-                // Find clock signals in the sensitivity list
-                for edge in edges {
-                    if let LValue::Signal(signal_id) = &edge.signal {
-                        if let Some(domain) = self.signal_domains.get(signal_id) {
-                            return Some(*domain);
-                        }
+            SensitivityList::Edge(edge_sensitivities) => {
+                // For edge-triggered processes, look at the clock signals
+                for edge_sens in edge_sensitivities {
+                    if let Some(domain) = self.get_lvalue_clock_domain(&edge_sens.signal) {
+                        return Some(domain);
                     }
                 }
                 None
             }
-            SensitivityList::Level(signals) => {
-                // For combinational processes, check if all inputs are from same domain
-                let mut domains = HashSet::new();
-                for signal_lval in signals {
-                    if let LValue::Signal(signal_id) = signal_lval {
-                        if let Some(domain) = self.signal_domains.get(signal_id) {
-                            domains.insert(*domain);
-                        }
+            SensitivityList::Level(lvalues) => {
+                // For level-sensitive processes, use the first signal's domain
+                for lvalue in lvalues {
+                    if let Some(domain) = self.get_lvalue_clock_domain(lvalue) {
+                        return Some(domain);
                     }
                 }
-                // Return domain only if all signals are from same domain
-                if domains.len() == 1 {
-                    domains.into_iter().next()
-                } else {
-                    None
-                }
+                None
             }
-            SensitivityList::Always => None, // Always_comb has no specific domain
+            SensitivityList::Always => {
+                // Always processes don't have a specific clock domain
+                None
+            }
         }
     }
 
-    /// Analyze a process for CDC violations
-    fn analyze_process(&mut self, module: &Module, process: &Process) {
-        let process_domain = self.process_domains.get(&process.id).copied();
-
-        // Analyze all statements in the process
-        self.analyze_block(module, &process.body, process_domain, Some(process));
-    }
-
-    /// Analyze a block of statements
-    fn analyze_block(
-        &mut self,
+    /// Analyze a list of statements for CDC violations
+    fn analyze_statements(
+        &self,
+        statements: &[Statement],
+        process_domain: Option<ClockDomainId>,
         module: &Module,
-        block: &Block,
-        current_domain: Option<ClockDomainId>,
-        process: Option<&Process>,
-    ) {
-        for statement in &block.statements {
-            self.analyze_statement(module, statement, current_domain, process);
+    ) -> Vec<CdcViolation> {
+        let mut violations = Vec::new();
+
+        for statement in statements {
+            violations.extend(self.analyze_statement(statement, process_domain, module));
         }
+
+        violations
     }
 
     /// Analyze a single statement for CDC violations
     fn analyze_statement(
-        &mut self,
-        module: &Module,
+        &self,
         statement: &Statement,
-        current_domain: Option<ClockDomainId>,
-        process: Option<&Process>,
-    ) {
+        process_domain: Option<ClockDomainId>,
+        module: &Module,
+    ) -> Vec<CdcViolation> {
+        let mut violations = Vec::new();
+
         match statement {
-            Statement::Assignment(assign) => {
-                self.analyze_assignment(module, assign, current_domain, process);
-            }
-            Statement::If(if_stmt) => {
-                self.analyze_block(module, &if_stmt.then_block, current_domain, process);
-                if let Some(else_block) = &if_stmt.else_block {
-                    self.analyze_block(module, else_block, current_domain, process);
+            Statement::Assignment(assignment) => {
+                // Check if we're assigning across clock domains
+                let target_domain = self.get_lvalue_clock_domain(&assignment.lhs);
+                let source_domains = self.get_expression_clock_domains(&assignment.rhs);
+
+                // Debug removed
+
+                // Check for direct clock domain crossings
+                if let Some(target_domain) = target_domain {
+                    if let Some(process_domain) = process_domain {
+                        if target_domain != process_domain {
+                            violations.push(CdcViolation {
+                                violation_type: CdcViolationType::DirectCrossing,
+                                severity: CdcSeverity::Critical,
+                                description: format!(
+                                    "Assignment to signal in domain {:?} from process in domain {:?}",
+                                    target_domain, process_domain
+                                ),
+                                source_domain: Some(process_domain),
+                                target_domain: Some(target_domain),
+                                location: None,
+                            });
+                        }
+                    }
+
+                    // Check for cross-domain reads in source expression
+                    for source_domain in source_domains.iter() {
+                        if let Some(process_domain) = process_domain {
+                            if *source_domain != process_domain {
+                                violations.push(CdcViolation {
+                                    violation_type: CdcViolationType::DirectCrossing,
+                                    severity: CdcSeverity::Critical,
+                                    description: format!(
+                                        "Reading signal from domain {:?} in process from domain {:?}",
+                                        source_domain, process_domain
+                                    ),
+                                    source_domain: Some(*source_domain),
+                                    target_domain: Some(process_domain),
+                                    location: None,
+                                });
+                            }
+                        }
+                    }
+
+                    // Check for mixing multiple source domains
+                    if source_domains.len() > 1 {
+                        violations.push(CdcViolation {
+                            violation_type: CdcViolationType::CombinationalMixing,
+                            severity: CdcSeverity::Warning,
+                            description: format!(
+                                "Expression mixes signals from {} different clock domains",
+                                source_domains.len()
+                            ),
+                            source_domain: None,
+                            target_domain: Some(target_domain),
+                            location: None,
+                        });
+                    }
                 }
             }
+
+            Statement::If(if_stmt) => {
+                violations.extend(self.analyze_statements(&if_stmt.then_block.statements, process_domain, module));
+                if let Some(else_block) = &if_stmt.else_block {
+                    violations.extend(self.analyze_statements(&else_block.statements, process_domain, module));
+                }
+            }
+
             Statement::Case(case_stmt) => {
                 for item in &case_stmt.items {
-                    self.analyze_block(module, &item.block, current_domain, process);
+                    violations.extend(self.analyze_statements(&item.block.statements, process_domain, module));
                 }
                 if let Some(default_block) = &case_stmt.default {
-                    self.analyze_block(module, default_block, current_domain, process);
+                    violations.extend(self.analyze_statements(&default_block.statements, process_domain, module));
                 }
             }
-            Statement::Block(inner_block) => {
-                self.analyze_block(module, inner_block, current_domain, process);
+
+            Statement::Block(block) => {
+                violations.extend(self.analyze_statements(&block.statements, process_domain, module));
             }
+
             Statement::Loop(_) => {
-                // TODO: Implement loop analysis
+                // Loop analysis would go here
             }
         }
+
+        violations
     }
 
-    /// Analyze an assignment for CDC violations
-    fn analyze_assignment(
-        &mut self,
-        module: &Module,
-        assignment: &Assignment,
-        current_domain: Option<ClockDomainId>,
-        process: Option<&Process>,
-    ) {
-        // Get the domain of the target signal
-        let target_domain = self.get_lvalue_domain(&assignment.lhs);
+    /// Analyze a continuous assignment for CDC violations
+    fn analyze_continuous_assign(
+        &self,
+        continuous_assign: &crate::mir::ContinuousAssign,
+        _module: &Module,
+    ) -> Vec<CdcViolation> {
+        let mut violations = Vec::new();
 
-        // Get domains of all source signals
-        let source_domains = self.get_expression_domains(&assignment.rhs);
+        // Get the clock domains involved in the assignment
+        let target_domain = self.get_lvalue_clock_domain(&continuous_assign.lhs);
+        let source_domains = self.get_expression_clock_domains(&continuous_assign.rhs);
 
-        // Check for CDC violations
-        self.check_assignment_cdc(
-            module,
-            &assignment.lhs,
-            &assignment.rhs,
-            target_domain,
-            source_domains,
-            current_domain,
-            process,
-        );
+        // Continuous assignments should not cross clock domains
+        if let Some(target_domain) = target_domain {
+            for source_domain in source_domains {
+                if source_domain != target_domain {
+                    violations.push(CdcViolation {
+                        violation_type: CdcViolationType::DirectCrossing,
+                        severity: CdcSeverity::Critical,
+                        description: format!(
+                            "Continuous assignment crosses from domain {:?} to {:?}",
+                            source_domain, target_domain
+                        ),
+                        source_domain: Some(source_domain),
+                        target_domain: Some(target_domain),
+                        location: None,
+                    });
+                }
+            }
+        }
+
+        violations
     }
 
     /// Get the clock domain of an LValue
-    fn get_lvalue_domain(&self, lvalue: &LValue) -> Option<ClockDomainId> {
+    fn get_lvalue_clock_domain(&self, lvalue: &LValue) -> Option<ClockDomainId> {
         match lvalue {
             LValue::Signal(signal_id) => self.signal_domains.get(signal_id).copied(),
-            LValue::Variable(_) => None, // Variables don't have domains
-            LValue::Port(port_id) => {
-                // Convert PortId to SignalId for domain lookup
-                let signal_id = SignalId(port_id.0);
-                self.signal_domains.get(&signal_id).copied()
-            }
-            LValue::BitSelect { base, .. } => self.get_lvalue_domain(base),
-            LValue::RangeSelect { base, .. } => self.get_lvalue_domain(base),
-            LValue::Concat(lvals) => {
-                // For concatenation, check if all parts have same domain
-                let mut domains = HashSet::new();
-                for lval in lvals {
-                    if let Some(domain) = self.get_lvalue_domain(lval) {
-                        domains.insert(domain);
+            LValue::Port(port_id) => self.port_domains.get(port_id).copied(),
+            LValue::Variable(_) => None, // Variables don't have clock domains
+            LValue::BitSelect { base, .. } => self.get_lvalue_clock_domain(base),
+            LValue::RangeSelect { base, .. } => self.get_lvalue_clock_domain(base),
+            LValue::Concat(lvalues) => {
+                // For concatenations, use the first non-None domain
+                for lvalue in lvalues {
+                    if let Some(domain) = self.get_lvalue_clock_domain(lvalue) {
+                        return Some(domain);
                     }
                 }
-                if domains.len() == 1 {
-                    domains.into_iter().next()
-                } else {
-                    None
-                }
+                None
             }
         }
     }
 
-    /// Get all clock domains referenced in an expression
-    fn get_expression_domains(&self, expr: &Expression) -> HashSet<ClockDomainId> {
+    /// Get all clock domains referenced by an expression
+    fn get_expression_clock_domains(&self, expression: &Expression) -> HashSet<ClockDomainId> {
         let mut domains = HashSet::new();
-        self.collect_expression_domains(expr, &mut domains);
-        domains
-    }
 
-    /// Recursively collect clock domains from an expression
-    fn collect_expression_domains(&self, expr: &Expression, domains: &mut HashSet<ClockDomainId>) {
-        match expr {
-            Expression::Literal(_) => {}, // Literals have no domain
+        match expression {
+            Expression::Literal(_) => {
+                // Literals don't have clock domains
+            }
             Expression::Ref(lvalue) => {
-                if let Some(domain) = self.get_lvalue_domain(lvalue) {
+                if let Some(domain) = self.get_lvalue_clock_domain(lvalue) {
                     domains.insert(domain);
                 }
             }
             Expression::Binary { left, right, .. } => {
-                self.collect_expression_domains(left, domains);
-                self.collect_expression_domains(right, domains);
+                domains.extend(self.get_expression_clock_domains(left));
+                domains.extend(self.get_expression_clock_domains(right));
             }
             Expression::Unary { operand, .. } => {
-                self.collect_expression_domains(operand, domains);
+                domains.extend(self.get_expression_clock_domains(operand));
             }
             Expression::Conditional { cond, then_expr, else_expr } => {
-                self.collect_expression_domains(cond, domains);
-                self.collect_expression_domains(then_expr, domains);
-                self.collect_expression_domains(else_expr, domains);
+                domains.extend(self.get_expression_clock_domains(cond));
+                domains.extend(self.get_expression_clock_domains(then_expr));
+                domains.extend(self.get_expression_clock_domains(else_expr));
             }
-            Expression::Concat(exprs) => {
-                for expr in exprs {
-                    self.collect_expression_domains(expr, domains);
+            Expression::Concat(expressions) => {
+                for expr in expressions {
+                    domains.extend(self.get_expression_clock_domains(expr));
                 }
             }
             Expression::Replicate { count, value } => {
-                self.collect_expression_domains(count, domains);
-                self.collect_expression_domains(value, domains);
+                domains.extend(self.get_expression_clock_domains(count));
+                domains.extend(self.get_expression_clock_domains(value));
             }
             Expression::FunctionCall { args, .. } => {
                 for arg in args {
-                    self.collect_expression_domains(arg, domains);
-                }
-            }
-        }
-    }
-
-    /// Check for CDC violations in an assignment
-    fn check_assignment_cdc(
-        &mut self,
-        module: &Module,
-        target: &LValue,
-        source: &Expression,
-        target_domain: Option<ClockDomainId>,
-        source_domains: HashSet<ClockDomainId>,
-        current_domain: Option<ClockDomainId>,
-        process: Option<&Process>,
-    ) {
-        // Check for unsynchronized domain crossings
-        if let Some(target_dom) = target_domain {
-            for source_dom in &source_domains {
-                if target_dom != *source_dom {
-                    // Found a CDC violation
-                    let violation = CdcViolation {
-                        violation_type: CdcViolationType::UnsynchronizedCrossing {
-                            source_domain: *source_dom,
-                            target_domain: target_dom,
-                            signal_name: self.get_lvalue_name(target),
-                        },
-                        location: ViolationLocation {
-                            module_name: module.name.clone(),
-                            process_name: process.map(|p| format!("process_{}", p.id.0)),
-                            line: None,
-                        },
-                        severity: CdcSeverity::Error,
-                        suggestion: "Add proper synchronization (e.g., flip-flop synchronizer) when crossing clock domains".to_string(),
-                    };
-                    self.violations.push(violation);
+                    domains.extend(self.get_expression_clock_domains(arg));
                 }
             }
         }
 
-        // Check for multi-domain convergence
-        if source_domains.len() > 1 {
-            let violation = CdcViolation {
-                violation_type: CdcViolationType::MultiDomainConvergence {
-                    domains: source_domains.into_iter().collect(),
-                    target_signal: self.get_lvalue_name(target),
-                },
-                location: ViolationLocation {
-                    module_name: module.name.clone(),
-                    process_name: process.map(|p| format!("process_{}", p.id.0)),
-                    line: None,
-                },
-                severity: CdcSeverity::Warning,
-                suggestion: "Ensure all source signals are properly synchronized to the same domain before combining".to_string(),
-            };
-            self.violations.push(violation);
-        }
-    }
-
-    /// Analyze continuous assignment for CDC violations
-    fn analyze_continuous_assignment(&mut self, module: &Module, assignment: &ContinuousAssign) {
-        let target_domain = self.get_lvalue_domain(&assignment.lhs);
-        let source_domains = self.get_expression_domains(&assignment.rhs);
-
-        self.check_assignment_cdc(
-            module,
-            &assignment.lhs,
-            &assignment.rhs,
-            target_domain,
-            source_domains,
-            None,
-            None,
-        );
-    }
-
-    /// Get a human-readable name for an LValue
-    fn get_lvalue_name(&self, lvalue: &LValue) -> String {
-        match lvalue {
-            LValue::Signal(id) => format!("signal_{}", id.0),
-            LValue::Variable(id) => format!("var_{}", id.0),
-            LValue::Port(id) => format!("port_{}", id.0),
-            LValue::BitSelect { base, index } => {
-                format!("{}[{}]", self.get_lvalue_name(base), "index")
-            }
-            LValue::RangeSelect { base, .. } => {
-                format!("{}[range]", self.get_lvalue_name(base))
-            }
-            LValue::Concat(lvals) => {
-                let names: Vec<String> = lvals.iter()
-                    .map(|l| self.get_lvalue_name(l))
-                    .collect();
-                format!("{{{}}}", names.join(", "))
-            }
-        }
+        domains
     }
 }
 
 impl Default for CdcAnalyzer {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cdc_analyzer_creation() {
-        let analyzer = CdcAnalyzer::new();
-        assert_eq!(analyzer.violations.len(), 0);
-    }
-
-    #[test]
-    fn test_extract_signal_domain() {
-        let analyzer = CdcAnalyzer::new();
-
-        let clock_type = DataType::Clock { domain: Some(ClockDomainId(1)) };
-        assert_eq!(analyzer.extract_signal_domain(&clock_type), Some(ClockDomainId(1)));
-
-        let reset_type = DataType::Reset { active_high: true, domain: Some(ClockDomainId(2)) };
-        assert_eq!(analyzer.extract_signal_domain(&reset_type), Some(ClockDomainId(2)));
-
-        let bit_type = DataType::Bit(8);
-        assert_eq!(analyzer.extract_signal_domain(&bit_type), None);
     }
 }

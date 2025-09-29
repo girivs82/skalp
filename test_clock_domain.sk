@@ -1,13 +1,13 @@
-// Simple counter example in SKALP
-
-entity Counter {
+// Test clock domain lifetime syntax
+entity ClockDomainCounter<'clk> {
     in clk: clock
     in rst: reset
-    out count: nat[8]
+    in data: nat[8]
+    out count: nat[32]
 }
 
-impl Counter {
-    signal counter: nat[8] = 0
+impl ClockDomainCounter<'clk> {
+    signal counter: nat[32] = 0
 
     on(clk.rise) {
         if (rst) {

@@ -1,0 +1,32 @@
+// Test multiple clock domains for CDC detection
+entity MultiClockDesign<'clk_a, 'clk_b> {
+    in clk_a: clock
+    in clk_b: clock
+    in rst: reset
+    in data: nat[8]
+    out result: nat[8]
+}
+
+impl MultiClockDesign<'clk_a, 'clk_b> {
+    signal reg_a: nat[8] = 0
+    signal reg_b: nat[8] = 0
+
+    on(clk_a.rise) {
+        if (rst) {
+            reg_a <= 0
+        } else {
+            reg_a <= data
+        }
+    }
+
+    on(clk_b.rise) {
+        if (rst) {
+            reg_b <= 0
+        } else {
+            // This should trigger a CDC warning when we implement detection!
+            reg_b <= reg_a
+        }
+    }
+
+    result = reg_b
+}

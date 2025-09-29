@@ -46,6 +46,8 @@ pub struct LirSignal {
     pub signal_type: String,
     /// Whether this is an input signal
     pub is_input: bool,
+    /// Whether this is an output signal
+    pub is_output: bool,
     /// Whether this is a register
     pub is_register: bool,
 }

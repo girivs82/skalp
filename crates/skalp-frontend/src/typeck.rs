@@ -3,7 +3,7 @@
 //! This module implements the type checker that operates on the syntax tree
 
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
-use crate::types::{Type, Width, TypeEnv, TypeInference, TypeError, TypeScheme, ResetPolarity, StructType};
+use crate::types::{self, Type, Width, TypeEnv, TypeInference, TypeError, TypeScheme, ResetPolarity, StructType, StructField, EnumType, EnumVariant};
 use std::collections::HashMap;
 
 /// Type checker for SKALP
@@ -63,6 +63,8 @@ impl TypeChecker {
         // Check all top-level items
         for child in root.children() {
             match child.kind() {
+                SyntaxKind::StructDecl => self.check_struct_decl(&child),
+                SyntaxKind::EnumDecl => self.check_enum_decl(&child),
                 SyntaxKind::EntityDecl => self.check_entity_decl(&child),
                 SyntaxKind::ImplBlock => self.check_impl_block(&child),
                 _ => {} // Skip other nodes for now
@@ -82,6 +84,107 @@ impl TypeChecker {
         } else {
             Err(self.errors.clone())
         }
+    }
+
+    /// Check struct declaration
+    fn check_struct_decl(&mut self, node: &SyntaxNode) {
+        // Extract struct name
+        let struct_name = self.get_struct_name(node);
+
+        // Create struct type
+        let mut fields = Vec::new();
+
+        // Check each field
+        if let Some(field_list) = node.first_child_of_kind(SyntaxKind::StructFieldList) {
+            for field_node in field_list.children_of_kind(SyntaxKind::StructField) {
+                let field_name = self.get_field_name(&field_node);
+                let field_type = self.extract_type(&field_node);
+
+                // Check for duplicate field names
+                if fields.iter().any(|f: &StructField| f.name == field_name) {
+                    self.errors.push(TypeCheckError {
+                        error: TypeError::DuplicateDefinition(format!("field {}", field_name)),
+                        location: None,
+                    });
+                } else {
+                    fields.push(StructField {
+                        name: field_name,
+                        field_type,
+                    });
+                }
+            }
+        }
+
+        let struct_type = StructType {
+            name: struct_name.clone(),
+            fields,
+        };
+
+        // Add struct type to environment
+        self.env.define_type(struct_name.clone(), Type::Struct(struct_type));
+
+        // Cache the type
+        self.node_types.insert(node.text_range().start().into(), Type::Struct(StructType {
+            name: struct_name,
+            fields: vec![], // Simplified for caching
+        }));
+    }
+
+    /// Check enum declaration
+    fn check_enum_decl(&mut self, node: &SyntaxNode) {
+        // Extract enum name
+        let enum_name = self.get_enum_name(node);
+
+        // Check base type if specified
+        let base_type = if let Some(base_type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+            self.extract_type(&base_type_node)
+        } else {
+            Type::Nat(Width::Fixed(32)) // Default to 32-bit nat
+        };
+
+        // Create enum type
+        let mut variants = Vec::new();
+
+        // Check each variant
+        if let Some(variant_list) = node.first_child_of_kind(SyntaxKind::EnumVariantList) {
+            for variant_node in variant_list.children_of_kind(SyntaxKind::EnumVariant) {
+                let variant_name = self.get_variant_name(&variant_node);
+
+                // Check for duplicate variant names
+                if variants.iter().any(|v: &EnumVariant| v.name == variant_name) {
+                    self.errors.push(TypeCheckError {
+                        error: TypeError::DuplicateDefinition(format!("variant {}", variant_name)),
+                        location: None,
+                    });
+                } else {
+                    // Check for payload type if specified
+                    let payload = if let Some(payload_node) = variant_node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+                        Some(self.extract_type(&payload_node))
+                    } else {
+                        None
+                    };
+
+                    variants.push(EnumVariant {
+                        name: variant_name,
+                        payload,
+                    });
+                }
+            }
+        }
+
+        let enum_type = EnumType {
+            name: enum_name.clone(),
+            variants,
+        };
+
+        // Add enum type to environment
+        self.env.define_type(enum_name.clone(), Type::Enum(enum_type));
+
+        // Cache the type
+        self.node_types.insert(node.text_range().start().into(), Type::Enum(EnumType {
+            name: enum_name,
+            variants: vec![], // Simplified for caching
+        }));
     }
 
     /// Check entity declaration
@@ -109,13 +212,37 @@ impl TypeChecker {
         }
 
         // Store the entity's ports for use in impl blocks
-        self.entity_ports.insert(name.clone(), entity_ports);
+        self.entity_ports.insert(name.clone(), entity_ports.clone());
 
         // Restore parent environment
         self.env = parent_env.clone();
 
         // Register entity type
-        // TODO: Create proper entity type
+        let entity_name = self.get_entity_name(node);
+        let mut entity_type = types::EntityType {
+            name: entity_name.clone(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            inouts: Vec::new(),
+            type_params: Vec::new(),
+            width_params: Vec::new(),
+        };
+
+        // Collect ports
+        for port in &entity_ports {
+            let port_type = types::PortType {
+                name: port.0.clone(),
+                port_type: port.1.clone(),
+            };
+
+            // Determine port direction (simplified - would need proper AST analysis)
+            // For now, assume all are inputs
+            entity_type.inputs.push(port_type);
+        }
+
+        // Register entity type in environment
+        let entity_type = types::Type::Entity(entity_type);
+        self.env.define_type(entity_name.clone(), entity_type);
     }
 
     /// Check implementation block
@@ -356,9 +483,11 @@ impl TypeChecker {
         ) {
             let cond_type = self.check_expression(&cond_expr);
 
-            // Condition should be bit[1] or boolean
+            // Condition should be bit[1], boolean, or reset (resets are implicitly boolean)
             match &cond_type {
                 Type::Bit(Width::Fixed(1)) => {} // OK
+                Type::Reset { .. } => {} // OK - resets can be used as booleans
+                Type::Clock { .. } => {} // OK - clocks can be used as booleans (for gated logic)
                 _ => {
                     // Try to coerce to bit[1]
                     self.inference.add_constraint(
@@ -425,7 +554,16 @@ impl TypeChecker {
         let parent_env = self.env.clone();
         self.env = TypeEnv::child(parent_env.clone());
 
-        // TODO: Add pattern variables to scope
+        // Add pattern variables to scope
+        if let Some(pattern_node) = node.children().find(|n|
+            matches!(n.kind(),
+                SyntaxKind::LiteralPattern |
+                SyntaxKind::IdentPattern |
+                SyntaxKind::WildcardPattern |
+                SyntaxKind::TuplePattern)
+        ) {
+            self.bind_pattern_variables(&pattern_node, &match_expr_type);
+        }
 
         // Check statements in arm
         for child in node.children() {
@@ -440,6 +578,38 @@ impl TypeChecker {
 
         // Restore parent scope
         self.env = parent_env;
+    }
+
+    /// Bind pattern variables to their types in the current scope
+    fn bind_pattern_variables(&mut self, pattern: &SyntaxNode, matched_type: &Type) {
+        match pattern.kind() {
+            SyntaxKind::IdentPattern => {
+                // Get the identifier name
+                if let Some(ident_token) = pattern.first_child_or_token() {
+                    if let Some(token) = ident_token.as_token() {
+                        if token.kind() == SyntaxKind::Ident {
+                            let var_name = token.text().to_string();
+                            // Bind the variable to the matched type
+                            let scheme = TypeScheme {
+                                type_params: vec![],
+                                width_params: vec![],
+                                ty: matched_type.clone(),
+                            };
+                            self.env.bind(var_name, scheme);
+                        }
+                    }
+                }
+            }
+            SyntaxKind::TuplePattern => {
+                // For tuple patterns, recursively bind each element
+                // Would need to destructure the matched type as well
+                // For now, skip complex patterns
+            }
+            SyntaxKind::WildcardPattern | SyntaxKind::LiteralPattern => {
+                // These don't bind any variables
+            }
+            _ => {}
+        }
     }
 
     /// Check pattern and return its type
@@ -808,6 +978,70 @@ impl TypeChecker {
     fn get_constant_name(&self, node: &SyntaxNode) -> String {
         self.get_entity_name(node)
     }
+
+    /// Extract struct name from struct declaration
+    fn get_struct_name(&self, node: &SyntaxNode) -> String {
+        // Look for the first Ident token after the struct keyword
+        node.children_with_tokens()
+            .filter_map(|child| {
+                if let Some(token) = child.as_token() {
+                    if token.kind() == SyntaxKind::Ident {
+                        return Some(token.text().to_string());
+                    }
+                }
+                None
+            })
+            .next()
+            .unwrap_or_else(|| "unknown_struct".to_string())
+    }
+
+    /// Extract enum name from enum declaration
+    fn get_enum_name(&self, node: &SyntaxNode) -> String {
+        // Look for the first Ident token after the enum keyword
+        node.children_with_tokens()
+            .filter_map(|child| {
+                if let Some(token) = child.as_token() {
+                    if token.kind() == SyntaxKind::Ident {
+                        return Some(token.text().to_string());
+                    }
+                }
+                None
+            })
+            .next()
+            .unwrap_or_else(|| "unknown_enum".to_string())
+    }
+
+    /// Extract field name from struct field
+    fn get_field_name(&self, node: &SyntaxNode) -> String {
+        // Look for the first Ident token in the struct field
+        node.children_with_tokens()
+            .filter_map(|child| {
+                if let Some(token) = child.as_token() {
+                    if token.kind() == SyntaxKind::Ident {
+                        return Some(token.text().to_string());
+                    }
+                }
+                None
+            })
+            .next()
+            .unwrap_or_else(|| "unknown_field".to_string())
+    }
+
+    /// Extract variant name from enum variant
+    fn get_variant_name(&self, node: &SyntaxNode) -> String {
+        // Look for the first Ident token in the enum variant
+        node.children_with_tokens()
+            .filter_map(|child| {
+                if let Some(token) = child.as_token() {
+                    if token.kind() == SyntaxKind::Ident {
+                        return Some(token.text().to_string());
+                    }
+                }
+                None
+            })
+            .next()
+            .unwrap_or_else(|| "unknown_variant".to_string())
+    }
 }
 
 /// Parse binary literal
@@ -884,6 +1118,20 @@ impl TypeChecker {
                 });
                 Type::Error
             }
+            Type::Enum(enum_type) => {
+                // Look up variant in enum
+                for variant in &enum_type.variants {
+                    if variant.name == field_name {
+                        // Return the enum type itself for variant access
+                        return Type::Enum(enum_type.clone());
+                    }
+                }
+                self.errors.push(TypeCheckError {
+                    error: TypeError::UndefinedVariable(format!("variant {}", field_name)),
+                    location: None,
+                });
+                Type::Error
+            }
             Type::Protocol(protocol_name) => {
                 // For protocols, field access might reference signals
                 // This would need protocol definitions to be tracked
@@ -893,7 +1141,7 @@ impl TypeChecker {
                 self.errors.push(TypeCheckError {
                     error: TypeError::TypeMismatch {
                         expected: Type::Struct(StructType {
-                            name: "struct".to_string(),
+                            name: "struct or enum".to_string(),
                             fields: vec![],
                         }),
                         found: base_type.clone(),

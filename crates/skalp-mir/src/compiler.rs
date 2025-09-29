@@ -5,6 +5,7 @@
 use crate::hir_to_mir::HirToMir;
 use crate::optimize::{OptimizationPass, DeadCodeElimination, ConstantFolding};
 use crate::codegen::SystemVerilogGenerator;
+use crate::cdc_analysis::{CdcAnalyzer, CdcViolation, CdcSeverity};
 use crate::mir::Mir;
 use skalp_frontend::hir::Hir;
 
@@ -48,8 +49,8 @@ impl MirCompiler {
         self
     }
 
-    /// Compile HIR to SystemVerilog
-    pub fn compile(&self, hir: &Hir) -> Result<String, String> {
+    /// Compile HIR to MIR with CDC analysis
+    pub fn compile_to_mir(&self, hir: &Hir) -> Result<Mir, String> {
         // Step 1: Transform HIR to MIR
         if self.verbose {
             println!("Phase 1: HIR to MIR transformation");
@@ -57,17 +58,43 @@ impl MirCompiler {
         let mut transformer = HirToMir::new();
         let mut mir = transformer.transform(hir);
 
-        // Step 2: Apply optimizations
-        if self.opt_level != OptimizationLevel::None {
-            if self.verbose {
-                println!("Phase 2: Applying optimizations");
+        // Step 2: Perform CDC analysis
+        if self.verbose {
+            println!("Phase 2: Clock Domain Crossing (CDC) analysis");
+        }
+        let violations = self.perform_cdc_analysis(&mir);
+
+        // Check for critical CDC violations and report them
+        if !violations.is_empty() {
+            self.report_cdc_violations(&violations);
+
+            // Fail compilation if there are critical violations
+            let critical_violations: Vec<_> = violations.iter()
+                .filter(|v| v.severity == CdcSeverity::Critical)
+                .collect();
+
+            if !critical_violations.is_empty() {
+                return Err(format!("Compilation failed due to {} critical CDC violations", critical_violations.len()));
             }
-            self.apply_optimizations(&mut mir);
         }
 
-        // Step 3: Generate SystemVerilog
+        // Step 3: Apply optimizations
         if self.verbose {
-            println!("Phase 3: SystemVerilog code generation");
+            println!("Phase 3: Applying optimizations (level: {:?})", self.opt_level);
+        }
+        self.apply_optimizations(&mut mir);
+
+        Ok(mir)
+    }
+
+    /// Compile HIR to SystemVerilog
+    pub fn compile(&self, hir: &Hir) -> Result<String, String> {
+        // Compile to MIR with CDC analysis
+        let mir = self.compile_to_mir(hir)?;
+
+        // Step 4: Generate SystemVerilog
+        if self.verbose {
+            println!("Phase 4: SystemVerilog code generation");
         }
         let mut generator = SystemVerilogGenerator::new();
         let verilog = generator.generate(&mir);
@@ -97,6 +124,53 @@ impl MirCompiler {
             println!("  - Applying {}", pass.name());
         }
         pass.apply(mir);
+    }
+
+    /// Perform CDC analysis on all modules in the MIR
+    fn perform_cdc_analysis(&self, mir: &Mir) -> Vec<CdcViolation> {
+        let mut all_violations = Vec::new();
+
+        for module in &mir.modules {
+            let mut analyzer = CdcAnalyzer::new();
+            let violations = analyzer.analyze_module(module);
+            all_violations.extend(violations);
+        }
+
+        all_violations
+    }
+
+    /// Report CDC violations to the user
+    fn report_cdc_violations(&self, violations: &[CdcViolation]) {
+        if violations.is_empty() {
+            return;
+        }
+
+
+        for (i, violation) in violations.iter().enumerate() {
+            let severity_str = match violation.severity {
+                CdcSeverity::Critical => "CRITICAL",
+                CdcSeverity::Warning => "WARNING",
+                CdcSeverity::Info => "INFO",
+            };
+
+            let violation_type_str = match violation.violation_type {
+                crate::cdc_analysis::CdcViolationType::DirectCrossing => "Direct Clock Domain Crossing",
+                crate::cdc_analysis::CdcViolationType::CombinationalMixing => "Combinational Logic Mixing",
+                crate::cdc_analysis::CdcViolationType::AsyncResetCrossing => "Async Reset Crossing",
+                crate::cdc_analysis::CdcViolationType::ArithmeticMixing => "Arithmetic Mixing",
+            };
+
+            // Violation details removed
+
+        }
+
+        // Summary
+        let critical_count = violations.iter().filter(|v| v.severity == CdcSeverity::Critical).count();
+        let warning_count = violations.iter().filter(|v| v.severity == CdcSeverity::Warning).count();
+        let info_count = violations.iter().filter(|v| v.severity == CdcSeverity::Info).count();
+
+
+        // Summary removed
     }
 }
 

@@ -29,15 +29,43 @@ use anyhow::Result;
 
 /// Lower MIR to LIR
 pub fn lower_to_lir(mir: &Mir) -> Result<LirDesign> {
-    // Simplified lowering - would use full transformer in production
     let mut lir_modules = Vec::new();
 
     for module in &mir.modules {
+        // Transform MIR module to LIR
         let lir = transform_mir_to_lir(module);
-        // Convert Lir to LirModule
+
+        // Create LirSignals from MIR ports and signals
+        let mut signals = Vec::new();
+
+        // Convert ports to signals
+        for port in &module.ports {
+            let signal = LirSignal {
+                name: port.name.clone(),
+                signal_type: format!("{:?}", port.port_type), // Convert type to string
+                is_input: matches!(port.direction, skalp_mir::PortDirection::Input),
+                is_register: false, // Ports are not registers
+                is_output: matches!(port.direction, skalp_mir::PortDirection::Output),
+            };
+            signals.push(signal);
+        }
+
+        // Convert internal signals
+        for signal in &module.signals {
+            let lir_signal = LirSignal {
+                name: signal.name.clone(),
+                signal_type: format!("{:?}", signal.signal_type),
+                is_input: false,
+                is_output: false, // Internal signals are not ports
+                is_register: signal.initial.is_some(), // Signals with initial values are registers
+            };
+            signals.push(lir_signal);
+        }
+
+        // Create LirModule with populated signals
         lir_modules.push(LirModule {
             name: module.name.clone(),
-            signals: Vec::new(),
+            signals,
             gates: lir.gates.clone(),
             nets: lir.nets.clone(),
         });
@@ -51,6 +79,9 @@ pub fn lower_to_lir(mir: &Mir) -> Result<LirDesign> {
             gates: Vec::new(),
             nets: Vec::new(),
         });
+    }
+
+    if !lir_modules.is_empty() {
     }
 
     Ok(LirDesign {

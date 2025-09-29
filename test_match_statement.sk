@@ -1,0 +1,34 @@
+// Test match statement functionality specifically
+entity MatchTest {
+    in clk: clock
+    in rst: reset
+    in start: nat[32]
+    out state_out: nat[32]
+}
+
+impl MatchTest {
+    signal state: nat[32] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            state <= 0
+        } else {
+            match start {
+                0 => {
+                    state <= 10
+                }
+                1 => {
+                    state <= 20
+                }
+                2 => {
+                    state <= 30
+                }
+                _ => {
+                    state <= 99
+                }
+            }
+        }
+    }
+
+    state_out = state
+}

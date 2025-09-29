@@ -42,23 +42,11 @@ use anyhow::Result;
 
 /// Lower HIR to MIR
 pub fn lower_to_mir(hir: &Hir) -> Result<Mir> {
-    // Simplified lowering - would be more complex in production
-    let mut mir = Mir::new(hir.name.clone());
+    // Use the actual HIR to MIR transformer
+    let mut transformer = HirToMir::new();
+    let mir = transformer.transform(hir);
 
-    // Create a basic module for now
-    let module = Module {
-        id: ModuleId(0),
-        name: "main".to_string(),
-        parameters: Vec::new(),
-        ports: Vec::new(),
-        signals: Vec::new(),
-        variables: Vec::new(),
-        processes: Vec::new(),
-        assignments: Vec::new(),
-        instances: Vec::new(),
-        clock_domains: Vec::new(),
-    };
+    // Debug info removed
 
-    mir.add_module(module);
     Ok(mir)
 }

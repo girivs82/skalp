@@ -9,7 +9,17 @@
       "Bash(cargo clippy:*)",
       "Bash(git add:*)",
       "Bash(cargo fix:*)",
-      "Bash(./target/debug/skalp:*)"
+      "Bash(./target/debug/skalp:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(./target/release/skalp compile examples/advanced_types.sk -o /tmp/advanced_types.sv)",
+      "Bash(./target/release/skalp --help)",
+      "Bash(./target/release/skalp build:*)",
+      "Bash(../target/release/skalp build)",
+      "Read(//tmp/enum_debug/**)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp build)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp new struct_test)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp new enum_test)"
     ],
     "deny": [],
     "ask": []

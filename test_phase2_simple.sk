@@ -1,0 +1,37 @@
+// Simple test of Phase 2 features
+entity SimpleTest {
+    in clk: clock
+    in rst: reset
+    in data_in: nat[8]
+    out data_out: nat[8]
+    out state_out: nat[2]
+}
+
+impl SimpleTest {
+    signal state: nat[2] = 0
+    signal buffer: nat[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            state <= 0
+            buffer <= 0
+        } else {
+            match state {
+                0 => {
+                    buffer <= data_in
+                    state <= 1
+                }
+                1 => {
+                    data_out <= buffer
+                    state <= 0
+                }
+                _ => {
+                    state <= 0
+                }
+            }
+        }
+    }
+
+    // Continuous assignment
+    state_out = state
+}

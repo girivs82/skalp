@@ -101,6 +101,7 @@ pub enum HirPortDirection {
     Input,
     Output,
     Bidirectional,
+    Protocol,
 }
 
 /// Signal in HIR
@@ -114,6 +115,8 @@ pub struct HirSignal {
     pub signal_type: HirType,
     /// Initial value
     pub initial_value: Option<HirExpression>,
+    /// Clock domain this signal belongs to (inferred from assignments)
+    pub clock_domain: Option<ClockDomainId>,
 }
 
 /// Variable in HIR
@@ -156,10 +159,19 @@ pub struct HirEventBlock {
 /// Event trigger in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirEventTrigger {
-    /// Signal being monitored
-    pub signal: SignalId,
+    /// Signal being monitored (can be a port or signal)
+    pub signal: HirEventSignal,
     /// Edge type
     pub edge: HirEdgeType,
+}
+
+/// Signal reference in event trigger
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirEventSignal {
+    /// Port reference
+    Port(PortId),
+    /// Signal reference
+    Signal(SignalId),
 }
 
 /// Edge types in HIR
@@ -198,6 +210,7 @@ pub enum HirAssignmentType {
 pub enum HirLValue {
     Signal(SignalId),
     Variable(VariableId),
+    Port(PortId),
     Index(Box<HirLValue>, HirExpression),
     Range(Box<HirLValue>, HirExpression, HirExpression),
 }
@@ -282,6 +295,10 @@ pub enum HirExpression {
         base: Box<HirExpression>,
         field: String,
     },
+    EnumVariant {
+        enum_type: String,
+        variant: String,
+    },
 }
 
 /// Literals in HIR
@@ -363,11 +380,17 @@ pub enum HirType {
     Clock(Option<ClockDomainId>),   // Clock with optional domain
     Reset(Option<ClockDomainId>),   // Reset with optional domain
     Event,
+    Stream(Box<HirType>),           // Stream<T> for streaming data with handshaking
     Array(Box<HirType>, u32),
     Custom(String),
     Struct(HirStructType),
     Enum(Box<HirEnumType>),
     Union(HirUnionType),
+    // Parameterized types for generics
+    BitParam(String),               // bit[WIDTH] where WIDTH is a parameter
+    LogicParam(String),             // logic[WIDTH] where WIDTH is a parameter
+    IntParam(String),               // int[WIDTH] where WIDTH is a parameter
+    NatParam(String),               // nat[WIDTH] where WIDTH is a parameter
 }
 
 /// Patterns in HIR
@@ -386,6 +409,8 @@ pub struct HirGeneric {
     pub name: String,
     /// Parameter type
     pub param_type: HirGenericType,
+    /// Default value (for type parameters like WIDTH: nat = 8)
+    pub default_value: Option<HirExpression>,
 }
 
 /// Generic parameter types
@@ -479,11 +504,11 @@ pub struct HirProtocolSignal {
     pub signal_type: HirType,
 }
 
-/// Protocol signal directions
+/// Protocol signal directions (same as port directions)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HirProtocolDirection {
-    MasterToSlave,
-    SlaveToMaster,
+    In,
+    Out,
 }
 
 /// Intent in HIR

@@ -8,253 +8,120 @@ use std::fmt;
 /// Token types for SKALP
 #[derive(Logos, Debug, Clone, PartialEq)]
 pub enum Token {
-    // Keywords
+    // Core Hardware Description (12)
     #[token("entity")]
     Entity,
-
     #[token("impl")]
     Impl,
-
-    #[token("in")]
-    In,
-
-    #[token("out")]
-    Out,
-
-    #[token("inout")]
-    Inout,
-
     #[token("signal")]
     Signal,
-
     #[token("var")]
     Var,
-
-    #[token("let")]
-    Let,
-
     #[token("const")]
     Const,
-
+    #[token("in")]
+    In,
+    #[token("out")]
+    Out,
+    #[token("inout")]
+    Inout,
+    #[token("port")]
+    Port,
     #[token("on")]
     On,
-
     #[token("if")]
     If,
-
     #[token("else")]
     Else,
+    #[token("assign")]
+    AssignKw,
 
-    #[token("match")]
-    Match,
-
-    #[token("flow")]
-    Flow,
-
-    #[token("with")]
-    With,
-
-    #[token("intent")]
-    Intent,
-
-    #[token("protocol")]
-    Protocol,
-
-    #[token("requirement")]
-    Requirement,
-
-    #[token("async")]
-    Async,
-
-    #[token("await")]
-    Await,
-
-    #[token("trait")]
-    Trait,
-
-    #[token("for")]
-    For,
-
+    // Type System (10) - Updated to include numeric types
+    #[token("bit")]
+    Bit,
+    #[token("nat")]
+    Nat,
+    #[token("int")]
+    Int,
+    #[token("logic")]
+    Logic,
+    #[token("clock")]
+    Clock,
+    #[token("reset")]
+    Reset,
     #[token("type")]
     Type,
+    #[token("stream")]
+    Stream,
+    #[token("struct")]
+    Struct,
+    #[token("enum")]
+    Enum,
+    #[token("union")]
+    Union,
 
+    // Traits and Generics (5)
+    #[token("trait")]
+    Trait,
+    #[token("protocol")]
+    Protocol,
     #[token("where")]
     Where,
-
-    #[token("fn")]
-    Fn,
-
-    #[token("return")]
-    Return,
-
-    #[token("break")]
-    Break,
-
-    #[token("continue")]
-    Continue,
-
-    #[token("loop")]
-    Loop,
-
-    #[token("while")]
-    While,
-
-    #[token("pub")]
-    Pub,
-
-    #[token("mod")]
-    Mod,
-
-    #[token("use")]
-    Use,
-
-    #[token("crate")]
-    Crate,
-
-    #[token("super")]
-    Super,
-
     #[token("self")]
     SelfKeyword,
-
     #[token("Self")]
     SelfType,
 
-    #[token("static")]
-    Static,
 
-    #[token("mut")]
-    Mut,
-
-    #[token("ref")]
-    Ref,
-
-    // Intent-related keywords
-    #[token("timing")]
-    Timing,
-
-    #[token("power")]
-    Power,
-
-    #[token("area")]
-    Area,
-
-    #[token("throughput")]
-    Throughput,
-
-    #[token("latency")]
-    Latency,
-
-    #[token("minimize")]
-    Minimize,
-
-    #[token("maximize")]
-    Maximize,
-
-    // Type keywords
-    #[token("bit")]
-    Bit,
-
-    #[token("logic")]
-    Logic,
-
-    #[token("int")]
-    Int,
-
-    #[token("nat")]
-    Nat,
-
-    #[token("fixed")]
-    Fixed,
-
-    #[token("clock")]
-    Clock,
-
-    #[token("reset")]
-    Reset,
-
-    #[token("event")]
-    Event,
-
-    #[token("stream")]
-    Stream,
-
-    // Special keywords
+    // Event Control (2)
     #[token("rise")]
     Rise,
-
     #[token("fall")]
     Fall,
 
-    #[token("edge")]
-    Edge,
+    // Control Flow (2)
+    #[token("match")]
+    Match,
+    #[token("for")]
+    For,
 
-    #[token("posedge")]
-    Posedge,
+    // Design Intent (3)
+    #[token("intent")]
+    Intent,
+    #[token("flow")]
+    Flow,
+    #[token("requirement")]
+    Requirement,
 
-    #[token("negedge")]
-    Negedge,
+    // Testbench Only (5)
+    #[token("async")]
+    Async,
+    #[token("await")]
+    Await,
+    #[token("fn")]
+    Fn,
+    #[token("return")]
+    Return,
+    #[token("let")]
+    Let,
 
-    #[token("always")]
-    Always,
+    // Type Conversion (1)
+    #[token("as")]
+    As,
 
-    #[token("initial")]
-    Initial,
+    // Module System (4)
+    #[token("use")]
+    Use,
+    #[token("mod")]
+    Mod,
+    #[token("pub")]
+    Pub,
+    #[token("with")]
+    With,
 
-    #[token("final")]
-    Final,
-
-    #[token("fork")]
-    Fork,
-
-    #[token("join")]
-    Join,
-
-    #[token("disable")]
-    Disable,
-
-    #[token("wait")]
-    Wait,
-
-    #[token("assign")]
-    AssignKeyword,
-
-    #[token("force")]
-    Force,
-
-    #[token("release")]
-    Release,
-
-    // Safety and verification keywords
+    // Verification (1)
     #[token("assert")]
     Assert,
-
-    #[token("assume")]
-    Assume,
-
-    #[token("cover")]
-    Cover,
-
-    #[token("property")]
-    Property,
-
-    #[token("sequence")]
-    Sequence,
-
-    #[token("eventually")]
-    Eventually,
-
-    #[token("always_ff")]
-    AlwaysFF,
-
-    #[token("always_comb")]
-    AlwaysComb,
-
-    #[token("unique")]
-    Unique,
-
-    #[token("priority")]
-    Priority,
 
     // Identifiers and literals
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_owned())]
@@ -347,6 +214,9 @@ pub enum Token {
     #[token("|>")]
     Pipeline,
 
+    #[token("=>")]
+    FatArrow,
+
     #[token("->")]
     Arrow,
 
@@ -378,6 +248,9 @@ pub enum Token {
     #[token(";")]
     Semicolon,
 
+    #[token("::")]
+    ColonColon,
+
     #[token(":")]
     Colon,
 
@@ -389,6 +262,10 @@ pub enum Token {
 
     #[token("'")]
     Apostrophe,
+
+    // Lifetime token - 'identifier for clock domain lifetimes
+    #[regex(r"'[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
+    Lifetime(String),
 
     // Whitespace and comments (skipped but tracked for position)
     #[regex(r"[ \t\n\f]+", logos::skip)]
@@ -409,6 +286,7 @@ impl fmt::Display for Token {
             Token::BinaryLiteral(n) => write!(f, "0b{:b}", n),
             Token::HexLiteral(n) => write!(f, "0x{:x}", n),
             Token::StringLiteral(s) => write!(f, "\"{}\"", s),
+            Token::Lifetime(name) => write!(f, "'{}", name),
             Token::LeftParen => write!(f, "("),
             Token::RightParen => write!(f, ")"),
             _ => write!(f, "{:?}", self),
@@ -623,31 +501,38 @@ entity Counter {
 
     #[test]
     fn test_advanced_keywords() {
-        let mut lexer = Lexer::new("intent requirement protocol assert property always_ff");
+        let mut lexer = Lexer::new("intent requirement protocol async await flow");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
         assert_eq!(tokens, vec![
             Token::Intent,
             Token::Requirement,
             Token::Protocol,
-            Token::Assert,
-            Token::Property,
-            Token::AlwaysFF,
+            Token::Async,
+            Token::Await,
+            Token::Flow,
         ]);
     }
 
     #[test]
-    fn test_safety_keywords() {
-        let mut lexer = Lexer::new("assert assume cover property sequence eventually");
+    fn test_event_keywords() {
+        let mut lexer = Lexer::new("rise fall");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        assert_eq!(tokens, vec![
+            Token::Rise,
+            Token::Fall,
+        ]);
+    }
+
+    #[test]
+    fn test_verification_keywords() {
+        let mut lexer = Lexer::new("assert requirement");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
         assert_eq!(tokens, vec![
             Token::Assert,
-            Token::Assume,
-            Token::Cover,
-            Token::Property,
-            Token::Sequence,
-            Token::Eventually,
+            Token::Requirement,
         ]);
     }
 
@@ -655,21 +540,19 @@ entity Counter {
     fn test_complete_intent_block() {
         let source = r#"
         intent {
-            throughput: 100M_samples_per_sec,
-            latency: minimize,
-            power: 10mW
+            target_freq: 100_000_000,
+            optimization: area
         }
         "#;
 
         let mut lexer = Lexer::new(source);
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        // Should contain all intent-related tokens
+        // Should contain intent keyword and identifiers
         assert!(tokens.contains(&Token::Intent));
-        assert!(tokens.contains(&Token::Throughput));
-        assert!(tokens.contains(&Token::Latency));
-        assert!(tokens.contains(&Token::Minimize));
-        assert!(tokens.contains(&Token::Power));
+        assert!(tokens.contains(&Token::Identifier("target_freq".to_string())));
+        assert!(tokens.contains(&Token::Identifier("optimization".to_string())));
+        assert!(tokens.contains(&Token::Identifier("area".to_string())));
     }
 
     #[test]

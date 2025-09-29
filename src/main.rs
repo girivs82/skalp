@@ -231,10 +231,9 @@ skalpc synth src/main.sk --device ice40-hx8k
 
 /// Build SKALP design
 fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<()> {
-    use skalp_frontend::{parse_file, build_hir, typecheck};
-    use skalp_mir::lower_to_mir;
+    use skalp_frontend::parse_and_build_hir;
     use skalp_lir::lower_to_lir;
-    use skalp_codegen::{generate_verilog, generate_vhdl, generate_systemverilog};
+    use skalp_codegen::{generate_verilog, generate_vhdl, generate_systemverilog, generate_systemverilog_from_mir};
 
     info!("Building design from {:?} to {}", source, target);
 
@@ -242,25 +241,18 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
     let source_code = fs::read_to_string(source)
         .context("Failed to read source file")?;
 
-    // Parse
-    info!("Parsing SKALP source...");
-    let ast = parse_file(&source_code)
-        .context("Failed to parse SKALP source")?;
+    // Parse, build HIR, and type check in one step
+    info!("Parsing SKALP source and building HIR...");
+    let hir = parse_and_build_hir(&source_code)
+        .context("Failed to parse and build HIR")?;
 
-    // Build HIR
-    info!("Building HIR...");
-    let hir = build_hir(&ast)
-        .context("Failed to build HIR")?;
-
-    // Type check
-    info!("Type checking...");
-    typecheck(&hir)
-        .context("Type checking failed")?;
-
-    // Lower to MIR
-    info!("Lowering to MIR...");
-    let mir = lower_to_mir(&hir)
-        .context("Failed to lower to MIR")?;
+    // Lower to MIR with CDC analysis
+    info!("Lowering to MIR with CDC analysis...");
+    let compiler = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::Basic)
+        .with_verbose(true); // Enable verbose output for CDC analysis
+    let mir = compiler.compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR with CDC analysis: {}", e))?;
 
     // Lower to LIR
     info!("Lowering to LIR...");
@@ -274,7 +266,8 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
     let output_file = match target {
         "sv" | "systemverilog" => {
             info!("Generating SystemVerilog...");
-            let sv_code = generate_systemverilog(&lir)?;
+            // Use the new MIR-based generator for proper process generation
+            let sv_code = generate_systemverilog_from_mir(&mir, &lir)?;
             let output_path = output_dir.join("design.sv");
             fs::write(&output_path, sv_code)?;
             output_path

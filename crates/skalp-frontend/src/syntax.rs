@@ -9,94 +9,73 @@
 pub enum SyntaxKind {
     // === Tokens (Terminal nodes) ===
 
-    // Keywords
+    // Core Hardware Description (12)
     EntityKw,
     ImplKw,
+    SignalKw,
+    VarKw,
+    ConstKw,
     InKw,
     OutKw,
     InoutKw,
-    SignalKw,
-    VarKw,
-    LetKw,
-    ConstKw,
+    PortKw,
     OnKw,
     IfKw,
     ElseKw,
-    MatchKw,
-    FlowKw,
-    WithKw,
-    IntentKw,
-    ProtocolKw,
-    RequirementKw,
-    AsyncKw,
-    AwaitKw,
-    TraitKw,
-    ForKw,
-    TypeKw,
-    WhereKw,
-    FnKw,
-    ReturnKw,
-    BreakKw,
-    ContinueKw,
-    LoopKw,
-    WhileKeyword,
-    PubKw,
-    ModKw,
-    UseKw,
-    CrateKw,
-    SuperKw,
-    SelfKw,
-    SelfTypeKw,
-    StaticKw,
-    MutKw,
-    RefKw,
-    TimingKw,
-    PowerKw,
-    AreaKw,
-    ThroughputKw,
-    LatencyKw,
-    MinimizeKw,
-    MaximizeKw,
+    AssignKw,
 
-    // Type keywords
+    // Type System (10) - Updated to include numeric types
     BitKw,
-    LogicKw,
-    IntKw,
     NatKw,
-    FixedKw,
+    IntKw,
+    LogicKw,
     ClockKw,
     ResetKw,
-    EventKw,
+    TypeKw,
     StreamKw,
+    StructKw,
+    EnumKw,
+    UnionKw,
 
-    // Special keywords
+    // Traits and Generics (5)
+    TraitKw,
+    ProtocolKw,
+    WhereKw,
+    SelfKw,
+    SelfTypeKw,
+
+
+    // Event Control (2)
     RiseKw,
     FallKw,
-    EdgeKw,
-    PosedgeKw,
-    NegedgeKw,
-    AlwaysKw,
-    InitialKw,
-    FinalKw,
-    ForkKw,
-    JoinKw,
-    DisableKw,
-    WaitKw,
-    AssignKeywordKw,
-    ForceKw,
-    ReleaseKw,
 
-    // Safety and verification keywords
+    // Control Flow (2)
+    MatchKw,
+    ForKw,
+
+    // Design Intent (3)
+    IntentKw,
+    FlowKw,
+    RequirementKw,
+
+    // Testbench Only (5)
+    AsyncKw,
+    AwaitKw,
+    FnKw,
+    ReturnKw,
+    LetKw,
+
+    // Type Conversion (1)
+    AsKw,
+
+    // Module System (4)
+    UseKw,
+    ModKw,
+    PubKw,
+    WithKw,
+
+    // Verification (1)
     AssertKw,
-    AssumeKw,
-    CoverKw,
-    PropertyKw,
-    SequenceKw,
-    EventuallyKw,
-    AlwaysFFKw,
-    AlwaysCombKw,
-    UniqueKw,
-    PriorityKw,
 
     // Literals
     Ident,
@@ -104,6 +83,7 @@ pub enum SyntaxKind {
     BinLiteral,
     HexLiteral,
     StringLiteral,
+    Lifetime,
 
     // Operators
     NonBlockingAssign, // <=
@@ -130,6 +110,7 @@ pub enum SyntaxKind {
     Shl,                 // <<
     Shr,                 // >>
     Pipeline,            // |>
+    FatArrow,            // =>
     Arrow,               // ->
     LeftArrow,          // <-
 
@@ -142,6 +123,7 @@ pub enum SyntaxKind {
     RBrace,             // }
     Comma,               // ,
     Semicolon,           // ;
+    ColonColon,          // ::
     Colon,               // :
     Dot,                 // .
     Question,            // ?
@@ -167,6 +149,9 @@ pub enum SyntaxKind {
     RequirementDecl,
     TraitDef,
     TraitImpl,
+    StructDecl,
+    EnumDecl,
+    UnionDecl,
 
     // Entity parts
     PortList,
@@ -190,6 +175,9 @@ pub enum SyntaxKind {
     MatchStmt,
     BlockStmt,
     FlowStmt,
+    InstanceDecl,
+    ConnectionList,
+    Connection,
 
     // Flow pipeline
     FlowPipeline,
@@ -205,8 +193,10 @@ pub enum SyntaxKind {
     IndexExpr,
     ParenExpr,
     ArrayLiteral,
+    PathExpr,
 
     // Types
+    TypeExpr,
     TypeAnnotation,
     BitType,
     LogicType,
@@ -215,9 +205,14 @@ pub enum SyntaxKind {
     ClockType,
     ResetType,
     EventType,
+    StreamType,
+    IdentType,
     ArrayType,
+    ArraySize,
     TupleType,
     CustomType,
+    StructType,
+    EnumType,
 
     // Type parts
     WidthSpec,
@@ -241,6 +236,14 @@ pub enum SyntaxKind {
     // Intent parts
     IntentConstraintList,
     IntentConstraint,
+
+    // Struct/Enum/Union parts
+    StructFieldList,
+    StructField,
+    EnumVariantList,
+    EnumVariant,
+    UnionFieldList,
+    UnionField,
 
     // Generic parameters
     GenericParamList,
@@ -287,41 +290,27 @@ impl SyntaxKind {
     pub fn is_keyword(self) -> bool {
         matches!(
             self,
-            EntityKw
-                | ImplKw
-                | InKw
-                | OutKw
-                | InoutKw
-                | SignalKw
-                | VarKw
-                | LetKw
-                | ConstKw
-                | OnKw
-                | IfKw
-                | ElseKw
-                | MatchKw
-                | WithKw
-                | IntentKw
-                | ProtocolKw
-                | RequirementKw
-                | AsyncKw
-                | AwaitKw
-                | TraitKw
-                | ForKw
-                | TypeKw
-                | WhereKw
-                | BitKw
-                | LogicKw
-                | IntKw
-                | NatKw
-                | FixedKw
-                | ClockKw
-                | ResetKw
-                | EventKw
-                | StreamKw
-                | RiseKw
-                | FallKw
-                | EdgeKw
+            // Core Hardware Description (12)
+            EntityKw | ImplKw | SignalKw | VarKw | ConstKw
+                | InKw | OutKw | InoutKw | OnKw | IfKw | ElseKw | AssignKw
+            // Type System (7)
+            | BitKw | ClockKw | ResetKw | TypeKw | StreamKw | StructKw | EnumKw | UnionKw
+            // Traits and Generics (5)
+            | TraitKw | ProtocolKw | WhereKw | SelfKw | SelfTypeKw
+            // Event Control (2)
+            | RiseKw | FallKw
+            // Control Flow (2)
+            | MatchKw | ForKw
+            // Design Intent (3)
+            | IntentKw | FlowKw | RequirementKw
+            // Testbench Only (5)
+            | AsyncKw | AwaitKw | FnKw | ReturnKw | LetKw
+            // Type Conversion (1)
+            | AsKw
+            // Module System (4)
+            | UseKw | ModKw | PubKw | WithKw
+            // Verification (1)
+            | AssertKw
         )
     }
 
@@ -369,45 +358,75 @@ impl SyntaxKind {
     /// Get a human-readable description of this syntax kind
     pub fn description(self) -> &'static str {
         match self {
+            // Core Hardware Description (12)
             EntityKw => "'entity'",
             ImplKw => "'impl'",
+            SignalKw => "'signal'",
+            VarKw => "'var'",
+            ConstKw => "'const'",
             InKw => "'in'",
             OutKw => "'out'",
             InoutKw => "'inout'",
-            SignalKw => "'signal'",
-            VarKw => "'var'",
-            LetKw => "'let'",
-            ConstKw => "'const'",
             OnKw => "'on'",
             IfKw => "'if'",
             ElseKw => "'else'",
-            MatchKw => "'match'",
-            WithKw => "'with'",
-            IntentKw => "'intent'",
-            ProtocolKw => "'protocol'",
-            RequirementKw => "'requirement'",
-            AsyncKw => "'async'",
-            AwaitKw => "'await'",
+            AssignKw => "'assign'",
 
+            // Type System (7)
             BitKw => "'bit'",
-            LogicKw => "'logic'",
-            IntKw => "'int'",
-            NatKw => "'nat'",
-            FixedKw => "'fixed'",
             ClockKw => "'clock'",
             ResetKw => "'reset'",
-            EventKw => "'event'",
+            TypeKw => "'type'",
             StreamKw => "'stream'",
+            StructKw => "'struct'",
+            EnumKw => "'enum'",
+            UnionKw => "'union'",
 
+            // Traits and Generics (5)
+            TraitKw => "'trait'",
+            ProtocolKw => "'protocol'",
+            WhereKw => "'where'",
+            SelfKw => "'self'",
+            SelfTypeKw => "'Self'",
+
+            // Event Control (2)
             RiseKw => "'rise'",
             FallKw => "'fall'",
-            EdgeKw => "'edge'",
+
+            // Control Flow (2)
+            MatchKw => "'match'",
+            ForKw => "'for'",
+
+            // Design Intent (3)
+            IntentKw => "'intent'",
+            FlowKw => "'flow'",
+            RequirementKw => "'requirement'",
+
+            // Testbench Only (5)
+            AsyncKw => "'async'",
+            AwaitKw => "'await'",
+            FnKw => "'fn'",
+            ReturnKw => "'return'",
+            LetKw => "'let'",
+
+            // Type Conversion (1)
+            AsKw => "'as'",
+
+            // Module System (4)
+            UseKw => "'use'",
+            ModKw => "'mod'",
+            PubKw => "'pub'",
+            WithKw => "'with'",
+
+            // Verification (1)
+            AssertKw => "'assert'",
 
             Ident => "identifier",
             IntLiteral => "integer literal",
             BinLiteral => "binary literal",
             HexLiteral => "hexadecimal literal",
             StringLiteral => "string literal",
+            Lifetime => "lifetime",
 
             NonBlockingAssign => "'<='",
             BlockingAssign => "':='",
@@ -471,95 +490,80 @@ impl From<crate::lexer::Token> for SyntaxKind {
         use crate::lexer::Token;
 
         match token {
+            // Core Hardware Description (12)
             Token::Entity => EntityKw,
             Token::Impl => ImplKw,
+            Token::Signal => SignalKw,
+            Token::Var => VarKw,
+            Token::Const => ConstKw,
             Token::In => InKw,
             Token::Out => OutKw,
             Token::Inout => InoutKw,
-            Token::Signal => SignalKw,
-            Token::Var => VarKw,
-            Token::Let => LetKw,
-            Token::Const => ConstKw,
+            Token::Port => PortKw,
             Token::On => OnKw,
             Token::If => IfKw,
             Token::Else => ElseKw,
-            Token::Match => MatchKw,
-            Token::Flow => FlowKw,
-            Token::With => WithKw,
-            Token::Intent => IntentKw,
-            Token::Protocol => ProtocolKw,
-            Token::Requirement => RequirementKw,
-            Token::Async => AsyncKw,
-            Token::Await => AwaitKw,
-            Token::Trait => TraitKw,
-            Token::For => ForKw,
-            Token::Type => TypeKw,
-            Token::Where => WhereKw,
-            Token::Fn => FnKw,
-            Token::Return => ReturnKw,
-            Token::Break => BreakKw,
-            Token::Continue => ContinueKw,
-            Token::Loop => LoopKw,
-            Token::While => WhileKeyword,
-            Token::Pub => PubKw,
-            Token::Mod => ModKw,
-            Token::Use => UseKw,
-            Token::Crate => CrateKw,
-            Token::Super => SuperKw,
-            Token::SelfKeyword => SelfKw,
-            Token::SelfType => SelfTypeKw,
-            Token::Static => StaticKw,
-            Token::Mut => MutKw,
-            Token::Ref => RefKw,
-            Token::Timing => TimingKw,
-            Token::Power => PowerKw,
-            Token::Area => AreaKw,
-            Token::Throughput => ThroughputKw,
-            Token::Latency => LatencyKw,
-            Token::Minimize => MinimizeKw,
-            Token::Maximize => MaximizeKw,
+            Token::AssignKw => AssignKw,
 
+            // Type System (10) - Updated to include numeric types
             Token::Bit => BitKw,
-            Token::Logic => LogicKw,
-            Token::Int => IntKw,
             Token::Nat => NatKw,
-            Token::Fixed => FixedKw,
+            Token::Int => IntKw,
+            Token::Logic => LogicKw,
             Token::Clock => ClockKw,
             Token::Reset => ResetKw,
-            Token::Event => EventKw,
+            Token::Type => TypeKw,
             Token::Stream => StreamKw,
+            Token::Struct => StructKw,
+            Token::Enum => EnumKw,
+            Token::Union => UnionKw,
 
+            // Traits and Generics (5)
+            Token::Trait => TraitKw,
+            Token::Protocol => ProtocolKw,
+            Token::Where => WhereKw,
+            Token::SelfKeyword => SelfKw,
+            Token::SelfType => SelfTypeKw,
+
+
+            // Event Control (2)
             Token::Rise => RiseKw,
             Token::Fall => FallKw,
-            Token::Edge => EdgeKw,
-            Token::Posedge => PosedgeKw,
-            Token::Negedge => NegedgeKw,
-            Token::Always => AlwaysKw,
-            Token::Initial => InitialKw,
-            Token::Final => FinalKw,
-            Token::Fork => ForkKw,
-            Token::Join => JoinKw,
-            Token::Disable => DisableKw,
-            Token::Wait => WaitKw,
-            Token::AssignKeyword => AssignKeywordKw,
-            Token::Force => ForceKw,
-            Token::Release => ReleaseKw,
+
+            // Control Flow (2)
+            Token::Match => MatchKw,
+            Token::For => ForKw,
+
+            // Design Intent (3)
+            Token::Intent => IntentKw,
+            Token::Flow => FlowKw,
+            Token::Requirement => RequirementKw,
+
+            // Testbench Only (5)
+            Token::Async => AsyncKw,
+            Token::Await => AwaitKw,
+            Token::Fn => FnKw,
+            Token::Return => ReturnKw,
+            Token::Let => LetKw,
+
+            // Type Conversion (1)
+            Token::As => AsKw,
+
+            // Module System (4)
+            Token::Use => UseKw,
+            Token::Mod => ModKw,
+            Token::Pub => PubKw,
+            Token::With => WithKw,
+
+            // Verification (1)
             Token::Assert => AssertKw,
-            Token::Assume => AssumeKw,
-            Token::Cover => CoverKw,
-            Token::Property => PropertyKw,
-            Token::Sequence => SequenceKw,
-            Token::Eventually => EventuallyKw,
-            Token::AlwaysFF => AlwaysFFKw,
-            Token::AlwaysComb => AlwaysCombKw,
-            Token::Unique => UniqueKw,
-            Token::Priority => PriorityKw,
 
             Token::Identifier(_) => Ident,
             Token::DecimalLiteral(_) => IntLiteral,
             Token::BinaryLiteral(_) => BinLiteral,
             Token::HexLiteral(_) => HexLiteral,
             Token::StringLiteral(_) => StringLiteral,
+            Token::Lifetime(_) => Lifetime,
 
             Token::NonBlockingAssign => NonBlockingAssign,
             Token::BlockingAssign => BlockingAssign,
@@ -585,6 +589,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::LeftShift => Shl,
             Token::RightShift => Shr,
             Token::Pipeline => Pipeline,
+            Token::FatArrow => FatArrow,
             Token::Arrow => Arrow,
             Token::LeftArrow => LeftArrow,
 
@@ -596,6 +601,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::RightBrace => RBrace,
             Token::Comma => Comma,
             Token::Semicolon => Semicolon,
+            Token::ColonColon => ColonColon,
             Token::Colon => Colon,
             Token::Dot => Dot,
             Token::Question => Question,

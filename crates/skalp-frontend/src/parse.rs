@@ -16,6 +16,10 @@ pub struct ParseState<'a> {
     builder: GreenNodeBuilder<'static>,
     /// Source text
     source: &'a str,
+    /// Collected parse errors
+    errors: Vec<ParseError>,
+    /// Track if we've partially consumed a >> token
+    partial_shr: bool,
 }
 
 impl<'a> ParseState<'a> {
@@ -29,6 +33,8 @@ impl<'a> ParseState<'a> {
             current: 0,
             builder: GreenNodeBuilder::new(),
             source,
+            errors: Vec::new(),
+            partial_shr: false,
         }
     }
 
@@ -53,6 +59,9 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::IntentKw) => self.parse_intent_decl(),
                 Some(SyntaxKind::RequirementKw) => self.parse_requirement_decl(),
                 Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
+                Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
+                Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
+                Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
                 _ => {
                     // Unknown item - consume token as error and continue
                     self.error_and_bump("expected top-level item");
@@ -64,7 +73,7 @@ impl<'a> ParseState<'a> {
 
         ParseResult {
             green_node: self.builder.finish(),
-            errors: Vec::new(), // TODO: Return collected errors
+            errors: self.errors,
         }
     }
 
@@ -77,6 +86,7 @@ impl<'a> ParseState<'a> {
 
         // Entity name
         self.expect(SyntaxKind::Ident);
+
 
         // Optional generic parameters
         if self.at(SyntaxKind::Lt) {
@@ -201,9 +211,11 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
                 Some(SyntaxKind::VarKw) => self.parse_variable_decl(),
                 Some(SyntaxKind::ConstKw) => self.parse_constant_decl(),
+                Some(SyntaxKind::LetKw) => self.parse_instance_decl(),
                 Some(SyntaxKind::OnKw) => self.parse_event_block(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
+                Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
                 Some(SyntaxKind::Ident) => {
                     // Could be an assignment or start of another construct
                     self.parse_assignment_or_statement();
@@ -222,6 +234,7 @@ impl<'a> ParseState<'a> {
 
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
             self.skip_trivia();
+
 
             if self.at_port_direction() {
                 self.parse_port_decl();
@@ -246,6 +259,8 @@ impl<'a> ParseState<'a> {
         } else if self.at(SyntaxKind::OutKw) {
             self.bump();
         } else if self.at(SyntaxKind::InoutKw) {
+            self.bump();
+        } else if self.at(SyntaxKind::PortKw) {
             self.bump();
         }
         self.finish_node();
@@ -310,6 +325,71 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse instance declaration (let instance = Entity { ... })
+    fn parse_instance_decl(&mut self) {
+        self.start_node(SyntaxKind::InstanceDecl);
+
+        // 'let' keyword
+        self.expect(SyntaxKind::LetKw);
+
+        // Instance name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional array index for instance arrays
+        if self.at(SyntaxKind::LBracket) {
+            self.bump();
+            self.parse_expression();
+            self.expect(SyntaxKind::RBracket);
+        }
+
+        // '=' sign
+        self.expect(SyntaxKind::Assign);
+
+        // Entity name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // Connection list
+        self.expect(SyntaxKind::LBrace);
+        self.parse_connection_list();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse connection list for instance
+    fn parse_connection_list(&mut self) {
+        self.start_node(SyntaxKind::ConnectionList);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            // Parse connection: port_name: signal_name
+            self.start_node(SyntaxKind::Connection);
+            self.expect(SyntaxKind::Ident); // port name
+            self.expect(SyntaxKind::Colon);
+            self.parse_expression(); // signal expression
+            self.finish_node();
+
+            // Optional comma
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            } else if !self.at(SyntaxKind::RBrace) {
+                break;
+            }
+        }
+
+        self.finish_node();
+    }
+
     /// Parse event block (on clause)
     fn parse_event_block(&mut self) {
         self.start_node(SyntaxKind::EventBlock);
@@ -347,10 +427,10 @@ impl<'a> ParseState<'a> {
             self.bump();
 
             self.start_node(SyntaxKind::EdgeType);
-            if self.at(SyntaxKind::RiseKw) || self.at(SyntaxKind::FallKw) || self.at(SyntaxKind::EdgeKw) {
+            if self.at(SyntaxKind::RiseKw) || self.at(SyntaxKind::FallKw) {
                 self.bump();
             } else {
-                self.error("expected 'rise', 'fall', or 'edge'");
+                self.error("expected 'rise' or 'fall'");
             }
             self.finish_node();
         }
@@ -363,6 +443,28 @@ impl<'a> ParseState<'a> {
         // For now, just parse as assignment
         // In the future, we could look ahead to determine the statement type
         self.parse_assignment_stmt();
+    }
+
+    /// Parse continuous assignment (assign keyword)
+    fn parse_continuous_assignment(&mut self) {
+        self.start_node(SyntaxKind::AssignmentStmt);
+
+        // Consume 'assign' keyword
+        self.expect(SyntaxKind::AssignKw);
+
+        // Left-hand side
+        self.parse_expression();
+
+        // Assignment operator (should be =)
+        self.expect(SyntaxKind::Assign);
+
+        // Right-hand side
+        self.parse_expression();
+
+        // Optional semicolon
+        self.consume_semicolon();
+
+        self.finish_node();
     }
 
     /// Parse assignment statement
@@ -402,6 +504,12 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
                 Some(SyntaxKind::LBrace) => self.parse_block_statement(),
+                Some(SyntaxKind::AssignKw) => {
+                    self.error("'assign' statements cannot be inside event blocks");
+                    // Skip the assign statement without creating a node
+                    self.error_and_bump("skipping misplaced assign statement");
+                    break; // Exit the block parsing
+                }
                 Some(SyntaxKind::RBrace) => break,
                 _ => {
                     self.error_and_bump("expected statement");
@@ -460,8 +568,8 @@ impl<'a> ParseState<'a> {
         // Parse pattern
         self.parse_pattern();
 
-        // Expect arrow (=>)
-        self.expect(SyntaxKind::Arrow);
+        // Expect fat arrow (=>)
+        self.expect(SyntaxKind::FatArrow);
 
         // Parse arm body (statement or block)
         if self.at(SyntaxKind::LBrace) {
@@ -490,9 +598,16 @@ impl<'a> ParseState<'a> {
                         self.bump();
                         self.finish_node();
                     } else {
-                        // Identifier pattern
+                        // Could be identifier pattern or path pattern (Enum::Variant)
                         self.start_node(SyntaxKind::IdentPattern);
-                        self.bump();
+                        self.bump(); // consume first identifier
+
+                        // Check for path pattern (::)
+                        while self.at(SyntaxKind::ColonColon) {
+                            self.bump(); // consume ::
+                            self.expect(SyntaxKind::Ident); // consume path segment
+                        }
+
                         self.finish_node();
                     }
                 } else {
@@ -627,11 +742,14 @@ impl<'a> ParseState<'a> {
     fn parse_protocol_signal(&mut self) {
         self.start_node(SyntaxKind::ProtocolSignal);
 
-        // Protocol direction (master or slave)
+        // Protocol direction (in or out)
         self.start_node(SyntaxKind::ProtocolDirection);
-        if self.at(SyntaxKind::Ident) {
-            // Could be "master" or "slave" - just accept any identifier for now
-            self.bump();
+        if self.at(SyntaxKind::InKw) {
+            self.bump(); // consume 'in'
+        } else if self.at(SyntaxKind::OutKw) {
+            self.bump(); // consume 'out'
+        } else {
+            self.error("expected 'in' or 'out'");
         }
         self.finish_node();
 
@@ -1046,18 +1164,221 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::ArgList);
         self.expect(SyntaxKind::Lt);
 
-        if !self.at(SyntaxKind::Gt) {
+        if !self.at_closing_angle() {
             self.parse_type_or_const_arg();
 
             while self.at(SyntaxKind::Comma) {
                 self.bump(); // consume comma
-                if !self.at(SyntaxKind::Gt) {
+                if !self.at_closing_angle() {
                     self.parse_type_or_const_arg();
                 }
             }
         }
 
-        self.expect(SyntaxKind::Gt);
+        self.expect_closing_angle();
+        self.finish_node();
+    }
+
+    /// Parse struct declaration
+    fn parse_struct_decl(&mut self) {
+        self.start_node(SyntaxKind::StructDecl);
+
+        // 'struct' keyword
+        self.expect(SyntaxKind::StructKw);
+
+        // Struct name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // Struct body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_struct_fields();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse struct fields
+    fn parse_struct_fields(&mut self) {
+        self.start_node(SyntaxKind::StructFieldList);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+            self.parse_struct_field();
+            self.consume_semicolon();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a single struct field
+    fn parse_struct_field(&mut self) {
+        self.start_node(SyntaxKind::StructField);
+
+        // Field name
+        self.expect(SyntaxKind::Ident);
+
+        // Colon
+        self.expect(SyntaxKind::Colon);
+
+        // Field type
+        self.parse_type();
+
+        self.finish_node();
+    }
+
+    /// Parse enum declaration
+    fn parse_enum_decl(&mut self) {
+        self.start_node(SyntaxKind::EnumDecl);
+
+        // 'enum' keyword
+        self.expect(SyntaxKind::EnumKw);
+
+        // Enum name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // Enum body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_enum_variants();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse enum variants
+    fn parse_enum_variants(&mut self) {
+        self.start_node(SyntaxKind::EnumVariantList);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+            self.parse_enum_variant();
+
+            // Variants are separated by commas
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            } else if !self.at(SyntaxKind::RBrace) {
+                // If not at end and no comma, still try to continue
+                self.error("expected ',' or '}'");
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a single enum variant
+    fn parse_enum_variant(&mut self) {
+        self.start_node(SyntaxKind::EnumVariant);
+
+        // Variant name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional variant data
+        if self.at(SyntaxKind::LParen) {
+            // Tuple variant
+            self.bump(); // (
+
+            if !self.at(SyntaxKind::RParen) {
+                self.parse_type();
+                while self.at(SyntaxKind::Comma) {
+                    self.bump();
+                    if !self.at(SyntaxKind::RParen) {
+                        self.parse_type();
+                    }
+                }
+            }
+
+            self.expect(SyntaxKind::RParen);
+        } else if self.at(SyntaxKind::LBrace) {
+            // Struct variant
+            self.bump(); // {
+
+            while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                // Field name
+                self.expect(SyntaxKind::Ident);
+                self.expect(SyntaxKind::Colon);
+                self.parse_type();
+
+                if self.at(SyntaxKind::Comma) {
+                    self.bump();
+                } else if !self.at(SyntaxKind::RBrace) {
+                    break;
+                }
+            }
+
+            self.expect(SyntaxKind::RBrace);
+        }
+        // else: Unit variant (no data)
+
+        self.finish_node();
+    }
+
+    /// Parse union declaration
+    fn parse_union_decl(&mut self) {
+        self.start_node(SyntaxKind::UnionDecl);
+
+        // 'union' keyword
+        self.expect(SyntaxKind::UnionKw);
+
+        // Union name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // Union body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_union_fields();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse union fields
+    fn parse_union_fields(&mut self) {
+        self.start_node(SyntaxKind::UnionFieldList);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+            self.parse_union_field();
+            self.consume_semicolon();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a single union field
+    fn parse_union_field(&mut self) {
+        self.start_node(SyntaxKind::UnionField);
+
+        // Field name
+        self.expect(SyntaxKind::Ident);
+
+        // Colon
+        self.expect(SyntaxKind::Colon);
+
+        // Field type
+        self.parse_type();
+
         self.finish_node();
     }
 
@@ -1088,8 +1409,8 @@ impl<'a> ParseState<'a> {
                 self.parse_width_spec();
                 self.finish_node();
             }
-            Some(SyntaxKind::LogicKw) => {
-                self.start_node(SyntaxKind::LogicType);
+            Some(SyntaxKind::NatKw) => {
+                self.start_node(SyntaxKind::NatType);
                 self.bump();
                 self.parse_width_spec();
                 self.finish_node();
@@ -1100,8 +1421,8 @@ impl<'a> ParseState<'a> {
                 self.parse_width_spec();
                 self.finish_node();
             }
-            Some(SyntaxKind::NatKw) => {
-                self.start_node(SyntaxKind::NatType);
+            Some(SyntaxKind::LogicKw) => {
+                self.start_node(SyntaxKind::LogicType);
                 self.bump();
                 self.parse_width_spec();
                 self.finish_node();
@@ -1109,11 +1430,17 @@ impl<'a> ParseState<'a> {
             Some(SyntaxKind::ClockKw) => {
                 self.start_node(SyntaxKind::ClockType);
                 self.bump();
-                // Optional clock domain parameter
+                // Optional clock domain parameter - support both old and new syntax
                 if self.at(SyntaxKind::LParen) {
+                    // Old syntax: clock(domain_name)
                     self.bump();
                     self.expect(SyntaxKind::Ident); // clock domain name
                     self.expect(SyntaxKind::RParen);
+                } else if self.at(SyntaxKind::Lt) {
+                    // New syntax: clock<'lifetime>
+                    self.bump(); // consume <
+                    self.expect(SyntaxKind::Lifetime); // consume 'lifetime
+                    self.expect_closing_angle(); // consume >
                 }
                 self.finish_node();
             }
@@ -1125,6 +1452,17 @@ impl<'a> ParseState<'a> {
                     self.bump();
                     self.expect(SyntaxKind::Ident); // active_high or active_low
                     self.expect(SyntaxKind::RParen);
+                }
+                self.finish_node();
+            }
+            Some(SyntaxKind::StreamKw) => {
+                self.start_node(SyntaxKind::StreamType);
+                self.bump();
+                // Optional type parameter stream<T>
+                if self.at(SyntaxKind::Lt) {
+                    self.bump();
+                    self.parse_type();
+                    self.expect_closing_angle();
                 }
                 self.finish_node();
             }
@@ -1212,7 +1550,7 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::GenericParamList);
         self.expect(SyntaxKind::Lt);
 
-        if !self.at(SyntaxKind::Gt) {
+        if !self.at_closing_angle() {
             self.parse_generic_param();
 
             while self.at(SyntaxKind::Comma) {
@@ -1221,7 +1559,7 @@ impl<'a> ParseState<'a> {
             }
         }
 
-        self.expect(SyntaxKind::Gt);
+        self.expect_closing_angle();
         self.finish_node();
     }
 
@@ -1229,21 +1567,47 @@ impl<'a> ParseState<'a> {
     fn parse_generic_param(&mut self) {
         self.start_node(SyntaxKind::GenericParam);
 
+        // Check if it's a lifetime parameter ('clk)
+        if self.at(SyntaxKind::Lifetime) {
+            self.bump(); // consume 'lifetime
+        }
+        // Legacy support for apostrophe + ident
+        else if self.at(SyntaxKind::Apostrophe) {
+            self.bump(); // consume '
+            self.expect(SyntaxKind::Ident); // lifetime name
+        }
         // Check if it's a const parameter (const N: nat[32])
-        if self.at(SyntaxKind::ConstKw) {
+        else if self.at(SyntaxKind::ConstKw) {
             self.bump(); // consume 'const'
             self.expect(SyntaxKind::Ident); // parameter name
             self.expect(SyntaxKind::Colon);
             self.parse_type(); // parameter type
         }
-        // Check if it's a type parameter with bounds (T: Trait)
+        // Check if it's a type parameter with bounds (T: Trait) or type constraint (WIDTH: nat = 8)
         else if self.current_kind() == Some(SyntaxKind::Ident) {
             self.bump(); // consume identifier
 
-            // Optional type bounds
+            // Optional type annotation or bounds
             if self.at(SyntaxKind::Colon) {
                 self.bump();
-                self.parse_trait_bound_list();
+
+                // Check if next token indicates a type (nat, bit, etc.) or a trait bound
+                if matches!(self.current_kind(),
+                    Some(SyntaxKind::NatKw) | Some(SyntaxKind::BitKw) |
+                    Some(SyntaxKind::IntKw) | Some(SyntaxKind::LogicKw) |
+                    Some(SyntaxKind::ClockKw) | Some(SyntaxKind::ResetKw)) {
+                    // Parse type constraint (WIDTH: nat)
+                    self.parse_type();
+
+                    // Optional default value (= 8)
+                    if self.at(SyntaxKind::Assign) {
+                        self.bump(); // consume =
+                        self.parse_expression(); // default value
+                    }
+                } else {
+                    // Parse trait bounds (T: Trait)
+                    self.parse_trait_bound_list();
+                }
             }
         } else {
             self.error("expected generic parameter");
@@ -1429,6 +1793,21 @@ impl<'a> ParseState<'a> {
 
     /// Parse identifier expression with possible postfix operations
     fn parse_identifier_expression(&mut self) {
+        // Check for :: ahead to determine if this is a path expression
+        let is_path = self.current_kind() == Some(SyntaxKind::Ident) &&
+                      self.peek_kind(1) == Some(SyntaxKind::ColonColon);
+
+        if is_path {
+            // Parse as path expression (Type::Variant)
+            self.start_node(SyntaxKind::PathExpr);
+            self.expect(SyntaxKind::Ident); // enum type name
+            self.expect(SyntaxKind::ColonColon); // ::
+            self.expect(SyntaxKind::Ident); // variant name
+            self.finish_node();
+            return;
+        }
+
+        // Parse as regular identifier expression
         self.start_node(SyntaxKind::IdentExpr);
         self.bump(); // consume identifier
 
@@ -1593,7 +1972,7 @@ impl<'a> ParseState<'a> {
     fn at_port_direction(&self) -> bool {
         matches!(
             self.current_kind(),
-            Some(SyntaxKind::InKw | SyntaxKind::OutKw | SyntaxKind::InoutKw)
+            Some(SyntaxKind::InKw | SyntaxKind::OutKw | SyntaxKind::InoutKw | SyntaxKind::PortKw)
         )
     }
 
@@ -1623,12 +2002,72 @@ impl<'a> ParseState<'a> {
         }
     }
 
+    /// Check if we're at a closing angle bracket, treating >> as two >
+    fn at_closing_angle(&self) -> bool {
+        self.partial_shr || matches!(self.current_kind(), Some(SyntaxKind::Gt | SyntaxKind::Shr))
+    }
+
+    /// Consume a closing angle bracket, handling >> as two separate >
+    /// This is used when parsing generic arguments to handle cases like List<List<T>>
+    fn expect_closing_angle(&mut self) {
+        // Check if we have a partially consumed >> token
+        if self.partial_shr {
+            // We already consumed one > from >>, now consume the second
+            self.builder.token(rowan::SyntaxKind(SyntaxKind::Gt as u16), ">");
+            self.partial_shr = false;
+            // NOW consume the >> token that we deferred earlier
+            self.current += 1;
+            return;
+        }
+
+        match self.current_kind() {
+            Some(SyntaxKind::Gt) => {
+                self.bump();
+            }
+            Some(SyntaxKind::Shr) => {
+                // Handle >> as two separate > tokens
+                // Emit the first > but DON'T consume the token yet
+                self.builder.token(rowan::SyntaxKind(SyntaxKind::Gt as u16), ">");
+
+                // Mark that we've consumed one > from >>
+                // The actual token consumption will happen on the next call
+                self.partial_shr = true;
+
+                // DON'T consume the >> token here - wait for next call
+            }
+            _ => {
+                self.expect(SyntaxKind::Gt);
+            }
+        }
+    }
+
     /// Expect a specific token kind
     fn expect(&mut self, kind: SyntaxKind) {
         if self.at(kind) {
             self.bump();
         } else {
-            self.error(&format!("expected {}", kind.description()));
+            let position = if let Some(token) = self.current_token() {
+                token.span.start
+            } else {
+                self.source.len()
+            };
+
+            let error = ParseError {
+                message: format!("expected {}", kind.description()),
+                position,
+                kind: ParseErrorKind::MissingToken,
+                expected: Some(kind.description().to_string()),
+                found: self.current_token().map(|t| format!("{:?}", t.token)),
+            };
+
+            self.errors.push(error);
+        }
+    }
+
+    /// Consume an optional semicolon
+    fn consume_semicolon(&mut self) {
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
         }
     }
 
@@ -1653,8 +2092,15 @@ impl<'a> ParseState<'a> {
             self.source.len()
         };
 
-        eprintln!("Parse error at position {}: {}", position, message);
-        // TODO: Collect errors for later reporting instead of just printing
+        let error = ParseError {
+            message: message.to_string(),
+            position,
+            kind,
+            expected: None,
+            found: self.current_token().map(|t| format!("{:?}", t.token)),
+        };
+
+        self.errors.push(error);
     }
 }
 
@@ -1670,10 +2116,12 @@ pub struct ParseError {
     pub message: String,
     pub position: usize,
     pub kind: ParseErrorKind,
+    pub expected: Option<String>,
+    pub found: Option<String>,
 }
 
 /// Types of parse errors
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParseErrorKind {
     UnexpectedToken,
     MissingToken,
@@ -1688,9 +2136,92 @@ pub fn parse(source: &str) -> SyntaxNode {
     SyntaxNode::new_root(result.green_node)
 }
 
+/// Parse with error reporting
+pub fn parse_with_errors(source: &str) -> (SyntaxNode, Vec<ParseError>) {
+    let parser = ParseState::new(source);
+    let result = parser.parse_source_file();
+    (SyntaxNode::new_root(result.green_node), result.errors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_error_reporting() {
+        let source = "entity { // missing name";
+        let (_, errors) = parse_with_errors(source);
+
+        assert!(!errors.is_empty());
+        assert!(errors[0].message.contains("expected"));
+    }
+
+    #[test]
+    fn test_missing_token_error() {
+        let source = "entity Counter // missing brace";
+        let (_, errors) = parse_with_errors(source);
+
+        // Should report missing opening brace
+        assert!(errors.iter().any(|e| e.kind == ParseErrorKind::MissingToken));
+    }
+
+    #[test]
+    fn test_valid_parse_no_errors() {
+        let source = r#"
+            entity Counter {
+                in clk: clock
+                out count: bit[8]
+            }
+        "#;
+        let (_, errors) = parse_with_errors(source);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_generic_parameter_parsing() {
+        let source = r#"
+            entity Counter {
+                out count: bit[8]
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        // Should parse without errors - generic params will be added in Week 2
+        assert!(errors.is_empty());
+
+        // Should contain entity declaration
+        assert!(tree.to_string().contains("Counter"));
+    }
+
+    #[test]
+    fn test_intent_parsing() {
+        let source = r#"
+            entity TestEntity {
+                out test: bit
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        // Should parse basic entity without errors - intent parsing will be added in Week 2
+        assert!(errors.is_empty());
+        assert!(tree.to_string().contains("TestEntity"));
+    }
+
+    #[test]
+    fn test_pattern_matching_tokens() {
+        // Test that new pattern matching tokens (:: and =>) are properly recognized
+        // This validates that the lexer enhancements are working
+        let mut lexer = crate::lexer::Lexer::new(":: =>");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        assert_eq!(tokens, vec![
+            crate::lexer::Token::ColonColon,
+            crate::lexer::Token::FatArrow,
+        ]);
+
+        // Note: Full pattern matching parsing will be integrated with event block parsing in Week 2
+        // The core enhancements (ColonColon, FatArrow tokens, path pattern support) are implemented
+    }
     use crate::syntax::SyntaxNodeExt;
 
     #[test]

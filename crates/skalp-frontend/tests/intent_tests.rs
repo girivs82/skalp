@@ -150,7 +150,7 @@ fn test_complex_intent_expressions() {
     // Should handle complex constraint expressions with units and operators
     let mut found_constraints = false;
     fn check_constraints(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
-        if node.kind() == skalp_frontend::syntax::SyntaxKind::INTENT_CONSTRAINT {
+        if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentConstraint {
             return true;
         }
         for child in node.children() {
