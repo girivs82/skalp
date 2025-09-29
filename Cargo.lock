@@ -2082,6 +2082,7 @@ dependencies = [
  "skalp-lir",
  "skalp-mir",
  "skalp-sim",
+ "skalp-sir",
  "skalp-testing",
  "tempfile",
  "thiserror",
@@ -2270,6 +2271,18 @@ dependencies = [
  "skalp-mir",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "skalp-sir"
+version = "0.1.0"
+dependencies = [
+ "cocoa-foundation",
+ "metal",
+ "objc",
+ "skalp-frontend",
+ "skalp-mir",
+ "thiserror",
 ]
 
 [[package]]

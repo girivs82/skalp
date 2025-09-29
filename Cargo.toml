@@ -48,6 +48,7 @@ skalp-frontend = { path = "crates/skalp-frontend" }
 skalp-mir = { path = "crates/skalp-mir" }
 skalp-codegen = { path = "crates/skalp-codegen" }
 skalp-lir = { path = "crates/skalp-lir" }
+skalp-sir = { path = "crates/skalp-sir" }
 skalp-sim = { path = "crates/skalp-sim" }
 skalp-backends = { path = "crates/skalp-backends" }
 skalp-testing = { path = "crates/skalp-testing" }

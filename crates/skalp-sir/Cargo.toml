@@ -1,0 +1,12 @@
+[package]
+name = "skalp-sir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skalp-mir = { path = "../skalp-mir" }
+skalp-frontend = { path = "../skalp-frontend" }
+metal = "0.27"
+objc = "0.2"
+cocoa-foundation = "0.1"
+thiserror = "1.0"

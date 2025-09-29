@@ -543,7 +543,6 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
                 String::new()
             }
         }
-        _ => String::new(),
     }
 }
 
