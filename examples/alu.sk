@@ -1,0 +1,50 @@
+// Arithmetic Logic Unit for testing complex combinational logic
+entity ALU {
+    in a: bit[32]
+    in b: bit[32]
+    in op: bit[3]
+    in clk: clock
+    out result: bit[32]
+    out zero: bit[1]
+    out overflow: bit[1]
+}
+
+impl ALU {
+    signal result_comb: bit[32]
+    signal zero_comb: bit[1]
+    signal overflow_comb: bit[1]
+
+    // Combinational logic for ALU operations
+    always_comb {
+        case(op) {
+            0b000: result_comb = a + b           // ADD
+            0b001: result_comb = a - b           // SUB
+            0b010: result_comb = a & b           // AND
+            0b011: result_comb = a | b           // OR
+            0b100: result_comb = a ^ b           // XOR
+            0b101: result_comb = a << b[4:0]     // SHL
+            0b110: result_comb = a >> b[4:0]     // SHR
+            0b111: result_comb = (a < b) ? 1 : 0 // SLT
+        }
+
+        zero_comb = (result_comb == 0) ? 1 : 0
+
+        // Overflow detection for ADD/SUB
+        if (op == 0b000) {
+            overflow_comb = (~a[31] & ~b[31] & result_comb[31]) |
+                           (a[31] & b[31] & ~result_comb[31])
+        } else if (op == 0b001) {
+            overflow_comb = (~a[31] & b[31] & result_comb[31]) |
+                           (a[31] & ~b[31] & ~result_comb[31])
+        } else {
+            overflow_comb = 0
+        }
+    }
+
+    // Register outputs
+    on(clk.rise) {
+        result <= result_comb
+        zero <= zero_comb
+        overflow <= overflow_comb
+    }
+}

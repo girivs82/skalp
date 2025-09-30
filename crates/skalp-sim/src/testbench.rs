@@ -1,4 +1,5 @@
 use crate::simulator::{Simulator, SimulationConfig, SimulationResult, SimulationError};
+use crate::clock_manager::ClockManager;
 use skalp_sir::SirModule;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,7 +12,7 @@ pub struct TestVector {
     pub expected_outputs: Option<HashMap<String, Vec<u8>>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TestResult {
     pub passed: bool,
     pub cycle: u64,
@@ -19,7 +20,7 @@ pub struct TestResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SignalMismatch {
     pub signal_name: String,
     pub expected: Vec<u8>,
@@ -31,6 +32,8 @@ pub struct Testbench {
     simulator: Simulator,
     test_vectors: Vec<TestVector>,
     results: Vec<TestResult>,
+    clock_manager: ClockManager,
+    auto_clock: bool,
 }
 
 impl Testbench {
@@ -41,10 +44,24 @@ impl Testbench {
             simulator,
             test_vectors: Vec::new(),
             results: Vec::new(),
+            clock_manager: ClockManager::new(),
+            auto_clock: true,  // Enable auto-clocking by default
         })
     }
 
+    pub fn with_auto_clock(mut self, enabled: bool) -> Self {
+        self.auto_clock = enabled;
+        self
+    }
+
     pub async fn load_module(&mut self, module: &SirModule) -> SimulationResult<()> {
+        // Register clocks from the module
+        for input in &module.inputs {
+            if input.name.contains("clk") || input.name.contains("clock") {
+                self.clock_manager.add_clock(input.name.clone(), 10_000);  // 10ns period
+            }
+        }
+
         self.simulator.load_module(module).await
     }
 
@@ -60,6 +77,7 @@ impl Testbench {
         // Reset the simulator
         self.simulator.reset().await?;
         self.results.clear();
+        self.clock_manager.reset();
 
         // Sort test vectors by cycle
         self.test_vectors.sort_by_key(|v| v.cycle);
@@ -72,6 +90,17 @@ impl Testbench {
 
             // Run simulation until the next test vector cycle
             while current_cycle < vector.cycle {
+                // Toggle clocks if auto-clock is enabled
+                if self.auto_clock {
+                    for (clock_name, _) in self.clock_manager.clocks.clone() {
+                        let edge = self.clock_manager.toggle_clock(&clock_name);
+                        if let Some(edge) = edge {
+                            let value = self.clock_manager.get_clock_value(&clock_name).unwrap_or(false);
+                            self.simulator.set_input(&clock_name, vec![value as u8]).await?;
+                        }
+                    }
+                }
+
                 self.simulator.step_simulation().await?;
                 current_cycle += 1;
             }
@@ -81,9 +110,25 @@ impl Testbench {
                 self.simulator.set_input(name, value.clone()).await?;
             }
 
-            // Step once to propagate inputs
-            self.simulator.step_simulation().await?;
-            current_cycle += 1;
+            // Step twice to ensure clock edge if auto-clocking
+            if self.auto_clock {
+                // Rising edge
+                for (clock_name, _) in self.clock_manager.clocks.clone() {
+                    self.simulator.set_input(&clock_name, vec![1]).await?;
+                }
+                self.simulator.step_simulation().await?;
+
+                // Falling edge
+                for (clock_name, _) in self.clock_manager.clocks.clone() {
+                    self.simulator.set_input(&clock_name, vec![0]).await?;
+                }
+                self.simulator.step_simulation().await?;
+                current_cycle += 2;
+            } else {
+                // Step once to propagate inputs
+                self.simulator.step_simulation().await?;
+                current_cycle += 1;
+            }
 
             // Check outputs if expected values are provided
             if let Some(expected_outputs) = &vector.expected_outputs {

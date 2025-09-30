@@ -93,9 +93,10 @@ impl Waveform {
         let mut signal_map = HashMap::new();
 
         for (name, signal) in &self.signals {
-            let id = std::str::from_utf8(&[identifier]).unwrap();
+            let id_char = identifier as char;
+            let id = id_char.to_string();
             writeln!(writer, "$var wire {} {} {} $end", signal.width, id, name)?;
-            signal_map.insert(name.clone(), id.to_string());
+            signal_map.insert(name.clone(), id.clone());
             identifier += 1;
             if identifier > 126 {
                 identifier = 33; // Wrap around if needed

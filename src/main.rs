@@ -233,7 +233,7 @@ skalpc synth src/main.sk --device ice40-hx8k
 fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<()> {
     use skalp_frontend::parse_and_build_hir;
     use skalp_lir::lower_to_lir;
-    use skalp_codegen::{generate_verilog, generate_vhdl, generate_systemverilog, generate_systemverilog_from_mir};
+    use skalp_codegen::{generate_verilog, generate_vhdl, generate_systemverilog_from_mir};
 
     info!("Building design from {:?} to {}", source, target);
 
@@ -306,9 +306,11 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
 
 /// Simulate design using GPU-accelerated simulation
 fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> {
-    use skalp_sim::MirToSir;
-    use skalp_lir::LirDesign;
     use skalp_mir::Mir;
+    use skalp_sir::convert_mir_to_sir;
+    use skalp_sim::{Simulator, SimulationConfig};
+    use skalp_sim::waveform::Waveform;
+    use tokio::runtime::Runtime;
 
     info!("Loading design from {:?}", design_file);
 
@@ -316,16 +318,16 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
     let design_str = fs::read_to_string(design_file)?;
 
     let sir = if design_file.extension() == Some(std::ffi::OsStr::new("lir")) {
-        // Load LIR and convert to MIR then SIR
-        let lir: LirDesign = serde_json::from_str(&design_str)?;
-        // Convert LIR -> MIR -> SIR (simplified for now)
-        let mir = Mir::new(lir.name.clone());
-        let mut transformer = MirToSir::new();
-        transformer.transform(&mir)
+        // For LIR files, we need to first convert to MIR, then to SIR
+        anyhow::bail!("LIR to SIR conversion not yet implemented. Please use .mir files for simulation");
     } else if design_file.extension() == Some(std::ffi::OsStr::new("mir")) {
+        // Load MIR and convert to SIR
         let mir: Mir = serde_json::from_str(&design_str)?;
-        let mut transformer = MirToSir::new();
-        transformer.transform(&mir)
+        // Use the first module in the MIR
+        if mir.modules.is_empty() {
+            anyhow::bail!("No modules found in MIR");
+        }
+        convert_mir_to_sir(&mir.modules[0])
     } else {
         anyhow::bail!("Unsupported file format. Use .lir or .mir files");
     };
@@ -346,12 +348,40 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
     println!("🚀 Starting GPU-accelerated simulation...");
     println!("⏱️  Simulating {} cycles", cycles);
 
-    println!("⚠️  GPU simulation not yet fully integrated in CLI");
-    println!("   Would simulate {} cycles", cycles);
+    // Create async runtime for simulation
+    let runtime = Runtime::new()?;
 
-    println!("✅ Simulation would be complete!");
+    runtime.block_on(async {
+        // Create simulation config
+        let config = SimulationConfig {
+            use_gpu: true,
+            max_cycles: cycles,
+            timeout_ms: 60_000,
+            capture_waveforms: true,
+            parallel_threads: 4,
+        };
 
-    // Simulation statistics would be shown here
+        // Create and initialize simulator
+        let mut simulator = Simulator::new(config).await?;
+        simulator.load_module(&sir).await?;
+
+        // Run simulation
+        simulator.run_simulation().await?;
+
+        println!("✅ Simulation complete!");
+        println!("📊 Simulated {} cycles", cycles);
+
+        // Get simulation history and create waveform
+        let state_history = simulator.get_waveforms().await;
+        if !state_history.is_empty() {
+            let waveform = Waveform::from_simulation_states(&state_history);
+            waveform.export_vcd(&PathBuf::from("simulation.vcd"))?;
+            println!("📈 Waveform exported to simulation.vcd");
+            waveform.print_summary();
+        }
+
+        Ok::<(), anyhow::Error>(())
+    })?;
 
     Ok(())
 }

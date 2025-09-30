@@ -1431,17 +1431,27 @@ impl HirBuilderContext {
     fn build_bit_type(&self, node: &SyntaxNode) -> HirType {
         // Look for width specification [N] or [WIDTH]
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
-            // Try integer literal first
+            // Look for expression inside width spec
+            for child in width_node.children() {
+                if child.kind() == SyntaxKind::LiteralExpr {
+                    // Found a literal expression, look for the integer literal token
+                    if let Some(lit) = child.first_token_of_kind(SyntaxKind::IntLiteral) {
+                        if let Ok(width) = lit.text().parse::<u32>() {
+                            return HirType::Bit(width);
+                        }
+                    }
+                } else if child.kind() == SyntaxKind::IdentExpr {
+                    // Generic parameter case
+                    if let Some(ident) = child.first_token_of_kind(SyntaxKind::Ident) {
+                        let param_name = ident.text().to_string();
+                        return HirType::BitParam(param_name);
+                    }
+                }
+            }
+            // Fallback: try direct integer literal token
             if let Some(lit) = width_node.first_token_of_kind(SyntaxKind::IntLiteral) {
                 if let Ok(width) = lit.text().parse::<u32>() {
                     return HirType::Bit(width);
-                }
-            }
-            // Try identifier expression (generic parameter)
-            if let Some(ident_expr) = width_node.first_child_of_kind(SyntaxKind::IdentExpr) {
-                if let Some(ident) = ident_expr.first_token_of_kind(SyntaxKind::Ident) {
-                    let param_name = ident.text().to_string();
-                    return HirType::BitParam(param_name);
                 }
             }
             // Fallback: try direct identifier token
@@ -1457,17 +1467,28 @@ impl HirBuilderContext {
     fn build_nat_type(&self, node: &SyntaxNode) -> HirType {
         // Look for width specification [N] or [WIDTH]
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
-            // Try integer literal first
+            // Look for expression inside width spec
+            for child in width_node.children() {
+                if child.kind() == SyntaxKind::LiteralExpr {
+                    // Found a literal expression, look for the integer literal token
+                    if let Some(lit) = child.first_token_of_kind(SyntaxKind::IntLiteral) {
+                        if let Ok(width) = lit.text().parse::<u32>() {
+                            return HirType::Nat(width);
+                        }
+                    }
+                } else if child.kind() == SyntaxKind::IdentExpr {
+                    // Generic parameter case
+                    if let Some(ident) = child.first_token_of_kind(SyntaxKind::Ident) {
+                        let param_name = ident.text().to_string();
+                        return HirType::NatParam(param_name);
+                    }
+                }
+            }
+
+            // Fallback: try direct integer literal token
             if let Some(lit) = width_node.first_token_of_kind(SyntaxKind::IntLiteral) {
                 if let Ok(width) = lit.text().parse::<u32>() {
                     return HirType::Nat(width);
-                }
-            }
-            // Try identifier expression (generic parameter)
-            if let Some(ident_expr) = width_node.first_child_of_kind(SyntaxKind::IdentExpr) {
-                if let Some(ident) = ident_expr.first_token_of_kind(SyntaxKind::Ident) {
-                    let param_name = ident.text().to_string();
-                    return HirType::NatParam(param_name);
                 }
             }
             // Fallback: try direct identifier token
@@ -1483,17 +1504,27 @@ impl HirBuilderContext {
     fn build_int_type(&self, node: &SyntaxNode) -> HirType {
         // Look for width specification [N] or [WIDTH]
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
-            // Try integer literal first
+            // Look for expression inside width spec
+            for child in width_node.children() {
+                if child.kind() == SyntaxKind::LiteralExpr {
+                    // Found a literal expression, look for the integer literal token
+                    if let Some(lit) = child.first_token_of_kind(SyntaxKind::IntLiteral) {
+                        if let Ok(width) = lit.text().parse::<u32>() {
+                            return HirType::Int(width);
+                        }
+                    }
+                } else if child.kind() == SyntaxKind::IdentExpr {
+                    // Generic parameter case
+                    if let Some(ident) = child.first_token_of_kind(SyntaxKind::Ident) {
+                        let param_name = ident.text().to_string();
+                        return HirType::IntParam(param_name);
+                    }
+                }
+            }
+            // Fallback: try direct integer literal token
             if let Some(lit) = width_node.first_token_of_kind(SyntaxKind::IntLiteral) {
                 if let Ok(width) = lit.text().parse::<u32>() {
                     return HirType::Int(width);
-                }
-            }
-            // Try identifier expression (generic parameter)
-            if let Some(ident_expr) = width_node.first_child_of_kind(SyntaxKind::IdentExpr) {
-                if let Some(ident) = ident_expr.first_token_of_kind(SyntaxKind::Ident) {
-                    let param_name = ident.text().to_string();
-                    return HirType::IntParam(param_name);
                 }
             }
             // Fallback: try direct identifier token

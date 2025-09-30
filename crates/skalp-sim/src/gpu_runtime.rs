@@ -1,7 +1,8 @@
 use async_trait::async_trait;
-use metal::{Device, CommandQueue, ComputePipelineState, Buffer, MTLResourceOptions};
+use metal::{Device, CommandQueue, ComputePipelineState, Buffer, CommandBufferRef, MTLResourceOptions};
 use skalp_sir::{SirModule, generate_metal_shader};
 use crate::simulator::{SimulationRuntime, SimulationResult, SimulationState, SimulationError};
+use crate::clock_manager::{ClockManager, ClockEdge};
 use std::collections::HashMap;
 use std::mem;
 
@@ -28,37 +29,37 @@ pub struct GpuRuntime {
     device: GpuDevice,
     module: Option<SirModule>,
     pipelines: HashMap<String, ComputePipelineState>,
-    state_buffer: Option<Buffer>,
-    next_state_buffer: Option<Buffer>,
+    input_buffer: Option<Buffer>,
+    register_buffer: Option<Buffer>,
     signal_buffer: Option<Buffer>,
-    clock_edge_buffer: Option<Buffer>,
     current_cycle: u64,
+    clock_manager: ClockManager,
 }
 
 impl GpuRuntime {
-    pub async fn new() -> Result<Self, SimulationError> {
+    pub async fn new() -> SimulationResult<Self> {
         let device = GpuDevice::new()?;
 
         Ok(GpuRuntime {
             device,
             module: None,
             pipelines: HashMap::new(),
-            state_buffer: None,
-            next_state_buffer: None,
+            input_buffer: None,
+            register_buffer: None,
             signal_buffer: None,
-            clock_edge_buffer: None,
             current_cycle: 0,
+            clock_manager: ClockManager::new(),
         })
     }
 
-    fn compile_shader(&mut self, shader_source: &str) -> Result<ComputePipelineState, SimulationError> {
+    fn compile_shader(&mut self, shader_source: &str, function_name: &str) -> Result<ComputePipelineState, SimulationError> {
         let library = self.device.device
             .new_library_with_source(shader_source, &metal::CompileOptions::new())
             .map_err(|e| SimulationError::GpuError(format!("Shader compilation failed: {:?}", e)))?;
 
         let function = library
-            .get_function("combinational_cone_0", None)
-            .ok_or_else(|| SimulationError::GpuError("Function not found in shader".into()))?;
+            .get_function(function_name, None)
+            .map_err(|e| SimulationError::GpuError(format!("Function '{}' not found: {}", function_name, e)))?;
 
         let pipeline = self.device.device
             .new_compute_pipeline_state_with_function(&function)
@@ -69,112 +70,169 @@ impl GpuRuntime {
 
     fn allocate_buffers(&mut self, module: &SirModule) -> Result<(), SimulationError> {
         // Calculate buffer sizes
-        let state_size = self.calculate_state_size(module);
+        let input_size = self.calculate_input_size(module);
+        let register_size = self.calculate_register_size(module);
         let signal_size = self.calculate_signal_size(module);
 
-        // Allocate state buffers
-        self.state_buffer = Some(self.device.device.new_buffer(
-            state_size,
+        // Allocate input buffer
+        self.input_buffer = Some(self.device.device.new_buffer(
+            input_size.max(16),
             MTLResourceOptions::StorageModeShared,
         ));
 
-        self.next_state_buffer = Some(self.device.device.new_buffer(
-            state_size,
+        // Allocate register buffer (for flip-flop states)
+        self.register_buffer = Some(self.device.device.new_buffer(
+            register_size.max(16),
             MTLResourceOptions::StorageModeShared,
         ));
 
-        // Allocate signal buffer
+        // Allocate signal buffer (for all computed values)
         self.signal_buffer = Some(self.device.device.new_buffer(
-            signal_size,
+            signal_size.max(1024),
             MTLResourceOptions::StorageModeShared,
         ));
 
-        // Allocate clock edge buffer (for edge detection)
-        let clock_buffer_size = module.clock_domains.len() * mem::size_of::<u32>();
-        self.clock_edge_buffer = Some(self.device.device.new_buffer(
-            clock_buffer_size as u64,
-            MTLResourceOptions::StorageModeShared,
-        ));
+        // Initialize registers to zero
+        if let Some(reg_buffer) = &self.register_buffer {
+            let ptr = reg_buffer.contents();
+            unsafe {
+                std::ptr::write_bytes(ptr, 0, register_size as usize);
+            }
+        }
 
         Ok(())
     }
 
-    fn calculate_state_size(&self, module: &SirModule) -> u64 {
+    fn calculate_input_size(&self, module: &SirModule) -> u64 {
         let mut size = 0u64;
-
-        // Inputs
         for input in &module.inputs {
-            size += (input.width + 7) / 8; // Round up to bytes
+            size += self.get_metal_type_size(input.width) as u64;
         }
+        size
+    }
 
-        // Outputs
-        for output in &module.outputs {
-            size += (output.width + 7) / 8;
-        }
-
-        // State elements
+    fn calculate_register_size(&self, module: &SirModule) -> u64 {
+        let mut size = 0u64;
         for (_, state) in &module.state_elements {
-            size += (state.width + 7) / 8;
+            size += self.get_metal_type_size(state.width) as u64;
         }
-
         size
     }
 
     fn calculate_signal_size(&self, module: &SirModule) -> u64 {
         let mut size = 0u64;
 
+        // Outputs go in signals
+        for output in &module.outputs {
+            size += self.get_metal_type_size(output.width) as u64;
+        }
+
+        // All non-state signals
         for signal in &module.signals {
-            size += (signal.width + 7) / 8;
+            if !signal.is_state {
+                size += self.get_metal_type_size(signal.width) as u64;
+            }
         }
 
         size
     }
 
+    fn get_metal_type_size(&self, width: usize) -> usize {
+        match width {
+            1..=32 => 4,    // uint (32-bit)
+            33..=64 => 8,   // uint2 (64-bit)
+            _ => 16,        // uint4 (128-bit)
+        }
+    }
+
     async fn execute_combinational(&mut self) -> Result<(), SimulationError> {
-        if let Some(pipeline) = self.pipelines.get("combinational") {
-            let command_buffer = self.device.command_queue.new_command_buffer();
-            let encoder = command_buffer.new_compute_command_encoder();
+        // Get the number of combinational cones from the module
+        let cone_count = if let Some(module) = &self.module {
+            let cones = module.extract_combinational_cones();
+            if cones.is_empty() { 1 } else { cones.len() }  // Execute empty kernel if no cones
+        } else {
+            0
+        };
 
-            encoder.set_compute_pipeline_state(&pipeline);
+        // Execute each combinational cone kernel
+        for i in 0..cone_count {
+            let pipeline_name = format!("combinational_{}", i);
+            if let Some(pipeline) = self.pipelines.get(&pipeline_name) {
+                let command_buffer = self.device.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
 
-            if let Some(state_buffer) = &self.state_buffer {
-                encoder.set_buffer(0, Some(state_buffer), 0);
+                encoder.set_compute_pipeline_state(&pipeline);
+
+                // Set buffers: inputs, registers, signals
+                if let Some(input_buffer) = &self.input_buffer {
+                    encoder.set_buffer(0, Some(input_buffer), 0);
+                }
+
+                if let Some(register_buffer) = &self.register_buffer {
+                    encoder.set_buffer(1, Some(register_buffer), 0);
+                }
+
+                if let Some(signal_buffer) = &self.signal_buffer {
+                    encoder.set_buffer(2, Some(signal_buffer), 0);
+                }
+
+                let thread_groups = metal::MTLSize { width: 1, height: 1, depth: 1 };
+                let threads_per_group = metal::MTLSize { width: 64, height: 1, depth: 1 };
+
+                encoder.dispatch_thread_groups(thread_groups, threads_per_group);
+                encoder.end_encoding();
+
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
             }
-
-            if let Some(signal_buffer) = &self.signal_buffer {
-                encoder.set_buffer(1, Some(signal_buffer), 0);
-            }
-
-            let thread_groups = metal::MTLSize { width: 1, height: 1, depth: 1 };
-            let threads_per_group = metal::MTLSize { width: 64, height: 1, depth: 1 };
-
-            encoder.dispatch_thread_groups(thread_groups, threads_per_group);
-            encoder.end_encoding();
-
-            command_buffer.commit();
-            command_buffer.wait_until_completed();
         }
 
         Ok(())
     }
 
     async fn execute_sequential(&mut self) -> Result<(), SimulationError> {
+        // Check if we have any clock edges by looking at current vs prev clock values
+        let mut has_edge = false;
+        if let Some(module) = &self.module {
+            for input in &module.inputs {
+                if input.name.contains("clk") || input.name.contains("clock") {
+                    // Check if this clock has changed
+                    if let Some(input_buffer) = &self.input_buffer {
+                        let ptr = input_buffer.contents() as *const u32;
+                        let current_value = unsafe { *ptr } != 0;
+                        let prev_value = self.clock_manager.clocks.get(&input.name)
+                            .map(|c| c.previous_value).unwrap_or(false);
+
+                        if current_value && !prev_value {
+                            // Rising edge detected
+                            has_edge = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !has_edge {
+            return Ok(());
+        }
+
         if let Some(pipeline) = self.pipelines.get("sequential") {
             let command_buffer = self.device.command_queue.new_command_buffer();
             let encoder = command_buffer.new_compute_command_encoder();
 
             encoder.set_compute_pipeline_state(&pipeline);
 
-            if let Some(state_buffer) = &self.state_buffer {
-                encoder.set_buffer(0, Some(state_buffer), 0);
+            // Set buffers: inputs, registers (in/out), signals
+            if let Some(input_buffer) = &self.input_buffer {
+                encoder.set_buffer(0, Some(input_buffer), 0);
             }
 
-            if let Some(next_state_buffer) = &self.next_state_buffer {
-                encoder.set_buffer(1, Some(next_state_buffer), 0);
+            if let Some(register_buffer) = &self.register_buffer {
+                encoder.set_buffer(1, Some(register_buffer), 0);
             }
 
-            if let Some(clock_edge_buffer) = &self.clock_edge_buffer {
-                encoder.set_buffer(2, Some(clock_edge_buffer), 0);
+            if let Some(signal_buffer) = &self.signal_buffer {
+                encoder.set_buffer(2, Some(signal_buffer), 0);
             }
 
             let thread_groups = metal::MTLSize { width: 1, height: 1, depth: 1 };
@@ -185,9 +243,6 @@ impl GpuRuntime {
 
             command_buffer.commit();
             command_buffer.wait_until_completed();
-
-            // Swap buffers
-            std::mem::swap(&mut self.state_buffer, &mut self.next_state_buffer);
         }
 
         Ok(())
@@ -197,7 +252,69 @@ impl GpuRuntime {
         let mut signals = HashMap::new();
         let mut registers = HashMap::new();
 
-        // TODO: Read data from GPU buffers and populate the HashMaps
+        // Read data from GPU buffers
+        if let Some(module) = &self.module {
+            // Read outputs from signal buffer
+            if let Some(signal_buffer) = &self.signal_buffer {
+                let signal_ptr = signal_buffer.contents() as *const u8;
+                let mut offset = 0usize;
+
+                // Read outputs first
+                for output in &module.outputs {
+                    let metal_size = self.get_metal_type_size(output.width);
+                    let bytes_needed = ((output.width + 7) / 8) as usize;
+                    let mut value = vec![0u8; bytes_needed];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            signal_ptr.add(offset),
+                            value.as_mut_ptr(),
+                            bytes_needed.min(metal_size)
+                        );
+                    }
+                    signals.insert(output.name.clone(), value);
+                    offset += metal_size;
+                }
+
+                // Read intermediate signals
+                for signal in &module.signals {
+                    if !signal.is_state {
+                        let metal_size = self.get_metal_type_size(signal.width);
+                        let bytes_needed = ((signal.width + 7) / 8) as usize;
+                        let mut value = vec![0u8; bytes_needed];
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                signal_ptr.add(offset),
+                                value.as_mut_ptr(),
+                                bytes_needed.min(metal_size)
+                            );
+                        }
+                        signals.insert(signal.name.clone(), value);
+                        offset += metal_size;
+                    }
+                }
+            }
+
+            // Read state elements from register buffer
+            if let Some(register_buffer) = &self.register_buffer {
+                let register_ptr = register_buffer.contents() as *const u8;
+                let mut offset = 0usize;
+
+                for (name, state_elem) in &module.state_elements {
+                    let metal_size = self.get_metal_type_size(state_elem.width);
+                    let bytes_needed = ((state_elem.width + 7) / 8) as usize;
+                    let mut value = vec![0u8; bytes_needed];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            register_ptr.add(offset),
+                            value.as_mut_ptr(),
+                            bytes_needed.min(metal_size)
+                        );
+                    }
+                    registers.insert(name.clone(), value);
+                    offset += metal_size;
+                }
+            }
+        }
 
         SimulationState {
             cycle: self.current_cycle,
@@ -212,12 +329,44 @@ impl SimulationRuntime for GpuRuntime {
     async fn initialize(&mut self, module: &SirModule) -> SimulationResult<()> {
         self.module = Some(module.clone());
 
+        // Register clocks from the module
+        for (name, _domain) in &module.clock_domains {
+            // Default to 10ns period (100MHz)
+            self.clock_manager.add_clock(name.clone(), 10_000);
+        }
+
+        // Also check for clock inputs
+        for input in &module.inputs {
+            if input.name.contains("clk") || input.name.contains("clock") {
+                // Just add it, the clock manager will handle duplicates
+                self.clock_manager.add_clock(input.name.clone(), 10_000);
+            }
+        }
+
         // Generate Metal shader from SIR
         let shader_source = generate_metal_shader(module);
 
-        // Compile shaders
-        let pipeline = self.compile_shader(&shader_source)?;
-        self.pipelines.insert("combinational".to_string(), pipeline);
+        // Get the number of combinational cones
+        let cones = module.extract_combinational_cones();
+
+        // Compile combinational cone kernels
+        if cones.is_empty() {
+            // If no cones, compile the empty kernel
+            let pipeline = self.compile_shader(&shader_source, "combinational_cone_0")?;
+            self.pipelines.insert("combinational_0".to_string(), pipeline);
+        } else {
+            for (i, _cone) in cones.iter().enumerate() {
+                let function_name = format!("combinational_cone_{}", i);
+                let pipeline = self.compile_shader(&shader_source, &function_name)?;
+                self.pipelines.insert(format!("combinational_{}", i), pipeline);
+            }
+        }
+
+        // Compile sequential kernel if there are sequential nodes
+        if !module.sequential_nodes.is_empty() {
+            let pipeline = self.compile_shader(&shader_source, "sequential_update")?;
+            self.pipelines.insert("sequential".to_string(), pipeline);
+        }
 
         // Allocate GPU buffers
         self.allocate_buffers(module)?;
@@ -226,10 +375,10 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn step(&mut self) -> SimulationResult<SimulationState> {
-        // Execute combinational logic
+        // Execute combinational logic first
         self.execute_combinational().await?;
 
-        // Execute sequential logic
+        // Execute sequential logic (depends on combinational results)
         self.execute_sequential().await?;
 
         self.current_cycle += 1;
@@ -259,12 +408,72 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn set_input(&mut self, name: &str, value: &[u8]) -> SimulationResult<()> {
-        // TODO: Write input value to appropriate location in state buffer
-        Ok(())
+        // Update clock manager for clock signals
+        if name.contains("clk") || name.contains("clock") {
+            let clock_value = value[0] != 0;
+            self.clock_manager.set_clock(name, clock_value);
+        }
+
+        // Write to input buffer
+        if let Some(module) = &self.module {
+            if let Some(input_buffer) = &self.input_buffer {
+                let input_ptr = input_buffer.contents() as *mut u8;
+                let mut offset = 0usize;
+
+                // Find the input and write to its location
+                for input in &module.inputs {
+                    let metal_size = self.get_metal_type_size(input.width);
+                    let bytes_needed = ((input.width + 7) / 8) as usize;
+                    if input.name == name {
+                        if value.len() != bytes_needed {
+                            return Err(SimulationError::GpuError(
+                                format!("Input {} expects {} bytes, got {}", name, bytes_needed, value.len())
+                            ));
+                        }
+                        unsafe {
+                            // Clear the Metal-sized buffer first
+                            std::ptr::write_bytes(input_ptr.add(offset), 0, metal_size);
+                            // Then copy our data
+                            std::ptr::copy_nonoverlapping(
+                                value.as_ptr(),
+                                input_ptr.add(offset),
+                                bytes_needed.min(metal_size)
+                            );
+                        }
+                        return Ok(());
+                    }
+                    offset += metal_size;
+                }
+            }
+        }
+        Err(SimulationError::GpuError(format!("Input {} not found", name)))
     }
 
     async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
-        // TODO: Read output value from state buffer
-        Ok(vec![])
+        if let Some(module) = &self.module {
+            if let Some(signal_buffer) = &self.signal_buffer {
+                let signal_ptr = signal_buffer.contents() as *const u8;
+                let mut offset = 0usize;
+
+                // Find the output in the signals buffer
+                for output in &module.outputs {
+                    let metal_size = self.get_metal_type_size(output.width);
+                    let bytes_needed = ((output.width + 7) / 8) as usize;
+                    if output.name == name {
+                        let mut value = vec![0u8; bytes_needed];
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                signal_ptr.add(offset),
+                                value.as_mut_ptr(),
+                                bytes_needed.min(metal_size)
+                            );
+                        }
+                        return Ok(value);
+                    }
+                    offset += metal_size;
+                }
+            }
+        }
+        Err(SimulationError::GpuError(format!("Output {} not found", name)))
     }
 }

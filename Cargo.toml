@@ -39,6 +39,9 @@ colored = "2.0"
 # Code generation
 indoc = "2.0"  # Indented string literals
 
+# Async runtime
+tokio = { version = "1.35", features = ["rt", "macros"] }
+
 # Testing and benchmarking
 proptest = { version = "1.0", optional = true }
 criterion = { version = "0.5", optional = true }

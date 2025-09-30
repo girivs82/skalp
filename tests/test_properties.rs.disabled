@@ -1,0 +1,337 @@
+#[cfg(test)]
+mod property_tests {
+    use proptest::prelude::*;
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_mir::{MirCompiler, OptimizationLevel};
+    use skalp_sir::convert_mir_to_sir;
+    use skalp_sim::{Simulator, SimulationConfig};
+    use tokio::runtime::Runtime;
+
+    // Property: Counter should always increment by 1 (modulo 2^width)
+    proptest! {
+        #[test]
+        fn prop_counter_increments(initial: u8, cycles in 1u16..100) {
+            let rt = Runtime::new().unwrap();
+
+            let source = format!(r#"
+            entity PropCounter {{
+                in clk: clock
+                in reset: reset
+                out count: bit[8]
+            }}
+
+            impl PropCounter {{
+                signal counter: bit[8] = {}
+
+                on(clk.rise) {{
+                    if (reset.active) {{
+                        counter <= {}
+                    }} else {{
+                        counter <= counter + 1
+                    }}
+                }}
+
+                count = counter
+            }}
+            "#, initial, initial);
+
+            rt.block_on(async {
+                let hir = parse_and_build_hir(&source).unwrap();
+                let compiler = MirCompiler::new();
+                let mir = compiler.compile_to_mir(&hir).unwrap();
+                let sir = convert_mir_to_sir(&mir.modules[0]);
+
+                let config = SimulationConfig {
+                    use_gpu: false,  // Use CPU for property tests
+                    max_cycles: cycles as u64 * 2,
+                    timeout_ms: 5000,
+                    capture_waveforms: false,
+                    parallel_threads: 1,
+                };
+
+                let mut sim = Simulator::new(config).await.unwrap();
+                sim.load_module(&sir).await.unwrap();
+
+                // Initialize
+                sim.set_input("reset", vec![0]).await.unwrap();
+                sim.set_input("clk", vec![0]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+
+                let mut expected = initial;
+
+                for _ in 0..cycles {
+                    // Rising edge
+                    sim.set_input("clk", vec![1]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+
+                    expected = expected.wrapping_add(1);
+
+                    let count = sim.get_output("count").await.unwrap();
+                    assert_eq!(count[0], expected, "Counter should increment correctly");
+
+                    // Falling edge
+                    sim.set_input("clk", vec![0]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+                }
+            });
+        }
+    }
+
+    // Property: ALU addition should be commutative
+    proptest! {
+        #[test]
+        fn prop_alu_addition_commutative(a: u8, b: u8) {
+            let rt = Runtime::new().unwrap();
+
+            let source = r#"
+            entity ALU {
+                in a: bit[8]
+                in b: bit[8]
+                in clk: clock
+                out result: bit[8]
+            }
+
+            impl ALU {
+                signal result_reg: bit[8] = 0
+
+                on(clk.rise) {
+                    result_reg <= a + b
+                }
+
+                result = result_reg
+            }
+            "#;
+
+            rt.block_on(async {
+                let hir = parse_and_build_hir(source).unwrap();
+                let compiler = MirCompiler::new();
+                let mir = compiler.compile_to_mir(&hir).unwrap();
+                let sir = convert_mir_to_sir(&mir.modules[0]);
+
+                let config = SimulationConfig {
+                    use_gpu: false,
+                    max_cycles: 10,
+                    timeout_ms: 5000,
+                    capture_waveforms: false,
+                    parallel_threads: 1,
+                };
+
+                let mut sim = Simulator::new(config).await.unwrap();
+                sim.load_module(&sir).await.unwrap();
+
+                // Test a + b
+                sim.set_input("a", vec![a]).await.unwrap();
+                sim.set_input("b", vec![b]).await.unwrap();
+                sim.set_input("clk", vec![0]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+                sim.set_input("clk", vec![1]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+
+                let result_ab = sim.get_output("result").await.unwrap();
+
+                // Test b + a
+                sim.set_input("a", vec![b]).await.unwrap();
+                sim.set_input("b", vec![a]).await.unwrap();
+                sim.set_input("clk", vec![0]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+                sim.set_input("clk", vec![1]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+
+                let result_ba = sim.get_output("result").await.unwrap();
+
+                assert_eq!(result_ab[0], result_ba[0],
+                          "Addition should be commutative: {} + {} = {} + {}",
+                          a, b, b, a);
+            });
+        }
+    }
+
+    // Property: FIFO should preserve order (FIFO property)
+    proptest! {
+        #[test]
+        fn prop_fifo_preserves_order(data: Vec<u8>) {
+            if data.is_empty() || data.len() > 8 {
+                return Ok(());  // Skip empty or too large datasets
+            }
+
+            let rt = Runtime::new().unwrap();
+
+            let source = r#"
+            entity SimpleFIFO {
+                in clk: clock
+                in reset: reset
+                in write: bit[1]
+                in read: bit[1]
+                in data_in: bit[8]
+                out data_out: bit[8]
+                out empty: bit[1]
+            }
+
+            impl SimpleFIFO {
+                const DEPTH = 16
+
+                signal buffer[DEPTH]: bit[8]
+                signal wr_ptr: bit[4] = 0
+                signal rd_ptr: bit[4] = 0
+                signal count: bit[5] = 0
+
+                empty = (count == 0) ? 1 : 0
+                data_out = buffer[rd_ptr]
+
+                on(clk.rise) {
+                    if (reset.active) {
+                        wr_ptr <= 0
+                        rd_ptr <= 0
+                        count <= 0
+                    } else {
+                        if (write & (count < DEPTH)) {
+                            buffer[wr_ptr] <= data_in
+                            wr_ptr <= (wr_ptr + 1) % DEPTH
+                            if (~read) {
+                                count <= count + 1
+                            }
+                        }
+
+                        if (read & (count > 0)) {
+                            rd_ptr <= (rd_ptr + 1) % DEPTH
+                            if (~write) {
+                                count <= count - 1
+                            }
+                        }
+                    }
+                }
+            }
+            "#;
+
+            rt.block_on(async {
+                let hir = parse_and_build_hir(source).unwrap();
+                let compiler = MirCompiler::new();
+                let mir = compiler.compile_to_mir(&hir).unwrap();
+                let sir = convert_mir_to_sir(&mir.modules[0]);
+
+                let config = SimulationConfig {
+                    use_gpu: false,
+                    max_cycles: 1000,
+                    timeout_ms: 5000,
+                    capture_waveforms: false,
+                    parallel_threads: 1,
+                };
+
+                let mut sim = Simulator::new(config).await.unwrap();
+                sim.load_module(&sir).await.unwrap();
+
+                // Reset
+                sim.set_input("reset", vec![1]).await.unwrap();
+                sim.set_input("clk", vec![0]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+                sim.set_input("clk", vec![1]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+
+                sim.set_input("reset", vec![0]).await.unwrap();
+                sim.set_input("write", vec![0]).await.unwrap();
+                sim.set_input("read", vec![0]).await.unwrap();
+
+                // Write all data
+                for &value in &data {
+                    sim.set_input("data_in", vec![value]).await.unwrap();
+                    sim.set_input("write", vec![1]).await.unwrap();
+                    sim.set_input("clk", vec![0]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+                    sim.set_input("clk", vec![1]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+                }
+
+                sim.set_input("write", vec![0]).await.unwrap();
+
+                // Read all data and verify order
+                for &expected in &data {
+                    sim.set_input("read", vec![1]).await.unwrap();
+
+                    let output = sim.get_output("data_out").await.unwrap();
+                    assert_eq!(output[0], expected,
+                              "FIFO should preserve order of data");
+
+                    sim.set_input("clk", vec![0]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+                    sim.set_input("clk", vec![1]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+                }
+            });
+        }
+    }
+
+    // Property: Reset should always bring system to known state
+    proptest! {
+        #[test]
+        fn prop_reset_brings_known_state(
+            random_state: u8,
+            random_input: u8,
+            cycles_before_reset in 0u8..20
+        ) {
+            let rt = Runtime::new().unwrap();
+
+            let source = r#"
+            entity Resettable {
+                in clk: clock
+                in reset: reset
+                in data: bit[8]
+                out state: bit[8]
+            }
+
+            impl Resettable {
+                signal reg: bit[8] = 0
+
+                on(clk.rise) {
+                    if (reset.active) {
+                        reg <= 42  // Known reset value
+                    } else {
+                        reg <= reg ^ data  // Some operation
+                    }
+                }
+
+                state = reg
+            }
+            "#;
+
+            rt.block_on(async {
+                let hir = parse_and_build_hir(source).unwrap();
+                let compiler = MirCompiler::new();
+                let mir = compiler.compile_to_mir(&hir).unwrap();
+                let sir = convert_mir_to_sir(&mir.modules[0]);
+
+                let config = SimulationConfig {
+                    use_gpu: false,
+                    max_cycles: 100,
+                    timeout_ms: 5000,
+                    capture_waveforms: false,
+                    parallel_threads: 1,
+                };
+
+                let mut sim = Simulator::new(config).await.unwrap();
+                sim.load_module(&sir).await.unwrap();
+
+                // Run with random inputs for some cycles
+                sim.set_input("reset", vec![0]).await.unwrap();
+                for i in 0..cycles_before_reset {
+                    sim.set_input("data", vec![random_input.wrapping_add(i)]).await.unwrap();
+                    sim.set_input("clk", vec![0]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+                    sim.set_input("clk", vec![1]).await.unwrap();
+                    sim.step_simulation().await.unwrap();
+                }
+
+                // Apply reset
+                sim.set_input("reset", vec![1]).await.unwrap();
+                sim.set_input("clk", vec![0]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+                sim.set_input("clk", vec![1]).await.unwrap();
+                sim.step_simulation().await.unwrap();
+
+                // Check state is at known value
+                let state = sim.get_output("state").await.unwrap();
+                assert_eq!(state[0], 42,
+                          "Reset should always bring state to known value (42)");
+            });
+        }
+    }
+}

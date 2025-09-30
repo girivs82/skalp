@@ -19,7 +19,13 @@
       "Read(//tmp/enum_debug/**)",
       "Bash(/Users/girivs/src/hw/hls/target/debug/skalp build)",
       "Bash(/Users/girivs/src/hw/hls/target/debug/skalp new struct_test)",
-      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp new enum_test)"
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp new enum_test)",
+      "Bash(rustc:*)",
+      "Bash(./test_counter_gpu)",
+      "Bash(/Users/girivs/src/hw/hls/target/release/skalp build -s /tmp/test_counter.sk -o /tmp/build)",
+      "Bash(/Users/girivs/src/hw/hls/target/release/skalp sim --help)",
+      "Bash(/Users/girivs/src/hw/hls/target/release/skalp:*)",
+      "Bash(./debug_sir_detailed)"
     ],
     "deny": [],
     "ask": []

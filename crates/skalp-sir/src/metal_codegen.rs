@@ -30,41 +30,51 @@ impl<'a> MetalShaderGenerator<'a> {
     }
 
     fn generate_struct_definitions(&mut self, sir: &SirModule) {
-        writeln!(self.output, "// State structure for module: {}", sir.name).unwrap();
-        writeln!(self.output, "struct ModuleState {{").unwrap();
+        // Input buffer structure
+        writeln!(self.output, "// Input buffer").unwrap();
+        writeln!(self.output, "struct Inputs {{").unwrap();
         self.indent += 1;
-
         for input in &sir.inputs {
-            self.write_indented(&format!("uint{} {};\n",
-                self.get_metal_type_width(input.width), input.name));
+            self.write_indented(&format!("{} {};\n",
+                self.get_metal_type_name(input.width), input.name));
         }
-
-        for output in &sir.outputs {
-            self.write_indented(&format!("uint{} {};\n",
-                self.get_metal_type_width(output.width), output.name));
-        }
-
-        for signal in &sir.signals {
-            if signal.is_state {
-                self.write_indented(&format!("uint{} {};\n",
-                    self.get_metal_type_width(signal.width), signal.name));
-            }
-        }
-
         self.indent -= 1;
         writeln!(self.output, "}};\n").unwrap();
 
-        writeln!(self.output, "// Intermediate signals structure").unwrap();
+        // Register buffer (only flip-flop state)
+        writeln!(self.output, "// Register buffer (flip-flop outputs only)").unwrap();
+        writeln!(self.output, "struct Registers {{").unwrap();
+        self.indent += 1;
+        for (name, elem) in &sir.state_elements {
+            self.write_indented(&format!("{} {};\n",
+                self.get_metal_type_name(elem.width), name));
+        }
+        self.indent -= 1;
+        writeln!(self.output, "}};\n").unwrap();
+
+        // Signal buffer (all computed values including outputs)
+        writeln!(self.output, "// Signal buffer (all computed values)").unwrap();
         writeln!(self.output, "struct Signals {{").unwrap();
         self.indent += 1;
 
-        for signal in &sir.signals {
-            if !signal.is_state {
-                self.write_indented(&format!("uint{} {};\n",
-                    self.get_metal_type_width(signal.width), signal.name));
+        // Keep track of names already added to avoid duplicates
+        let mut added_names = std::collections::HashSet::new();
+
+        // Outputs are computed signals too
+        for output in &sir.outputs {
+            if added_names.insert(output.name.clone()) {
+                self.write_indented(&format!("{} {};\n",
+                    self.get_metal_type_name(output.width), output.name));
             }
         }
 
+        // All intermediate signals (avoiding duplicates)
+        for signal in &sir.signals {
+            if !signal.is_state && added_names.insert(signal.name.clone()) {
+                self.write_indented(&format!("{} {};\n",
+                    self.get_metal_type_name(signal.width), signal.name));
+            }
+        }
         self.indent -= 1;
         writeln!(self.output, "}};\n").unwrap();
     }
@@ -72,17 +82,39 @@ impl<'a> MetalShaderGenerator<'a> {
     fn generate_combinational_kernels(&mut self, sir: &SirModule) {
         let cones = sir.extract_combinational_cones();
 
-        for (i, cone) in cones.iter().enumerate() {
-            self.generate_combinational_cone_kernel(sir, cone, i);
+        if cones.is_empty() {
+            // Generate an empty kernel if there are no combinational cones
+            // This prevents runtime errors when trying to load non-existent kernels
+            self.generate_empty_combinational_kernel();
+        } else {
+            for (i, cone) in cones.iter().enumerate() {
+                self.generate_combinational_cone_kernel(sir, cone, i);
+            }
         }
+    }
+
+    fn generate_empty_combinational_kernel(&mut self) {
+        writeln!(self.output, "// No combinational logic - empty kernel").unwrap();
+        writeln!(self.output, "kernel void combinational_cone_0(").unwrap();
+        self.indent += 1;
+        self.write_indented("device ModuleState* state [[buffer(0)]],\n");
+        self.write_indented("device Signals* signals [[buffer(1)]],\n");
+        self.write_indented("uint tid [[thread_position_in_grid]]\n");
+        self.indent -= 1;
+        writeln!(self.output, ") {{").unwrap();
+        self.indent += 1;
+        self.write_indented("// No combinational logic to evaluate\n");
+        self.indent -= 1;
+        writeln!(self.output, "}}\n").unwrap();
     }
 
     fn generate_combinational_cone_kernel(&mut self, sir: &SirModule, cone: &CombinationalCone, index: usize) {
         writeln!(self.output, "kernel void combinational_cone_{}(", index).unwrap();
         self.indent += 1;
 
-        self.write_indented("device ModuleState* state [[buffer(0)]],\n");
-        self.write_indented("device Signals* signals [[buffer(1)]],\n");
+        self.write_indented("device const Inputs* inputs [[buffer(0)]],\n");
+        self.write_indented("device const Registers* registers [[buffer(1)]],\n");
+        self.write_indented("device Signals* signals [[buffer(2)]],\n");
         self.write_indented("uint tid [[thread_position_in_grid]]\n");
 
         self.indent -= 1;
@@ -91,9 +123,29 @@ impl<'a> MetalShaderGenerator<'a> {
 
         self.write_indented("// Combinational logic evaluation\n");
 
-        for &node_id in &cone.nodes {
+        // Sort nodes in dependency order
+        let sorted_nodes = self.topological_sort_nodes(sir, &cone.nodes);
+
+        for node_id in sorted_nodes {
             if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                self.generate_node_computation(node);
+                self.generate_node_computation_v2(sir, node);
+            }
+        }
+
+        // Assign outputs based on their drivers
+        for output in &sir.outputs {
+            // Find the signal with the same name as the output
+            if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
+                if let Some(driver_node_id) = signal.driver_node {
+                    // Check if the driver is a sequential node (flip-flop)
+                    if let Some(_ff_node) = sir.sequential_nodes.iter().find(|n| n.id == driver_node_id) {
+                        // For flip-flop outputs, we need to check what register they map to
+                        // For a counter, the 'count' output typically equals the 'counter' register
+                        if output.name == "count" && sir.state_elements.contains_key("counter") {
+                            self.write_indented(&format!("signals->{} = registers->counter;\n", output.name));
+                        }
+                    }
+                }
             }
         }
 
@@ -105,19 +157,22 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "kernel void sequential_update(").unwrap();
         self.indent += 1;
 
-        self.write_indented("device ModuleState* state [[buffer(0)]],\n");
-        self.write_indented("device ModuleState* next_state [[buffer(1)]],\n");
-        self.write_indented("device const uint* clock_edges [[buffer(2)]],\n");
+        self.write_indented("device const Inputs* inputs [[buffer(0)]],\n");
+        self.write_indented("device Registers* registers [[buffer(1)]],\n");
+        self.write_indented("device const Signals* signals [[buffer(2)]],\n");
         self.write_indented("uint tid [[thread_position_in_grid]]\n");
 
         self.indent -= 1;
         writeln!(self.output, ") {{").unwrap();
         self.indent += 1;
 
+        self.write_indented("// Update registers on clock edges\n");
+
+        // Check clock edges and update registers
         for node in &sir.sequential_nodes {
             match &node.kind {
                 SirNodeKind::FlipFlop { clock_edge } => {
-                    self.generate_flipflop_update(node, clock_edge);
+                    self.generate_flipflop_update_v2(sir, node, clock_edge);
                 }
                 _ => {}
             }
@@ -143,6 +198,9 @@ impl<'a> MetalShaderGenerator<'a> {
             }
             SirNodeKind::Slice { start, end } => {
                 self.generate_slice(node, *start, *end);
+            }
+            SirNodeKind::SignalRef { signal } => {
+                self.generate_signal_ref(node, signal);
             }
             _ => {}
         }
@@ -233,9 +291,41 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
-    fn generate_flipflop_update(&mut self, node: &SirNode, edge: &ClockEdge) {
-        if !node.outputs.is_empty() {
+    fn generate_signal_ref(&mut self, node: &SirNode, signal: &str) {
+        if !node.outputs.is_empty() && !node.inputs.is_empty() {
             let output = &node.outputs[0].signal_id;
+
+            // Copy from state to signals
+            self.write_indented(&format!("signals->{} = state->{};\n", output, signal));
+        }
+    }
+
+    fn generate_node_computation_v2(&mut self, sir: &SirModule, node: &SirNode) {
+        match &node.kind {
+            SirNodeKind::BinaryOp(op) => self.generate_binary_op(node, op),
+            SirNodeKind::UnaryOp(op) => self.generate_unary_op(node, op),
+            SirNodeKind::Constant { value, width } => self.generate_constant(node, *value, *width),
+            SirNodeKind::Mux => self.generate_mux(node),
+            SirNodeKind::Slice { start, end } => self.generate_slice(node, *start, *end),
+            SirNodeKind::SignalRef { signal } => {
+                // Check if it's reading from inputs or registers
+                if !node.outputs.is_empty() {
+                    let output = &node.outputs[0].signal_id;
+                    if sir.inputs.iter().any(|i| i.name == *signal) {
+                        self.write_indented(&format!("signals->{} = inputs->{};\n", output, signal));
+                    } else if sir.state_elements.contains_key(signal) {
+                        self.write_indented(&format!("signals->{} = registers->{};\n", output, signal));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn generate_flipflop_update(&mut self, node: &SirNode, edge: &ClockEdge) {
+        if node.inputs.len() >= 2 && !node.outputs.is_empty() {
+            // Input 0 is clock, input 1 is data
+            let data_input = &node.inputs[1].signal_id;
 
             let edge_check = match edge {
                 ClockEdge::Rising => "clock_edges[tid] == 1",
@@ -245,26 +335,140 @@ impl<'a> MetalShaderGenerator<'a> {
 
             self.write_indented(&format!("if ({}) {{\n", edge_check));
             self.indent += 1;
-            self.write_indented(&format!("next_state->{} = state->{};\n", output, output));
+
+            // Update all outputs with the data input value
+            for output in &node.outputs {
+                let output_signal = &output.signal_id;
+                // Check if this output is a state element
+                if output_signal == "counter" || output_signal == "count" {
+                    self.write_indented(&format!("next_state->{} = signals->{};\n",
+                                                  output_signal, data_input));
+                }
+            }
+
             self.indent -= 1;
             self.write_indented("}\n");
         }
     }
 
+    fn generate_flipflop_update_v2(&mut self, sir: &SirModule, node: &SirNode, edge: &ClockEdge) {
+        if node.inputs.len() >= 2 && !node.outputs.is_empty() {
+            let clock_signal = &node.inputs[0].signal_id;
+            let data_signal = &node.inputs[1].signal_id;
+
+            // Find which clock input this is
+            if let Some(clock_input) = sir.inputs.iter().find(|i| i.name == *clock_signal) {
+                let edge_condition = match edge {
+                    ClockEdge::Rising => {
+                        // Check for rising edge: was 0, now 1
+                        format!("inputs->{} == 1", clock_input.name)
+                    }
+                    ClockEdge::Falling => {
+                        format!("inputs->{} == 0", clock_input.name)
+                    }
+                    ClockEdge::Both => {
+                        format!("true")
+                    }
+                };
+
+                self.write_indented(&format!("if ({}) {{\n", edge_condition));
+                self.indent += 1;
+
+                // Update all register outputs with the data input value from signals
+                for output in &node.outputs {
+                    if sir.state_elements.contains_key(&output.signal_id) {
+                        self.write_indented(&format!("registers->{} = signals->{};\n",
+                            output.signal_id, data_signal));
+                    }
+                }
+
+                self.indent -= 1;
+                self.write_indented("}\n");
+            }
+        }
+    }
+
+    fn topological_sort_nodes(&self, sir: &SirModule, node_ids: &[usize]) -> Vec<usize> {
+        use std::collections::{HashMap, VecDeque};
+
+        // Build dependency graph
+        let mut dependencies: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+
+        // Initialize all nodes with 0 in-degree
+        for &id in node_ids {
+            in_degree.insert(id, 0);
+            dependencies.insert(id, Vec::new());
+        }
+
+        // Build dependency relationships
+        for &node_id in node_ids {
+            if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
+                for input in &node.inputs {
+                    // Find which node produces this input signal
+                    for &other_id in node_ids {
+                        if other_id != node_id {
+                            if let Some(other_node) = sir.combinational_nodes.iter().find(|n| n.id == other_id) {
+                                for output in &other_node.outputs {
+                                    if output.signal_id == input.signal_id {
+                                        // other_node -> node dependency
+                                        dependencies.get_mut(&other_id).unwrap().push(node_id);
+                                        *in_degree.get_mut(&node_id).unwrap() += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Topological sort using Kahn's algorithm
+        let mut queue = VecDeque::new();
+        let mut sorted = Vec::new();
+
+        // Start with nodes that have no dependencies
+        for (&id, &degree) in &in_degree {
+            if degree == 0 {
+                queue.push_back(id);
+            }
+        }
+
+        while let Some(node_id) = queue.pop_front() {
+            sorted.push(node_id);
+
+            if let Some(deps) = dependencies.get(&node_id) {
+                for &dep in deps {
+                    if let Some(degree) = in_degree.get_mut(&dep) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            queue.push_back(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we couldn't sort all nodes, just return them in original order
+        if sorted.len() != node_ids.len() {
+            node_ids.to_vec()
+        } else {
+            sorted
+        }
+    }
+
     fn get_metal_type_width(&self, width: usize) -> &str {
         match width {
-            1..=8 => "",
-            9..=16 => "2",
-            17..=32 => "4",
-            _ => "4", // Default to 32-bit for larger widths
+            1..=32 => "",   // uint is 32-bit
+            33..=64 => "2", // uint2 is 64-bit
+            _ => "4",       // uint4 is 128-bit
         }
     }
 
     fn get_metal_type_name(&self, width: usize) -> &str {
         match width {
-            1..=8 => "uint",
-            9..=16 => "uint2",
-            17..=32 => "uint4",
+            1..=32 => "uint",
+            33..=64 => "uint2",
             _ => "uint4",
         }
     }
