@@ -74,8 +74,31 @@ pub enum SyntaxKind {
     PubKw,
     WithKw,
 
-    // Verification (1)
+    // Verification (24)
     AssertKw,
+    PropertyKw,
+    CoverKw,
+    SequenceKw,
+    AssumeKw,
+    ExpectKw,
+    AlwaysKw,
+    EventuallyKw,
+    UntilKw,
+    StrongKw,
+    WeakKw,
+    ThroughoutKw,
+    CovergroupKw,
+    CoverpointKw,
+    BinsKw,
+    IgnoreBinsKw,
+    IllegalBinsKw,
+    CrossKw,
+    InvariantKw,
+    SafetyKw,
+    LivenessKw,
+    BoundedKw,
+    FormalKw,
+    ProveKw,
 
     // Literals
     Ident,
@@ -113,6 +136,17 @@ pub enum SyntaxKind {
     FatArrow,            // =>
     Arrow,               // ->
     LeftArrow,          // <-
+    Implies,             // |->
+    ImpliesOverlap,      // |=>
+    HashHash,            // ##
+    RepeatOpen,          // [*
+    RepeatClose,         // *]
+    RepeatPlusOpen,      // [+
+    RepeatPlusClose,     // +]
+    RepeatEqualOpen,     // [=
+    RepeatEqualClose,    // =]
+    At,                  // @
+    Dollar,              // $
 
     // Delimiters
     LParen,             // (
@@ -175,6 +209,36 @@ pub enum SyntaxKind {
     MatchStmt,
     BlockStmt,
     FlowStmt,
+    AssertStmt,
+    PropertyStmt,
+    CoverStmt,
+    SequenceStmt,
+    AssumeStmt,
+    ExpectStmt,
+
+    // Temporal logic
+    TemporalExpr,
+    PropertyExpr,
+    SequenceExpr,
+    ClockingEvent,
+    ImplicationExpr,
+    RepetitionExpr,
+    DelayExpr,
+
+    // Coverage
+    CovergroupDecl,
+    CoverpointDecl,
+    BinsDecl,
+    CrossDecl,
+    CoverageItem,
+
+    // Formal Verification
+    InvariantDecl,
+    SafetyProperty,
+    LivenessProperty,
+    BoundedProperty,
+    FormalBlock,
+    ProveStmt,
     InstanceDecl,
     ConnectionList,
     Connection,
@@ -227,6 +291,7 @@ pub enum SyntaxKind {
     // Match parts
     MatchArmList,
     MatchArm,
+    MatchGuard,
 
     // Protocol parts
     ProtocolSignalList,
@@ -309,8 +374,11 @@ impl SyntaxKind {
             | AsKw
             // Module System (4)
             | UseKw | ModKw | PubKw | WithKw
-            // Verification (1)
-            | AssertKw
+            // Verification (24)
+            | AssertKw | PropertyKw | CoverKw | SequenceKw | AssumeKw | ExpectKw
+            | AlwaysKw | EventuallyKw | UntilKw | StrongKw | WeakKw | ThroughoutKw
+            | CovergroupKw | CoverpointKw | BinsKw | IgnoreBinsKw | IllegalBinsKw | CrossKw
+            | InvariantKw | SafetyKw | LivenessKw | BoundedKw | FormalKw | ProveKw
         )
     }
 
@@ -418,8 +486,31 @@ impl SyntaxKind {
             PubKw => "'pub'",
             WithKw => "'with'",
 
-            // Verification (1)
+            // Verification (24)
             AssertKw => "'assert'",
+            PropertyKw => "'property'",
+            CoverKw => "'cover'",
+            SequenceKw => "'sequence'",
+            AssumeKw => "'assume'",
+            ExpectKw => "'expect'",
+            AlwaysKw => "'always'",
+            EventuallyKw => "'eventually'",
+            UntilKw => "'until'",
+            StrongKw => "'strong'",
+            WeakKw => "'weak'",
+            ThroughoutKw => "'throughout'",
+            CovergroupKw => "'covergroup'",
+            CoverpointKw => "'coverpoint'",
+            BinsKw => "'bins'",
+            IgnoreBinsKw => "'ignore_bins'",
+            IllegalBinsKw => "'illegal_bins'",
+            CrossKw => "'cross'",
+            InvariantKw => "'invariant'",
+            SafetyKw => "'safety'",
+            LivenessKw => "'liveness'",
+            BoundedKw => "'bounded'",
+            FormalKw => "'formal'",
+            ProveKw => "'prove'",
 
             Ident => "identifier",
             IntLiteral => "integer literal",
@@ -454,6 +545,17 @@ impl SyntaxKind {
             Pipeline => "'|>'",
             Arrow => "'->'",
             LeftArrow => "'<-'",
+            Implies => "'|->'",
+            ImpliesOverlap => "'|=>'",
+            HashHash => "'##'",
+            RepeatOpen => "'[*'",
+            RepeatClose => "'*]'",
+            RepeatPlusOpen => "'[+'",
+            RepeatPlusClose => "'+]'",
+            RepeatEqualOpen => "'[='",
+            RepeatEqualClose => "'=]'",
+            At => "'@'",
+            Dollar => "'$'",
 
             LParen => "'('",
             RParen => "')'",
@@ -555,8 +657,31 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Pub => PubKw,
             Token::With => WithKw,
 
-            // Verification (1)
+            // Verification (24)
             Token::Assert => AssertKw,
+            Token::Property => PropertyKw,
+            Token::Cover => CoverKw,
+            Token::Sequence => SequenceKw,
+            Token::Assume => AssumeKw,
+            Token::Expect => ExpectKw,
+            Token::Always => AlwaysKw,
+            Token::Eventually => EventuallyKw,
+            Token::Until => UntilKw,
+            Token::Strong => StrongKw,
+            Token::Weak => WeakKw,
+            Token::Throughout => ThroughoutKw,
+            Token::Covergroup => CovergroupKw,
+            Token::Coverpoint => CoverpointKw,
+            Token::Bins => BinsKw,
+            Token::IgnoreBins => IgnoreBinsKw,
+            Token::IllegalBins => IllegalBinsKw,
+            Token::Cross => CrossKw,
+            Token::Invariant => InvariantKw,
+            Token::Safety => SafetyKw,
+            Token::Liveness => LivenessKw,
+            Token::Bounded => BoundedKw,
+            Token::Formal => FormalKw,
+            Token::Prove => ProveKw,
 
             Token::Identifier(_) => Ident,
             Token::DecimalLiteral(_) => IntLiteral,
@@ -592,6 +717,17 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::FatArrow => FatArrow,
             Token::Arrow => Arrow,
             Token::LeftArrow => LeftArrow,
+            Token::Implies => Implies,
+            Token::ImpliesOverlap => ImpliesOverlap,
+            Token::HashHash => HashHash,
+            Token::RepeatOpen => RepeatOpen,
+            Token::RepeatClose => RepeatClose,
+            Token::RepeatPlusOpen => RepeatPlusOpen,
+            Token::RepeatPlusClose => RepeatPlusClose,
+            Token::RepeatEqualOpen => RepeatEqualOpen,
+            Token::RepeatEqualClose => RepeatEqualClose,
+            Token::At => At,
+            Token::Dollar => Dollar,
 
             Token::LeftParen => LParen,
             Token::RightParen => RParen,

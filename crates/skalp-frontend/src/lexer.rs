@@ -119,9 +119,55 @@ pub enum Token {
     #[token("with")]
     With,
 
-    // Verification (1)
+    // Verification (24)
     #[token("assert")]
     Assert,
+    #[token("property")]
+    Property,
+    #[token("cover")]
+    Cover,
+    #[token("sequence")]
+    Sequence,
+    #[token("assume")]
+    Assume,
+    #[token("expect")]
+    Expect,
+    #[token("always")]
+    Always,
+    #[token("eventually")]
+    Eventually,
+    #[token("until")]
+    Until,
+    #[token("strong")]
+    Strong,
+    #[token("weak")]
+    Weak,
+    #[token("throughout")]
+    Throughout,
+    #[token("covergroup")]
+    Covergroup,
+    #[token("coverpoint")]
+    Coverpoint,
+    #[token("bins")]
+    Bins,
+    #[token("ignore_bins")]
+    IgnoreBins,
+    #[token("illegal_bins")]
+    IllegalBins,
+    #[token("cross")]
+    Cross,
+    #[token("invariant")]
+    Invariant,
+    #[token("safety")]
+    Safety,
+    #[token("liveness")]
+    Liveness,
+    #[token("bounded")]
+    Bounded,
+    #[token("formal")]
+    Formal,
+    #[token("prove")]
+    Prove,
 
     // Identifiers and literals
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_owned())]
@@ -222,6 +268,40 @@ pub enum Token {
 
     #[token("<-")]
     LeftArrow,
+
+    // Assertion operators
+    #[token("|->")]
+    Implies,
+
+    #[token("|=>")]
+    ImpliesOverlap,
+
+    #[token("##")]
+    HashHash,
+
+    #[token("[*")]
+    RepeatOpen,
+
+    #[token("*]")]
+    RepeatClose,
+
+    #[token("[+")]
+    RepeatPlusOpen,
+
+    #[token("+]")]
+    RepeatPlusClose,
+
+    #[token("[=")]
+    RepeatEqualOpen,
+
+    #[token("=]")]
+    RepeatEqualClose,
+
+    #[token("@")]
+    At,
+
+    #[token("$")]
+    Dollar,
 
     // Delimiters
     #[token("(")]

@@ -58,6 +58,10 @@ pub struct HirImplementation {
     pub assignments: Vec<HirAssignment>,
     /// Module instances
     pub instances: Vec<HirInstance>,
+    /// Coverage groups
+    pub covergroups: Vec<HirCovergroup>,
+    /// Formal verification blocks
+    pub formal_blocks: Vec<HirFormalBlock>,
 }
 
 /// Module instance in HIR
@@ -223,6 +227,9 @@ pub enum HirStatement {
     Match(HirMatchStatement),
     Flow(HirFlowStatement),
     Block(Vec<HirStatement>),
+    Assert(HirAssertStatement),
+    Property(HirPropertyStatement),
+    Cover(HirCoverStatement),
 }
 
 /// If statement in HIR
@@ -250,6 +257,8 @@ pub struct HirMatchStatement {
 pub struct HirMatchArm {
     /// Pattern
     pub pattern: HirPattern,
+    /// Optional guard expression (for `pattern if condition` syntax)
+    pub guard: Option<HirExpression>,
     /// Statements
     pub statements: Vec<HirStatement>,
 }
@@ -284,6 +293,7 @@ pub enum HirPipelineStage {
 pub enum HirExpression {
     Literal(HirLiteral),
     Signal(SignalId),
+    Port(PortId),
     Variable(VariableId),
     Constant(ConstantId),
     Binary(HirBinaryExpr),
@@ -400,6 +410,7 @@ pub enum HirPattern {
     Variable(String),
     Wildcard,
     Tuple(Vec<HirPattern>),
+    Path(String, String), // enum_name, variant_name for enum matching
 }
 
 /// Generic parameter in HIR
@@ -603,6 +614,18 @@ pub struct InstanceId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClockDomainId(pub u32);
 
+/// Assertion identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssertionId(pub u32);
+
+/// Property identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PropertyId(pub u32);
+
+/// Cover identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CoverId(pub u32);
+
 /// HIR builder for converting AST to HIR
 pub struct HirBuilder {
     /// Next entity ID
@@ -629,6 +652,12 @@ pub struct HirBuilder {
     next_instance_id: u32,
     /// Next clock domain ID
     next_clock_domain_id: u32,
+    /// Next assertion ID
+    next_assertion_id: u32,
+    /// Next property ID
+    next_property_id: u32,
+    /// Next cover ID
+    next_cover_id: u32,
 }
 
 impl HirBuilder {
@@ -647,6 +676,9 @@ impl HirBuilder {
             next_requirement_id: 0,
             next_instance_id: 0,
             next_clock_domain_id: 0,
+            next_assertion_id: 0,
+            next_property_id: 0,
+            next_cover_id: 0,
         }
     }
 
@@ -697,6 +729,27 @@ impl HirBuilder {
     fn next_clock_domain_id(&mut self) -> ClockDomainId {
         let id = ClockDomainId(self.next_clock_domain_id);
         self.next_clock_domain_id += 1;
+        id
+    }
+
+    /// Generate next assertion ID
+    fn next_assertion_id(&mut self) -> AssertionId {
+        let id = AssertionId(self.next_assertion_id);
+        self.next_assertion_id += 1;
+        id
+    }
+
+    /// Generate next property ID
+    fn next_property_id(&mut self) -> PropertyId {
+        let id = PropertyId(self.next_property_id);
+        self.next_property_id += 1;
+        id
+    }
+
+    /// Generate next cover ID
+    fn next_cover_id(&mut self) -> CoverId {
+        let id = CoverId(self.next_cover_id);
+        self.next_cover_id += 1;
         id
     }
 }
@@ -825,3 +878,374 @@ pub struct HirTraitConstImpl {
     /// Constant value
     pub value: HirExpression,
 }
+
+/// Immediate assertion statement in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirAssertStatement {
+    /// Assertion identifier
+    pub id: AssertionId,
+    /// Condition to assert
+    pub condition: HirExpression,
+    /// Optional message for assertion failure
+    pub message: Option<String>,
+    /// Assertion severity level
+    pub severity: HirAssertionSeverity,
+}
+
+/// Property statement in HIR (concurrent assertions)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirPropertyStatement {
+    /// Property identifier
+    pub id: PropertyId,
+    /// Property name
+    pub name: String,
+    /// Property definition
+    pub property: HirProperty,
+    /// Clock expression for property evaluation
+    pub clock: Option<HirExpression>,
+    /// Optional disable condition
+    pub disable: Option<HirExpression>,
+}
+
+/// Cover statement in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirCoverStatement {
+    /// Cover identifier
+    pub id: CoverId,
+    /// Property to cover
+    pub property: HirProperty,
+    /// Optional cover name
+    pub name: Option<String>,
+}
+
+/// Property definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirProperty {
+    /// Simple expression property
+    Expression(HirExpression),
+    /// Sequence property
+    Sequence(HirSequence),
+    /// Implication property (antecedent |-> consequent)
+    Implication {
+        antecedent: Box<HirProperty>,
+        consequent: Box<HirProperty>,
+    },
+    /// Overlapping implication (antecedent |=> consequent)
+    OverlappingImplication {
+        antecedent: Box<HirProperty>,
+        consequent: Box<HirProperty>,
+    },
+    /// Logical AND of properties
+    And(Box<HirProperty>, Box<HirProperty>),
+    /// Logical OR of properties
+    Or(Box<HirProperty>, Box<HirProperty>),
+    /// Logical NOT of property
+    Not(Box<HirProperty>),
+    /// Always property (always p)
+    Always(Box<HirProperty>),
+    /// Eventually property (eventually p)
+    Eventually(Box<HirProperty>),
+    /// Until property (p until q)
+    Until {
+        left: Box<HirProperty>,
+        right: Box<HirProperty>,
+        strong: bool, // true for strong until, false for weak
+    },
+    /// Throughout property (p throughout q)
+    Throughout {
+        left: Box<HirProperty>,
+        right: Box<HirProperty>,
+    },
+    /// Clocked property with edge
+    Clocked {
+        clock_edge: HirClockEdge,
+        property: Box<HirProperty>,
+    },
+}
+
+/// Sequence definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirSequence {
+    /// Sequence elements
+    pub elements: Vec<HirSequenceElement>,
+}
+
+/// Sequence element in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirSequenceElement {
+    /// Boolean expression
+    Expression(HirExpression),
+    /// Delay (##n)
+    Delay(u32),
+    /// Variable delay (##[m:n])
+    DelayRange(u32, u32),
+    /// Repetition ([*n])
+    Repetition(Box<HirSequenceElement>, u32),
+    /// Variable repetition ([*m:n])
+    RepetitionRange(Box<HirSequenceElement>, u32, u32),
+    /// Consecutive repetition ([+n])
+    ConsecutiveRepetition(Box<HirSequenceElement>, u32),
+    /// Variable consecutive repetition ([+m:n])
+    ConsecutiveRepetitionRange(Box<HirSequenceElement>, u32, u32),
+    /// Goto repetition ([=n])
+    GotoRepetition(Box<HirSequenceElement>, u32),
+    /// Variable goto repetition ([=m:n])
+    GotoRepetitionRange(Box<HirSequenceElement>, u32, u32),
+    /// Sequence concatenation
+    Concatenation(Vec<HirSequenceElement>),
+    /// Sequence intersection
+    Intersection(Box<HirSequenceElement>, Box<HirSequenceElement>),
+    /// Sequence union
+    Union(Box<HirSequenceElement>, Box<HirSequenceElement>),
+}
+
+/// Assertion severity levels
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirAssertionSeverity {
+    Info,
+    Warning,
+    Error,
+    Fatal,
+}
+
+/// Clock edge specification for assertions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirClockEdge {
+    /// Positive edge (posedge)
+    Posedge(HirExpression),
+    /// Negative edge (negedge)
+    Negedge(HirExpression),
+    /// Any edge
+    Edge(HirExpression),
+}
+
+/// Coverage group definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirCovergroup {
+    /// Covergroup identifier
+    pub id: CovergroupId,
+    /// Covergroup name
+    pub name: String,
+    /// Sampling event (optional)
+    pub sampling_event: Option<HirClockEdge>,
+    /// Coverage points
+    pub coverpoints: Vec<HirCoverpoint>,
+    /// Coverage crosses
+    pub crosses: Vec<HirCross>,
+}
+
+/// Coverage point definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirCoverpoint {
+    /// Coverpoint identifier
+    pub id: CoverpointId,
+    /// Coverpoint name
+    pub name: String,
+    /// Expression to cover
+    pub expression: HirExpression,
+    /// Bins definition
+    pub bins: Vec<HirBins>,
+}
+
+/// Bins definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirBins {
+    /// Bins identifier
+    pub id: BinsId,
+    /// Bins name
+    pub name: String,
+    /// Bins type
+    pub bins_type: HirBinsType,
+    /// Value ranges or expressions
+    pub values: Vec<HirBinsValue>,
+}
+
+/// Types of bins in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirBinsType {
+    /// Regular bins for coverage
+    Regular,
+    /// Ignore bins (not counted in coverage)
+    Ignore,
+    /// Illegal bins (cause error if hit)
+    Illegal,
+}
+
+/// Bins value specification in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirBinsValue {
+    /// Single value
+    Value(HirExpression),
+    /// Range of values [min, max]
+    Range(HirExpression, HirExpression),
+    /// Set of discrete values
+    Set(Vec<HirExpression>),
+    /// Default bin (covers all other values)
+    Default,
+}
+
+/// Coverage cross definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirCross {
+    /// Cross identifier
+    pub id: CrossId,
+    /// Cross name
+    pub name: String,
+    /// List of coverpoints to cross
+    pub coverpoints: Vec<CoverpointId>,
+    /// Optional bins for cross coverage
+    pub bins: Vec<HirBins>,
+}
+
+/// Unique identifiers for coverage constructs
+pub type CovergroupId = u32;
+pub type CoverpointId = u32;
+pub type BinsId = u32;
+pub type CrossId = u32;
+
+/// Formal verification property definition in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirFormalProperty {
+    /// Property identifier
+    pub id: FormalPropertyId,
+    /// Property name
+    pub name: String,
+    /// Property type
+    pub property_type: HirFormalPropertyType,
+    /// Property expression
+    pub property: HirProperty,
+    /// Verification bounds (for bounded model checking)
+    pub bounds: Option<HirVerificationBounds>,
+    /// Clock domain for this property
+    pub clock_domain: Option<HirClockEdge>,
+}
+
+/// Types of formal verification properties
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirFormalPropertyType {
+    /// Safety property (something bad never happens)
+    Safety,
+    /// Liveness property (something good eventually happens)
+    Liveness,
+    /// Invariant property (always true)
+    Invariant,
+    /// Bounded property (true within bounds)
+    Bounded,
+}
+
+/// Verification bounds for bounded model checking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirVerificationBounds {
+    /// Minimum depth for verification
+    pub min_depth: Option<u32>,
+    /// Maximum depth for verification
+    pub max_depth: u32,
+    /// Step size for incremental verification
+    pub step_size: Option<u32>,
+}
+
+/// Formal verification block in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirFormalBlock {
+    /// Block identifier
+    pub id: FormalBlockId,
+    /// Block name
+    pub name: Option<String>,
+    /// Formal properties in this block
+    pub properties: Vec<HirFormalProperty>,
+    /// Assumptions for this verification context
+    pub assumptions: Vec<HirProperty>,
+    /// Verification engine configuration
+    pub config: HirVerificationConfig,
+}
+
+/// Verification engine configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirVerificationConfig {
+    /// Target verification engine
+    pub engine: HirVerificationEngine,
+    /// Timeout for verification (in seconds)
+    pub timeout: Option<u32>,
+    /// Memory limit for verification (in MB)
+    pub memory_limit: Option<u32>,
+    /// Additional engine-specific options
+    pub options: Vec<(String, String)>,
+}
+
+/// Supported verification engines
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirVerificationEngine {
+    /// Built-in bounded model checker
+    BuiltinBMC,
+    /// Induction-based prover
+    Induction,
+    /// SAT-based model checker
+    SATSolver,
+    /// SMT-based verification
+    SMTSolver,
+    /// External tool integration
+    External(String),
+}
+
+/// Verification result from formal verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirVerificationResult {
+    /// Property that was verified
+    pub property_id: FormalPropertyId,
+    /// Verification status
+    pub status: HirVerificationStatus,
+    /// Verification statistics
+    pub statistics: HirVerificationStatistics,
+    /// Counterexample (if property failed)
+    pub counterexample: Option<HirCounterexample>,
+}
+
+/// Verification status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirVerificationStatus {
+    /// Property is proven true
+    Proven,
+    /// Property is disproven (counterexample found)
+    Disproven,
+    /// Verification timed out
+    Timeout,
+    /// Verification failed due to error
+    Error(String),
+    /// Verification is inconclusive
+    Unknown,
+}
+
+/// Verification statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirVerificationStatistics {
+    /// Time taken for verification (in seconds)
+    pub verification_time: f64,
+    /// Memory used for verification (in MB)
+    pub memory_used: u32,
+    /// Number of solver calls
+    pub solver_calls: u32,
+    /// Maximum depth reached
+    pub max_depth_reached: u32,
+}
+
+/// Counterexample for failed properties
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirCounterexample {
+    /// Length of the counterexample trace
+    pub length: u32,
+    /// Signal values at each step
+    pub trace: Vec<HirTraceStep>,
+}
+
+/// Single step in a counterexample trace
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTraceStep {
+    /// Step number
+    pub step: u32,
+    /// Signal assignments at this step
+    pub assignments: Vec<(String, HirExpression)>,
+}
+
+/// Unique identifiers for formal verification constructs
+pub type FormalPropertyId = u32;
+pub type FormalBlockId = u32;

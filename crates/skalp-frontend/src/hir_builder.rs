@@ -23,6 +23,9 @@ pub struct HirBuilderContext {
     next_requirement_id: u32,
     next_instance_id: u32,
     next_clock_domain_id: u32,
+    next_assertion_id: u32,
+    next_property_id: u32,
+    next_cover_id: u32,
 
     /// Symbol table for name resolution
     symbols: SymbolTable,
@@ -88,6 +91,9 @@ impl HirBuilderContext {
             next_requirement_id: 0,
             next_instance_id: 0,
             next_clock_domain_id: 0,
+            next_assertion_id: 0,
+            next_property_id: 0,
+            next_cover_id: 0,
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
@@ -130,6 +136,16 @@ impl HirBuilderContext {
                 SyntaxKind::ProtocolDecl => {
                     if let Some(protocol) = self.build_protocol(&child) {
                         hir.protocols.push(protocol);
+                    }
+                }
+                SyntaxKind::TraitDef => {
+                    if let Some(trait_def) = self.build_trait_def(&child) {
+                        hir.trait_definitions.push(trait_def);
+                    }
+                }
+                SyntaxKind::TraitImpl => {
+                    if let Some(trait_impl) = self.build_trait_impl(&child) {
+                        hir.trait_implementations.push(trait_impl);
                     }
                 }
                 SyntaxKind::IntentDecl => {
@@ -346,6 +362,8 @@ impl HirBuilderContext {
             constants,
             event_blocks,
             assignments,
+            covergroups: Vec::new(), // TODO: Implement covergroup building
+            formal_blocks: Vec::new(), // TODO: Implement formal verification building
             instances,
         };
 
@@ -601,6 +619,15 @@ impl HirBuilderContext {
             SyntaxKind::FlowStmt => {
                 self.build_flow_statement(node).map(HirStatement::Flow)
             }
+            SyntaxKind::AssertStmt => {
+                self.build_assert_statement(node).map(HirStatement::Assert)
+            }
+            SyntaxKind::PropertyStmt => {
+                self.build_property_statement(node).map(HirStatement::Property)
+            }
+            SyntaxKind::CoverStmt => {
+                self.build_cover_statement(node).map(HirStatement::Cover)
+            }
             SyntaxKind::BlockStmt => {
                 let block_stmts = self.build_statements(node);
                 Some(HirStatement::Block(block_stmts))
@@ -619,7 +646,8 @@ impl HirBuilderContext {
                 SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
                 SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
                 SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
-                SyntaxKind::PathExpr))
+                SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
             .collect();
 
         if exprs.len() < 2 {
@@ -650,6 +678,11 @@ impl HirBuilderContext {
                 // The binary expr should have the operator and second operand
                 // We need to create a new binary expression with first_expr as left operand
                 self.combine_expressions_with_binary(first_expr, binary_expr)?
+            } else if third_expr.kind() == SyntaxKind::IndexExpr {
+                // Case: LHS op BASE_EXPR INDEX_EXPR
+                // This happens with range/index access like "decode_opcode <= fetch_instruction[15:12]"
+                // EXPR1 is the base (fetch_instruction), EXPR2 is the index expression ([15:12])
+                self.build_index_access_from_parts(&exprs[1], &exprs[2])?
             } else {
                 // Fallback to last expression
                 self.build_expression(exprs.last().unwrap())?
@@ -758,6 +791,21 @@ impl HirBuilderContext {
                 SyntaxKind::WildcardPattern | SyntaxKind::TuplePattern))
             .and_then(|n| self.build_pattern(&n))?;
 
+        // Find optional guard
+        let guard = node.children()
+            .find(|n| n.kind() == SyntaxKind::MatchGuard)
+            .and_then(|guard_node| {
+                // Find the expression inside the guard
+                guard_node.children()
+                    .find(|n| matches!(n.kind(),
+                        SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
+                        SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                        SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
+                    .and_then(|n| self.build_expression(&n))
+            });
+
         // Find statements (after the arrow)
         let mut statements = Vec::new();
         for child in node.children() {
@@ -774,6 +822,7 @@ impl HirBuilderContext {
 
         Some(HirMatchArm {
             pattern,
+            guard,
             statements,
         })
     }
@@ -839,6 +888,108 @@ impl HirBuilderContext {
         None
     }
 
+    /// Build assert statement
+    fn build_assert_statement(&mut self, node: &SyntaxNode) -> Option<HirAssertStatement> {
+        let id = self.next_assertion_id();
+
+        // Find the condition expression (first expression)
+        let expressions: Vec<_> = node.children()
+            .filter(|n| matches!(n.kind(),
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr))
+            .collect();
+
+        let condition = if let Some(expr_node) = expressions.first() {
+            self.build_expression(expr_node)?
+        } else {
+            // Default to a literal false if no condition is found
+            HirExpression::Literal(HirLiteral::Boolean(false))
+        };
+
+        // Check for optional message (second expression)
+        let message = if expressions.len() > 1 {
+            if let Some(expr) = self.build_expression(&expressions[1]) {
+                match expr {
+                    HirExpression::Literal(HirLiteral::String(s)) => Some(s),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Some(HirAssertStatement {
+            id,
+            condition,
+            message,
+            severity: HirAssertionSeverity::Error, // Default severity
+        })
+    }
+
+    /// Build property statement
+    fn build_property_statement(&mut self, node: &SyntaxNode) -> Option<HirPropertyStatement> {
+        let id = self.next_property_id();
+
+        // Extract property name
+        let name = node.children_with_tokens()
+            .filter_map(|element| {
+                element.as_token()
+                    .filter(|token| token.kind() == SyntaxKind::Ident)
+                    .map(|token| token.text().to_string())
+            })
+            .next()
+            .unwrap_or_else(|| "unnamed_property".to_string());
+
+        // For now, parse the property body as a simple expression
+        // This will be expanded to handle full SVA syntax in future milestones
+        let property = if let Some(expr_node) = node.children()
+            .find(|n| matches!(n.kind(),
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr)) {
+            let expr = self.build_expression(&expr_node)?;
+            HirProperty::Expression(expr)
+        } else {
+            // Default to a literal true property
+            HirProperty::Expression(HirExpression::Literal(HirLiteral::Boolean(true)))
+        };
+
+        Some(HirPropertyStatement {
+            id,
+            name,
+            property,
+            clock: None, // Will be parsed in future milestones
+            disable: None,
+        })
+    }
+
+    /// Build cover statement
+    fn build_cover_statement(&mut self, node: &SyntaxNode) -> Option<HirCoverStatement> {
+        let id = self.next_cover_id();
+
+        // Find the property expression
+        let property = if let Some(expr_node) = node.children()
+            .find(|n| matches!(n.kind(),
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr)) {
+            let expr = self.build_expression(&expr_node)?;
+            HirProperty::Expression(expr)
+        } else {
+            // Default to a literal true property
+            HirProperty::Expression(HirExpression::Literal(HirLiteral::Boolean(true)))
+        };
+
+        Some(HirCoverStatement {
+            id,
+            property,
+            name: None, // Optional cover name
+        })
+    }
+
     /// Build pattern
     fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
         match node.kind() {
@@ -852,10 +1003,27 @@ impl HirBuilderContext {
                 Some(HirPattern::Literal(literal))
             }
             SyntaxKind::IdentPattern => {
-                // Get identifier name
-                let name = node.first_token_of_kind(SyntaxKind::Ident)
-                    .map(|t| t.text().to_string())?;
-                Some(HirPattern::Variable(name))
+                // Check if this is a path pattern (Enum::Variant) or just a variable
+                let idents: Vec<_> = node.children_with_tokens()
+                    .filter_map(|element| {
+                        element.as_token()
+                            .filter(|t| t.kind() == SyntaxKind::Ident)
+                            .map(|t| t.text().to_string())
+                    })
+                    .collect();
+
+                if idents.len() == 2 {
+                    // Path pattern: Enum::Variant
+                    Some(HirPattern::Path(idents[0].clone(), idents[1].clone()))
+                } else if idents.len() == 1 {
+                    // Variable pattern
+                    Some(HirPattern::Variable(idents[0].clone()))
+                } else {
+                    // Fallback to first identifier
+                    let name = node.first_token_of_kind(SyntaxKind::Ident)
+                        .map(|t| t.text().to_string())?;
+                    Some(HirPattern::Variable(name))
+                }
             }
             SyntaxKind::WildcardPattern => {
                 Some(HirPattern::Wildcard)
@@ -940,6 +1108,8 @@ impl HirBuilderContext {
             SyntaxKind::IndexExpr => {
                 // Handle indexed L-values like signal[index] or signal[start:end]
                 let children: Vec<_> = node.children().collect();
+
+
                 if children.is_empty() {
                     return None;
                 }
@@ -1015,11 +1185,14 @@ impl HirBuilderContext {
             SyntaxKind::IndexExpr => self.build_index_expr(node),
             SyntaxKind::PathExpr => self.build_path_expr(node),
             SyntaxKind::ParenExpr => {
-                // Unwrap parentheses
+                // Unwrap parentheses - recursively process any expression inside
                 node.children()
                     .find(|n| matches!(n.kind(),
                         SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
-                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr))
+                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                        SyntaxKind::CallExpr | SyntaxKind::FieldExpr |
+                        SyntaxKind::IndexExpr | SyntaxKind::ArrayLiteral |
+                        SyntaxKind::PathExpr | SyntaxKind::ParenExpr))
                     .and_then(|n| self.build_expression(&n))
             }
             _ => None,
@@ -1073,8 +1246,8 @@ impl HirBuilderContext {
         if let Some(symbol) = self.symbols.lookup(&name) {
             match symbol {
                 SymbolId::Port(id) => {
-                    // For ports in expressions, treat as signals
-                    Some(HirExpression::Signal(SignalId(id.0)))
+                    // For ports in expressions, use port reference
+                    Some(HirExpression::Port(*id))
                 }
                 SymbolId::Signal(id) => Some(HirExpression::Signal(*id)),
                 SymbolId::Variable(id) => Some(HirExpression::Variable(*id)),
@@ -1092,13 +1265,22 @@ impl HirBuilderContext {
 
     /// Build binary expression
     fn build_binary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        let children: Vec<_> = node.children().collect();
-        if children.len() < 2 {
+        // Find all expression children (filter out tokens and other nodes)
+        let expr_children: Vec<_> = node.children()
+            .filter(|n| matches!(n.kind(),
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
+                SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
+            .collect();
+
+        if expr_children.len() < 2 {
             return None;
         }
 
-        let left = Box::new(self.build_expression(&children[0])?);
-        let right = Box::new(self.build_expression(&children[1])?);
+        let left = Box::new(self.build_expression(&expr_children[0])?);
+        let right = Box::new(self.build_expression(&expr_children[1])?);
 
         // Get operator
         let tokens: Vec<_> = node.children_with_tokens()
@@ -1178,6 +1360,41 @@ impl HirBuilderContext {
             base,
             field: field_name,
         })
+    }
+
+    /// Build index access from separate base and index expression nodes
+    fn build_index_access_from_parts(&mut self, base_node: &SyntaxNode, index_node: &SyntaxNode) -> Option<HirExpression> {
+        // Build the base expression from the base node
+        let base = Box::new(self.build_expression(base_node)?);
+
+        // Parse the index expression to get the indices
+        let indices: Vec<_> = index_node.children()
+            .filter(|n| matches!(n.kind(),
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr))
+            .collect();
+
+        if indices.is_empty() {
+            return None;
+        }
+
+        // Check if it's a range access [start:end] by looking for colon token
+        let has_colon = index_node.children_with_tokens()
+            .any(|element| {
+                element.as_token()
+                    .map_or(false, |t| t.kind() == SyntaxKind::Colon)
+            });
+
+        if has_colon && indices.len() >= 2 {
+            // Range access: base[start:end]
+            let start = Box::new(self.build_expression(&indices[0])?);
+            let end = Box::new(self.build_expression(&indices[1])?);
+            Some(HirExpression::Range(base, start, end))
+        } else {
+            // Single index access: base[index]
+            let index = Box::new(self.build_expression(&indices[0])?);
+            Some(HirExpression::Index(base, index))
+        }
     }
 
     /// Build path expression (e.g., State::Idle)
@@ -1282,16 +1499,68 @@ impl HirBuilderContext {
         })
     }
 
-    /// Build intent (stub)
+    /// Build intent with constraints
     fn build_intent(&mut self, node: &SyntaxNode) -> Option<HirIntent> {
         let id = self.next_intent_id();
         let name = self.extract_name(node)?;
+
+        // Parse intent constraints
+        let mut constraints = Vec::new();
+        if let Some(constraint_list) = node.first_child_of_kind(SyntaxKind::IntentConstraintList) {
+            for constraint_node in constraint_list.children() {
+                if constraint_node.kind() == SyntaxKind::IntentConstraint {
+                    if let Some(constraint) = self.build_intent_constraint(&constraint_node) {
+                        constraints.push(constraint);
+                    }
+                }
+            }
+        }
 
         Some(HirIntent {
             id,
             name,
             description: String::new(),
-            constraints: Vec::new(),
+            constraints,
+        })
+    }
+
+    /// Build intent constraint from syntax node
+    fn build_intent_constraint(&mut self, node: &SyntaxNode) -> Option<HirIntentConstraint> {
+        // Extract constraint type identifier
+        let constraint_token = node.children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|token| token.kind() == SyntaxKind::Ident)?;
+        let constraint_type_name = constraint_token.text();
+
+        // Map constraint type name to HirConstraintType
+        let constraint_type = match constraint_type_name {
+            "timing" => HirConstraintType::Timing,
+            "power" => HirConstraintType::Power,
+            "area" => HirConstraintType::Area,
+            "performance" => HirConstraintType::Performance,
+            _ => {
+                // Unknown constraint type, default to Performance
+                HirConstraintType::Performance
+            }
+        };
+
+        // Parse constraint expression
+        let expr = node.children()
+            .find(|child| matches!(child.kind(),
+                SyntaxKind::BinaryExpr |
+                SyntaxKind::UnaryExpr |
+                SyntaxKind::LiteralExpr |
+                SyntaxKind::IdentExpr
+            ))
+            .and_then(|expr_node| self.build_expression(&expr_node))
+            .unwrap_or_else(|| {
+                // Default expression if parsing fails
+                HirExpression::Literal(HirLiteral::Integer(0))
+            });
+
+        Some(HirIntentConstraint {
+            constraint_type,
+            expr,
         })
     }
 
@@ -1842,6 +2111,24 @@ impl HirBuilderContext {
         self.next_requirement_id += 1;
         id
     }
+
+    fn next_assertion_id(&mut self) -> AssertionId {
+        let id = AssertionId(self.next_assertion_id);
+        self.next_assertion_id += 1;
+        id
+    }
+
+    fn next_property_id(&mut self) -> PropertyId {
+        let id = PropertyId(self.next_property_id);
+        self.next_property_id += 1;
+        id
+    }
+
+    fn next_cover_id(&mut self) -> CoverId {
+        let id = CoverId(self.next_cover_id);
+        self.next_cover_id += 1;
+        id
+    }
 }
 
 impl SymbolTable {
@@ -1948,14 +2235,21 @@ impl HirBuilderContext {
 
     /// Build trait implementation
     fn build_trait_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitImplementation> {
-        // Extract trait name and target type
-        let children: Vec<_> = node.children().collect();
-        if children.len() < 2 {
+        // Extract trait name and target type from tokens
+        let tokens: Vec<_> = node.children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .collect();
+
+        let ident_tokens: Vec<_> = tokens.iter()
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .collect();
+
+        if ident_tokens.len() < 2 {
             return None;
         }
 
-        let trait_name = self.extract_name(&children[0])?;
-        let target_type = self.extract_name(&children[1])?;
+        let trait_name = ident_tokens[0].text().to_string();
+        let target_type = ident_tokens[1].text().to_string();
 
         // Look up target entity
         let target_entity = *self.symbols.entities.get(&target_type)?;

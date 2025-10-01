@@ -216,6 +216,12 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
+                Some(SyntaxKind::CovergroupKw) => self.parse_covergroup_decl(),
+                Some(SyntaxKind::FormalKw) => self.parse_formal_block(),
+                Some(SyntaxKind::InvariantKw) => self.parse_invariant_decl(),
+                Some(SyntaxKind::SafetyKw) => self.parse_safety_property(),
+                Some(SyntaxKind::LivenessKw) => self.parse_liveness_property(),
+                Some(SyntaxKind::ProveKw) => self.parse_prove_statement(),
                 Some(SyntaxKind::Ident) => {
                     // Could be an assignment or start of another construct
                     self.parse_assignment_or_statement();
@@ -486,6 +492,9 @@ impl<'a> ParseState<'a> {
         // Right-hand side
         self.parse_expression();
 
+        // Optional semicolon or newline
+        self.consume_semicolon();
+
         self.finish_node();
     }
 
@@ -502,6 +511,12 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
+                Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
+                Some(SyntaxKind::PropertyKw) => self.parse_property_statement(),
+                Some(SyntaxKind::CoverKw) => self.parse_cover_statement(),
+                Some(SyntaxKind::SequenceKw) => self.parse_sequence_statement(),
+                Some(SyntaxKind::AssumeKw) => self.parse_assume_statement(),
+                Some(SyntaxKind::ExpectKw) => self.parse_expect_statement(),
                 Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
                 Some(SyntaxKind::LBrace) => self.parse_block_statement(),
                 Some(SyntaxKind::AssignKw) => {
@@ -567,6 +582,14 @@ impl<'a> ParseState<'a> {
 
         // Parse pattern
         self.parse_pattern();
+
+        // Parse optional guard (if expression)
+        if self.at(SyntaxKind::IfKw) {
+            self.start_node(SyntaxKind::MatchGuard);
+            self.bump(); // consume 'if'
+            self.parse_expression(); // guard condition
+            self.finish_node();
+        }
 
         // Expect fat arrow (=>)
         self.expect(SyntaxKind::FatArrow);
@@ -694,6 +717,746 @@ impl<'a> ParseState<'a> {
             // Expression stage
             self.parse_expression();
         }
+
+        self.finish_node();
+    }
+
+    /// Parse assert statement
+    fn parse_assert_statement(&mut self) {
+        self.start_node(SyntaxKind::AssertStmt);
+
+        // 'assert' keyword
+        self.expect(SyntaxKind::AssertKw);
+
+        // Expect opening parenthesis
+        self.expect(SyntaxKind::LParen);
+
+        // Parse condition expression
+        self.parse_expression();
+
+        // Optional comma and message
+        if self.at(SyntaxKind::Comma) {
+            self.bump(); // consume comma
+            self.parse_expression(); // message (usually string literal)
+        }
+
+        // Expect closing parenthesis
+        self.expect(SyntaxKind::RParen);
+
+        // Expect semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse property statement
+    fn parse_property_statement(&mut self) {
+        self.start_node(SyntaxKind::PropertyStmt);
+
+        // 'property' keyword
+        self.expect(SyntaxKind::PropertyKw);
+
+        // Property name (identifier)
+        self.expect(SyntaxKind::Ident);
+
+        // Property body
+        self.expect(SyntaxKind::LBrace);
+
+        // For now, parse as generic expression until we implement full property syntax
+        self.parse_expression();
+
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse cover statement
+    fn parse_cover_statement(&mut self) {
+        self.start_node(SyntaxKind::CoverStmt);
+
+        // 'cover' keyword
+        self.expect(SyntaxKind::CoverKw);
+
+        // 'property' keyword
+        self.expect(SyntaxKind::PropertyKw);
+
+        // Property expression in parentheses
+        self.expect(SyntaxKind::LParen);
+        self.parse_expression();
+        self.expect(SyntaxKind::RParen);
+
+        // Expect semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse sequence statement
+    fn parse_sequence_statement(&mut self) {
+        self.start_node(SyntaxKind::SequenceStmt);
+
+        // 'sequence' keyword
+        self.expect(SyntaxKind::SequenceKw);
+
+        // Sequence name (identifier)
+        self.expect(SyntaxKind::Ident);
+
+        // Sequence body
+        self.expect(SyntaxKind::LBrace);
+
+        // Parse sequence elements
+        self.parse_sequence_expression();
+
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse assume statement
+    fn parse_assume_statement(&mut self) {
+        self.start_node(SyntaxKind::AssumeStmt);
+
+        // 'assume' keyword
+        self.expect(SyntaxKind::AssumeKw);
+
+        // 'property' keyword
+        self.expect(SyntaxKind::PropertyKw);
+
+        // Property expression in parentheses
+        self.expect(SyntaxKind::LParen);
+        self.parse_temporal_expression();
+        self.expect(SyntaxKind::RParen);
+
+        // Expect semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse expect statement
+    fn parse_expect_statement(&mut self) {
+        self.start_node(SyntaxKind::ExpectStmt);
+
+        // 'expect' keyword
+        self.expect(SyntaxKind::ExpectKw);
+
+        // Property expression in parentheses
+        self.expect(SyntaxKind::LParen);
+        self.parse_temporal_expression();
+        self.expect(SyntaxKind::RParen);
+
+        // Expect semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse temporal expression (properties and sequences)
+    fn parse_temporal_expression(&mut self) {
+        self.start_node(SyntaxKind::TemporalExpr);
+
+        self.parse_temporal_or_expression();
+
+        self.finish_node();
+    }
+
+    /// Parse temporal OR expression
+    fn parse_temporal_or_expression(&mut self) {
+        self.parse_temporal_and_expression();
+
+        while self.at(SyntaxKind::PipePipe) {
+            self.bump(); // consume ||
+            self.parse_temporal_and_expression();
+        }
+    }
+
+    /// Parse temporal AND expression
+    fn parse_temporal_and_expression(&mut self) {
+        self.parse_temporal_implication_expression();
+
+        while self.at(SyntaxKind::AmpAmp) {
+            self.bump(); // consume &&
+            self.parse_temporal_implication_expression();
+        }
+    }
+
+    /// Parse temporal implication expression
+    fn parse_temporal_implication_expression(&mut self) {
+        self.start_node(SyntaxKind::ImplicationExpr);
+
+        self.parse_temporal_primary();
+
+        // Check for implication operators
+        if self.at(SyntaxKind::Implies) {
+            self.bump(); // consume |->
+            self.parse_temporal_primary();
+        } else if self.at(SyntaxKind::ImpliesOverlap) {
+            self.bump(); // consume |=>
+            self.parse_temporal_primary();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse temporal primary expression
+    fn parse_temporal_primary(&mut self) {
+        match self.current_kind() {
+            Some(SyntaxKind::AlwaysKw) => {
+                self.bump(); // consume 'always'
+                self.parse_temporal_primary();
+            }
+            Some(SyntaxKind::EventuallyKw) => {
+                self.bump(); // consume 'eventually'
+                self.parse_temporal_primary();
+            }
+            Some(SyntaxKind::StrongKw) | Some(SyntaxKind::WeakKw) => {
+                self.bump(); // consume 'strong' or 'weak'
+                self.expect(SyntaxKind::LParen);
+                self.parse_temporal_expression();
+                self.expect(SyntaxKind::UntilKw);
+                self.parse_temporal_expression();
+                self.expect(SyntaxKind::RParen);
+            }
+            Some(SyntaxKind::At) => {
+                self.parse_clocking_event();
+                self.parse_temporal_primary();
+            }
+            Some(SyntaxKind::LParen) => {
+                self.bump(); // consume (
+                self.parse_temporal_expression();
+                self.expect(SyntaxKind::RParen);
+            }
+            _ => {
+                // Parse as regular expression or sequence
+                self.parse_sequence_expression();
+            }
+        }
+    }
+
+    /// Parse clocking event (@(posedge clk))
+    fn parse_clocking_event(&mut self) {
+        self.start_node(SyntaxKind::ClockingEvent);
+
+        self.expect(SyntaxKind::At);
+        self.expect(SyntaxKind::LParen);
+
+        // Parse edge type (posedge, negedge, or just expression)
+        if self.at_keyword("posedge") {
+            self.bump(); // consume 'posedge'
+        } else if self.at_keyword("negedge") {
+            self.bump(); // consume 'negedge'
+        }
+
+        // Parse clock expression
+        self.parse_expression();
+
+        self.expect(SyntaxKind::RParen);
+
+        self.finish_node();
+    }
+
+    /// Parse sequence expression
+    fn parse_sequence_expression(&mut self) {
+        self.start_node(SyntaxKind::SequenceExpr);
+
+        self.parse_sequence_concatenation();
+
+        self.finish_node();
+    }
+
+    /// Parse sequence concatenation
+    fn parse_sequence_concatenation(&mut self) {
+        self.parse_sequence_primary();
+
+        // Handle repetition operators
+        while self.at(SyntaxKind::RepeatOpen) ||
+              self.at(SyntaxKind::RepeatPlusOpen) ||
+              self.at(SyntaxKind::RepeatEqualOpen) {
+            self.parse_repetition();
+        }
+
+        // Handle delay operators
+        while self.at(SyntaxKind::HashHash) {
+            self.parse_delay();
+        }
+    }
+
+    /// Parse sequence primary
+    fn parse_sequence_primary(&mut self) {
+        if self.at(SyntaxKind::LParen) {
+            self.bump(); // consume (
+            self.parse_sequence_expression();
+            self.expect(SyntaxKind::RParen);
+        } else {
+            // Parse as boolean expression
+            self.parse_expression();
+        }
+    }
+
+    /// Parse repetition ([*n], [+n], [=n])
+    fn parse_repetition(&mut self) {
+        self.start_node(SyntaxKind::RepetitionExpr);
+
+        // Consume opening bracket
+        if self.at(SyntaxKind::RepeatOpen) {
+            self.bump(); // consume [*
+        } else if self.at(SyntaxKind::RepeatPlusOpen) {
+            self.bump(); // consume [+
+        } else if self.at(SyntaxKind::RepeatEqualOpen) {
+            self.bump(); // consume [=
+        }
+
+        // Parse count (number or range)
+        if self.at(SyntaxKind::IntLiteral) {
+            self.bump(); // consume number
+
+            // Check for range (:)
+            if self.at(SyntaxKind::Colon) {
+                self.bump(); // consume :
+                if self.at(SyntaxKind::IntLiteral) {
+                    self.bump(); // consume upper bound
+                } else if self.at(SyntaxKind::Dollar) {
+                    self.bump(); // consume $ (infinity)
+                }
+            }
+        } else if self.at(SyntaxKind::Dollar) {
+            self.bump(); // consume $ (infinity)
+        }
+
+        // Consume closing bracket
+        if self.at(SyntaxKind::RepeatClose) {
+            self.bump(); // consume *]
+        } else if self.at(SyntaxKind::RepeatPlusClose) {
+            self.bump(); // consume +]
+        } else if self.at(SyntaxKind::RepeatEqualClose) {
+            self.bump(); // consume =]
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse delay (##n, ##[m:n])
+    fn parse_delay(&mut self) {
+        self.start_node(SyntaxKind::DelayExpr);
+
+        self.expect(SyntaxKind::HashHash);
+
+        if self.at(SyntaxKind::LBracket) {
+            self.bump(); // consume [
+            self.expect(SyntaxKind::IntLiteral); // min delay
+            if self.at(SyntaxKind::Colon) {
+                self.bump(); // consume :
+                if self.at(SyntaxKind::IntLiteral) {
+                    self.bump(); // consume max delay
+                } else if self.at(SyntaxKind::Dollar) {
+                    self.bump(); // consume $ (infinity)
+                }
+            }
+            self.expect(SyntaxKind::RBracket);
+        } else if self.at(SyntaxKind::IntLiteral) {
+            self.bump(); // consume fixed delay
+        } else if self.at(SyntaxKind::Dollar) {
+            self.bump(); // consume $ (infinity)
+        }
+
+        self.finish_node();
+    }
+
+    /// Check if current token is a specific keyword
+    fn at_keyword(&self, keyword: &str) -> bool {
+        if let Some(SyntaxKind::Ident) = self.current_kind() {
+            if let Some(token) = self.tokens.get(self.current) {
+                if let crate::lexer::Token::Identifier(id) = &token.token {
+                    return id == keyword;
+                }
+            }
+        }
+        false
+    }
+
+    /// Parse covergroup declaration
+    fn parse_covergroup_decl(&mut self) {
+        self.start_node(SyntaxKind::CovergroupDecl);
+
+        // 'covergroup' keyword
+        self.expect(SyntaxKind::CovergroupKw);
+
+        // Covergroup name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional sampling event
+        if self.at(SyntaxKind::At) {
+            self.parse_clocking_event();
+        }
+
+        // Covergroup body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_covergroup_body();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse covergroup body
+    fn parse_covergroup_body(&mut self) {
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            match self.current_kind() {
+                Some(SyntaxKind::CoverpointKw) => self.parse_coverpoint_decl(),
+                Some(SyntaxKind::CrossKw) => self.parse_cross_decl(),
+                Some(SyntaxKind::RBrace) => break,
+                _ => {
+                    self.error_and_bump("expected coverpoint or cross");
+                }
+            }
+        }
+    }
+
+    /// Parse coverpoint declaration
+    fn parse_coverpoint_decl(&mut self) {
+        self.start_node(SyntaxKind::CoverpointDecl);
+
+        // 'coverpoint' keyword
+        self.expect(SyntaxKind::CoverpointKw);
+
+        // Expression to cover
+        self.parse_expression();
+
+        // Optional coverpoint body with bins
+        if self.at(SyntaxKind::LBrace) {
+            self.bump(); // consume {
+            self.parse_coverpoint_body();
+            self.expect(SyntaxKind::RBrace);
+        }
+
+        // Optional semicolon
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse coverpoint body
+    fn parse_coverpoint_body(&mut self) {
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            match self.current_kind() {
+                Some(SyntaxKind::BinsKw) => self.parse_bins_decl(),
+                Some(SyntaxKind::IgnoreBinsKw) => self.parse_ignore_bins_decl(),
+                Some(SyntaxKind::IllegalBinsKw) => self.parse_illegal_bins_decl(),
+                Some(SyntaxKind::RBrace) => break,
+                _ => {
+                    self.error_and_bump("expected bins declaration");
+                }
+            }
+        }
+    }
+
+    /// Parse bins declaration
+    fn parse_bins_decl(&mut self) {
+        self.start_node(SyntaxKind::BinsDecl);
+
+        // 'bins' keyword
+        self.expect(SyntaxKind::BinsKw);
+
+        // Bins name
+        self.expect(SyntaxKind::Ident);
+
+        // Bins values
+        self.expect(SyntaxKind::Assign);
+        self.parse_bins_values();
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse ignore_bins declaration
+    fn parse_ignore_bins_decl(&mut self) {
+        self.start_node(SyntaxKind::BinsDecl);
+
+        // 'ignore_bins' keyword
+        self.expect(SyntaxKind::IgnoreBinsKw);
+
+        // Bins name
+        self.expect(SyntaxKind::Ident);
+
+        // Bins values
+        self.expect(SyntaxKind::Assign);
+        self.parse_bins_values();
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse illegal_bins declaration
+    fn parse_illegal_bins_decl(&mut self) {
+        self.start_node(SyntaxKind::BinsDecl);
+
+        // 'illegal_bins' keyword
+        self.expect(SyntaxKind::IllegalBinsKw);
+
+        // Bins name
+        self.expect(SyntaxKind::Ident);
+
+        // Bins values
+        self.expect(SyntaxKind::Assign);
+        self.parse_bins_values();
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse bins values (ranges, sets, etc.)
+    fn parse_bins_values(&mut self) {
+        if self.at(SyntaxKind::LBrace) {
+            // Set of values: { 1, 2, 3 }
+            self.bump(); // consume {
+            while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                self.parse_expression();
+                if self.at(SyntaxKind::Comma) {
+                    self.bump();
+                }
+            }
+            self.expect(SyntaxKind::RBrace);
+        } else if self.at(SyntaxKind::LBracket) {
+            // Range: [1:10]
+            self.bump(); // consume [
+            self.parse_expression();
+            if self.at(SyntaxKind::Colon) {
+                self.bump(); // consume :
+                self.parse_expression();
+            }
+            self.expect(SyntaxKind::RBracket);
+        } else {
+            // Single value or expression
+            self.parse_expression();
+        }
+    }
+
+    /// Parse cross declaration
+    fn parse_cross_decl(&mut self) {
+        self.start_node(SyntaxKind::CrossDecl);
+
+        // 'cross' keyword
+        self.expect(SyntaxKind::CrossKw);
+
+        // Cross name
+        self.expect(SyntaxKind::Ident);
+
+        // Cross variables
+        self.expect(SyntaxKind::Assign);
+        self.parse_expression(); // First coverpoint
+        while self.at(SyntaxKind::Comma) {
+            self.bump(); // consume ,
+            self.parse_expression(); // Next coverpoint
+        }
+
+        // Optional cross body with bins
+        if self.at(SyntaxKind::LBrace) {
+            self.bump(); // consume {
+            self.parse_coverpoint_body(); // Reuse coverpoint body parsing
+            self.expect(SyntaxKind::RBrace);
+        }
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse formal verification block
+    fn parse_formal_block(&mut self) {
+        self.start_node(SyntaxKind::FormalBlock);
+
+        // 'formal' keyword
+        self.expect(SyntaxKind::FormalKw);
+
+        // Optional block name
+        if self.at(SyntaxKind::Ident) {
+            self.bump(); // consume name
+        }
+
+        // Formal block body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_formal_block_body();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse formal block body
+    fn parse_formal_block_body(&mut self) {
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            match self.current_kind() {
+                Some(SyntaxKind::InvariantKw) => self.parse_invariant_decl(),
+                Some(SyntaxKind::SafetyKw) => self.parse_safety_property(),
+                Some(SyntaxKind::LivenessKw) => self.parse_liveness_property(),
+                Some(SyntaxKind::BoundedKw) => self.parse_bounded_property(),
+                Some(SyntaxKind::AssumeKw) => self.parse_assume_statement(),
+                Some(SyntaxKind::ProveKw) => self.parse_prove_statement(),
+                Some(SyntaxKind::RBrace) => break,
+                _ => {
+                    self.error_and_bump("expected formal verification statement");
+                }
+            }
+        }
+    }
+
+    /// Parse invariant declaration
+    fn parse_invariant_decl(&mut self) {
+        self.start_node(SyntaxKind::InvariantDecl);
+
+        // 'invariant' keyword
+        self.expect(SyntaxKind::InvariantKw);
+
+        // Optional invariant name
+        if self.at(SyntaxKind::Ident) {
+            self.bump(); // consume name
+        }
+
+        // Colon separator
+        if self.at(SyntaxKind::Colon) {
+            self.bump();
+        }
+
+        // Property expression
+        self.parse_temporal_expression();
+
+        // Optional semicolon
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse safety property
+    fn parse_safety_property(&mut self) {
+        self.start_node(SyntaxKind::SafetyProperty);
+
+        // 'safety' keyword
+        self.expect(SyntaxKind::SafetyKw);
+
+        // Optional property name
+        if self.at(SyntaxKind::Ident) {
+            self.bump(); // consume name
+        }
+
+        // Colon separator
+        if self.at(SyntaxKind::Colon) {
+            self.bump();
+        }
+
+        // Property expression
+        self.parse_temporal_expression();
+
+        // Optional bounds
+        if self.at(SyntaxKind::BoundedKw) {
+            self.parse_verification_bounds();
+        }
+
+        // Optional semicolon
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse liveness property
+    fn parse_liveness_property(&mut self) {
+        self.start_node(SyntaxKind::LivenessProperty);
+
+        // 'liveness' keyword
+        self.expect(SyntaxKind::LivenessKw);
+
+        // Optional property name
+        if self.at(SyntaxKind::Ident) {
+            self.bump(); // consume name
+        }
+
+        // Colon separator
+        if self.at(SyntaxKind::Colon) {
+            self.bump();
+        }
+
+        // Property expression
+        self.parse_temporal_expression();
+
+        // Optional bounds
+        if self.at(SyntaxKind::BoundedKw) {
+            self.parse_verification_bounds();
+        }
+
+        // Optional semicolon
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse bounded property
+    fn parse_bounded_property(&mut self) {
+        self.start_node(SyntaxKind::BoundedProperty);
+
+        // 'bounded' keyword
+        self.expect(SyntaxKind::BoundedKw);
+
+        // Bounds specification
+        self.parse_verification_bounds();
+
+        // Property expression
+        self.parse_temporal_expression();
+
+        // Optional semicolon
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse verification bounds
+    fn parse_verification_bounds(&mut self) {
+        // Bounds: bounded[min:max] or bounded[max]
+        self.expect(SyntaxKind::LBracket);
+
+        self.parse_expression(); // min or max
+
+        if self.at(SyntaxKind::Colon) {
+            self.bump(); // consume :
+            self.parse_expression(); // max
+        }
+
+        self.expect(SyntaxKind::RBracket);
+    }
+
+    /// Parse prove statement
+    fn parse_prove_statement(&mut self) {
+        self.start_node(SyntaxKind::ProveStmt);
+
+        // 'prove' keyword
+        self.expect(SyntaxKind::ProveKw);
+
+        // Property to prove
+        self.parse_temporal_expression();
+
+        // Optional verification bounds
+        if self.at(SyntaxKind::BoundedKw) {
+            self.parse_verification_bounds();
+        }
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
 
         self.finish_node();
     }
@@ -2222,6 +2985,7 @@ mod tests {
         // Note: Full pattern matching parsing will be integrated with event block parsing in Week 2
         // The core enhancements (ColonColon, FatArrow tokens, path pattern support) are implemented
     }
+
     use crate::syntax::SyntaxNodeExt;
 
     #[test]
