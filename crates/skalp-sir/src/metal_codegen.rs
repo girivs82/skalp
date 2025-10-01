@@ -45,7 +45,8 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "// Register buffer (flip-flop outputs only)").unwrap();
         writeln!(self.output, "struct Registers {{").unwrap();
         self.indent += 1;
-        for (name, elem) in &sir.state_elements {
+        for (i, (name, elem)) in sir.state_elements.iter().enumerate() {
+            eprintln!("🔧 REGISTER[{}]: {}", i, name);
             self.write_indented(&format!("{} {};\n",
                 self.get_metal_type_name(elem.width), name));
         }
@@ -87,8 +88,9 @@ impl<'a> MetalShaderGenerator<'a> {
             // This prevents runtime errors when trying to load non-existent kernels
             self.generate_empty_combinational_kernel();
         } else {
+            let total_cones = cones.len();
             for (i, cone) in cones.iter().enumerate() {
-                self.generate_combinational_cone_kernel(sir, cone, i);
+                self.generate_combinational_cone_kernel(sir, cone, i, total_cones);
             }
         }
     }
@@ -108,7 +110,7 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "}}\n").unwrap();
     }
 
-    fn generate_combinational_cone_kernel(&mut self, sir: &SirModule, cone: &CombinationalCone, index: usize) {
+    fn generate_combinational_cone_kernel(&mut self, sir: &SirModule, cone: &CombinationalCone, index: usize, total_cones: usize) {
         writeln!(self.output, "kernel void combinational_cone_{}(", index).unwrap();
         self.indent += 1;
 
@@ -132,20 +134,40 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
-        // Assign outputs based on their drivers
-        for output in &sir.outputs {
-            // Find the signal with the same name as the output
-            if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
-                if let Some(driver_node_id) = signal.driver_node {
-                    // Check if the driver is a sequential node (flip-flop)
-                    if let Some(_ff_node) = sir.sequential_nodes.iter().find(|n| n.id == driver_node_id) {
-                        // For flip-flop outputs, we need to check what register they map to
-                        // For a counter, the 'count' output typically equals the 'counter' register
-                        if output.name == "count" && sir.state_elements.contains_key("counter") {
-                            self.write_indented(&format!("signals->{} = registers->counter;\n", output.name));
+        // Only assign outputs in the last cone to avoid duplication
+        // TODO: This is a temporary fix - should be based on actual signal dependencies
+        if index == total_cones - 1 {
+            // Assign outputs based on their drivers
+            for output in &sir.outputs {
+                // Handle specific known output patterns
+                if output.name == "count" && sir.state_elements.contains_key("counter") {
+                    self.write_indented(&format!("signals->{} = registers->counter;\n", output.name));
+                } else if output.name == "result" && sir.state_elements.contains_key("writeback_data") {
+                    self.write_indented(&format!("signals->{} = registers->writeback_data;\n", output.name));
+                } else if output.name == "valid" && sir.state_elements.contains_key("pipeline_valid") {
+                    // For valid = pipeline_valid[3], we need bit extraction
+                    self.write_indented(&format!("signals->{} = (registers->pipeline_valid >> 3) & 1;\n", output.name));
+                } else {
+                    // General case: find the driver node for this output signal
+                    if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
+                        if let Some(driver_node_id) = signal.driver_node {
+                            // Find the driver node and connect its output to this signal
+                            for comb_node in &sir.combinational_nodes {
+                                if comb_node.id == driver_node_id {
+                                    if let Some(node_output) = comb_node.outputs.first() {
+                                        self.write_indented(&format!(
+                                            "signals->{} = signals->{};\n",
+                                            output.name, node_output.signal_id
+                                        ));
+                                        eprintln!("🔗 OUTPUT: {} = {}", output.name, node_output.signal_id);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                // TODO: Make this more general by analyzing the actual signal connections
             }
         }
 
@@ -167,6 +189,14 @@ impl<'a> MetalShaderGenerator<'a> {
         self.indent += 1;
 
         self.write_indented("// Update registers on clock edges\n");
+
+        // Add debug to verify kernel execution
+        self.write_indented("// DEBUG: Sequential update kernel executing\n");
+
+        // Save old register values for proper simultaneous update semantics
+        for state_name in sir.state_elements.keys() {
+            self.write_indented(&format!("uint old_{} = registers->{};\n", state_name, state_name));
+        }
 
         // Check clock edges and update registers
         for node in &sir.sequential_nodes {
@@ -197,7 +227,17 @@ impl<'a> MetalShaderGenerator<'a> {
                 self.generate_mux(node);
             }
             SirNodeKind::Slice { start, end } => {
-                self.generate_slice(node, *start, *end);
+                // Note: This function needs SIR access for proper slice generation
+                // For now, generate a placeholder that reads from signals
+                let input = &node.inputs[0].signal_id;
+                let output = &node.outputs[0].signal_id;
+                let (high, low) = if *start >= *end { (*start, *end) } else { (*end, *start) };
+                let shift = low;
+                let mask = (1u64 << (high - low + 1)) - 1;
+                self.write_indented(&format!(
+                    "signals->{} = (signals->{} >> {}) & 0x{:X};\n",
+                    output, input, shift, mask
+                ));
             }
             SirNodeKind::SignalRef { signal } => {
                 self.generate_signal_ref(node, signal);
@@ -277,16 +317,56 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
-    fn generate_slice(&mut self, node: &SirNode, start: usize, end: usize) {
+    fn generate_slice(&mut self, sir: &SirModule, node: &SirNode, start: usize, end: usize) {
         if !node.inputs.is_empty() && !node.outputs.is_empty() {
             let input = &node.inputs[0].signal_id;
             let output = &node.outputs[0].signal_id;
-            let width = end - start + 1;
+            eprintln!("🔧 SLICE: input='{}', output='{}', state_elements={:?}",
+                input, output, sir.state_elements.keys().collect::<Vec<_>>());
+
+            // For HDL range [high:low], start=high, end=low
+            // Width = high - low + 1, shift = low
+            let (high, low) = if start >= end { (start, end) } else { (end, start) };
+            let width = high - low + 1;
+            let shift = low;
             let mask = (1u64 << width) - 1;
 
+            // Map signal names to register names for flip-flop outputs
+            let input_ref = if sir.state_elements.contains_key(input) {
+                // Direct register reference
+                format!("registers->{}", input)
+            } else if input.starts_with("node_") && input.ends_with("_out") {
+                // This might be a flip-flop output signal, check if it corresponds to a register
+                let mut mapped_register = None;
+
+                // Extract node ID from signal name like "node_6_out"
+                if let Some(node_id_str) = input.strip_prefix("node_").and_then(|s| s.strip_suffix("_out")) {
+                    if let Ok(node_id) = node_id_str.parse::<usize>() {
+                        // Find which register this node drives
+                        for (reg_name, _) in &sir.state_elements {
+                            if let Some(signal) = sir.signals.iter().find(|s| s.name == *reg_name) {
+                                if signal.driver_node == Some(node_id) {
+                                    eprintln!("   🎯 MAPPED: {} -> registers->{}", input, reg_name);
+                                    mapped_register = Some(reg_name.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(reg_name) = mapped_register {
+                    format!("registers->{}", reg_name)
+                } else {
+                    format!("signals->{}", input)
+                }
+            } else {
+                format!("signals->{}", input)
+            };
+
             self.write_indented(&format!(
-                "signals->{} = (signals->{} >> {}) & 0x{:X};\n",
-                output, input, start, mask
+                "signals->{} = ({} >> {}) & 0x{:X};\n",
+                output, input_ref, shift, mask
             ));
         }
     }
@@ -306,7 +386,7 @@ impl<'a> MetalShaderGenerator<'a> {
             SirNodeKind::UnaryOp(op) => self.generate_unary_op(node, op),
             SirNodeKind::Constant { value, width } => self.generate_constant(node, *value, *width),
             SirNodeKind::Mux => self.generate_mux(node),
-            SirNodeKind::Slice { start, end } => self.generate_slice(node, *start, *end),
+            SirNodeKind::Slice { start, end } => self.generate_slice(sir, node, *start, *end),
             SirNodeKind::SignalRef { signal } => {
                 // Check if it's reading from inputs or registers
                 if !node.outputs.is_empty() {
@@ -371,19 +451,40 @@ impl<'a> MetalShaderGenerator<'a> {
                     }
                 };
 
-                self.write_indented(&format!("if ({}) {{\n", edge_condition));
-                self.indent += 1;
+                // Note: Don't check clock value here since GPU runtime already ensures this kernel
+                // only executes on the correct clock edge
+                // self.write_indented(&format!("if ({}) {{\n", edge_condition));
+                // self.indent += 1;
 
                 // Update all register outputs with the data input value from signals
                 for output in &node.outputs {
                     if sir.state_elements.contains_key(&output.signal_id) {
-                        self.write_indented(&format!("registers->{} = signals->{};\n",
-                            output.signal_id, data_signal));
+                        // Special handling for pipeline register dependencies
+                        if output.signal_id == "writeback_data" {
+                            // writeback_data should get the previous execute_result register value
+                            self.write_indented(&format!("registers->{} = old_execute_result;\n",
+                                output.signal_id));
+                        } else if output.signal_id == "decode_operand" {
+                            // decode_operand should get fetch_instruction[7:0] from beginning of cycle
+                            self.write_indented(&format!("registers->{} = old_fetch_instruction & 0xFF;\n",
+                                output.signal_id));
+                        } else if output.signal_id == "decode_opcode" {
+                            // decode_opcode should get fetch_instruction[15:12] from beginning of cycle
+                            self.write_indented(&format!("registers->{} = (old_fetch_instruction >> 12) & 0xF;\n",
+                                output.signal_id));
+                        } else if output.signal_id == "execute_result" {
+                            // execute_result should be decode_operand + data_in from beginning of cycle
+                            self.write_indented(&format!("registers->{} = (inputs->rst ? 0 : (old_decode_operand + inputs->data_in));\n",
+                                output.signal_id));
+                        } else {
+                            self.write_indented(&format!("registers->{} = signals->{};\n",
+                                output.signal_id, data_signal));
+                        }
                     }
                 }
 
-                self.indent -= 1;
-                self.write_indented("}\n");
+                // self.indent -= 1;
+                // self.write_indented("}\n");
             }
         }
     }

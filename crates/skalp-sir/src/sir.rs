@@ -180,6 +180,49 @@ impl SirModule {
             }
         }
 
+        // Also start from output signals and trace backwards to find combinational logic
+        // that drives outputs but doesn't feed sequential nodes
+        for output in &self.outputs {
+            // Find all combinational nodes that feed this output
+            let mut cone_nodes = Vec::new();
+            let mut to_visit = vec![];
+
+            // Find the driver of this output signal
+            if let Some(driver) = self.get_signal_driver(&output.name) {
+                if self.is_combinational_node(driver) && !visited.contains(&driver) {
+                    to_visit.push(driver);
+                }
+            }
+
+            // Traverse backwards through all combinational logic
+            while let Some(node_id) = to_visit.pop() {
+                if !visited.contains(&node_id) {
+                    visited.insert(node_id);
+                    cone_nodes.push(node_id);
+
+                    // Add all combinational inputs of this node
+                    if let Some(node) = self.get_node(node_id) {
+                        for node_input in &node.inputs {
+                            if let Some(driver) = self.get_signal_driver(&node_input.signal_id) {
+                                if self.is_combinational_node(driver) && !visited.contains(&driver) {
+                                    to_visit.push(driver);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we found combinational nodes, create a cone
+            if !cone_nodes.is_empty() {
+                cones.push(CombinationalCone {
+                    nodes: cone_nodes.clone(),
+                    inputs: self.get_cone_inputs(&cone_nodes),
+                    outputs: self.get_cone_outputs(&cone_nodes),
+                });
+            }
+        }
+
         // If there are no sequential nodes, treat all combinational logic as one cone
         if self.sequential_nodes.is_empty() && !self.combinational_nodes.is_empty() {
             let all_comb_nodes: Vec<usize> = self.combinational_nodes.iter().map(|n| n.id).collect();
