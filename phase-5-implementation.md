@@ -1,66 +1,59 @@
-# Phase 5: Advanced Features
+# Phase 5: Complex Conditional Logic Fix
 
-**Goal:** Implement high-level design abstractions including pattern matching, flow blocks, and traits
+**Goal:** Fix MIR to SIR conversion for complex if-else-if chains to enable GPU simulation of complex hardware designs
 
-**Duration:** 4 weeks
+**Duration:** 2 weeks
 
-**Success Test:** Implement a pipelined design using flow blocks with pattern matching
+**Success Test:** Pipelined processor test achieves 11/11 passing (currently 8/11)
 
 ---
 
 ## 🎯 TASKS
 
 **Core Work:**
-- [ ] **Match expressions and pattern matching**
-  - Implement match syntax with literal, wildcard, and destructuring patterns
-  - Add pattern matching to expressions and statements
-  - Generate efficient conditional logic in MIR
-
-- [ ] **Flow blocks with `|>` operator**
-  - Design flow block syntax for pipelined designs
-  - Implement pipeline stage inference and optimization
-  - Generate appropriate clocking and enable signals
-
-- [ ] **Trait definitions and implementations**
-  - Add trait syntax to parser and AST
-  - Implement trait resolution in type checker
-  - Support generic traits with associated types
-
-- [ ] **Generic entities with type parameters**
-  - Extend entity syntax for generic parameters
-  - Implement generic instantiation and monomorphization
-  - Add constraints and bounds checking
-
-- [ ] **Intent parsing and propagation**
-  - Parse intent annotations and requirements
-  - Propagate intent through design hierarchy
-  - Generate documentation and analysis
+- [ ] Debug assignment value extraction in if-else-if chains
+  - Add debug prints to `find_assignment_in_block()` and `convert_if_to_sequential_mux()`
+  - Verify MIR representation correctly captures conditional structure
+  - Identify why different branches return identical assignment values
+- [ ] Fix recursive mux tree generation for nested conditionals
+  - Correct `convert_if_to_sequential_mux()` function to handle else-if chains properly
+  - Ensure each condition gets its own unique assignment value
+  - Fix recursive descent through else-if structures
+- [ ] Validate expression node creation for different operations
+  - Verify `create_expression_node()` generates different nodes for different arithmetic operations
+  - Check binary operations (add, sub, mul, xor) are created properly
+  - Ensure comparisons (`decode_opcode == 1`, `decode_opcode == 2`, etc.) generate distinct condition nodes
 
 **Testing:**
-- [ ] Test match expressions with various pattern types
-- [ ] Test flow block pipeline generation and timing
-- [ ] Test trait implementations and generic resolution
-- [ ] Test generic entity instantiation with different parameters
-- [ ] Test intent propagation through hierarchical designs
+- [ ] Fix pipelined processor test (4-stage pipeline with ALU)
+  - Target: All 11 test cases passing
+  - Current status: 8/11 passing (failing on cycles where ALU operations should produce results)
+  - Expected outputs: ADD(10+5)=15, SUB(20-3)=17, XOR(15^7)=8
+- [ ] Create additional test cases with complex conditional logic
+  - Complex ALU with 8+ operations
+  - Multi-state FSM with complex transitions
+  - Nested conditionals (if-else-if within if-else-if)
+- [ ] Test edge cases and integration
+  - Mixed simple and complex conditional structures
+  - Multiple signals with different conditional assignments
+  - Performance with complex designs on GPU
 
 **Documentation:**
-- [ ] Document pattern matching syntax and semantics
-- [ ] Create flow block design guide with examples
-- [ ] Document trait system and generic programming
-- [ ] Add advanced language features to user guide
+- [ ] Document the fix in conditional logic compilation
+- [ ] Update technical notes on MIR to SIR conversion
+- [ ] Add comments to fixed functions explaining the correct approach
 
 ---
 
 ## ✅ COMPLETION CRITERIA
 
 **This phase is done when:**
-- [ ] Can write complex pattern matching with destructuring
-- [ ] Can implement pipelined designs using flow blocks
-- [ ] Traits work with generic parameters and constraints
-- [ ] Generic entities can be instantiated with different types
-- [ ] Intent annotations are parsed and propagated correctly
+- [ ] Pipelined processor test shows 11/11 passing tests
+- [ ] Generated Metal shaders show proper nested mux structures with different values
+- [ ] Multiple complex examples demonstrate robust conditional compilation
+- [ ] GPU simulation performance maintains efficiency with complex designs
 
-**Success Test:** Implement a pipelined CPU design using flow blocks, pattern matching for instruction decode, and generic traits for different pipeline stages
+**Success Test:** Run `cargo test --test test_pipelined_processor test_pipelined_processor_gpu` and see all 11 tests pass
 
 ---
 
@@ -72,47 +65,82 @@
 ```
 
 **Blockers:**
-- [ ] None currently identified
+- [ ] Any current issues blocking progress
 
 ---
 
-## 🧪 TECHNICAL DETAILS
+## 🔧 TECHNICAL DETAILS
 
-**Pattern Matching Design:**
-- Support literal patterns (integers, bit patterns)
-- Wildcard patterns with variable binding
-- Struct and enum destructuring
-- Guard clauses for conditional matching
-- Exhaustiveness checking at compile time
+### Problem Analysis
+**File:** `/Users/girivs/src/hw/hls/crates/skalp-sir/src/mir_to_sir.rs` (lines 263-313)
 
-**Flow Block Strategy:**
-- `|>` operator for explicit pipeline stages
-- Automatic register insertion between stages
-- Pipeline bubble and stall handling
-- Backpressure and flow control signals
-- Stage-level enable and reset propagation
+**Current Issue:** Complex if-else-if chains generate incorrect Metal shader code:
+```metal
+signals->node_6_out = signals->node_0_out ? signals->node_5_out : signals->node_5_out;
+```
 
-**Trait System:**
-- Associated types and constants
-- Generic trait implementations
-- Trait bounds and where clauses
-- Coherence rules to prevent conflicts
-- Automatic trait derivation for common patterns
+**Root Cause:** The recursive `convert_if_to_sequential_mux()` function doesn't correctly extract different assignment values for each branch.
 
-**Generic Entity Design:**
-- Type parameters with bounds
-- Const generic parameters for widths
-- Associated types in entity interfaces
-- Monomorphization for concrete instances
-- Generic constraint solving
+**Expected Output:** Proper nested mux structure:
+```metal
+decode_opcode == 1 ? (decode_operand + data_in) :
+  (decode_opcode == 2 ? (decode_operand - data_in) :
+    (decode_opcode == 3 ? (decode_operand * 2) :
+      (decode_opcode == 4 ? (decode_operand ^ data_in) :
+        decode_operand)))
+```
 
-**Intent System:**
-- Intent annotation syntax
-- Requirement propagation through hierarchy
-- Documentation generation from intent
-- Analysis and verification hooks
-- Safety requirement tracking
+### Key Functions to Fix
+1. **`convert_if_in_sequential()`** - Main entry point for sequential if statements
+2. **`convert_if_to_sequential_mux()`** - Recursive mux tree generation
+3. **`find_else_value()`** - Handling of else-if chains
+4. **`find_assignment_in_block()`** - Assignment extraction from blocks
+
+### Test Case Reference
+**HDL Input:**
+```hdl
+if (decode_opcode == 1) {
+    execute_result <= decode_operand + data_in
+} else if (decode_opcode == 2) {
+    execute_result <= decode_operand - data_in
+} else if (decode_opcode == 3) {
+    execute_result <= decode_operand * 2
+} else if (decode_opcode == 4) {
+    execute_result <= decode_operand ^ data_in
+} else {
+    execute_result <= decode_operand
+}
+```
+
+**Current Test Results:**
+- Tests 9, 10, 11 failing (cycles 18, 20, 22)
+- Expected results: 15, 17, 8
+- Actual results: 0, 0, 0
 
 ---
 
-**When done, run `/complete-phase` again for Phase 6: Synthesis & Optimization**
+## 🎯 SUCCESS METRICS
+
+1. **Functional:** Pipelined processor test: 11/11 passing
+2. **Correctness:** Metal shaders show distinct values in mux branches
+3. **Performance:** Complex designs run efficiently on GPU
+4. **Robustness:** Multiple complex examples work correctly
+
+---
+
+## 📊 CURRENT STATUS
+
+**Architecture Status:** ✅ GPU simulation backend fully functional
+- Counter test: 7/7 passing
+- Three-buffer architecture working correctly
+- Metal shader generation framework operational
+- Async GPU runtime with proper synchronization
+
+**Issue Scope:** ❌ Frontend compilation only
+- GPU simulation architecture is not the problem
+- Issue isolated to MIR → SIR conditional logic conversion
+- All other GPU simulation features working correctly
+
+---
+
+**When done, run `/complete-phase` again for the next phase**

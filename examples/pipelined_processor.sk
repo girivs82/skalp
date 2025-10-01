@@ -1,0 +1,66 @@
+// Pipelined processor with multiple stages and complex combinational logic
+entity PipelinedProcessor {
+    in clk: clock
+    in rst: reset
+    in instruction: nat[16]
+    in data_in: nat[8]
+    out result: nat[8]
+    out valid: bool
+}
+
+impl PipelinedProcessor {
+    // Pipeline stages
+    signal fetch_instruction: nat[16] = 0
+    signal decode_opcode: nat[4] = 0
+    signal decode_operand: nat[8] = 0
+    signal execute_result: nat[8] = 0
+    signal writeback_data: nat[8] = 0
+    signal pipeline_valid: nat[4] = 0  // 4-bit shift register for valid tracking
+
+    on(clk.rise) {
+        if (rst) {
+            // Reset all pipeline stages
+            fetch_instruction <= 0
+            decode_opcode <= 0
+            decode_operand <= 0
+            execute_result <= 0
+            writeback_data <= 0
+            pipeline_valid <= 0
+        } else {
+            // Stage 1: Fetch
+            fetch_instruction <= instruction
+
+            // Stage 2: Decode
+            decode_opcode <= fetch_instruction[15:12]  // Upper 4 bits
+            decode_operand <= fetch_instruction[7:0]   // Lower 8 bits
+
+            // Stage 3: Execute (complex combinational logic)
+            if (decode_opcode == 1) {
+                // ADD operation
+                execute_result <= decode_operand + data_in
+            } else if (decode_opcode == 2) {
+                // SUB operation
+                execute_result <= decode_operand - data_in
+            } else if (decode_opcode == 3) {
+                // MUL operation (simplified)
+                execute_result <= decode_operand * 2  // Simple shift
+            } else if (decode_opcode == 4) {
+                // XOR operation
+                execute_result <= decode_operand ^ data_in
+            } else {
+                // NOP
+                execute_result <= decode_operand
+            }
+
+            // Stage 4: Writeback
+            writeback_data <= execute_result
+
+            // Valid bit pipeline (tracks when data is valid through pipeline)
+            pipeline_valid <= (pipeline_valid << 1) | 1
+        }
+    }
+
+    // Outputs
+    result = writeback_data
+    valid = pipeline_valid[3]  // Valid when data has passed through all 4 stages
+}
