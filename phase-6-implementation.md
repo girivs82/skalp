@@ -1,87 +1,71 @@
-# Phase 6: Synthesis & Optimization
+# Phase 6: Advanced Features
 
-**Goal:** Build real synthesis capabilities - transform MIR to optimized gate-level netlists
+**Goal:** Implement high-level design abstractions for expressive hardware design
 
-**Duration:** 4 weeks (Weeks 21-24)
+**Duration:** 4 weeks (Weeks 19-22)
 
-**Success Test:** Synthesize design with 20% better area than naive approach
+**Success Test:** Implement a pipelined design using flow blocks - all tests passing
 
 ---
 
 ## 🎯 TASKS
 
 **Core Work:**
-- [ ] Implement LIR (Low-level IR) data structures
-  - [ ] Gate-level representation (AND, OR, NOT, etc.)
-  - [ ] Netlist connectivity model
-  - [ ] Technology library abstraction
-  - [ ] Timing annotation support
+- [ ] Match expressions and pattern matching
+  - [ ] Implement match statement HIR generation
+  - [ ] Add pattern matching semantics to MIR
+  - [ ] Generate SystemVerilog case statements from match expressions
+  - [ ] Support pattern guards and wildcard patterns
 
-- [ ] MIR to LIR lowering
-  - [ ] Boolean expression decomposition
-  - [ ] State machine extraction
-  - [ ] Memory inference (registers, RAMs)
-  - [ ] Arithmetic operator mapping
-  - [ ] Mux generation for conditionals
+- [ ] Flow blocks with `|>` operator
+  - [ ] Design flow block syntax and semantics
+  - [ ] Implement pipeline operator (`|>`) in parser
+  - [ ] Add flow control to HIR/MIR pipeline
+  - [ ] Generate proper sequential logic for pipelined flows
 
-- [ ] Technology Mapping
-  - [ ] Generic gate library
-  - [ ] Standard cell mapping (ASIC)
-  - [ ] LUT mapping (FPGA)
-  - [ ] Technology-specific optimizations
+- [ ] Trait definitions and implementations
+  - [ ] Add trait declaration syntax
+  - [ ] Implement trait resolution in type checker
+  - [ ] Support trait bounds on generic parameters
+  - [ ] Generate interface-like SystemVerilog from traits
 
-- [ ] Optimization Passes
-  - [ ] Constant folding and propagation
-  - [ ] Dead code elimination
-  - [ ] Common subexpression elimination (CSE)
-  - [ ] Boolean algebra simplification
-  - [ ] Resource sharing analysis
-  - [ ] Retiming for performance
-  - [ ] Pipeline balancing
+- [ ] Enhanced generic entities
+  - [ ] Support const parameters alongside type parameters
+  - [ ] Implement generic constraint checking
+  - [ ] Add default values for generic parameters
+  - [ ] Improve SystemVerilog parameter generation
 
-- [ ] Timing Analysis
-  - [ ] Static timing analysis (STA) engine
-  - [ ] Critical path identification
-  - [ ] Setup/hold time checking
-  - [ ] Clock tree analysis
-  - [ ] Multi-cycle path support
-
-- [ ] Area Optimization
-  - [ ] Resource estimation models
-  - [ ] Sharing opportunity detection
-  - [ ] Multiplexer optimization
-  - [ ] State encoding optimization
-  - [ ] Logic minimization
+- [ ] Intent parsing and propagation
+  - [ ] Add intent annotation syntax (`@intent`)
+  - [ ] Parse and store intent metadata in HIR
+  - [ ] Propagate intent through compilation pipeline
+  - [ ] Use intent for optimization decisions
 
 **Testing:**
-- [ ] Unit tests for each optimization pass
-- [ ] Test LIR generation for common patterns
-- [ ] Benchmark suite comparing optimized vs unoptimized
-- [ ] Validate timing analysis against known designs
-- [ ] Test technology mapping for different targets
+- [ ] Test match expressions with complex patterns
+- [ ] Test flow blocks with multi-stage pipelines
+- [ ] Test trait implementations with generic constraints
+- [ ] Test const generic parameters with SystemVerilog generation
+- [ ] Test intent annotations and their propagation
 
 **Documentation:**
-- [ ] Document LIR format and semantics
-- [ ] Create optimization pass guide
-- [ ] Document timing analysis methodology
-- [ ] Add synthesis options to user guide
+- [ ] Update language specification with new features
+- [ ] Document trait system and generic constraints
+- [ ] Add examples of flow block usage patterns
+- [ ] Document intent annotation semantics
 
 ---
 
 ## ✅ COMPLETION CRITERIA
 
 **This phase is done when:**
-- [ ] Can generate gate-level netlist from any MIR design
-- [ ] Optimization passes reduce area by at least 20% on benchmarks
-- [ ] Timing analysis correctly identifies critical paths
-- [ ] Technology mapping works for both ASIC and FPGA targets
-- [ ] All optimization passes have comprehensive tests
+- [ ] Match expressions compile to correct SystemVerilog case statements
+- [ ] Flow blocks generate proper pipelined hardware
+- [ ] Trait system works with generic entities
+- [ ] Const generics generate parameterized SystemVerilog
+- [ ] Intent annotations are parsed and stored correctly
 
-**Success Test:**
-1. Synthesize a 32-bit ALU design
-2. Compare area with unoptimized version (should be 20% smaller)
-3. Verify timing analysis matches expected critical path
-4. Generate both ASIC (standard cell) and FPGA (LUT) mappings
+**Success Test:** Successfully compile a pipelined processor design using flow blocks and trait-based interfaces, with all generated SystemVerilog synthesizing correctly.
 
 ---
 
@@ -89,34 +73,80 @@
 
 **Daily Log:**
 ```
-[Dec 28, 2024] - Phase 6 started - Setting up LIR crate structure
+[Oct 1, 2024] - Phase 6 started - Advanced Features implementation
 ```
 
 **Blockers:**
-- [ ] Need to decide on technology library format
-- [ ] Consider integrating with existing tools (Yosys, ABC) vs building from scratch
+- [ ] None currently identified
 
 ---
 
-## 🔧 TECHNICAL DECISIONS
+## 🎯 SPECIFIC MILESTONES
 
-**LIR Design Philosophy:**
-- Keep it simple and gate-level (no high-level constructs)
-- Support hierarchical netlists for modularity
-- Make optimization passes composable and optional
-- Design for both ASIC and FPGA from the start
+### Milestone 1: Pattern Matching (Week 1)
+- [ ] Implement match expression parsing
+- [ ] Add pattern syntax (literals, wildcards, guards)
+- [ ] Generate SystemVerilog case statements
+- [ ] Test with state machine examples
 
-**Optimization Strategy:**
-- Start with simple local optimizations
-- Build up to complex global optimizations
-- Make each pass independently testable
-- Provide detailed optimization reports
+### Milestone 2: Flow Blocks (Week 2)
+- [ ] Design pipeline operator syntax (`|>`)
+- [ ] Implement flow block HIR generation
+- [ ] Add pipeline semantics to MIR
+- [ ] Generate multi-stage sequential logic
 
-**Integration Points:**
-- Consider BLIF or structural Verilog as exchange formats
-- Support constraint files (SDC for timing)
-- Enable integration with place & route tools
+### Milestone 3: Trait System (Week 3)
+- [ ] Add trait declaration and implementation syntax
+- [ ] Implement trait resolution in type checker
+- [ ] Support trait bounds on generics
+- [ ] Generate SystemVerilog interfaces
+
+### Milestone 4: Enhanced Generics & Intent (Week 4)
+- [ ] Add const generic parameter support
+- [ ] Implement intent annotation parsing
+- [ ] Integrate intent with optimization passes
+- [ ] Complete integration testing
 
 ---
 
-**When done, run `/complete-phase` again for Phase 7: Verification**
+## 🧪 KEY TEST CASES
+
+**Test 1: Pattern Matching State Machine**
+```skalp
+enum State { Idle, Active, Done }
+
+match current_state {
+    State::Idle => next_state = State::Active,
+    State::Active if ready => next_state = State::Done,
+    State::Active => next_state = State::Active,
+    State::Done => next_state = State::Idle,
+}
+```
+
+**Test 2: Flow Block Pipeline**
+```skalp
+data |> validate |> transform |> output
+```
+
+**Test 3: Trait-based Generic Entity**
+```skalp
+trait BusInterface<const WIDTH: usize> {
+    fn transfer(data: nat[WIDTH]) -> bool;
+}
+
+entity Processor<T: BusInterface<32>> {
+    // Use T for bus operations
+}
+```
+
+**Test 4: Intent-driven Design**
+```skalp
+@intent(low_power, high_performance)
+entity FastALU {
+    // Compiler optimizes based on intent
+}
+```
+
+---
+
+**When done, run `/complete-phase` again for Phase 7: Synthesis & Optimization**
