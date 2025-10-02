@@ -17,12 +17,14 @@ pub mod optimization;
 pub mod primitives;
 pub mod tech_mapping;
 pub mod technology;
+pub mod technology_mapping;
 pub mod timing;
 
 pub use lir::{Gate, GateType, Lir, Net, LirDesign, LirModule, LirSignal};
 pub use mir_to_lir::transform_mir_to_lir;
 pub use optimization::{OptimizationPipeline, OptimizationResult};
 pub use netlist::Netlist;
+pub use technology_mapping::{TechnologyMapper, TechnologyTarget, TechnologyMappingResult, ResourceUsage};
 
 use skalp_mir::Mir;
 use anyhow::Result;

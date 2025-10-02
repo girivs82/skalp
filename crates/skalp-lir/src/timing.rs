@@ -314,7 +314,8 @@ impl TimingAnalyzer {
         path.reverse();
 
         // Calculate total delay
-        for i in 0..path.len() - 1 {
+        if path.len() > 1 {
+            for i in 0..path.len() - 1 {
             if let Some(arcs) = self.graph.forward_arcs.get(&path[i]) {
                 for arc in arcs {
                     if arc.to == path[i + 1] {
@@ -322,6 +323,7 @@ impl TimingAnalyzer {
                         break;
                     }
                 }
+            }
             }
         }
 
