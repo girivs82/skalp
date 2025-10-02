@@ -169,6 +169,34 @@ pub enum Token {
     #[token("prove")]
     Prove,
 
+    // Safety Features (ISO 26262)
+    #[token("asil")]
+    Asil,
+    #[token("safety_req")]
+    SafetyReq,
+    #[token("safety_goal")]
+    SafetyGoal,
+    #[token("fmea")]
+    Fmea,
+    #[token("fmeda")]
+    Fmeda,
+    #[token("psm")]
+    Psm,
+    #[token("lsm")]
+    Lsm,
+    #[token("spfm")]
+    Spfm,
+    #[token("lfm")]
+    Lfm,
+    #[token("pmhf")]
+    Pmhf,
+    #[token("power_domain")]
+    PowerDomain,
+    #[token("isolation")]
+    Isolation,
+    #[token("diagnostic_coverage")]
+    DiagnosticCoverage,
+
     // Identifiers and literals
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_owned())]
     Identifier(String),
@@ -613,6 +641,21 @@ entity Counter {
         assert_eq!(tokens, vec![
             Token::Assert,
             Token::Requirement,
+        ]);
+    }
+
+    #[test]
+    fn test_safety_keywords() {
+        let mut lexer = Lexer::new("asil safety_req psm lsm fmea power_domain");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        assert_eq!(tokens, vec![
+            Token::Asil,
+            Token::SafetyReq,
+            Token::Psm,
+            Token::Lsm,
+            Token::Fmea,
+            Token::PowerDomain,
         ]);
     }
 

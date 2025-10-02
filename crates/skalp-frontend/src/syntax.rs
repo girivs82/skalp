@@ -100,6 +100,21 @@ pub enum SyntaxKind {
     FormalKw,
     ProveKw,
 
+    // Safety Features (ISO 26262)
+    AsilKw,
+    SafetyReqKw,
+    SafetyGoalKw,
+    FmeaKw,
+    FmedaKw,
+    PsmKw,
+    LsmKw,
+    SpfmKw,
+    LfmKw,
+    PmhfKw,
+    PowerDomainKw,
+    IsolationKw,
+    DiagnosticCoverageKw,
+
     // Literals
     Ident,
     IntLiteral,
@@ -379,6 +394,10 @@ impl SyntaxKind {
             | AlwaysKw | EventuallyKw | UntilKw | StrongKw | WeakKw | ThroughoutKw
             | CovergroupKw | CoverpointKw | BinsKw | IgnoreBinsKw | IllegalBinsKw | CrossKw
             | InvariantKw | SafetyKw | LivenessKw | BoundedKw | FormalKw | ProveKw
+            // Safety Features (ISO 26262)
+            | AsilKw | SafetyReqKw | SafetyGoalKw | FmeaKw | FmedaKw
+            | PsmKw | LsmKw | SpfmKw | LfmKw | PmhfKw
+            | PowerDomainKw | IsolationKw | DiagnosticCoverageKw
         )
     }
 
@@ -511,6 +530,21 @@ impl SyntaxKind {
             BoundedKw => "'bounded'",
             FormalKw => "'formal'",
             ProveKw => "'prove'",
+
+            // Safety Features (ISO 26262)
+            AsilKw => "'asil'",
+            SafetyReqKw => "'safety_req'",
+            SafetyGoalKw => "'safety_goal'",
+            FmeaKw => "'fmea'",
+            FmedaKw => "'fmeda'",
+            PsmKw => "'psm'",
+            LsmKw => "'lsm'",
+            SpfmKw => "'spfm'",
+            LfmKw => "'lfm'",
+            PmhfKw => "'pmhf'",
+            PowerDomainKw => "'power_domain'",
+            IsolationKw => "'isolation'",
+            DiagnosticCoverageKw => "'diagnostic_coverage'",
 
             Ident => "identifier",
             IntLiteral => "integer literal",
@@ -742,6 +776,21 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Dot => Dot,
             Token::Question => Question,
             Token::Apostrophe => Apostrophe,
+
+            // Safety Features (ISO 26262)
+            Token::Asil => AsilKw,
+            Token::SafetyReq => SafetyReqKw,
+            Token::SafetyGoal => SafetyGoalKw,
+            Token::Fmea => FmeaKw,
+            Token::Fmeda => FmedaKw,
+            Token::Psm => PsmKw,
+            Token::Lsm => LsmKw,
+            Token::Spfm => SpfmKw,
+            Token::Lfm => LfmKw,
+            Token::Pmhf => PmhfKw,
+            Token::PowerDomain => PowerDomainKw,
+            Token::Isolation => IsolationKw,
+            Token::DiagnosticCoverage => DiagnosticCoverageKw,
 
             Token::Error => Error,
         }

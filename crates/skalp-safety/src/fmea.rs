@@ -638,6 +638,11 @@ impl FmeaGenerator {
                         inputs.push(interface.clone());
                         outputs.push(interface);
                     }
+                    skalp_frontend::hir::HirPortDirection::Protocol => {
+                        // Protocol ports can be bidirectional
+                        inputs.push(interface.clone());
+                        outputs.push(interface);
+                    }
                 }
             }
 

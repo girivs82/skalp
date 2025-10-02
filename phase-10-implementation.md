@@ -1,50 +1,67 @@
-# Phase 10: Polish & Tools
+# Phase 10: Advanced Backends
 
-**Goal:** Production readiness with developer tools and documentation
+**Goal:** FPGA and ASIC support for real hardware deployment
 
 **Duration:** 4 weeks
 
-**Success Test:** External user successfully uses SKALP for a real design project
+**Success Test:** Synthesize SKALP design to iCE40 FPGA bitstream and run on physical hardware
 
 ---
 
 ## 🎯 TASKS
 
 **Core Work:**
-- [x] Implement Language Server Protocol (LSP) for IDE integration
-- [x] Create comprehensive documentation and tutorials
-- [x] Build standard library with common components (AXI, FIFO, etc.)
-- [ ] Optimize performance across all compilation phases
-- [ ] Complete test suite with coverage metrics
+- [ ] iCE40 FPGA backend implementation
+  - [ ] iCE40-specific LUT and resource mapping
+  - [ ] Yosys integration for iCE40 synthesis
+  - [ ] NextPNR integration for place & route
+  - [ ] Bitstream generation with icepack
+- [ ] Standard cell ASIC backend
+  - [ ] Standard cell library integration
+  - [ ] Liberty file parsing for timing/power
+  - [ ] OpenROAD integration for P&R
+  - [ ] GDSII output generation
+- [ ] Timing constraints support
+  - [ ] SDC (Synopsys Design Constraints) generation
+  - [ ] Clock domain constraint propagation
+  - [ ] Setup/hold timing validation
+  - [ ] Multi-corner analysis support
+- [ ] Power analysis integration
+  - [ ] Static power estimation
+  - [ ] Dynamic power calculation
+  - [ ] Power domain isolation validation
+  - [ ] DVFS (Dynamic Voltage/Frequency Scaling) support
+- [ ] Place & route integration
+  - [ ] Floorplanning hints from SKALP intent
+  - [ ] Congestion-aware placement
+  - [ ] Timing-driven routing
+  - [ ] DRC (Design Rule Check) validation
 
 **Testing:**
-- [ ] End-to-end testing of complete SKALP flow
-- [ ] Performance benchmarking against hand-written HDL
-- [x] LSP integration testing with VS Code
-- [x] Standard library component validation
-- [ ] External user acceptance testing
+- [ ] Test iCE40 synthesis with simple counter design
+- [ ] Test ASIC flow with standard cell library
+- [ ] Validate timing constraints propagation
+- [ ] Test power analysis accuracy vs. post-layout results
+- [ ] Test complete flow: SKALP → LIR → Backend → Hardware
 
 **Documentation:**
-- [ ] Complete language reference manual
-- [x] Tutorial series for beginners
-- [ ] API documentation for all public interfaces
-- [ ] Migration guide from Verilog/VHDL
-- [ ] Best practices and design patterns guide
+- [ ] Backend configuration documentation
+- [ ] Timing constraint specification guide
+- [ ] Power analysis methodology
+- [ ] Hardware deployment workflow
 
 ---
 
 ## ✅ COMPLETION CRITERIA
 
 **This phase is done when:**
-- [x] LSP provides full IDE support (completion, diagnostics, hover)
-- [x] Documentation covers all language features comprehensively
-- [x] Standard library includes at least 10 common components
-- [ ] Performance meets or exceeds hand-written HDL compilation
-- [ ] Test coverage exceeds 90% across all crates
-- [ ] At least one external user successfully completes a design
-- [ ] All example designs compile and simulate correctly
+- [ ] iCE40 FPGA backend generates working bitstreams
+- [ ] ASIC backend produces clean GDSII with timing closure
+- [ ] Timing constraints are properly propagated and validated
+- [ ] Power analysis provides accurate estimates within 15% of actual
+- [ ] Complete end-to-end flow validated on real hardware
 
-**Success Test:** External user designs and implements a complete digital system using SKALP with IDE support, achieving synthesis results comparable to hand-written HDL
+**Success Test:** Deploy a SKALP counter design to iCE40 FPGA, verify functionality with logic analyzer, and demonstrate <10% power/timing variance from estimates
 
 ---
 
@@ -52,113 +69,30 @@
 
 **Daily Log:**
 ```
-Dec 28, 2024 - Completed core Phase 10 deliverables:
-  - Implemented full LSP server with tower-lsp
-  - Created VS Code extension with syntax highlighting
-  - Built standard library with 6 core components
-  - Established documentation structure
-  - All LSP features working (hover, completion, diagnostics, go-to-definition)
-  - 14 tests passing in LSP crate
+[Date] - [What got done] - [Any blockers]
 ```
 
-**Completed:**
-- ✅ LSP implementation with all core features
-- ✅ VS Code extension with TextMate grammar
-- ✅ Standard library components (Counter, FIFO, Shift Register, UART, Adder, Multiplier)
-- ✅ Documentation structure and getting started guide
-- ✅ IDE integration working end-to-end
-
-**Remaining Work:**
-- Performance optimization and benchmarking
-- Complete test coverage analysis
-- External user validation
-- Full API documentation
-- Migration guides from Verilog/VHDL
-
 **Blockers:**
-- [x] ~~LSP protocol complexity for hardware languages~~ - RESOLVED using tower-lsp
-- [ ] Need external users for validation testing
-- [ ] Performance benchmarking infrastructure needed
+- [ ] Need access to iCE40 development board for testing
+- [ ] Need standard cell library for ASIC flow testing
+- [ ] May need to integrate with external EDA tools
 
 ---
 
 ## 🔧 TECHNICAL ARCHITECTURE
 
-### Language Server Protocol (LSP)
-1. **Core Services:**
-   - Syntax highlighting and semantic tokens
-   - Auto-completion for entities, signals, types
-   - Hover information with type details
-   - Go-to-definition and find-references
-   - Diagnostics with error recovery
+**Backend Pipeline:**
+1. **LIR → Target IR:** Convert from SKALP LIR to target-specific representation
+2. **Technology Mapping:** Map to target primitives (LUTs for FPGA, cells for ASIC)
+3. **Constraint Application:** Apply timing, power, and area constraints
+4. **Optimization:** Target-specific optimizations for performance/area/power
+5. **Output Generation:** Generate bitstream (FPGA) or netlist (ASIC)
 
-2. **Advanced Features:**
-   - Clock domain analysis in IDE
-   - Intent validation and suggestions
-   - Waveform preview integration
-   - Quick fixes for common issues
-
-### Standard Library Components
-1. **Basic Components:**
-   - FIFO (synchronous and asynchronous)
-   - Counter (up/down/modulo)
-   - Shift register (SIPO/PISO/Universal)
-   - Memory (single/dual port RAM/ROM)
-
-2. **Interface Components:**
-   - AXI4/AXI4-Lite master/slave
-   - UART transmitter/receiver
-   - SPI master/slave
-   - I2C master/slave
-
-3. **Arithmetic Components:**
-   - Adder/Subtractor (pipelined)
-   - Multiplier (various architectures)
-   - Divider (radix-2/radix-4)
-   - Fixed-point arithmetic units
-
-### Performance Optimization
-1. **Compiler Performance:**
-   - Parallel compilation phases
-   - Incremental compilation support
-   - Optimized IR transformations
-   - Memory usage optimization
-
-2. **Generated Code Quality:**
-   - Advanced optimization passes
-   - Target-specific code generation
-   - Minimize intermediate representations
-   - Smart clock gating insertion
-
-### Documentation Structure
-1. **Getting Started:**
-   - Installation guide
-   - Hello World tutorial
-   - Basic concepts explanation
-
-2. **Language Reference:**
-   - Complete syntax specification
-   - Type system details
-   - Intent system documentation
-   - Safety features guide
-
-3. **Advanced Topics:**
-   - Clock domain crossing patterns
-   - Verification strategies
-   - Performance optimization tips
-   - Integration with existing workflows
+**Target Support:**
+- **FPGA:** iCE40 family with yosys/nextpnr integration
+- **ASIC:** Generic standard cell flow with OpenROAD integration
+- **Future:** Xilinx, Intel/Altera, advanced ASIC processes
 
 ---
 
-## 🎯 KEY DELIVERABLES
-
-1. **skalp-lsp** crate with full LSP implementation
-2. **skalp-stdlib** crate with validated components
-3. **docs/** directory with complete documentation
-4. **examples/** with 20+ working examples
-5. **benchmarks/** with performance comparisons
-6. **VS Code extension** for SKALP support
-
----
-
-**When done, SKALP will be production-ready for real hardware development projects!**
+**When done, run `/complete-phase` again for Phase 11: Polish & Tools**

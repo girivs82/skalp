@@ -1,49 +1,69 @@
-# Phase 9: Advanced Backends
+# Phase 9: Safety Features Implementation
 
-**Goal:** FPGA and ASIC support for real hardware deployment
+**Goal:** ISO 26262 compliance features with FMEA generation and safety metrics
 
-**Duration:** 4 weeks
+**Duration:** 4 weeks (Oct 2 - Oct 30, 2024)
 
-**Success Test:** Synthesize SKALP design to iCE40 FPGA bitstream and run on physical hardware
+**Success Test:** Generate accurate FMEA for a safety-critical design
 
 ---
 
 ## 🎯 TASKS
 
 **Core Work:**
-- [ ] Implement iCE40 FPGA backend with bitstream generation
-- [ ] Create standard cell mapping for ASIC synthesis flows
-- [ ] Add timing constraints support and analysis
-- [ ] Implement power analysis and optimization
-- [ ] Integrate with place & route tools (nextpnr, OpenROAD)
+- [ ] **Safety Requirement Support** - Add safety requirements to language syntax
+  - [ ] Parse safety requirement annotations (`safety_req!`, `safety_goal!`)
+  - [ ] Safety integrity levels (SIL, ASIL) integration
+  - [ ] Safety constraint propagation through design hierarchy
+  - [ ] Safety requirement verification and traceability
+
+- [ ] **PSM/LSM Mechanisms** - Primary and Latent Safety Mechanisms
+  - [ ] PSM definition syntax and parsing
+  - [ ] LSM detection and validation
+  - [ ] Diagnostic coverage calculation
+  - [ ] Single-point and residual failure analysis
+
+- [ ] **FMEA Generation from Intent** - Automated failure mode analysis
+  - [ ] Intent-driven failure mode extraction
+  - [ ] Severity, occurrence, and detection scoring
+  - [ ] Risk Priority Number (RPN) calculation
+  - [ ] FMEA report generation (XML/CSV/PDF formats)
+
+- [ ] **Safety Metrics Calculation** - Quantitative safety assessment
+  - [ ] Single Point Fault Metric (SPFM) calculation
+  - [ ] Latent Fault Metric (LFM) calculation
+  - [ ] Probabilistic Metric for Random Hardware Failures (PMHF)
+  - [ ] Diagnostic coverage metrics
+
+- [ ] **Power Domain Support** - Safety-aware power management
+  - [ ] Power domain definition and isolation
+  - [ ] Cross-domain safety analysis
+  - [ ] Power-related failure mode detection
+  - [ ] Safety shutdown mechanisms
 
 **Testing:**
-- [ ] Test FPGA synthesis with simple designs (counter, adder)
-- [ ] Validate timing constraints on complex designs
-- [ ] Test ASIC flow with standard cell libraries
-- [ ] Verify power analysis accuracy
-- [ ] Test place & route integration
+- [ ] Test safety requirement parsing and validation
+- [ ] Test FMEA generation accuracy against manual analysis
+- [ ] Test safety metrics calculation with known designs
+- [ ] Test power domain isolation and safety mechanisms
 
 **Documentation:**
-- [ ] Create FPGA backend user guide
-- [ ] Document ASIC flow setup and usage
-- [ ] Add timing constraint examples
-- [ ] Document power analysis capabilities
+- [ ] Safety feature user guide
+- [ ] FMEA generation methodology documentation
+- [ ] ISO 26262 compliance mapping
 
 ---
 
 ## ✅ COMPLETION CRITERIA
 
 **This phase is done when:**
-- [ ] Can synthesize SKALP designs to iCE40 FPGA bitstream
-- [ ] ASIC synthesis flow works with standard cell libraries
-- [ ] Timing analysis provides accurate critical path information
-- [ ] Power analysis reports realistic power estimates
-- [ ] Place & route integration produces working layouts
-- [ ] All backend tests pass
-- [ ] Can demo FPGA design running on physical hardware
+- [ ] Safety requirements can be expressed and validated in SKALP
+- [ ] FMEA reports are automatically generated from design intent
+- [ ] Safety metrics (SPFM, LFM, PMHF) are calculated accurately
+- [ ] Power domain safety mechanisms are functional
+- [ ] ISO 26262 compliance features are demonstrated
 
-**Success Test:** Synthesize a complex SKALP design (e.g., FIFO with CDC) to iCE40 FPGA bitstream and demonstrate it working on physical hardware
+**Success Test:** Generate accurate FMEA for a automotive safety-critical design (e.g., airbag controller, brake system) with correct failure modes, safety mechanisms, and compliance metrics
 
 ---
 
@@ -51,30 +71,36 @@
 
 **Daily Log:**
 ```
-[Date] - [What got done] - [Any blockers]
+[Oct 2] - Phase 9 initiated - Planning safety features implementation
 ```
 
 **Blockers:**
-- [ ] Need access to iCE40 development board for testing
-- [ ] Need standard cell library for ASIC flow testing
-- [ ] May need to integrate with external EDA tools
+- [ ] None currently identified
 
 ---
 
-## 🔧 TECHNICAL ARCHITECTURE
+## 🛡️ SAFETY FEATURE ARCHITECTURE
 
-**Backend Pipeline:**
-1. **LIR → Target IR:** Convert from SKALP LIR to target-specific representation
-2. **Technology Mapping:** Map to target primitives (LUTs for FPGA, cells for ASIC)
-3. **Constraint Application:** Apply timing, power, and area constraints
-4. **Optimization:** Target-specific optimizations for performance/area/power
-5. **Output Generation:** Generate bitstream (FPGA) or netlist (ASIC)
+**Language Extensions:**
+- Safety requirement annotations (`safety_req!`, `safety_goal!`, `asil!`)
+- PSM/LSM mechanism definitions (`primary_safety_mechanism!`, `latent_safety_mechanism!`)
+- Power domain specifications (`power_domain!`, `isolation!`)
+- Diagnostic coverage attributes (`diagnostic_coverage!`)
 
-**Target Support:**
-- **FPGA:** iCE40 family with yosys/nextpnr integration
-- **ASIC:** Generic standard cell flow with OpenROAD integration
-- **Future:** Xilinx, Intel/Altera, advanced ASIC processes
+**Analysis Engine:**
+- Intent-to-FMEA mapping algorithms
+- Safety metric calculation engines (SPFM, LFM, PMHF)
+- Failure propagation analysis
+- Cross-domain safety validation
+- Risk Priority Number (RPN) calculation
+
+**Output Formats:**
+- FMEA reports (XML/CSV/PDF formats)
+- Safety metric dashboards
+- Compliance audit trails
+- Power domain isolation reports
+- ISO 26262 traceability matrices
 
 ---
 
-**When done, run `/complete-phase` again for Phase 10: Polish & Tools**
+**When done, run `/complete-phase` again for Phase 10: Advanced Backends**

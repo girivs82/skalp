@@ -25,6 +25,9 @@ petgraph = "0.6"  # Graph algorithms for netlist
 indexmap = "2.0"  # Order-preserving maps
 bitvec = "1.0"  # Bit manipulation
 
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
 # CLI and configuration
 clap = { version = "4.0", features = ["derive"] }
 toml = "0.8"
@@ -55,6 +58,7 @@ skalp-sir = { path = "crates/skalp-sir" }
 skalp-sim = { path = "crates/skalp-sim" }
 skalp-backends = { path = "crates/skalp-backends" }
 skalp-testing = { path = "crates/skalp-testing" }
+skalp-safety = { path = "crates/skalp-safety" }
 
 [dev-dependencies]
 pretty_assertions = "1.4"
