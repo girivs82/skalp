@@ -1,0 +1,21 @@
+[package]
+name = "skalp-asic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skalp-lir = { path = "../skalp-lir" }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+nalgebra = "0.33"  # For geometry operations
+petgraph = "0.6"   # For netlist graphs
+rand = "0.9.2"
+chrono = "0.4.42"
+bincode = { version = "2.0.1", features = ["serde"] }
+num_cpus = "1.16"
+rayon = "1.10"
+
+[dev-dependencies]
+criterion = "0.5"
+pretty_assertions = "1.4"
