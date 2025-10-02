@@ -244,6 +244,8 @@ pub enum Statement {
     Block(Block),
     /// Loop statement
     Loop(LoopStatement),
+    /// Synthesis-resolved conditional assignment (replaces complex if-else-if chains)
+    ResolvedConditional(ResolvedConditional),
 }
 
 /// Assignment in a process
@@ -494,6 +496,38 @@ pub struct ModuleInstance {
     pub connections: HashMap<String, Expression>,
     /// Generic/parameter overrides
     pub parameters: HashMap<String, Value>,
+}
+
+/// Synthesis-resolved conditional assignment
+/// Contains both original form (for analysis tools) and resolved form (for SIR/LIR generation)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedConditional {
+    /// Target signal being assigned
+    pub target: LValue,
+    /// Assignment kind (blocking/non-blocking)
+    pub kind: AssignmentKind,
+    /// Original if-else-if chain (preserved for analysis tools)
+    pub original: Box<IfStatement>,
+    /// Synthesis-resolved priority mux tree
+    pub resolved: PriorityMux,
+}
+
+/// Priority-encoded multiplexer tree (synthesis-resolved form of if-else-if)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorityMux {
+    /// Ordered list of condition-value pairs (highest priority first)
+    pub cases: Vec<ConditionalCase>,
+    /// Default value (when no conditions match)
+    pub default: Expression,
+}
+
+/// A single condition-value pair in a priority mux
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalCase {
+    /// Condition expression
+    pub condition: Expression,
+    /// Value to select when condition is true
+    pub value: Expression,
 }
 
 impl Mir {

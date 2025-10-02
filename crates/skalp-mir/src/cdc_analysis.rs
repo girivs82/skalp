@@ -271,6 +271,53 @@ impl CdcAnalyzer {
             Statement::Loop(_) => {
                 // Loop analysis would go here
             }
+
+            Statement::ResolvedConditional(resolved) => {
+                // Analyze the resolved priority mux for CDC violations
+                for case in &resolved.resolved.cases {
+                    let condition_domains = self.get_expression_clock_domains(&case.condition);
+                    let value_domains = self.get_expression_clock_domains(&case.value);
+
+                    // Check for domain crossings in conditions and values
+                    for &source_domain in &condition_domains {
+                        if let Some(process_domain) = process_domain {
+                            if source_domain != process_domain {
+                                violations.push(CdcViolation {
+                                    violation_type: CdcViolationType::DirectCrossing,
+                                    severity: CdcSeverity::Warning,
+                                    description: format!(
+                                        "Condition in resolved conditional uses signal from domain {:?} in process domain {:?}",
+                                        source_domain, process_domain
+                                    ),
+                                    source_domain: Some(source_domain),
+                                    target_domain: Some(process_domain),
+                                    location: None,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Check default value
+                let default_domains = self.get_expression_clock_domains(&resolved.resolved.default);
+                for &source_domain in &default_domains {
+                    if let Some(process_domain) = process_domain {
+                        if source_domain != process_domain {
+                            violations.push(CdcViolation {
+                                violation_type: CdcViolationType::DirectCrossing,
+                                severity: CdcSeverity::Warning,
+                                description: format!(
+                                    "Default value in resolved conditional uses signal from domain {:?} in process domain {:?}",
+                                    source_domain, process_domain
+                                ),
+                                source_domain: Some(source_domain),
+                                target_domain: Some(process_domain),
+                                location: None,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         violations

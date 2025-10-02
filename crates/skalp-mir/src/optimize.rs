@@ -145,6 +145,14 @@ impl DeadCodeElimination {
             Statement::Block(block) => {
                 self.mark_used_in_block(block);
             }
+            Statement::ResolvedConditional(resolved) => {
+                // Mark expressions in the resolved priority mux
+                for case in &resolved.resolved.cases {
+                    self.mark_used_in_expression(&case.condition);
+                    self.mark_used_in_expression(&case.value);
+                }
+                self.mark_used_in_expression(&resolved.resolved.default);
+            }
         }
     }
 

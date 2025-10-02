@@ -383,6 +383,40 @@ impl SimulationRuntime for GpuRuntime {
 
         self.current_cycle += 1;
 
+        // Debug: Print register values when they have meaningful data
+        if self.current_cycle >= 1 && self.current_cycle <= 35 {
+            if let Some(register_buffer) = &self.register_buffer {
+                let register_ptr = register_buffer.contents() as *const u32;
+                let reg0 = unsafe { *register_ptr.offset(0) };
+                let reg1 = unsafe { *register_ptr.offset(1) };
+                let reg2 = unsafe { *register_ptr.offset(2) };
+                let reg3 = unsafe { *register_ptr.offset(3) };
+                let reg4 = unsafe { *register_ptr.offset(4) };
+                let reg5 = unsafe { *register_ptr.offset(5) };
+
+                // Check input values
+                if let Some(input_buffer) = &self.input_buffer {
+                    let input_ptr = input_buffer.contents() as *const u32;
+                    let rst = unsafe { *input_ptr.offset(1) };
+                    let instruction = unsafe { *input_ptr.offset(2) };
+                    let data_in = unsafe { *input_ptr.offset(3) };
+
+                    // Also check signal buffer
+                    if let Some(signal_buffer) = &self.signal_buffer {
+                        let signal_ptr = signal_buffer.contents() as *const u32;
+                        let result_signal = unsafe { *signal_ptr.offset(0) };
+                        let valid_signal = unsafe { *signal_ptr.offset(1) };
+
+                        eprintln!("DEBUG Cycle {}: rst={}, instr=0x{:04X}, data={}, regs=[{},{},{},{},{},{}], signals=[result={}, valid={}]",
+                            self.current_cycle, rst, instruction, data_in, reg0, reg1, reg2, reg3, reg4, reg5, result_signal, valid_signal);
+                    } else {
+                        eprintln!("DEBUG Cycle {}: rst={}, instr=0x{:04X}, data={}, regs=[{},{},{},{},{},{}]",
+                            self.current_cycle, rst, instruction, data_in, reg0, reg1, reg2, reg3, reg4, reg5);
+                    }
+                }
+            }
+        }
+
         // Extract and return current state
         Ok(self.extract_state())
     }

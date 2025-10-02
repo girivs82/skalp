@@ -158,13 +158,13 @@ mod integration_tests {
         let hir = parse_and_build_hir(source).unwrap();
 
         // Test different optimization levels
-        for opt_level in [OptimizationLevel::None, OptimizationLevel::Basic, OptimizationLevel::Aggressive] {
+        for opt_level in [OptimizationLevel::None, OptimizationLevel::Basic, OptimizationLevel::Full] {
             let compiler = MirCompiler::new()
                 .with_optimization_level(opt_level);
             let mir = compiler.compile_to_mir(&hir).unwrap();
 
             // Basic optimization should simplify the circuit
-            if matches!(opt_level, OptimizationLevel::Basic | OptimizationLevel::Aggressive) {
+            if matches!(opt_level, OptimizationLevel::Basic | OptimizationLevel::Full) {
                 // Check that optimizations were applied
                 // This would depend on the specific optimizations implemented
                 assert!(!mir.modules.is_empty());

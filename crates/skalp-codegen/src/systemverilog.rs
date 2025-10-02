@@ -4,6 +4,7 @@
 //! preserving sequential logic, event blocks, and assignments.
 
 use skalp_mir::{Mir, Module, Process, ProcessKind, Statement, Assignment, AssignmentKind, EdgeType, DataType, StructType, EnumType};
+use skalp_mir::mir::PriorityMux;
 use skalp_lir::LirDesign;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -250,9 +251,39 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
             }
             sv.push_str(&format!("{}end\n", indent));
         }
+        Statement::ResolvedConditional(resolved) => {
+            // Generate as a single ternary assignment - synthesis-resolved form
+            let op = match resolved.kind {
+                AssignmentKind::NonBlocking => "<=",
+                AssignmentKind::Blocking => "=",
+            };
+
+            // Build nested ternary expression from priority mux
+            let ternary_expr = build_ternary_expression(&resolved.resolved, module);
+            sv.push_str(&format!("{}{} {} {};\n",
+                indent,
+                format_lvalue_with_context(&resolved.target, module),
+                op,
+                ternary_expr));
+        }
     }
 
     Ok(sv)
+}
+
+/// Build nested ternary expression from priority mux
+fn build_ternary_expression(mux: &PriorityMux, module: &Module) -> String {
+    let mut result = format_expression_with_context(&mux.default, module);
+
+    // Build ternary chain from right to left (lowest to highest priority)
+    for case in mux.cases.iter().rev() {
+        result = format!("({}) ? ({}) : ({})",
+            format_expression_with_context(&case.condition, module),
+            format_expression_with_context(&case.value, module),
+            result);
+    }
+
+    result
 }
 
 /// Format sensitivity list

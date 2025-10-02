@@ -150,7 +150,8 @@ impl OptimizationPass for DeadCodeElimination {
 
         // Mark all output ports as live
         for net in &lir.nets {
-            if net.id.starts_with("out_") || net.id.starts_with("output") {
+            // Use proper metadata to identify output nets
+            if net.is_output || net.id.starts_with("out_") || net.id.starts_with("output") {
                 live_nets.insert(net.id.clone());
             }
         }

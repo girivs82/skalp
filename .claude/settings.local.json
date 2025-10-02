@@ -25,7 +25,10 @@
       "Bash(/Users/girivs/src/hw/hls/target/release/skalp build -s /tmp/test_counter.sk -o /tmp/build)",
       "Bash(/Users/girivs/src/hw/hls/target/release/skalp sim --help)",
       "Bash(/Users/girivs/src/hw/hls/target/release/skalp:*)",
-      "Bash(./debug_sir_detailed)"
+      "Bash(./debug_sir_detailed)",
+      "Bash(./target/debug/deps/debug_context_tracking-*)",
+      "Bash(./target/debug/deps/test_pipelined_processor-*)",
+      "Bash(test_pipelined_processor_gpu:*)"
     ],
     "deny": [],
     "ask": []

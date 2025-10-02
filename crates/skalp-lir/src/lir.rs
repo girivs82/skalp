@@ -108,6 +108,10 @@ pub struct Net {
     pub driver: Option<String>,
     /// Load gates
     pub loads: Vec<String>,
+    /// Whether this net connects to an output port
+    pub is_output: bool,
+    /// Whether this net connects to an input port
+    pub is_input: bool,
 }
 
 impl Lir {

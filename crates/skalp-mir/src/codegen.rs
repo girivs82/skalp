@@ -236,6 +236,9 @@ impl SystemVerilogGenerator {
                 // TODO: Implement loop generation
                 self.emit_line("// TODO: Loop statement");
             }
+            Statement::ResolvedConditional(resolved) => {
+                self.generate_resolved_conditional(resolved);
+            }
         }
     }
 
@@ -264,6 +267,37 @@ impl SystemVerilogGenerator {
             self.emit("else ");
             self.generate_block(else_block);
         }
+    }
+
+    /// Generate synthesis-resolved conditional assignment
+    fn generate_resolved_conditional(&mut self, resolved: &ResolvedConditional) {
+        // Generate as a single continuous assignment with nested ternary operators
+        self.emit(&self.format_lvalue(&resolved.target));
+        match resolved.kind {
+            AssignmentKind::NonBlocking => self.emit(" <= "),
+            AssignmentKind::Blocking => self.emit(" = "),
+        }
+
+        // Build nested ternary from priority mux
+        let expr = self.build_ternary_expression(&resolved.resolved);
+        self.emit(&self.format_expression(&expr));
+        self.emit_line(";");
+    }
+
+    /// Build nested ternary expression from priority mux
+    fn build_ternary_expression(&self, mux: &PriorityMux) -> Expression {
+        let mut result = mux.default.clone();
+
+        // Build ternary chain from right to left (lowest to highest priority)
+        for case in mux.cases.iter().rev() {
+            result = Expression::Conditional {
+                cond: Box::new(case.condition.clone()),
+                then_expr: Box::new(case.value.clone()),
+                else_expr: Box::new(result),
+            };
+        }
+
+        result
     }
 
     /// Generate case statement
