@@ -84,7 +84,9 @@ impl Simulator {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                return Err(SimulationError::GpuError("GPU simulation only available on macOS".into()));
+                return Err(SimulationError::GpuError(
+                    "GPU simulation only available on macOS".into(),
+                ));
             }
         } else {
             Box::new(crate::cpu_runtime::CpuRuntime::new())

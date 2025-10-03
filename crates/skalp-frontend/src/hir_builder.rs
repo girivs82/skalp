@@ -1078,7 +1078,11 @@ impl HirBuilderContext {
     }
 
     /// Build pattern
-    #[allow(clippy::only_used_in_recursion, clippy::unnecessary_map_or, clippy::comparison_chain)]
+    #[allow(
+        clippy::only_used_in_recursion,
+        clippy::unnecessary_map_or,
+        clippy::comparison_chain
+    )]
     fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
         match node.kind() {
             SyntaxKind::LiteralPattern => {
@@ -1720,11 +1724,7 @@ impl HirBuilderContext {
 
         let op = op?;
 
-        Some(HirExpression::Binary(HirBinaryExpr {
-            left,
-            op,
-            right,
-        }))
+        Some(HirExpression::Binary(HirBinaryExpr { left, op, right }))
     }
 
     /// Build unary expression
