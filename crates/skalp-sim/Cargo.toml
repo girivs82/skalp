@@ -13,7 +13,8 @@ tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 async-trait = "0.1"
 
-# Metal GPU support
+# Metal GPU support (macOS only)
+[target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.27"
 objc = "0.2"
 cocoa-foundation = "0.1"

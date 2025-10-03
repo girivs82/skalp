@@ -55,7 +55,8 @@
       "Bash(SKALP_UPDATE_GOLDEN=1 cargo test --test golden_file_tests)",
       "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test --test golden_file_tests)",
       "Bash(gh run list:*)",
-      "Bash(gh run view:*)"
+      "Bash(gh run view:*)",
+      "Bash(gh run watch:*)"
     ],
     "deny": [],
     "ask": []
