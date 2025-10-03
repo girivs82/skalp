@@ -3,11 +3,18 @@
 //! Demonstrates comprehensive ISO 26262 safety analysis capabilities
 
 use skalp_safety::asil::AsilLevel;
-use skalp_safety::requirements::{SafetyRequirementManager, SafetyRequirement, RequirementCategory};
-use skalp_safety::mechanisms::{SafetyMechanismManager, SafetyMechanism, MechanismType, MechanismCategory};
-use skalp_safety::fmea::{FmeaGenerator, FmeaConfig, AnalysisDepth};
-use skalp_safety::metrics::{SafetyMetricsCalculator, CalculationConfig, ComplianceStatus};
-use skalp_safety::power_domains::{self, PowerDomainManager, PowerDomain, PowerDomainType, PowerState, PowerSupply, PowerSourceType, IsolationRequirements};
+use skalp_safety::fmea::{AnalysisDepth, FmeaConfig, FmeaGenerator};
+use skalp_safety::mechanisms::{
+    MechanismCategory, MechanismType, SafetyMechanism, SafetyMechanismManager,
+};
+use skalp_safety::metrics::{CalculationConfig, ComplianceStatus, SafetyMetricsCalculator};
+use skalp_safety::power_domains::{
+    self, IsolationRequirements, PowerDomain, PowerDomainManager, PowerDomainType, PowerSourceType,
+    PowerState, PowerSupply,
+};
+use skalp_safety::requirements::{
+    RequirementCategory, SafetyRequirement, SafetyRequirementManager,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== SKALP Safety Framework Demo ===\n");
@@ -26,8 +33,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     req_manager.add_requirement(safety_req);
 
     let coverage_report = req_manager.generate_coverage_report();
-    println!("   Total requirements: {}", coverage_report.total_requirements);
-    println!("   ASIL D requirements: {:?}\n", coverage_report.asil_breakdown.get(&AsilLevel::D));
+    println!(
+        "   Total requirements: {}",
+        coverage_report.total_requirements
+    );
+    println!(
+        "   ASIL D requirements: {:?}\n",
+        coverage_report.asil_breakdown.get(&AsilLevel::D)
+    );
 
     // 2. Define safety mechanisms (PSM/LSM)
     println!("2. Safety Mechanisms");
@@ -63,8 +76,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mechanism_report = mechanism_manager.generate_report();
     println!("   Total mechanisms: {}", mechanism_report.total_mechanisms);
-    println!("   Average fault coverage: {:.1}%", mechanism_report.avg_fault_coverage);
-    println!("   Average diagnostic coverage: {:.1}%\n", mechanism_report.avg_diagnostic_coverage);
+    println!(
+        "   Average fault coverage: {:.1}%",
+        mechanism_report.avg_fault_coverage
+    );
+    println!(
+        "   Average diagnostic coverage: {:.1}%\n",
+        mechanism_report.avg_diagnostic_coverage
+    );
 
     // 3. Generate FMEA
     println!("3. FMEA Generation");
@@ -83,8 +102,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("   FMEA ID: {}", fmea_analysis.metadata.id);
     println!("   Target ASIL: {:?}", fmea_analysis.metadata.target_asil);
-    println!("   Total FMEA entries: {}", fmea_analysis.summary.total_entries);
-    println!("   Analysis date: {}\n", fmea_analysis.metadata.analysis_date.format("%Y-%m-%d"));
+    println!(
+        "   Total FMEA entries: {}",
+        fmea_analysis.summary.total_entries
+    );
+    println!(
+        "   Analysis date: {}\n",
+        fmea_analysis.metadata.analysis_date.format("%Y-%m-%d")
+    );
 
     // 4. Calculate safety metrics
     println!("4. Safety Metrics Calculation");
@@ -100,7 +125,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match safety_metrics.compliance_assessment.overall_compliance {
         ComplianceStatus::Compliant => println!("   ✅ ASIL compliance: PASSED"),
-        ComplianceStatus::CompliantWithMargins => println!("   ✅ ASIL compliance: PASSED with margins"),
+        ComplianceStatus::CompliantWithMargins => {
+            println!("   ✅ ASIL compliance: PASSED with margins")
+        }
         _ => println!("   ❌ ASIL compliance: FAILED"),
     }
     println!();
@@ -143,8 +170,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     power_manager.add_domain(safety_domain)?;
 
     let power_report = power_manager.get_power_consumption_report();
-    println!("   Total power consumption: {:.1} W", power_report.total_power_consumption);
-    println!("   Power efficiency: {:.1}%", power_report.efficiency_metrics.power_efficiency);
+    println!(
+        "   Total power consumption: {:.1} W",
+        power_report.total_power_consumption
+    );
+    println!(
+        "   Power efficiency: {:.1}%",
+        power_report.efficiency_metrics.power_efficiency
+    );
 
     // Try to power off safety domain (should fail)
     match power_manager.change_power_state("safety_domain", PowerState::PoweredOff) {

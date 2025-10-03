@@ -3,12 +3,12 @@
 //! Provides calculation of hardware architectural metrics including SPFM, LF, and PMHF
 //! for demonstrating compliance with ASIL requirements.
 
+use crate::asil::AsilLevel;
+use crate::fmea::{FailureClass, FmeaAnalysis};
+use crate::mechanisms::{MechanismType, SafetyMechanism};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
-use crate::asil::AsilLevel;
-use crate::fmea::{FmeaAnalysis, FailureClass};
-use crate::mechanisms::{SafetyMechanism, MechanismType};
 
 /// Comprehensive safety metrics for a design
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -488,7 +488,8 @@ impl SafetyMetricsCalculator {
 
         let hardware_metrics = self.calculate_hardware_metrics(fmea, mechanisms)?;
         let mechanism_effectiveness = self.calculate_mechanism_effectiveness(mechanisms)?;
-        let compliance_assessment = self.assess_compliance(&hardware_metrics, fmea.metadata.target_asil)?;
+        let compliance_assessment =
+            self.assess_compliance(&hardware_metrics, fmea.metadata.target_asil)?;
         let diagnostic_coverage = self.calculate_diagnostic_coverage(mechanisms)?;
 
         let fault_injection_results = if self.config.fault_injection_config.is_some() {
@@ -538,8 +539,8 @@ impl SafetyMetricsCalculator {
                 match entry.failure_mode.failure_class {
                     FailureClass::Safe => safe_failure_rate += failure_rate,
                     FailureClass::SinglePoint => single_point_failure_rate += failure_rate,
-                    FailureClass::Residual => {}, // Contributes to PMHF
-                    FailureClass::MultiplePoint => {}, // Contributes to LF
+                    FailureClass::Residual => {} // Contributes to PMHF
+                    FailureClass::MultiplePoint => {} // Contributes to LF
                 }
 
                 // Add to component breakdown
@@ -564,7 +565,9 @@ impl SafetyMetricsCalculator {
 
         // Calculate SPFM (Single Point Fault Metric)
         let spfm = if total_failure_rate > 0.0 {
-            ((safe_failure_rate + single_point_failure_rate * mechanism_effectiveness) / total_failure_rate) * 100.0
+            ((safe_failure_rate + single_point_failure_rate * mechanism_effectiveness)
+                / total_failure_rate)
+                * 100.0
         } else {
             100.0
         };
@@ -596,21 +599,24 @@ impl SafetyMetricsCalculator {
     }
 
     /// Calculate overall mechanism effectiveness
-    fn calculate_overall_mechanism_effectiveness(&self, mechanisms: &[SafetyMechanism]) -> Result<f64, MetricsError> {
+    fn calculate_overall_mechanism_effectiveness(
+        &self,
+        mechanisms: &[SafetyMechanism],
+    ) -> Result<f64, MetricsError> {
         if mechanisms.is_empty() {
             return Ok(0.0);
         }
 
-        let total_effectiveness: f64 = mechanisms
-            .iter()
-            .map(|m| m.calculate_effectiveness())
-            .sum();
+        let total_effectiveness: f64 = mechanisms.iter().map(|m| m.calculate_effectiveness()).sum();
 
         Ok(total_effectiveness / mechanisms.len() as f64 / 100.0)
     }
 
     /// Calculate mechanism effectiveness metrics
-    fn calculate_mechanism_effectiveness(&self, mechanisms: &[SafetyMechanism]) -> Result<MechanismEffectivenessMetrics, MetricsError> {
+    fn calculate_mechanism_effectiveness(
+        &self,
+        mechanisms: &[SafetyMechanism],
+    ) -> Result<MechanismEffectivenessMetrics, MetricsError> {
         let overall_effectiveness = self.calculate_overall_mechanism_effectiveness(mechanisms)?;
 
         let mut effectiveness_by_type = HashMap::new();
@@ -618,8 +624,12 @@ impl SafetyMetricsCalculator {
 
         for mechanism in mechanisms {
             let effectiveness = mechanism.calculate_effectiveness();
-            *effectiveness_by_type.entry(mechanism.mechanism_type.clone()).or_insert(0.0) += effectiveness;
-            *type_counts.entry(mechanism.mechanism_type.clone()).or_insert(0) += 1;
+            *effectiveness_by_type
+                .entry(mechanism.mechanism_type.clone())
+                .or_insert(0.0) += effectiveness;
+            *type_counts
+                .entry(mechanism.mechanism_type.clone())
+                .or_insert(0) += 1;
         }
 
         // Calculate average effectiveness by type
@@ -721,10 +731,14 @@ impl SafetyMetricsCalculator {
             },
         };
 
-        let overall_compliance = spfm_compliance.compliant && lf_compliance.compliant && pmhf_compliance.compliant;
+        let overall_compliance =
+            spfm_compliance.compliant && lf_compliance.compliant && pmhf_compliance.compliant;
 
         let overall_status = if overall_compliance {
-            if spfm_compliance.margin > 10.0 && lf_compliance.margin > 10.0 && pmhf_compliance.margin > 10.0 {
+            if spfm_compliance.margin > 10.0
+                && lf_compliance.margin > 10.0
+                && pmhf_compliance.margin > 10.0
+            {
                 ComplianceStatus::CompliantWithMargins
             } else {
                 ComplianceStatus::Compliant
@@ -765,11 +779,15 @@ impl SafetyMetricsCalculator {
     }
 
     /// Calculate diagnostic coverage metrics
-    fn calculate_diagnostic_coverage(&self, mechanisms: &[SafetyMechanism]) -> Result<DiagnosticCoverageMetrics, MetricsError> {
+    fn calculate_diagnostic_coverage(
+        &self,
+        mechanisms: &[SafetyMechanism],
+    ) -> Result<DiagnosticCoverageMetrics, MetricsError> {
         let overall_coverage = mechanisms
             .iter()
             .map(|m| m.diagnostic_coverage)
-            .sum::<f64>() / mechanisms.len().max(1) as f64;
+            .sum::<f64>()
+            / mechanisms.len().max(1) as f64;
 
         let mut coverage_by_type = HashMap::new();
         coverage_by_type.insert(DiagnosticType::Online, overall_coverage);
@@ -780,12 +798,21 @@ impl SafetyMetricsCalculator {
             coverage_by_type,
             diagnostic_effectiveness: overall_coverage,
             diagnostic_latency: DiagnosticLatencyMetrics {
-                avg_detection_time: 1000.0, // 1 µs
+                avg_detection_time: 1000.0,  // 1 µs
                 max_detection_time: 10000.0, // 10 µs
                 detection_time_distribution: vec![
-                    LatencyBin { range: (0.0, 1000.0), percentage: 60.0 },
-                    LatencyBin { range: (1000.0, 5000.0), percentage: 30.0 },
-                    LatencyBin { range: (5000.0, 10000.0), percentage: 10.0 },
+                    LatencyBin {
+                        range: (0.0, 1000.0),
+                        percentage: 60.0,
+                    },
+                    LatencyBin {
+                        range: (1000.0, 5000.0),
+                        percentage: 30.0,
+                    },
+                    LatencyBin {
+                        range: (5000.0, 10000.0),
+                        percentage: 10.0,
+                    },
                 ],
             },
         })
@@ -800,19 +827,17 @@ impl SafetyMetricsCalculator {
             undetected_faults: 50,
             false_positives: 5,
             detection_coverage: 95.0,
-            test_campaigns: vec![
-                TestCampaign {
-                    name: "CPU Core Test".to_string(),
-                    target_component: "cpu_core".to_string(),
-                    fault_types: vec!["stuck-at".to_string(), "bit-flip".to_string()],
-                    results: CampaignResults {
-                        injected: 500,
-                        detected: 475,
-                        detection_rate: 95.0,
-                        avg_detection_time: 500.0,
-                    },
+            test_campaigns: vec![TestCampaign {
+                name: "CPU Core Test".to_string(),
+                target_component: "cpu_core".to_string(),
+                fault_types: vec!["stuck-at".to_string(), "bit-flip".to_string()],
+                results: CampaignResults {
+                    injected: 500,
+                    detected: 475,
+                    detection_rate: 95.0,
+                    avg_detection_time: 500.0,
                 },
-            ],
+            }],
         })
     }
 }
@@ -845,8 +870,8 @@ impl Default for CalculationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fmea::{FmeaMetadata, FmeaSummary, SystemBoundary, FunctionalAnalysis};
-    use crate::mechanisms::{SafetyMechanism, MechanismType, MechanismCategory};
+    use crate::fmea::{FmeaMetadata, FmeaSummary, FunctionalAnalysis, SystemBoundary};
+    use crate::mechanisms::{MechanismCategory, MechanismType, SafetyMechanism};
 
     #[test]
     fn test_metrics_calculation() {
@@ -915,7 +940,9 @@ mod tests {
             component_breakdown: HashMap::new(),
         };
 
-        let compliance = calculator.assess_compliance(&hardware_metrics, AsilLevel::B).unwrap();
+        let compliance = calculator
+            .assess_compliance(&hardware_metrics, AsilLevel::B)
+            .unwrap();
         assert!(compliance.asil_assessment.spfm_compliance.compliant);
         assert!(compliance.asil_assessment.lf_compliance.compliant);
         assert!(compliance.asil_assessment.pmhf_compliance.compliant);
@@ -944,10 +971,16 @@ mod tests {
         );
         mechanism2.set_diagnostic_coverage(85.0);
 
-        let effectiveness = calculator.calculate_mechanism_effectiveness(&[mechanism1, mechanism2]).unwrap();
+        let effectiveness = calculator
+            .calculate_mechanism_effectiveness(&[mechanism1, mechanism2])
+            .unwrap();
         assert!(effectiveness.overall_effectiveness > 0.0);
-        assert!(effectiveness.effectiveness_by_type.contains_key(&MechanismType::Primary));
-        assert!(effectiveness.effectiveness_by_type.contains_key(&MechanismType::Latent));
+        assert!(effectiveness
+            .effectiveness_by_type
+            .contains_key(&MechanismType::Primary));
+        assert!(effectiveness
+            .effectiveness_by_type
+            .contains_key(&MechanismType::Latent));
     }
 
     #[test]
@@ -964,9 +997,13 @@ mod tests {
         );
         mechanism.set_diagnostic_coverage(92.0);
 
-        let coverage = calculator.calculate_diagnostic_coverage(&[mechanism]).unwrap();
+        let coverage = calculator
+            .calculate_diagnostic_coverage(&[mechanism])
+            .unwrap();
         assert_eq!(coverage.overall_coverage, 92.0);
-        assert!(coverage.coverage_by_type.contains_key(&DiagnosticType::Online));
+        assert!(coverage
+            .coverage_by_type
+            .contains_key(&DiagnosticType::Online));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Compilation pipeline management
 
-use crate::{ParallelResult, scheduler::TaskGraph};
+use crate::{scheduler::TaskGraph, ParallelResult};
 
 #[derive(Debug, Default)]
 pub struct CompilationResults {
@@ -19,8 +19,6 @@ impl CompilationPipeline {
     }
 
     pub fn build_task_graph(&self) -> ParallelResult<TaskGraph> {
-        Ok(TaskGraph {
-            tasks: Vec::new(),
-        })
+        Ok(TaskGraph { tasks: Vec::new() })
     }
 }

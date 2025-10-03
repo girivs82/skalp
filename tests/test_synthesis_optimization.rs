@@ -1,11 +1,13 @@
 #[cfg(test)]
 mod synthesis_optimization_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
-    use skalp_lir::{lower_to_lir, transform_mir_to_lir};
-    use skalp_lir::optimization::{OptimizationPipeline, ConstantFolding, BooleanSimplification,
-                                   CommonSubexpressionElimination, DeadCodeElimination, OptimizationPass};
+    use skalp_lir::optimization::{
+        BooleanSimplification, CommonSubexpressionElimination, ConstantFolding,
+        DeadCodeElimination, OptimizationPass, OptimizationPipeline,
+    };
     use skalp_lir::timing::TimingAnalyzer;
+    use skalp_lir::{lower_to_lir, transform_mir_to_lir};
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn test_constant_folding_optimization() {
@@ -178,9 +180,18 @@ mod synthesis_optimization_tests {
             timing_report.print();
 
             // Basic checks
-            assert!(timing_report.clock_period > 0.0, "Should have valid clock period");
-            assert!(timing_report.critical_path_delay >= 0.0, "Should have non-negative delay");
-            println!("Critical path delay: {:.2} ps", timing_report.critical_path_delay);
+            assert!(
+                timing_report.clock_period > 0.0,
+                "Should have valid clock period"
+            );
+            assert!(
+                timing_report.critical_path_delay >= 0.0,
+                "Should have non-negative delay"
+            );
+            println!(
+                "Critical path delay: {:.2} ps",
+                timing_report.critical_path_delay
+            );
             println!("Worst slack: {:.2} ps", timing_report.worst_slack);
         }
     }
@@ -299,8 +310,10 @@ mod synthesis_optimization_tests {
 
             // Show optimization results
             for result in &opt_results {
-                println!("  {} -> {} gates -> {} gates",
-                        result.pass_name, result.gates_before, result.gates_after);
+                println!(
+                    "  {} -> {} gates -> {} gates",
+                    result.pass_name, result.gates_before, result.gates_after
+                );
             }
 
             // Run timing analysis
@@ -311,12 +324,18 @@ mod synthesis_optimization_tests {
 
             println!("Timing Results:");
             println!("  Clock Period: {:.0} ps", timing_report.clock_period);
-            println!("  Critical Path: {:.2} ps", timing_report.critical_path_delay);
+            println!(
+                "  Critical Path: {:.2} ps",
+                timing_report.critical_path_delay
+            );
             println!("  Worst Slack: {:.2} ps", timing_report.worst_slack);
 
             // Check if we meet timing
             let timing_ok = timing_report.worst_slack >= 0.0;
-            println!("  Timing Closure: {}", if timing_ok { "✅ PASS" } else { "❌ FAIL" });
+            println!(
+                "  Timing Closure: {}",
+                if timing_ok { "✅ PASS" } else { "❌ FAIL" }
+            );
 
             // Calculate performance metrics
             let frequency_mhz = if timing_report.critical_path_delay > 0.0 {

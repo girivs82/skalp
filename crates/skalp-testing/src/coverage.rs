@@ -1,6 +1,6 @@
 //! Coverage tracking and analysis
 
-use crate::{CoverageMetric, TestingResult, TestCase};
+use crate::{CoverageMetric, TestCase, TestingResult};
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]

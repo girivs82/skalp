@@ -1,7 +1,7 @@
 //! Tests for SystemVerilog code generation
 
-use skalp_mir::mir::*;
 use skalp_mir::codegen::SystemVerilogGenerator;
+use skalp_mir::mir::*;
 
 /// Helper to create a simple counter module
 fn create_counter_mir() -> Mir {
@@ -20,7 +20,10 @@ fn create_counter_mir() -> Mir {
         id: PortId(1),
         name: "rst".to_string(),
         direction: PortDirection::Input,
-        port_type: DataType::Reset { active_high: true, domain: None },
+        port_type: DataType::Reset {
+            active_high: true,
+            domain: None,
+        },
     });
     module.ports.push(Port {
         id: PortId(2),
@@ -45,26 +48,22 @@ fn create_counter_mir() -> Mir {
     let reset_check = IfStatement {
         condition: Expression::Ref(LValue::Port(PortId(1))),
         then_block: Block {
-            statements: vec![
-                Statement::Assignment(Assignment {
-                    lhs: LValue::Signal(SignalId(0)),
-                    rhs: Expression::Literal(Value::Integer(0)),
-                    kind: AssignmentKind::NonBlocking,
-                }),
-            ],
+            statements: vec![Statement::Assignment(Assignment {
+                lhs: LValue::Signal(SignalId(0)),
+                rhs: Expression::Literal(Value::Integer(0)),
+                kind: AssignmentKind::NonBlocking,
+            })],
         },
         else_block: Some(Block {
-            statements: vec![
-                Statement::Assignment(Assignment {
-                    lhs: LValue::Signal(SignalId(0)),
-                    rhs: Expression::Binary {
-                        op: BinaryOp::Add,
-                        left: Box::new(Expression::Ref(LValue::Signal(SignalId(0)))),
-                        right: Box::new(Expression::Literal(Value::Integer(1))),
-                    },
-                    kind: AssignmentKind::NonBlocking,
-                }),
-            ],
+            statements: vec![Statement::Assignment(Assignment {
+                lhs: LValue::Signal(SignalId(0)),
+                rhs: Expression::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(Expression::Ref(LValue::Signal(SignalId(0)))),
+                    right: Box::new(Expression::Literal(Value::Integer(1))),
+                },
+                kind: AssignmentKind::NonBlocking,
+            })],
         }),
     };
 
@@ -73,12 +72,10 @@ fn create_counter_mir() -> Mir {
     let process = Process {
         id: ProcessId(0),
         kind: ProcessKind::Sequential,
-        sensitivity: SensitivityList::Edge(vec![
-            EdgeSensitivity {
-                signal: LValue::Port(PortId(0)),
-                edge: EdgeType::Rising,
-            },
-        ]),
+        sensitivity: SensitivityList::Edge(vec![EdgeSensitivity {
+            signal: LValue::Port(PortId(0)),
+            edge: EdgeType::Rising,
+        }]),
         body: process_body,
     };
 
@@ -195,36 +192,39 @@ fn test_case_statement() {
             CaseItem {
                 values: vec![Expression::Literal(Value::Integer(0))],
                 block: Block {
-                    statements: vec![
-                        Statement::Assignment(Assignment {
-                            lhs: LValue::Port(PortId(1)),
-                            rhs: Expression::Literal(Value::BitVector { width: 4, value: 0b0001 }),
-                            kind: AssignmentKind::Blocking,
+                    statements: vec![Statement::Assignment(Assignment {
+                        lhs: LValue::Port(PortId(1)),
+                        rhs: Expression::Literal(Value::BitVector {
+                            width: 4,
+                            value: 0b0001,
                         }),
-                    ],
+                        kind: AssignmentKind::Blocking,
+                    })],
                 },
             },
             CaseItem {
                 values: vec![Expression::Literal(Value::Integer(1))],
                 block: Block {
-                    statements: vec![
-                        Statement::Assignment(Assignment {
-                            lhs: LValue::Port(PortId(1)),
-                            rhs: Expression::Literal(Value::BitVector { width: 4, value: 0b0010 }),
-                            kind: AssignmentKind::Blocking,
+                    statements: vec![Statement::Assignment(Assignment {
+                        lhs: LValue::Port(PortId(1)),
+                        rhs: Expression::Literal(Value::BitVector {
+                            width: 4,
+                            value: 0b0010,
                         }),
-                    ],
+                        kind: AssignmentKind::Blocking,
+                    })],
                 },
             },
         ],
         default: Some(Block {
-            statements: vec![
-                Statement::Assignment(Assignment {
-                    lhs: LValue::Port(PortId(1)),
-                    rhs: Expression::Literal(Value::BitVector { width: 4, value: 0b0000 }),
-                    kind: AssignmentKind::Blocking,
+            statements: vec![Statement::Assignment(Assignment {
+                lhs: LValue::Port(PortId(1)),
+                rhs: Expression::Literal(Value::BitVector {
+                    width: 4,
+                    value: 0b0000,
                 }),
-            ],
+                kind: AssignmentKind::Blocking,
+            })],
         }),
     };
 

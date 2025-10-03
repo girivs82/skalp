@@ -6,8 +6,8 @@
 //! - Type checking
 //! - Width inference and checking
 
-use std::fmt;
 use std::collections::HashMap;
+use std::fmt;
 
 /// Core type representation in SKALP
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -25,7 +25,10 @@ pub enum Type {
     Nat(Width),
 
     /// Fixed-point type with integer and fractional bits
-    Fixed { integer_bits: u32, fractional_bits: u32 },
+    Fixed {
+        integer_bits: u32,
+        fractional_bits: u32,
+    },
 
     /// Clock type with optional domain
     Clock(Option<ClockDomain>),
@@ -276,9 +279,7 @@ impl Type {
     /// Apply type substitution
     pub fn apply_subst(&self, subst: &HashMap<TypeVarId, Type>) -> Type {
         match self {
-            Type::TypeVar(id) => {
-                subst.get(id).cloned().unwrap_or_else(|| self.clone())
-            }
+            Type::TypeVar(id) => subst.get(id).cloned().unwrap_or_else(|| self.clone()),
             Type::Array { element_type, size } => Type::Array {
                 element_type: Box::new(element_type.apply_subst(subst)),
                 size: *size,
@@ -297,16 +298,20 @@ impl Type {
             (Type::Logic(w1), Type::Logic(w2)) => w1.can_unify(w2),
             (Type::Int(w1), Type::Int(w2)) => w1.can_unify(w2),
             (Type::Nat(w1), Type::Nat(w2)) => w1.can_unify(w2),
-            (Type::Clock(d1), Type::Clock(d2)) => {
-                match (d1, d2) {
-                    (None, _) | (_, None) => true,
-                    (Some(d1), Some(d2)) => d1.name == d2.name,
-                }
-            }
-            (Type::Array { element_type: e1, size: s1 },
-             Type::Array { element_type: e2, size: s2 }) => {
-                s1 == s2 && e1.can_unify(e2)
-            }
+            (Type::Clock(d1), Type::Clock(d2)) => match (d1, d2) {
+                (None, _) | (_, None) => true,
+                (Some(d1), Some(d2)) => d1.name == d2.name,
+            },
+            (
+                Type::Array {
+                    element_type: e1,
+                    size: s1,
+                },
+                Type::Array {
+                    element_type: e2,
+                    size: s2,
+                },
+            ) => s1 == s2 && e1.can_unify(e2),
             _ => self == other,
         }
     }
@@ -335,9 +340,7 @@ impl Width {
     /// Apply width substitution
     pub fn apply_subst(&self, subst: &HashMap<WidthVar, Width>) -> Width {
         match self {
-            Width::Inferred(var) => {
-                subst.get(var).cloned().unwrap_or_else(|| self.clone())
-            }
+            Width::Inferred(var) => subst.get(var).cloned().unwrap_or_else(|| self.clone()),
             _ => self.clone(),
         }
     }
@@ -369,20 +372,26 @@ impl TypeEnv {
     /// Add built-in types
     fn add_builtin_types(&mut self) {
         // These are available as type constructors
-        self.type_defs.insert("bit".to_string(), Type::Bit(Width::Unknown));
-        self.type_defs.insert("logic".to_string(), Type::Logic(Width::Unknown));
-        self.type_defs.insert("int".to_string(), Type::Int(Width::Unknown));
-        self.type_defs.insert("nat".to_string(), Type::Nat(Width::Unknown));
-        self.type_defs.insert("clock".to_string(), Type::Clock(None));
-        self.type_defs.insert("reset".to_string(), Type::Reset(ResetPolarity::ActiveHigh));
+        self.type_defs
+            .insert("bit".to_string(), Type::Bit(Width::Unknown));
+        self.type_defs
+            .insert("logic".to_string(), Type::Logic(Width::Unknown));
+        self.type_defs
+            .insert("int".to_string(), Type::Int(Width::Unknown));
+        self.type_defs
+            .insert("nat".to_string(), Type::Nat(Width::Unknown));
+        self.type_defs
+            .insert("clock".to_string(), Type::Clock(None));
+        self.type_defs
+            .insert("reset".to_string(), Type::Reset(ResetPolarity::ActiveHigh));
         self.type_defs.insert("event".to_string(), Type::Event);
     }
 
     /// Look up a variable's type
     pub fn lookup(&self, name: &str) -> Option<&TypeScheme> {
-        self.bindings.get(name).or_else(|| {
-            self.parent.as_ref().and_then(|p| p.lookup(name))
-        })
+        self.bindings
+            .get(name)
+            .or_else(|| self.parent.as_ref().and_then(|p| p.lookup(name)))
     }
 
     /// Add a variable binding
@@ -392,9 +401,9 @@ impl TypeEnv {
 
     /// Look up a type definition
     pub fn lookup_type(&self, name: &str) -> Option<&Type> {
-        self.type_defs.get(name).or_else(|| {
-            self.parent.as_ref().and_then(|p| p.lookup_type(name))
-        })
+        self.type_defs
+            .get(name)
+            .or_else(|| self.parent.as_ref().and_then(|p| p.lookup_type(name)))
     }
 
     /// Add a type definition
@@ -450,7 +459,11 @@ impl TypeInference {
     /// Infer type for a binary literal
     pub fn infer_bin_literal(&mut self, value: u64, explicit_width: Option<u32>) -> Type {
         let width = explicit_width.unwrap_or_else(|| {
-            if value == 0 { 1 } else { 64 - value.leading_zeros() }
+            if value == 0 {
+                1
+            } else {
+                64 - value.leading_zeros()
+            }
         });
 
         Type::Bit(Width::Fixed(width))
@@ -459,7 +472,11 @@ impl TypeInference {
     /// Infer type for a hex literal
     pub fn infer_hex_literal(&mut self, value: u64, explicit_width: Option<u32>) -> Type {
         let width = explicit_width.unwrap_or_else(|| {
-            if value == 0 { 1 } else { 64 - value.leading_zeros() }
+            if value == 0 {
+                1
+            } else {
+                64 - value.leading_zeros()
+            }
         });
 
         Type::Bit(Width::Fixed(width))
@@ -470,10 +487,10 @@ impl TypeInference {
         // Check if types are compatible (allowing width extension)
         match (lhs_type, rhs_type) {
             // Same base type with potentially different widths
-            (Type::Bit(w1), Type::Bit(w2)) |
-            (Type::Logic(w1), Type::Logic(w2)) |
-            (Type::Int(w1), Type::Int(w2)) |
-            (Type::Nat(w1), Type::Nat(w2)) => {
+            (Type::Bit(w1), Type::Bit(w2))
+            | (Type::Logic(w1), Type::Logic(w2))
+            | (Type::Int(w1), Type::Int(w2))
+            | (Type::Nat(w1), Type::Nat(w2)) => {
                 // Allow assignment if RHS width <= LHS width (can zero/sign extend)
                 match (w1, w2) {
                     (Width::Fixed(lhs_w), Width::Fixed(rhs_w)) if rhs_w <= lhs_w => Ok(()),
@@ -530,15 +547,21 @@ impl TypeInference {
                 Ok(())
             }
 
-            (Type::Bit(w1), Type::Bit(w2)) |
-            (Type::Logic(w1), Type::Logic(w2)) |
-            (Type::Int(w1), Type::Int(w2)) |
-            (Type::Nat(w1), Type::Nat(w2)) => {
-                self.unify_width(w1, w2)
-            }
+            (Type::Bit(w1), Type::Bit(w2))
+            | (Type::Logic(w1), Type::Logic(w2))
+            | (Type::Int(w1), Type::Int(w2))
+            | (Type::Nat(w1), Type::Nat(w2)) => self.unify_width(w1, w2),
 
-            (Type::Array { element_type: e1, size: s1 },
-             Type::Array { element_type: e2, size: s2 }) => {
+            (
+                Type::Array {
+                    element_type: e1,
+                    size: s1,
+                },
+                Type::Array {
+                    element_type: e2,
+                    size: s2,
+                },
+            ) => {
                 if s1 != s2 {
                     return Err(TypeError::ArraySizeMismatch {
                         expected: *s1,
@@ -553,7 +576,7 @@ impl TypeInference {
             _ => Err(TypeError::TypeMismatch {
                 expected: t1.clone(),
                 found: t2.clone(),
-            })
+            }),
         }
     }
 
@@ -574,7 +597,7 @@ impl TypeInference {
             _ => Err(TypeError::WidthMismatch {
                 expected: w1.clone(),
                 found: w2.clone(),
-            })
+            }),
         }
     }
 
@@ -614,28 +637,16 @@ impl TypeInference {
 #[derive(Debug, Clone)]
 pub enum TypeError {
     /// Type mismatch
-    TypeMismatch {
-        expected: Type,
-        found: Type,
-    },
+    TypeMismatch { expected: Type, found: Type },
 
     /// Width mismatch
-    WidthMismatch {
-        expected: Width,
-        found: Width,
-    },
+    WidthMismatch { expected: Width, found: Width },
 
     /// Insufficient width
-    InsufficientWidth {
-        required: u32,
-        found: u32,
-    },
+    InsufficientWidth { required: u32, found: u32 },
 
     /// Array size mismatch
-    ArraySizeMismatch {
-        expected: u32,
-        found: u32,
-    },
+    ArraySizeMismatch { expected: u32, found: u32 },
 
     /// Type is not numeric
     NotNumeric(Type),
@@ -663,21 +674,20 @@ impl fmt::Display for Type {
             Type::Logic(w) => write!(f, "logic{}", w),
             Type::Int(w) => write!(f, "int{}", w),
             Type::Nat(w) => write!(f, "nat{}", w),
-            Type::Fixed { integer_bits, fractional_bits } => {
+            Type::Fixed {
+                integer_bits,
+                fractional_bits,
+            } => {
                 write!(f, "fixed<{}, {}>", integer_bits, fractional_bits)
             }
-            Type::Clock(domain) => {
-                match domain {
-                    Some(d) => write!(f, "clock<'{}'>", d.name),
-                    None => write!(f, "clock"),
-                }
-            }
-            Type::Reset(pol) => {
-                match pol {
-                    ResetPolarity::ActiveHigh => write!(f, "reset"),
-                    ResetPolarity::ActiveLow => write!(f, "reset_n"),
-                }
-            }
+            Type::Clock(domain) => match domain {
+                Some(d) => write!(f, "clock<'{}'>", d.name),
+                None => write!(f, "clock"),
+            },
+            Type::Reset(pol) => match pol {
+                ResetPolarity::ActiveHigh => write!(f, "reset"),
+                ResetPolarity::ActiveLow => write!(f, "reset_n"),
+            },
             Type::Event => write!(f, "event"),
             Type::Stream(t) => write!(f, "stream<{}>", t),
             Type::Array { element_type, size } => {
@@ -716,10 +726,18 @@ impl fmt::Display for TypeError {
                 write!(f, "Width mismatch: expected {}, found {}", expected, found)
             }
             TypeError::InsufficientWidth { required, found } => {
-                write!(f, "Insufficient width: requires at least {} bits, found {}", required, found)
+                write!(
+                    f,
+                    "Insufficient width: requires at least {} bits, found {}",
+                    required, found
+                )
             }
             TypeError::ArraySizeMismatch { expected, found } => {
-                write!(f, "Array size mismatch: expected {}, found {}", expected, found)
+                write!(
+                    f,
+                    "Array size mismatch: expected {}, found {}",
+                    expected, found
+                )
             }
             TypeError::NotNumeric(t) => {
                 write!(f, "Type {} is not numeric", t)

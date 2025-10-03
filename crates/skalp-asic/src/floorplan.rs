@@ -2,10 +2,10 @@
 //!
 //! Interactive floorplanning with hierarchical design support
 
-use crate::{AsicError};
 use crate::placement::{Placement, PlacementRow};
+use crate::AsicError;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use serde::{Serialize, Deserialize};
 
 /// Floorplan manager
 pub struct FloorplanManager {
@@ -149,14 +149,14 @@ pub struct MacroBlock {
 /// Orientation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Orientation {
-    N,   // North (0 degrees)
-    S,   // South (180 degrees)
-    E,   // East (270 degrees)
-    W,   // West (90 degrees)
-    FN,  // Flipped North
-    FS,  // Flipped South
-    FE,  // Flipped East
-    FW,  // Flipped West
+    N,  // North (0 degrees)
+    S,  // South (180 degrees)
+    E,  // East (270 degrees)
+    W,  // West (90 degrees)
+    FN, // Flipped North
+    FS, // Flipped South
+    FE, // Flipped East
+    FW, // Flipped West
 }
 
 /// Power pin
@@ -433,13 +433,32 @@ pub struct FloorplanEditor {
 /// Floorplan edit operation
 #[derive(Debug, Clone)]
 pub enum FloorplanEdit {
-    MoveRegion { name: String, new_bounds: Rectangle },
-    ResizeRegion { name: String, new_bounds: Rectangle },
-    AddRegion { region: FloorplanRegion },
-    RemoveRegion { name: String },
-    PlaceMacro { name: String, position: (f64, f64) },
-    MoveMacro { name: String, new_position: (f64, f64) },
-    RotateMacro { name: String, orientation: Orientation },
+    MoveRegion {
+        name: String,
+        new_bounds: Rectangle,
+    },
+    ResizeRegion {
+        name: String,
+        new_bounds: Rectangle,
+    },
+    AddRegion {
+        region: FloorplanRegion,
+    },
+    RemoveRegion {
+        name: String,
+    },
+    PlaceMacro {
+        name: String,
+        position: (f64, f64),
+    },
+    MoveMacro {
+        name: String,
+        new_position: (f64, f64),
+    },
+    RotateMacro {
+        name: String,
+        orientation: Orientation,
+    },
 }
 
 /// Floorplan validator
@@ -506,8 +525,8 @@ impl FloorplanManager {
 
     /// Calculate area utilization
     pub fn calculate_utilization(&self) -> f64 {
-        let core_area = (self.die.width - self.die.core.left_offset - self.die.core.right_offset) *
-                       (self.die.height - self.die.core.top_offset - self.die.core.bottom_offset);
+        let core_area = (self.die.width - self.die.core.left_offset - self.die.core.right_offset)
+            * (self.die.height - self.die.core.top_offset - self.die.core.bottom_offset);
 
         let mut used_area = 0.0;
         for macro_block in &self.macros {
@@ -525,8 +544,10 @@ impl FloorplanManager {
         for macro_block in &self.macros {
             if macro_block.fixed {
                 if let Some(pos) = macro_block.position {
-                    constraints.push(format!("set_cell_location {} {:.2} {:.2} -fixed",
-                                           macro_block.name, pos.0, pos.1));
+                    constraints.push(format!(
+                        "set_cell_location {} {:.2} {:.2} -fixed",
+                        macro_block.name, pos.0, pos.1
+                    ));
                 }
             }
         }
@@ -534,10 +555,14 @@ impl FloorplanManager {
         // Region constraints
         for region in &self.regions {
             if let Some(ref module) = region.module {
-                constraints.push(format!("create_region {} {:.2} {:.2} {:.2} {:.2}",
-                                       region.name,
-                                       region.bounds.x1, region.bounds.y1,
-                                       region.bounds.x2, region.bounds.y2));
+                constraints.push(format!(
+                    "create_region {} {:.2} {:.2} {:.2} {:.2}",
+                    region.name,
+                    region.bounds.x1,
+                    region.bounds.y1,
+                    region.bounds.x2,
+                    region.bounds.y2
+                ));
                 constraints.push(format!("add_to_region {} {}", region.name, module));
             }
         }
@@ -586,8 +611,12 @@ impl FloorplanManager {
         writeln!(file)?;
 
         // Die area
-        writeln!(file, "DIEAREA ( 0 0 ) ( {:.0} {:.0} ) ;",
-                self.die.width * 1000.0, self.die.height * 1000.0)?;
+        writeln!(
+            file,
+            "DIEAREA ( 0 0 ) ( {:.0} {:.0} ) ;",
+            self.die.width * 1000.0,
+            self.die.height * 1000.0
+        )?;
         writeln!(file)?;
 
         // Rows
@@ -601,8 +630,13 @@ impl FloorplanManager {
             for macro_block in &self.macros {
                 write!(file, "  - {} {}", macro_block.name, macro_block.cell_type)?;
                 if let Some(pos) = macro_block.position {
-                    write!(file, " + PLACED ( {:.0} {:.0} ) {:?}",
-                          pos.0 * 1000.0, pos.1 * 1000.0, macro_block.orientation)?;
+                    write!(
+                        file,
+                        " + PLACED ( {:.0} {:.0} ) {:?}",
+                        pos.0 * 1000.0,
+                        pos.1 * 1000.0,
+                        macro_block.orientation
+                    )?;
                 }
                 if macro_block.fixed {
                     write!(file, " + FIXED")?;
@@ -644,17 +678,16 @@ impl FloorplanEditor {
         // Apply edit
         match edit.clone() {
             FloorplanEdit::MoveRegion { name, new_bounds } => {
-                if let Some(region) = self.floorplan.regions.iter_mut()
-                    .find(|r| r.name == name) {
+                if let Some(region) = self.floorplan.regions.iter_mut().find(|r| r.name == name) {
                     region.bounds = new_bounds;
                 }
-            },
+            }
             FloorplanEdit::PlaceMacro { name, position } => {
-                if let Some(macro_block) = self.floorplan.macros.iter_mut()
-                    .find(|m| m.name == name) {
+                if let Some(macro_block) = self.floorplan.macros.iter_mut().find(|m| m.name == name)
+                {
                     macro_block.position = Some(position);
                 }
-            },
+            }
             _ => {}
         }
 
@@ -678,19 +711,21 @@ impl FloorplanEditor {
                 ValidationRule::NoOverlap => {
                     // Check macro overlaps
                     for i in 0..self.floorplan.macros.len() {
-                        for j in i+1..self.floorplan.macros.len() {
-                            if self.macros_overlap(&self.floorplan.macros[i],
-                                                  &self.floorplan.macros[j]) {
+                        for j in i + 1..self.floorplan.macros.len() {
+                            if self.macros_overlap(
+                                &self.floorplan.macros[i],
+                                &self.floorplan.macros[j],
+                            ) {
                                 return false;
                             }
                         }
                     }
-                },
+                }
                 ValidationRule::MaxUtilization { threshold } => {
                     if self.floorplan.calculate_utilization() > *threshold {
                         return false;
                     }
-                },
+                }
                 _ => {}
             }
         }
@@ -713,8 +748,10 @@ impl FloorplanEditor {
                 y2: p2.1 + m2.height,
             };
 
-            !(m1_rect.x2 < m2_rect.x1 || m1_rect.x1 > m2_rect.x2 ||
-              m1_rect.y2 < m2_rect.y1 || m1_rect.y1 > m2_rect.y2)
+            !(m1_rect.x2 < m2_rect.x1
+                || m1_rect.x1 > m2_rect.x2
+                || m1_rect.y2 < m2_rect.y1
+                || m1_rect.y1 > m2_rect.y2)
         } else {
             false
         }

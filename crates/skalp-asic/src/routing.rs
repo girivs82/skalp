@@ -3,19 +3,19 @@
 //! Implements global and detailed routing for ASICs without external tools.
 //! Uses a combination of maze routing, channel routing, and track assignment.
 
-use crate::{AsicError, DesignRules, Technology};
-use crate::placement::{Placement, Netlist, Net};
+use crate::placement::{Net, Netlist, Placement};
 use crate::sky130::StandardCellLibrary;
-use petgraph::graph::{Graph, NodeIndex, EdgeReference};
+use crate::{AsicError, DesignRules, Technology};
 use petgraph::algo::dijkstra;
-use petgraph::Direction;
+use petgraph::graph::{EdgeReference, Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use std::collections::{HashMap, HashSet, BinaryHeap};
+use petgraph::Direction;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use rayon::prelude::*;
-use serde::{Serialize, Deserialize};
 
 /// Routing result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,7 +198,11 @@ impl GlobalRouter {
     }
 
     /// Perform global routing
-    pub fn route(&self, netlist: &Netlist, placement: &Placement) -> Result<GlobalRouting, AsicError> {
+    pub fn route(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+    ) -> Result<GlobalRouting, AsicError> {
         println!("   Starting global routing...");
 
         // Create routing grid
@@ -226,16 +230,25 @@ impl GlobalRouter {
                 placement,
                 &grid,
                 &mut routing_graph,
-                &mut congestion_map
+                &mut congestion_map,
             )?;
 
             global_wires.push(route);
         }
 
         // Handle congestion with rip-up and reroute
-        self.handle_congestion(&mut global_wires, &grid, &mut congestion_map, netlist, placement)?;
+        self.handle_congestion(
+            &mut global_wires,
+            &grid,
+            &mut congestion_map,
+            netlist,
+            placement,
+        )?;
 
-        println!("   Global routing complete: {} nets routed", global_wires.len());
+        println!(
+            "   Global routing complete: {} nets routed",
+            global_wires.len()
+        );
 
         Ok(GlobalRouting {
             grid,
@@ -250,12 +263,18 @@ impl GlobalRouter {
     /// Create routing grid
     fn create_routing_grid(&self, placement: &Placement) -> Result<Vec<Vec<GCell>>, AsicError> {
         // Determine grid dimensions
-        let max_x = placement.cell_positions.iter()
+        let max_x = placement
+            .cell_positions
+            .iter()
             .map(|(x, _)| *x)
-            .fold(0.0, f64::max) + 100.0;
-        let max_y = placement.cell_positions.iter()
+            .fold(0.0, f64::max)
+            + 100.0;
+        let max_y = placement
+            .cell_positions
+            .iter()
             .map(|(_, y)| *y)
-            .fold(0.0, f64::max) + 100.0;
+            .fold(0.0, f64::max)
+            + 100.0;
 
         let grid_width = (max_x / self.config.gcell_size).ceil() as usize;
         let grid_height = (max_y / self.config.gcell_size).ceil() as usize;
@@ -343,10 +362,15 @@ impl GlobalRouter {
     }
 
     /// Route a single net
-    fn route_net(&self, net_idx: usize, net: &Net, placement: &Placement,
-                 grid: &[Vec<GCell>], routing_graph: &mut RoutingGraph,
-                 congestion_map: &mut CongestionTracker) -> Result<GlobalWire, AsicError> {
-
+    fn route_net(
+        &self,
+        net_idx: usize,
+        net: &Net,
+        placement: &Placement,
+        grid: &[Vec<GCell>],
+        routing_graph: &mut RoutingGraph,
+        congestion_map: &mut CongestionTracker,
+    ) -> Result<GlobalWire, AsicError> {
         // Get terminal positions
         let terminals = self.get_net_terminals(net, placement);
 
@@ -392,10 +416,13 @@ impl GlobalRouter {
     }
 
     /// Find shortest path using A* algorithm
-    fn find_shortest_path(&self, start: &(usize, usize, usize), end: &(usize, usize, usize),
-                         graph: &RoutingGraph, congestion: &CongestionTracker)
-                         -> Result<Vec<(usize, usize, usize)>, AsicError> {
-
+    fn find_shortest_path(
+        &self,
+        start: &(usize, usize, usize),
+        end: &(usize, usize, usize),
+        graph: &RoutingGraph,
+        congestion: &CongestionTracker,
+    ) -> Result<Vec<(usize, usize, usize)>, AsicError> {
         let start_node = graph.node_map[start];
         let end_node = graph.node_map[end];
 
@@ -451,14 +478,18 @@ impl GlobalRouter {
 
     /// Manhattan distance heuristic
     fn heuristic(&self, a: &(usize, usize, usize), b: &(usize, usize, usize)) -> f64 {
-        ((a.0 as i32 - b.0 as i32).abs() +
-         (a.1 as i32 - b.1 as i32).abs() +
-         (a.2 as i32 - b.2 as i32).abs() * 5) as f64 // Via penalty
+        ((a.0 as i32 - b.0 as i32).abs()
+            + (a.1 as i32 - b.1 as i32).abs()
+            + (a.2 as i32 - b.2 as i32).abs() * 5) as f64 // Via penalty
     }
 
     /// Reconstruct path from A* search
-    fn reconstruct_path(&self, came_from: HashMap<NodeIndex, NodeIndex>,
-                       end: NodeIndex, graph: &RoutingGraph) -> Vec<(usize, usize, usize)> {
+    fn reconstruct_path(
+        &self,
+        came_from: HashMap<NodeIndex, NodeIndex>,
+        end: NodeIndex,
+        graph: &RoutingGraph,
+    ) -> Vec<(usize, usize, usize)> {
         let mut path = Vec::new();
         let mut current = end;
 
@@ -483,10 +514,12 @@ impl GlobalRouter {
     }
 
     /// Compute Steiner tree for multi-pin nets
-    fn compute_steiner_tree(&self, terminals: &[(usize, usize, usize)],
-                           graph: &RoutingGraph, congestion: &CongestionTracker)
-                           -> Result<Vec<(usize, usize, usize)>, AsicError> {
-
+    fn compute_steiner_tree(
+        &self,
+        terminals: &[(usize, usize, usize)],
+        graph: &RoutingGraph,
+        congestion: &CongestionTracker,
+    ) -> Result<Vec<(usize, usize, usize)>, AsicError> {
         // Use minimum spanning tree as approximation
         let mut connected = HashSet::new();
         let mut tree_edges = Vec::new();
@@ -503,7 +536,8 @@ impl GlobalRouter {
             for &connected_term in &connected {
                 for &terminal in terminals {
                     if !connected.contains(&terminal) {
-                        match self.find_shortest_path(&connected_term, &terminal, graph, congestion) {
+                        match self.find_shortest_path(&connected_term, &terminal, graph, congestion)
+                        {
                             Ok(path) => {
                                 let distance = path.len() as f64;
                                 if distance < best_distance {
@@ -526,9 +560,14 @@ impl GlobalRouter {
     }
 
     /// Sort nets by criticality
-    fn sort_nets_by_criticality<'a>(&self, netlist: &'a Netlist, placement: &Placement)
-                                -> Vec<(usize, &'a Net)> {
-        let mut nets_with_priority: Vec<_> = netlist.nets.iter()
+    fn sort_nets_by_criticality<'a>(
+        &self,
+        netlist: &'a Netlist,
+        placement: &Placement,
+    ) -> Vec<(usize, &'a Net)> {
+        let mut nets_with_priority: Vec<_> = netlist
+            .nets
+            .iter()
             .enumerate()
             .map(|(idx, net)| {
                 let hpwl = self.calculate_net_hpwl(net, placement);
@@ -539,7 +578,8 @@ impl GlobalRouter {
         // Sort by HPWL (shorter nets first)
         nets_with_priority.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
 
-        nets_with_priority.into_iter()
+        nets_with_priority
+            .into_iter()
             .map(|(idx, net, _)| (idx, net))
             .collect()
     }
@@ -567,10 +607,14 @@ impl GlobalRouter {
     }
 
     /// Handle congestion with rip-up and reroute
-    fn handle_congestion(&self, wires: &mut Vec<GlobalWire>, grid: &[Vec<GCell>],
-                        congestion: &mut CongestionTracker, netlist: &Netlist,
-                        placement: &Placement) -> Result<(), AsicError> {
-
+    fn handle_congestion(
+        &self,
+        wires: &mut Vec<GlobalWire>,
+        grid: &[Vec<GCell>],
+        congestion: &mut CongestionTracker,
+        netlist: &Netlist,
+        placement: &Placement,
+    ) -> Result<(), AsicError> {
         // Identify congested regions
         let congested_gcells = congestion.get_congested_cells(self.config.congestion_threshold);
 
@@ -670,9 +714,12 @@ impl DetailedRouter {
     }
 
     /// Perform detailed routing
-    pub fn route(&self, netlist: &Netlist, placement: &Placement,
-                global: &GlobalRouting) -> Result<DetailedRouting, AsicError> {
-
+    pub fn route(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+        global: &GlobalRouting,
+    ) -> Result<DetailedRouting, AsicError> {
         println!("   Starting detailed routing...");
 
         let mut wires = Vec::new();
@@ -694,15 +741,22 @@ impl DetailedRouter {
             self.minimize_vias(&mut wires, &mut vias)?;
         }
 
-        println!("   Detailed routing complete: {} wires, {} vias", wires.len(), vias.len());
+        println!(
+            "   Detailed routing complete: {} wires, {} vias",
+            wires.len(),
+            vias.len()
+        );
 
         Ok(DetailedRouting { wires, vias })
     }
 
     /// Detail route a single net
-    fn detail_route_net(&self, global_wire: &GlobalWire, netlist: &Netlist,
-                       placement: &Placement) -> Result<(Vec<DetailedWire>, Vec<Via>), AsicError> {
-
+    fn detail_route_net(
+        &self,
+        global_wire: &GlobalWire,
+        netlist: &Netlist,
+        placement: &Placement,
+    ) -> Result<(Vec<DetailedWire>, Vec<Via>), AsicError> {
         let mut wires = Vec::new();
         let mut vias = Vec::new();
 
@@ -739,8 +793,15 @@ impl DetailedRouter {
     }
 
     /// Create L-shaped route with via
-    fn create_l_shape_route(&self, x1: usize, y1: usize, x2: usize, y2: usize,
-                           wires: &mut Vec<DetailedWire>, vias: &mut Vec<Via>) -> Result<(), AsicError> {
+    fn create_l_shape_route(
+        &self,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+        wires: &mut Vec<DetailedWire>,
+        vias: &mut Vec<Via>,
+    ) -> Result<(), AsicError> {
         // Create L-shaped routing with via at corner
         // First segment: horizontal on metal1
         let corner_x = x2;
@@ -795,7 +856,11 @@ impl DetailedRouter {
     }
 
     /// Minimize number of vias
-    fn minimize_vias(&self, _wires: &mut Vec<DetailedWire>, _vias: &mut Vec<Via>) -> Result<(), AsicError> {
+    fn minimize_vias(
+        &self,
+        _wires: &mut Vec<DetailedWire>,
+        _vias: &mut Vec<Via>,
+    ) -> Result<(), AsicError> {
         // Via minimization through layer reassignment
         // (Simplified implementation)
         Ok(())
@@ -834,7 +899,10 @@ impl PartialEq for AStarNode {
 impl Ord for AStarNode {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse for min-heap
-        other.f_score.partial_cmp(&self.f_score).unwrap_or(Ordering::Equal)
+        other
+            .f_score
+            .partial_cmp(&self.f_score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -942,7 +1010,9 @@ impl Router {
         };
 
         // Perform detailed routing
-        let detailed_result = self.detailed_router.route(&netlist, placement, &global_result)?;
+        let detailed_result = self
+            .detailed_router
+            .route(&netlist, placement, &global_result)?;
 
         // Build final result - convert DetailedRouting to RoutingResult
         let mut routed_nets = Vec::new();
@@ -959,7 +1029,8 @@ impl Router {
                     width: seg.width,
                 };
                 segments.push(segment);
-                total_wirelength += ((seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs());
+                total_wirelength +=
+                    ((seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs());
             }
 
             // For now, we don't track which vias belong to which net
@@ -1006,7 +1077,8 @@ impl Router {
         let config_arc = Arc::new(self.config.clone());
 
         // Route nets in parallel
-        let parallel_results: Result<Vec<_>, _> = nets.par_iter()
+        let parallel_results: Result<Vec<_>, _> = nets
+            .par_iter()
             .map(|net_chunk| {
                 let mut local_router = Router::new();
                 local_router.config = (*config_arc).clone();
@@ -1027,7 +1099,11 @@ impl Router {
     }
 
     /// Route a chunk of nets
-    fn route_chunk(&mut self, netlist: &Netlist, placement: &Placement) -> Result<RoutingResult, AsicError> {
+    fn route_chunk(
+        &mut self,
+        netlist: &Netlist,
+        placement: &Placement,
+    ) -> Result<RoutingResult, AsicError> {
         // Perform global routing
         let global_result = if self.config.use_global {
             self.global_router.route(netlist, placement)?
@@ -1043,7 +1119,9 @@ impl Router {
         };
 
         // Perform detailed routing
-        let detailed_result = self.detailed_router.route(netlist, placement, &global_result)?;
+        let detailed_result = self
+            .detailed_router
+            .route(netlist, placement, &global_result)?;
 
         // Convert to RoutingResult
         let mut routed_nets = Vec::new();
@@ -1059,7 +1137,8 @@ impl Router {
                     width: seg.width,
                 };
                 segments.push(segment);
-                total_wirelength += ((seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs());
+                total_wirelength +=
+                    ((seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs());
             }
 
             routed_nets.push(RoutedNet {
@@ -1094,7 +1173,11 @@ impl Router {
     }
 
     /// Create coarse placement for hierarchical routing
-    fn create_coarse_placement(&self, placement: &Placement, factor: usize) -> Result<Placement, AsicError> {
+    fn create_coarse_placement(
+        &self,
+        placement: &Placement,
+        factor: usize,
+    ) -> Result<Placement, AsicError> {
         let mut coarse_placement = placement.clone();
 
         // Reduce the number of cells by clustering
@@ -1118,7 +1201,11 @@ impl Router {
     }
 
     /// Refine routing result from coarse to fine grid
-    fn refine_routing(&mut self, coarse_result: &RoutingResult, fine_placement: &Placement) -> Result<RoutingResult, AsicError> {
+    fn refine_routing(
+        &mut self,
+        coarse_result: &RoutingResult,
+        fine_placement: &Placement,
+    ) -> Result<RoutingResult, AsicError> {
         // For now, just scale up the routing coordinates
         // In a complete implementation, this would involve detailed refinement
         let mut fine_result = coarse_result.clone();
@@ -1142,7 +1229,10 @@ impl Router {
     }
 
     /// Merge multiple routing results
-    fn merge_routing_results(&self, results: Vec<RoutingResult>) -> Result<RoutingResult, AsicError> {
+    fn merge_routing_results(
+        &self,
+        results: Vec<RoutingResult>,
+    ) -> Result<RoutingResult, AsicError> {
         let mut merged_nets = Vec::new();
         let mut total_wirelength = 0.0;
         let mut total_vias = 0;
@@ -1183,7 +1273,8 @@ impl Router {
         while temperature > min_temperature {
             // Try random wire rerouting
             for net in &mut optimized.routed_nets {
-                if rand::random::<f64>() < 0.1 { // 10% chance to reroute
+                if rand::random::<f64>() < 0.1 {
+                    // 10% chance to reroute
                     if let Ok(improved_net) = self.reroute_net_optimized(net) {
                         *net = improved_net;
                     }

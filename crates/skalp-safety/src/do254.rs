@@ -68,7 +68,10 @@ impl Do254Checker {
         Ok(())
     }
 
-    fn check_verification_compliance(&self, report: &mut Do254ComplianceReport) -> SafetyResult<()> {
+    fn check_verification_compliance(
+        &self,
+        report: &mut Do254ComplianceReport,
+    ) -> SafetyResult<()> {
         report.add_check("Requirements-Based Testing".to_string(), true);
 
         if matches!(self.dal, DesignAssuranceLevel::A | DesignAssuranceLevel::B) {

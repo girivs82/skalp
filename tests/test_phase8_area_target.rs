@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod phase8_area_target_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
     use skalp_lir::{transform_mir_to_lir, OptimizationPipeline};
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn test_redundant_logic_optimization() {
@@ -43,8 +43,10 @@ mod phase8_area_target_tests {
             // Print initial gates for debugging
             println!("Initial gates:");
             for gate in &lir.gates {
-                println!("  {}: {:?} inputs: {:?} outputs: {:?}",
-                    gate.id, gate.gate_type, gate.inputs, gate.outputs);
+                println!(
+                    "  {}: {:?} inputs: {:?} outputs: {:?}",
+                    gate.id, gate.gate_type, gate.inputs, gate.outputs
+                );
             }
 
             // Apply optimization pipeline
@@ -57,8 +59,10 @@ mod phase8_area_target_tests {
             // Print final gates for debugging
             println!("Final gates:");
             for gate in &lir.gates {
-                println!("  {}: {:?} inputs: {:?} outputs: {:?}",
-                    gate.id, gate.gate_type, gate.inputs, gate.outputs);
+                println!(
+                    "  {}: {:?} inputs: {:?} outputs: {:?}",
+                    gate.id, gate.gate_type, gate.inputs, gate.outputs
+                );
             }
 
             // Calculate area improvement
@@ -73,18 +77,26 @@ mod phase8_area_target_tests {
             // Show optimization details
             for result in &opt_results {
                 if result.gates_before != result.gates_after {
-                    println!("  {}: {} -> {} gates ({} reduction)",
-                            result.pass_name,
-                            result.gates_before,
-                            result.gates_after,
-                            result.gates_before - result.gates_after);
+                    println!(
+                        "  {}: {} -> {} gates ({} reduction)",
+                        result.pass_name,
+                        result.gates_before,
+                        result.gates_after,
+                        result.gates_before - result.gates_after
+                    );
                 }
             }
 
             if area_improvement >= 20.0 {
-                println!("🎯 SUCCESS: Achieved {:.1}% area improvement (target: 20%)", area_improvement);
+                println!(
+                    "🎯 SUCCESS: Achieved {:.1}% area improvement (target: 20%)",
+                    area_improvement
+                );
             } else if area_improvement > 0.0 {
-                println!("📈 Partial success: {:.1}% area improvement (target: 20%)", area_improvement);
+                println!(
+                    "📈 Partial success: {:.1}% area improvement (target: 20%)",
+                    area_improvement
+                );
             } else {
                 println!("🔧 No area improvement (design may already be optimal)");
             }
@@ -94,7 +106,10 @@ mod phase8_area_target_tests {
             if area_improvement >= 20.0 {
                 println!("✅ 20% area improvement target ACHIEVED!");
             } else {
-                println!("⚠️  Still working toward 20% target, but good progress: {:.1}%", area_improvement);
+                println!(
+                    "⚠️  Still working toward 20% target, but good progress: {:.1}%",
+                    area_improvement
+                );
             }
         }
     }

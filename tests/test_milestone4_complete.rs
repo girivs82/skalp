@@ -95,7 +95,8 @@ mod milestone4_tests {
         }
         "#;
 
-        let hir = parse_and_build_hir(source).expect("Failed to parse comprehensive milestone 4 test");
+        let hir =
+            parse_and_build_hir(source).expect("Failed to parse comprehensive milestone 4 test");
 
         // Verify all features are working
         println!("=== MILESTONE 4: COMPREHENSIVE TEST RESULTS ===");
@@ -106,7 +107,11 @@ mod milestone4_tests {
         println!("Intents: {}", hir.intents.len());
 
         // Verify Enhanced Generics
-        let buffer_entity = hir.entities.iter().find(|e| e.name == "Buffer").expect("Buffer entity should exist");
+        let buffer_entity = hir
+            .entities
+            .iter()
+            .find(|e| e.name == "Buffer")
+            .expect("Buffer entity should exist");
         println!("Buffer generics: {}", buffer_entity.generics.len());
         for generic in &buffer_entity.generics {
             println!("  Generic: {} type: {:?}", generic.name, generic.param_type);
@@ -114,21 +119,38 @@ mod milestone4_tests {
 
         // Verify Intent Constraints
         for intent in &hir.intents {
-            println!("Intent: {} with {} constraints", intent.name, intent.constraints.len());
+            println!(
+                "Intent: {} with {} constraints",
+                intent.name,
+                intent.constraints.len()
+            );
             for constraint in &intent.constraints {
                 println!("  Constraint: {:?}", constraint.constraint_type);
             }
         }
 
         // Verify core functionality
-        assert!(hir.entities.len() >= 4, "Should have Buffer, DataProcessor, StateMachine, and others");
-        assert!(hir.implementations.len() >= 4, "Should have multiple implementations");
+        assert!(
+            hir.entities.len() >= 4,
+            "Should have Buffer, DataProcessor, StateMachine, and others"
+        );
+        assert!(
+            hir.implementations.len() >= 4,
+            "Should have multiple implementations"
+        );
         assert_eq!(hir.trait_definitions.len(), 1, "Should have Clocked trait");
-        assert_eq!(hir.trait_implementations.len(), 1, "Should have trait implementation");
+        assert_eq!(
+            hir.trait_implementations.len(),
+            1,
+            "Should have trait implementation"
+        );
         assert_eq!(hir.intents.len(), 2, "Should have 2 intent declarations");
 
         // Verify enhanced generics specifically
-        assert!(buffer_entity.generics.len() >= 2, "Buffer should have const and type generics");
+        assert!(
+            buffer_entity.generics.len() >= 2,
+            "Buffer should have const and type generics"
+        );
 
         println!("✅ ALL MILESTONE 4 FEATURES WORKING!");
         println!("✅ Enhanced Generics: Const parameters and constraints");

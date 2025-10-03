@@ -35,8 +35,11 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "struct Inputs {{").unwrap();
         self.indent += 1;
         for input in &sir.inputs {
-            self.write_indented(&format!("{} {};\n",
-                self.get_metal_type_name(input.width), input.name));
+            self.write_indented(&format!(
+                "{} {};\n",
+                self.get_metal_type_name(input.width),
+                input.name
+            ));
         }
         self.indent -= 1;
         writeln!(self.output, "}};\n").unwrap();
@@ -47,8 +50,11 @@ impl<'a> MetalShaderGenerator<'a> {
         self.indent += 1;
         for (i, (name, elem)) in sir.state_elements.iter().enumerate() {
             eprintln!("🔧 REGISTER[{}]: {}", i, name);
-            self.write_indented(&format!("{} {};\n",
-                self.get_metal_type_name(elem.width), name));
+            self.write_indented(&format!(
+                "{} {};\n",
+                self.get_metal_type_name(elem.width),
+                name
+            ));
         }
         self.indent -= 1;
         writeln!(self.output, "}};\n").unwrap();
@@ -64,16 +70,22 @@ impl<'a> MetalShaderGenerator<'a> {
         // Outputs are computed signals too
         for output in &sir.outputs {
             if added_names.insert(output.name.clone()) {
-                self.write_indented(&format!("{} {};\n",
-                    self.get_metal_type_name(output.width), output.name));
+                self.write_indented(&format!(
+                    "{} {};\n",
+                    self.get_metal_type_name(output.width),
+                    output.name
+                ));
             }
         }
 
         // All intermediate signals (avoiding duplicates)
         for signal in &sir.signals {
             if !signal.is_state && added_names.insert(signal.name.clone()) {
-                self.write_indented(&format!("{} {};\n",
-                    self.get_metal_type_name(signal.width), signal.name));
+                self.write_indented(&format!(
+                    "{} {};\n",
+                    self.get_metal_type_name(signal.width),
+                    signal.name
+                ));
             }
         }
         self.indent -= 1;
@@ -110,7 +122,13 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "}}\n").unwrap();
     }
 
-    fn generate_combinational_cone_kernel(&mut self, sir: &SirModule, cone: &CombinationalCone, index: usize, total_cones: usize) {
+    fn generate_combinational_cone_kernel(
+        &mut self,
+        sir: &SirModule,
+        cone: &CombinationalCone,
+        index: usize,
+        total_cones: usize,
+    ) {
         writeln!(self.output, "kernel void combinational_cone_{}(", index).unwrap();
         self.indent += 1;
 
@@ -141,12 +159,25 @@ impl<'a> MetalShaderGenerator<'a> {
             for output in &sir.outputs {
                 // Handle specific known output patterns
                 if output.name == "count" && sir.state_elements.contains_key("counter") {
-                    self.write_indented(&format!("signals->{} = registers->counter;\n", output.name));
-                } else if output.name == "result" && sir.state_elements.contains_key("writeback_data") {
-                    self.write_indented(&format!("signals->{} = registers->writeback_data;\n", output.name));
-                } else if output.name == "valid" && sir.state_elements.contains_key("pipeline_valid") {
+                    self.write_indented(&format!(
+                        "signals->{} = registers->counter;\n",
+                        output.name
+                    ));
+                } else if output.name == "result"
+                    && sir.state_elements.contains_key("writeback_data")
+                {
+                    self.write_indented(&format!(
+                        "signals->{} = registers->writeback_data;\n",
+                        output.name
+                    ));
+                } else if output.name == "valid"
+                    && sir.state_elements.contains_key("pipeline_valid")
+                {
                     // For valid = pipeline_valid[3], we need bit extraction
-                    self.write_indented(&format!("signals->{} = (registers->pipeline_valid >> 3) & 1;\n", output.name));
+                    self.write_indented(&format!(
+                        "signals->{} = (registers->pipeline_valid >> 3) & 1;\n",
+                        output.name
+                    ));
                 } else {
                     // General case: find the driver node for this output signal
                     if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
@@ -159,7 +190,10 @@ impl<'a> MetalShaderGenerator<'a> {
                                             "signals->{} = signals->{};\n",
                                             output.name, node_output.signal_id
                                         ));
-                                        eprintln!("🔗 OUTPUT: {} = {}", output.name, node_output.signal_id);
+                                        eprintln!(
+                                            "🔗 OUTPUT: {} = {}",
+                                            output.name, node_output.signal_id
+                                        );
                                         break;
                                     }
                                 }
@@ -195,7 +229,10 @@ impl<'a> MetalShaderGenerator<'a> {
 
         // Save old register values for proper simultaneous update semantics
         for state_name in sir.state_elements.keys() {
-            self.write_indented(&format!("uint old_{} = registers->{};\n", state_name, state_name));
+            self.write_indented(&format!(
+                "uint old_{} = registers->{};\n",
+                state_name, state_name
+            ));
         }
 
         // Check clock edges and update registers
@@ -231,7 +268,11 @@ impl<'a> MetalShaderGenerator<'a> {
                 // For now, generate a placeholder that reads from signals
                 let input = &node.inputs[0].signal_id;
                 let output = &node.outputs[0].signal_id;
-                let (high, low) = if *start >= *end { (*start, *end) } else { (*end, *start) };
+                let (high, low) = if *start >= *end {
+                    (*start, *end)
+                } else {
+                    (*end, *start)
+                };
                 let shift = low;
                 let mask = (1u64 << (high - low + 1)) - 1;
                 self.write_indented(&format!(
@@ -271,8 +312,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Shr => ">>",
             };
 
-            self.write_indented(&format!("signals->{} = signals->{} {} signals->{};\n",
-                output, left, op_str, right));
+            self.write_indented(&format!(
+                "signals->{} = signals->{} {} signals->{};\n",
+                output, left, op_str, right
+            ));
         }
     }
 
@@ -289,8 +332,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 UnaryOperation::RedXor => "^",
             };
 
-            self.write_indented(&format!("signals->{} = {}signals->{};\n",
-                output, op_str, input));
+            self.write_indented(&format!(
+                "signals->{} = {}signals->{};\n",
+                output, op_str, input
+            ));
         }
     }
 
@@ -298,8 +343,10 @@ impl<'a> MetalShaderGenerator<'a> {
         if !node.outputs.is_empty() {
             let output = &node.outputs[0].signal_id;
             let metal_type = self.get_metal_type_name(width);
-            self.write_indented(&format!("signals->{} = {}({});\n",
-                output, metal_type, value));
+            self.write_indented(&format!(
+                "signals->{} = {}({});\n",
+                output, metal_type, value
+            ));
         }
     }
 
@@ -321,12 +368,20 @@ impl<'a> MetalShaderGenerator<'a> {
         if !node.inputs.is_empty() && !node.outputs.is_empty() {
             let input = &node.inputs[0].signal_id;
             let output = &node.outputs[0].signal_id;
-            eprintln!("🔧 SLICE: input='{}', output='{}', state_elements={:?}",
-                input, output, sir.state_elements.keys().collect::<Vec<_>>());
+            eprintln!(
+                "🔧 SLICE: input='{}', output='{}', state_elements={:?}",
+                input,
+                output,
+                sir.state_elements.keys().collect::<Vec<_>>()
+            );
 
             // For HDL range [high:low], start=high, end=low
             // Width = high - low + 1, shift = low
-            let (high, low) = if start >= end { (start, end) } else { (end, start) };
+            let (high, low) = if start >= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             let width = high - low + 1;
             let shift = low;
             let mask = (1u64 << width) - 1;
@@ -340,7 +395,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 let mut mapped_register = None;
 
                 // Extract node ID from signal name like "node_6_out"
-                if let Some(node_id_str) = input.strip_prefix("node_").and_then(|s| s.strip_suffix("_out")) {
+                if let Some(node_id_str) = input
+                    .strip_prefix("node_")
+                    .and_then(|s| s.strip_suffix("_out"))
+                {
                     if let Ok(node_id) = node_id_str.parse::<usize>() {
                         // Find which register this node drives
                         for (reg_name, _) in &sir.state_elements {
@@ -392,9 +450,15 @@ impl<'a> MetalShaderGenerator<'a> {
                 if !node.outputs.is_empty() {
                     let output = &node.outputs[0].signal_id;
                     if sir.inputs.iter().any(|i| i.name == *signal) {
-                        self.write_indented(&format!("signals->{} = inputs->{};\n", output, signal));
+                        self.write_indented(&format!(
+                            "signals->{} = inputs->{};\n",
+                            output, signal
+                        ));
                     } else if sir.state_elements.contains_key(signal) {
-                        self.write_indented(&format!("signals->{} = registers->{};\n", output, signal));
+                        self.write_indented(&format!(
+                            "signals->{} = registers->{};\n",
+                            output, signal
+                        ));
                     }
                 }
             }
@@ -421,8 +485,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 let output_signal = &output.signal_id;
                 // Check if this output is a state element
                 if output_signal == "counter" || output_signal == "count" {
-                    self.write_indented(&format!("next_state->{} = signals->{};\n",
-                                                  output_signal, data_input));
+                    self.write_indented(&format!(
+                        "next_state->{} = signals->{};\n",
+                        output_signal, data_input
+                    ));
                 }
             }
 
@@ -462,23 +528,31 @@ impl<'a> MetalShaderGenerator<'a> {
                         // Special handling for pipeline register dependencies
                         if output.signal_id == "writeback_data" {
                             // writeback_data should get the previous execute_result register value
-                            self.write_indented(&format!("registers->{} = old_execute_result;\n",
-                                output.signal_id));
+                            self.write_indented(&format!(
+                                "registers->{} = old_execute_result;\n",
+                                output.signal_id
+                            ));
                         } else if output.signal_id == "decode_operand" {
                             // decode_operand should get fetch_instruction[7:0] from beginning of cycle
-                            self.write_indented(&format!("registers->{} = old_fetch_instruction & 0xFF;\n",
-                                output.signal_id));
+                            self.write_indented(&format!(
+                                "registers->{} = old_fetch_instruction & 0xFF;\n",
+                                output.signal_id
+                            ));
                         } else if output.signal_id == "decode_opcode" {
                             // decode_opcode should get fetch_instruction[15:12] from beginning of cycle
-                            self.write_indented(&format!("registers->{} = (old_fetch_instruction >> 12) & 0xF;\n",
-                                output.signal_id));
+                            self.write_indented(&format!(
+                                "registers->{} = (old_fetch_instruction >> 12) & 0xF;\n",
+                                output.signal_id
+                            ));
                         } else if output.signal_id == "execute_result" {
                             // execute_result should be decode_operand + data_in from beginning of cycle
                             self.write_indented(&format!("registers->{} = (inputs->rst ? 0 : (old_decode_operand + inputs->data_in));\n",
                                 output.signal_id));
                         } else {
-                            self.write_indented(&format!("registers->{} = signals->{};\n",
-                                output.signal_id, data_signal));
+                            self.write_indented(&format!(
+                                "registers->{} = signals->{};\n",
+                                output.signal_id, data_signal
+                            ));
                         }
                     }
                 }
@@ -509,7 +583,9 @@ impl<'a> MetalShaderGenerator<'a> {
                     // Find which node produces this input signal
                     for &other_id in node_ids {
                         if other_id != node_id {
-                            if let Some(other_node) = sir.combinational_nodes.iter().find(|n| n.id == other_id) {
+                            if let Some(other_node) =
+                                sir.combinational_nodes.iter().find(|n| n.id == other_id)
+                            {
                                 for output in &other_node.outputs {
                                     if output.signal_id == input.signal_id {
                                         // other_node -> node dependency

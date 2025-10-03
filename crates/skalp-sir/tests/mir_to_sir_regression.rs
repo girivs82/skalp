@@ -15,8 +15,8 @@
 //! - State element identification
 //! - Complex patterns (ALU, FSM, counter)
 
-use skalp_frontend::parse::parse;
 use skalp_frontend::hir_builder::build_hir;
+use skalp_frontend::parse::parse;
 use skalp_mir::hir_to_mir::HirToMir;
 use skalp_sir::mir_to_sir::convert_mir_to_sir;
 use skalp_sir::sir::*;
@@ -32,7 +32,10 @@ fn compile_to_sir(source: &str) -> SirModule {
     let mut transformer = HirToMir::new();
     let mir = transformer.transform(&hir);
 
-    assert!(!mir.modules.is_empty(), "MIR should have at least one module");
+    assert!(
+        !mir.modules.is_empty(),
+        "MIR should have at least one module"
+    );
     convert_mir_to_sir(&mir.modules[0])
 }
 
@@ -327,9 +330,10 @@ impl Register {
     assert!(!sir.combinational_nodes.is_empty() || !sir.sequential_nodes.is_empty());
 
     // Should have at least one flipflop node in sequential nodes
-    let has_ff = sir.sequential_nodes.iter().any(|node| {
-        matches!(node.kind, SirNodeKind::FlipFlop { .. })
-    });
+    let has_ff = sir
+        .sequential_nodes
+        .iter()
+        .any(|node| matches!(node.kind, SirNodeKind::FlipFlop { .. }));
     assert!(has_ff);
 }
 

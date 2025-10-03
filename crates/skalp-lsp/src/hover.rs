@@ -1,7 +1,7 @@
 //! Hover information provider for SKALP
 
-use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 use crate::DocumentState;
+use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 
 /// Get hover information for a position in the document
 pub fn get_hover(doc: &DocumentState, position: Position) -> Option<Hover> {
@@ -67,7 +67,8 @@ fn is_word_char(c: &char) -> bool {
 fn generate_hover_content(word: &str) -> Option<String> {
     match word {
         // Keywords
-        "entity" => Some("## entity\n\n\
+        "entity" => Some(
+            "## entity\n\n\
             Defines a hardware entity (module) in SKALP.\n\n\
             ### Syntax\n\
             ```skalp\n\
@@ -76,9 +77,12 @@ fn generate_hover_content(word: &str) -> Option<String> {
                 in data: bit<8>;\n\
                 out result: bit<8>;\n\
             }\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "impl" => Some("## impl\n\n\
+        "impl" => Some(
+            "## impl\n\n\
             Implementation block for an entity.\n\n\
             ### Syntax\n\
             ```skalp\n\
@@ -89,9 +93,12 @@ fn generate_hover_content(word: &str) -> Option<String> {
                     result <= data + 1;\n\
                 }\n\
             }\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "on" => Some("## on\n\n\
+        "on" => Some(
+            "## on\n\n\
             Event-driven block that executes on specific events.\n\n\
             ### Common Events\n\
             - `clock.rise` - Rising edge of clock\n\
@@ -103,17 +110,23 @@ fn generate_hover_content(word: &str) -> Option<String> {
             on(clk.rise) {\n\
                 counter <= counter + 1;\n\
             }\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "signal" => Some("## signal\n\n\
+        "signal" => Some(
+            "## signal\n\n\
             Declares an internal signal within an entity.\n\n\
             ### Syntax\n\
             ```skalp\n\
             signal name: type;\n\
             signal counter: nat<8> = 0;\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "protocol" => Some("## protocol\n\n\
+        "protocol" => Some(
+            "## protocol\n\n\
             Defines a communication protocol interface.\n\n\
             ### Syntax\n\
             ```skalp\n\
@@ -122,9 +135,12 @@ fn generate_hover_content(word: &str) -> Option<String> {
                 signal ready: bit;\n\
                 signal data: bit<32>;\n\
             }\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "match" => Some("## match\n\n\
+        "match" => Some(
+            "## match\n\n\
             Pattern matching for conditional logic.\n\n\
             ### Syntax\n\
             ```skalp\n\
@@ -133,9 +149,12 @@ fn generate_hover_content(word: &str) -> Option<String> {
                 START => next_state = PROCESS;\n\
                 _ => next_state = IDLE;\n\
             }\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "assert" => Some("## assert\n\n\
+        "assert" => Some(
+            "## assert\n\n\
             Assertion for verification and validation.\n\n\
             ### Types\n\
             - Immediate assertions: Check conditions instantly\n\
@@ -144,65 +163,88 @@ fn generate_hover_content(word: &str) -> Option<String> {
             ```skalp\n\
             assert data != 0;\n\
             assert property (req |-> ##[1:3] ack);\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "intent" => Some("## @intent\n\n\
+        "intent" => Some(
+            "## @intent\n\n\
             Design intent annotation for optimization hints.\n\n\
             ### Syntax\n\
             ```skalp\n\
             @intent(\"low_power\")\n\
             @intent(\"high_performance\")\n\
             @intent(\"minimize_area\")\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
         // Types
-        "bit" => Some("## bit\n\n\
+        "bit" => Some(
+            "## bit\n\n\
             Single bit type (0 or 1).\n\n\
             ### Bit Vector\n\
             ```skalp\n\
             bit<8>  // 8-bit vector\n\
             bit<32> // 32-bit vector\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "logic" => Some("## logic\n\n\
+        "logic" => Some(
+            "## logic\n\n\
             4-state logic type (0, 1, X, Z).\n\n\
             ### Logic Vector\n\
             ```skalp\n\
             logic<8>  // 8-bit logic vector\n\
             logic<32> // 32-bit logic vector\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "int" => Some("## int\n\n\
+        "int" => Some(
+            "## int\n\n\
             Signed integer type.\n\n\
             ### Syntax\n\
             ```skalp\n\
             int<8>  // 8-bit signed integer (-128 to 127)\n\
             int<32> // 32-bit signed integer\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "nat" => Some("## nat\n\n\
+        "nat" => Some(
+            "## nat\n\n\
             Natural number (unsigned integer) type.\n\n\
             ### Syntax\n\
             ```skalp\n\
             nat<8>  // 8-bit unsigned (0 to 255)\n\
             nat<32> // 32-bit unsigned\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "clock" => Some("## clock\n\n\
+        "clock" => Some(
+            "## clock\n\n\
             Clock signal type with domain safety.\n\n\
             ### Clock Domains\n\
             ```skalp\n\
             in clk: clock<'sys>;\n\
             in clk_fast: clock<'fast>;\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
-        "reset" => Some("## reset\n\n\
+        "reset" => Some(
+            "## reset\n\n\
             Reset signal type with polarity.\n\n\
             ### Example\n\
             ```skalp\n\
             in rst_n: reset(active_low);\n\
             in rst: reset(active_high);\n\
-            ```".to_string()),
+            ```"
+            .to_string(),
+        ),
 
         _ => None,
     }
@@ -237,7 +279,13 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let hover = get_hover(&doc, Position { line: 0, character: 3 });
+        let hover = get_hover(
+            &doc,
+            Position {
+                line: 0,
+                character: 3,
+            },
+        );
         assert!(hover.is_some());
 
         if let Some(hover) = hover {

@@ -62,7 +62,6 @@ fn test_trait_implementation() {
     let tree = parse(source);
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
-
     // Should find both trait definition and implementation
     let mut found_trait_impl = false;
     fn find_trait_impl(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
@@ -77,7 +76,10 @@ fn test_trait_implementation() {
         false
     }
     found_trait_impl = find_trait_impl(&tree);
-    assert!(found_trait_impl, "Trait implementation not found in parsed tree");
+    assert!(
+        found_trait_impl,
+        "Trait implementation not found in parsed tree"
+    );
 }
 
 #[test]

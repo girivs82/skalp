@@ -2,14 +2,14 @@
 //!
 //! Enables incremental changes and design state management
 
-use crate::{AsicError, DesignRules, Technology};
-use crate::placement::{Placement, Placer, Netlist};
-use crate::routing::{Router, RoutingResult};
 use crate::cts::{ClockTree, ClockTreeSynthesizer};
-use serde::{Serialize, Deserialize};
+use crate::placement::{Netlist, Placement, Placer};
+use crate::routing::{Router, RoutingResult};
+use crate::{AsicError, DesignRules, Technology};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Incremental PAR engine
@@ -59,9 +59,9 @@ pub struct DesignMetrics {
 /// Timing metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimingMetrics {
-    pub wns: f64,  // Worst negative slack
-    pub tns: f64,  // Total negative slack
-    pub whs: f64,  // Worst hold slack
+    pub wns: f64, // Worst negative slack
+    pub tns: f64, // Total negative slack
+    pub whs: f64, // Worst hold slack
     pub clock_period: f64,
     pub critical_path_delay: f64,
 }
@@ -373,9 +373,11 @@ impl IncrementalPAR {
     }
 
     /// Perform incremental placement
-    pub fn incremental_place(&mut self, changes: &[DesignChange])
-                            -> Result<(), AsicError> {
-        let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    pub fn incremental_place(&mut self, changes: &[DesignChange]) -> Result<(), AsicError> {
+        let start = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         // Track changes
         for change in changes {
@@ -389,21 +391,26 @@ impl IncrementalPAR {
         self.algorithms.placer.place_incremental(
             &mut self.state.placement,
             &affected_region,
-            &self.changes.modified_cells
+            &self.changes.modified_cells,
         )?;
 
         // Update metrics
         self.update_metrics();
-        let end = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let end = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         self.monitor.stats.placement_time += (end - start) as f64;
 
         Ok(())
     }
 
     /// Perform incremental routing
-    pub fn incremental_route(&mut self, changes: &[DesignChange])
-                            -> Result<(), AsicError> {
-        let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    pub fn incremental_route(&mut self, changes: &[DesignChange]) -> Result<(), AsicError> {
+        let start = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         // Determine affected nets
         let affected_nets = self.compute_affected_nets(changes);
@@ -416,12 +423,14 @@ impl IncrementalPAR {
         }
 
         // Reroute affected nets
-        self.algorithms.router.route_incremental(
-            &self.state.placement,
-            &affected_nets
-        )?;
+        self.algorithms
+            .router
+            .route_incremental(&self.state.placement, &affected_nets)?;
 
-        let end = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let end = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         self.monitor.stats.routing_time += (end - start) as f64;
 
         Ok(())
@@ -430,13 +439,15 @@ impl IncrementalPAR {
     /// Save checkpoint
     pub fn save_checkpoint(&mut self, name: &str) -> Result<String, AsicError> {
         let checkpoint_id = self.generate_checkpoint_id();
-        let checkpoint_path = self.checkpoints.checkpoint_dir
+        let checkpoint_path = self
+            .checkpoints
+            .checkpoint_dir
             .join(format!("{}.ckpt", checkpoint_id));
 
         // Serialize state
         // Serialize state - bincode v2 API
         let serialized = Vec::new(); // TODO: Implement proper serialization
-        // For now, return a placeholder
+                                     // For now, return a placeholder
 
         // Compress if enabled
         let data = if self.checkpoints.compression.enabled {
@@ -469,10 +480,12 @@ impl IncrementalPAR {
     }
 
     /// Restore checkpoint
-    pub fn restore_checkpoint(&mut self, checkpoint_id: &str)
-                             -> Result<(), AsicError> {
+    pub fn restore_checkpoint(&mut self, checkpoint_id: &str) -> Result<(), AsicError> {
         // Find checkpoint
-        let checkpoint = self.checkpoints.checkpoints.iter()
+        let checkpoint = self
+            .checkpoints
+            .checkpoints
+            .iter()
             .find(|c| c.id == checkpoint_id)
             .ok_or_else(|| AsicError::PlacementError("Checkpoint not found".to_string()))?;
 
@@ -504,12 +517,14 @@ impl IncrementalPAR {
     }
 
     /// Delete checkpoint
-    pub fn delete_checkpoint(&mut self, checkpoint_id: &str)
-                           -> Result<(), AsicError> {
+    pub fn delete_checkpoint(&mut self, checkpoint_id: &str) -> Result<(), AsicError> {
         // Find and remove checkpoint
-        if let Some(pos) = self.checkpoints.checkpoints.iter()
-            .position(|c| c.id == checkpoint_id) {
-
+        if let Some(pos) = self
+            .checkpoints
+            .checkpoints
+            .iter()
+            .position(|c| c.id == checkpoint_id)
+        {
             let checkpoint = self.checkpoints.checkpoints.remove(pos);
 
             // Delete file
@@ -521,8 +536,11 @@ impl IncrementalPAR {
     }
 
     /// Compare two checkpoints
-    pub fn compare_checkpoints(&self, id1: &str, id2: &str)
-                             -> Result<CheckpointComparison, AsicError> {
+    pub fn compare_checkpoints(
+        &self,
+        id1: &str,
+        id2: &str,
+    ) -> Result<CheckpointComparison, AsicError> {
         let ckpt1 = self.find_checkpoint(id1)?;
         let ckpt2 = self.find_checkpoint(id2)?;
 
@@ -531,11 +549,11 @@ impl IncrementalPAR {
             checkpoint2: ckpt2.id.clone(),
             timing_diff: self.compare_timing(&ckpt1.metrics.timing, &ckpt2.metrics.timing),
             area_diff: (ckpt2.metrics.area.total_area - ckpt1.metrics.area.total_area)
-                      / ckpt1.metrics.area.total_area,
+                / ckpt1.metrics.area.total_area,
             power_diff: (ckpt2.metrics.power.total - ckpt1.metrics.power.total)
-                       / ckpt1.metrics.power.total,
+                / ckpt1.metrics.power.total,
             quality_diff: (ckpt2.metrics.quality.wirelength - ckpt1.metrics.quality.wirelength)
-                        / ckpt1.metrics.quality.wirelength,
+                / ckpt1.metrics.quality.wirelength,
         })
     }
 
@@ -553,13 +571,13 @@ impl IncrementalPAR {
                     min_y = min_y.min(from.1).min(to.1);
                     max_x = max_x.max(from.0).max(to.0);
                     max_y = max_y.max(from.1).max(to.1);
-                },
+                }
                 _ => {}
             }
         }
 
         Region {
-            x1: min_x - 100.0,  // Add margin
+            x1: min_x - 100.0, // Add margin
             y1: min_y - 100.0,
             x2: max_x + 100.0,
             y2: max_y + 100.0,
@@ -631,7 +649,9 @@ impl IncrementalPAR {
 
     /// Find checkpoint by ID
     fn find_checkpoint(&self, id: &str) -> Result<&CheckpointInfo, AsicError> {
-        self.checkpoints.checkpoints.iter()
+        self.checkpoints
+            .checkpoints
+            .iter()
             .find(|c| c.id == id)
             .ok_or_else(|| AsicError::PlacementError(format!("Checkpoint {} not found", id)))
     }
@@ -706,7 +726,7 @@ impl CheckpointManager {
             checkpoints: Vec::new(),
             auto_save: AutoSaveConfig {
                 enabled: true,
-                interval: 300,  // 5 minutes
+                interval: 300, // 5 minutes
                 change_threshold: 100,
                 max_checkpoints: 50,
             },
@@ -744,9 +764,12 @@ impl IncrementalPlacer {
         }
     }
 
-    pub fn place_incremental(&mut self, placement: &mut Placement,
-                            region: &Region, cells: &HashSet<String>)
-                           -> Result<(), AsicError> {
+    pub fn place_incremental(
+        &mut self,
+        placement: &mut Placement,
+        region: &Region,
+        cells: &HashSet<String>,
+    ) -> Result<(), AsicError> {
         // TODO: Implement incremental placement
         Ok(())
     }
@@ -760,7 +783,10 @@ impl IncrementalRouter {
                 routes: HashMap::new(),
                 congestion: CongestionCache {
                     grid: Vec::new(),
-                    last_update: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    last_update: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
                 },
                 vias: HashMap::new(),
             },
@@ -771,8 +797,11 @@ impl IncrementalRouter {
         }
     }
 
-    pub fn route_incremental(&mut self, placement: &Placement,
-                           nets: &HashSet<String>) -> Result<(), AsicError> {
+    pub fn route_incremental(
+        &mut self,
+        placement: &Placement,
+        nets: &HashSet<String>,
+    ) -> Result<(), AsicError> {
         // TODO: Implement incremental routing
         Ok(())
     }

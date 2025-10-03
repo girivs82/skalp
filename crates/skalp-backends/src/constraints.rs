@@ -2,7 +2,7 @@
 //!
 //! Provides constraint parsing, validation, and application for both FPGA and ASIC flows.
 
-use crate::{BackendResult, TimingConstraint, PowerConstraints};
+use crate::{BackendResult, PowerConstraints, TimingConstraint};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -167,7 +167,8 @@ impl ConstraintManager {
 
     /// Add pin constraint
     pub fn add_pin_constraint(&mut self, constraint: PinConstraint) {
-        self.pin_constraints.insert(constraint.signal_name.clone(), constraint);
+        self.pin_constraints
+            .insert(constraint.signal_name.clone(), constraint);
     }
 
     /// Add floorplan constraint
@@ -420,25 +421,46 @@ impl ConstraintManager {
 
         for constraint in &self.timing_constraints {
             match constraint {
-                TimingConstraint::ClockPeriod { clock_name, period_ns } => {
-                    sdc.push_str(&format!("create_clock -period {:.3} [get_ports {}]\n",
-                                        period_ns, clock_name));
+                TimingConstraint::ClockPeriod {
+                    clock_name,
+                    period_ns,
+                } => {
+                    sdc.push_str(&format!(
+                        "create_clock -period {:.3} [get_ports {}]\n",
+                        period_ns, clock_name
+                    ));
                 }
-                TimingConstraint::InputDelay { port_name, delay_ns, clock_name } => {
-                    sdc.push_str(&format!("set_input_delay -clock {} {:.3} [get_ports {}]\n",
-                                        clock_name, delay_ns, port_name));
+                TimingConstraint::InputDelay {
+                    port_name,
+                    delay_ns,
+                    clock_name,
+                } => {
+                    sdc.push_str(&format!(
+                        "set_input_delay -clock {} {:.3} [get_ports {}]\n",
+                        clock_name, delay_ns, port_name
+                    ));
                 }
-                TimingConstraint::OutputDelay { port_name, delay_ns, clock_name } => {
-                    sdc.push_str(&format!("set_output_delay -clock {} {:.3} [get_ports {}]\n",
-                                        clock_name, delay_ns, port_name));
+                TimingConstraint::OutputDelay {
+                    port_name,
+                    delay_ns,
+                    clock_name,
+                } => {
+                    sdc.push_str(&format!(
+                        "set_output_delay -clock {} {:.3} [get_ports {}]\n",
+                        clock_name, delay_ns, port_name
+                    ));
                 }
                 TimingConstraint::FalsePath { from, to } => {
-                    sdc.push_str(&format!("set_false_path -from [get_pins {}] -to [get_pins {}]\n",
-                                        from, to));
+                    sdc.push_str(&format!(
+                        "set_false_path -from [get_pins {}] -to [get_pins {}]\n",
+                        from, to
+                    ));
                 }
                 TimingConstraint::MulticyclePath { from, to, cycles } => {
-                    sdc.push_str(&format!("set_multicycle_path -setup {} -from [get_pins {}] -to [get_pins {}]\n",
-                                        cycles, from, to));
+                    sdc.push_str(&format!(
+                        "set_multicycle_path -setup {} -from [get_pins {}] -to [get_pins {}]\n",
+                        cycles, from, to
+                    ));
                 }
             }
         }
@@ -452,11 +474,15 @@ impl ConstraintManager {
         xdc.push_str("\n# Xilinx-specific constraints\n");
 
         for (signal, pin) in &self.pin_constraints {
-            xdc.push_str(&format!("set_property PACKAGE_PIN {} [get_ports {}]\n",
-                                pin.location, signal));
+            xdc.push_str(&format!(
+                "set_property PACKAGE_PIN {} [get_ports {}]\n",
+                pin.location, signal
+            ));
             if let Some(ref io_standard) = pin.io_standard {
-                xdc.push_str(&format!("set_property IOSTANDARD {} [get_ports {}]\n",
-                                    io_standard, signal));
+                xdc.push_str(&format!(
+                    "set_property IOSTANDARD {} [get_ports {}]\n",
+                    io_standard, signal
+                ));
             }
         }
 

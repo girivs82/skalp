@@ -49,40 +49,32 @@ fn create_simple_entity() -> Hir {
     // Create implementation
     let implementation = HirImplementation {
         entity: EntityId(1),
-        signals: vec![
-            HirSignal {
-                id: SignalId(1),
-                name: "next_count".to_string(),
-                signal_type: HirType::Bit(8),
-                initial_value: None,
-                clock_domain: None,
-            },
-        ],
+        signals: vec![HirSignal {
+            id: SignalId(1),
+            name: "next_count".to_string(),
+            signal_type: HirType::Bit(8),
+            initial_value: None,
+            clock_domain: None,
+        }],
         variables: vec![],
         constants: vec![],
-        event_blocks: vec![
-            HirEventBlock {
-                id: BlockId(1),
-                triggers: vec![
-                    HirEventTrigger {
-                        signal: HirEventSignal::Signal(SignalId(1)),  // clk (actually should be mapped to port)
-                        edge: HirEdgeType::Rising,
-                    },
-                ],
-                statements: vec![
-                    HirStatement::Assignment(HirAssignment {
-                        id: AssignmentId(1),
-                        lhs: HirLValue::Signal(SignalId(1)),
-                        rhs: HirExpression::Binary(HirBinaryExpr {
-                            left: Box::new(HirExpression::Signal(SignalId(1))),
-                            op: HirBinaryOp::Add,
-                            right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
-                        }),
-                        assignment_type: HirAssignmentType::NonBlocking,
-                    }),
-                ],
-            },
-        ],
+        event_blocks: vec![HirEventBlock {
+            id: BlockId(1),
+            triggers: vec![HirEventTrigger {
+                signal: HirEventSignal::Signal(SignalId(1)), // clk (actually should be mapped to port)
+                edge: HirEdgeType::Rising,
+            }],
+            statements: vec![HirStatement::Assignment(HirAssignment {
+                id: AssignmentId(1),
+                lhs: HirLValue::Signal(SignalId(1)),
+                rhs: HirExpression::Binary(HirBinaryExpr {
+                    left: Box::new(HirExpression::Signal(SignalId(1))),
+                    op: HirBinaryOp::Add,
+                    right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+                }),
+                assignment_type: HirAssignmentType::NonBlocking,
+            })],
+        }],
         assignments: vec![],
         instances: vec![],
         covergroups: vec![],
@@ -121,18 +113,36 @@ fn test_port_conversion() {
 
     // Check clock port
     assert_eq!(module.ports[0].name, "clk");
-    assert!(matches!(module.ports[0].direction, skalp_mir::mir::PortDirection::Input));
-    assert!(matches!(module.ports[0].port_type, skalp_mir::mir::DataType::Clock { domain: _ }));
+    assert!(matches!(
+        module.ports[0].direction,
+        skalp_mir::mir::PortDirection::Input
+    ));
+    assert!(matches!(
+        module.ports[0].port_type,
+        skalp_mir::mir::DataType::Clock { domain: _ }
+    ));
 
     // Check reset port
     assert_eq!(module.ports[1].name, "rst");
-    assert!(matches!(module.ports[1].direction, skalp_mir::mir::PortDirection::Input));
-    assert!(matches!(module.ports[1].port_type, skalp_mir::mir::DataType::Reset { .. }));
+    assert!(matches!(
+        module.ports[1].direction,
+        skalp_mir::mir::PortDirection::Input
+    ));
+    assert!(matches!(
+        module.ports[1].port_type,
+        skalp_mir::mir::DataType::Reset { .. }
+    ));
 
     // Check output port
     assert_eq!(module.ports[2].name, "count");
-    assert!(matches!(module.ports[2].direction, skalp_mir::mir::PortDirection::Output));
-    assert!(matches!(module.ports[2].port_type, skalp_mir::mir::DataType::Bit(8)));
+    assert!(matches!(
+        module.ports[2].direction,
+        skalp_mir::mir::PortDirection::Output
+    ));
+    assert!(matches!(
+        module.ports[2].port_type,
+        skalp_mir::mir::DataType::Bit(8)
+    ));
 }
 
 #[test]
@@ -145,7 +155,10 @@ fn test_process_conversion() {
     let process = &module.processes[0];
 
     // Check process type
-    assert!(matches!(process.kind, skalp_mir::mir::ProcessKind::Sequential));
+    assert!(matches!(
+        process.kind,
+        skalp_mir::mir::ProcessKind::Sequential
+    ));
 
     // Check sensitivity list
     match &process.sensitivity {

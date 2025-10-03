@@ -40,7 +40,9 @@ pub fn analyze_document(content: &str) -> Vec<Diagnostic> {
                     },
                 },
                 severity: Some(DiagnosticSeverity::ERROR),
-                code: Some(tower_lsp::lsp_types::NumberOrString::String("E001".to_string())),
+                code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "E001".to_string(),
+                )),
                 source: Some("skalp".to_string()),
                 message: "Missing semicolon".to_string(),
                 related_information: None,
@@ -66,8 +68,12 @@ fn should_have_semicolon(line: &str) -> bool {
     }
 
     // Skip lines that are part of block structures
-    if trimmed.ends_with('{') || trimmed.ends_with('}') || trimmed.contains("entity")
-        || trimmed.contains("impl") || trimmed.contains("on(") {
+    if trimmed.ends_with('{')
+        || trimmed.ends_with('}')
+        || trimmed.contains("entity")
+        || trimmed.contains("impl")
+        || trimmed.contains("on(")
+    {
         return false;
     }
 
@@ -87,11 +93,19 @@ fn parse_error_to_diagnostic(error: &ParseError) -> Option<Diagnostic> {
     // TODO: Extract proper position information from ParseError
     Some(Diagnostic {
         range: Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 1 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 1,
+            },
         },
         severity: Some(DiagnosticSeverity::ERROR),
-        code: Some(tower_lsp::lsp_types::NumberOrString::String("E100".to_string())),
+        code: Some(tower_lsp::lsp_types::NumberOrString::String(
+            "E100".to_string(),
+        )),
         source: Some("skalp-parser".to_string()),
         message: format!("Parse error: {:?}", error),
         related_information: None,
@@ -120,7 +134,9 @@ fn check_style_warnings(content: &str, diagnostics: &mut Vec<Diagnostic>) {
                     },
                 },
                 severity: Some(DiagnosticSeverity::INFORMATION),
-                code: Some(tower_lsp::lsp_types::NumberOrString::String("I001".to_string())),
+                code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "I001".to_string(),
+                )),
                 source: Some("skalp".to_string()),
                 message: "Use 'on(clock.rise)' instead of 'always @'".to_string(),
                 related_information: None,
@@ -144,7 +160,9 @@ fn check_style_warnings(content: &str, diagnostics: &mut Vec<Diagnostic>) {
                     },
                 },
                 severity: Some(DiagnosticSeverity::WARNING),
-                code: Some(tower_lsp::lsp_types::NumberOrString::String("W001".to_string())),
+                code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "W001".to_string(),
+                )),
                 source: Some("skalp".to_string()),
                 message: "Potential clock domain crossing detected".to_string(),
                 related_information: None,
@@ -167,13 +185,17 @@ mod tests {
         // Should have parse errors since this isn't valid SKALP syntax
         assert!(diagnostics.len() > 0);
         // Check if any diagnostic mentions parsing issues or missing semicolons
-        assert!(diagnostics.iter().any(|d| d.message.contains("Parse error") || d.message.contains("Missing semicolon")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("Parse error") || d.message.contains("Missing semicolon")));
     }
 
     #[test]
     fn test_cdc_warning() {
         // Test the CDC detection function directly
-        assert!(detect_potential_cdc("signal data<'clk1>: bit<8> = input<'clk2>;"));
+        assert!(detect_potential_cdc(
+            "signal data<'clk1>: bit<8> = input<'clk2>;"
+        ));
         assert!(!detect_potential_cdc("signal data<'clk>: bit<8>;"));
     }
 
@@ -182,6 +204,8 @@ mod tests {
         // Test the deprecated syntax directly in check_style_warnings
         let mut diagnostics = Vec::new();
         check_style_warnings("always @ (posedge clk)", &mut diagnostics);
-        assert!(diagnostics.iter().any(|d| d.message.contains("on(clock.rise)")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("on(clock.rise)")));
     }
 }

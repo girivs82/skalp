@@ -86,8 +86,8 @@ impl TimingAnalyzer {
                 backward_arcs: HashMap::new(),
             },
             clock_period,
-            setup_time: 50.0,  // Default setup time
-            hold_time: 30.0,   // Default hold time
+            setup_time: 50.0, // Default setup time
+            hold_time: 30.0,  // Default hold time
             delay_library,
         }
     }
@@ -132,13 +132,15 @@ impl TimingAnalyzer {
                     };
 
                     // Add to forward arcs
-                    self.graph.forward_arcs
+                    self.graph
+                        .forward_arcs
                         .entry(input.clone())
                         .or_insert_with(Vec::new)
                         .push(arc.clone());
 
                     // Add to backward arcs
-                    self.graph.backward_arcs
+                    self.graph
+                        .backward_arcs
                         .entry(output.clone())
                         .or_insert_with(Vec::new)
                         .push(arc);
@@ -217,7 +219,10 @@ impl TimingAnalyzer {
         let mut visited = HashSet::new();
 
         // Start from primary outputs and register inputs
-        let output_nodes: Vec<_> = self.graph.nodes.iter()
+        let output_nodes: Vec<_> = self
+            .graph
+            .nodes
+            .iter()
             .filter(|(_, node)| node.is_output)
             .map(|(id, _)| id.clone())
             .collect();
@@ -232,7 +237,10 @@ impl TimingAnalyzer {
         }
 
         // Find register inputs and set their required times
-        let register_nodes: Vec<_> = self.graph.backward_arcs.keys()
+        let register_nodes: Vec<_> = self
+            .graph
+            .backward_arcs
+            .keys()
             .filter(|id| self.graph.nodes.get(*id).map_or(false, |n| n.is_register))
             .cloned()
             .collect();
@@ -283,7 +291,10 @@ impl TimingAnalyzer {
         let mut total_delay = 0.0;
 
         // Find the node with worst slack
-        let mut current = self.graph.nodes.values()
+        let mut current = self
+            .graph
+            .nodes
+            .values()
             .filter(|n| n.is_output || n.is_register)
             .min_by(|a, b| a.slack.partial_cmp(&b.slack).unwrap())
             .map(|n| n.id.clone());
@@ -293,17 +304,18 @@ impl TimingAnalyzer {
             path.push(node_id.clone());
 
             // Find the predecessor with worst slack
-            current = self.graph.backward_arcs.get(&node_id)
-                .and_then(|arcs| {
-                    arcs.iter()
-                        .map(|arc| &arc.from)
-                        .min_by_key(|id| {
-                            self.graph.nodes.get(*id)
-                                .map(|n| (n.slack * 1000.0) as i64)
-                                .unwrap_or(i64::MAX)
-                        })
-                        .cloned()
-                });
+            current = self.graph.backward_arcs.get(&node_id).and_then(|arcs| {
+                arcs.iter()
+                    .map(|arc| &arc.from)
+                    .min_by_key(|id| {
+                        self.graph
+                            .nodes
+                            .get(*id)
+                            .map(|n| (n.slack * 1000.0) as i64)
+                            .unwrap_or(i64::MAX)
+                    })
+                    .cloned()
+            });
 
             let node = &self.graph.nodes[&node_id];
             if node.is_input || node.is_register {
@@ -316,14 +328,14 @@ impl TimingAnalyzer {
         // Calculate total delay
         if path.len() > 1 {
             for i in 0..path.len() - 1 {
-            if let Some(arcs) = self.graph.forward_arcs.get(&path[i]) {
-                for arc in arcs {
-                    if arc.to == path[i + 1] {
-                        total_delay += arc.delay;
-                        break;
+                if let Some(arcs) = self.graph.forward_arcs.get(&path[i]) {
+                    for arc in arcs {
+                        if arc.to == path[i + 1] {
+                            total_delay += arc.delay;
+                            break;
+                        }
                     }
                 }
-            }
             }
         }
 
@@ -357,7 +369,9 @@ impl TimingAnalyzer {
 
     /// Find worst slack
     fn find_worst_slack(&self) -> f64 {
-        self.graph.nodes.values()
+        self.graph
+            .nodes
+            .values()
             .map(|n| n.slack)
             .min_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap_or(0.0)

@@ -1,6 +1,6 @@
 //! Task definitions and execution
 
-use crate::{TaskContext, ParallelResult};
+use crate::{ParallelResult, TaskContext};
 
 pub trait Task {
     fn execute(&self, context: &TaskContext) -> ParallelResult<()>;

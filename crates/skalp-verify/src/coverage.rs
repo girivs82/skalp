@@ -446,7 +446,9 @@ impl BranchCoverage {
 
     fn get_percentage(&self) -> f64 {
         let total = self.branches.len() * 2; // Each branch has 2 outcomes
-        let covered = self.branches.iter()
+        let covered = self
+            .branches
+            .iter()
             .map(|b| (b.true_taken as usize) + (b.false_taken as usize))
             .sum::<usize>();
 
@@ -488,7 +490,9 @@ impl ConditionCoverage {
             return 0.0;
         }
 
-        let total_combinations: usize = self.conditions.iter()
+        let total_combinations: usize = self
+            .conditions
+            .iter()
             .map(|c| 1 << c.sub_conditions.len())
             .sum();
 
@@ -567,7 +571,9 @@ impl ToggleCoverage {
         }
 
         let total = self.signals.len() * 2; // Each signal needs both toggles
-        let covered = self.toggles.values()
+        let covered = self
+            .toggles
+            .values()
             .map(|t| ((t.rising > 0) as usize) + ((t.falling > 0) as usize))
             .sum::<usize>();
 
@@ -656,10 +662,22 @@ impl fmt::Display for CoverageReport {
         writeln!(f, "====================")?;
         writeln!(f, "Overall:      {:.1}%", self.metrics.overall)?;
         writeln!(f, "Goal:         {:.1}%", self.goal)?;
-        writeln!(f, "Status:       {}", if self.goal_met { "✓ PASSED" } else { "✗ FAILED" })?;
+        writeln!(
+            f,
+            "Status:       {}",
+            if self.goal_met {
+                "✓ PASSED"
+            } else {
+                "✗ FAILED"
+            }
+        )?;
 
         if !self.uncovered_statements.is_empty() {
-            writeln!(f, "\nUncovered statements: {}", self.uncovered_statements.len())?;
+            writeln!(
+                f,
+                "\nUncovered statements: {}",
+                self.uncovered_statements.len()
+            )?;
         }
         if !self.uncovered_branches.is_empty() {
             writeln!(f, "Uncovered branches: {}", self.uncovered_branches.len())?;
@@ -778,17 +796,21 @@ mod tests {
             id: FsmId(0),
             name: "test_fsm".to_string(),
             states: vec![
-                State { id: StateId(0), name: "IDLE".to_string() },
-                State { id: StateId(1), name: "ACTIVE".to_string() },
-            ],
-            transitions: vec![
-                Transition {
-                    id: TransitionId(0),
-                    from: StateId(0),
-                    to: StateId(1),
-                    condition: "start".to_string(),
+                State {
+                    id: StateId(0),
+                    name: "IDLE".to_string(),
+                },
+                State {
+                    id: StateId(1),
+                    name: "ACTIVE".to_string(),
                 },
             ],
+            transitions: vec![Transition {
+                id: TransitionId(0),
+                from: StateId(0),
+                to: StateId(1),
+                condition: "start".to_string(),
+            }],
         });
 
         // Test state coverage

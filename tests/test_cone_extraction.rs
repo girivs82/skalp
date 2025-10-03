@@ -2,8 +2,8 @@
 mod cone_extraction_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
-    use skalp_sir::{convert_mir_to_sir, SirNodeKind};
     use skalp_sir::sir::BinaryOperation;
+    use skalp_sir::{convert_mir_to_sir, SirNodeKind};
 
     #[test]
     fn test_counter_cone_extraction() {
@@ -30,8 +30,7 @@ mod cone_extraction_tests {
         "#;
 
         let hir = parse_and_build_hir(source).unwrap();
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::Basic);
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
         let mir = compiler.compile_to_mir(&hir).unwrap();
 
         println!("=== MIR Analysis ===");
@@ -50,9 +49,18 @@ mod cone_extraction_tests {
 
         println!("\n=== SIR Analysis ===");
         println!("Module: {}", sir.name);
-        println!("Inputs: {:?}", sir.inputs.iter().map(|p| &p.name).collect::<Vec<_>>());
-        println!("Outputs: {:?}", sir.outputs.iter().map(|p| &p.name).collect::<Vec<_>>());
-        println!("State elements: {:?}", sir.state_elements.keys().collect::<Vec<_>>());
+        println!(
+            "Inputs: {:?}",
+            sir.inputs.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        println!(
+            "Outputs: {:?}",
+            sir.outputs.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        println!(
+            "State elements: {:?}",
+            sir.state_elements.keys().collect::<Vec<_>>()
+        );
 
         println!("\nCombinational nodes: {}", sir.combinational_nodes.len());
         for (i, node) in sir.combinational_nodes.iter().enumerate() {
@@ -93,20 +101,25 @@ mod cone_extraction_tests {
         }
 
         // Verify we have the increment logic
-        assert!(sir.combinational_nodes.len() > 0 || sir.sequential_nodes.len() > 0,
-                "Should have some nodes");
+        assert!(
+            sir.combinational_nodes.len() > 0 || sir.sequential_nodes.len() > 0,
+            "Should have some nodes"
+        );
 
         // Check if any combinational node is an add operation
-        let has_add = sir.combinational_nodes.iter().any(|node| {
-            matches!(node.kind, SirNodeKind::BinaryOp(BinaryOperation::Add))
-        });
+        let has_add = sir
+            .combinational_nodes
+            .iter()
+            .any(|node| matches!(node.kind, SirNodeKind::BinaryOp(BinaryOperation::Add)));
 
         println!("\nHas ADD operation in combinational nodes: {}", has_add);
 
         // The counter should have either:
         // 1. A combinational ADD node for counter + 1
         // 2. Or the increment should be in sequential logic
-        assert!(has_add || sir.sequential_nodes.len() > 0,
-                "Counter should have increment logic");
+        assert!(
+            has_add || sir.sequential_nodes.len() > 0,
+            "Counter should have increment logic"
+        );
     }
 }

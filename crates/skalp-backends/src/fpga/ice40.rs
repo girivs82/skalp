@@ -3,15 +3,15 @@
 //! Implements synthesis flow for Lattice iCE40 FPGAs using the open-source
 //! Yosys synthesis tool and nextpnr place-and-route tool.
 
-use crate::{
-    BackendResult, SynthesisResults, AreaMetrics, TimingResults, PowerResults,
-    OutputFile, OutputFileType, LogMessage, LogLevel, TimingSlack,
-};
 use crate::fpga::FpgaConfig;
+use crate::{
+    AreaMetrics, BackendResult, LogLevel, LogMessage, OutputFile, OutputFileType, PowerResults,
+    SynthesisResults, TimingResults, TimingSlack,
+};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
-use std::collections::HashMap;
 
 /// iCE40-specific device information
 #[derive(Debug, Clone)]
@@ -322,10 +322,7 @@ async fn run_nextpnr_pnr(
 }
 
 /// Run icepack to generate bitstream
-async fn run_icepack(
-    temp_dir: &Path,
-    log_messages: &mut Vec<LogMessage>,
-) -> BackendResult<bool> {
+async fn run_icepack(temp_dir: &Path, log_messages: &mut Vec<LogMessage>) -> BackendResult<bool> {
     let asc_file = temp_dir.join("design.asc");
     let bin_file = temp_dir.join("design.bin");
 
@@ -419,7 +416,7 @@ async fn analyze_area_utilization(
         flip_flops_used,
         block_ram_used: Some(brams_used),
         dsp_slices_used: Some(0), // iCE40 doesn't have dedicated DSP slices
-        cell_area_um2: None, // Not applicable for FPGA
+        cell_area_um2: None,      // Not applicable for FPGA
         utilization_percent,
     })
 }
@@ -537,8 +534,14 @@ mod tests {
 
     #[test]
     fn test_extract_frequency_from_line() {
-        assert_eq!(extract_frequency_from_line("Max frequency: 125.5 MHz"), Some(125.5));
-        assert_eq!(extract_frequency_from_line("Frequency is 100.0 MHz"), Some(100.0));
+        assert_eq!(
+            extract_frequency_from_line("Max frequency: 125.5 MHz"),
+            Some(125.5)
+        );
+        assert_eq!(
+            extract_frequency_from_line("Frequency is 100.0 MHz"),
+            Some(100.0)
+        );
         assert_eq!(extract_frequency_from_line("No frequency here"), None);
     }
 
@@ -548,7 +551,8 @@ mod tests {
         let config = FpgaConfig::default();
         let verilog = "module test(input a, output b); assign b = a; endmodule";
 
-        let result = synthesize_ice40(verilog, "iCE40HX8K", "CT256", temp_dir.path(), &config).await;
+        let result =
+            synthesize_ice40(verilog, "iCE40HX8K", "CT256", temp_dir.path(), &config).await;
         assert!(result.is_ok());
 
         let synthesis_result = result.unwrap();

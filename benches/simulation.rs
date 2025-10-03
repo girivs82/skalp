@@ -1,37 +1,33 @@
 //! Simulation performance benchmarks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::BinaryHeap;
 
 fn benchmark_gpu_vs_cpu(c: &mut Criterion) {
     let mut group = c.benchmark_group("gpu_vs_cpu_simulation");
 
     let design_sizes = vec![
-        ("small", 100),    // 100 gates
-        ("medium", 500),   // 500 gates
-        ("large", 1000),   // 1K gates
+        ("small", 100),  // 100 gates
+        ("medium", 500), // 500 gates
+        ("large", 1000), // 1K gates
     ];
 
     for (name, size) in design_sizes {
         group.throughput(Throughput::Elements(size as u64));
 
         // CPU simulation
-        group.bench_with_input(
-            BenchmarkId::new("cpu", name),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    // Simulate CPU-based evaluation
-                    let mut state = vec![0u32; size];
-                    for cycle in 0..100 {
-                        for i in 0..size {
-                            state[i] = black_box((state[i] + cycle) % 256);
-                        }
+        group.bench_with_input(BenchmarkId::new("cpu", name), &size, |b, &size| {
+            b.iter(|| {
+                // Simulate CPU-based evaluation
+                let mut state = vec![0u32; size];
+                for cycle in 0..100 {
+                    for i in 0..size {
+                        state[i] = black_box((state[i] + cycle) % 256);
                     }
-                    black_box(state[0])
-                });
-            },
-        );
+                }
+                black_box(state[0])
+            });
+        });
 
         // GPU simulation (simulated with parallel chunks)
         group.bench_with_input(
@@ -90,41 +86,37 @@ fn benchmark_signal_updates(c: &mut Criterion) {
     let signal_counts = vec![100, 500, 1000];
 
     for count in signal_counts {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            &count,
-            |b, &count| {
-                b.iter(|| {
-                    // Simulate signal update propagation
-                    let mut signals = vec![0u64; count];
-                    let mut changed = vec![false; count];
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.iter(|| {
+                // Simulate signal update propagation
+                let mut signals = vec![0u64; count];
+                let mut changed = vec![false; count];
 
-                    // Initial changes
-                    for i in 0..10 {
-                        signals[i] = i as u64;
-                        changed[i] = true;
-                    }
+                // Initial changes
+                for i in 0..10 {
+                    signals[i] = i as u64;
+                    changed[i] = true;
+                }
 
-                    // Propagate changes
-                    let mut iterations = 0;
-                    let mut any_changed = true;
+                // Propagate changes
+                let mut iterations = 0;
+                let mut any_changed = true;
 
-                    while any_changed && iterations < 10 {
-                        any_changed = false;
-                        for i in 1..count {
-                            if changed[i - 1] {
-                                signals[i] = black_box(signals[i - 1] + 1);
-                                changed[i] = true;
-                                any_changed = true;
-                            }
+                while any_changed && iterations < 10 {
+                    any_changed = false;
+                    for i in 1..count {
+                        if changed[i - 1] {
+                            signals[i] = black_box(signals[i - 1] + 1);
+                            changed[i] = true;
+                            any_changed = true;
                         }
-                        iterations += 1;
                     }
+                    iterations += 1;
+                }
 
-                    black_box(signals[count - 1])
-                });
-            },
-        );
+                black_box(signals[count - 1])
+            });
+        });
     }
 
     group.finish();

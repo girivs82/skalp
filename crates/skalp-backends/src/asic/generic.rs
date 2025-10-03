@@ -3,10 +3,13 @@
 //! Provides a generic ASIC synthesis implementation that can work with
 //! any standard cell library.
 
-use crate::{BackendResult, SynthesisResults, LogMessage, LogLevel, AreaMetrics, TimingResults, PowerResults, OutputFile, OutputFileType, TimingSlack};
 use crate::asic::AsicConfig;
-use std::path::Path;
+use crate::{
+    AreaMetrics, BackendResult, LogLevel, LogMessage, OutputFile, OutputFileType, PowerResults,
+    SynthesisResults, TimingResults, TimingSlack,
+};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Synthesize design for generic ASIC target
 pub async fn synthesize_generic(
@@ -19,7 +22,8 @@ pub async fn synthesize_generic(
     let mut log_messages = Vec::new();
 
     // Step 1: Logic synthesis (would use Yosys or commercial tool)
-    let synthesis_result = run_logic_synthesis(verilog, library_name, temp_dir, config, &mut log_messages).await?;
+    let synthesis_result =
+        run_logic_synthesis(verilog, library_name, temp_dir, config, &mut log_messages).await?;
 
     // Step 2: Floorplanning and placement (would use OpenROAD or commercial tool)
     let placement_result = run_placement(temp_dir, config, &mut log_messages).await?;
@@ -40,7 +44,10 @@ pub async fn synthesize_generic(
 
     output_files.push(OutputFile {
         file_type: OutputFileType::Netlist,
-        path: temp_dir.join("design_mapped.v").to_string_lossy().to_string(),
+        path: temp_dir
+            .join("design_mapped.v")
+            .to_string_lossy()
+            .to_string(),
         description: "Technology-mapped netlist".to_string(),
     });
 
@@ -127,14 +134,17 @@ async fn run_placement(
 ) -> BackendResult<String> {
     log_messages.push(LogMessage {
         level: LogLevel::Info,
-        message: format!("Running placement with target utilization: {:.1}%",
-                        config.target_utilization * 100.0),
+        message: format!(
+            "Running placement with target utilization: {:.1}%",
+            config.target_utilization * 100.0
+        ),
         source: "placement".to_string(),
         timestamp: chrono::Utc::now(),
     });
 
     // Mock placement - would use OpenROAD or commercial tool
-    let placement_result = "Placement completed successfully\nTotal cells placed: 1250\nUtilization: 68.5%";
+    let placement_result =
+        "Placement completed successfully\nTotal cells placed: 1250\nUtilization: 68.5%";
 
     let placement_file = temp_dir.join("placement.log");
     tokio::fs::write(&placement_file, placement_result).await?;
@@ -219,9 +229,9 @@ async fn analyze_area(
     let total_area = cell_count as f64 * average_cell_area;
 
     Ok(AreaMetrics {
-        luts_used: None, // Not applicable for ASIC
-        flip_flops_used: 425, // Estimated from mock design
-        block_ram_used: None, // SRAM instances would be counted separately
+        luts_used: None,       // Not applicable for ASIC
+        flip_flops_used: 425,  // Estimated from mock design
+        block_ram_used: None,  // SRAM instances would be counted separately
         dsp_slices_used: None, // Not applicable for ASIC
         cell_area_um2: Some(total_area),
         utilization_percent: 68.5, // From mock placement
@@ -234,9 +244,9 @@ async fn analyze_timing(
 ) -> BackendResult<TimingResults> {
     // Mock timing analysis - would run STA tool
     Ok(TimingResults {
-        max_frequency_mhz: 750.0, // ASIC can achieve higher frequencies
+        max_frequency_mhz: 750.0,     // ASIC can achieve higher frequencies
         critical_path_delay_ns: 1.33, // 750 MHz = 1.33ns period
-        setup_violations: vec![], // No violations in this mock
+        setup_violations: vec![],     // No violations in this mock
         hold_violations: vec![],
         timing_slack: TimingSlack {
             worst_negative_slack_ns: 0.15, // Positive slack
@@ -274,8 +284,14 @@ async fn analyze_power(
     let cell_count = (area_metrics.cell_area_um2.unwrap_or(3125.0) / 2.5) as u32;
     let frequency_hz = timing_results.max_frequency_mhz * 1e6;
 
-    let dynamic_power = (cell_count as f64 * capacitance_per_cell * voltage * voltage
-                        * frequency_hz * switching_activity * power_scale) * 1000.0; // Convert to mW
+    let dynamic_power = (cell_count as f64
+        * capacitance_per_cell
+        * voltage
+        * voltage
+        * frequency_hz
+        * switching_activity
+        * power_scale)
+        * 1000.0; // Convert to mW
 
     // Static power (leakage)
     let static_power = cell_count as f64 * 0.001 * power_scale; // 1 uW per cell scaled
@@ -299,7 +315,10 @@ async fn analyze_power(
 fn create_mock_synthesized_netlist(original_verilog: &str, library_name: &str) -> String {
     let mut netlist = String::new();
 
-    netlist.push_str(&format!("// Technology-mapped netlist using {}\n", library_name));
+    netlist.push_str(&format!(
+        "// Technology-mapped netlist using {}\n",
+        library_name
+    ));
     netlist.push_str("`timescale 1ns/1ps\n\n");
 
     // Extract module name from original verilog
@@ -357,15 +376,11 @@ mod tests {
     async fn test_generic_asic_synthesis() {
         let temp_dir = tempdir().unwrap();
         let config = AsicConfig::default();
-        let verilog = "module test(input clk, input [31:0] data_in, output [31:0] data_out); endmodule";
+        let verilog =
+            "module test(input clk, input [31:0] data_in, output [31:0] data_out); endmodule";
 
-        let result = synthesize_generic(
-            verilog,
-            "test_lib",
-            "45nm",
-            temp_dir.path(),
-            &config
-        ).await;
+        let result =
+            synthesize_generic(verilog, "test_lib", "45nm", temp_dir.path(), &config).await;
 
         assert!(result.is_ok());
         let synthesis_result = result.unwrap();

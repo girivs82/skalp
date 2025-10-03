@@ -2,16 +2,16 @@
 //!
 //! Provides visualization, constraints, and manual control for PAR and CTS
 
-use crate::{AsicError, Technology, DesignRules};
-use crate::placement::{Placement, Netlist, StandardCell, Floorplan};
-use crate::routing::{RoutingResult, GlobalRouting, DetailedRouting};
-use crate::cts::{ClockTree, ClockSpecification};
-use crate::timing::{StaticTimingAnalyzer, TimingAnalysisResult, TimingOptimization};
+use crate::cts::{ClockSpecification, ClockTree};
+use crate::placement::{Floorplan, Netlist, Placement, StandardCell};
+use crate::routing::{DetailedRouting, GlobalRouting, RoutingResult};
 use crate::sdc::SDCManager;
+use crate::timing::{StaticTimingAnalyzer, TimingAnalysisResult, TimingOptimization};
+use crate::{AsicError, DesignRules, Technology};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::fs::File;
-use std::io::{Write, BufReader, BufRead};
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 
 /// Interactive design session
 pub struct InteractiveDesign {
@@ -225,7 +225,7 @@ pub enum GuideType {
     /// Prefer to route
     Prefer(f64), // preference weight
     /// Avoid routing
-    Avoid(f64),  // penalty weight
+    Avoid(f64), // penalty weight
 }
 
 /// Non-default rule
@@ -503,7 +503,8 @@ impl InteractiveDesign {
         let reader = BufReader::new(file);
 
         for line in reader.lines() {
-            let line = line.map_err(|e| AsicError::TechnologyError(format!("Read error: {}", e)))?;
+            let line =
+                line.map_err(|e| AsicError::TechnologyError(format!("Read error: {}", e)))?;
             self.parse_sdc_command(&line)?;
         }
 
@@ -610,28 +611,45 @@ impl InteractiveDesign {
             }
         }
 
-        self.constraints.timing.max_delay.push(PathConstraint {
-            from,
-            to,
-            delay,
-        });
+        self.constraints
+            .timing
+            .max_delay
+            .push(PathConstraint { from, to, delay });
 
         Ok(())
     }
 
     /// Similar parsers for other SDC commands...
-    fn parse_min_delay(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
-    fn parse_false_path(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
-    fn parse_multicycle_path(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
-    fn parse_clock_uncertainty(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
-    fn parse_clock_latency(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
-    fn parse_voltage_area(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
-    fn parse_placement_blockage(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
-    fn parse_routing_rule(&mut self, _args: &[&str]) -> Result<(), AsicError> { Ok(()) }
+    fn parse_min_delay(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
+    fn parse_false_path(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
+    fn parse_multicycle_path(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
+    fn parse_clock_uncertainty(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
+    fn parse_clock_latency(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
+    fn parse_voltage_area(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
+    fn parse_placement_blockage(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
+    fn parse_routing_rule(&mut self, _args: &[&str]) -> Result<(), AsicError> {
+        Ok(())
+    }
 
     /// Apply manual cell placement
     pub fn place_cell(&mut self, cell: &str, x: f64, y: f64) {
-        self.overrides.cell_positions.insert(cell.to_string(), (x, y));
+        self.overrides
+            .cell_positions
+            .insert(cell.to_string(), (x, y));
         self.overrides.locked_elements.insert(cell.to_string());
     }
 
@@ -652,8 +670,15 @@ impl InteractiveDesign {
     }
 
     /// Add routing guide
-    pub fn add_routing_guide(&mut self, net: &str, layer: usize,
-                             x1: f64, y1: f64, x2: f64, y2: f64) {
+    pub fn add_routing_guide(
+        &mut self,
+        net: &str,
+        layer: usize,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+    ) {
         self.constraints.routing.routing_guides.push(RoutingGuide {
             net_pattern: net.to_string(),
             regions: vec![(layer, x1, y1, x2, y2)],
@@ -678,19 +703,28 @@ impl InteractiveDesign {
 
     /// Run timing analysis
     pub fn run_timing_analysis(&mut self) -> Result<&TimingAnalysisResult, AsicError> {
-        let analyzer = self.timing_analyzer.as_ref()
-            .ok_or_else(|| AsicError::TechnologyError("Timing analyzer not initialized".to_string()))?;
+        let analyzer = self.timing_analyzer.as_ref().ok_or_else(|| {
+            AsicError::TechnologyError("Timing analyzer not initialized".to_string())
+        })?;
 
-        let placement = self.placement.as_ref()
+        let placement = self
+            .placement
+            .as_ref()
             .ok_or_else(|| AsicError::PlacementError("No placement available".to_string()))?;
 
-        let routing = self.routing.as_ref()
+        let routing = self
+            .routing
+            .as_ref()
             .ok_or_else(|| AsicError::RoutingError("No routing available".to_string()))?;
 
-        let clock_tree = self.clock_tree.as_ref()
+        let clock_tree = self
+            .clock_tree
+            .as_ref()
             .ok_or_else(|| AsicError::CtsError("No clock tree available".to_string()))?;
 
-        let constraints = self.sdc_constraints.as_ref()
+        let constraints = self
+            .sdc_constraints
+            .as_ref()
             .ok_or_else(|| AsicError::TechnologyError("No SDC constraints loaded".to_string()))?;
 
         let result = analyzer.analyze(placement, routing, clock_tree, constraints)?;
@@ -701,17 +735,22 @@ impl InteractiveDesign {
 
     /// Get timing optimization suggestions
     pub fn get_timing_optimizations(&self) -> Result<Vec<TimingOptimization>, AsicError> {
-        let analyzer = self.timing_analyzer.as_ref()
-            .ok_or_else(|| AsicError::TechnologyError("Timing analyzer not initialized".to_string()))?;
+        let analyzer = self.timing_analyzer.as_ref().ok_or_else(|| {
+            AsicError::TechnologyError("Timing analyzer not initialized".to_string())
+        })?;
 
-        let timing_result = self.timing_analysis.as_ref()
-            .ok_or_else(|| AsicError::TechnologyError("No timing analysis results available".to_string()))?;
+        let timing_result = self.timing_analysis.as_ref().ok_or_else(|| {
+            AsicError::TechnologyError("No timing analysis results available".to_string())
+        })?;
 
         Ok(analyzer.suggest_optimizations(timing_result))
     }
 
     /// Apply timing optimization
-    pub fn apply_timing_optimization(&mut self, optimization: &TimingOptimization) -> Result<(), AsicError> {
+    pub fn apply_timing_optimization(
+        &mut self,
+        optimization: &TimingOptimization,
+    ) -> Result<(), AsicError> {
         match optimization.optimization_type {
             crate::timing::OptimizationType::CriticalPath => {
                 // Apply critical path fixes
@@ -720,21 +759,21 @@ impl InteractiveDesign {
                         crate::timing::FixType::BufferInsertion => {
                             // Insert buffer on critical path
                             self.insert_buffer(&optimization.target, 0.0, 0.0, "BUF_X1");
-                        },
+                        }
                         crate::timing::FixType::CellSizing => {
                             // Upsize cells on critical path
                             self.override_cell_size(&optimization.target, "X2");
-                        },
+                        }
                         _ => {
                             // Other optimizations would be implemented here
                         }
                     }
                 }
-            },
+            }
             crate::timing::OptimizationType::ClockTree => {
                 // Apply clock tree optimizations
                 // This would involve rebuilding the clock tree with different parameters
-            },
+            }
             _ => {
                 // Other optimization types
             }
@@ -752,29 +791,51 @@ impl InteractiveDesign {
     }
 
     /// Get critical timing paths
-    pub fn get_critical_paths(&self, max_paths: usize) -> Result<Vec<&crate::timing::TimingPath>, AsicError> {
-        let timing_result = self.timing_analysis.as_ref()
-            .ok_or_else(|| AsicError::TechnologyError("No timing analysis results available".to_string()))?;
+    pub fn get_critical_paths(
+        &self,
+        max_paths: usize,
+    ) -> Result<Vec<&crate::timing::TimingPath>, AsicError> {
+        let timing_result = self.timing_analysis.as_ref().ok_or_else(|| {
+            AsicError::TechnologyError("No timing analysis results available".to_string())
+        })?;
 
-        let mut paths: Vec<&crate::timing::TimingPath> = timing_result.critical_paths.iter().collect();
-        paths.sort_by(|a, b| a.slack.partial_cmp(&b.slack).unwrap_or(std::cmp::Ordering::Equal));
+        let mut paths: Vec<&crate::timing::TimingPath> =
+            timing_result.critical_paths.iter().collect();
+        paths.sort_by(|a, b| {
+            a.slack
+                .partial_cmp(&b.slack)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         paths.truncate(max_paths);
 
         Ok(paths)
     }
 
     /// Get timing violations
-    pub fn get_timing_violations(&self) -> Result<(&[crate::timing::TimingViolation], &[crate::timing::TimingViolation]), AsicError> {
-        let timing_result = self.timing_analysis.as_ref()
-            .ok_or_else(|| AsicError::TechnologyError("No timing analysis results available".to_string()))?;
+    pub fn get_timing_violations(
+        &self,
+    ) -> Result<
+        (
+            &[crate::timing::TimingViolation],
+            &[crate::timing::TimingViolation],
+        ),
+        AsicError,
+    > {
+        let timing_result = self.timing_analysis.as_ref().ok_or_else(|| {
+            AsicError::TechnologyError("No timing analysis results available".to_string())
+        })?;
 
-        Ok((&timing_result.setup_violations, &timing_result.hold_violations))
+        Ok((
+            &timing_result.setup_violations,
+            &timing_result.hold_violations,
+        ))
     }
 
     /// Get timing summary
     pub fn get_timing_summary(&self) -> Result<TimingSummary, AsicError> {
-        let timing_result = self.timing_analysis.as_ref()
-            .ok_or_else(|| AsicError::TechnologyError("No timing analysis results available".to_string()))?;
+        let timing_result = self.timing_analysis.as_ref().ok_or_else(|| {
+            AsicError::TechnologyError("No timing analysis results available".to_string())
+        })?;
 
         let (setup_violations, hold_violations) = self.get_timing_violations()?;
 
@@ -784,7 +845,9 @@ impl InteractiveDesign {
             setup_violations: setup_violations.len(),
             hold_violations: hold_violations.len(),
             clock_domains: timing_result.clock_summary.len(),
-            max_frequency: timing_result.clock_summary.iter()
+            max_frequency: timing_result
+                .clock_summary
+                .iter()
                 .map(|cd| cd.frequency)
                 .fold(0.0, f64::max),
             power_consumption: timing_result.power_analysis.total_power,
@@ -814,14 +877,16 @@ impl InteractiveDesign {
 
     /// Restore from checkpoint
     pub fn restore(&mut self, checkpoint_name: &str) -> Result<(), AsicError> {
-        if let Some(checkpoint) = self.checkpoints.iter()
-            .find(|c| c.name == checkpoint_name) {
+        if let Some(checkpoint) = self.checkpoints.iter().find(|c| c.name == checkpoint_name) {
             self.placement = checkpoint.placement.clone();
             self.routing = checkpoint.routing.clone();
             self.clock_tree = checkpoint.clock_tree.clone();
             Ok(())
         } else {
-            Err(AsicError::TechnologyError(format!("Checkpoint {} not found", checkpoint_name)))
+            Err(AsicError::TechnologyError(format!(
+                "Checkpoint {} not found",
+                checkpoint_name
+            )))
         }
     }
 
@@ -881,8 +946,10 @@ impl InteractiveDesign {
         for region in &self.constraints.placement.regions {
             script.push_str(&format!("\n# Region: {}\n", region.name));
             script.push_str(&format!("create_region {} \\\n", region.name));
-            script.push_str(&format!("  -bounds {} {} {} {} \\\n",
-                region.bounds.0, region.bounds.1, region.bounds.2, region.bounds.3));
+            script.push_str(&format!(
+                "  -bounds {} {} {} {} \\\n",
+                region.bounds.0, region.bounds.1, region.bounds.2, region.bounds.3
+            ));
             script.push_str(&format!("  -utilization {}\n", region.utilization));
         }
 
@@ -905,8 +972,14 @@ impl InteractiveDesign {
         // NDR rules
         for (name, rule) in &self.constraints.routing.ndr_rules {
             script.push_str(&format!("create_ndr {} \\\n", name));
-            script.push_str(&format!("  -width_multiplier {} \\\n", rule.width_multiplier));
-            script.push_str(&format!("  -spacing_multiplier {} \\\n", rule.spacing_multiplier));
+            script.push_str(&format!(
+                "  -width_multiplier {} \\\n",
+                rule.width_multiplier
+            ));
+            script.push_str(&format!(
+                "  -spacing_multiplier {} \\\n",
+                rule.spacing_multiplier
+            ));
             script.push_str(&format!("  -via_count {}\n", rule.via_count));
 
             for net in &rule.nets {
@@ -929,8 +1002,10 @@ impl InteractiveDesign {
             script.push_str(&format!("\n# Manual route for {}\n", net));
             script.push_str(&format!("create_manual_route {} \\\n", net));
             for point in points {
-                script.push_str(&format!("  -point {} {} {} \\\n",
-                    point.position.0, point.position.1, point.layer));
+                script.push_str(&format!(
+                    "  -point {} {} {} \\\n",
+                    point.position.0, point.position.1, point.layer
+                ));
             }
         }
 
@@ -970,8 +1045,10 @@ impl InteractiveDesign {
         // Manual buffer insertions
         script.push_str("\n# Manual buffer insertions\n");
         for buf in &self.overrides.buffer_insertions {
-            script.push_str(&format!("insert_buffer {} {} {} {}\n",
-                buf.net, buf.position.0, buf.position.1, buf.buffer_type));
+            script.push_str(&format!(
+                "insert_buffer {} {} {} {}\n",
+                buf.net, buf.position.0, buf.position.1, buf.buffer_type
+            ));
         }
 
         script

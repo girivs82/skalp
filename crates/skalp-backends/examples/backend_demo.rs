@@ -89,7 +89,11 @@ fn create_demo_design() -> mock_lir::Design {
             mock_lir::Gate {
                 id: 1,
                 gate_type: mock_lir::GateType::FlipFlop,
-                inputs: vec!["count_next".to_string(), "clk".to_string(), "reset".to_string()],
+                inputs: vec![
+                    "count_next".to_string(),
+                    "clk".to_string(),
+                    "reset".to_string(),
+                ],
                 outputs: vec!["count_reg".to_string()],
                 parameters: HashMap::new(),
             },
@@ -128,12 +132,10 @@ async fn demo_fpga_synthesis(design: &mock_lir::Design) -> BackendResult<Synthes
             target_frequency: Some(100.0),
             max_power: Some(500.0),
         },
-        timing_constraints: vec![
-            TimingConstraint::ClockPeriod {
-                clock_name: "clk".to_string(),
-                period_ns: 10.0, // 100 MHz
-            },
-        ],
+        timing_constraints: vec![TimingConstraint::ClockPeriod {
+            clock_name: "clk".to_string(),
+            period_ns: 10.0, // 100 MHz
+        }],
         power_constraints: None,
         output_dir: "/tmp/fpga_demo".to_string(),
         tool_options: HashMap::new(),
@@ -158,12 +160,10 @@ async fn demo_asic_synthesis(design: &mock_lir::Design) -> BackendResult<Synthes
             target_frequency: Some(500.0),
             max_power: Some(100.0),
         },
-        timing_constraints: vec![
-            TimingConstraint::ClockPeriod {
-                clock_name: "clk".to_string(),
-                period_ns: 2.0, // 500 MHz
-            },
-        ],
+        timing_constraints: vec![TimingConstraint::ClockPeriod {
+            clock_name: "clk".to_string(),
+            period_ns: 2.0, // 500 MHz
+        }],
         power_constraints: Some(PowerConstraints {
             max_dynamic_power: Some(80.0),
             max_static_power: Some(20.0),
@@ -222,14 +222,14 @@ async fn demo_power_analysis() -> BackendResult<()> {
 
     // Mock cell counts for analysis
     let mut cell_counts = HashMap::new();
-    cell_counts.insert("DFF_X1".to_string(), 8);  // 8-bit counter
+    cell_counts.insert("DFF_X1".to_string(), 8); // 8-bit counter
     cell_counts.insert("AND2_X1".to_string(), 4); // Enable logic
-    cell_counts.insert("INV_X1".to_string(), 2);  // Inverters
+    cell_counts.insert("INV_X1".to_string(), 2); // Inverters
 
     let results = analyzer.analyze_power(
         "ASIC_45nm",
         &cell_counts,
-        125.0, // 125 MHz
+        125.0,       // 125 MHz
         Some(100.0), // 100 um^2 area
     )?;
 
@@ -321,9 +321,18 @@ fn print_synthesis_summary(target_name: &str, results: &SynthesisResults) {
         println!("  Area: {:.1} um²", area);
     }
 
-    println!("  Utilization: {:.1}%", results.area_metrics.utilization_percent);
-    println!("  Max frequency: {:.1} MHz", results.timing_results.max_frequency_mhz);
-    println!("  Total power: {:.1} mW", results.power_results.total_power_mw);
+    println!(
+        "  Utilization: {:.1}%",
+        results.area_metrics.utilization_percent
+    );
+    println!(
+        "  Max frequency: {:.1} MHz",
+        results.timing_results.max_frequency_mhz
+    );
+    println!(
+        "  Total power: {:.1} mW",
+        results.power_results.total_power_mw
+    );
     println!("  Output files: {}", results.output_files.len());
     println!("  Log messages: {}", results.log_messages.len());
     println!();

@@ -3,9 +3,9 @@
 //! Complete implementation of SKY130 standard cells without external dependencies.
 //! Based on the open-source SKY130 PDK.
 
+use crate::placement::{Net, Netlist, StandardCell};
 use crate::{AsicError, DesignRules, Technology};
-use crate::placement::{Netlist, StandardCell, Net};
-use skalp_lir::{LirDesign, LirModule, Gate, GateType};
+use skalp_lir::{Gate, GateType, LirDesign, LirModule};
 use std::collections::HashMap;
 
 /// SKY130 Standard Cell Library
@@ -117,11 +117,11 @@ pub struct ViaInstance {
 /// Via types in SKY130
 #[derive(Debug, Clone)]
 pub enum ViaType {
-    Contact,    // Diffusion/Poly to Metal1
-    Via1,       // Metal1 to Metal2
-    Via2,       // Metal2 to Metal3
-    Via3,       // Metal3 to Metal4
-    Via4,       // Metal4 to Metal5
+    Contact, // Diffusion/Poly to Metal1
+    Via1,    // Metal1 to Metal2
+    Via2,    // Metal2 to Metal3
+    Via3,    // Metal3 to Metal4
+    Via4,    // Metal4 to Metal5
 }
 
 /// Pin layout information
@@ -176,8 +176,16 @@ impl StandardCellLibrary {
                 },
                 layout: Self::create_inverter_layout(),
                 pins: vec![
-                    Pin { name: "A".to_string(), position: (0.23, 0.85), direction: PinDirection::Input },
-                    Pin { name: "Y".to_string(), position: (1.15, 1.87), direction: PinDirection::Output },
+                    Pin {
+                        name: "A".to_string(),
+                        position: (0.23, 0.85),
+                        direction: PinDirection::Input,
+                    },
+                    Pin {
+                        name: "Y".to_string(),
+                        position: (1.15, 1.87),
+                        direction: PinDirection::Output,
+                    },
                 ],
             },
         );
@@ -187,7 +195,7 @@ impl StandardCellLibrary {
             "NAND2_X1".to_string(),
             CellDefinition {
                 name: "sky130_fd_sc_hd__nand2_1".to_string(),
-                width: 1.84,  // 4 tracks
+                width: 1.84, // 4 tracks
                 height: 2.72,
                 area: 5.0048,
                 input_cap: 1.7,
@@ -203,9 +211,21 @@ impl StandardCellLibrary {
                 },
                 layout: Self::create_nand2_layout(),
                 pins: vec![
-                    Pin { name: "A".to_string(), position: (0.23, 0.85), direction: PinDirection::Input },
-                    Pin { name: "B".to_string(), position: (0.69, 0.85), direction: PinDirection::Input },
-                    Pin { name: "Y".to_string(), position: (1.61, 1.87), direction: PinDirection::Output },
+                    Pin {
+                        name: "A".to_string(),
+                        position: (0.23, 0.85),
+                        direction: PinDirection::Input,
+                    },
+                    Pin {
+                        name: "B".to_string(),
+                        position: (0.69, 0.85),
+                        direction: PinDirection::Input,
+                    },
+                    Pin {
+                        name: "Y".to_string(),
+                        position: (1.61, 1.87),
+                        direction: PinDirection::Output,
+                    },
                 ],
             },
         );
@@ -215,7 +235,7 @@ impl StandardCellLibrary {
             "NOR2_X1".to_string(),
             CellDefinition {
                 name: "sky130_fd_sc_hd__nor2_1".to_string(),
-                width: 2.30,  // 5 tracks
+                width: 2.30, // 5 tracks
                 height: 2.72,
                 area: 6.256,
                 input_cap: 1.7,
@@ -231,9 +251,21 @@ impl StandardCellLibrary {
                 },
                 layout: Self::create_nor2_layout(),
                 pins: vec![
-                    Pin { name: "A".to_string(), position: (0.46, 0.85), direction: PinDirection::Input },
-                    Pin { name: "B".to_string(), position: (1.15, 0.85), direction: PinDirection::Input },
-                    Pin { name: "Y".to_string(), position: (1.84, 1.87), direction: PinDirection::Output },
+                    Pin {
+                        name: "A".to_string(),
+                        position: (0.46, 0.85),
+                        direction: PinDirection::Input,
+                    },
+                    Pin {
+                        name: "B".to_string(),
+                        position: (1.15, 0.85),
+                        direction: PinDirection::Input,
+                    },
+                    Pin {
+                        name: "Y".to_string(),
+                        position: (1.84, 1.87),
+                        direction: PinDirection::Output,
+                    },
                 ],
             },
         );
@@ -243,7 +275,7 @@ impl StandardCellLibrary {
             "DFF_X1".to_string(),
             CellDefinition {
                 name: "sky130_fd_sc_hd__dfxtp_1".to_string(),
-                width: 7.36,  // 16 tracks
+                width: 7.36, // 16 tracks
                 height: 2.72,
                 area: 20.0192,
                 input_cap: 2.1,
@@ -259,9 +291,21 @@ impl StandardCellLibrary {
                 },
                 layout: Self::create_dff_layout(),
                 pins: vec![
-                    Pin { name: "D".to_string(), position: (0.46, 1.25), direction: PinDirection::Input },
-                    Pin { name: "CLK".to_string(), position: (2.30, 1.25), direction: PinDirection::Input },
-                    Pin { name: "Q".to_string(), position: (6.90, 1.87), direction: PinDirection::Output },
+                    Pin {
+                        name: "D".to_string(),
+                        position: (0.46, 1.25),
+                        direction: PinDirection::Input,
+                    },
+                    Pin {
+                        name: "CLK".to_string(),
+                        position: (2.30, 1.25),
+                        direction: PinDirection::Input,
+                    },
+                    Pin {
+                        name: "Q".to_string(),
+                        position: (6.90, 1.87),
+                        direction: PinDirection::Output,
+                    },
                 ],
             },
         );
@@ -301,7 +345,9 @@ impl StandardCellLibrary {
                             connections: Vec::new(),
                         });
                     }
-                    nets[*net_id].connections.push((gate_idx, format!("I{}", i)));
+                    nets[*net_id]
+                        .connections
+                        .push((gate_idx, format!("I{}", i)));
                 }
 
                 // Output nets
@@ -313,7 +359,9 @@ impl StandardCellLibrary {
                             connections: Vec::new(),
                         });
                     }
-                    nets[*net_id].connections.push((gate_idx, format!("O{}", i)));
+                    nets[*net_id]
+                        .connections
+                        .push((gate_idx, format!("O{}", i)));
                 }
             }
         }
@@ -331,16 +379,21 @@ impl StandardCellLibrary {
             GateType::Nand => "NAND2_X1",
             GateType::Nor => "NOR2_X1",
             GateType::DFF => "DFF_X1",
-            _ => return Err(AsicError::TechnologyError(format!("Unsupported gate type: {:?}", gate_type))),
+            _ => {
+                return Err(AsicError::TechnologyError(format!(
+                    "Unsupported gate type: {:?}",
+                    gate_type
+                )))
+            }
         };
         Ok(cell_name.to_string())
     }
 
     /// Get cell definition by name
     fn get_cell_definition(&self, cell_name: &str) -> Result<&CellDefinition, AsicError> {
-        self.cells
-            .get(cell_name)
-            .ok_or_else(|| AsicError::TechnologyError(format!("Cell {} not found in library", cell_name)))
+        self.cells.get(cell_name).ok_or_else(|| {
+            AsicError::TechnologyError(format!("Cell {} not found in library", cell_name))
+        })
     }
 
     /// Create pins for a gate based on cell definition
@@ -386,40 +439,117 @@ impl StandardCellLibrary {
         CellLayout {
             // Simplified layout - real implementation would have exact coordinates
             metal1_regions: vec![
-                Rectangle { x1: 0.0, y1: 0.0, x2: 0.46, y2: 0.17 },    // VSS rail
-                Rectangle { x1: 0.0, y1: 2.55, x2: 0.46, y2: 2.72 },   // VDD rail
-                Rectangle { x1: 0.23, y1: 0.5, x2: 0.46, y2: 1.5 },    // Input
-                Rectangle { x1: 0.69, y1: 0.5, x2: 0.92, y2: 2.2 },    // Output
+                Rectangle {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 0.46,
+                    y2: 0.17,
+                }, // VSS rail
+                Rectangle {
+                    x1: 0.0,
+                    y1: 2.55,
+                    x2: 0.46,
+                    y2: 2.72,
+                }, // VDD rail
+                Rectangle {
+                    x1: 0.23,
+                    y1: 0.5,
+                    x2: 0.46,
+                    y2: 1.5,
+                }, // Input
+                Rectangle {
+                    x1: 0.69,
+                    y1: 0.5,
+                    x2: 0.92,
+                    y2: 2.2,
+                }, // Output
             ],
             metal2_regions: vec![],
             poly_regions: vec![
-                Rectangle { x1: 0.46, y1: 0.3, x2: 0.58, y2: 2.42 },   // Gate poly
+                Rectangle {
+                    x1: 0.46,
+                    y1: 0.3,
+                    x2: 0.58,
+                    y2: 2.42,
+                }, // Gate poly
             ],
             active_regions: vec![
-                Rectangle { x1: 0.30, y1: 0.3, x2: 0.75, y2: 1.15 },   // N-diffusion
-                Rectangle { x1: 0.30, y1: 1.57, x2: 0.75, y2: 2.42 },  // P-diffusion
+                Rectangle {
+                    x1: 0.30,
+                    y1: 0.3,
+                    x2: 0.75,
+                    y2: 1.15,
+                }, // N-diffusion
+                Rectangle {
+                    x1: 0.30,
+                    y1: 1.57,
+                    x2: 0.75,
+                    y2: 2.42,
+                }, // P-diffusion
             ],
             contact_regions: vec![
-                Rectangle { x1: 0.20, y1: 0.80, x2: 0.26, y2: 0.90 },
-                Rectangle { x1: 0.66, y1: 0.80, x2: 0.72, y2: 0.90 },
-                Rectangle { x1: 0.66, y1: 1.82, x2: 0.72, y2: 1.92 },
+                Rectangle {
+                    x1: 0.20,
+                    y1: 0.80,
+                    x2: 0.26,
+                    y2: 0.90,
+                },
+                Rectangle {
+                    x1: 0.66,
+                    y1: 0.80,
+                    x2: 0.72,
+                    y2: 0.90,
+                },
+                Rectangle {
+                    x1: 0.66,
+                    y1: 1.82,
+                    x2: 0.72,
+                    y2: 1.92,
+                },
             ],
-            nwell_region: Some(Rectangle { x1: 0.0, y1: 1.36, x2: 1.38, y2: 2.72 }),
+            nwell_region: Some(Rectangle {
+                x1: 0.0,
+                y1: 1.36,
+                x2: 1.38,
+                y2: 2.72,
+            }),
             vias: vec![
-                ViaInstance { x: 0.23, y: 0.85, via_type: ViaType::Contact },
-                ViaInstance { x: 0.69, y: 0.85, via_type: ViaType::Contact },
-                ViaInstance { x: 0.69, y: 1.87, via_type: ViaType::Contact },
+                ViaInstance {
+                    x: 0.23,
+                    y: 0.85,
+                    via_type: ViaType::Contact,
+                },
+                ViaInstance {
+                    x: 0.69,
+                    y: 0.85,
+                    via_type: ViaType::Contact,
+                },
+                ViaInstance {
+                    x: 0.69,
+                    y: 1.87,
+                    via_type: ViaType::Contact,
+                },
             ],
             pins: vec![
                 PinLayout {
                     name: "A".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 0.23, y1: 0.5, x2: 0.46, y2: 1.5 },
+                    geometry: Rectangle {
+                        x1: 0.23,
+                        y1: 0.5,
+                        x2: 0.46,
+                        y2: 1.5,
+                    },
                 },
                 PinLayout {
                     name: "Y".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 0.69, y1: 0.5, x2: 0.92, y2: 2.2 },
+                    geometry: Rectangle {
+                        x1: 0.69,
+                        y1: 0.5,
+                        x2: 0.92,
+                        y2: 2.2,
+                    },
                 },
             ],
         }
@@ -430,38 +560,91 @@ impl StandardCellLibrary {
         // Simplified - actual layout would be much more detailed
         CellLayout {
             metal1_regions: vec![
-                Rectangle { x1: 0.0, y1: 0.0, x2: 1.84, y2: 0.17 },    // VSS
-                Rectangle { x1: 0.0, y1: 2.55, x2: 1.84, y2: 2.72 },   // VDD
+                Rectangle {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 1.84,
+                    y2: 0.17,
+                }, // VSS
+                Rectangle {
+                    x1: 0.0,
+                    y1: 2.55,
+                    x2: 1.84,
+                    y2: 2.72,
+                }, // VDD
             ],
             metal2_regions: vec![],
             poly_regions: vec![
-                Rectangle { x1: 0.46, y1: 0.3, x2: 0.58, y2: 2.42 },
-                Rectangle { x1: 0.92, y1: 0.3, x2: 1.04, y2: 2.42 },
+                Rectangle {
+                    x1: 0.46,
+                    y1: 0.3,
+                    x2: 0.58,
+                    y2: 2.42,
+                },
+                Rectangle {
+                    x1: 0.92,
+                    y1: 0.3,
+                    x2: 1.04,
+                    y2: 2.42,
+                },
             ],
             active_regions: vec![
-                Rectangle { x1: 0.30, y1: 0.3, x2: 1.20, y2: 1.15 },
-                Rectangle { x1: 0.30, y1: 1.57, x2: 1.20, y2: 2.42 },
+                Rectangle {
+                    x1: 0.30,
+                    y1: 0.3,
+                    x2: 1.20,
+                    y2: 1.15,
+                },
+                Rectangle {
+                    x1: 0.30,
+                    y1: 1.57,
+                    x2: 1.20,
+                    y2: 2.42,
+                },
             ],
-            contact_regions: vec![
-                Rectangle { x1: 0.25, y1: 0.80, x2: 0.31, y2: 0.90 },
-            ],
-            nwell_region: Some(Rectangle { x1: 0.0, y1: 1.36, x2: 1.84, y2: 2.72 }),
+            contact_regions: vec![Rectangle {
+                x1: 0.25,
+                y1: 0.80,
+                x2: 0.31,
+                y2: 0.90,
+            }],
+            nwell_region: Some(Rectangle {
+                x1: 0.0,
+                y1: 1.36,
+                x2: 1.84,
+                y2: 2.72,
+            }),
             vias: vec![],
             pins: vec![
                 PinLayout {
                     name: "A".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 0.23, y1: 0.5, x2: 0.46, y2: 1.5 },
+                    geometry: Rectangle {
+                        x1: 0.23,
+                        y1: 0.5,
+                        x2: 0.46,
+                        y2: 1.5,
+                    },
                 },
                 PinLayout {
                     name: "B".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 0.69, y1: 0.5, x2: 0.92, y2: 1.5 },
+                    geometry: Rectangle {
+                        x1: 0.69,
+                        y1: 0.5,
+                        x2: 0.92,
+                        y2: 1.5,
+                    },
                 },
                 PinLayout {
                     name: "Y".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 1.38, y1: 0.5, x2: 1.61, y2: 2.2 },
+                    geometry: Rectangle {
+                        x1: 1.38,
+                        y1: 0.5,
+                        x2: 1.61,
+                        y2: 2.2,
+                    },
                 },
             ],
         }
@@ -472,22 +655,60 @@ impl StandardCellLibrary {
         // Simplified layout
         CellLayout {
             metal1_regions: vec![
-                Rectangle { x1: 0.0, y1: 0.0, x2: 2.30, y2: 0.17 },
-                Rectangle { x1: 0.0, y1: 2.55, x2: 2.30, y2: 2.72 },
+                Rectangle {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 2.30,
+                    y2: 0.17,
+                },
+                Rectangle {
+                    x1: 0.0,
+                    y1: 2.55,
+                    x2: 2.30,
+                    y2: 2.72,
+                },
             ],
             metal2_regions: vec![],
             poly_regions: vec![
-                Rectangle { x1: 0.46, y1: 0.3, x2: 0.58, y2: 2.42 },
-                Rectangle { x1: 1.15, y1: 0.3, x2: 1.27, y2: 2.42 },
+                Rectangle {
+                    x1: 0.46,
+                    y1: 0.3,
+                    x2: 0.58,
+                    y2: 2.42,
+                },
+                Rectangle {
+                    x1: 1.15,
+                    y1: 0.3,
+                    x2: 1.27,
+                    y2: 2.42,
+                },
             ],
             active_regions: vec![
-                Rectangle { x1: 0.30, y1: 0.3, x2: 1.50, y2: 1.15 },
-                Rectangle { x1: 0.30, y1: 1.57, x2: 1.50, y2: 2.42 },
+                Rectangle {
+                    x1: 0.30,
+                    y1: 0.3,
+                    x2: 1.50,
+                    y2: 1.15,
+                },
+                Rectangle {
+                    x1: 0.30,
+                    y1: 1.57,
+                    x2: 1.50,
+                    y2: 2.42,
+                },
             ],
-            contact_regions: vec![
-                Rectangle { x1: 0.25, y1: 0.80, x2: 0.31, y2: 0.90 },
-            ],
-            nwell_region: Some(Rectangle { x1: 0.0, y1: 1.36, x2: 2.30, y2: 2.72 }),
+            contact_regions: vec![Rectangle {
+                x1: 0.25,
+                y1: 0.80,
+                x2: 0.31,
+                y2: 0.90,
+            }],
+            nwell_region: Some(Rectangle {
+                x1: 0.0,
+                y1: 1.36,
+                x2: 2.30,
+                y2: 2.72,
+            }),
             vias: vec![],
             pins: vec![],
         }
@@ -498,30 +719,60 @@ impl StandardCellLibrary {
         // Simplified DFF layout - actual would be complex with master-slave latches
         CellLayout {
             metal1_regions: vec![
-                Rectangle { x1: 0.0, y1: 0.0, x2: 7.36, y2: 0.17 },
-                Rectangle { x1: 0.0, y1: 2.55, x2: 7.36, y2: 2.72 },
+                Rectangle {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 7.36,
+                    y2: 0.17,
+                },
+                Rectangle {
+                    x1: 0.0,
+                    y1: 2.55,
+                    x2: 7.36,
+                    y2: 2.72,
+                },
             ],
             metal2_regions: vec![],
             poly_regions: vec![],
             active_regions: vec![],
             contact_regions: vec![],
-            nwell_region: Some(Rectangle { x1: 0.0, y1: 3.68, x2: 7.36, y2: 5.44 }),
+            nwell_region: Some(Rectangle {
+                x1: 0.0,
+                y1: 3.68,
+                x2: 7.36,
+                y2: 5.44,
+            }),
             vias: vec![],
             pins: vec![
                 PinLayout {
                     name: "D".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 0.46, y1: 1.0, x2: 0.69, y2: 1.5 },
+                    geometry: Rectangle {
+                        x1: 0.46,
+                        y1: 1.0,
+                        x2: 0.69,
+                        y2: 1.5,
+                    },
                 },
                 PinLayout {
                     name: "CLK".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 3.0, y1: 0.5, x2: 3.23, y2: 1.0 },
+                    geometry: Rectangle {
+                        x1: 3.0,
+                        y1: 0.5,
+                        x2: 3.23,
+                        y2: 1.0,
+                    },
                 },
                 PinLayout {
                     name: "Q".to_string(),
                     layer: LayerType::Metal1,
-                    geometry: Rectangle { x1: 6.9, y1: 1.0, x2: 7.13, y2: 1.5 },
+                    geometry: Rectangle {
+                        x1: 6.9,
+                        y1: 1.0,
+                        x2: 7.13,
+                        y2: 1.5,
+                    },
                 },
             ],
         }

@@ -1,7 +1,7 @@
 //! Technology mapping and library information for SKALP LIR
 
-use serde::{Deserialize, Serialize};
 use crate::primitives::{Primitive, PrimitiveInfo};
+use serde::{Deserialize, Serialize};
 
 /// Technology definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,7 +113,11 @@ impl TechnologyMapper {
     }
 
     /// Map a primitive to target technology
-    pub fn map_primitive(&self, primitive: &Primitive, target_library: &str) -> Option<MappingResult> {
+    pub fn map_primitive(
+        &self,
+        primitive: &Primitive,
+        target_library: &str,
+    ) -> Option<MappingResult> {
         // Stub implementation - will be expanded in Phase 3
         None
     }

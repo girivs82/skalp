@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod pipelined_processor_tests {
+    use skalp_frontend::hir::HirStatement;
     use skalp_frontend::parse_and_build_hir;
+    use skalp_mir::{Expression, Statement};
     use skalp_mir::{MirCompiler, OptimizationLevel};
-    use skalp_sir::convert_mir_to_sir;
     use skalp_sim::{
         simulator::SimulationConfig,
-        testbench::{Testbench, TestVectorBuilder},
+        testbench::{TestVectorBuilder, Testbench},
     };
-    use skalp_mir::{Statement, Expression};
-    use skalp_frontend::hir::HirStatement;
+    use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
     async fn test_pipelined_processor_gpu() {
@@ -85,15 +85,19 @@ mod pipelined_processor_tests {
         println!("\n=== HIR Event Block Assignments ===");
         for implementation in &hir.implementations {
             for event_block in &implementation.event_blocks {
-                println!("Event block has {} statements", event_block.statements.len());
+                println!(
+                    "Event block has {} statements",
+                    event_block.statements.len()
+                );
                 check_hir_assignments(&event_block.statements, 0);
             }
         }
 
         // Compile to MIR (disable optimizations to prevent signal removal)
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         // Debug: Print MIR module info
         println!("\n=== MIR Module Info ===");
@@ -108,7 +112,10 @@ mod pipelined_processor_tests {
         println!("\n=== Pipeline Assignment Debug ===");
         for process in &mir.modules[0].processes {
             if matches!(process.kind, skalp_mir::ProcessKind::Sequential) {
-                println!("Sequential process has {} statements", process.body.statements.len());
+                println!(
+                    "Sequential process has {} statements",
+                    process.body.statements.len()
+                );
                 check_pipeline_assignments(&process.body.statements, 0);
             }
         }
@@ -118,7 +125,10 @@ mod pipelined_processor_tests {
 
         println!("\n=== SIR Analysis ===");
         println!("Module: {}", sir.name);
-        println!("State elements: {:?}", sir.state_elements.keys().collect::<Vec<_>>());
+        println!(
+            "State elements: {:?}",
+            sir.state_elements.keys().collect::<Vec<_>>()
+        );
         println!("Combinational nodes: {}", sir.combinational_nodes.len());
         println!("Sequential nodes: {}", sir.sequential_nodes.len());
 
@@ -144,23 +154,28 @@ mod pipelined_processor_tests {
         };
 
         // Create testbench
-        let mut testbench = Testbench::new(config).await
+        let mut testbench = Testbench::new(config)
+            .await
             .expect("Failed to create testbench");
 
         // Load the module
-        testbench.load_module(&sir).await
+        testbench
+            .load_module(&sir)
+            .await
             .expect("Failed to load module");
 
         // Test sequence: Reset, then pipeline operations following f1->c1->f2->c2->f3 pattern
 
         // Reset sequence (cycles 0-3)
         for cycle in 0..4 {
-            testbench.add_test_vector(TestVectorBuilder::new(cycle * 2)
-                .with_input("rst", vec![1])
-                .with_input("instruction", vec![0, 0])
-                .with_input("data_in", vec![0])
-                .with_expected_output("valid", vec![0])
-                .build());
+            testbench.add_test_vector(
+                TestVectorBuilder::new(cycle * 2)
+                    .with_input("rst", vec![1])
+                    .with_input("instruction", vec![0, 0])
+                    .with_input("data_in", vec![0])
+                    .with_expected_output("valid", vec![0])
+                    .build(),
+            );
         }
 
         // Following the pipeline stages:
@@ -179,78 +194,102 @@ mod pipelined_processor_tests {
         // Results reach output (writeback_data) 1 cycle after execute
 
         // Cycle 4: Feed ADD instruction (0x100A = opcode=1, operand=10)
-        let add_instr = (1u16 << 12) | 10u16;  // 0x100A
-        testbench.add_test_vector(TestVectorBuilder::new(8)  // GPU cycle 4
-            .with_input("rst", vec![0])
-            .with_input("instruction", vec![(add_instr & 0xFF) as u8, (add_instr >> 8) as u8])
-            .with_input("data_in", vec![0])
-            .build());
+        let add_instr = (1u16 << 12) | 10u16; // 0x100A
+        testbench.add_test_vector(
+            TestVectorBuilder::new(8) // GPU cycle 4
+                .with_input("rst", vec![0])
+                .with_input(
+                    "instruction",
+                    vec![(add_instr & 0xFF) as u8, (add_instr >> 8) as u8],
+                )
+                .with_input("data_in", vec![0])
+                .build(),
+        );
 
         // Cycle 5: Feed SUB instruction (0x2014 = opcode=2, operand=20)
-        let sub_instr = (2u16 << 12) | 20u16;  // 0x2014
-        testbench.add_test_vector(TestVectorBuilder::new(10)  // GPU cycle 5
-            .with_input("rst", vec![0])
-            .with_input("instruction", vec![(sub_instr & 0xFF) as u8, (sub_instr >> 8) as u8])
-            .with_input("data_in", vec![0])
-            .build());
+        let sub_instr = (2u16 << 12) | 20u16; // 0x2014
+        testbench.add_test_vector(
+            TestVectorBuilder::new(10) // GPU cycle 5
+                .with_input("rst", vec![0])
+                .with_input(
+                    "instruction",
+                    vec![(sub_instr & 0xFF) as u8, (sub_instr >> 8) as u8],
+                )
+                .with_input("data_in", vec![0])
+                .build(),
+        );
 
         // Cycle 6: Feed XOR instruction + provide data_in=5 for ADD execution
         // ADD (fed at cycle 4) reaches execute stage
-        let xor_instr = (4u16 << 12) | 15u16;  // 0x400F
-        testbench.add_test_vector(TestVectorBuilder::new(12)  // GPU cycle 6
-            .with_input("rst", vec![0])
-            .with_input("instruction", vec![(xor_instr & 0xFF) as u8, (xor_instr >> 8) as u8])
-            .with_input("data_in", vec![5])  // ADD executes: decode_operand(10) + data_in(5) = 15
-            .build());
+        let xor_instr = (4u16 << 12) | 15u16; // 0x400F
+        testbench.add_test_vector(
+            TestVectorBuilder::new(12) // GPU cycle 6
+                .with_input("rst", vec![0])
+                .with_input(
+                    "instruction",
+                    vec![(xor_instr & 0xFF) as u8, (xor_instr >> 8) as u8],
+                )
+                .with_input("data_in", vec![5]) // ADD executes: decode_operand(10) + data_in(5) = 15
+                .build(),
+        );
 
         // Cycle 7: Feed NOP + provide data_in=3 for SUB execution + check ADD result
         // SUB (fed at cycle 5) reaches execute stage, ADD result now in writeback_data
-        testbench.add_test_vector(TestVectorBuilder::new(14)  // GPU cycle 7
-            .with_input("rst", vec![0])
-            .with_input("instruction", vec![0, 0])
-            .with_input("data_in", vec![3])  // SUB executes: decode_operand(20) + data_in(3) = 23
-            .with_expected_output("result", vec![15])  // ADD result: 10 + 5 = 15
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(14) // GPU cycle 7
+                .with_input("rst", vec![0])
+                .with_input("instruction", vec![0, 0])
+                .with_input("data_in", vec![3]) // SUB executes: decode_operand(20) + data_in(3) = 23
+                .with_expected_output("result", vec![15]) // ADD result: 10 + 5 = 15
+                .build(),
+        );
 
         // Cycle 8: Feed NOP + provide data_in=7 for XOR execution + check SUB result
         // XOR (fed at cycle 6) reaches execute stage, SUB result now in writeback_data
-        testbench.add_test_vector(TestVectorBuilder::new(16)  // GPU cycle 8
-            .with_input("rst", vec![0])
-            .with_input("instruction", vec![0, 0])
-            .with_input("data_in", vec![7])  // XOR executes: decode_operand(15) + data_in(7) = 22
-            .with_expected_output("result", vec![23])  // SUB result: 20 + 3 = 23
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(16) // GPU cycle 8
+                .with_input("rst", vec![0])
+                .with_input("instruction", vec![0, 0])
+                .with_input("data_in", vec![7]) // XOR executes: decode_operand(15) + data_in(7) = 22
+                .with_expected_output("result", vec![23]) // SUB result: 20 + 3 = 23
+                .build(),
+        );
 
         // Cycle 9: Feed NOP + check XOR result
         // XOR result now in writeback_data
-        testbench.add_test_vector(TestVectorBuilder::new(18)  // GPU cycle 9
-            .with_input("rst", vec![0])
-            .with_input("instruction", vec![0, 0])
-            .with_input("data_in", vec![0])
-            .with_expected_output("result", vec![22])  // XOR result: 15 + 7 = 22
-            .build());
-
-        // Continue with NOPs
-        for cycle in 10..15 {
-            testbench.add_test_vector(TestVectorBuilder::new(cycle * 2)
+        testbench.add_test_vector(
+            TestVectorBuilder::new(18) // GPU cycle 9
                 .with_input("rst", vec![0])
                 .with_input("instruction", vec![0, 0])
                 .with_input("data_in", vec![0])
-                .build());
+                .with_expected_output("result", vec![22]) // XOR result: 15 + 7 = 22
+                .build(),
+        );
+
+        // Continue with NOPs
+        for cycle in 10..15 {
+            testbench.add_test_vector(
+                TestVectorBuilder::new(cycle * 2)
+                    .with_input("rst", vec![0])
+                    .with_input("instruction", vec![0, 0])
+                    .with_input("data_in", vec![0])
+                    .build(),
+            );
         }
 
         // Check that valid signal becomes 1 when pipeline_valid[3] is set
         // pipeline_valid increments each cycle, so bit 3 is set when counter >= 8
-        testbench.add_test_vector(TestVectorBuilder::new(24)  // GPU cycle 12
-            .with_input("rst", vec![0])
-            .with_input("instruction", vec![0, 0])
-            .with_input("data_in", vec![0])
-            .with_expected_output("valid", vec![1])
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(24) // GPU cycle 12
+                .with_input("rst", vec![0])
+                .with_input("instruction", vec![0, 0])
+                .with_input("data_in", vec![0])
+                .with_expected_output("valid", vec![1])
+                .build(),
+        );
 
         // Run the test
-        let results = testbench.run_test().await
-            .expect("Failed to run test");
+        let results = testbench.run_test().await.expect("Failed to run test");
 
         // Print report
         println!("\n{}", testbench.generate_report());
@@ -268,8 +307,10 @@ mod pipelined_processor_tests {
             match stmt {
                 Statement::Assignment(assign) => {
                     if let Expression::Binary { op, left, right } = &assign.rhs {
-                        println!("{}⚙️ BINARY: {:?} <= {:?} {:?} {:?}",
-                            indent_str, assign.lhs, left, op, right);
+                        println!(
+                            "{}⚙️ BINARY: {:?} <= {:?} {:?} {:?}",
+                            indent_str, assign.lhs, left, op, right
+                        );
                     }
                 }
                 Statement::If(if_stmt) => {
@@ -282,8 +323,10 @@ mod pipelined_processor_tests {
                     // Check for binary operations in the resolved cases
                     for case in &resolved.resolved.cases {
                         if let Expression::Binary { op, left, right } = &case.value {
-                            println!("{}⚙️ CONDITIONAL BINARY: {:?} {:?} {:?}",
-                                indent_str, left, op, right);
+                            println!(
+                                "{}⚙️ CONDITIONAL BINARY: {:?} {:?} {:?}",
+                                indent_str, left, op, right
+                            );
                         }
                     }
                 }
@@ -312,17 +355,24 @@ mod pipelined_processor_tests {
                 }
                 Statement::ResolvedConditional(resolved) => {
                     let target_str = format!("{:?}", resolved.target);
-                    if target_str.contains("decode_operand") ||
-                       target_str.contains("decode_opcode") ||
-                       target_str.contains("fetch_instruction") ||
-                       target_str.contains("writeback_data") ||
-                       target_str.contains("pipeline_valid") {
-                        println!("{}🔄 RESOLVED PIPELINE: {} <= {} cases",
-                            indent_str, target_str, resolved.resolved.cases.len());
+                    if target_str.contains("decode_operand")
+                        || target_str.contains("decode_opcode")
+                        || target_str.contains("fetch_instruction")
+                        || target_str.contains("writeback_data")
+                        || target_str.contains("pipeline_valid")
+                    {
+                        println!(
+                            "{}🔄 RESOLVED PIPELINE: {} <= {} cases",
+                            indent_str,
+                            target_str,
+                            resolved.resolved.cases.len()
+                        );
                         // Show what the resolved cases contain
                         for (i, case) in resolved.resolved.cases.iter().enumerate() {
-                            println!("{}   Case {}: when {:?} then {:?}",
-                                indent_str, i, case.condition, case.value);
+                            println!(
+                                "{}   Case {}: when {:?} then {:?}",
+                                indent_str, i, case.condition, case.value
+                            );
                         }
                         println!("{}   Default: {:?}", indent_str, resolved.resolved.default);
                     }
@@ -345,7 +395,8 @@ mod pipelined_processor_tests {
                     if assignment_str.contains("Port(PortId(0))") || // instruction
                        assignment_str.contains("Port(PortId(3))") || // data_in
                        assignment_str.contains("instruction") ||
-                       assignment_str.contains("data_in") {
+                       assignment_str.contains("data_in")
+                    {
                         println!("{}🔌 INPUT: {}", indent_str, assignment_str);
                     }
                     // Look for range select operations
@@ -362,8 +413,12 @@ mod pipelined_processor_tests {
                 Statement::ResolvedConditional(resolved) => {
                     let target_str = format!("{:?}", resolved.target);
                     if target_str.contains("execute_result") {
-                        println!("{}🔄 EXECUTE: {} <= PriorityMux with {} cases",
-                            indent_str, target_str, resolved.resolved.cases.len());
+                        println!(
+                            "{}🔄 EXECUTE: {} <= PriorityMux with {} cases",
+                            indent_str,
+                            target_str,
+                            resolved.resolved.cases.len()
+                        );
                     }
                 }
                 Statement::Block(block) => {
@@ -382,10 +437,11 @@ mod pipelined_processor_tests {
                     let assignment_str = format!("{:?} <= {:?}", assign.lhs, assign.rhs);
                     println!("{}📋 HIR: {}", indent_str, assignment_str);
                     // Check for specific pipeline assignments
-                    if assignment_str.contains("decode_opcode") ||
-                       assignment_str.contains("decode_operand") ||
-                       assignment_str.contains("writeback_data") ||
-                       assignment_str.contains("pipeline_valid") {
+                    if assignment_str.contains("decode_opcode")
+                        || assignment_str.contains("decode_operand")
+                        || assignment_str.contains("writeback_data")
+                        || assignment_str.contains("pipeline_valid")
+                    {
                         println!("{}🎯 PIPELINE HIR: {}", indent_str, assignment_str);
                     }
                 }

@@ -67,10 +67,22 @@ pub enum SirNodeKind {
 
 #[derive(Debug, Clone)]
 pub enum BinaryOperation {
-    Add, Sub, Mul, Div, Mod,
-    And, Or, Xor,
-    Eq, Neq, Lt, Lte, Gt, Gte,
-    Shl, Shr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Xor,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone)]
@@ -159,8 +171,11 @@ impl SirModule {
                         // Add all combinational inputs of this node
                         if let Some(node) = self.get_node(node_id) {
                             for node_input in &node.inputs {
-                                if let Some(driver) = self.get_signal_driver(&node_input.signal_id) {
-                                    if self.is_combinational_node(driver) && !visited.contains(&driver) {
+                                if let Some(driver) = self.get_signal_driver(&node_input.signal_id)
+                                {
+                                    if self.is_combinational_node(driver)
+                                        && !visited.contains(&driver)
+                                    {
                                         to_visit.push(driver);
                                     }
                                 }
@@ -204,7 +219,8 @@ impl SirModule {
                     if let Some(node) = self.get_node(node_id) {
                         for node_input in &node.inputs {
                             if let Some(driver) = self.get_signal_driver(&node_input.signal_id) {
-                                if self.is_combinational_node(driver) && !visited.contains(&driver) {
+                                if self.is_combinational_node(driver) && !visited.contains(&driver)
+                                {
                                     to_visit.push(driver);
                                 }
                             }
@@ -225,7 +241,8 @@ impl SirModule {
 
         // If there are no sequential nodes, treat all combinational logic as one cone
         if self.sequential_nodes.is_empty() && !self.combinational_nodes.is_empty() {
-            let all_comb_nodes: Vec<usize> = self.combinational_nodes.iter().map(|n| n.id).collect();
+            let all_comb_nodes: Vec<usize> =
+                self.combinational_nodes.iter().map(|n| n.id).collect();
             cones.push(CombinationalCone {
                 nodes: all_comb_nodes.clone(),
                 inputs: self.get_cone_inputs(&all_comb_nodes),
@@ -237,13 +254,15 @@ impl SirModule {
     }
 
     fn get_node(&self, id: usize) -> Option<&SirNode> {
-        self.combinational_nodes.iter()
+        self.combinational_nodes
+            .iter()
             .chain(self.sequential_nodes.iter())
             .find(|n| n.id == id)
     }
 
     fn get_signal_driver(&self, signal_name: &str) -> Option<usize> {
-        self.signals.iter()
+        self.signals
+            .iter()
             .find(|s| s.name == signal_name)
             .and_then(|s| s.driver_node)
     }

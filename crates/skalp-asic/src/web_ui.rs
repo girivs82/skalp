@@ -2,16 +2,18 @@
 //!
 //! Provides real-time visualization and manual adjustment capabilities
 
-use crate::{AsicError};
-use crate::placement::{Placement, Netlist};
-use crate::routing::{RoutingResult};
 use crate::cts::ClockTree;
-use crate::interactive::{DesignConstraints, InteractiveDesign, DesignCheckpoint, BufferInsertion, RoutingPoint};
+use crate::interactive::{
+    BufferInsertion, DesignCheckpoint, DesignConstraints, InteractiveDesign, RoutingPoint,
+};
+use crate::placement::{Netlist, Placement};
+use crate::routing::RoutingResult;
 use crate::visualization::Visualizer;
-use std::sync::{Arc, Mutex};
+use crate::AsicError;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// Web UI server for interactive ASIC design
 pub struct WebUIServer {
@@ -150,9 +152,7 @@ pub enum UIResponse {
         metrics: DesignMetrics,
     },
     /// Constraint violation
-    ConstraintViolation {
-        violations: Vec<Violation>,
-    },
+    ConstraintViolation { violations: Vec<Violation> },
     /// Operation result
     OperationResult {
         success: bool,
@@ -160,10 +160,7 @@ pub enum UIResponse {
         changes: Vec<DesignChange>,
     },
     /// Real-time metric update
-    MetricUpdate {
-        metric: String,
-        value: f64,
-    },
+    MetricUpdate { metric: String, value: f64 },
 }
 
 /// Simplified placement data for UI
@@ -347,55 +344,72 @@ impl WebUIServer {
     }
 
     /// Handle UI command from client
-    pub fn handle_command(&mut self, session_id: &str, command: UICommand)
-                         -> Result<UIResponse, AsicError> {
+    pub fn handle_command(
+        &mut self,
+        session_id: &str,
+        command: UICommand,
+    ) -> Result<UIResponse, AsicError> {
         match command {
             UICommand::MoveCell { instance, x, y } => {
                 self.save_checkpoint(session_id)?;
                 let mut designer = self.designer.lock().unwrap();
-                designer.overrides.cell_positions.insert(instance.clone(), (x, y));
+                designer
+                    .overrides
+                    .cell_positions
+                    .insert(instance.clone(), (x, y));
                 self.update_placement(&mut designer)?;
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
-            UICommand::LockCell { instance: _, locked: _ } => {
+            UICommand::LockCell {
+                instance: _,
+                locked: _,
+            } => {
                 // Lock functionality would need separate tracking
                 // For now, just acknowledge the command
                 let designer = self.designer.lock().unwrap();
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
             UICommand::AddRoutingGuide { net, layer, path } => {
                 let mut designer = self.designer.lock().unwrap();
-                let routing_points: Vec<RoutingPoint> = path.into_iter().map(|pos| {
-                    RoutingPoint {
+                let routing_points: Vec<RoutingPoint> = path
+                    .into_iter()
+                    .map(|pos| RoutingPoint {
                         position: pos,
                         layer,
                         width: None,
-                    }
-                }).collect();
+                    })
+                    .collect();
                 designer.overrides.routing_paths.insert(net, routing_points);
                 self.update_routing(&mut designer)?;
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
-            UICommand::InsertBuffer { net, position, buffer_type } => {
+            UICommand::InsertBuffer {
+                net,
+                position,
+                buffer_type,
+            } => {
                 let mut designer = self.designer.lock().unwrap();
                 designer.overrides.buffer_insertions.push(BufferInsertion {
                     net,
                     position,
                     buffer_type,
-                    drive_strength: 1.0,  // Default drive strength
+                    drive_strength: 1.0, // Default drive strength
                 });
                 self.update_routing(&mut designer)?;
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
-            UICommand::UpdateConstraint { constraint_type, value } => {
+            UICommand::UpdateConstraint {
+                constraint_type,
+                value,
+            } => {
                 let mut designer = self.designer.lock().unwrap();
                 self.update_constraint(&mut designer, &constraint_type, value)?;
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
             UICommand::RunOptimization { target, options } => {
                 let mut designer = self.designer.lock().unwrap();
@@ -405,7 +419,7 @@ impl WebUIServer {
                     message: "Optimization completed".to_string(),
                     changes,
                 })
-            },
+            }
 
             UICommand::SaveCheckpoint { name } => {
                 let mut designer = self.designer.lock().unwrap();
@@ -427,13 +441,12 @@ impl WebUIServer {
                     message: format!("Checkpoint '{}' saved", name),
                     changes: Vec::new(),
                 })
-            },
+            }
 
             UICommand::RestoreCheckpoint { name } => {
                 let mut designer = self.designer.lock().unwrap();
                 // Find and restore checkpoint
-                if let Some(checkpoint) = designer.checkpoints.iter()
-                    .find(|c| c.name == name) {
+                if let Some(checkpoint) = designer.checkpoints.iter().find(|c| c.name == name) {
                     let checkpoint = checkpoint.clone(); // Clone to avoid borrow issues
                     designer.placement = checkpoint.placement;
                     designer.routing = checkpoint.routing;
@@ -446,37 +459,36 @@ impl WebUIServer {
                         changes: Vec::new(),
                     })
                 }
-            },
+            }
 
             UICommand::Undo => {
                 self.undo(session_id)?;
                 let designer = self.designer.lock().unwrap();
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
             UICommand::Redo => {
                 self.redo(session_id)?;
                 let designer = self.designer.lock().unwrap();
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
             UICommand::ChangeView { view } => {
                 self.set_view(session_id, view);
                 let designer = self.designer.lock().unwrap();
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
 
             UICommand::Select { elements } => {
                 self.set_selection(session_id, elements);
                 let designer = self.designer.lock().unwrap();
                 Ok(self.create_design_update(&designer)?)
-            },
+            }
         }
     }
 
     /// Create design update response
-    fn create_design_update(&self, designer: &InteractiveDesign)
-                          -> Result<UIResponse, AsicError> {
+    fn create_design_update(&self, designer: &InteractiveDesign) -> Result<UIResponse, AsicError> {
         Ok(UIResponse::DesignUpdate {
             placement: self.extract_placement_data(designer)?,
             routing: self.extract_routing_data(designer)?,
@@ -485,37 +497,46 @@ impl WebUIServer {
     }
 
     /// Extract placement data for UI
-    fn extract_placement_data(&self, designer: &InteractiveDesign)
-                            -> Result<PlacementData, AsicError> {
+    fn extract_placement_data(
+        &self,
+        designer: &InteractiveDesign,
+    ) -> Result<PlacementData, AsicError> {
         // Extract placement information
         let cells: Vec<CellData> = if let Some(placement) = &designer.placement {
-            placement.cells.iter().enumerate().map(|(i, cell)| {
-                let position = if i < placement.cell_positions.len() {
-                    placement.cell_positions[i]
-                } else {
-                    (0.0, 0.0)
-                };
+            placement
+                .cells
+                .iter()
+                .enumerate()
+                .map(|(i, cell)| {
+                    let position = if i < placement.cell_positions.len() {
+                        placement.cell_positions[i]
+                    } else {
+                        (0.0, 0.0)
+                    };
 
-                CellData {
-                    id: cell.instance_name.clone(),
-                    cell_type: cell.cell_type.clone(),
-                    x: position.0,
-                    y: position.1,
-                    width: 1.0, // Default width
-                    height: 1.0, // Default height
-                    orientation: if i < placement.orientation.len() {
-                        match placement.orientation[i] {
-                        crate::placement::Orientation::R0 => "R0".to_string(),
-                        crate::placement::Orientation::R90 => "R90".to_string(),
-                        crate::placement::Orientation::R180 => "R180".to_string(),
-                        crate::placement::Orientation::R270 => "R270".to_string(),
-                        _ => "R0".to_string(),
+                    CellData {
+                        id: cell.instance_name.clone(),
+                        cell_type: cell.cell_type.clone(),
+                        x: position.0,
+                        y: position.1,
+                        width: 1.0,  // Default width
+                        height: 1.0, // Default height
+                        orientation: if i < placement.orientation.len() {
+                            match placement.orientation[i] {
+                                crate::placement::Orientation::R0 => "R0".to_string(),
+                                crate::placement::Orientation::R90 => "R90".to_string(),
+                                crate::placement::Orientation::R180 => "R180".to_string(),
+                                crate::placement::Orientation::R270 => "R270".to_string(),
+                                _ => "R0".to_string(),
+                            }
+                        } else {
+                            "R0".to_string()
+                        },
+                        locked: false,   // Default unlocked
+                        critical: false, // Default not critical
                     }
-                } else { "R0".to_string() },
-                locked: false, // Default unlocked
-                critical: false, // Default not critical
-            }
-            }).collect()
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -523,14 +544,19 @@ impl WebUIServer {
         let nets: Vec<NetData> = Vec::new(); // Would need netlist access
 
         let rows: Vec<RowData> = if let Some(placement) = &designer.placement {
-            placement.rows.iter().enumerate().map(|(i, row)| {
-                RowData {
-                    id: i,
-                    y: row.y,
-                    height: row.height,
-                    utilization: 0.5, // Default utilization
-                }
-            }).collect()
+            placement
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    RowData {
+                        id: i,
+                        y: row.y,
+                        height: row.height,
+                        utilization: 0.5, // Default utilization
+                    }
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -539,31 +565,52 @@ impl WebUIServer {
     }
 
     /// Extract routing data for UI
-    fn extract_routing_data(&self, designer: &InteractiveDesign)
-                          -> Result<Option<RoutingData>, AsicError> {
+    fn extract_routing_data(
+        &self,
+        designer: &InteractiveDesign,
+    ) -> Result<Option<RoutingData>, AsicError> {
         // Extract routing information if available
         if let Some(routing) = &designer.routing {
-            let wires: Vec<WireData> = routing.routed_nets.iter().flat_map(|net| {
-                net.segments.iter().map(|seg| WireData {
-                    net_name: net.name.clone(),
-                    layer: seg.layer,
-                    start: if seg.points.len() >= 1 { seg.points[0] } else { (0.0, 0.0) },
-                    end: if seg.points.len() >= 2 { seg.points[seg.points.len()-1] } else { (0.0, 0.0) },
-                    width: seg.width,
+            let wires: Vec<WireData> = routing
+                .routed_nets
+                .iter()
+                .flat_map(|net| {
+                    net.segments.iter().map(|seg| WireData {
+                        net_name: net.name.clone(),
+                        layer: seg.layer,
+                        start: if seg.points.len() >= 1 {
+                            seg.points[0]
+                        } else {
+                            (0.0, 0.0)
+                        },
+                        end: if seg.points.len() >= 2 {
+                            seg.points[seg.points.len() - 1]
+                        } else {
+                            (0.0, 0.0)
+                        },
+                        width: seg.width,
+                    })
                 })
-            }).collect();
+                .collect();
 
-            let vias: Vec<ViaData> = routing.routed_nets.iter().flat_map(|net| {
-                net.vias.iter().map(|via| ViaData {
-                    net_name: net.name.clone(),
-                    position: via.position,
-                    from_layer: via.from_layer,
-                    to_layer: via.to_layer,
-                    via_type: format!("Via{}_{}", via.from_layer, via.to_layer),
+            let vias: Vec<ViaData> = routing
+                .routed_nets
+                .iter()
+                .flat_map(|net| {
+                    net.vias.iter().map(|via| ViaData {
+                        net_name: net.name.clone(),
+                        position: via.position,
+                        from_layer: via.from_layer,
+                        to_layer: via.to_layer,
+                        via_type: format!("Via{}_{}", via.from_layer, via.to_layer),
+                    })
                 })
-            }).collect();
+                .collect();
 
-            let congestion_data: Vec<CongestionData> = routing.congestion.values.iter()
+            let congestion_data: Vec<CongestionData> = routing
+                .congestion
+                .values
+                .iter()
                 .enumerate()
                 .flat_map(|(y, row)| {
                     row.iter().enumerate().map(move |(x, &value)| {
@@ -575,41 +622,60 @@ impl WebUIServer {
                             layer: 1,       // Default layer
                         }
                     })
-                }).collect();
+                })
+                .collect();
 
             // Convert to expected format
-            let routes: Vec<RouteData> = routing.routed_nets.iter().map(|net| {
-                let segments: Vec<RouteSegment> = net.segments.iter().map(|seg| {
-                    RouteSegment {
-                        start: if seg.points.len() >= 1 { seg.points[0] } else { (0.0, 0.0) },
-                        end: if seg.points.len() >= 2 { seg.points[seg.points.len()-1] } else { (0.0, 0.0) },
-                        layer: seg.layer,
-                        via: None, // Simplified for now
-                    }
-                }).collect();
-
-                RouteData {
-                    net: net.name.clone(),
-                    segments,
-                    layer: net.segments.get(0).map(|s| s.layer).unwrap_or(1),
-                    length: net.segments.iter()
-                        .map(|s| {
-                            if s.points.len() >= 2 {
-                                let start = s.points[0];
-                                let end = s.points[s.points.len()-1];
-                                ((end.0 - start.0).powi(2) + (end.1 - start.1).powi(2)).sqrt()
-                            } else {
-                                0.0
+            let routes: Vec<RouteData> = routing
+                .routed_nets
+                .iter()
+                .map(|net| {
+                    let segments: Vec<RouteSegment> = net
+                        .segments
+                        .iter()
+                        .map(|seg| {
+                            RouteSegment {
+                                start: if seg.points.len() >= 1 {
+                                    seg.points[0]
+                                } else {
+                                    (0.0, 0.0)
+                                },
+                                end: if seg.points.len() >= 2 {
+                                    seg.points[seg.points.len() - 1]
+                                } else {
+                                    (0.0, 0.0)
+                                },
+                                layer: seg.layer,
+                                via: None, // Simplified for now
                             }
                         })
-                        .sum(),
-                }
-            }).collect();
+                        .collect();
+
+                    RouteData {
+                        net: net.name.clone(),
+                        segments,
+                        layer: net.segments.get(0).map(|s| s.layer).unwrap_or(1),
+                        length: net
+                            .segments
+                            .iter()
+                            .map(|s| {
+                                if s.points.len() >= 2 {
+                                    let start = s.points[0];
+                                    let end = s.points[s.points.len() - 1];
+                                    ((end.0 - start.0).powi(2) + (end.1 - start.1).powi(2)).sqrt()
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .sum(),
+                    }
+                })
+                .collect();
 
             Ok(Some(RoutingData {
                 routes,
                 congestion: congestion_data,
-                violations: Vec::new() // Empty for now
+                violations: Vec::new(), // Empty for now
             }))
         } else {
             Ok(None)
@@ -617,8 +683,7 @@ impl WebUIServer {
     }
 
     /// Calculate design metrics
-    fn calculate_metrics(&self, _designer: &InteractiveDesign)
-                       -> Result<DesignMetrics, AsicError> {
+    fn calculate_metrics(&self, _designer: &InteractiveDesign) -> Result<DesignMetrics, AsicError> {
         Ok(DesignMetrics {
             timing: TimingMetrics {
                 worst_slack: 0.0,
@@ -647,15 +712,16 @@ impl WebUIServer {
     }
 
     /// Update placement
-    fn update_placement(&self, designer: &mut InteractiveDesign)
-                      -> Result<(), AsicError> {
+    fn update_placement(&self, designer: &mut InteractiveDesign) -> Result<(), AsicError> {
         // Apply manual position overrides to placement
         if let Some(placement) = &mut designer.placement {
             for (instance_name, &(x, y)) in &designer.overrides.cell_positions {
                 // Find the cell in the placement and update its position
-                if let Some(cell_idx) = placement.cells.iter()
-                    .position(|cell| cell.instance_name == *instance_name) {
-
+                if let Some(cell_idx) = placement
+                    .cells
+                    .iter()
+                    .position(|cell| cell.instance_name == *instance_name)
+                {
                     // Update cell position
                     if cell_idx < placement.cell_positions.len() {
                         placement.cell_positions[cell_idx] = (x, y);
@@ -674,25 +740,25 @@ impl WebUIServer {
     }
 
     /// Update routing
-    fn update_routing(&self, designer: &mut InteractiveDesign)
-                    -> Result<(), AsicError> {
+    fn update_routing(&self, designer: &mut InteractiveDesign) -> Result<(), AsicError> {
         // Apply routing guides and buffer insertions
         if let Some(routing) = &mut designer.routing {
             // Apply manual routing paths
             for (net_name, routing_points) in &designer.overrides.routing_paths {
                 // Convert routing points to wire segments
-                let segments: Vec<crate::routing::WireSegment> = routing_points.windows(2)
+                let segments: Vec<crate::routing::WireSegment> = routing_points
+                    .windows(2)
                     .map(|window| {
                         crate::routing::WireSegment {
                             points: vec![window[0].position, window[1].position],
                             layer: window[0].layer,
                             width: window[0].width.unwrap_or(0.14), // Default width
                         }
-                    }).collect();
+                    })
+                    .collect();
 
                 // Update or add net to routing
-                if let Some(net) = routing.routed_nets.iter_mut()
-                    .find(|n| n.name == *net_name) {
+                if let Some(net) = routing.routed_nets.iter_mut().find(|n| n.name == *net_name) {
                     net.segments = segments;
                 } else {
                     routing.routed_nets.push(crate::routing::RoutedNet {
@@ -707,8 +773,11 @@ impl WebUIServer {
             for buffer in &designer.overrides.buffer_insertions {
                 // Insert buffer as a via or split existing segment
                 // This is a simplified implementation
-                if let Some(net) = routing.routed_nets.iter_mut()
-                    .find(|n| n.name == buffer.net) {
+                if let Some(net) = routing
+                    .routed_nets
+                    .iter_mut()
+                    .find(|n| n.name == buffer.net)
+                {
                     // Add via at buffer position
                     net.vias.push(crate::routing::ViaInstance {
                         position: buffer.position,
@@ -724,30 +793,35 @@ impl WebUIServer {
     }
 
     /// Update constraint
-    fn update_constraint(&self, designer: &mut InteractiveDesign,
-                        constraint_type: &str, value: serde_json::Value)
-                      -> Result<(), AsicError> {
+    fn update_constraint(
+        &self,
+        designer: &mut InteractiveDesign,
+        constraint_type: &str,
+        value: serde_json::Value,
+    ) -> Result<(), AsicError> {
         // TODO: Parse and apply constraint update
         match constraint_type {
             "timing" => {
                 // Update timing constraints
-            },
+            }
             "placement" => {
                 // Update placement constraints
-            },
+            }
             "routing" => {
                 // Update routing constraints
-            },
+            }
             _ => {}
         }
         Ok(())
     }
 
     /// Run optimization
-    fn run_optimization(&self, _designer: &mut InteractiveDesign,
-                       _target: OptimizationTarget,
-                       _options: OptimizationOptions)
-                     -> Result<Vec<DesignChange>, AsicError> {
+    fn run_optimization(
+        &self,
+        _designer: &mut InteractiveDesign,
+        _target: OptimizationTarget,
+        _options: OptimizationOptions,
+    ) -> Result<Vec<DesignChange>, AsicError> {
         // TODO: Run targeted optimization
         Ok(Vec::new())
     }

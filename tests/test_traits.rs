@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod trait_tests {
     use skalp_frontend::parse_and_build_hir;
-    
 
     #[test]
     fn test_simple_trait_definition() {
@@ -23,7 +22,12 @@ mod trait_tests {
         println!("Trait implementations: {}", hir.trait_implementations.len());
 
         // Verify trait definitions
-        assert_eq!(hir.trait_definitions.len(), 1, "Expected 1 trait definition but found {}", hir.trait_definitions.len());
+        assert_eq!(
+            hir.trait_definitions.len(),
+            1,
+            "Expected 1 trait definition but found {}",
+            hir.trait_definitions.len()
+        );
         let trait_def = &hir.trait_definitions[0];
         assert_eq!(trait_def.name, "Clocked");
 

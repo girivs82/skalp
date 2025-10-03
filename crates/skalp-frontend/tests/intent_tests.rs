@@ -46,7 +46,10 @@ fn test_basic_intent_declaration() {
         false
     }
     found_constraints = find_constraints(&tree);
-    assert!(found_constraints, "Intent constraints not found in parsed tree");
+    assert!(
+        found_constraints,
+        "Intent constraints not found in parsed tree"
+    );
 }
 
 #[test]

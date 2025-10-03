@@ -72,7 +72,6 @@ pub enum Token {
     #[token("Self")]
     SelfType,
 
-
     // Event Control (2)
     #[token("rise")]
     Rise,
@@ -379,7 +378,6 @@ pub enum Token {
     #[regex(r"[ \t\n\f]+", logos::skip)]
     #[regex(r"//[^\n]*", logos::skip)]
     #[regex(r"/\*([^*]|\*+[^*/])*\*+/", logos::skip)]
-
     // Error token for unknown/invalid input
     Error,
 }
@@ -424,25 +422,23 @@ pub fn parse_decimal(input: &str) -> Option<u64> {
 
 /// Parse string literal (remove quotes and handle escapes)
 fn parse_string(input: &str) -> Option<String> {
-    let without_quotes = &input[1..input.len()-1]; // Remove quotes
+    let without_quotes = &input[1..input.len() - 1]; // Remove quotes
     let mut result = String::new();
     let mut chars = without_quotes.chars();
 
     while let Some(ch) = chars.next() {
         match ch {
-            '\\' => {
-                match chars.next() {
-                    Some('"') => result.push('"'),
-                    Some('\\') => result.push('\\'),
-                    Some('n') => result.push('\n'),
-                    Some('t') => result.push('\t'),
-                    Some(c) => {
-                        result.push('\\');
-                        result.push(c);
-                    }
-                    None => result.push('\\'),
+            '\\' => match chars.next() {
+                Some('"') => result.push('"'),
+                Some('\\') => result.push('\\'),
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some(c) => {
+                    result.push('\\');
+                    result.push(c);
                 }
-            }
+                None => result.push('\\'),
+            },
             c => result.push(c),
         }
     }
@@ -508,14 +504,17 @@ mod tests {
         let mut lexer = Lexer::new("entity impl in out signal on");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::Entity,
-            Token::Impl,
-            Token::In,
-            Token::Out,
-            Token::Signal,
-            Token::On,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Entity,
+                Token::Impl,
+                Token::In,
+                Token::Out,
+                Token::Signal,
+                Token::On,
+            ]
+        );
     }
 
     #[test]
@@ -523,12 +522,15 @@ mod tests {
         let mut lexer = Lexer::new("counter clk reset_n my_signal");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::Identifier("counter".to_string()),
-            Token::Identifier("clk".to_string()),
-            Token::Identifier("reset_n".to_string()),
-            Token::Identifier("my_signal".to_string()),
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Identifier("counter".to_string()),
+                Token::Identifier("clk".to_string()),
+                Token::Identifier("reset_n".to_string()),
+                Token::Identifier("my_signal".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -536,12 +538,15 @@ mod tests {
         let mut lexer = Lexer::new("42 0xFF 0b1010 \"hello world\"");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::DecimalLiteral(42),
-            Token::HexLiteral(255),
-            Token::BinaryLiteral(10),
-            Token::StringLiteral("hello world".to_string()),
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::DecimalLiteral(42),
+                Token::HexLiteral(255),
+                Token::BinaryLiteral(10),
+                Token::StringLiteral("hello world".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -549,14 +554,17 @@ mod tests {
         let mut lexer = Lexer::new("<= := = |> -> <-");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::NonBlockingAssign,
-            Token::BlockingAssign,
-            Token::Assign,
-            Token::Pipeline,
-            Token::Arrow,
-            Token::LeftArrow,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::NonBlockingAssign,
+                Token::BlockingAssign,
+                Token::Assign,
+                Token::Pipeline,
+                Token::Arrow,
+                Token::LeftArrow,
+            ]
+        );
     }
 
     #[test]
@@ -581,18 +589,21 @@ entity Counter {
         let mut lexer = Lexer::new("on(clk.rise | reset.rise)");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::On,
-            Token::LeftParen,
-            Token::Identifier("clk".to_string()),
-            Token::Dot,
-            Token::Rise,
-            Token::Pipe,
-            Token::Reset,
-            Token::Dot,
-            Token::Rise,
-            Token::RightParen,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::On,
+                Token::LeftParen,
+                Token::Identifier("clk".to_string()),
+                Token::Dot,
+                Token::Rise,
+                Token::Pipe,
+                Token::Reset,
+                Token::Dot,
+                Token::Rise,
+                Token::RightParen,
+            ]
+        );
     }
 
     #[test]
@@ -600,11 +611,14 @@ entity Counter {
         let mut lexer = Lexer::new("1_000_000 0xFF_FF 0b1010_1010");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::DecimalLiteral(1_000_000),
-            Token::HexLiteral(0xFFFF),
-            Token::BinaryLiteral(0b10101010),
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::DecimalLiteral(1_000_000),
+                Token::HexLiteral(0xFFFF),
+                Token::BinaryLiteral(0b10101010),
+            ]
+        );
     }
 
     #[test]
@@ -612,14 +626,17 @@ entity Counter {
         let mut lexer = Lexer::new("intent requirement protocol async await flow");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::Intent,
-            Token::Requirement,
-            Token::Protocol,
-            Token::Async,
-            Token::Await,
-            Token::Flow,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Intent,
+                Token::Requirement,
+                Token::Protocol,
+                Token::Async,
+                Token::Await,
+                Token::Flow,
+            ]
+        );
     }
 
     #[test]
@@ -627,10 +644,7 @@ entity Counter {
         let mut lexer = Lexer::new("rise fall");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::Rise,
-            Token::Fall,
-        ]);
+        assert_eq!(tokens, vec![Token::Rise, Token::Fall,]);
     }
 
     #[test]
@@ -638,10 +652,7 @@ entity Counter {
         let mut lexer = Lexer::new("assert requirement");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::Assert,
-            Token::Requirement,
-        ]);
+        assert_eq!(tokens, vec![Token::Assert, Token::Requirement,]);
     }
 
     #[test]
@@ -649,14 +660,17 @@ entity Counter {
         let mut lexer = Lexer::new("asil safety_req psm lsm fmea power_domain");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            Token::Asil,
-            Token::SafetyReq,
-            Token::Psm,
-            Token::Lsm,
-            Token::Fmea,
-            Token::PowerDomain,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Asil,
+                Token::SafetyReq,
+                Token::Psm,
+                Token::Lsm,
+                Token::Fmea,
+                Token::PowerDomain,
+            ]
+        );
     }
 
     #[test]

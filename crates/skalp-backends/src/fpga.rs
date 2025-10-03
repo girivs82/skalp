@@ -3,16 +3,16 @@
 //! Provides synthesis support for various FPGA families including iCE40, Xilinx, and Intel.
 
 use crate::{
-    Backend, BackendError, BackendResult, FpgaTarget, SynthesisConfig,
-    SynthesisResults, TargetPlatform,
+    Backend, BackendError, BackendResult, FpgaTarget, SynthesisConfig, SynthesisResults,
+    TargetPlatform,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tempfile::TempDir;
 
 pub mod ice40;
-pub mod xilinx;
 pub mod intel;
+pub mod xilinx;
 
 /// FPGA-specific synthesis configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +80,10 @@ impl FpgaBackend {
                     verilog.push_str(";\n");
                 }
                 crate::mock_lir::GateType::Not => {
-                    verilog.push_str(&format!("assign {} = ~{};\n", gate.outputs[0], gate.inputs[0]));
+                    verilog.push_str(&format!(
+                        "assign {} = ~{};\n",
+                        gate.outputs[0], gate.inputs[0]
+                    ));
                 }
                 crate::mock_lir::GateType::Xor => {
                     verilog.push_str(&format!("assign {} = ", gate.outputs[0]));
@@ -89,8 +92,10 @@ impl FpgaBackend {
                 }
                 crate::mock_lir::GateType::Mux => {
                     if gate.inputs.len() >= 3 {
-                        verilog.push_str(&format!("assign {} = {} ? {} : {};\n",
-                            gate.outputs[0], gate.inputs[0], gate.inputs[1], gate.inputs[2]));
+                        verilog.push_str(&format!(
+                            "assign {} = {} ? {} : {};\n",
+                            gate.outputs[0], gate.inputs[0], gate.inputs[1], gate.inputs[2]
+                        ));
                     }
                 }
                 crate::mock_lir::GateType::FlipFlop => {
@@ -99,9 +104,13 @@ impl FpgaBackend {
                         verilog.push_str(&format!("    if ({})\n", gate.inputs[2])); // reset
                         verilog.push_str(&format!("        {} <= 1'b0;\n", gate.outputs[0]));
                         verilog.push_str("    else\n");
-                        verilog.push_str(&format!("        {} <= {};\n", gate.outputs[0], gate.inputs[0]));
+                        verilog.push_str(&format!(
+                            "        {} <= {};\n",
+                            gate.outputs[0], gate.inputs[0]
+                        ));
                     } else {
-                        verilog.push_str(&format!("    {} <= {};\n", gate.outputs[0], gate.inputs[0]));
+                        verilog
+                            .push_str(&format!("    {} <= {};\n", gate.outputs[0], gate.inputs[0]));
                     }
                     verilog.push_str("end\n");
                 }
@@ -122,7 +131,11 @@ impl FpgaBackend {
     }
 
     /// Run synthesis tool chain
-    async fn run_synthesis(&self, verilog: &str, temp_dir: &Path) -> BackendResult<SynthesisResults> {
+    async fn run_synthesis(
+        &self,
+        verilog: &str,
+        temp_dir: &Path,
+    ) -> BackendResult<SynthesisResults> {
         match &self.target {
             FpgaTarget::Ice40 { part, package } => {
                 ice40::synthesize_ice40(verilog, part, package, temp_dir, &self.config).await
@@ -172,15 +185,11 @@ impl Backend for FpgaBackend {
         match &config.target {
             TargetPlatform::Fpga(fpga_target) => {
                 if fpga_target != &self.target {
-                    return Err(BackendError::FpgaError(
-                        "Target mismatch".to_string()
-                    ));
+                    return Err(BackendError::FpgaError("Target mismatch".to_string()));
                 }
                 Ok(())
             }
-            _ => Err(BackendError::FpgaError(
-                "Not an FPGA target".to_string()
-            )),
+            _ => Err(BackendError::FpgaError("Not an FPGA target".to_string())),
         }
     }
 

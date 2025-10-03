@@ -1,6 +1,6 @@
-use std::process::Command;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use tempfile::TempDir;
 
 fn skalp_binary() -> PathBuf {

@@ -380,26 +380,40 @@ impl SystemVerilogGenerator {
             DataType::Event => "event".to_string(),
             DataType::Struct(struct_type) => {
                 if struct_type.packed {
-                    format!("packed struct {{{}}}", self.format_struct_fields(&struct_type.fields))
+                    format!(
+                        "packed struct {{{}}}",
+                        self.format_struct_fields(&struct_type.fields)
+                    )
                 } else {
-                    format!("struct {{{}}}", self.format_struct_fields(&struct_type.fields))
+                    format!(
+                        "struct {{{}}}",
+                        self.format_struct_fields(&struct_type.fields)
+                    )
                 }
-            },
+            }
             DataType::Enum(enum_type) => {
-                format!("enum {} {{{}}}",
+                format!(
+                    "enum {} {{{}}}",
                     self.format_data_type(&enum_type.base_type),
-                    self.format_enum_variants(&enum_type.variants))
-            },
+                    self.format_enum_variants(&enum_type.variants)
+                )
+            }
             DataType::Union(union_type) => {
                 if union_type.packed {
-                    format!("packed union {{{}}}", self.format_struct_fields(&union_type.fields))
+                    format!(
+                        "packed union {{{}}}",
+                        self.format_struct_fields(&union_type.fields)
+                    )
                 } else {
-                    format!("union {{{}}}", self.format_struct_fields(&union_type.fields))
+                    format!(
+                        "union {{{}}}",
+                        self.format_struct_fields(&union_type.fields)
+                    )
                 }
-            },
+            }
             DataType::Array(element_type, size) => {
                 format!("{} [0:{}]", self.format_data_type(element_type), size - 1)
-            },
+            }
             // Parametric types use parameter name in width spec
             DataType::BitParam { param, default } => {
                 if *default == 1 {
@@ -426,15 +440,23 @@ impl SystemVerilogGenerator {
 
     /// Format struct fields for SystemVerilog
     fn format_struct_fields(&self, fields: &[StructField]) -> String {
-        fields.iter()
-            .map(|field| format!("{} {};", self.format_data_type(&field.field_type), field.name))
+        fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "{} {};",
+                    self.format_data_type(&field.field_type),
+                    field.name
+                )
+            })
             .collect::<Vec<String>>()
             .join(" ")
     }
 
     /// Format enum variants for SystemVerilog
     fn format_enum_variants(&self, variants: &[EnumVariant]) -> String {
-        variants.iter()
+        variants
+            .iter()
             .map(|variant| {
                 if let Some(value) = &variant.value {
                     format!("{} = {}", variant.name, self.format_value(value))
@@ -451,7 +473,9 @@ impl SystemVerilogGenerator {
         match lval {
             LValue::Signal(id) => {
                 if let Some(ref module) = self.current_module {
-                    module.signals.iter()
+                    module
+                        .signals
+                        .iter()
                         .find(|s| s.id == *id)
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| format!("sig_{}", id.0))
@@ -461,7 +485,9 @@ impl SystemVerilogGenerator {
             }
             LValue::Variable(id) => {
                 if let Some(ref module) = self.current_module {
-                    module.variables.iter()
+                    module
+                        .variables
+                        .iter()
                         .find(|v| v.id == *id)
                         .map(|v| v.name.clone())
                         .unwrap_or_else(|| format!("var_{}", id.0))
@@ -471,7 +497,9 @@ impl SystemVerilogGenerator {
             }
             LValue::Port(id) => {
                 if let Some(ref module) = self.current_module {
-                    module.ports.iter()
+                    module
+                        .ports
+                        .iter()
                         .find(|p| p.id == *id)
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| format!("port_{}", id.0))
@@ -480,18 +508,22 @@ impl SystemVerilogGenerator {
                 }
             }
             LValue::BitSelect { base, index } => {
-                format!("{}[{}]", self.format_lvalue(base), self.format_expression(index))
+                format!(
+                    "{}[{}]",
+                    self.format_lvalue(base),
+                    self.format_expression(index)
+                )
             }
             LValue::RangeSelect { base, high, low } => {
-                format!("{}[{}:{}]",
+                format!(
+                    "{}[{}:{}]",
                     self.format_lvalue(base),
                     self.format_expression(high),
-                    self.format_expression(low))
+                    self.format_expression(low)
+                )
             }
             LValue::Concat(lvals) => {
-                let parts: Vec<String> = lvals.iter()
-                    .map(|l| self.format_lvalue(l))
-                    .collect();
+                let parts: Vec<String> = lvals.iter().map(|l| self.format_lvalue(l)).collect();
                 format!("{{{}}}", parts.join(", "))
             }
         }
@@ -503,37 +535,46 @@ impl SystemVerilogGenerator {
             Expression::Literal(val) => self.format_value(val),
             Expression::Ref(lval) => self.format_lvalue(lval),
             Expression::Binary { op, left, right } => {
-                format!("({} {} {})",
+                format!(
+                    "({} {} {})",
                     self.format_expression(left),
                     self.format_binary_op(op),
-                    self.format_expression(right))
+                    self.format_expression(right)
+                )
             }
             Expression::Unary { op, operand } => {
-                format!("{}{}",
+                format!(
+                    "{}{}",
                     self.format_unary_op(op),
-                    self.format_expression(operand))
+                    self.format_expression(operand)
+                )
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
-                format!("({} ? {} : {})",
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                format!(
+                    "({} ? {} : {})",
                     self.format_expression(cond),
                     self.format_expression(then_expr),
-                    self.format_expression(else_expr))
+                    self.format_expression(else_expr)
+                )
             }
             Expression::Concat(exprs) => {
-                let parts: Vec<String> = exprs.iter()
-                    .map(|e| self.format_expression(e))
-                    .collect();
+                let parts: Vec<String> = exprs.iter().map(|e| self.format_expression(e)).collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Expression::Replicate { count, value } => {
-                format!("{{{{{}}}{{{}}}}}",
+                format!(
+                    "{{{{{}}}{{{}}}}}",
                     self.format_expression(count),
-                    self.format_expression(value))
+                    self.format_expression(value)
+                )
             }
             Expression::FunctionCall { name, args } => {
-                let arg_strs: Vec<String> = args.iter()
-                    .map(|a| self.format_expression(a))
-                    .collect();
+                let arg_strs: Vec<String> =
+                    args.iter().map(|a| self.format_expression(a)).collect();
                 format!("{}({})", name, arg_strs.join(", "))
             }
         }
@@ -560,9 +601,9 @@ impl SystemVerilogGenerator {
             BinaryOp::Mul => "*",
             BinaryOp::Div => "/",
             BinaryOp::Mod => "%",
-            BinaryOp::And => "&",  // Logical AND in context
-            BinaryOp::Or => "|",   // Logical OR in context
-            BinaryOp::Xor => "^",  // Logical XOR in context
+            BinaryOp::And => "&", // Logical AND in context
+            BinaryOp::Or => "|",  // Logical OR in context
+            BinaryOp::Xor => "^", // Logical XOR in context
             BinaryOp::BitwiseAnd => "&",
             BinaryOp::BitwiseOr => "|",
             BinaryOp::BitwiseXor => "^",

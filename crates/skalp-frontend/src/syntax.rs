@@ -2,7 +2,6 @@
 //!
 //! This module defines the syntax kinds and tree structure for the SKALP language
 
-
 /// Syntax kinds for SKALP language
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
@@ -43,7 +42,6 @@ pub enum SyntaxKind {
     WhereKw,
     SelfKw,
     SelfTypeKw,
-
 
     // Event Control (2)
     RiseKw,
@@ -125,58 +123,58 @@ pub enum SyntaxKind {
 
     // Operators
     NonBlockingAssign, // <=
-    BlockingAssign,     // :=
-    Assign,              // =
-    Eq,                  // ==
-    Neq,                 // !=
-    Lt,                  // <
-    Gt,                  // >
-    Le,                  // <=
-    Ge,                  // >=
-    Plus,                // +
-    Minus,               // -
-    Star,                // *
-    Slash,               // /
-    Percent,             // %
-    Amp,                 // &
-    Pipe,                // |
-    Caret,               // ^
-    Bang,                // !
-    Tilde,               // ~
-    AmpAmp,             // &&
-    PipePipe,           // ||
-    Shl,                 // <<
-    Shr,                 // >>
-    Pipeline,            // |>
-    FatArrow,            // =>
-    Arrow,               // ->
-    LeftArrow,          // <-
-    Implies,             // |->
-    ImpliesOverlap,      // |=>
-    HashHash,            // ##
-    RepeatOpen,          // [*
-    RepeatClose,         // *]
-    RepeatPlusOpen,      // [+
-    RepeatPlusClose,     // +]
-    RepeatEqualOpen,     // [=
-    RepeatEqualClose,    // =]
-    At,                  // @
-    Dollar,              // $
+    BlockingAssign,    // :=
+    Assign,            // =
+    Eq,                // ==
+    Neq,               // !=
+    Lt,                // <
+    Gt,                // >
+    Le,                // <=
+    Ge,                // >=
+    Plus,              // +
+    Minus,             // -
+    Star,              // *
+    Slash,             // /
+    Percent,           // %
+    Amp,               // &
+    Pipe,              // |
+    Caret,             // ^
+    Bang,              // !
+    Tilde,             // ~
+    AmpAmp,            // &&
+    PipePipe,          // ||
+    Shl,               // <<
+    Shr,               // >>
+    Pipeline,          // |>
+    FatArrow,          // =>
+    Arrow,             // ->
+    LeftArrow,         // <-
+    Implies,           // |->
+    ImpliesOverlap,    // |=>
+    HashHash,          // ##
+    RepeatOpen,        // [*
+    RepeatClose,       // *]
+    RepeatPlusOpen,    // [+
+    RepeatPlusClose,   // +]
+    RepeatEqualOpen,   // [=
+    RepeatEqualClose,  // =]
+    At,                // @
+    Dollar,            // $
 
     // Delimiters
-    LParen,             // (
-    RParen,             // )
-    LBracket,           // [
-    RBracket,           // ]
-    LBrace,             // {
-    RBrace,             // }
-    Comma,               // ,
-    Semicolon,           // ;
-    ColonColon,          // ::
-    Colon,               // :
-    Dot,                 // .
-    Question,            // ?
-    Apostrophe,          // '
+    LParen,     // (
+    RParen,     // )
+    LBracket,   // [
+    RBracket,   // ]
+    LBrace,     // {
+    RBrace,     // }
+    Comma,      // ,
+    Semicolon,  // ;
+    ColonColon, // ::
+    Colon,      // :
+    Dot,        // .
+    Question,   // ?
+    Apostrophe, // '
 
     // Trivia
     Whitespace,
@@ -438,10 +436,7 @@ impl SyntaxKind {
 
     /// Check if this is a literal
     pub fn is_literal(self) -> bool {
-        matches!(
-            self,
-            IntLiteral | BinLiteral | HexLiteral | StringLiteral
-        )
+        matches!(self, IntLiteral | BinLiteral | HexLiteral | StringLiteral)
     }
 
     /// Get a human-readable description of this syntax kind
@@ -662,7 +657,6 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Where => WhereKw,
             Token::SelfKeyword => SelfKw,
             Token::SelfType => SelfTypeKw,
-
 
             // Event Control (2)
             Token::Rise => RiseKw,

@@ -4,17 +4,17 @@
 //! ISO 26262 functional safety implementation for SKALP hardware synthesis.
 //! Provides ASIL-compliant safety requirements, FMEA generation, and safety mechanisms.
 
-use thiserror::Error;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub mod asil;
-pub mod requirements;
+pub mod do254;
 pub mod fmea;
+pub mod iec61508;
 pub mod mechanisms;
 pub mod metrics;
 pub mod power_domains;
-pub mod do254;
-pub mod iec61508;
+pub mod requirements;
 
 /// Safety-related errors
 #[derive(Error, Debug)]

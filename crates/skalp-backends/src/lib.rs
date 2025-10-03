@@ -65,14 +65,14 @@ pub mod mock_lir {
     }
 }
 
-pub mod fpga;
 pub mod asic;
-pub mod timing;
-pub mod power;
 pub mod constraints;
-pub mod xilinx;
+pub mod fpga;
 pub mod intel;
+pub mod power;
+pub mod timing;
 pub mod verilog;
+pub mod xilinx;
 
 /// Backend-specific errors
 #[derive(Error, Debug)]
@@ -119,20 +119,11 @@ impl Default for TargetPlatform {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FpgaTarget {
     /// Lattice iCE40 family
-    Ice40 {
-        part: String,
-        package: String,
-    },
+    Ice40 { part: String, package: String },
     /// Xilinx 7-Series
-    Xilinx7Series {
-        part: String,
-        package: String,
-    },
+    Xilinx7Series { part: String, package: String },
     /// Intel/Altera Cyclone
-    CycloneV {
-        part: String,
-        package: String,
-    },
+    CycloneV { part: String, package: String },
 }
 
 impl Default for FpgaTarget {
@@ -205,10 +196,7 @@ pub enum OptimizationTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TimingConstraint {
     /// Clock period constraint
-    ClockPeriod {
-        clock_name: String,
-        period_ns: f64,
-    },
+    ClockPeriod { clock_name: String, period_ns: f64 },
     /// Input delay constraint
     InputDelay {
         port_name: String,
@@ -222,10 +210,7 @@ pub enum TimingConstraint {
         clock_name: String,
     },
     /// False path constraint
-    FalsePath {
-        from: String,
-        to: String,
-    },
+    FalsePath { from: String, to: String },
     /// Multicycle path constraint
     MulticyclePath {
         from: String,
@@ -425,12 +410,8 @@ impl BackendFactory {
     /// Create a backend for the specified target
     pub fn create_backend(target: &TargetPlatform) -> BackendResult<Box<dyn Backend>> {
         match target {
-            TargetPlatform::Fpga(fpga_target) => {
-                fpga::create_fpga_backend(fpga_target)
-            }
-            TargetPlatform::Asic(asic_target) => {
-                asic::create_asic_backend(asic_target)
-            }
+            TargetPlatform::Fpga(fpga_target) => fpga::create_fpga_backend(fpga_target),
+            TargetPlatform::Asic(asic_target) => asic::create_asic_backend(asic_target),
         }
     }
 
@@ -472,12 +453,10 @@ mod tests {
                 target_frequency: Some(100.0),
                 max_power: Some(500.0),
             },
-            timing_constraints: vec![
-                TimingConstraint::ClockPeriod {
-                    clock_name: "clk".to_string(),
-                    period_ns: 10.0,
-                },
-            ],
+            timing_constraints: vec![TimingConstraint::ClockPeriod {
+                clock_name: "clk".to_string(),
+                period_ns: 10.0,
+            }],
             power_constraints: None,
             output_dir: "/tmp/synthesis".to_string(),
             tool_options: HashMap::new(),

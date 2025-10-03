@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use skalp_sir::SirModule;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
 use thiserror::Error;
+use tokio::sync::{mpsc, RwLock};
 
 #[derive(Debug, Error)]
 pub enum SimulationError {
@@ -168,17 +168,23 @@ impl Simulator {
     }
 
     pub async fn pause(&self) -> SimulationResult<()> {
-        self.control_tx.send(SimulatorCommand::Pause).await
+        self.control_tx
+            .send(SimulatorCommand::Pause)
+            .await
             .map_err(|_| SimulationError::CpuError("Failed to send pause command".into()))
     }
 
     pub async fn resume(&self) -> SimulationResult<()> {
-        self.control_tx.send(SimulatorCommand::Start).await
+        self.control_tx
+            .send(SimulatorCommand::Start)
+            .await
             .map_err(|_| SimulationError::CpuError("Failed to send start command".into()))
     }
 
     pub async fn stop(&self) -> SimulationResult<()> {
-        self.control_tx.send(SimulatorCommand::Stop).await
+        self.control_tx
+            .send(SimulatorCommand::Stop)
+            .await
             .map_err(|_| SimulationError::CpuError("Failed to send stop command".into()))
     }
 }

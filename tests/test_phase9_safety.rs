@@ -2,8 +2,8 @@
 mod phase9_safety_tests {
     use skalp_safety::{
         asil::{AsilLevel, HardwareMetrics, VerificationMethod},
-        mechanisms::{SafetyMechanism, MechanismType, MechanismCategory, SafetyMechanismManager},
-        requirements::{SafetyRequirement, SafetyRequirementManager, RequirementCategory},
+        mechanisms::{MechanismCategory, MechanismType, SafetyMechanism, SafetyMechanismManager},
+        requirements::{RequirementCategory, SafetyRequirement, SafetyRequirementManager},
     };
 
     #[test]
@@ -26,8 +26,10 @@ mod phase9_safety_tests {
         req_manager.add_requirement(safety_req);
 
         let coverage_report = req_manager.generate_coverage_report();
-        println!("   Safety requirements: {} total, {:.1}% verified",
-            coverage_report.total_requirements, coverage_report.coverage_percentage);
+        println!(
+            "   Safety requirements: {} total, {:.1}% verified",
+            coverage_report.total_requirements, coverage_report.coverage_percentage
+        );
 
         // Test 2: Safety Mechanisms (PSM/LSM)
         println!("\n2️⃣ Testing Safety Mechanisms (PSM/LSM)...");
@@ -67,7 +69,10 @@ mod phase9_safety_tests {
         let processor_diagnostic = mech_manager.calculate_diagnostic_coverage("processor_core");
 
         println!("   ECC mechanism: {:.1}% fault coverage", memory_coverage);
-        println!("   Watchdog mechanism: {:.1}% diagnostic coverage", processor_diagnostic);
+        println!(
+            "   Watchdog mechanism: {:.1}% diagnostic coverage",
+            processor_diagnostic
+        );
 
         // Test 3: Hardware Metrics Validation
         println!("\n3️⃣ Testing Hardware Metrics...");
@@ -80,16 +85,23 @@ mod phase9_safety_tests {
         };
 
         let meets_asil_d = test_metrics.meets_asil_requirements(&AsilLevel::D);
-        println!("   Test metrics SPFM: {:.1}%, LF: {:.1}%, PMHF: {:.1} FIT",
-            test_metrics.spfm, test_metrics.lf, test_metrics.pmhf);
-        println!("   Meets ASIL D requirements: {}", if meets_asil_d { "✅ YES" } else { "❌ NO" });
+        println!(
+            "   Test metrics SPFM: {:.1}%, LF: {:.1}%, PMHF: {:.1} FIT",
+            test_metrics.spfm, test_metrics.lf, test_metrics.pmhf
+        );
+        println!(
+            "   Meets ASIL D requirements: {}",
+            if meets_asil_d { "✅ YES" } else { "❌ NO" }
+        );
 
         // Test 4: Integration Test - Complete Safety Analysis
         println!("\n4️⃣ Integration Test - Complete Safety Analysis...");
 
         let mechanism_report = mech_manager.generate_report();
-        println!("   Mechanisms: {} total, {:.1}% verified",
-            mechanism_report.total_mechanisms, mechanism_report.verification_percentage);
+        println!(
+            "   Mechanisms: {} total, {:.1}% verified",
+            mechanism_report.total_mechanisms, mechanism_report.verification_percentage
+        );
 
         // Test 5: Validation of Phase 9 Success Criteria
         println!("\n5️⃣ Phase 9 Success Criteria Validation...");
@@ -99,12 +111,36 @@ mod phase9_safety_tests {
         let hardware_metrics_working = meets_asil_d;
         let asil_working = AsilLevel::D.requirements().spfm_target.is_some();
 
-        println!("   ✅ Safety requirements management: {}", if safety_requirements_working { "PASS" } else { "FAIL" });
-        println!("   ✅ PSM/LSM mechanisms: {}", if psm_lsm_working { "PASS" } else { "FAIL" });
-        println!("   ✅ Hardware metrics validation: {}", if hardware_metrics_working { "PASS" } else { "FAIL" });
-        println!("   ✅ ASIL framework: {}", if asil_working { "PASS" } else { "FAIL" });
+        println!(
+            "   ✅ Safety requirements management: {}",
+            if safety_requirements_working {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
+        println!(
+            "   ✅ PSM/LSM mechanisms: {}",
+            if psm_lsm_working { "PASS" } else { "FAIL" }
+        );
+        println!(
+            "   ✅ Hardware metrics validation: {}",
+            if hardware_metrics_working {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
+        println!(
+            "   ✅ ASIL framework: {}",
+            if asil_working { "PASS" } else { "FAIL" }
+        );
 
-        if safety_requirements_working && psm_lsm_working && hardware_metrics_working && asil_working {
+        if safety_requirements_working
+            && psm_lsm_working
+            && hardware_metrics_working
+            && asil_working
+        {
             println!("\n🎉 PHASE 9: SAFETY FEATURES - COMPLETE!");
             println!("   ✅ ISO 26262 compliance framework operational");
             println!("   ✅ Safety mechanisms (PSM/LSM) implemented and verified");
@@ -116,7 +152,10 @@ mod phase9_safety_tests {
         }
 
         // Test assertions
-        assert!(safety_requirements_working, "Safety requirements should work");
+        assert!(
+            safety_requirements_working,
+            "Safety requirements should work"
+        );
         assert!(psm_lsm_working, "PSM/LSM mechanisms should work");
         assert!(hardware_metrics_working, "Hardware metrics should work");
         assert!(asil_working, "ASIL framework should work");
@@ -154,7 +193,10 @@ mod phase9_safety_tests {
         dual_mechanism.set_diagnostic_coverage(98.0);
 
         let effectiveness = dual_mechanism.calculate_effectiveness();
-        println!("Dual mechanism effectiveness: {:.2}%", effectiveness * 100.0);
+        println!(
+            "Dual mechanism effectiveness: {:.2}%",
+            effectiveness * 100.0
+        );
 
         // Dual mechanisms should have high combined effectiveness
         assert!(effectiveness > 0.99);

@@ -1,10 +1,10 @@
-use skalp_verify::*;
+use skalp_mir::mir::{Expression, Value};
 use skalp_verify::assertions::*;
 use skalp_verify::coverage::*;
 use skalp_verify::properties::*;
 use skalp_verify::requirements::*;
 use skalp_verify::testbench;
-use skalp_mir::mir::{Expression, Value};
+use skalp_verify::*;
 
 #[test]
 fn test_immediate_assertions() {
@@ -100,14 +100,12 @@ fn test_requirements_tracking() {
         req_type: RequirementType::Functional,
         parent: None,
         children: vec![],
-        criteria: vec![
-            VerificationCriterion {
-                description: "Reset clears all registers".to_string(),
-                method: VerificationMethod::Simulation,
-                pass_criteria: "All registers == 0 after reset".to_string(),
-                status: CriterionStatus::NotTested,
-            },
-        ],
+        criteria: vec![VerificationCriterion {
+            description: "Reset clears all registers".to_string(),
+            method: VerificationMethod::Simulation,
+            pass_criteria: "All registers == 0 after reset".to_string(),
+            status: CriterionStatus::NotTested,
+        }],
         properties: vec!["reset_prop".to_string()],
         tests: vec!["test_reset".to_string()],
         status: RequirementStatus::Implemented,
@@ -174,7 +172,11 @@ fn test_verification_report() {
         let req = Requirement {
             id: format!("REQ-{:03}", i),
             description: format!("Requirement {}", i),
-            priority: if i == 0 { Priority::Critical } else { Priority::Medium },
+            priority: if i == 0 {
+                Priority::Critical
+            } else {
+                Priority::Medium
+            },
             req_type: RequirementType::Functional,
             parent: None,
             children: vec![],
@@ -246,7 +248,7 @@ fn test_property_evaluator() {
 fn test_coverage_report() {
     let config = CoverageConfig::default();
     let coverage = Coverage::new(config);
-    
+
     let report = coverage.generate_report();
     assert_eq!(report.goal, 90.0);
     assert!(!report.goal_met); // No coverage yet
@@ -256,7 +258,7 @@ fn test_coverage_report() {
 fn test_assertion_report() {
     let checker = AssertionChecker::new();
     let report = checker.get_report();
-    
+
     assert_eq!(report.total_assertions, 0);
     assert_eq!(report.passed, 0);
     assert_eq!(report.failed, 0);
@@ -266,7 +268,7 @@ fn test_assertion_report() {
 fn test_traceability_report() {
     let tracker = RequirementTracker::new();
     let report = tracker.generate_traceability_report();
-    
+
     assert_eq!(report.orphan_requirements.len(), 0);
     assert_eq!(report.untested_requirements.len(), 0);
 }

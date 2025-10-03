@@ -3,12 +3,12 @@
 //! Provides power domain management and isolation analysis for safety-critical systems.
 //! Supports multiple power domains with controlled cross-domain communication.
 
+use crate::asil::AsilLevel;
+use chrono::{DateTime, Utc};
+use petgraph::graph::NodeIndex;
+use petgraph::Graph;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
-use crate::asil::AsilLevel;
-use petgraph::Graph;
-use petgraph::graph::NodeIndex;
 
 /// Power domain management system
 #[derive(Debug, Clone)]
@@ -653,7 +653,9 @@ impl PowerDomainManager {
 
         // Add node to dependency graph
         let node_index = self.hierarchy.dependency_graph.add_node(domain_id.clone());
-        self.hierarchy.domain_nodes.insert(domain_id.clone(), node_index);
+        self.hierarchy
+            .domain_nodes
+            .insert(domain_id.clone(), node_index);
 
         // Check if this is a root domain (no dependencies)
         // This would be determined by the domain type and configuration
@@ -672,15 +674,24 @@ impl PowerDomainManager {
         target: &str,
         dependency_type: DependencyType,
     ) -> Result<(), PowerDomainError> {
-        let source_node = self.hierarchy.domain_nodes.get(source)
+        let source_node = self
+            .hierarchy
+            .domain_nodes
+            .get(source)
             .ok_or_else(|| PowerDomainError::DomainNotFound(source.to_string()))?;
-        let target_node = self.hierarchy.domain_nodes.get(target)
+        let target_node = self
+            .hierarchy
+            .domain_nodes
+            .get(target)
             .ok_or_else(|| PowerDomainError::DomainNotFound(target.to_string()))?;
 
-        self.hierarchy.dependency_graph.add_edge(*source_node, *target_node, dependency_type);
+        self.hierarchy
+            .dependency_graph
+            .add_edge(*source_node, *target_node, dependency_type);
 
         // Update parent-child relationships
-        self.hierarchy.parent_child
+        self.hierarchy
+            .parent_child
             .entry(source.to_string())
             .or_insert_with(Vec::new)
             .push(target.to_string());
@@ -689,13 +700,20 @@ impl PowerDomainManager {
     }
 
     /// Add isolation barrier
-    pub fn add_isolation_barrier(&mut self, barrier: IsolationBarrier) -> Result<(), PowerDomainError> {
+    pub fn add_isolation_barrier(
+        &mut self,
+        barrier: IsolationBarrier,
+    ) -> Result<(), PowerDomainError> {
         // Validate that both domains exist
         if !self.domains.contains_key(&barrier.source_domain) {
-            return Err(PowerDomainError::DomainNotFound(barrier.source_domain.clone()));
+            return Err(PowerDomainError::DomainNotFound(
+                barrier.source_domain.clone(),
+            ));
         }
         if !self.domains.contains_key(&barrier.target_domain) {
-            return Err(PowerDomainError::DomainNotFound(barrier.target_domain.clone()));
+            return Err(PowerDomainError::DomainNotFound(
+                barrier.target_domain.clone(),
+            ));
         }
 
         self.isolation_barriers.push(barrier);
@@ -703,13 +721,20 @@ impl PowerDomainManager {
     }
 
     /// Add communication channel
-    pub fn add_communication_channel(&mut self, channel: CrossDomainChannel) -> Result<(), PowerDomainError> {
+    pub fn add_communication_channel(
+        &mut self,
+        channel: CrossDomainChannel,
+    ) -> Result<(), PowerDomainError> {
         // Validate that both domains exist
         if !self.domains.contains_key(&channel.source_domain) {
-            return Err(PowerDomainError::DomainNotFound(channel.source_domain.clone()));
+            return Err(PowerDomainError::DomainNotFound(
+                channel.source_domain.clone(),
+            ));
         }
         if !self.domains.contains_key(&channel.target_domain) {
-            return Err(PowerDomainError::DomainNotFound(channel.target_domain.clone()));
+            return Err(PowerDomainError::DomainNotFound(
+                channel.target_domain.clone(),
+            ));
         }
 
         self.communication_channels.push(channel);
@@ -753,7 +778,7 @@ impl PowerDomainManager {
         // Safety-critical domains cannot be powered off
         if domain.safety_level != AsilLevel::QM && matches!(new_state, PowerState::PoweredOff) {
             return Err(PowerDomainError::SafetyViolation(
-                "Safety-critical domain cannot be powered off".to_string()
+                "Safety-critical domain cannot be powered off".to_string(),
             ));
         }
 
@@ -761,11 +786,15 @@ impl PowerDomainManager {
         if let Some(children) = self.hierarchy.parent_child.get(domain_id) {
             for child_id in children {
                 if let Some(child_domain) = self.domains.get(child_id) {
-                    if matches!(new_state, PowerState::PoweredOff | PowerState::EmergencyShutdown) &&
-                       !matches!(child_domain.current_state, PowerState::PoweredOff) {
-                        return Err(PowerDomainError::DependencyViolation(
-                            format!("Cannot power off domain {} while {} is active", domain_id, child_id)
-                        ));
+                    if matches!(
+                        new_state,
+                        PowerState::PoweredOff | PowerState::EmergencyShutdown
+                    ) && !matches!(child_domain.current_state, PowerState::PoweredOff)
+                    {
+                        return Err(PowerDomainError::DependencyViolation(format!(
+                            "Cannot power off domain {} while {} is active",
+                            domain_id, child_id
+                        )));
                     }
                 }
             }
@@ -797,8 +826,7 @@ impl PowerDomainManager {
                         violation_type: ViolationType::InsufficientIsolation,
                         description: format!(
                             "Isolation voltage {} V is below required {} V",
-                            barrier.specifications.isolation_voltage,
-                            min_isolation_voltage
+                            barrier.specifications.isolation_voltage, min_isolation_voltage
                         ),
                         severity: ViolationSeverity::High,
                     });
@@ -841,11 +869,11 @@ impl PowerDomainManager {
         let max_level = if level1 > level2 { level1 } else { level2 };
 
         match max_level {
-            AsilLevel::QM => 1000.0,  // 1 kV
-            AsilLevel::A => 2500.0,   // 2.5 kV
-            AsilLevel::B => 4000.0,   // 4 kV
-            AsilLevel::C => 6000.0,   // 6 kV
-            AsilLevel::D => 8000.0,   // 8 kV
+            AsilLevel::QM => 1000.0, // 1 kV
+            AsilLevel::A => 2500.0,  // 2.5 kV
+            AsilLevel::B => 4000.0,  // 4 kV
+            AsilLevel::C => 6000.0,  // 6 kV
+            AsilLevel::D => 8000.0,  // 8 kV
         }
     }
 
@@ -858,19 +886,33 @@ impl PowerDomainManager {
         for domain in self.domains.values() {
             // Simplified power calculation based on state
             let domain_power = match domain.current_state {
-                PowerState::Active => domain.power_supply.max_current * domain.power_supply.nominal_voltage,
-                PowerState::ClockGated => domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.7,
-                PowerState::Retention => domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.1,
+                PowerState::Active => {
+                    domain.power_supply.max_current * domain.power_supply.nominal_voltage
+                }
+                PowerState::ClockGated => {
+                    domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.7
+                }
+                PowerState::Retention => {
+                    domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.1
+                }
                 PowerState::PoweredOff => 0.0,
-                PowerState::Standby => domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.5,
-                PowerState::Sleep => domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.2,
-                PowerState::DeepSleep => domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.05,
+                PowerState::Standby => {
+                    domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.5
+                }
+                PowerState::Sleep => {
+                    domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.2
+                }
+                PowerState::DeepSleep => {
+                    domain.power_supply.max_current * domain.power_supply.nominal_voltage * 0.05
+                }
                 PowerState::EmergencyShutdown => 0.0,
             };
 
             total_power += domain_power;
             power_by_domain.insert(domain.id.clone(), domain_power);
-            *power_by_state.entry(domain.current_state.clone()).or_insert(0.0) += domain_power;
+            *power_by_state
+                .entry(domain.current_state.clone())
+                .or_insert(0.0) += domain_power;
         }
 
         PowerConsumptionReport {
@@ -1199,7 +1241,11 @@ mod tests {
             },
             components: vec![],
             clock_domains: vec![],
-            power_states: vec![PowerState::Active, PowerState::Standby, PowerState::PoweredOff],
+            power_states: vec![
+                PowerState::Active,
+                PowerState::Standby,
+                PowerState::PoweredOff,
+            ],
             current_state: PowerState::Active,
             isolation_requirements: IsolationRequirements {
                 electrical_isolation: true,
@@ -1240,7 +1286,10 @@ mod tests {
         // Attempt to power off safety-critical domain should fail
         let result = manager.change_power_state("safety_domain", PowerState::PoweredOff);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PowerDomainError::SafetyViolation(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            PowerDomainError::SafetyViolation(_)
+        ));
     }
 
     #[test]
@@ -1380,7 +1429,10 @@ mod tests {
         assert_eq!(analysis.total_barriers, 1);
         assert_eq!(analysis.compliant_barriers, 0);
         assert!(!analysis.violations.is_empty());
-        assert_eq!(analysis.violations[0].violation_type, ViolationType::InsufficientIsolation);
+        assert_eq!(
+            analysis.violations[0].violation_type,
+            ViolationType::InsufficientIsolation
+        );
     }
 
     #[test]

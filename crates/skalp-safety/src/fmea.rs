@@ -3,13 +3,13 @@
 //! Automatic generation of FMEA tables from design intents and hardware structure.
 //! Supports both qualitative and quantitative analysis with ASIL evaluation.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use uuid::Uuid;
-use chrono::{DateTime, Utc};
 use crate::asil::AsilLevel;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::{HirEntity as Entity, HirIntent as Intent};
 use skalp_mir::mir::Module;
+use std::collections::HashMap;
+use uuid::Uuid;
 
 /// FMEA analysis for a design
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -594,7 +594,8 @@ impl FmeaGenerator {
         };
 
         // Generate FMEA entries for each component/function
-        analysis.fmea_entries = self.generate_entries(&analysis.system_boundary, &analysis.functional_analysis)?;
+        analysis.fmea_entries =
+            self.generate_entries(&analysis.system_boundary, &analysis.functional_analysis)?;
 
         // Calculate summary
         analysis.summary = self.calculate_summary(&analysis.fmea_entries);
@@ -664,7 +665,11 @@ impl FmeaGenerator {
     }
 
     /// Analyze functions from entities and intents
-    fn analyze_functions(&self, entities: &[Entity], intents: &[Intent]) -> Result<FunctionalAnalysis, FmeaError> {
+    fn analyze_functions(
+        &self,
+        entities: &[Entity],
+        intents: &[Intent],
+    ) -> Result<FunctionalAnalysis, FmeaError> {
         let mut functions = vec![];
         let dependencies = HashMap::new();
 
@@ -715,18 +720,16 @@ impl FmeaGenerator {
 
         // Generate entries for each component
         for component in &boundary.components {
-            let component_failures = self.failure_mode_db
+            let component_failures = self
+                .failure_mode_db
                 .component_failures
                 .get(&component.component_type)
                 .cloned()
                 .unwrap_or_default();
 
             for failure_mode in component_failures {
-                let entry = self.create_fmea_entry(
-                    &component.name,
-                    failure_mode,
-                    functional_analysis,
-                )?;
+                let entry =
+                    self.create_fmea_entry(&component.name, failure_mode, functional_analysis)?;
                 entries.push(entry);
             }
 
@@ -820,7 +823,11 @@ impl FmeaGenerator {
             severity: SeverityClass::S2,
             exposure: ExposureClass::E3,
             controllability: ControllabilityClass::C2,
-            determined_asil: self.determine_asil(SeverityClass::S2, ExposureClass::E3, ControllabilityClass::C2),
+            determined_asil: self.determine_asil(
+                SeverityClass::S2,
+                ExposureClass::E3,
+                ControllabilityClass::C2,
+            ),
             justification: "Based on severity, exposure, and controllability analysis".to_string(),
         };
 
@@ -835,48 +842,51 @@ impl FmeaGenerator {
     }
 
     /// Determine ASIL level from S, E, C classification
-    fn determine_asil(&self, severity: SeverityClass, exposure: ExposureClass, controllability: ControllabilityClass) -> AsilLevel {
+    fn determine_asil(
+        &self,
+        severity: SeverityClass,
+        exposure: ExposureClass,
+        controllability: ControllabilityClass,
+    ) -> AsilLevel {
         // ISO 26262 ASIL determination matrix
         match (severity, exposure, controllability) {
-            (SeverityClass::S1, _, _) => {
-                match (exposure, controllability) {
-                    (ExposureClass::E1 | ExposureClass::E2, _) => AsilLevel::QM,
-                    (ExposureClass::E3, ControllabilityClass::C1) => AsilLevel::QM,
-                    (ExposureClass::E3, ControllabilityClass::C2 | ControllabilityClass::C3) => AsilLevel::A,
-                    (ExposureClass::E4, ControllabilityClass::C1) => AsilLevel::A,
-                    (ExposureClass::E4, ControllabilityClass::C2) => AsilLevel::A,
-                    (ExposureClass::E4, ControllabilityClass::C3) => AsilLevel::B,
+            (SeverityClass::S1, _, _) => match (exposure, controllability) {
+                (ExposureClass::E1 | ExposureClass::E2, _) => AsilLevel::QM,
+                (ExposureClass::E3, ControllabilityClass::C1) => AsilLevel::QM,
+                (ExposureClass::E3, ControllabilityClass::C2 | ControllabilityClass::C3) => {
+                    AsilLevel::A
                 }
-            }
-            (SeverityClass::S2, _, _) => {
-                match (exposure, controllability) {
-                    (ExposureClass::E1, _) => AsilLevel::QM,
-                    (ExposureClass::E2, ControllabilityClass::C1) => AsilLevel::QM,
-                    (ExposureClass::E2, ControllabilityClass::C2) => AsilLevel::A,
-                    (ExposureClass::E2, ControllabilityClass::C3) => AsilLevel::B,
-                    (ExposureClass::E3, ControllabilityClass::C1) => AsilLevel::A,
-                    (ExposureClass::E3, ControllabilityClass::C2) => AsilLevel::B,
-                    (ExposureClass::E3, ControllabilityClass::C3) => AsilLevel::C,
-                    (ExposureClass::E4, ControllabilityClass::C1) => AsilLevel::B,
-                    (ExposureClass::E4, ControllabilityClass::C2) => AsilLevel::C,
-                    (ExposureClass::E4, ControllabilityClass::C3) => AsilLevel::D,
+                (ExposureClass::E4, ControllabilityClass::C1) => AsilLevel::A,
+                (ExposureClass::E4, ControllabilityClass::C2) => AsilLevel::A,
+                (ExposureClass::E4, ControllabilityClass::C3) => AsilLevel::B,
+            },
+            (SeverityClass::S2, _, _) => match (exposure, controllability) {
+                (ExposureClass::E1, _) => AsilLevel::QM,
+                (ExposureClass::E2, ControllabilityClass::C1) => AsilLevel::QM,
+                (ExposureClass::E2, ControllabilityClass::C2) => AsilLevel::A,
+                (ExposureClass::E2, ControllabilityClass::C3) => AsilLevel::B,
+                (ExposureClass::E3, ControllabilityClass::C1) => AsilLevel::A,
+                (ExposureClass::E3, ControllabilityClass::C2) => AsilLevel::B,
+                (ExposureClass::E3, ControllabilityClass::C3) => AsilLevel::C,
+                (ExposureClass::E4, ControllabilityClass::C1) => AsilLevel::B,
+                (ExposureClass::E4, ControllabilityClass::C2) => AsilLevel::C,
+                (ExposureClass::E4, ControllabilityClass::C3) => AsilLevel::D,
+            },
+            (SeverityClass::S3, _, _) => match (exposure, controllability) {
+                (ExposureClass::E1, ControllabilityClass::C1) => AsilLevel::QM,
+                (ExposureClass::E1, ControllabilityClass::C2) => AsilLevel::A,
+                (ExposureClass::E1, ControllabilityClass::C3) => AsilLevel::B,
+                (ExposureClass::E2, ControllabilityClass::C1) => AsilLevel::A,
+                (ExposureClass::E2, ControllabilityClass::C2) => AsilLevel::B,
+                (ExposureClass::E2, ControllabilityClass::C3) => AsilLevel::C,
+                (ExposureClass::E3, ControllabilityClass::C1) => AsilLevel::B,
+                (ExposureClass::E3, ControllabilityClass::C2) => AsilLevel::C,
+                (ExposureClass::E3, ControllabilityClass::C3) => AsilLevel::D,
+                (ExposureClass::E4, ControllabilityClass::C1) => AsilLevel::C,
+                (ExposureClass::E4, ControllabilityClass::C2 | ControllabilityClass::C3) => {
+                    AsilLevel::D
                 }
-            }
-            (SeverityClass::S3, _, _) => {
-                match (exposure, controllability) {
-                    (ExposureClass::E1, ControllabilityClass::C1) => AsilLevel::QM,
-                    (ExposureClass::E1, ControllabilityClass::C2) => AsilLevel::A,
-                    (ExposureClass::E1, ControllabilityClass::C3) => AsilLevel::B,
-                    (ExposureClass::E2, ControllabilityClass::C1) => AsilLevel::A,
-                    (ExposureClass::E2, ControllabilityClass::C2) => AsilLevel::B,
-                    (ExposureClass::E2, ControllabilityClass::C3) => AsilLevel::C,
-                    (ExposureClass::E3, ControllabilityClass::C1) => AsilLevel::B,
-                    (ExposureClass::E3, ControllabilityClass::C2) => AsilLevel::C,
-                    (ExposureClass::E3, ControllabilityClass::C3) => AsilLevel::D,
-                    (ExposureClass::E4, ControllabilityClass::C1) => AsilLevel::C,
-                    (ExposureClass::E4, ControllabilityClass::C2 | ControllabilityClass::C3) => AsilLevel::D,
-                }
-            }
+            },
         }
     }
 
@@ -892,13 +902,19 @@ impl FmeaGenerator {
 
         for entry in entries {
             // Count criticality levels
-            *criticality_breakdown.entry(entry.risk_assessment.criticality.clone()).or_insert(0) += 1;
+            *criticality_breakdown
+                .entry(entry.risk_assessment.criticality.clone())
+                .or_insert(0) += 1;
 
             // Count ASIL levels
-            *asil_breakdown.entry(entry.risk_assessment.asil_determination.determined_asil).or_insert(0) += 1;
+            *asil_breakdown
+                .entry(entry.risk_assessment.asil_determination.determined_asil)
+                .or_insert(0) += 1;
 
             // Count failure classes
-            *failure_class_breakdown.entry(entry.failure_mode.failure_class.clone()).or_insert(0) += 1;
+            *failure_class_breakdown
+                .entry(entry.failure_mode.failure_class.clone())
+                .or_insert(0) += 1;
 
             // Calculate average RPN
             if let Some(rpn) = entry.risk_assessment.rpn {
@@ -907,7 +923,9 @@ impl FmeaGenerator {
             }
 
             // Count open actions
-            open_actions += entry.recommended_actions.iter()
+            open_actions += entry
+                .recommended_actions
+                .iter()
                 .filter(|a| !matches!(a.status, ActionStatus::Completed | ActionStatus::Verified))
                 .count();
         }
@@ -919,14 +937,12 @@ impl FmeaGenerator {
         };
 
         // Find highest risk entries (top 5 by RPN)
-        let mut rpn_entries: Vec<_> = entries.iter()
+        let mut rpn_entries: Vec<_> = entries
+            .iter()
             .filter_map(|e| e.risk_assessment.rpn.map(|rpn| (rpn, e.id.clone())))
             .collect();
         rpn_entries.sort_by(|a, b| b.0.cmp(&a.0));
-        let highest_risk_entries = rpn_entries.into_iter()
-            .take(5)
-            .map(|(_, id)| id)
-            .collect();
+        let highest_risk_entries = rpn_entries.into_iter().take(5).map(|(_, id)| id).collect();
 
         FmeaSummary {
             total_entries,
@@ -944,11 +960,20 @@ impl FmeaGenerator {
         let name_lower = name.to_lowercase();
         if name_lower.contains("cpu") || name_lower.contains("processor") {
             ComponentType::Processor
-        } else if name_lower.contains("memory") || name_lower.contains("ram") || name_lower.contains("rom") {
+        } else if name_lower.contains("memory")
+            || name_lower.contains("ram")
+            || name_lower.contains("rom")
+        {
             ComponentType::Memory
-        } else if name_lower.contains("io") || name_lower.contains("input") || name_lower.contains("output") {
+        } else if name_lower.contains("io")
+            || name_lower.contains("input")
+            || name_lower.contains("output")
+        {
             ComponentType::InputOutput
-        } else if name_lower.contains("comm") || name_lower.contains("uart") || name_lower.contains("spi") {
+        } else if name_lower.contains("comm")
+            || name_lower.contains("uart")
+            || name_lower.contains("spi")
+        {
             ComponentType::Communication
         } else if name_lower.contains("safety") || name_lower.contains("watchdog") {
             ComponentType::Safety
@@ -982,40 +1007,46 @@ impl Default for FailureModeDatabase {
         };
 
         // Add common failure modes for processors
-        db.component_failures.insert(ComponentType::Processor, vec![
-            FailureMode {
-                id: "PROC-001".to_string(),
-                description: "Instruction execution error".to_string(),
-                category: FailureModeCategory::IncorrectValue,
-                failure_rate: Some(100.0), // 100 FIT
-                failure_class: FailureClass::SinglePoint,
-            },
-            FailureMode {
-                id: "PROC-002".to_string(),
-                description: "Clock failure".to_string(),
-                category: FailureModeCategory::TimingFailure,
-                failure_rate: Some(50.0),
-                failure_class: FailureClass::SinglePoint,
-            },
-        ]);
+        db.component_failures.insert(
+            ComponentType::Processor,
+            vec![
+                FailureMode {
+                    id: "PROC-001".to_string(),
+                    description: "Instruction execution error".to_string(),
+                    category: FailureModeCategory::IncorrectValue,
+                    failure_rate: Some(100.0), // 100 FIT
+                    failure_class: FailureClass::SinglePoint,
+                },
+                FailureMode {
+                    id: "PROC-002".to_string(),
+                    description: "Clock failure".to_string(),
+                    category: FailureModeCategory::TimingFailure,
+                    failure_rate: Some(50.0),
+                    failure_class: FailureClass::SinglePoint,
+                },
+            ],
+        );
 
         // Add common failure modes for memory
-        db.component_failures.insert(ComponentType::Memory, vec![
-            FailureMode {
-                id: "MEM-001".to_string(),
-                description: "Single bit upset".to_string(),
-                category: FailureModeCategory::IncorrectValue,
-                failure_rate: Some(200.0),
-                failure_class: FailureClass::Safe, // If ECC is present
-            },
-            FailureMode {
-                id: "MEM-002".to_string(),
-                description: "Double bit upset".to_string(),
-                category: FailureModeCategory::IncorrectValue,
-                failure_rate: Some(10.0),
-                failure_class: FailureClass::SinglePoint,
-            },
-        ]);
+        db.component_failures.insert(
+            ComponentType::Memory,
+            vec![
+                FailureMode {
+                    id: "MEM-001".to_string(),
+                    description: "Single bit upset".to_string(),
+                    category: FailureModeCategory::IncorrectValue,
+                    failure_rate: Some(200.0),
+                    failure_class: FailureClass::Safe, // If ECC is present
+                },
+                FailureMode {
+                    id: "MEM-002".to_string(),
+                    description: "Double bit upset".to_string(),
+                    category: FailureModeCategory::IncorrectValue,
+                    failure_rate: Some(10.0),
+                    failure_class: FailureClass::SinglePoint,
+                },
+            ],
+        );
 
         db
     }
@@ -1038,7 +1069,6 @@ impl Default for FmeaSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_asil_determination() {
@@ -1077,10 +1107,22 @@ mod tests {
             analysis_depth: AnalysisDepth::Component,
         });
 
-        assert_eq!(generator.classify_component("cpu_core"), ComponentType::Processor);
-        assert_eq!(generator.classify_component("memory_controller"), ComponentType::Memory);
-        assert_eq!(generator.classify_component("io_driver"), ComponentType::InputOutput);
-        assert_eq!(generator.classify_component("safety_monitor"), ComponentType::Safety);
+        assert_eq!(
+            generator.classify_component("cpu_core"),
+            ComponentType::Processor
+        );
+        assert_eq!(
+            generator.classify_component("memory_controller"),
+            ComponentType::Memory
+        );
+        assert_eq!(
+            generator.classify_component("io_driver"),
+            ComponentType::InputOutput
+        );
+        assert_eq!(
+            generator.classify_component("safety_monitor"),
+            ComponentType::Safety
+        );
     }
 
     #[test]

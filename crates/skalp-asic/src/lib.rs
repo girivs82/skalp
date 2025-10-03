@@ -7,21 +7,21 @@
 //! - GDSII generation
 //! - Design rule checking
 
-pub mod sky130;
+pub mod cts;
+pub mod cts_manual;
+pub mod drc;
+pub mod floorplan;
+pub mod gdsii;
+pub mod incremental;
+pub mod interactive;
 pub mod placement;
 pub mod routing;
-pub mod cts;
-pub mod gdsii;
-pub mod drc;
-pub mod interactive;
+pub mod routing_guide;
+pub mod sdc;
+pub mod sky130;
+pub mod timing;
 pub mod visualization;
 pub mod web_ui;
-pub mod routing_guide;
-pub mod cts_manual;
-pub mod incremental;
-pub mod sdc;
-pub mod floorplan;
-pub mod timing;
 
 use skalp_lir::LirDesign;
 use thiserror::Error;

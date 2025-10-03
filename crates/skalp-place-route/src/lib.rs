@@ -7,12 +7,12 @@
 //! - Bitstream generation
 //! - Device programming
 
-pub mod placer;
-pub mod router;
 pub mod bitstream;
 pub mod device;
+pub mod placer;
+pub mod router;
 pub mod timing;
 
+pub use bitstream::BitstreamGenerator;
 pub use placer::Placer;
 pub use router::Router;
-pub use bitstream::BitstreamGenerator;

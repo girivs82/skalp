@@ -2,11 +2,11 @@
 //!
 //! Provides interactive routing control with congestion-aware guidance
 
-use crate::{AsicError};
-use crate::routing::{Router, RoutingResult, GlobalRouting, DetailedRouting, RouteSegment};
 use crate::placement::Placement;
-use std::collections::{HashMap, HashSet, BinaryHeap};
+use crate::routing::{DetailedRouting, GlobalRouting, RouteSegment, Router, RoutingResult};
+use crate::AsicError;
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Routing guidance system
 pub struct RoutingGuide {
@@ -169,7 +169,9 @@ impl PartialEq for RerouteTask {
 
 impl Ord for RerouteTask {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.priority.partial_cmp(&other.priority).unwrap_or(Ordering::Equal)
+        self.priority
+            .partial_cmp(&other.priority)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -215,7 +217,10 @@ impl RoutingGuide {
 
     /// Add manual route constraint
     pub fn add_constraint(&mut self, net: String, constraint: RouteConstraint) {
-        self.manual_routes.entry(net).or_insert(Vec::new()).push(constraint);
+        self.manual_routes
+            .entry(net)
+            .or_insert(Vec::new())
+            .push(constraint);
     }
 
     /// Add routing blockage
@@ -231,8 +236,7 @@ impl RoutingGuide {
     /// Check if point is in blocked region
     pub fn is_blocked(&self, x: f64, y: f64, layer: usize) -> bool {
         for blockage in &self.blockages {
-            if blockage.layers.contains(&layer) &&
-               self.in_region(x, y, &blockage.region) {
+            if blockage.layers.contains(&layer) && self.in_region(x, y, &blockage.region) {
                 match blockage.blockage_type {
                     BlockageType::Hard => return true,
                     _ => {}
@@ -248,8 +252,7 @@ impl RoutingGuide {
 
         // Check blockages
         for blockage in &self.blockages {
-            if blockage.layers.contains(&layer) &&
-               self.in_region(x, y, &blockage.region) {
+            if blockage.layers.contains(&layer) && self.in_region(x, y, &blockage.region) {
                 match &blockage.blockage_type {
                     BlockageType::Soft { penalty: p } => penalty *= p,
                     _ => {}
@@ -267,13 +270,11 @@ impl RoutingGuide {
 
     /// Check if point is in region
     fn in_region(&self, x: f64, y: f64, region: &Region) -> bool {
-        x >= region.x1 && x <= region.x2 &&
-        y >= region.y1 && y <= region.y2
+        x >= region.x1 && x <= region.x2 && y >= region.y1 && y <= region.y2
     }
 
     /// Analyze congestion and suggest fixes
-    pub fn analyze_congestion(&mut self, routing: &RoutingResult)
-                            -> Vec<CongestionFix> {
+    pub fn analyze_congestion(&mut self, routing: &RoutingResult) -> Vec<CongestionFix> {
         let mut fixes = Vec::new();
         let snapshot = self.create_congestion_snapshot(routing);
 
@@ -293,8 +294,7 @@ impl RoutingGuide {
     }
 
     /// Create congestion snapshot
-    fn create_congestion_snapshot(&self, routing: &RoutingResult)
-                                 -> CongestionSnapshot {
+    fn create_congestion_snapshot(&self, routing: &RoutingResult) -> CongestionSnapshot {
         let mut hotspots = Vec::new();
         let mut total_congestion = 0.0;
         let mut count = 0;
@@ -317,7 +317,7 @@ impl RoutingGuide {
                             y as f64 * 10.0,
                             (x + 1) as f64 * 10.0,
                             (y + 1) as f64 * 10.0,
-                            routing
+                            routing,
                         );
 
                         hotspots.push(CongestionHotspot {
@@ -340,22 +340,31 @@ impl RoutingGuide {
             timestamp: std::time::Instant::now(),
             iteration: self.congestion_history.len(),
             peak,
-            average: if count > 0 { total_congestion / count as f64 } else { 0.0 },
+            average: if count > 0 {
+                total_congestion / count as f64
+            } else {
+                0.0
+            },
             hotspots,
         }
     }
 
     /// Find nets in region
-    fn find_nets_in_region(&self, x1: f64, y1: f64, x2: f64, y2: f64,
-                          routing: &RoutingResult) -> Vec<String> {
+    fn find_nets_in_region(
+        &self,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        routing: &RoutingResult,
+    ) -> Vec<String> {
         let mut nets = Vec::new();
 
         for routed_net in &routing.routed_nets {
             for segment in &routed_net.segments {
                 // Check if any point in the segment is in the region
                 for point in &segment.points {
-                    if point.0 >= x1 && point.0 <= x2 &&
-                       point.1 >= y1 && point.1 <= y2 {
+                    if point.0 >= x1 && point.0 <= x2 && point.1 >= y1 && point.1 <= y2 {
                         nets.push(routed_net.name.clone());
                         break;
                     }
@@ -366,9 +375,8 @@ impl RoutingGuide {
         nets
     }
 
-/// Generate fix suggestions
-    fn generate_fix_suggestions(&self, hotspot: &CongestionHotspot)
-                              -> Vec<FixSuggestion> {
+    /// Generate fix suggestions
+    fn generate_fix_suggestions(&self, hotspot: &CongestionHotspot) -> Vec<FixSuggestion> {
         let mut suggestions = Vec::new();
 
         // Suggest rerouting
@@ -450,8 +458,7 @@ impl InteractiveRouter {
     }
 
     /// Perform guided routing
-    pub fn route_guided(&mut self, placement: &Placement)
-                      -> Result<RoutingResult, AsicError> {
+    pub fn route_guided(&mut self, placement: &Placement) -> Result<RoutingResult, AsicError> {
         // Save current state
         let initial_result = self.router.route(placement)?;
         self.save_state(initial_result.clone());
@@ -485,20 +492,20 @@ impl InteractiveRouter {
     }
 
     /// Apply manual routes
-    fn apply_manual_routes(&self, mut result: RoutingResult)
-                         -> Result<RoutingResult, AsicError> {
+    fn apply_manual_routes(&self, mut result: RoutingResult) -> Result<RoutingResult, AsicError> {
         for (net, constraints) in &self.guide.manual_routes {
             for constraint in constraints {
                 match &constraint.constraint_type {
                     RouteConstraintType::Fixed { path } => {
                         // Replace with fixed path - find matching net and update
-                        if let Some(routed_net) = result.routed_nets.iter_mut()
-                            .find(|n| n.name == *net) {
+                        if let Some(routed_net) =
+                            result.routed_nets.iter_mut().find(|n| n.name == *net)
+                        {
                             // Convert path to wire segments
                             let segments = self.create_segments_from_path(path);
                             routed_net.segments = segments;
                         }
-                    },
+                    }
                     _ => {
                         // Apply as routing hint
                     }
@@ -519,8 +526,11 @@ impl InteractiveRouter {
     }
 
     /// Apply congestion fix
-    fn apply_congestion_fix(&mut self, result: &mut RoutingResult,
-                          fix: CongestionFix) -> Result<(), AsicError> {
+    fn apply_congestion_fix(
+        &mut self,
+        result: &mut RoutingResult,
+        fix: CongestionFix,
+    ) -> Result<(), AsicError> {
         for suggestion in fix.suggestions {
             match suggestion {
                 FixSuggestion::Reroute { nets, .. } => {
@@ -531,18 +541,19 @@ impl InteractiveRouter {
                             reason: RerouteReason::Congestion,
                         });
                     }
-                },
+                }
                 FixSuggestion::ChangeLayer { nets, to_layer, .. } => {
                     for net in nets {
                         // Find the net in routed_nets
-                        if let Some(routed_net) = result.routed_nets.iter_mut()
-                            .find(|n| n.name == net) {
+                        if let Some(routed_net) =
+                            result.routed_nets.iter_mut().find(|n| n.name == net)
+                        {
                             for segment in &mut routed_net.segments {
                                 segment.layer = to_layer;
                             }
                         }
                     }
-                },
+                }
                 _ => {}
             }
         }
@@ -550,8 +561,11 @@ impl InteractiveRouter {
     }
 
     /// Reroute specific net
-    fn reroute_net(&mut self, result: &mut RoutingResult,
-                   task: &RerouteTask) -> Result<(), AsicError> {
+    fn reroute_net(
+        &mut self,
+        result: &mut RoutingResult,
+        task: &RerouteTask,
+    ) -> Result<(), AsicError> {
         // Remove existing route
         // Remove the net from routed_nets
         result.routed_nets.retain(|n| n.name != task.net);
@@ -603,13 +617,19 @@ impl InteractiveRouter {
         // Congestion analysis
         if let Some(snapshot) = self.guide.congestion_history.last() {
             report.push_str(&format!("Peak Congestion: {:.1}%\n", snapshot.peak * 100.0));
-            report.push_str(&format!("Average Congestion: {:.1}%\n", snapshot.average * 100.0));
+            report.push_str(&format!(
+                "Average Congestion: {:.1}%\n",
+                snapshot.average * 100.0
+            ));
             report.push_str(&format!("Hotspots: {}\n\n", snapshot.hotspots.len()));
         }
 
         // Net statistics
         report.push_str(&format!("Total Nets: {}\n", result.routed_nets.len()));
-        report.push_str(&format!("Critical Nets: {}\n", self.guide.critical_nets.len()));
+        report.push_str(&format!(
+            "Critical Nets: {}\n",
+            self.guide.critical_nets.len()
+        ));
 
         // Manual routes
         let manual_count = self.guide.manual_routes.len();
@@ -622,8 +642,11 @@ impl InteractiveRouter {
     }
 
     /// Intelligently reroute a net avoiding congestion
-    fn reroute_net_intelligently(&self, net_name: &str, routing: &RoutingResult)
-                                -> Result<Option<crate::routing::RoutedNet>, AsicError> {
+    fn reroute_net_intelligently(
+        &self,
+        net_name: &str,
+        routing: &RoutingResult,
+    ) -> Result<Option<crate::routing::RoutedNet>, AsicError> {
         // Analyze current congestion to find alternative paths
         let congestion = &routing.congestion;
 
@@ -639,7 +662,7 @@ impl InteractiveRouter {
                     points: vec![(0.0, 0.0), (10.0, 10.0)],
                     layer: preferred_layers.get(0).copied().unwrap_or(1),
                     width: 0.14, // Min width for SKY130
-                }
+                },
             ],
             vias: Vec::new(),
         };
@@ -665,7 +688,10 @@ impl InteractiveRouter {
         layer_congestion.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
         // Return layers in order of increasing congestion
-        layer_congestion.into_iter().map(|(layer, _)| layer + 1).collect()
+        layer_congestion
+            .into_iter()
+            .map(|(layer, _)| layer + 1)
+            .collect()
     }
 }
 

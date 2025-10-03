@@ -2,11 +2,11 @@
 mod counter_sim_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
-    use skalp_sir::convert_mir_to_sir;
     use skalp_sim::{
         simulator::SimulationConfig,
-        testbench::{Testbench, TestVectorBuilder},
+        testbench::{TestVectorBuilder, Testbench},
     };
+    use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
     async fn test_counter_gpu_simulation() {
@@ -44,9 +44,10 @@ mod counter_sim_tests {
         }
 
         // Compile to MIR
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::Basic);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         // Debug: Print MIR module info
         println!("\n=== MIR Module Info ===");
@@ -62,13 +63,19 @@ mod counter_sim_tests {
 
         println!("\n=== SIR Analysis ===");
         println!("Module: {}", sir.name);
-        println!("State elements: {:?}", sir.state_elements.keys().collect::<Vec<_>>());
+        println!(
+            "State elements: {:?}",
+            sir.state_elements.keys().collect::<Vec<_>>()
+        );
         println!("Combinational nodes: {}", sir.combinational_nodes.len());
         println!("Sequential nodes: {}", sir.sequential_nodes.len());
 
         // Check for ADD operation
         let has_add = sir.combinational_nodes.iter().any(|node| {
-            matches!(node.kind, skalp_sir::sir::SirNodeKind::BinaryOp(skalp_sir::sir::BinaryOperation::Add))
+            matches!(
+                node.kind,
+                skalp_sir::sir::SirNodeKind::BinaryOp(skalp_sir::sir::BinaryOperation::Add)
+            )
         });
 
         assert!(has_add, "Should have ADD operation in combinational logic");
@@ -76,8 +83,10 @@ mod counter_sim_tests {
         // Print all signals for debugging
         println!("\n=== All SIR Signals ===");
         for signal in &sir.signals {
-            println!("Signal '{}': width={}, is_state={}, driver={:?}",
-                signal.name, signal.width, signal.is_state, signal.driver_node);
+            println!(
+                "Signal '{}': width={}, is_state={}, driver={:?}",
+                signal.name, signal.width, signal.is_state, signal.driver_node
+            );
         }
 
         // Extract cones
@@ -86,7 +95,10 @@ mod counter_sim_tests {
         for (i, cone) in cones.iter().enumerate() {
             println!("  Cone {}: nodes={:?}", i, cone.nodes);
         }
-        assert!(cones.len() > 0, "Should have at least one combinational cone");
+        assert!(
+            cones.len() > 0,
+            "Should have at least one combinational cone"
+        );
 
         // Generate and print Metal shader for debugging
         let shader_code = skalp_sir::generate_metal_shader(&sir);
@@ -103,7 +115,10 @@ mod counter_sim_tests {
             }
         }
         for node in &sir.combinational_nodes {
-            if matches!(node.kind, skalp_sir::sir::SirNodeKind::BinaryOp(skalp_sir::sir::BinaryOperation::Add)) {
+            if matches!(
+                node.kind,
+                skalp_sir::sir::SirNodeKind::BinaryOp(skalp_sir::sir::BinaryOperation::Add)
+            ) {
                 println!("ADD Node {}:", node.id);
                 println!("  Inputs: {:?}", node.inputs);
                 println!("  Outputs: {:?}", node.outputs);
@@ -125,59 +140,73 @@ mod counter_sim_tests {
         };
 
         // Create testbench
-        let mut testbench = Testbench::new(config).await
+        let mut testbench = Testbench::new(config)
+            .await
             .expect("Failed to create testbench");
 
         // Load the module
-        testbench.load_module(&sir).await
+        testbench
+            .load_module(&sir)
+            .await
             .expect("Failed to load module");
 
         // Create test vectors
         // Apply reset for first few cycles
-        testbench.add_test_vector(TestVectorBuilder::new(0)
-            .with_input("rst", vec![1])
-            .build());
+        testbench.add_test_vector(TestVectorBuilder::new(0).with_input("rst", vec![1]).build());
 
-        testbench.add_test_vector(TestVectorBuilder::new(2)
-            .with_input("rst", vec![1])
-            .with_expected_output("count", vec![0])
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(2)
+                .with_input("rst", vec![1])
+                .with_expected_output("count", vec![0])
+                .build(),
+        );
 
         // Release reset
         // With synchronous reset, counter increments on the first clock edge where rst=0
-        testbench.add_test_vector(TestVectorBuilder::new(4)
-            .with_input("rst", vec![0])
-            .with_expected_output("count", vec![1])  // Correct: increments on this clock edge
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(4)
+                .with_input("rst", vec![0])
+                .with_expected_output("count", vec![1]) // Correct: increments on this clock edge
+                .build(),
+        );
 
-        testbench.add_test_vector(TestVectorBuilder::new(6)
-            .with_input("rst", vec![0])
-            .with_expected_output("count", vec![2])
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(6)
+                .with_input("rst", vec![0])
+                .with_expected_output("count", vec![2])
+                .build(),
+        );
 
-        testbench.add_test_vector(TestVectorBuilder::new(8)
-            .with_input("rst", vec![0])
-            .with_expected_output("count", vec![3])
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(8)
+                .with_input("rst", vec![0])
+                .with_expected_output("count", vec![3])
+                .build(),
+        );
 
-        testbench.add_test_vector(TestVectorBuilder::new(10)
-            .with_input("rst", vec![0])
-            .with_expected_output("count", vec![4])
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(10)
+                .with_input("rst", vec![0])
+                .with_expected_output("count", vec![4])
+                .build(),
+        );
 
-        testbench.add_test_vector(TestVectorBuilder::new(12)
-            .with_input("rst", vec![0])
-            .with_expected_output("count", vec![5])
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(12)
+                .with_input("rst", vec![0])
+                .with_expected_output("count", vec![5])
+                .build(),
+        );
 
-        testbench.add_test_vector(TestVectorBuilder::new(14)
-            .with_input("rst", vec![0])
-            .with_expected_output("count", vec![6])
-            .build());
+        testbench.add_test_vector(
+            TestVectorBuilder::new(14)
+                .with_input("rst", vec![0])
+                .with_expected_output("count", vec![6])
+                .build(),
+        );
 
         // Run the test
-        let results = testbench.run_test().await
-            .expect("Failed to run test");
+        let results = testbench.run_test().await.expect("Failed to run test");
 
         // Print report
         println!("{}", testbench.generate_report());
@@ -189,16 +218,23 @@ mod counter_sim_tests {
             // Print the actual SIR structure
             println!("\n=== SIR Signal Details ===");
             for signal in &sir.signals {
-                if signal.name == "count" || signal.name == "counter" || signal.name.contains("node_6") {
-                    println!("Signal '{}': width={}, is_state={}, driver={:?}",
-                        signal.name, signal.width, signal.is_state, signal.driver_node);
+                if signal.name == "count"
+                    || signal.name == "counter"
+                    || signal.name.contains("node_6")
+                {
+                    println!(
+                        "Signal '{}': width={}, is_state={}, driver={:?}",
+                        signal.name, signal.width, signal.is_state, signal.driver_node
+                    );
                 }
             }
 
             println!("\n=== Flip-flop connections ===");
             for node in &sir.sequential_nodes {
-                println!("FF Node {}: inputs={:?}, outputs={:?}",
-                    node.id, node.inputs, node.outputs);
+                println!(
+                    "FF Node {}: inputs={:?}, outputs={:?}",
+                    node.id, node.inputs, node.outputs
+                );
             }
         }
 
@@ -207,4 +243,3 @@ mod counter_sim_tests {
         assert!(results.len() > 0, "Should have test results");
     }
 }
-

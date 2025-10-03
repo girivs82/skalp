@@ -1,9 +1,9 @@
 //! Formal verification support using SMT solvers
 
-use z3::{Config, Context, Solver, ast::*, SatResult};
-use std::collections::HashMap;
 use crate::properties::{Property, PropertyExpr, TemporalOperator};
-use skalp_mir::mir::{Module, Expression as MirExpr, Statement, Process};
+use skalp_mir::mir::{Expression as MirExpr, Module, Process, Statement};
+use std::collections::HashMap;
+use z3::{ast::*, Config, Context, SatResult, Solver};
 
 /// Formal verification engine
 pub struct FormalEngine {
@@ -110,7 +110,11 @@ impl FormalEngine {
                     }
                 }
             }
-            Statement::Conditional { condition, then_branch, else_branch } => {
+            Statement::Conditional {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 let cond = self.translate_expression(condition);
                 if let Some(cond) = cond {
                     // Add implication constraints
@@ -134,9 +138,7 @@ impl FormalEngine {
     fn translate_expression(&self, expr: &MirExpr) -> Option<Dynamic> {
         match expr {
             MirExpr::Identifier(name) => self.variables.get(name).cloned(),
-            MirExpr::Literal(val) => {
-                Some(BV::from_u64(&self.context, *val, 32).into())
-            }
+            MirExpr::Literal(val) => Some(BV::from_u64(&self.context, *val, 32).into()),
             MirExpr::BinaryOp { op, left, right } => {
                 let l = self.translate_expression(left)?;
                 let r = self.translate_expression(right)?;
@@ -219,12 +221,8 @@ impl FormalEngine {
 
         for property in &self.properties {
             let result = match property.kind {
-                crate::properties::PropertyKind::Safety => {
-                    self.verify_safety(property)
-                }
-                crate::properties::PropertyKind::Liveness => {
-                    self.verify_liveness(property)
-                }
+                crate::properties::PropertyKind::Safety => self.verify_safety(property),
+                crate::properties::PropertyKind::Liveness => self.verify_liveness(property),
                 _ => PropertyResult {
                     property_name: property.name.clone(),
                     status: VerificationStatus::Unknown,
@@ -252,7 +250,7 @@ impl FormalEngine {
         for k in 0..=self.config.bmc_bound {
             // Create unrolled model
             let unrolled = self.unroll_model(k);
-            
+
             // Add property constraint (negated for counterexample search)
             let prop_constraint = self.translate_property(&property.expression, k);
             if let Some(constraint) = prop_constraint {
@@ -317,7 +315,7 @@ impl FormalEngine {
     /// Unroll model for k steps
     fn unroll_model(&mut self, k: usize) -> Vec<Dynamic> {
         let mut constraints = Vec::new();
-        
+
         // Create variables for each time step
         for i in 0..=k {
             for (name, var) in &self.variables {
@@ -406,7 +404,10 @@ impl FormalEngine {
                             }
                         }
                         if !constraints.is_empty() {
-                            Some(Bool::and(&self.context, &constraints.iter().collect::<Vec<_>>()).into())
+                            Some(
+                                Bool::and(&self.context, &constraints.iter().collect::<Vec<_>>())
+                                    .into(),
+                            )
                         } else {
                             None
                         }
@@ -423,7 +424,10 @@ impl FormalEngine {
                             }
                         }
                         if !constraints.is_empty() {
-                            Some(Bool::or(&self.context, &constraints.iter().collect::<Vec<_>>()).into())
+                            Some(
+                                Bool::or(&self.context, &constraints.iter().collect::<Vec<_>>())
+                                    .into(),
+                            )
                         } else {
                             None
                         }
@@ -451,19 +455,25 @@ impl FormalEngine {
             trace.push(state);
         }
 
-        Counterexample {
-            depth,
-            trace,
-        }
+        Counterexample { depth, trace }
     }
 
     /// Compute overall verification status
     fn compute_overall_status(&self, results: &[PropertyResult]) -> VerificationStatus {
-        if results.iter().any(|r| r.status == VerificationStatus::Failed) {
+        if results
+            .iter()
+            .any(|r| r.status == VerificationStatus::Failed)
+        {
             VerificationStatus::Failed
-        } else if results.iter().all(|r| r.status == VerificationStatus::Proven) {
+        } else if results
+            .iter()
+            .all(|r| r.status == VerificationStatus::Proven)
+        {
             VerificationStatus::Proven
-        } else if results.iter().any(|r| r.status == VerificationStatus::Unknown) {
+        } else if results
+            .iter()
+            .any(|r| r.status == VerificationStatus::Unknown)
+        {
             VerificationStatus::Unknown
         } else {
             VerificationStatus::Bounded

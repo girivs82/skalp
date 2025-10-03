@@ -42,73 +42,84 @@ mod flow_block_tests {
         for signal in &implementation.signals {
             println!("  Signal: {}", signal.name);
         }
-        assert!(implementation.signals.len() >= 2, "Should have temp1 and temp2 signals");
+        assert!(
+            implementation.signals.len() >= 2,
+            "Should have temp1 and temp2 signals"
+        );
 
         // Find the flow statement in the HIR
         println!("Found {} event blocks:", implementation.event_blocks.len());
         for (i, event_block) in implementation.event_blocks.iter().enumerate() {
-            println!("  Event block {}: {} statements", i, event_block.statements.len());
+            println!(
+                "  Event block {}: {} statements",
+                i,
+                event_block.statements.len()
+            );
             for (j, stmt) in event_block.statements.iter().enumerate() {
                 match stmt {
                     skalp_frontend::hir::HirStatement::Flow(_) => {
                         println!("    Statement {}: Flow", j);
-                    },
+                    }
                     skalp_frontend::hir::HirStatement::If(if_stmt) => {
-                        println!("    Statement {}: If with {} then statements", j, if_stmt.then_statements.len());
+                        println!(
+                            "    Statement {}: If with {} then statements",
+                            j,
+                            if_stmt.then_statements.len()
+                        );
                         for (k, then_stmt) in if_stmt.then_statements.iter().enumerate() {
                             match then_stmt {
                                 skalp_frontend::hir::HirStatement::Flow(_) => {
                                     println!("      Then statement {}: Flow", k);
-                                },
+                                }
                                 skalp_frontend::hir::HirStatement::Assert(_) => {
                                     println!("      Then statement {}: Assert", k);
-                                },
+                                }
                                 skalp_frontend::hir::HirStatement::Property(_) => {
                                     println!("      Then statement {}: Property", k);
-                                },
+                                }
                                 skalp_frontend::hir::HirStatement::Cover(_) => {
                                     println!("      Then statement {}: Cover", k);
-                                },
+                                }
                                 _ => {
                                     println!("      Then statement {}: Other", k);
                                 }
                             }
                         }
-                    },
+                    }
                     skalp_frontend::hir::HirStatement::Assignment(_) => {
                         println!("    Statement {}: Assignment", j);
-                    },
+                    }
                     skalp_frontend::hir::HirStatement::Match(_) => {
                         println!("    Statement {}: Match", j);
-                    },
+                    }
                     skalp_frontend::hir::HirStatement::Block(stmts) => {
                         println!("    Statement {}: Block with {} statements", j, stmts.len());
                         for (k, sub_stmt) in stmts.iter().enumerate() {
                             match sub_stmt {
                                 skalp_frontend::hir::HirStatement::Flow(_) => {
                                     println!("      Sub-statement {}: Flow", k);
-                                },
+                                }
                                 skalp_frontend::hir::HirStatement::Assert(_) => {
                                     println!("      Sub-statement {}: Assert", k);
-                                },
+                                }
                                 skalp_frontend::hir::HirStatement::Property(_) => {
                                     println!("      Sub-statement {}: Property", k);
-                                },
+                                }
                                 skalp_frontend::hir::HirStatement::Cover(_) => {
                                     println!("      Sub-statement {}: Cover", k);
-                                },
+                                }
                                 _ => {
                                     println!("      Sub-statement {}: Other", k);
                                 }
                             }
                         }
-                    },
+                    }
                     skalp_frontend::hir::HirStatement::Assert(_) => {
                         println!("    Statement {}: Assert", j);
-                    },
+                    }
                     skalp_frontend::hir::HirStatement::Property(_) => {
                         println!("    Statement {}: Property", j);
-                    },
+                    }
                     skalp_frontend::hir::HirStatement::Cover(_) => {
                         println!("    Statement {}: Cover", j);
                     }
@@ -117,30 +128,34 @@ mod flow_block_tests {
         }
 
         fn has_flow_in_statements(stmts: &[skalp_frontend::hir::HirStatement]) -> bool {
-            stmts.iter().any(|stmt| {
-                match stmt {
-                    skalp_frontend::hir::HirStatement::Flow(_) => true,
-                    skalp_frontend::hir::HirStatement::Block(sub_stmts) => {
-                        has_flow_in_statements(sub_stmts)
-                    },
-                    skalp_frontend::hir::HirStatement::If(if_stmt) => {
-                        has_flow_in_statements(&if_stmt.then_statements) ||
-                        if_stmt.else_statements.as_ref().map_or(false, |else_stmts| has_flow_in_statements(else_stmts))
-                    },
-                    _ => false
+            stmts.iter().any(|stmt| match stmt {
+                skalp_frontend::hir::HirStatement::Flow(_) => true,
+                skalp_frontend::hir::HirStatement::Block(sub_stmts) => {
+                    has_flow_in_statements(sub_stmts)
                 }
+                skalp_frontend::hir::HirStatement::If(if_stmt) => {
+                    has_flow_in_statements(&if_stmt.then_statements)
+                        || if_stmt
+                            .else_statements
+                            .as_ref()
+                            .map_or(false, |else_stmts| has_flow_in_statements(else_stmts))
+                }
+                _ => false,
             })
         }
 
-        let has_flow_statement = implementation.event_blocks.iter()
+        let has_flow_statement = implementation
+            .event_blocks
+            .iter()
             .any(|event_block| has_flow_in_statements(&event_block.statements));
 
         assert!(has_flow_statement, "Should have flow statement in HIR");
 
         // Test MIR compilation
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR compilation successful for simple pipeline");
         println!("Module: {}", mir.modules[0].name);
@@ -181,9 +196,10 @@ mod flow_block_tests {
         println!("HIR generation successful for block pipeline");
 
         // Test MIR compilation
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR compilation successful for block pipeline");
 
@@ -217,9 +233,10 @@ mod flow_block_tests {
         println!("HIR generation successful for mixed pipeline");
 
         // Test MIR compilation
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR compilation successful for mixed pipeline");
 

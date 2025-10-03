@@ -7,14 +7,14 @@
 //! - Work-stealing scheduler
 //! - Parallel synthesis and verification
 
-pub mod scheduler;
-pub mod pipeline;
-pub mod tasks;
 pub mod dependencies;
+pub mod pipeline;
+pub mod scheduler;
+pub mod tasks;
 pub mod workers;
 
-use thiserror::Error;
 use std::time::Duration;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ParallelError {
@@ -100,7 +100,10 @@ impl ParallelEngine {
 
     /// Start the parallel compilation engine
     pub async fn start(&mut self) -> ParallelResult<()> {
-        log::info!("Starting parallel engine with {} workers", self.config.worker_threads);
+        log::info!(
+            "Starting parallel engine with {} workers",
+            self.config.worker_threads
+        );
 
         // Start worker threads
         self.workers.start(&self.scheduler).await?;

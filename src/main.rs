@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use tracing::info;
 
 /// SKALP - Intent-driven hardware synthesis
@@ -108,16 +108,18 @@ fn main() -> Result<()> {
         _ => "trace",
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(log_level)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(log_level).init();
 
     match cli.command {
         Commands::New { name } => {
             create_new_project(&name)?;
         }
 
-        Commands::Build { source, target, output } => {
+        Commands::Build {
+            source,
+            target,
+            output,
+        } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
             build_design(&source_file, &target, &output)?;
         }
@@ -126,11 +128,19 @@ fn main() -> Result<()> {
             simulate_design(&design, duration.as_deref())?;
         }
 
-        Commands::Synth { source, device, full_flow } => {
+        Commands::Synth {
+            source,
+            device,
+            full_flow,
+        } => {
             synthesize_design(&source, &device, full_flow)?;
         }
 
-        Commands::Program { bitstream, interface, verify } => {
+        Commands::Program {
+            bitstream,
+            interface,
+            verify,
+        } => {
             program_device(&bitstream, &interface, verify)?;
         }
 
@@ -156,14 +166,17 @@ fn create_new_project(name: &str) -> Result<()> {
     fs::create_dir_all(format!("{}/examples", name))?;
 
     // Create Cargo.toml
-    let cargo_toml = format!(r#"[package]
+    let cargo_toml = format!(
+        r#"[package]
 name = "{}"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 skalp-stdlib = {{ git = "https://github.com/skalp-lang/skalp" }}
-"#, name);
+"#,
+        name
+    );
     fs::write(format!("{}/Cargo.toml", name), cargo_toml)?;
 
     // Create main.sk with a simple example
@@ -192,7 +205,8 @@ impl Counter {
     fs::write(format!("{}/src/main.sk", name), main_sk)?;
 
     // Create README
-    let readme = format!(r#"# {}
+    let readme = format!(
+        r#"# {}
 
 A SKALP hardware design project.
 
@@ -213,7 +227,9 @@ skalpc sim build/design.lir
 ```bash
 skalpc synth src/main.sk --device ice40-hx8k
 ```
-"#, name);
+"#,
+        name
+    );
     fs::write(format!("{}/README.md", name), readme)?;
 
     println!("✅ Created new SKALP project '{}'", name);
@@ -231,33 +247,31 @@ skalpc synth src/main.sk --device ice40-hx8k
 
 /// Build SKALP design
 fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<()> {
+    use skalp_codegen::{generate_systemverilog_from_mir, generate_verilog, generate_vhdl};
     use skalp_frontend::parse_and_build_hir;
     use skalp_lir::lower_to_lir;
-    use skalp_codegen::{generate_verilog, generate_vhdl, generate_systemverilog_from_mir};
 
     info!("Building design from {:?} to {}", source, target);
 
     // Read source file
-    let source_code = fs::read_to_string(source)
-        .context("Failed to read source file")?;
+    let source_code = fs::read_to_string(source).context("Failed to read source file")?;
 
     // Parse, build HIR, and type check in one step
     info!("Parsing SKALP source and building HIR...");
-    let hir = parse_and_build_hir(&source_code)
-        .context("Failed to parse and build HIR")?;
+    let hir = parse_and_build_hir(&source_code).context("Failed to parse and build HIR")?;
 
     // Lower to MIR with CDC analysis
     info!("Lowering to MIR with CDC analysis...");
     let compiler = skalp_mir::MirCompiler::new()
         .with_optimization_level(skalp_mir::OptimizationLevel::None)
         .with_verbose(true); // Enable verbose output for CDC analysis
-    let mir = compiler.compile_to_mir(&hir)
+    let mir = compiler
+        .compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR with CDC analysis: {}", e))?;
 
     // Lower to LIR
     info!("Lowering to LIR...");
-    let lir = lower_to_lir(&mir)
-        .context("Failed to lower to LIR")?;
+    let lir = lower_to_lir(&mir).context("Failed to lower to LIR")?;
 
     // Create output directory
     fs::create_dir_all(output_dir)?;
@@ -301,7 +315,10 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
             output_path
         }
         _ => {
-            anyhow::bail!("Unsupported target: {}. Use 'sv', 'v', 'vhdl', 'lir', or 'mir'", target);
+            anyhow::bail!(
+                "Unsupported target: {}. Use 'sv', 'v', 'vhdl', 'lir', or 'mir'",
+                target
+            );
         }
     };
 
@@ -314,9 +331,9 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
 /// Simulate design using GPU-accelerated simulation
 fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> {
     use skalp_mir::Mir;
-    use skalp_sir::convert_mir_to_sir;
-    use skalp_sim::{Simulator, SimulationConfig};
     use skalp_sim::waveform::Waveform;
+    use skalp_sim::{SimulationConfig, Simulator};
+    use skalp_sir::convert_mir_to_sir;
     use tokio::runtime::Runtime;
 
     info!("Loading design from {:?}", design_file);
@@ -326,7 +343,9 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
 
     let sir = if design_file.extension() == Some(std::ffi::OsStr::new("lir")) {
         // For LIR files, we need to first convert to MIR, then to SIR
-        anyhow::bail!("LIR to SIR conversion not yet implemented. Please use .mir files for simulation");
+        anyhow::bail!(
+            "LIR to SIR conversion not yet implemented. Please use .mir files for simulation"
+        );
     } else if design_file.extension() == Some(std::ffi::OsStr::new("mir")) {
         // Load MIR and convert to SIR
         let mir: Mir = serde_json::from_str(&design_str)?;
@@ -342,7 +361,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
     // Parse duration (default 1000 cycles)
     let cycles = if let Some(dur) = duration {
         if dur.ends_with("ns") {
-            dur.trim_end_matches("ns").parse::<u64>()? / 10  // Assume 10ns clock
+            dur.trim_end_matches("ns").parse::<u64>()? / 10 // Assume 10ns clock
         } else if dur.ends_with("us") {
             dur.trim_end_matches("us").parse::<u64>()? * 100
         } else {
@@ -425,7 +444,10 @@ fn synthesize_design(source: &PathBuf, device: &str, full_flow: bool) -> Result<
         "sky130" => TargetPlatform::Asic(skalp_backends::AsicTarget::Sky130),
         "freepdk45" => TargetPlatform::Asic(skalp_backends::AsicTarget::FreePdk45),
         _ => {
-            anyhow::bail!("Unknown device: {}. Supported: ice40-hx1k, ice40-hx8k, xc7a35t, sky130, freepdk45", device);
+            anyhow::bail!(
+                "Unknown device: {}. Supported: ice40-hx1k, ice40-hx8k, xc7a35t, sky130, freepdk45",
+                device
+            );
         }
     };
 
@@ -478,7 +500,7 @@ fn program_device(bitstream: &PathBuf, interface: &str, verify: bool) -> Result<
 
 /// Format SKALP source files
 fn format_files(files: &[PathBuf], check: bool) -> Result<()> {
-    use skalp_frontend::{parse_file, format_ast};
+    use skalp_frontend::{format_ast, parse_file};
 
     if files.is_empty() {
         println!("No files specified");
@@ -488,8 +510,9 @@ fn format_files(files: &[PathBuf], check: bool) -> Result<()> {
     let mut needs_formatting = false;
 
     for file in files {
-        if file.extension() != Some(std::ffi::OsStr::new("sk")) &&
-           file.extension() != Some(std::ffi::OsStr::new("skalp")) {
+        if file.extension() != Some(std::ffi::OsStr::new("sk"))
+            && file.extension() != Some(std::ffi::OsStr::new("skalp"))
+        {
             continue;
         }
 
@@ -533,9 +556,7 @@ fn run_tests(filter: Option<&str>) -> Result<()> {
     // Find and load test files
     let test_files = fs::read_dir("tests")?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.path().extension() == Some(std::ffi::OsStr::new("sk"))
-        })
+        .filter(|entry| entry.path().extension() == Some(std::ffi::OsStr::new("sk")))
         .collect::<Vec<_>>();
 
     if test_files.is_empty() {

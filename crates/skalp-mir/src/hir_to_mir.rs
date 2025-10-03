@@ -71,7 +71,9 @@ impl<'hir> HirToMir<'hir> {
                 let parameter = GenericParameter {
                     name: hir_generic.name.clone(),
                     param_type: self.convert_generic_type(&hir_generic.param_type),
-                    default: hir_generic.default_value.as_ref()
+                    default: hir_generic
+                        .default_value
+                        .as_ref()
                         .and_then(|expr| self.convert_literal_expr(expr)),
                 };
                 module.parameters.push(parameter);
@@ -108,7 +110,9 @@ impl<'hir> HirToMir<'hir> {
                             id: signal_id,
                             name: hir_signal.name.clone(),
                             signal_type: self.convert_type(&hir_signal.signal_type),
-                            initial: hir_signal.initial_value.as_ref()
+                            initial: hir_signal
+                                .initial_value
+                                .as_ref()
                                 .and_then(|expr| self.convert_literal_expr(expr)),
                             clock_domain: hir_signal.clock_domain.map(|id| ClockDomainId(id.0)),
                         };
@@ -124,7 +128,9 @@ impl<'hir> HirToMir<'hir> {
                             id: var_id,
                             name: hir_var.name.clone(),
                             var_type: self.convert_type(&hir_var.var_type),
-                            initial: hir_var.initial_value.as_ref()
+                            initial: hir_var
+                                .initial_value
+                                .as_ref()
                                 .and_then(|expr| self.convert_literal_expr(expr)),
                         };
                         module.variables.push(variable);
@@ -271,9 +277,9 @@ impl<'hir> HirToMir<'hir> {
                     self.convert_if_statement(if_stmt).map(Statement::If)
                 }
             }
-            hir::HirStatement::Match(match_stmt) => {
-                self.convert_match_statement(match_stmt).map(Statement::Case)
-            }
+            hir::HirStatement::Match(match_stmt) => self
+                .convert_match_statement(match_stmt)
+                .map(Statement::Case),
             hir::HirStatement::Block(stmts) => {
                 // Recursively apply synthesis resolution within blocks
                 Some(Statement::Block(self.convert_statements(stmts)))
@@ -348,16 +354,20 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert a pipeline expression stage to an assignment
-    fn convert_pipeline_expression_stage(&mut self, expr: &hir::HirExpression, _stage_index: usize) -> Option<Assignment> {
+    fn convert_pipeline_expression_stage(
+        &mut self,
+        expr: &hir::HirExpression,
+        _stage_index: usize,
+    ) -> Option<Assignment> {
         // For pipeline expressions like `a |> b |> c`, each stage represents
         // a data flow where the previous stage's output becomes the next stage's input
 
         // For now, convert expression directly - this will handle signal references
         // In a more sophisticated implementation, we would track pipeline registers
         match expr {
-            hir::HirExpression::Signal(_) |
-            hir::HirExpression::Port(_) |
-            hir::HirExpression::Variable(_) => {
+            hir::HirExpression::Signal(_)
+            | hir::HirExpression::Port(_)
+            | hir::HirExpression::Variable(_) => {
                 // These represent signal references in the pipeline
                 // For now, this doesn't generate an assignment by itself
                 // The pipeline semantics will be handled by the overall flow
@@ -385,9 +395,15 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert continuous assignment
-    fn convert_continuous_assignment(&mut self, assign: &hir::HirAssignment) -> Option<ContinuousAssign> {
+    fn convert_continuous_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<ContinuousAssign> {
         // Only combinational assignments become continuous assigns
-        if !matches!(assign.assignment_type, hir::HirAssignmentType::Combinational) {
+        if !matches!(
+            assign.assignment_type,
+            hir::HirAssignmentType::Combinational
+        ) {
             return None;
         }
 
@@ -422,7 +438,9 @@ impl<'hir> HirToMir<'hir> {
     fn convert_if_statement(&mut self, if_stmt: &hir::HirIfStatement) -> Option<IfStatement> {
         let condition = self.convert_expression(&if_stmt.condition)?;
         let then_block = self.convert_statements(&if_stmt.then_statements);
-        let else_block = if_stmt.else_statements.as_ref()
+        let else_block = if_stmt
+            .else_statements
+            .as_ref()
             .map(|stmts| self.convert_statements(stmts));
 
         Some(IfStatement {
@@ -433,7 +451,10 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR match statement to MIR case statement
-    fn convert_match_statement(&mut self, match_stmt: &hir::HirMatchStatement) -> Option<CaseStatement> {
+    fn convert_match_statement(
+        &mut self,
+        match_stmt: &hir::HirMatchStatement,
+    ) -> Option<CaseStatement> {
         let expr = self.convert_expression(&match_stmt.expr)?;
 
         let mut items = Vec::new();
@@ -449,7 +470,9 @@ impl<'hir> HirToMir<'hir> {
                     then_block: block,
                     else_block: None,
                 });
-                Block { statements: vec![if_stmt] }
+                Block {
+                    statements: vec![if_stmt],
+                }
             } else {
                 block
             };
@@ -459,7 +482,7 @@ impl<'hir> HirToMir<'hir> {
                 Some(expr_val) => {
                     items.push(CaseItem {
                         values: vec![expr_val],
-                        block: final_block
+                        block: final_block,
                     });
                 }
                 None => {
@@ -469,7 +492,11 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        Some(CaseStatement { expr, items, default })
+        Some(CaseStatement {
+            expr,
+            items,
+            default,
+        })
     }
 
     /// Convert pattern to expression (for case values)
@@ -478,8 +505,12 @@ impl<'hir> HirToMir<'hir> {
             hir::HirPattern::Literal(lit) => {
                 // Convert literal pattern to expression
                 match lit {
-                    hir::HirLiteral::Integer(val) => Some(Expression::Literal(Value::Integer(*val as i64))),
-                    hir::HirLiteral::String(s) => Some(Expression::Literal(Value::String(s.clone()))),
+                    hir::HirLiteral::Integer(val) => {
+                        Some(Expression::Literal(Value::Integer(*val as i64)))
+                    }
+                    hir::HirLiteral::String(s) => {
+                        Some(Expression::Literal(Value::String(s.clone())))
+                    }
                     hir::HirLiteral::Boolean(b) => {
                         // Convert boolean to integer (true = 1, false = 0)
                         Some(Expression::Literal(Value::Integer(if *b { 1 } else { 0 })))
@@ -532,15 +563,11 @@ impl<'hir> HirToMir<'hir> {
     /// Convert HIR lvalue to MIR
     fn convert_lvalue(&mut self, lval: &hir::HirLValue) -> Option<LValue> {
         let result = match lval {
-            hir::HirLValue::Signal(id) => {
-                self.signal_map.get(id).map(|&id| LValue::Signal(id))
-            }
+            hir::HirLValue::Signal(id) => self.signal_map.get(id).map(|&id| LValue::Signal(id)),
             hir::HirLValue::Variable(id) => {
                 self.variable_map.get(id).map(|&id| LValue::Variable(id))
             }
-            hir::HirLValue::Port(id) => {
-                self.port_map.get(id).map(|&id| LValue::Port(id))
-            }
+            hir::HirLValue::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
             hir::HirLValue::Index(base, index) => {
                 let base = Box::new(self.convert_lvalue(base)?);
                 let index = Box::new(self.convert_expression(index)?);
@@ -556,13 +583,10 @@ impl<'hir> HirToMir<'hir> {
         result
     }
 
-
     /// Convert HIR expression to MIR
     fn convert_expression(&mut self, expr: &hir::HirExpression) -> Option<Expression> {
         match expr {
-            hir::HirExpression::Literal(lit) => {
-                self.convert_literal(lit).map(Expression::Literal)
-            }
+            hir::HirExpression::Literal(lit) => self.convert_literal(lit).map(Expression::Literal),
             hir::HirExpression::Signal(id) => {
                 // First try signal_map
                 if let Some(&signal_id) = self.signal_map.get(id) {
@@ -586,10 +610,10 @@ impl<'hir> HirToMir<'hir> {
                     None
                 }
             }
-            hir::HirExpression::Variable(id) => {
-                self.variable_map.get(id)
-                    .map(|&id| Expression::Ref(LValue::Variable(id)))
-            }
+            hir::HirExpression::Variable(id) => self
+                .variable_map
+                .get(id)
+                .map(|&id| Expression::Ref(LValue::Variable(id))),
             hir::HirExpression::Constant(id) => {
                 // Look up the constant value in HIR
                 if let Some(hir) = self.hir {
@@ -685,7 +709,7 @@ impl<'hir> HirToMir<'hir> {
         let mut result = self.convert_expression(&arms.last()?.expr)?;
 
         // Work backwards through the arms (excluding the last one which is the default)
-        for arm in arms[..arms.len()-1].iter().rev() {
+        for arm in arms[..arms.len() - 1].iter().rev() {
             // Build condition: match_value == pattern
             let condition = match &arm.pattern {
                 hir::HirPattern::Literal(lit) => {
@@ -765,7 +789,7 @@ impl<'hir> HirToMir<'hir> {
                 }
                 Some(Value::BitVector {
                     width: bits.len(),
-                    value
+                    value,
                 })
             }
         }
@@ -774,12 +798,8 @@ impl<'hir> HirToMir<'hir> {
     /// Helper to convert expression to lvalue (for index/range operations)
     fn expr_to_lvalue(&mut self, expr: &hir::HirExpression) -> Option<LValue> {
         match expr {
-            hir::HirExpression::Signal(id) => {
-                self.signal_map.get(id).map(|&id| LValue::Signal(id))
-            }
-            hir::HirExpression::Port(id) => {
-                self.port_map.get(id).map(|&id| LValue::Port(id))
-            }
+            hir::HirExpression::Signal(id) => self.signal_map.get(id).map(|&id| LValue::Signal(id)),
+            hir::HirExpression::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
             hir::HirExpression::Variable(id) => {
                 self.variable_map.get(id).map(|&id| LValue::Variable(id))
             }
@@ -840,38 +860,36 @@ impl<'hir> HirToMir<'hir> {
                 // For now, convert to the inner type
                 // TODO: Add proper stream protocol support in MIR
                 self.convert_type(inner_type)
-            },
+            }
             hir::HirType::Array(inner_type, size) => {
                 DataType::Array(Box::new(self.convert_type(inner_type)), *size as usize)
-            },
+            }
             hir::HirType::Custom(_name) => DataType::Bit(1), // TODO: Resolve custom types
-            hir::HirType::Struct(struct_type) => DataType::Struct(Box::new(self.convert_struct_type(struct_type))),
-            hir::HirType::Enum(enum_type) => DataType::Enum(Box::new(self.convert_enum_type(enum_type))),
-            hir::HirType::Union(union_type) => DataType::Union(Box::new(self.convert_union_type(union_type))),
+            hir::HirType::Struct(struct_type) => {
+                DataType::Struct(Box::new(self.convert_struct_type(struct_type)))
+            }
+            hir::HirType::Enum(enum_type) => {
+                DataType::Enum(Box::new(self.convert_enum_type(enum_type)))
+            }
+            hir::HirType::Union(union_type) => {
+                DataType::Union(Box::new(self.convert_union_type(union_type)))
+            }
             // Parametric types - preserve parameter name and default
-            hir::HirType::BitParam(param_name) => {
-                DataType::BitParam {
-                    param: param_name.clone(),
-                    default: 8
-                }
+            hir::HirType::BitParam(param_name) => DataType::BitParam {
+                param: param_name.clone(),
+                default: 8,
             },
-            hir::HirType::LogicParam(param_name) => {
-                DataType::LogicParam {
-                    param: param_name.clone(),
-                    default: 8
-                }
+            hir::HirType::LogicParam(param_name) => DataType::LogicParam {
+                param: param_name.clone(),
+                default: 8,
             },
-            hir::HirType::IntParam(param_name) => {
-                DataType::IntParam {
-                    param: param_name.clone(),
-                    default: 32
-                }
+            hir::HirType::IntParam(param_name) => DataType::IntParam {
+                param: param_name.clone(),
+                default: 32,
             },
-            hir::HirType::NatParam(param_name) => {
-                DataType::NatParam {
-                    param: param_name.clone(),
-                    default: 32
-                }
+            hir::HirType::NatParam(param_name) => DataType::NatParam {
+                param: param_name.clone(),
+                default: 32,
             },
         }
     }
@@ -904,7 +922,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirGenericType::Type => GenericParameterType::Type,
             hir::HirGenericType::Const(hir_data_type) => {
                 GenericParameterType::Const(self.convert_type(hir_data_type))
-            },
+            }
             hir::HirGenericType::Width => GenericParameterType::Width,
             hir::HirGenericType::ClockDomain => GenericParameterType::ClockDomain,
         }
@@ -912,7 +930,9 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR struct type to MIR struct type
     fn convert_struct_type(&mut self, hir_struct: &hir::HirStructType) -> StructType {
-        let fields = hir_struct.fields.iter()
+        let fields = hir_struct
+            .fields
+            .iter()
             .map(|field| StructField {
                 name: field.name.clone(),
                 field_type: self.convert_type(&field.field_type),
@@ -928,10 +948,15 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR enum type to MIR enum type
     fn convert_enum_type(&mut self, hir_enum: &hir::HirEnumType) -> EnumType {
-        let variants = hir_enum.variants.iter()
+        let variants = hir_enum
+            .variants
+            .iter()
             .map(|variant| EnumVariant {
                 name: variant.name.clone(),
-                value: variant.value.as_ref().and_then(|expr| self.convert_literal_expr(expr)),
+                value: variant
+                    .value
+                    .as_ref()
+                    .and_then(|expr| self.convert_literal_expr(expr)),
             })
             .collect();
 
@@ -944,7 +969,9 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR union type to MIR union type
     fn convert_union_type(&mut self, hir_union: &hir::HirUnionType) -> UnionType {
-        let fields = hir_union.fields.iter()
+        let fields = hir_union
+            .fields
+            .iter()
             .map(|field| StructField {
                 name: field.name.clone(),
                 field_type: self.convert_type(&field.field_type),
@@ -959,8 +986,11 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert struct field access to bit slice
-    fn convert_field_access(&mut self, base: &hir::HirExpression, field_name: &str) -> Option<Expression> {
-
+    fn convert_field_access(
+        &mut self,
+        base: &hir::HirExpression,
+        field_name: &str,
+    ) -> Option<Expression> {
         // Convert the base expression to an LValue
         let base_lval = match base {
             hir::HirExpression::Signal(id) => {
@@ -971,7 +1001,7 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(port_id) = self.port_map.values().find(|&&pid| {
                         // Check if this signal ID corresponds to a port
                         // This is a heuristic - we may need a better mapping
-                        pid.0 == id.0  // Compare the underlying numeric IDs
+                        pid.0 == id.0 // Compare the underlying numeric IDs
                     }) {
                         LValue::Port(*port_id)
                     } else {
@@ -1003,7 +1033,11 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Get the bit range for a struct field
-    fn get_field_bit_range(&self, base: &hir::HirExpression, field_name: &str) -> Option<(usize, usize)> {
+    fn get_field_bit_range(
+        &self,
+        base: &hir::HirExpression,
+        field_name: &str,
+    ) -> Option<(usize, usize)> {
         // Get the struct type from the base expression
         let struct_type = self.get_expression_struct_type(base)?;
 
@@ -1089,7 +1123,9 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Enum(enum_type) => self.get_hir_type_width(&enum_type.base_type),
             hir::HirType::Union(union_type) => {
                 // Union width is the maximum of all field widths
-                union_type.fields.iter()
+                union_type
+                    .fields
+                    .iter()
                     .map(|field| self.get_hir_type_width(&field.field_type))
                     .max()
                     .unwrap_or(0)
@@ -1222,7 +1258,10 @@ impl<'hir> HirToMir<'hir> {
     /// Try to synthesis-resolve a complex if-else-if chain
     /// Returns Some(ResolvedConditional) if this is a complex conditional assignment
     /// Returns None if this should remain as a regular if statement
-    fn try_synthesis_resolve_if(&mut self, if_stmt: &hir::HirIfStatement) -> Option<ResolvedConditional> {
+    fn try_synthesis_resolve_if(
+        &mut self,
+        if_stmt: &hir::HirIfStatement,
+    ) -> Option<ResolvedConditional> {
         // Only apply synthesis resolution to complex if-else-if chains, not simple if-else patterns
         if !self.is_complex_if_else_if_chain(if_stmt) {
             return None;
@@ -1235,7 +1274,9 @@ impl<'hir> HirToMir<'hir> {
             let original_if = IfStatement {
                 condition: condition.clone(),
                 then_block: self.convert_statements(&if_stmt.then_statements),
-                else_block: if_stmt.else_statements.as_ref()
+                else_block: if_stmt
+                    .else_statements
+                    .as_ref()
                     .map(|stmts| self.convert_statements(stmts)),
             };
 
@@ -1255,12 +1296,19 @@ impl<'hir> HirToMir<'hir> {
 
     /// Extract the target signal and assignment kind from a conditional assignment pattern
     /// Returns Some((target, kind)) if all branches assign to the same signal
-    fn extract_conditional_assignment_target(&mut self, if_stmt: &hir::HirIfStatement) -> Option<(LValue, AssignmentKind)> {
+    fn extract_conditional_assignment_target(
+        &mut self,
+        if_stmt: &hir::HirIfStatement,
+    ) -> Option<(LValue, AssignmentKind)> {
         // Check if then branch has exactly one assignment
-        if let Some((then_target, then_kind)) = self.extract_single_assignment(&if_stmt.then_statements) {
+        if let Some((then_target, then_kind)) =
+            self.extract_single_assignment(&if_stmt.then_statements)
+        {
             // Check else branch
             if let Some(else_stmts) = &if_stmt.else_statements {
-                if let Some((else_target, else_kind)) = self.extract_assignment_or_nested_if(else_stmts) {
+                if let Some((else_target, else_kind)) =
+                    self.extract_assignment_or_nested_if(else_stmts)
+                {
                     // Both branches must assign to the same target with the same kind
                     if self.lvalues_match(&then_target, &else_target) && then_kind == else_kind {
                         return Some((then_target, then_kind));
@@ -1272,7 +1320,10 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Extract assignment from a single statement list or nested if
-    fn extract_assignment_or_nested_if(&mut self, stmts: &[hir::HirStatement]) -> Option<(LValue, AssignmentKind)> {
+    fn extract_assignment_or_nested_if(
+        &mut self,
+        stmts: &[hir::HirStatement],
+    ) -> Option<(LValue, AssignmentKind)> {
         if stmts.len() == 1 {
             match &stmts[0] {
                 hir::HirStatement::Assignment(assign) => {
@@ -1296,7 +1347,10 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Extract single assignment from statement list
-    fn extract_single_assignment(&mut self, stmts: &[hir::HirStatement]) -> Option<(LValue, AssignmentKind)> {
+    fn extract_single_assignment(
+        &mut self,
+        stmts: &[hir::HirStatement],
+    ) -> Option<(LValue, AssignmentKind)> {
         if stmts.len() == 1 {
             if let hir::HirStatement::Assignment(assign) = &stmts[0] {
                 let target = self.convert_lvalue(&assign.lhs)?;
@@ -1322,7 +1376,10 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Build priority mux from HIR if-else-if chain
-    fn build_priority_mux_from_hir(&mut self, if_stmt: &hir::HirIfStatement) -> Option<PriorityMux> {
+    fn build_priority_mux_from_hir(
+        &mut self,
+        if_stmt: &hir::HirIfStatement,
+    ) -> Option<PriorityMux> {
         let mut cases = Vec::new();
 
         // Collect condition-value pairs
@@ -1335,7 +1392,11 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Collect conditional cases from HIR if-else-if chain
-    fn collect_conditional_cases_from_hir(&mut self, if_stmt: &hir::HirIfStatement, cases: &mut Vec<ConditionalCase>) -> Option<()> {
+    fn collect_conditional_cases_from_hir(
+        &mut self,
+        if_stmt: &hir::HirIfStatement,
+        cases: &mut Vec<ConditionalCase>,
+    ) -> Option<()> {
         // Add current condition-value pair
         let condition = self.convert_expression(&if_stmt.condition)?;
         let value = self.extract_assignment_value(&if_stmt.then_statements)?;
@@ -1367,7 +1428,10 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Extract default value from the final else clause
-    fn extract_default_value_from_hir(&mut self, if_stmt: &hir::HirIfStatement) -> Option<Expression> {
+    fn extract_default_value_from_hir(
+        &mut self,
+        if_stmt: &hir::HirIfStatement,
+    ) -> Option<Expression> {
         if let Some(else_stmts) = &if_stmt.else_statements {
             if else_stmts.len() == 1 {
                 match &else_stmts[0] {

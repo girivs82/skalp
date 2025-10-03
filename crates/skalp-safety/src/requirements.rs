@@ -3,10 +3,10 @@
 //! Provides structured safety requirements with ASIL allocation,
 //! traceability, and verification status tracking.
 
+use crate::asil::{AsilLevel, VerificationMethod};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
-use crate::asil::{AsilLevel, VerificationMethod};
 
 /// Safety requirement with ISO 26262 compliance information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,13 +172,18 @@ impl SafetyRequirement {
 
     /// Check if requirement is complete (verified or validated)
     pub fn is_complete(&self) -> bool {
-        matches!(self.status, RequirementStatus::Verified | RequirementStatus::Validated)
+        matches!(
+            self.status,
+            RequirementStatus::Verified | RequirementStatus::Validated
+        )
     }
 
     /// Check if requirement meets ASIL verification requirements
     pub fn meets_asil_verification(&self) -> bool {
         let required_methods = self.asil.requirements().verification_methods;
-        required_methods.iter().all(|method| self.verification_methods.contains(method))
+        required_methods
+            .iter()
+            .all(|method| self.verification_methods.contains(method))
     }
 }
 
@@ -205,7 +210,8 @@ impl SafetyRequirementManager {
 
         // Update hierarchy
         if let Some(parent_id) = &requirement.parent {
-            self.hierarchy.relationships
+            self.hierarchy
+                .relationships
                 .entry(parent_id.clone())
                 .or_insert_with(Vec::new)
                 .push(id.clone());
@@ -235,7 +241,10 @@ impl SafetyRequirementManager {
     }
 
     /// Get all requirements by category
-    pub fn get_requirements_by_category(&self, category: RequirementCategory) -> Vec<&SafetyRequirement> {
+    pub fn get_requirements_by_category(
+        &self,
+        category: RequirementCategory,
+    ) -> Vec<&SafetyRequirement> {
         self.requirements
             .values()
             .filter(|req| req.category == category)
@@ -294,7 +303,8 @@ impl SafetyRequirementManager {
     /// Generate requirement coverage report
     pub fn generate_coverage_report(&self) -> CoverageReport {
         let total = self.requirements.len();
-        let verified = self.requirements
+        let verified = self
+            .requirements
             .values()
             .filter(|req| req.is_complete())
             .count();

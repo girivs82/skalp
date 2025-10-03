@@ -2,8 +2,8 @@
 //!
 //! Placeholder implementation for Intel Cyclone and Arria FPGAs.
 
-use crate::{BackendResult, SynthesisResults, LogMessage, LogLevel};
 use crate::fpga::FpgaConfig;
+use crate::{BackendResult, LogLevel, LogMessage, SynthesisResults};
 use std::path::Path;
 
 /// Synthesize design for Intel FPGA using Quartus
@@ -15,14 +15,12 @@ pub async fn synthesize_intel(
     _config: &FpgaConfig,
 ) -> BackendResult<SynthesisResults> {
     // Placeholder implementation - would integrate with Quartus toolchain
-    let log_messages = vec![
-        LogMessage {
-            level: LogLevel::Info,
-            message: format!("Intel synthesis placeholder for {} {}", part, package),
-            source: "quartus".to_string(),
-            timestamp: chrono::Utc::now(),
-        }
-    ];
+    let log_messages = vec![LogMessage {
+        level: LogLevel::Info,
+        message: format!("Intel synthesis placeholder for {} {}", part, package),
+        source: "quartus".to_string(),
+        timestamp: chrono::Utc::now(),
+    }];
 
     Ok(SynthesisResults {
         success: false, // Not implemented

@@ -67,7 +67,8 @@ impl ClockManager {
     }
 
     pub fn add_clock(&mut self, name: String, period_ps: u64) {
-        self.clocks.insert(name.clone(), ClockInfo::new(name, period_ps));
+        self.clocks
+            .insert(name.clone(), ClockInfo::new(name, period_ps));
     }
 
     pub fn set_clock(&mut self, name: &str, value: bool) -> Option<ClockEdge> {

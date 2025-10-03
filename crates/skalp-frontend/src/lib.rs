@@ -8,26 +8,26 @@
 //! - HIR (High-level IR) generation
 
 pub mod ast;
-pub mod lexer;
-pub mod syntax;
-pub mod parse;
-pub mod types;
-pub mod typeck;
-pub mod parser;
-pub mod semantic;
+pub mod generics;
 pub mod hir;
 pub mod hir_builder;
-pub mod generics;
+pub mod lexer;
 pub mod macros;
+pub mod parse;
+pub mod parser;
+pub mod semantic;
+pub mod syntax;
+pub mod typeck;
+pub mod types;
 
 #[cfg(test)]
 mod stream_test;
 
+pub use hir::Hir;
 pub use lexer::Lexer;
 pub use parser::Parser;
-pub use hir::Hir;
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 
 /// Parse and build HIR directly from source
 pub fn parse_and_build_hir(source: &str) -> Result<Hir> {
@@ -39,7 +39,10 @@ pub fn parse_and_build_hir(source: &str) -> Result<Hir> {
     let hir = match builder.build(&syntax_tree) {
         Ok(hir) => hir,
         Err(errors) => {
-            return Err(anyhow::anyhow!("HIR building failed with {} errors", errors.len()));
+            return Err(anyhow::anyhow!(
+                "HIR building failed with {} errors",
+                errors.len()
+            ));
         }
     };
 
@@ -56,9 +59,7 @@ pub fn parse_and_build_hir(source: &str) -> Result<Hir> {
 pub fn parse_file(source: &str) -> Result<ast::SourceFile> {
     // For compatibility, return empty AST
     // The actual parsing happens in parse_and_build_hir
-    Ok(ast::SourceFile {
-        items: Vec::new(),
-    })
+    Ok(ast::SourceFile { items: Vec::new() })
 }
 
 /// Build HIR from AST (compatibility wrapper)

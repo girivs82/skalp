@@ -22,7 +22,11 @@ mod enhanced_features_tests {
         println!("Intents: {}", hir.intents.len());
 
         for intent in &hir.intents {
-            println!("Intent: {} with {} constraints", intent.name, intent.constraints.len());
+            println!(
+                "Intent: {} with {} constraints",
+                intent.name,
+                intent.constraints.len()
+            );
         }
 
         assert_eq!(hir.entities.len(), 1);
@@ -53,7 +57,11 @@ mod enhanced_features_tests {
         println!("Implementations: {}", hir.implementations.len());
 
         let entity = &hir.entities[0];
-        println!("Entity: {} with {} generics", entity.name, entity.generics.len());
+        println!(
+            "Entity: {} with {} generics",
+            entity.name,
+            entity.generics.len()
+        );
 
         for generic in &entity.generics {
             println!("Generic: {} type: {:?}", generic.name, generic.param_type);
@@ -82,7 +90,11 @@ mod enhanced_features_tests {
         println!("Trait definitions: {}", hir.trait_definitions.len());
 
         let entity = &hir.entities[0];
-        println!("Entity: {} with {} generics", entity.name, entity.generics.len());
+        println!(
+            "Entity: {} with {} generics",
+            entity.name,
+            entity.generics.len()
+        );
 
         assert_eq!(hir.entities.len(), 1);
         assert_eq!(hir.trait_definitions.len(), 1);

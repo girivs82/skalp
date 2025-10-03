@@ -212,17 +212,41 @@ impl Device {
                 if Self::is_logic_tile_ecp5(x, y, grid_size) {
                     logic_tiles.push(LogicTile {
                         position: (x, y),
-                        lut_count: 8,  // 8 LUT4s per slice, similar to iCE40 but different architecture
-                        lut_size: 4,   // 4-input LUTs
-                        ff_count: 8,   // 8 flip-flops per slice
+                        lut_count: 8, // 8 LUT4s per slice, similar to iCE40 but different architecture
+                        lut_size: 4,  // 4-input LUTs
+                        ff_count: 8,  // 8 flip-flops per slice
                         has_carry: true,
                         pins: vec![
-                            TilePin { name: "A0".to_string(), direction: PinDirection::Input, routing_tracks: vec![0, 1, 2, 3] },
-                            TilePin { name: "B0".to_string(), direction: PinDirection::Input, routing_tracks: vec![4, 5, 6, 7] },
-                            TilePin { name: "C0".to_string(), direction: PinDirection::Input, routing_tracks: vec![8, 9, 10, 11] },
-                            TilePin { name: "D0".to_string(), direction: PinDirection::Input, routing_tracks: vec![12, 13, 14, 15] },
-                            TilePin { name: "F0".to_string(), direction: PinDirection::Output, routing_tracks: vec![16, 17, 18, 19] },
-                            TilePin { name: "Q0".to_string(), direction: PinDirection::Output, routing_tracks: vec![20, 21, 22, 23] },
+                            TilePin {
+                                name: "A0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![0, 1, 2, 3],
+                            },
+                            TilePin {
+                                name: "B0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![4, 5, 6, 7],
+                            },
+                            TilePin {
+                                name: "C0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![8, 9, 10, 11],
+                            },
+                            TilePin {
+                                name: "D0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![12, 13, 14, 15],
+                            },
+                            TilePin {
+                                name: "F0".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![16, 17, 18, 19],
+                            },
+                            TilePin {
+                                name: "Q0".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![20, 21, 22, 23],
+                            },
                         ],
                     });
                 }
@@ -233,13 +257,17 @@ impl Device {
         let mut io_tiles = Vec::new();
         for x in 0..grid_size.0 {
             for y in 0..grid_size.1 {
-                if x == 0 || x == grid_size.0-1 || y == 0 || y == grid_size.1-1 {
+                if x == 0 || x == grid_size.0 - 1 || y == 0 || y == grid_size.1 - 1 {
                     io_tiles.push(IoTile {
                         position: (x, y),
                         io_standards: vec![
-                            IoStandard::Lvcmos33, IoStandard::Lvcmos25, IoStandard::Lvcmos18,
-                            IoStandard::Lvcmos15, IoStandard::Lvcmos12, IoStandard::Lvds,
-                            IoStandard::Sstl18
+                            IoStandard::Lvcmos33,
+                            IoStandard::Lvcmos25,
+                            IoStandard::Lvcmos18,
+                            IoStandard::Lvcmos15,
+                            IoStandard::Lvcmos12,
+                            IoStandard::Lvds,
+                            IoStandard::Sstl18,
                         ],
                         drive_strengths: vec![2, 4, 8, 12, 16, 20, 24],
                         diff_pairs: true, // ECP5 supports differential pairs
@@ -254,11 +282,12 @@ impl Device {
         // ECP5 LFE5U-25F has 56 EBRs arranged in columns
         let ebr_columns = vec![10, 20, 30, 40, 50, 60, 70];
         for col in ebr_columns {
-            for row in (10..75).step_by(8) { // EBRs every 8 rows
+            for row in (10..75).step_by(8) {
+                // EBRs every 8 rows
                 memory_blocks.push(MemoryBlock {
                     position: (col, row),
                     memory_type: MemoryType::BlockRam,
-                    size_bits: 18432, // 18Kbit EBR
+                    size_bits: 18432,                      // 18Kbit EBR
                     data_widths: vec![1, 2, 4, 9, 18, 36], // ECP5 supports various widths
                 });
             }
@@ -290,26 +319,47 @@ impl Device {
                 global_clocks: 16, // More global clocks than iCE40
                 plls: 2,
                 dlls: 2, // ECP5 has DLLs
-                clock_domains: vec![
-                    ClockDomain {
-                        id: 0,
-                        coverage: (0..grid_size.0).flat_map(|x| (0..grid_size.1).map(move |y| (x, y))).collect(),
-                        max_frequency: 400.0, // Higher frequency capability
-                    }
-                ],
+                clock_domains: vec![ClockDomain {
+                    id: 0,
+                    coverage: (0..grid_size.0)
+                        .flat_map(|x| (0..grid_size.1).map(move |y| (x, y)))
+                        .collect(),
+                    max_frequency: 400.0, // Higher frequency capability
+                }],
             },
             routing: RoutingArchitecture {
                 channels: (24, 24), // More routing tracks than iCE40
                 switch_pattern: SwitchPattern::Universal,
                 wire_segments: vec![
-                    WireSegment { length: 1, frequency: 0.4, resistance: 80.0, capacitance: 8.0 },
-                    WireSegment { length: 2, frequency: 0.3, resistance: 160.0, capacitance: 16.0 },
-                    WireSegment { length: 4, frequency: 0.2, resistance: 320.0, capacitance: 32.0 },
-                    WireSegment { length: 12, frequency: 0.1, resistance: 960.0, capacitance: 96.0 },
+                    WireSegment {
+                        length: 1,
+                        frequency: 0.4,
+                        resistance: 80.0,
+                        capacitance: 8.0,
+                    },
+                    WireSegment {
+                        length: 2,
+                        frequency: 0.3,
+                        resistance: 160.0,
+                        capacitance: 16.0,
+                    },
+                    WireSegment {
+                        length: 4,
+                        frequency: 0.2,
+                        resistance: 320.0,
+                        capacitance: 32.0,
+                    },
+                    WireSegment {
+                        length: 12,
+                        frequency: 0.1,
+                        resistance: 960.0,
+                        capacitance: 96.0,
+                    },
                 ],
-                connection_boxes: vec![
-                    ConnectionBox { tracks: (0..24).collect(), flexibility: 0.6 }
-                ],
+                connection_boxes: vec![ConnectionBox {
+                    tracks: (0..24).collect(),
+                    flexibility: 0.6,
+                }],
             },
         }
     }
@@ -329,8 +379,16 @@ impl Device {
                         ff_count: 8,
                         has_carry: true,
                         pins: vec![
-                            TilePin { name: "A0".to_string(), direction: PinDirection::Input, routing_tracks: vec![0, 1, 2, 3] },
-                            TilePin { name: "F0".to_string(), direction: PinDirection::Output, routing_tracks: vec![16, 17, 18, 19] },
+                            TilePin {
+                                name: "A0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![0, 1, 2, 3],
+                            },
+                            TilePin {
+                                name: "F0".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![16, 17, 18, 19],
+                            },
                         ],
                     });
                 }
@@ -340,12 +398,15 @@ impl Device {
         let mut io_tiles = Vec::new();
         for x in 0..grid_size.0 {
             for y in 0..grid_size.1 {
-                if x == 0 || x == grid_size.0-1 || y == 0 || y == grid_size.1-1 {
+                if x == 0 || x == grid_size.0 - 1 || y == 0 || y == grid_size.1 - 1 {
                     io_tiles.push(IoTile {
                         position: (x, y),
                         io_standards: vec![
-                            IoStandard::Lvcmos33, IoStandard::Lvcmos25, IoStandard::Lvcmos18,
-                            IoStandard::Lvds, IoStandard::Sstl18
+                            IoStandard::Lvcmos33,
+                            IoStandard::Lvcmos25,
+                            IoStandard::Lvcmos18,
+                            IoStandard::Lvds,
+                            IoStandard::Sstl18,
                         ],
                         drive_strengths: vec![2, 4, 8, 12, 16, 20, 24],
                         diff_pairs: true,
@@ -381,26 +442,47 @@ impl Device {
                 global_clocks: 16,
                 plls: 4, // More PLLs
                 dlls: 4,
-                clock_domains: vec![
-                    ClockDomain {
-                        id: 0,
-                        coverage: (0..grid_size.0).flat_map(|x| (0..grid_size.1).map(move |y| (x, y))).collect(),
-                        max_frequency: 400.0,
-                    }
-                ],
+                clock_domains: vec![ClockDomain {
+                    id: 0,
+                    coverage: (0..grid_size.0)
+                        .flat_map(|x| (0..grid_size.1).map(move |y| (x, y)))
+                        .collect(),
+                    max_frequency: 400.0,
+                }],
             },
             routing: RoutingArchitecture {
                 channels: (28, 28), // Even more routing for larger device
                 switch_pattern: SwitchPattern::Universal,
                 wire_segments: vec![
-                    WireSegment { length: 1, frequency: 0.4, resistance: 80.0, capacitance: 8.0 },
-                    WireSegment { length: 2, frequency: 0.3, resistance: 160.0, capacitance: 16.0 },
-                    WireSegment { length: 4, frequency: 0.2, resistance: 320.0, capacitance: 32.0 },
-                    WireSegment { length: 12, frequency: 0.1, resistance: 960.0, capacitance: 96.0 },
+                    WireSegment {
+                        length: 1,
+                        frequency: 0.4,
+                        resistance: 80.0,
+                        capacitance: 8.0,
+                    },
+                    WireSegment {
+                        length: 2,
+                        frequency: 0.3,
+                        resistance: 160.0,
+                        capacitance: 16.0,
+                    },
+                    WireSegment {
+                        length: 4,
+                        frequency: 0.2,
+                        resistance: 320.0,
+                        capacitance: 32.0,
+                    },
+                    WireSegment {
+                        length: 12,
+                        frequency: 0.1,
+                        resistance: 960.0,
+                        capacitance: 96.0,
+                    },
                 ],
-                connection_boxes: vec![
-                    ConnectionBox { tracks: (0..28).collect(), flexibility: 0.65 }
-                ],
+                connection_boxes: vec![ConnectionBox {
+                    tracks: (0..28).collect(),
+                    flexibility: 0.65,
+                }],
             },
         }
     }
@@ -408,7 +490,7 @@ impl Device {
     /// Helper to determine if a position should have a logic tile for ECP5
     fn is_logic_tile_ecp5(x: usize, y: usize, grid_size: (usize, usize)) -> bool {
         // Skip edges (I/O), and specific tiles for EBR/DSP
-        if x == 0 || x >= grid_size.0-1 || y == 0 || y >= grid_size.1-1 {
+        if x == 0 || x >= grid_size.0 - 1 || y == 0 || y >= grid_size.1 - 1 {
             return false;
         }
 
@@ -439,16 +521,36 @@ impl Device {
                 if Self::is_logic_tile_ice40(x, y, grid_size) {
                     logic_tiles.push(LogicTile {
                         position: (x, y),
-                        lut_count: 8,  // 8 LUT4s per tile
-                        lut_size: 4,   // 4-input LUTs
-                        ff_count: 8,   // 8 flip-flops per tile
+                        lut_count: 8, // 8 LUT4s per tile
+                        lut_size: 4,  // 4-input LUTs
+                        ff_count: 8,  // 8 flip-flops per tile
                         has_carry: true,
                         pins: vec![
-                            TilePin { name: "I0".to_string(), direction: PinDirection::Input, routing_tracks: vec![0, 1, 2] },
-                            TilePin { name: "I1".to_string(), direction: PinDirection::Input, routing_tracks: vec![3, 4, 5] },
-                            TilePin { name: "I2".to_string(), direction: PinDirection::Input, routing_tracks: vec![6, 7, 8] },
-                            TilePin { name: "I3".to_string(), direction: PinDirection::Input, routing_tracks: vec![9, 10, 11] },
-                            TilePin { name: "O".to_string(), direction: PinDirection::Output, routing_tracks: vec![12, 13, 14] },
+                            TilePin {
+                                name: "I0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![0, 1, 2],
+                            },
+                            TilePin {
+                                name: "I1".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![3, 4, 5],
+                            },
+                            TilePin {
+                                name: "I2".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![6, 7, 8],
+                            },
+                            TilePin {
+                                name: "I3".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![9, 10, 11],
+                            },
+                            TilePin {
+                                name: "O".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![12, 13, 14],
+                            },
                         ],
                     });
                 }
@@ -459,7 +561,7 @@ impl Device {
         let mut io_tiles = Vec::new();
         for x in 0..grid_size.0 {
             for y in 0..grid_size.1 {
-                if x == 0 || x == grid_size.0-1 || y == 0 || y == grid_size.1-1 {
+                if x == 0 || x == grid_size.0 - 1 || y == 0 || y == grid_size.1 - 1 {
                     io_tiles.push(IoTile {
                         position: (x, y),
                         io_standards: vec![IoStandard::Lvcmos33, IoStandard::Lvcmos25],
@@ -474,9 +576,7 @@ impl Device {
         // Create memory blocks (Block RAMs)
         let mut memory_blocks = Vec::new();
         // HX8K has 32 Block RAMs in specific locations
-        let bram_locations = vec![
-            (8, 16), (16, 8), (24, 16), (16, 24),
-        ];
+        let bram_locations = vec![(8, 16), (16, 8), (24, 16), (16, 24)];
         for (x, y) in bram_locations {
             memory_blocks.push(MemoryBlock {
                 position: (x, y),
@@ -498,25 +598,41 @@ impl Device {
                 global_clocks: 8,
                 plls: 2,
                 dlls: 0,
-                clock_domains: vec![
-                    ClockDomain {
-                        id: 0,
-                        coverage: (0..grid_size.0).flat_map(|x| (0..grid_size.1).map(move |y| (x, y))).collect(),
-                        max_frequency: 450.0, // MHz
-                    }
-                ],
+                clock_domains: vec![ClockDomain {
+                    id: 0,
+                    coverage: (0..grid_size.0)
+                        .flat_map(|x| (0..grid_size.1).map(move |y| (x, y)))
+                        .collect(),
+                    max_frequency: 450.0, // MHz
+                }],
             },
             routing: RoutingArchitecture {
                 channels: (12, 12), // 12 horizontal, 12 vertical tracks per channel
                 switch_pattern: SwitchPattern::Wilton,
                 wire_segments: vec![
-                    WireSegment { length: 1, frequency: 0.6, resistance: 100.0, capacitance: 10.0 },
-                    WireSegment { length: 4, frequency: 0.3, resistance: 400.0, capacitance: 40.0 },
-                    WireSegment { length: 12, frequency: 0.1, resistance: 1200.0, capacitance: 120.0 },
+                    WireSegment {
+                        length: 1,
+                        frequency: 0.6,
+                        resistance: 100.0,
+                        capacitance: 10.0,
+                    },
+                    WireSegment {
+                        length: 4,
+                        frequency: 0.3,
+                        resistance: 400.0,
+                        capacitance: 40.0,
+                    },
+                    WireSegment {
+                        length: 12,
+                        frequency: 0.1,
+                        resistance: 1200.0,
+                        capacitance: 120.0,
+                    },
                 ],
-                connection_boxes: vec![
-                    ConnectionBox { tracks: (0..12).collect(), flexibility: 0.5 }
-                ],
+                connection_boxes: vec![ConnectionBox {
+                    tracks: (0..12).collect(),
+                    flexibility: 0.5,
+                }],
             },
         }
     }
@@ -536,8 +652,16 @@ impl Device {
                         ff_count: 8,
                         has_carry: true,
                         pins: vec![
-                            TilePin { name: "I0".to_string(), direction: PinDirection::Input, routing_tracks: vec![0, 1, 2] },
-                            TilePin { name: "O".to_string(), direction: PinDirection::Output, routing_tracks: vec![3, 4, 5] },
+                            TilePin {
+                                name: "I0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![0, 1, 2],
+                            },
+                            TilePin {
+                                name: "O".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![3, 4, 5],
+                            },
                         ],
                     });
                 }
@@ -547,7 +671,7 @@ impl Device {
         let mut io_tiles = Vec::new();
         for x in 0..grid_size.0 {
             for y in 0..grid_size.1 {
-                if x == 0 || x == grid_size.0-1 || y == 0 || y == grid_size.1-1 {
+                if x == 0 || x == grid_size.0 - 1 || y == 0 || y == grid_size.1 - 1 {
                     io_tiles.push(IoTile {
                         position: (x, y),
                         io_standards: vec![IoStandard::Lvcmos33],
@@ -566,29 +690,40 @@ impl Device {
             logic_tiles,
             io_tiles,
             memory_blocks: vec![], // No Block RAMs in HX1K
-            dsp_tiles: None, // iCE40 doesn't have dedicated DSP tiles
+            dsp_tiles: None,       // iCE40 doesn't have dedicated DSP tiles
             clock_resources: ClockResources {
                 global_clocks: 8,
                 plls: 1,
                 dlls: 0,
-                clock_domains: vec![
-                    ClockDomain {
-                        id: 0,
-                        coverage: (0..grid_size.0).flat_map(|x| (0..grid_size.1).map(move |y| (x, y))).collect(),
-                        max_frequency: 450.0,
-                    }
-                ],
+                clock_domains: vec![ClockDomain {
+                    id: 0,
+                    coverage: (0..grid_size.0)
+                        .flat_map(|x| (0..grid_size.1).map(move |y| (x, y)))
+                        .collect(),
+                    max_frequency: 450.0,
+                }],
             },
             routing: RoutingArchitecture {
                 channels: (8, 8),
                 switch_pattern: SwitchPattern::Wilton,
                 wire_segments: vec![
-                    WireSegment { length: 1, frequency: 0.7, resistance: 100.0, capacitance: 10.0 },
-                    WireSegment { length: 4, frequency: 0.3, resistance: 400.0, capacitance: 40.0 },
+                    WireSegment {
+                        length: 1,
+                        frequency: 0.7,
+                        resistance: 100.0,
+                        capacitance: 10.0,
+                    },
+                    WireSegment {
+                        length: 4,
+                        frequency: 0.3,
+                        resistance: 400.0,
+                        capacitance: 40.0,
+                    },
                 ],
-                connection_boxes: vec![
-                    ConnectionBox { tracks: (0..8).collect(), flexibility: 0.4 }
-                ],
+                connection_boxes: vec![ConnectionBox {
+                    tracks: (0..8).collect(),
+                    flexibility: 0.4,
+                }],
             },
         }
     }
@@ -596,7 +731,7 @@ impl Device {
     /// Helper to determine if a position should have a logic tile for iCE40
     fn is_logic_tile_ice40(x: usize, y: usize, grid_size: (usize, usize)) -> bool {
         // Skip edges (I/O), and some specific tiles for Block RAM/DSP
-        x > 0 && x < grid_size.0-1 && y > 0 && y < grid_size.1-1
+        x > 0 && x < grid_size.0 - 1 && y > 0 && y < grid_size.1 - 1
     }
 
     /// Create VTR academic FPGA k6_frac_N10_mem32K_40nm device
@@ -611,23 +746,67 @@ impl Device {
                 if Self::is_logic_tile_vtr(x, y, grid_size) {
                     logic_tiles.push(LogicTile {
                         position: (x, y),
-                        lut_count: 10,  // 10 LUTs per CLB (Configurable Logic Block)
-                        lut_size: 6,    // 6-input fracturable LUTs (can be split to 5-LUT + 4-LUT)
-                        ff_count: 20,   // 20 flip-flops per CLB (2 per LUT)
+                        lut_count: 10, // 10 LUTs per CLB (Configurable Logic Block)
+                        lut_size: 6,   // 6-input fracturable LUTs (can be split to 5-LUT + 4-LUT)
+                        ff_count: 20,  // 20 flip-flops per CLB (2 per LUT)
                         has_carry: true,
                         pins: vec![
                             // VTR CLB has 40 input pins and 10 output pins
-                            TilePin { name: "I0".to_string(), direction: PinDirection::Input, routing_tracks: vec![0, 1, 2, 3] },
-                            TilePin { name: "I1".to_string(), direction: PinDirection::Input, routing_tracks: vec![4, 5, 6, 7] },
-                            TilePin { name: "I2".to_string(), direction: PinDirection::Input, routing_tracks: vec![8, 9, 10, 11] },
-                            TilePin { name: "I3".to_string(), direction: PinDirection::Input, routing_tracks: vec![12, 13, 14, 15] },
-                            TilePin { name: "I4".to_string(), direction: PinDirection::Input, routing_tracks: vec![16, 17, 18, 19] },
-                            TilePin { name: "I5".to_string(), direction: PinDirection::Input, routing_tracks: vec![20, 21, 22, 23] },
-                            TilePin { name: "O0".to_string(), direction: PinDirection::Output, routing_tracks: vec![24, 25, 26, 27] },
-                            TilePin { name: "O1".to_string(), direction: PinDirection::Output, routing_tracks: vec![28, 29, 30, 31] },
-                            TilePin { name: "O2".to_string(), direction: PinDirection::Output, routing_tracks: vec![32, 33, 34, 35] },
-                            TilePin { name: "carry_in".to_string(), direction: PinDirection::Input, routing_tracks: vec![36] },
-                            TilePin { name: "carry_out".to_string(), direction: PinDirection::Output, routing_tracks: vec![37] },
+                            TilePin {
+                                name: "I0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![0, 1, 2, 3],
+                            },
+                            TilePin {
+                                name: "I1".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![4, 5, 6, 7],
+                            },
+                            TilePin {
+                                name: "I2".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![8, 9, 10, 11],
+                            },
+                            TilePin {
+                                name: "I3".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![12, 13, 14, 15],
+                            },
+                            TilePin {
+                                name: "I4".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![16, 17, 18, 19],
+                            },
+                            TilePin {
+                                name: "I5".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![20, 21, 22, 23],
+                            },
+                            TilePin {
+                                name: "O0".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![24, 25, 26, 27],
+                            },
+                            TilePin {
+                                name: "O1".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![28, 29, 30, 31],
+                            },
+                            TilePin {
+                                name: "O2".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![32, 33, 34, 35],
+                            },
+                            TilePin {
+                                name: "carry_in".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![36],
+                            },
+                            TilePin {
+                                name: "carry_out".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![37],
+                            },
                         ],
                     });
                 }
@@ -638,10 +817,14 @@ impl Device {
         let mut io_tiles = Vec::new();
         for x in 0..grid_size.0 {
             for y in 0..grid_size.1 {
-                if x == 0 || x == grid_size.0-1 || y == 0 || y == grid_size.1-1 {
+                if x == 0 || x == grid_size.0 - 1 || y == 0 || y == grid_size.1 - 1 {
                     io_tiles.push(IoTile {
                         position: (x, y),
-                            io_standards: vec![IoStandard::Lvcmos33, IoStandard::Lvcmos25, IoStandard::Lvcmos18],
+                        io_standards: vec![
+                            IoStandard::Lvcmos33,
+                            IoStandard::Lvcmos25,
+                            IoStandard::Lvcmos18,
+                        ],
                         drive_strengths: vec![8, 12, 16],
                         diff_pairs: true,
                         pins: vec!["pad".to_string(), "outpad".to_string(), "inpad".to_string()],
@@ -693,19 +876,39 @@ impl Device {
                 global_clocks: 8,
                 plls: 4,
                 dlls: 2,
-                clock_domains: vec![ClockDomain { id: 0, coverage: vec![], max_frequency: 400.0e6 }],
+                clock_domains: vec![ClockDomain {
+                    id: 0,
+                    coverage: vec![],
+                    max_frequency: 400.0e6,
+                }],
             },
             routing: RoutingArchitecture {
                 channels: (40, 40), // 40 tracks per channel
                 switch_pattern: SwitchPattern::Wilton,
                 wire_segments: vec![
-                    WireSegment { length: 1, frequency: 0.8, resistance: 10.0, capacitance: 1.0 },
-                    WireSegment { length: 4, frequency: 0.15, resistance: 20.0, capacitance: 2.0 },
-                    WireSegment { length: 16, frequency: 0.05, resistance: 40.0, capacitance: 4.0 },
+                    WireSegment {
+                        length: 1,
+                        frequency: 0.8,
+                        resistance: 10.0,
+                        capacitance: 1.0,
+                    },
+                    WireSegment {
+                        length: 4,
+                        frequency: 0.15,
+                        resistance: 20.0,
+                        capacitance: 2.0,
+                    },
+                    WireSegment {
+                        length: 16,
+                        frequency: 0.05,
+                        resistance: 40.0,
+                        capacitance: 4.0,
+                    },
                 ], // Mix of short and long segments
-                connection_boxes: vec![
-                    ConnectionBox { tracks: (0..40).collect(), flexibility: 0.5 }
-                ],
+                connection_boxes: vec![ConnectionBox {
+                    tracks: (0..40).collect(),
+                    flexibility: 0.5,
+                }],
             },
         }
     }
@@ -721,17 +924,41 @@ impl Device {
             for y in 1..11 {
                 logic_tiles.push(LogicTile {
                     position: (x, y),
-                    lut_count: 8,  // 8 LUTs per CLB (N=8)
-                    lut_size: 4,   // 4-input LUTs
-                    ff_count: 8,   // 8 flip-flops per CLB
+                    lut_count: 8,     // 8 LUTs per CLB (N=8)
+                    lut_size: 4,      // 4-input LUTs
+                    ff_count: 8,      // 8 flip-flops per CLB
                     has_carry: false, // Simplified for academic use
                     pins: vec![
-                        TilePin { name: "I0".to_string(), direction: PinDirection::Input, routing_tracks: vec![0, 1] },
-                        TilePin { name: "I1".to_string(), direction: PinDirection::Input, routing_tracks: vec![2, 3] },
-                        TilePin { name: "I2".to_string(), direction: PinDirection::Input, routing_tracks: vec![4, 5] },
-                        TilePin { name: "I3".to_string(), direction: PinDirection::Input, routing_tracks: vec![6, 7] },
-                        TilePin { name: "O0".to_string(), direction: PinDirection::Output, routing_tracks: vec![8, 9] },
-                        TilePin { name: "O1".to_string(), direction: PinDirection::Output, routing_tracks: vec![10, 11] },
+                        TilePin {
+                            name: "I0".to_string(),
+                            direction: PinDirection::Input,
+                            routing_tracks: vec![0, 1],
+                        },
+                        TilePin {
+                            name: "I1".to_string(),
+                            direction: PinDirection::Input,
+                            routing_tracks: vec![2, 3],
+                        },
+                        TilePin {
+                            name: "I2".to_string(),
+                            direction: PinDirection::Input,
+                            routing_tracks: vec![4, 5],
+                        },
+                        TilePin {
+                            name: "I3".to_string(),
+                            direction: PinDirection::Input,
+                            routing_tracks: vec![6, 7],
+                        },
+                        TilePin {
+                            name: "O0".to_string(),
+                            direction: PinDirection::Output,
+                            routing_tracks: vec![8, 9],
+                        },
+                        TilePin {
+                            name: "O1".to_string(),
+                            direction: PinDirection::Output,
+                            routing_tracks: vec![10, 11],
+                        },
                     ],
                 });
             }
@@ -741,7 +968,7 @@ impl Device {
         let mut io_tiles = Vec::new();
         for x in 0..grid_size.0 {
             for y in 0..grid_size.1 {
-                if x == 0 || x == grid_size.0-1 || y == 0 || y == grid_size.1-1 {
+                if x == 0 || x == grid_size.0 - 1 || y == 0 || y == grid_size.1 - 1 {
                     io_tiles.push(IoTile {
                         position: (x, y),
                         io_standards: vec![IoStandard::Lvcmos33],
@@ -769,18 +996,33 @@ impl Device {
                 global_clocks: 2,
                 plls: 1,
                 dlls: 0,
-                clock_domains: vec![ClockDomain { id: 0, coverage: vec![], max_frequency: 250.0e6 }],
+                clock_domains: vec![ClockDomain {
+                    id: 0,
+                    coverage: vec![],
+                    max_frequency: 250.0e6,
+                }],
             },
             routing: RoutingArchitecture {
                 channels: (12, 12), // 12 tracks per channel
                 switch_pattern: SwitchPattern::Universal,
                 wire_segments: vec![
-                    WireSegment { length: 1, frequency: 0.7, resistance: 8.0, capacitance: 0.8 },
-                    WireSegment { length: 4, frequency: 0.3, resistance: 16.0, capacitance: 1.6 },
+                    WireSegment {
+                        length: 1,
+                        frequency: 0.7,
+                        resistance: 8.0,
+                        capacitance: 0.8,
+                    },
+                    WireSegment {
+                        length: 4,
+                        frequency: 0.3,
+                        resistance: 16.0,
+                        capacitance: 1.6,
+                    },
                 ], // Mix of short and medium segments
-                connection_boxes: vec![
-                    ConnectionBox { tracks: (0..12).collect(), flexibility: 0.8 }
-                ],
+                connection_boxes: vec![ConnectionBox {
+                    tracks: (0..12).collect(),
+                    flexibility: 0.8,
+                }],
             },
         }
     }
@@ -796,21 +1038,61 @@ impl Device {
                 if Self::is_logic_tile_openfpga(x, y, grid_size) {
                     logic_tiles.push(LogicTile {
                         position: (x, y),
-                        lut_count: 10,  // 10 LUTs per CLB (N=10)
-                        lut_size: 6,    // 6-input fracturable LUTs
-                        ff_count: 20,   // 20 flip-flops per CLB (2 per LUT)
+                        lut_count: 10, // 10 LUTs per CLB (N=10)
+                        lut_size: 6,   // 6-input fracturable LUTs
+                        ff_count: 20,  // 20 flip-flops per CLB (2 per LUT)
                         has_carry: true,
                         pins: vec![
-                            TilePin { name: "I0".to_string(), direction: PinDirection::Input, routing_tracks: vec![0, 1, 2] },
-                            TilePin { name: "I1".to_string(), direction: PinDirection::Input, routing_tracks: vec![3, 4, 5] },
-                            TilePin { name: "I2".to_string(), direction: PinDirection::Input, routing_tracks: vec![6, 7, 8] },
-                            TilePin { name: "I3".to_string(), direction: PinDirection::Input, routing_tracks: vec![9, 10, 11] },
-                            TilePin { name: "I4".to_string(), direction: PinDirection::Input, routing_tracks: vec![12, 13, 14] },
-                            TilePin { name: "I5".to_string(), direction: PinDirection::Input, routing_tracks: vec![15, 16, 17] },
-                            TilePin { name: "O0".to_string(), direction: PinDirection::Output, routing_tracks: vec![18, 19, 20] },
-                            TilePin { name: "O1".to_string(), direction: PinDirection::Output, routing_tracks: vec![21, 22, 23] },
-                            TilePin { name: "carry_in".to_string(), direction: PinDirection::Input, routing_tracks: vec![24] },
-                            TilePin { name: "carry_out".to_string(), direction: PinDirection::Output, routing_tracks: vec![25] },
+                            TilePin {
+                                name: "I0".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![0, 1, 2],
+                            },
+                            TilePin {
+                                name: "I1".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![3, 4, 5],
+                            },
+                            TilePin {
+                                name: "I2".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![6, 7, 8],
+                            },
+                            TilePin {
+                                name: "I3".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![9, 10, 11],
+                            },
+                            TilePin {
+                                name: "I4".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![12, 13, 14],
+                            },
+                            TilePin {
+                                name: "I5".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![15, 16, 17],
+                            },
+                            TilePin {
+                                name: "O0".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![18, 19, 20],
+                            },
+                            TilePin {
+                                name: "O1".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![21, 22, 23],
+                            },
+                            TilePin {
+                                name: "carry_in".to_string(),
+                                direction: PinDirection::Input,
+                                routing_tracks: vec![24],
+                            },
+                            TilePin {
+                                name: "carry_out".to_string(),
+                                direction: PinDirection::Output,
+                                routing_tracks: vec![25],
+                            },
                         ],
                     });
                 }
@@ -821,7 +1103,7 @@ impl Device {
         let mut io_tiles = Vec::new();
         for x in 0..grid_size.0 {
             for y in 0..grid_size.1 {
-                if x == 0 || x == grid_size.0-1 || y == 0 || y == grid_size.1-1 {
+                if x == 0 || x == grid_size.0 - 1 || y == 0 || y == grid_size.1 - 1 {
                     io_tiles.push(IoTile {
                         position: (x, y),
                         io_standards: vec![IoStandard::Lvcmos33, IoStandard::Lvcmos25],
@@ -859,19 +1141,39 @@ impl Device {
                 global_clocks: 4,
                 plls: 2,
                 dlls: 1,
-                clock_domains: vec![ClockDomain { id: 0, coverage: vec![], max_frequency: 300.0e6 }],
+                clock_domains: vec![ClockDomain {
+                    id: 0,
+                    coverage: vec![],
+                    max_frequency: 300.0e6,
+                }],
             },
             routing: RoutingArchitecture {
                 channels: (24, 24), // 24 tracks per channel
                 switch_pattern: SwitchPattern::Wilton,
                 wire_segments: vec![
-                    WireSegment { length: 1, frequency: 0.6, resistance: 9.0, capacitance: 0.9 },
-                    WireSegment { length: 4, frequency: 0.3, resistance: 18.0, capacitance: 1.8 },
-                    WireSegment { length: 8, frequency: 0.1, resistance: 32.0, capacitance: 3.2 },
+                    WireSegment {
+                        length: 1,
+                        frequency: 0.6,
+                        resistance: 9.0,
+                        capacitance: 0.9,
+                    },
+                    WireSegment {
+                        length: 4,
+                        frequency: 0.3,
+                        resistance: 18.0,
+                        capacitance: 1.8,
+                    },
+                    WireSegment {
+                        length: 8,
+                        frequency: 0.1,
+                        resistance: 32.0,
+                        capacitance: 3.2,
+                    },
                 ], // Mix of segment lengths
-                connection_boxes: vec![
-                    ConnectionBox { tracks: (0..24).collect(), flexibility: 0.6 }
-                ],
+                connection_boxes: vec![ConnectionBox {
+                    tracks: (0..24).collect(),
+                    flexibility: 0.6,
+                }],
             },
         }
     }
@@ -879,7 +1181,7 @@ impl Device {
     /// Helper to determine if a position should have a logic tile for VTR
     fn is_logic_tile_vtr(x: usize, y: usize, grid_size: (usize, usize)) -> bool {
         // Skip edges (I/O), and specific tiles for BRAM/DSP
-        if x == 0 || x >= grid_size.0-1 || y == 0 || y >= grid_size.1-1 {
+        if x == 0 || x >= grid_size.0 - 1 || y == 0 || y >= grid_size.1 - 1 {
             return false;
         }
 
@@ -901,7 +1203,7 @@ impl Device {
     /// Helper to determine if a position should have a logic tile for OpenFPGA
     fn is_logic_tile_openfpga(x: usize, y: usize, grid_size: (usize, usize)) -> bool {
         // Skip edges (I/O), and specific tiles for BRAM
-        if x == 0 || x >= grid_size.0-1 || y == 0 || y >= grid_size.1-1 {
+        if x == 0 || x >= grid_size.0 - 1 || y == 0 || y >= grid_size.1 - 1 {
             return false;
         }
 
@@ -961,7 +1263,11 @@ impl DeviceProgrammer {
     }
 
     /// Program device with bitstream
-    pub fn program(&self, _device: &Device, _bitstream: &super::bitstream::Bitstream) -> Result<(), ProgrammingError> {
+    pub fn program(
+        &self,
+        _device: &Device,
+        _bitstream: &super::bitstream::Bitstream,
+    ) -> Result<(), ProgrammingError> {
         // Simplified programming - would call actual programmer tools
         Ok(())
     }

@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod integration_tests {
-    use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::{MirCompiler, OptimizationLevel};
-    use skalp_lir::lower_to_lir;
     use skalp_codegen::generate_systemverilog_from_mir;
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_lir::lower_to_lir;
+    use skalp_mir::{MirCompiler, OptimizationLevel};
+    use skalp_sim::{SimulationConfig, Simulator};
     use skalp_sir::convert_mir_to_sir;
-    use skalp_sim::{Simulator, SimulationConfig};
     use std::fs;
-    
+
     use tempfile::TempDir;
 
     #[test]
@@ -33,23 +33,34 @@ mod integration_tests {
         assert!(!hir.entities.is_empty(), "Should have at least one entity");
 
         // Compile to MIR
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::Basic);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
         assert!(!mir.modules.is_empty(), "Should have at least one module");
 
         // Lower to LIR
         let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
-        assert!(!lir.modules.is_empty(), "Should have at least one LIR module");
+        assert!(
+            !lir.modules.is_empty(),
+            "Should have at least one LIR module"
+        );
 
         // Convert to SIR
         let sir = convert_mir_to_sir(&mir.modules[0]);
-        assert_eq!(sir.name, format!("{:?}", mir.modules[0].id), "Module names should match");
+        assert_eq!(
+            sir.name,
+            format!("{:?}", mir.modules[0].id),
+            "Module names should match"
+        );
 
         // Generate SystemVerilog
-        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
-            .expect("Failed to generate SystemVerilog");
-        assert!(sv_code.contains("module Adder"), "Should contain module declaration");
+        let sv_code =
+            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
+        assert!(
+            sv_code.contains("module Adder"),
+            "Should contain module declaration"
+        );
         assert!(sv_code.contains("input"), "Should contain input ports");
         assert!(sv_code.contains("output"), "Should contain output ports");
     }
@@ -80,8 +91,7 @@ mod integration_tests {
 
         // Compile through the pipeline
         let hir = parse_and_build_hir(source).unwrap();
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::Basic);
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
         let mir = compiler.compile_to_mir(&hir).unwrap();
         let sir = convert_mir_to_sir(&mir.modules[0]);
 
@@ -120,11 +130,14 @@ mod integration_tests {
 
             // Check value incremented
             let value = sim.get_output("value").await.unwrap();
-            let current_value = value[0] & 0x0F;  // 4-bit value
+            let current_value = value[0] & 0x0F; // 4-bit value
 
             if i > 0 {
-                assert_eq!(current_value, (prev_value + 1) & 0x0F,
-                          "Counter should increment modulo 16");
+                assert_eq!(
+                    current_value,
+                    (prev_value + 1) & 0x0F,
+                    "Counter should increment modulo 16"
+                );
             }
             prev_value = current_value;
 
@@ -158,13 +171,19 @@ mod integration_tests {
         let hir = parse_and_build_hir(source).unwrap();
 
         // Test different optimization levels
-        for opt_level in [OptimizationLevel::None, OptimizationLevel::Basic, OptimizationLevel::Full] {
-            let compiler = MirCompiler::new()
-                .with_optimization_level(opt_level);
+        for opt_level in [
+            OptimizationLevel::None,
+            OptimizationLevel::Basic,
+            OptimizationLevel::Full,
+        ] {
+            let compiler = MirCompiler::new().with_optimization_level(opt_level);
             let mir = compiler.compile_to_mir(&hir).unwrap();
 
             // Basic optimization should simplify the circuit
-            if matches!(opt_level, OptimizationLevel::Basic | OptimizationLevel::Full) {
+            if matches!(
+                opt_level,
+                OptimizationLevel::Basic | OptimizationLevel::Full
+            ) {
                 // Check that optimizations were applied
                 // This would depend on the specific optimizations implemented
                 assert!(!mir.modules.is_empty());
@@ -176,8 +195,10 @@ mod integration_tests {
     fn test_error_handling() {
         // Test parse errors
         let bad_syntax = "entity { invalid syntax }";
-        assert!(parse_and_build_hir(bad_syntax).is_err(),
-                "Should fail on invalid syntax");
+        assert!(
+            parse_and_build_hir(bad_syntax).is_err(),
+            "Should fail on invalid syntax"
+        );
 
         // Test semantic errors
         let bad_semantics = r#"
@@ -236,8 +257,14 @@ mod integration_tests {
         // Verify file was created and contains expected content
         assert!(output_path.exists(), "Output file should exist");
         let content = fs::read_to_string(&output_path).unwrap();
-        assert!(content.contains("module TestModule"), "Should contain module");
-        assert!(content.contains("always_ff"), "Should contain sequential logic");
+        assert!(
+            content.contains("module TestModule"),
+            "Should contain module"
+        );
+        assert!(
+            content.contains("always_ff"),
+            "Should contain sequential logic"
+        );
     }
 
     #[tokio::test]

@@ -44,7 +44,7 @@ mod temporal_logic_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Event blocks: {}", implementation.event_blocks.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Concurrent assertion parsing failed: {:?}", e);
                 // This may fail initially as we build up the HIR builder support
@@ -85,7 +85,7 @@ mod temporal_logic_tests {
                 println!("✅ Sequence definitions parsed successfully!");
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Sequence parsing failed: {:?}", e);
                 // This may fail initially as we build up the parser support
@@ -136,7 +136,7 @@ mod temporal_logic_tests {
                 println!("✅ Temporal operators parsed successfully!");
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Temporal operator parsing failed: {:?}", e);
                 // This may fail initially as we build up full temporal support
@@ -185,7 +185,7 @@ mod temporal_logic_tests {
                 println!("✅ Complex repetition patterns parsed successfully!");
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Complex repetition parsing failed: {:?}", e);
                 // Expected to work once full parser support is implemented
@@ -227,7 +227,7 @@ mod temporal_logic_tests {
                 println!("✅ All assertion types parsed successfully!");
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Assertion types parsing failed: {:?}", e);
                 // Should work once we complete the implementation

@@ -2,11 +2,11 @@
 mod minimal_pipeline_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
-    use skalp_sir::convert_mir_to_sir;
     use skalp_sim::{
         simulator::SimulationConfig,
-        testbench::{Testbench, TestVectorBuilder},
+        testbench::{TestVectorBuilder, Testbench},
     };
+    use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
     async fn test_simple_pipeline_valid() {
@@ -36,16 +36,20 @@ mod minimal_pipeline_tests {
         let hir = parse_and_build_hir(source).expect("Failed to parse");
 
         // Compile to MIR
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         // Convert to SIR
         let sir = convert_mir_to_sir(&mir.modules[0]);
 
         println!("\n=== Minimal Pipeline SIR Analysis ===");
         println!("Module: {}", sir.name);
-        println!("State elements: {:?}", sir.state_elements.keys().collect::<Vec<_>>());
+        println!(
+            "State elements: {:?}",
+            sir.state_elements.keys().collect::<Vec<_>>()
+        );
 
         // Generate and print Metal shader
         let shader_code = skalp_sir::generate_metal_shader(&sir);
@@ -62,35 +66,41 @@ mod minimal_pipeline_tests {
         };
 
         // Create testbench
-        let mut testbench = Testbench::new(config).await
+        let mut testbench = Testbench::new(config)
+            .await
             .expect("Failed to create testbench");
 
         // Load the module
-        testbench.load_module(&sir).await
+        testbench
+            .load_module(&sir)
+            .await
             .expect("Failed to load module");
 
         // Test sequence: Reset, then check valid bit
 
         // Reset for a few cycles
         for cycle in 0..4 {
-            testbench.add_test_vector(TestVectorBuilder::new(cycle * 2)
-                .with_input("rst", vec![1])
-                .with_expected_output("valid", vec![0])
-                .build());
+            testbench.add_test_vector(
+                TestVectorBuilder::new(cycle * 2)
+                    .with_input("rst", vec![1])
+                    .with_expected_output("valid", vec![0])
+                    .build(),
+            );
         }
 
         // Release reset and wait for valid bit
         for cycle in 4..16 {
-            let expected_valid = if cycle >= 12 { 1 } else { 0 };  // Should go valid when pipeline_valid reaches 8
-            testbench.add_test_vector(TestVectorBuilder::new(cycle * 2)
-                .with_input("rst", vec![0])
-                .with_expected_output("valid", vec![expected_valid])
-                .build());
+            let expected_valid = if cycle >= 12 { 1 } else { 0 }; // Should go valid when pipeline_valid reaches 8
+            testbench.add_test_vector(
+                TestVectorBuilder::new(cycle * 2)
+                    .with_input("rst", vec![0])
+                    .with_expected_output("valid", vec![expected_valid])
+                    .build(),
+            );
         }
 
         // Run the test
-        let results = testbench.run_test().await
-            .expect("Failed to run test");
+        let results = testbench.run_test().await.expect("Failed to run test");
 
         // Print report
         println!("\n{}", testbench.generate_report());

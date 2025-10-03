@@ -1,7 +1,7 @@
 //! Auto-completion support for SKALP
 
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position};
 use crate::DocumentState;
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position};
 
 /// Get completion items for the current position
 pub fn get_completions(doc: &DocumentState, position: Position) -> Vec<CompletionItem> {
@@ -88,7 +88,10 @@ fn get_keyword_completions() -> Vec<CompletionItem> {
             label: "match".to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
             detail: Some("Pattern matching".to_string()),
-            insert_text: Some("match ${1:expr} {\n    ${2:pattern} => ${3:value},\n    _ => ${4:default}\n}".to_string()),
+            insert_text: Some(
+                "match ${1:expr} {\n    ${2:pattern} => ${3:value},\n    _ => ${4:default}\n}"
+                    .to_string(),
+            ),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         },
@@ -275,7 +278,13 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let completions = get_completions(&doc, Position { line: 0, character: 0 });
+        let completions = get_completions(
+            &doc,
+            Position {
+                line: 0,
+                character: 0,
+            },
+        );
         assert!(completions.iter().any(|c| c.label == "entity"));
         assert!(completions.iter().any(|c| c.label == "protocol"));
     }
@@ -289,7 +298,13 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let completions = get_completions(&doc, Position { line: 0, character: 3 });
+        let completions = get_completions(
+            &doc,
+            Position {
+                line: 0,
+                character: 3,
+            },
+        );
         assert!(completions.iter().any(|c| c.label == "clock.rise"));
         assert!(completions.iter().any(|c| c.label == "reset.active"));
     }

@@ -1,6 +1,6 @@
+use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, SimulationState};
 use async_trait::async_trait;
 use skalp_sir::SirModule;
-use crate::simulator::{SimulationRuntime, SimulationResult, SimulationState, SimulationError};
 use std::collections::HashMap;
 
 pub struct CpuRuntime {
@@ -36,7 +36,10 @@ impl CpuRuntime {
         Ok(())
     }
 
-    fn evaluate_cone(&mut self, cone: &skalp_sir::CombinationalCone) -> Result<(), SimulationError> {
+    fn evaluate_cone(
+        &mut self,
+        cone: &skalp_sir::CombinationalCone,
+    ) -> Result<(), SimulationError> {
         // TODO: Implement actual cone evaluation
         // For now, just a placeholder
         Ok(())
@@ -51,7 +54,8 @@ impl CpuRuntime {
                         for output in &node.outputs {
                             let signal_name = &output.signal_id;
                             if let Some(current_val) = self.signals.get(signal_name) {
-                                self.next_state.insert(signal_name.clone(), current_val.clone());
+                                self.next_state
+                                    .insert(signal_name.clone(), current_val.clone());
                             }
                         }
                     }
@@ -71,7 +75,8 @@ impl CpuRuntime {
         // Initialize all signals to zero
         for signal in &module.signals {
             let byte_size = (signal.width + 7) / 8;
-            self.signals.insert(signal.name.clone(), vec![0u8; byte_size]);
+            self.signals
+                .insert(signal.name.clone(), vec![0u8; byte_size]);
         }
 
         // Initialize input ports
@@ -178,7 +183,10 @@ impl SimulationRuntime for CpuRuntime {
             self.state.insert(name.to_string(), value.to_vec());
             Ok(())
         } else {
-            Err(SimulationError::InvalidInput(format!("Input {} not found", name)))
+            Err(SimulationError::InvalidInput(format!(
+                "Input {} not found",
+                name
+            )))
         }
     }
 

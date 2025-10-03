@@ -1,13 +1,13 @@
-pub mod simulator;
-pub mod gpu_runtime;
+pub mod clock_manager;
 pub mod cpu_runtime;
+pub mod gpu_runtime;
+pub mod simulator;
 pub mod testbench;
 pub mod waveform;
-pub mod clock_manager;
 
-pub use simulator::{Simulator, SimulationConfig, SimulationResult};
-pub use gpu_runtime::{GpuRuntime, GpuDevice};
+pub use clock_manager::{ClockEdge, ClockInfo, ClockManager};
 pub use cpu_runtime::CpuRuntime;
-pub use testbench::{Testbench, TestVector, TestResult};
-pub use waveform::{Waveform, Signal as WaveformSignal};
-pub use clock_manager::{ClockManager, ClockInfo, ClockEdge};
+pub use gpu_runtime::{GpuDevice, GpuRuntime};
+pub use simulator::{SimulationConfig, SimulationResult, Simulator};
+pub use testbench::{TestResult, TestVector, Testbench};
+pub use waveform::{Signal as WaveformSignal, Waveform};

@@ -1,4 +1,4 @@
-use crate::lir::{Lir, Gate, GateType, Net};
+use crate::lir::{Gate, GateType, Lir, Net};
 use std::collections::HashMap;
 
 /// Technology mapping for different target platforms
@@ -15,8 +15,8 @@ pub enum TechnologyTarget {
     /// Generic gates (no specific technology)
     Generic,
     /// FPGA with LUTs (Look-Up Tables)
-    FpgaLut4,  // 4-input LUTs
-    FpgaLut6,  // 6-input LUTs
+    FpgaLut4, // 4-input LUTs
+    FpgaLut6, // 6-input LUTs
     /// ASIC with standard cells
     AsicStandardCell,
 }
@@ -97,8 +97,13 @@ impl TechnologyMapper {
         for gate in &mut lir.gates {
             match gate.gate_type {
                 // Simple gates can be packed into LUTs
-                GateType::And | GateType::Or | GateType::Not | GateType::Xor |
-                GateType::Nand | GateType::Nor | GateType::Xnor => {
+                GateType::And
+                | GateType::Or
+                | GateType::Not
+                | GateType::Xor
+                | GateType::Nand
+                | GateType::Nor
+                | GateType::Xnor => {
                     if gate.inputs.len() <= 4 {
                         // Fits in one LUT4
                         gate.gate_type = GateType::Buffer; // Placeholder for LUT4
@@ -128,7 +133,10 @@ impl TechnologyMapper {
         self.resource_usage.flip_flops = ff_count;
         self.resource_usage.area = (lut_count as f64 * 1.0) + (ff_count as f64 * 0.5);
 
-        notes.push(format!("FPGA LUT4 mapping: {} LUTs, {} FFs", lut_count, ff_count));
+        notes.push(format!(
+            "FPGA LUT4 mapping: {} LUTs, {} FFs",
+            lut_count, ff_count
+        ));
     }
 
     /// Map to FPGA with 6-input LUTs
@@ -139,8 +147,13 @@ impl TechnologyMapper {
         for gate in &mut lir.gates {
             match gate.gate_type {
                 // More gates can fit in LUT6
-                GateType::And | GateType::Or | GateType::Not | GateType::Xor |
-                GateType::Nand | GateType::Nor | GateType::Xnor => {
+                GateType::And
+                | GateType::Or
+                | GateType::Not
+                | GateType::Xor
+                | GateType::Nand
+                | GateType::Nor
+                | GateType::Xnor => {
                     if gate.inputs.len() <= 6 {
                         // Fits in one LUT6
                         gate.gate_type = GateType::Buffer; // Placeholder for LUT6
@@ -166,7 +179,10 @@ impl TechnologyMapper {
         self.resource_usage.flip_flops = ff_count;
         self.resource_usage.area = (lut_count as f64 * 1.2) + (ff_count as f64 * 0.5);
 
-        notes.push(format!("FPGA LUT6 mapping: {} LUTs, {} FFs", lut_count, ff_count));
+        notes.push(format!(
+            "FPGA LUT6 mapping: {} LUTs, {} FFs",
+            lut_count, ff_count
+        ));
     }
 
     /// Map to ASIC standard cells
@@ -185,7 +201,10 @@ impl TechnologyMapper {
             (GateType::Xnor, 1.5),
             (GateType::Buffer, 0.5),
             (GateType::DFF, 2.0),
-        ].iter().cloned().collect();
+        ]
+        .iter()
+        .cloned()
+        .collect();
 
         for gate in &lir.gates {
             if let Some(&gate_area) = gate_areas.get(&gate.gate_type) {
@@ -201,7 +220,10 @@ impl TechnologyMapper {
         self.resource_usage.area = area;
         self.resource_usage.flip_flops = ff_count;
 
-        notes.push(format!("ASIC standard cell mapping: {:.1} area units, {} FFs", area, ff_count));
+        notes.push(format!(
+            "ASIC standard cell mapping: {:.1} area units, {} FFs",
+            area, ff_count
+        ));
     }
 
     /// Calculate mapping efficiency
@@ -220,12 +242,20 @@ impl TechnologyMapper {
                     _ => 4,
                 };
                 let theoretical_luts = (total_inputs + max_lut_inputs - 1) / max_lut_inputs;
-                if theoretical_luts == 0 { 1.0 } else { theoretical_luts as f64 / self.resource_usage.luts as f64 }
+                if theoretical_luts == 0 {
+                    1.0
+                } else {
+                    theoretical_luts as f64 / self.resource_usage.luts as f64
+                }
             }
             TechnologyTarget::AsicStandardCell => {
                 // For ASIC, efficiency is area utilization
                 let ideal_area = lir.gates.len() as f64 * 0.8; // Ideal standard cell area
-                if self.resource_usage.area == 0.0 { 1.0 } else { ideal_area / self.resource_usage.area }
+                if self.resource_usage.area == 0.0 {
+                    1.0
+                } else {
+                    ideal_area / self.resource_usage.area
+                }
             }
             TechnologyTarget::Generic => 1.0,
         }
@@ -242,17 +272,22 @@ impl TechnologyMapper {
                     if gate.inputs.len() > 4 {
                         recommendations.push(format!(
                             "Gate {} has {} inputs, consider decomposition for LUT4",
-                            gate.id, gate.inputs.len()
+                            gate.id,
+                            gate.inputs.len()
                         ));
                     }
                 }
             }
             TechnologyTarget::FpgaLut6 => {
                 // Look for opportunities to pack more logic
-                let simple_gates = lir.gates.iter().filter(|g|
-                    matches!(g.gate_type, GateType::And | GateType::Or | GateType::Not) &&
-                    g.inputs.len() < 3
-                ).count();
+                let simple_gates = lir
+                    .gates
+                    .iter()
+                    .filter(|g| {
+                        matches!(g.gate_type, GateType::And | GateType::Or | GateType::Not)
+                            && g.inputs.len() < 3
+                    })
+                    .count();
 
                 if simple_gates > 2 {
                     recommendations.push(format!(
@@ -263,9 +298,11 @@ impl TechnologyMapper {
             }
             TechnologyTarget::AsicStandardCell => {
                 // Look for area optimization opportunities
-                let buffer_count = lir.gates.iter().filter(|g|
-                    matches!(g.gate_type, GateType::Buffer)
-                ).count();
+                let buffer_count = lir
+                    .gates
+                    .iter()
+                    .filter(|g| matches!(g.gate_type, GateType::Buffer))
+                    .count();
 
                 if buffer_count > 0 {
                     recommendations.push(format!(
@@ -275,7 +312,8 @@ impl TechnologyMapper {
                 }
             }
             TechnologyTarget::Generic => {
-                recommendations.push("Use specific technology target for detailed optimization".to_string());
+                recommendations
+                    .push("Use specific technology target for detailed optimization".to_string());
             }
         }
 

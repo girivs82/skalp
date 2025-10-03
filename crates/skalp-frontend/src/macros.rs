@@ -1,6 +1,6 @@
 //! Macro system for SKALP metaprogramming
 
-use crate::ast::{Type, Statement, Expression, Literal};
+use crate::ast::{Expression, Literal, Statement, Type};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -142,7 +142,7 @@ impl MacroExpander {
                     kind: MacroParamKind::Block,
                 },
             ],
-            body: vec![],  // Built-in implementation
+            body: vec![], // Built-in implementation
             is_proc: true,
         });
 
@@ -159,20 +159,18 @@ impl MacroExpander {
                     kind: MacroParamKind::Token,
                 },
             ],
-            body: vec![],  // Built-in implementation
+            body: vec![], // Built-in implementation
             is_proc: true,
         });
 
         // Register @bits macro for bit manipulation
         self.register_macro(MacroDef {
             name: "bits".to_string(),
-            params: vec![
-                MacroParam {
-                    name: "width".to_string(),
-                    kind: MacroParamKind::Expr,
-                },
-            ],
-            body: vec![],  // Built-in implementation
+            params: vec![MacroParam {
+                name: "width".to_string(),
+                kind: MacroParamKind::Expr,
+            }],
+            body: vec![], // Built-in implementation
             is_proc: true,
         });
 
@@ -189,22 +187,20 @@ impl MacroExpander {
                     kind: MacroParamKind::Block,
                 },
             ],
-            body: vec![],  // Built-in implementation
+            body: vec![], // Built-in implementation
             is_proc: true,
         });
 
         // Register @derive macro for trait derivation
         self.register_macro(MacroDef {
             name: "derive".to_string(),
-            params: vec![
-                MacroParam {
-                    name: "traits".to_string(),
-                    kind: MacroParamKind::Repetition {
-                        separator: Some(",".to_string())
-                    },
+            params: vec![MacroParam {
+                name: "traits".to_string(),
+                kind: MacroParamKind::Repetition {
+                    separator: Some(",".to_string()),
                 },
-            ],
-            body: vec![],  // Built-in implementation
+            }],
+            body: vec![], // Built-in implementation
             is_proc: true,
         });
     }
@@ -229,7 +225,9 @@ impl MacroExpander {
     }
 
     fn expand_impl(&mut self, invocation: &MacroInvocation) -> Result<Vec<MacroToken>, MacroError> {
-        let macro_def = self.macros.get(&invocation.name)
+        let macro_def = self
+            .macros
+            .get(&invocation.name)
             .ok_or_else(|| MacroError::UnknownMacro(invocation.name.clone()))?
             .clone();
 
@@ -262,10 +260,11 @@ impl MacroExpander {
     ) -> Result<Vec<MacroToken>, MacroError> {
         // Match parameters to arguments
         if def.params.len() != invocation.args.len() {
-            return Err(MacroError::InvalidArgument(
-                format!("Expected {} arguments, got {}",
-                    def.params.len(), invocation.args.len())
-            ));
+            return Err(MacroError::InvalidArgument(format!(
+                "Expected {} arguments, got {}",
+                def.params.len(),
+                invocation.args.len()
+            )));
         }
 
         // Create substitution map
@@ -292,11 +291,14 @@ impl MacroExpander {
         Ok(result)
     }
 
-    fn expand_generate(&mut self, invocation: &MacroInvocation) -> Result<Vec<MacroToken>, MacroError> {
+    fn expand_generate(
+        &mut self,
+        invocation: &MacroInvocation,
+    ) -> Result<Vec<MacroToken>, MacroError> {
         // @generate(N) { body } - generates N copies of body with $i substituted
         if invocation.args.len() != 2 {
             return Err(MacroError::InvalidArgument(
-                "generate requires 2 arguments".to_string()
+                "generate requires 2 arguments".to_string(),
             ));
         }
 
@@ -305,12 +307,20 @@ impl MacroExpander {
                 // Use integer literal directly
                 *n as usize
             }
-            _ => return Err(MacroError::InvalidArgument("count must be literal".to_string())),
+            _ => {
+                return Err(MacroError::InvalidArgument(
+                    "count must be literal".to_string(),
+                ))
+            }
         };
 
         let body = match &invocation.args[1] {
             MacroArg::TokenTree(tokens) => tokens,
-            _ => return Err(MacroError::InvalidArgument("body must be token tree".to_string())),
+            _ => {
+                return Err(MacroError::InvalidArgument(
+                    "body must be token tree".to_string(),
+                ))
+            }
         };
 
         let mut result = Vec::new();
@@ -335,35 +345,40 @@ impl MacroExpander {
         Ok(result)
     }
 
-    fn expand_assert(&mut self, invocation: &MacroInvocation) -> Result<Vec<MacroToken>, MacroError> {
+    fn expand_assert(
+        &mut self,
+        invocation: &MacroInvocation,
+    ) -> Result<Vec<MacroToken>, MacroError> {
         // @assert(condition, message) - compile-time assertion
         if invocation.args.len() != 2 {
             return Err(MacroError::InvalidArgument(
-                "assert requires 2 arguments".to_string()
+                "assert requires 2 arguments".to_string(),
             ));
         }
 
         // For now, just generate a static assertion
         // In full implementation, would evaluate at compile time
-        Ok(vec![
-            MacroToken {
-                kind: TokenKind::Keyword("static_assert".to_string()),
-                span: invocation.span.clone(),
-            },
-        ])
+        Ok(vec![MacroToken {
+            kind: TokenKind::Keyword("static_assert".to_string()),
+            span: invocation.span.clone(),
+        }])
     }
 
     fn expand_bits(&mut self, invocation: &MacroInvocation) -> Result<Vec<MacroToken>, MacroError> {
         // @bits(width) - generates bit<width> type
         if invocation.args.len() != 1 {
             return Err(MacroError::InvalidArgument(
-                "bits requires 1 argument".to_string()
+                "bits requires 1 argument".to_string(),
             ));
         }
 
         let width = match &invocation.args[0] {
             MacroArg::Expr(Expression::Literal(Literal::Decimal(w))) => w.to_string(),
-            _ => return Err(MacroError::InvalidArgument("width must be literal".to_string())),
+            _ => {
+                return Err(MacroError::InvalidArgument(
+                    "width must be literal".to_string(),
+                ))
+            }
         };
 
         Ok(vec![
@@ -386,33 +401,35 @@ impl MacroExpander {
         ])
     }
 
-    fn expand_pipeline(&mut self, invocation: &MacroInvocation) -> Result<Vec<MacroToken>, MacroError> {
+    fn expand_pipeline(
+        &mut self,
+        invocation: &MacroInvocation,
+    ) -> Result<Vec<MacroToken>, MacroError> {
         // @pipeline(stages) { body } - generates pipeline stages
         if invocation.args.len() != 2 {
             return Err(MacroError::InvalidArgument(
-                "pipeline requires 2 arguments".to_string()
+                "pipeline requires 2 arguments".to_string(),
             ));
         }
 
         // Generate pipeline structure
         // Simplified for now - full implementation would generate complete pipeline
-        Ok(vec![
-            MacroToken {
-                kind: TokenKind::Keyword("pipeline".to_string()),
-                span: invocation.span.clone(),
-            },
-        ])
+        Ok(vec![MacroToken {
+            kind: TokenKind::Keyword("pipeline".to_string()),
+            span: invocation.span.clone(),
+        }])
     }
 
-    fn expand_derive(&mut self, invocation: &MacroInvocation) -> Result<Vec<MacroToken>, MacroError> {
+    fn expand_derive(
+        &mut self,
+        invocation: &MacroInvocation,
+    ) -> Result<Vec<MacroToken>, MacroError> {
         // @derive(Trait1, Trait2, ...) - derives trait implementations
         // Simplified for now - full implementation would generate trait impls
-        Ok(vec![
-            MacroToken {
-                kind: TokenKind::Comment("// Derived traits".to_string()),
-                span: invocation.span.clone(),
-            },
-        ])
+        Ok(vec![MacroToken {
+            kind: TokenKind::Comment("// Derived traits".to_string()),
+            span: invocation.span.clone(),
+        }])
     }
 
     fn arg_to_tokens(&self, arg: &MacroArg) -> Result<Vec<MacroToken>, MacroError> {
@@ -507,9 +524,7 @@ mod tests {
 
         let invocation = MacroInvocation {
             name: "bits".to_string(),
-            args: vec![
-                MacroArg::Expr(Expression::Literal(Literal::Decimal(16))),
-            ],
+            args: vec![MacroArg::Expr(Expression::Literal(Literal::Decimal(16)))],
             span: 0..10,
         };
 

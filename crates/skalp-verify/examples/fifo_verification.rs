@@ -1,13 +1,13 @@
 //! FIFO verification example demonstrating comprehensive verification features
 
+use skalp_mir::mir::{BinaryOp, Expression, UnaryOp, Value};
 use skalp_verify::assertions::*;
 use skalp_verify::coverage::*;
 use skalp_verify::properties::*;
 use skalp_verify::requirements::*;
 use skalp_verify::testbench::*;
-use skalp_mir::mir::{Expression, BinaryOp, UnaryOp, Value};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
 fn main() {
     println!("=== FIFO Verification Example ===");
@@ -15,18 +15,25 @@ fn main() {
 
     // 1. Define Requirements
     let mut req_tracker = setup_requirements();
-    println!("Requirements defined: {}", req_tracker.generate_report().total_requirements);
+    println!(
+        "Requirements defined: {}",
+        req_tracker.generate_report().total_requirements
+    );
     println!();
 
     // 2. Define Properties
     let properties = define_properties();
     println!("Properties defined: {}", properties.len());
     for prop in &properties {
-        println!("  - {} ({})", prop.name, match prop.kind {
-            PropertyKind::Safety => "Safety",
-            PropertyKind::Liveness => "Liveness",
-            _ => "Other",
-        });
+        println!(
+            "  - {} ({})",
+            prop.name,
+            match prop.kind {
+                PropertyKind::Safety => "Safety",
+                PropertyKind::Liveness => "Liveness",
+                _ => "Other",
+            }
+        );
     }
     println!();
 
@@ -96,14 +103,12 @@ fn setup_requirements() -> RequirementTracker {
         req_type: RequirementType::Functional,
         parent: None,
         children: vec!["FIFO-001.1".to_string(), "FIFO-001.2".to_string()],
-        criteria: vec![
-            VerificationCriterion {
-                description: "FIFO depth is 16".to_string(),
-                method: VerificationMethod::Simulation,
-                pass_criteria: "Can store exactly 16 items".to_string(),
-                status: CriterionStatus::NotTested,
-            },
-        ],
+        criteria: vec![VerificationCriterion {
+            description: "FIFO depth is 16".to_string(),
+            method: VerificationMethod::Simulation,
+            pass_criteria: "Can store exactly 16 items".to_string(),
+            status: CriterionStatus::NotTested,
+        }],
         properties: vec!["fifo_depth_prop".to_string()],
         tests: vec!["test_fifo_depth".to_string()],
         status: RequirementStatus::Implemented,
@@ -118,14 +123,12 @@ fn setup_requirements() -> RequirementTracker {
         req_type: RequirementType::Functional,
         parent: Some("FIFO-001".to_string()),
         children: vec![],
-        criteria: vec![
-            VerificationCriterion {
-                description: "Full flag assertion".to_string(),
-                method: VerificationMethod::Simulation,
-                pass_criteria: "full=1 when count=16".to_string(),
-                status: CriterionStatus::NotTested,
-            },
-        ],
+        criteria: vec![VerificationCriterion {
+            description: "Full flag assertion".to_string(),
+            method: VerificationMethod::Simulation,
+            pass_criteria: "full=1 when count=16".to_string(),
+            status: CriterionStatus::NotTested,
+        }],
         properties: vec!["full_flag_prop".to_string()],
         tests: vec!["test_full_flag".to_string()],
         status: RequirementStatus::Implemented,
@@ -139,14 +142,12 @@ fn setup_requirements() -> RequirementTracker {
         req_type: RequirementType::Functional,
         parent: Some("FIFO-001".to_string()),
         children: vec![],
-        criteria: vec![
-            VerificationCriterion {
-                description: "Empty flag assertion".to_string(),
-                method: VerificationMethod::Simulation,
-                pass_criteria: "empty=1 when count=0".to_string(),
-                status: CriterionStatus::NotTested,
-            },
-        ],
+        criteria: vec![VerificationCriterion {
+            description: "Empty flag assertion".to_string(),
+            method: VerificationMethod::Simulation,
+            pass_criteria: "empty=1 when count=0".to_string(),
+            status: CriterionStatus::NotTested,
+        }],
         properties: vec!["empty_flag_prop".to_string()],
         tests: vec!["test_empty_flag".to_string()],
         status: RequirementStatus::Implemented,
@@ -161,14 +162,12 @@ fn setup_requirements() -> RequirementTracker {
         req_type: RequirementType::Performance,
         parent: None,
         children: vec![],
-        criteria: vec![
-            VerificationCriterion {
-                description: "Timing closure at 100MHz".to_string(),
-                method: VerificationMethod::StaticAnalysis,
-                pass_criteria: "Max delay < 10ns".to_string(),
-                status: CriterionStatus::NotTested,
-            },
-        ],
+        criteria: vec![VerificationCriterion {
+            description: "Timing closure at 100MHz".to_string(),
+            method: VerificationMethod::StaticAnalysis,
+            pass_criteria: "Max delay < 10ns".to_string(),
+            status: CriterionStatus::NotTested,
+        }],
         properties: vec![],
         tests: vec!["test_timing".to_string()],
         status: RequirementStatus::InProgress,
@@ -183,14 +182,12 @@ fn setup_requirements() -> RequirementTracker {
         req_type: RequirementType::Safety,
         parent: None,
         children: vec![],
-        criteria: vec![
-            VerificationCriterion {
-                description: "No data loss".to_string(),
-                method: VerificationMethod::Formal,
-                pass_criteria: "All written data can be read".to_string(),
-                status: CriterionStatus::NotTested,
-            },
-        ],
+        criteria: vec![VerificationCriterion {
+            description: "No data loss".to_string(),
+            method: VerificationMethod::Formal,
+            pass_criteria: "All written data can be read".to_string(),
+            status: CriterionStatus::NotTested,
+        }],
         properties: vec!["no_data_loss_prop".to_string()],
         tests: vec!["test_data_integrity".to_string()],
         status: RequirementStatus::Implemented,
@@ -213,27 +210,28 @@ fn define_properties() -> Vec<Property> {
             .safety()
             .build()
             .unwrap(),
-
         PropertyBuilder::new("full_flag_prop")
             .expression(PropertyExpr::Implies(
                 Box::new(PropertyExpr::Atom("full".to_string())),
-                Box::new(PropertyExpr::Not(Box::new(PropertyExpr::Atom("wr_en".to_string())))),
+                Box::new(PropertyExpr::Not(Box::new(PropertyExpr::Atom(
+                    "wr_en".to_string(),
+                )))),
             ))
             .clock("clk")
             .safety()
             .build()
             .unwrap(),
-
         PropertyBuilder::new("empty_flag_prop")
             .expression(PropertyExpr::Implies(
                 Box::new(PropertyExpr::Atom("empty".to_string())),
-                Box::new(PropertyExpr::Not(Box::new(PropertyExpr::Atom("rd_en".to_string())))),
+                Box::new(PropertyExpr::Not(Box::new(PropertyExpr::Atom(
+                    "rd_en".to_string(),
+                )))),
             ))
             .clock("clk")
             .safety()
             .build()
             .unwrap(),
-
         PropertyBuilder::new("no_data_loss_prop")
             .expression(PropertyExpr::Temporal(
                 TemporalOperator::Always { bound: None },
@@ -249,7 +247,6 @@ fn define_properties() -> Vec<Property> {
             .safety()
             .build()
             .unwrap(),
-
         // Liveness property
         PropertyBuilder::new("eventually_empty")
             .expression(PropertyExpr::Temporal(
@@ -278,15 +275,24 @@ fn setup_coverage() -> Coverage {
 
     // Initialize with expected coverage points
     coverage.statement.total = 50; // 50 statements to cover
-    
+
     // Add FSM for FIFO state
     coverage.fsm.fsms.push(FSM {
         id: FsmId(0),
         name: "fifo_state".to_string(),
         states: vec![
-            State { id: StateId(0), name: "EMPTY".to_string() },
-            State { id: StateId(1), name: "PARTIAL".to_string() },
-            State { id: StateId(2), name: "FULL".to_string() },
+            State {
+                id: StateId(0),
+                name: "EMPTY".to_string(),
+            },
+            State {
+                id: StateId(1),
+                name: "PARTIAL".to_string(),
+            },
+            State {
+                id: StateId(2),
+                name: "FULL".to_string(),
+            },
         ],
         transitions: vec![
             Transition {
@@ -317,25 +323,25 @@ fn setup_coverage() -> Coverage {
     });
 
     // Add signals for toggle coverage
-    coverage.toggle.signals.push(Signal { 
-        id: SignalId(0), 
-        name: "wr_en".to_string(), 
-        width: 1 
+    coverage.toggle.signals.push(Signal {
+        id: SignalId(0),
+        name: "wr_en".to_string(),
+        width: 1,
     });
-    coverage.toggle.signals.push(Signal { 
-        id: SignalId(1), 
-        name: "rd_en".to_string(), 
-        width: 1 
+    coverage.toggle.signals.push(Signal {
+        id: SignalId(1),
+        name: "rd_en".to_string(),
+        width: 1,
     });
-    coverage.toggle.signals.push(Signal { 
-        id: SignalId(2), 
-        name: "full".to_string(), 
-        width: 1 
+    coverage.toggle.signals.push(Signal {
+        id: SignalId(2),
+        name: "full".to_string(),
+        width: 1,
     });
-    coverage.toggle.signals.push(Signal { 
-        id: SignalId(3), 
-        name: "empty".to_string(), 
-        width: 1 
+    coverage.toggle.signals.push(Signal {
+        id: SignalId(3),
+        name: "empty".to_string(),
+        width: 1,
     });
 
     // Add cross coverage points
@@ -593,13 +599,13 @@ fn simulate_and_collect_coverage(coverage: &mut Coverage) {
     coverage.record_fsm_transition(FsmId(0), TransitionId(3));
 
     // Record toggle coverage
-    coverage.record_toggle(SignalId(0), true);  // wr_en rising
+    coverage.record_toggle(SignalId(0), true); // wr_en rising
     coverage.record_toggle(SignalId(0), false); // wr_en falling
-    coverage.record_toggle(SignalId(1), true);  // rd_en rising
+    coverage.record_toggle(SignalId(1), true); // rd_en rising
     coverage.record_toggle(SignalId(1), false); // rd_en falling
-    coverage.record_toggle(SignalId(2), true);  // full rising
+    coverage.record_toggle(SignalId(2), true); // full rising
     coverage.record_toggle(SignalId(2), false); // full falling
-    coverage.record_toggle(SignalId(3), true);  // empty rising
+    coverage.record_toggle(SignalId(3), true); // empty rising
     coverage.record_toggle(SignalId(3), false); // empty falling
 
     // Record condition coverage
@@ -643,16 +649,19 @@ fn run_formal_verification(properties: &[Property]) {
     println!("Formal Verification Results:");
     println!("  Overall: {:?}", result.overall_status);
     for prop_result in &result.properties {
-        println!("  {}: {:?} ({:.2}s)",
-                 prop_result.property_name,
-                 prop_result.status,
-                 prop_result.time);
-        
+        println!(
+            "  {}: {:?} ({:.2}s)",
+            prop_result.property_name, prop_result.status, prop_result.time
+        );
+
         if let Some(cex) = &prop_result.counterexample {
             println!("    Counterexample found at depth {}", cex.depth);
         }
         if let Some(proof) = &prop_result.proof {
-            println!("    Proven using {:?} at depth {}", proof.method, proof.depth);
+            println!(
+                "    Proven using {:?} at depth {}",
+                proof.method, proof.depth
+            );
         }
     }
 }

@@ -121,9 +121,7 @@ pub enum DataType {
     /// Unsigned natural
     Nat(usize),
     /// Clock signal with optional domain
-    Clock {
-        domain: Option<ClockDomainId>,
-    },
+    Clock { domain: Option<ClockDomainId> },
     /// Reset signal with optional domain
     Reset {
         active_high: bool,
@@ -220,8 +218,8 @@ pub enum EdgeType {
     Rising,
     Falling,
     Both,
-    Active,    // For reset active level
-    Inactive,  // For reset inactive level
+    Active,   // For reset active level
+    Inactive, // For reset inactive level
 }
 
 /// Block of statements
@@ -278,9 +276,16 @@ pub enum LValue {
     /// Variable reference
     Variable(VariableId),
     /// Bit selection
-    BitSelect { base: Box<LValue>, index: Box<Expression> },
+    BitSelect {
+        base: Box<LValue>,
+        index: Box<Expression>,
+    },
     /// Range selection
-    RangeSelect { base: Box<LValue>, high: Box<Expression>, low: Box<Expression> },
+    RangeSelect {
+        base: Box<LValue>,
+        high: Box<Expression>,
+        low: Box<Expression>,
+    },
     /// Concatenation
     Concat(Vec<LValue>),
 }
@@ -293,15 +298,29 @@ pub enum Expression {
     /// LValue reference
     Ref(LValue),
     /// Binary operation
-    Binary { op: BinaryOp, left: Box<Expression>, right: Box<Expression> },
+    Binary {
+        op: BinaryOp,
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
     /// Unary operation
-    Unary { op: UnaryOp, operand: Box<Expression> },
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expression>,
+    },
     /// Conditional expression (ternary)
-    Conditional { cond: Box<Expression>, then_expr: Box<Expression>, else_expr: Box<Expression> },
+    Conditional {
+        cond: Box<Expression>,
+        then_expr: Box<Expression>,
+        else_expr: Box<Expression>,
+    },
     /// Concatenation
     Concat(Vec<Expression>),
     /// Replication
-    Replicate { count: Box<Expression>, value: Box<Expression> },
+    Replicate {
+        count: Box<Expression>,
+        value: Box<Expression>,
+    },
     /// Function call
     FunctionCall { name: String, args: Vec<Expression> },
 }
@@ -325,17 +344,32 @@ pub enum Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
     // Arithmetic
-    Add, Sub, Mul, Div, Mod,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
     // Logical
-    And, Or, Xor,
+    And,
+    Or,
+    Xor,
     // Comparison
-    Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
     // Bitwise
-    BitwiseAnd, BitwiseOr, BitwiseXor,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
     // Shift
-    LeftShift, RightShift,
+    LeftShift,
+    RightShift,
     // Logical (boolean)
-    LogicalAnd, LogicalOr,
+    LogicalAnd,
+    LogicalOr,
 }
 
 /// Unary operators
@@ -350,7 +384,12 @@ pub enum UnaryOp {
 /// Reduction operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReduceOp {
-    And, Or, Xor, Nand, Nor, Xnor,
+    And,
+    Or,
+    Xor,
+    Nand,
+    Nor,
+    Xnor,
 }
 
 /// If statement
@@ -395,10 +434,7 @@ pub enum LoopStatement {
         body: Block,
     },
     /// While loop
-    While {
-        condition: Expression,
-        body: Block,
-    },
+    While { condition: Expression, body: Block },
 }
 
 /// Continuous assignment (outside processes)

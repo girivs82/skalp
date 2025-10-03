@@ -1,7 +1,9 @@
 //! End-to-end tests for the complete MIR compilation pipeline
 
 use skalp_frontend::hir::*;
-use skalp_mir::{compile_hir_to_verilog, compile_hir_to_verilog_optimized, MirCompiler, OptimizationLevel};
+use skalp_mir::{
+    compile_hir_to_verilog, compile_hir_to_verilog_optimized, MirCompiler, OptimizationLevel,
+};
 
 /// Create a simple counter HIR for testing
 fn create_counter_hir() -> Hir {
@@ -55,59 +57,45 @@ fn create_counter_hir() -> Hir {
     // Create implementation
     let implementation = HirImplementation {
         entity: EntityId(1),
-        signals: vec![
-            HirSignal {
-                id: SignalId(1),
-                name: "count_reg".to_string(),
-                signal_type: HirType::Bit(8),
-                initial_value: Some(HirExpression::Literal(HirLiteral::Integer(0))),
-                clock_domain: None,
-            },
-        ],
+        signals: vec![HirSignal {
+            id: SignalId(1),
+            name: "count_reg".to_string(),
+            signal_type: HirType::Bit(8),
+            initial_value: Some(HirExpression::Literal(HirLiteral::Integer(0))),
+            clock_domain: None,
+        }],
         variables: vec![],
         constants: vec![],
-        event_blocks: vec![
-            HirEventBlock {
-                id: BlockId(1),
-                triggers: vec![
-                    HirEventTrigger {
-                        signal: HirEventSignal::Signal(SignalId(100)), // clk - would be mapped properly in real code
-                        edge: HirEdgeType::Rising,
-                    },
-                ],
-                statements: vec![
-                    HirStatement::If(HirIfStatement {
-                        condition: HirExpression::Signal(SignalId(101)), // rst
-                        then_statements: vec![
-                            HirStatement::Assignment(HirAssignment {
-                                id: AssignmentId(1),
-                                lhs: HirLValue::Signal(SignalId(1)),
-                                rhs: HirExpression::Literal(HirLiteral::Integer(0)),
-                                assignment_type: HirAssignmentType::NonBlocking,
-                            }),
-                        ],
-                        else_statements: Some(vec![
-                            HirStatement::If(HirIfStatement {
-                                condition: HirExpression::Signal(SignalId(102)), // enable
-                                then_statements: vec![
-                                    HirStatement::Assignment(HirAssignment {
-                                        id: AssignmentId(2),
-                                        lhs: HirLValue::Signal(SignalId(1)),
-                                        rhs: HirExpression::Binary(HirBinaryExpr {
-                                            left: Box::new(HirExpression::Signal(SignalId(1))),
-                                            op: HirBinaryOp::Add,
-                                            right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
-                                        }),
-                                        assignment_type: HirAssignmentType::NonBlocking,
-                                    }),
-                                ],
-                                else_statements: None,
-                            }),
-                        ]),
-                    }),
-                ],
-            },
-        ],
+        event_blocks: vec![HirEventBlock {
+            id: BlockId(1),
+            triggers: vec![HirEventTrigger {
+                signal: HirEventSignal::Signal(SignalId(100)), // clk - would be mapped properly in real code
+                edge: HirEdgeType::Rising,
+            }],
+            statements: vec![HirStatement::If(HirIfStatement {
+                condition: HirExpression::Signal(SignalId(101)), // rst
+                then_statements: vec![HirStatement::Assignment(HirAssignment {
+                    id: AssignmentId(1),
+                    lhs: HirLValue::Signal(SignalId(1)),
+                    rhs: HirExpression::Literal(HirLiteral::Integer(0)),
+                    assignment_type: HirAssignmentType::NonBlocking,
+                })],
+                else_statements: Some(vec![HirStatement::If(HirIfStatement {
+                    condition: HirExpression::Signal(SignalId(102)), // enable
+                    then_statements: vec![HirStatement::Assignment(HirAssignment {
+                        id: AssignmentId(2),
+                        lhs: HirLValue::Signal(SignalId(1)),
+                        rhs: HirExpression::Binary(HirBinaryExpr {
+                            left: Box::new(HirExpression::Signal(SignalId(1))),
+                            op: HirBinaryOp::Add,
+                            right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+                        }),
+                        assignment_type: HirAssignmentType::NonBlocking,
+                    })],
+                    else_statements: None,
+                })]),
+            })],
+        }],
         assignments: vec![
             // Continuous assignment for output
             HirAssignment {
@@ -167,20 +155,17 @@ fn test_compilation_levels() {
     let hir = create_counter_hir();
 
     // Test with no optimization
-    let compiler_none = MirCompiler::new()
-        .with_optimization_level(OptimizationLevel::None);
+    let compiler_none = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
     let result_none = compiler_none.compile(&hir);
     assert!(result_none.is_ok());
 
     // Test with basic optimization
-    let compiler_basic = MirCompiler::new()
-        .with_optimization_level(OptimizationLevel::Basic);
+    let compiler_basic = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
     let result_basic = compiler_basic.compile(&hir);
     assert!(result_basic.is_ok());
 
     // Test with full optimization
-    let compiler_full = MirCompiler::new()
-        .with_optimization_level(OptimizationLevel::Full);
+    let compiler_full = MirCompiler::new().with_optimization_level(OptimizationLevel::Full);
     let result_full = compiler_full.compile(&hir);
     assert!(result_full.is_ok());
 }

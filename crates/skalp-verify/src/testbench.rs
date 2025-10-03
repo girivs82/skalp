@@ -1,10 +1,10 @@
 //! Testbench framework with async/await support
 
+use std::collections::{BinaryHeap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
-use std::collections::{BinaryHeap, VecDeque};
 use std::time::Duration;
 
 /// Testbench builder

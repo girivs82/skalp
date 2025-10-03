@@ -48,32 +48,46 @@ mod match_expression_tests {
 
         let implementation = &hir.implementations[0];
         // Verify we have the expected signals
-        assert!(implementation.signals.len() >= 2, "Should have current_state and next_state signals");
+        assert!(
+            implementation.signals.len() >= 2,
+            "Should have current_state and next_state signals"
+        );
 
         // Find the state signals
-        let current_state = implementation.signals.iter().find(|s| s.name == "current_state");
-        let next_state = implementation.signals.iter().find(|s| s.name == "next_state");
+        let current_state = implementation
+            .signals
+            .iter()
+            .find(|s| s.name == "current_state");
+        let next_state = implementation
+            .signals
+            .iter()
+            .find(|s| s.name == "next_state");
         assert!(current_state.is_some(), "Should have current_state signal");
         assert!(next_state.is_some(), "Should have next_state signal");
 
         // Test MIR compilation
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR compilation successful");
         println!("Module: {}", mir.modules[0].name);
         println!("Processes: {}", mir.modules[0].processes.len());
 
         // Verify that match statement was converted to case statement
-        let has_case_statement = mir.modules[0].processes.iter()
-            .any(|process| {
-                process.body.statements.iter().any(|stmt| {
-                    matches!(stmt, skalp_mir::Statement::Case(_))
-                })
-            });
+        let has_case_statement = mir.modules[0].processes.iter().any(|process| {
+            process
+                .body
+                .statements
+                .iter()
+                .any(|stmt| matches!(stmt, skalp_mir::Statement::Case(_)))
+        });
 
-        assert!(has_case_statement, "Should have case statement from match expression");
+        assert!(
+            has_case_statement,
+            "Should have case statement from match expression"
+        );
 
         println!("✅ State machine with match expressions compiled successfully!");
     }
@@ -104,21 +118,26 @@ mod match_expression_tests {
         println!("HIR generation successful for simple match");
 
         // Test MIR compilation
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR compilation successful for simple match");
 
         // Verify that match statement was converted to case statement
-        let has_case_statement = mir.modules[0].processes.iter()
-            .any(|process| {
-                process.body.statements.iter().any(|stmt| {
-                    matches!(stmt, skalp_mir::Statement::Case(_))
-                })
-            });
+        let has_case_statement = mir.modules[0].processes.iter().any(|process| {
+            process
+                .body
+                .statements
+                .iter()
+                .any(|stmt| matches!(stmt, skalp_mir::Statement::Case(_)))
+        });
 
-        assert!(has_case_statement, "Should have case statement from literal match");
+        assert!(
+            has_case_statement,
+            "Should have case statement from literal match"
+        );
 
         println!("✅ Simple literal match compiled successfully!");
     }
@@ -151,9 +170,10 @@ mod match_expression_tests {
         println!("HIR generation successful for guarded match");
 
         // Test MIR compilation
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR compilation successful for guarded match");
 

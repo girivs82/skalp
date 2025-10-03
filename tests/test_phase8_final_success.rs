@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod phase8_final_success_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
-    use skalp_lir::{lower_to_lir, transform_mir_to_lir, TechnologyMapper, TechnologyTarget};
     use skalp_lir::optimization::OptimizationPipeline;
     use skalp_lir::timing::TimingAnalyzer;
+    use skalp_lir::{lower_to_lir, transform_mir_to_lir, TechnologyMapper, TechnologyTarget};
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn test_phase8_final_success_simple_processor() {
@@ -84,9 +84,14 @@ mod phase8_final_success_tests {
         println!("✅ MIR lowering successful!");
         println!("   Modules: {}", mir.modules.len());
         if let Some(module) = mir.modules.first() {
-            println!("   Module '{}': {} ports, {} signals, {} assignments, {} processes",
-                    module.name, module.ports.len(), module.signals.len(),
-                    module.assignments.len(), module.processes.len());
+            println!(
+                "   Module '{}': {} ports, {} signals, {} assignments, {} processes",
+                module.name,
+                module.ports.len(),
+                module.signals.len(),
+                module.assignments.len(),
+                module.processes.len()
+            );
         }
 
         // Step 3: Transform to LIR
@@ -99,11 +104,13 @@ mod phase8_final_success_tests {
         // Analyze the generated LIR
         if let Some(module) = lir_design.modules.first() {
             println!("   Module: {}", module.name);
-            println!("     Signals: {} (inputs: {}, outputs: {}, registers: {})",
-                    module.signals.len(),
-                    module.signals.iter().filter(|s| s.is_input).count(),
-                    module.signals.iter().filter(|s| s.is_output).count(),
-                    module.signals.iter().filter(|s| s.is_register).count());
+            println!(
+                "     Signals: {} (inputs: {}, outputs: {}, registers: {})",
+                module.signals.len(),
+                module.signals.iter().filter(|s| s.is_input).count(),
+                module.signals.iter().filter(|s| s.is_output).count(),
+                module.signals.iter().filter(|s| s.is_register).count()
+            );
             println!("     Gates: {}", module.gates.len());
             println!("     Nets: {}", module.nets.len());
         }
@@ -112,22 +119,36 @@ mod phase8_final_success_tests {
         println!("\n4️⃣ Module-level synthesis and optimization...");
         if let Some(module) = mir.modules.first() {
             let mut lir = transform_mir_to_lir(module);
-            println!("   Initial LIR: {} gates, {} nets", lir.gates.len(), lir.nets.len());
+            println!(
+                "   Initial LIR: {} gates, {} nets",
+                lir.gates.len(),
+                lir.nets.len()
+            );
 
             // Apply optimization pipeline
             let mut pipeline = OptimizationPipeline::standard();
             let opt_results = pipeline.optimize(&mut lir);
 
             println!("✅ Optimization pipeline completed!");
-            let initial_gates: usize = opt_results.iter().map(|r| r.gates_before).max().unwrap_or(0);
+            let initial_gates: usize = opt_results
+                .iter()
+                .map(|r| r.gates_before)
+                .max()
+                .unwrap_or(0);
             let final_gates = lir.gates.len();
 
             for result in &opt_results {
-                println!("   {}: {} -> {} gates ({})",
-                        result.pass_name,
-                        result.gates_before,
-                        result.gates_after,
-                        if result.success { "success" } else { "no change" });
+                println!(
+                    "   {}: {} -> {} gates ({})",
+                    result.pass_name,
+                    result.gates_before,
+                    result.gates_after,
+                    if result.success {
+                        "success"
+                    } else {
+                        "no change"
+                    }
+                );
             }
 
             // Calculate area improvement
@@ -169,7 +190,10 @@ mod phase8_final_success_tests {
 
             println!("✅ Timing analysis completed!");
             println!("   Clock period: {:.2} ps", timing_report.clock_period);
-            println!("   Critical path delay: {:.2} ps", timing_report.critical_path_delay);
+            println!(
+                "   Critical path delay: {:.2} ps",
+                timing_report.critical_path_delay
+            );
             println!("   Worst slack: {:.2} ps", timing_report.worst_slack);
 
             // Calculate max frequency
@@ -189,19 +213,41 @@ mod phase8_final_success_tests {
             println!("   ✅ Timing analysis operational");
 
             // Quality metrics
-            let synthesis_quality = if final_gates > 0 { "Functional" } else { "Optimized away" };
-            let timing_closure = if timing_report.worst_slack >= 0.0 { "PASS" } else { "FAIL" };
-            let tech_mapping_quality = if fpga_result.efficiency > 0.5 { "Good" } else { "Acceptable" };
+            let synthesis_quality = if final_gates > 0 {
+                "Functional"
+            } else {
+                "Optimized away"
+            };
+            let timing_closure = if timing_report.worst_slack >= 0.0 {
+                "PASS"
+            } else {
+                "FAIL"
+            };
+            let tech_mapping_quality = if fpga_result.efficiency > 0.5 {
+                "Good"
+            } else {
+                "Acceptable"
+            };
 
             println!("\n📊 Quality Metrics:");
             println!("   Synthesis: {}", synthesis_quality);
-            println!("   Timing closure: {} (slack: {:.2} ps)", timing_closure, timing_report.worst_slack);
-            println!("   Technology mapping: {} (efficiency: {:.1}%)", tech_mapping_quality, fpga_result.efficiency * 100.0);
+            println!(
+                "   Timing closure: {} (slack: {:.2} ps)",
+                timing_closure, timing_report.worst_slack
+            );
+            println!(
+                "   Technology mapping: {} (efficiency: {:.1}%)",
+                tech_mapping_quality,
+                fpga_result.efficiency * 100.0
+            );
 
             if area_improvement >= 20.0 {
                 println!("   🎯 ACHIEVED 20% area improvement target!");
             } else if area_improvement > 0.0 {
-                println!("   📈 Area improvement: {:.1}% (target: 20%)", area_improvement);
+                println!(
+                    "   📈 Area improvement: {:.1}% (target: 20%)",
+                    area_improvement
+                );
             } else {
                 println!("   🔧 Area improvement: Design already optimized");
             }
@@ -213,10 +259,22 @@ mod phase8_final_success_tests {
             let tech_mapping_works = fpga_result.resource_usage.area >= 0.0;
 
             println!("\n🏆 Phase 8 Success Criteria:");
-            println!("   ✅ Gate-level LIR generation: {}", if synthesis_works { "PASS" } else { "FAIL" });
-            println!("   ✅ Optimization passes: {}", if optimization_works { "PASS" } else { "FAIL" });
-            println!("   ✅ Timing analysis: {}", if timing_works { "PASS" } else { "FAIL" });
-            println!("   ✅ Technology mapping: {}", if tech_mapping_works { "PASS" } else { "FAIL" });
+            println!(
+                "   ✅ Gate-level LIR generation: {}",
+                if synthesis_works { "PASS" } else { "FAIL" }
+            );
+            println!(
+                "   ✅ Optimization passes: {}",
+                if optimization_works { "PASS" } else { "FAIL" }
+            );
+            println!(
+                "   ✅ Timing analysis: {}",
+                if timing_works { "PASS" } else { "FAIL" }
+            );
+            println!(
+                "   ✅ Technology mapping: {}",
+                if tech_mapping_works { "PASS" } else { "FAIL" }
+            );
 
             if synthesis_works && optimization_works && timing_works && tech_mapping_works {
                 println!("\n🎉 PHASE 8: SYNTHESIS & OPTIMIZATION - COMPLETE!");
@@ -285,18 +343,26 @@ mod phase8_final_success_tests {
             // Show optimization details
             for result in &opt_results {
                 if result.gates_before != result.gates_after {
-                    println!("  {}: {} -> {} gates ({} reduction)",
-                            result.pass_name,
-                            result.gates_before,
-                            result.gates_after,
-                            result.gates_before - result.gates_after);
+                    println!(
+                        "  {}: {} -> {} gates ({} reduction)",
+                        result.pass_name,
+                        result.gates_before,
+                        result.gates_after,
+                        result.gates_before - result.gates_after
+                    );
                 }
             }
 
             if area_improvement >= 20.0 {
-                println!("🎯 SUCCESS: Achieved {:.1}% area improvement (target: 20%)", area_improvement);
+                println!(
+                    "🎯 SUCCESS: Achieved {:.1}% area improvement (target: 20%)",
+                    area_improvement
+                );
             } else if area_improvement > 0.0 {
-                println!("📈 Partial success: {:.1}% area improvement (target: 20%)", area_improvement);
+                println!(
+                    "📈 Partial success: {:.1}% area improvement (target: 20%)",
+                    area_improvement
+                );
             } else {
                 println!("🔧 No area improvement (design may already be optimal)");
             }
@@ -305,7 +371,10 @@ mod phase8_final_success_tests {
             let mut mapper = TechnologyMapper::new(TechnologyTarget::FpgaLut4);
             let mapping_result = mapper.map(&lir);
 
-            println!("Technology mapping efficiency: {:.1}%", mapping_result.efficiency * 100.0);
+            println!(
+                "Technology mapping efficiency: {:.1}%",
+                mapping_result.efficiency * 100.0
+            );
 
             println!("✅ Area optimization target test completed!");
         }

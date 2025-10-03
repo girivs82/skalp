@@ -1,9 +1,9 @@
 //! Advanced routing algorithms for FPGA designs
 
-use std::collections::{HashMap, BinaryHeap, HashSet, VecDeque};
-use std::cmp::Ordering;
 use crate::device::{Device, DeviceFamily};
-use skalp_lir::{LirDesign, Net, Gate};
+use skalp_lir::{Gate, LirDesign, Net};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 /// Advanced router with PathFinder A* algorithm
 pub struct Router {
@@ -147,7 +147,10 @@ impl PartialOrd for SearchNode {
 impl Ord for SearchNode {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap behavior
-        other.total_cost().partial_cmp(&self.total_cost()).unwrap_or(Ordering::Equal)
+        other
+            .total_cost()
+            .partial_cmp(&self.total_cost())
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -189,8 +192,11 @@ impl Router {
                     let position = (x, y, track);
 
                     // Determine node type based on position
-                    let node_type = if x == 0 || x == device.grid_size.0-1 ||
-                                      y == 0 || y == device.grid_size.1-1 {
+                    let node_type = if x == 0
+                        || x == device.grid_size.0 - 1
+                        || y == 0
+                        || y == device.grid_size.1 - 1
+                    {
                         NodeType::InputPin
                     } else {
                         NodeType::Wire
@@ -273,12 +279,19 @@ impl Router {
     }
 
     /// Run routing algorithm
-    pub fn route(&mut self, design: &LirDesign, placement: &super::placer::PlacementResult) -> Result<RoutingResult, RoutingError> {
-        println!("🔗 Running {} routing algorithm", match self.config.algorithm {
-            RoutingAlgorithm::PathFinderAStar => "PathFinder A*",
-            RoutingAlgorithm::MazeRouting => "Maze",
-            RoutingAlgorithm::TimingDriven => "Timing-Driven",
-        });
+    pub fn route(
+        &mut self,
+        design: &LirDesign,
+        placement: &super::placer::PlacementResult,
+    ) -> Result<RoutingResult, RoutingError> {
+        println!(
+            "🔗 Running {} routing algorithm",
+            match self.config.algorithm {
+                RoutingAlgorithm::PathFinderAStar => "PathFinder A*",
+                RoutingAlgorithm::MazeRouting => "Maze",
+                RoutingAlgorithm::TimingDriven => "Timing-Driven",
+            }
+        );
 
         match self.config.algorithm {
             RoutingAlgorithm::PathFinderAStar => self.pathfinder_astar_route(design, placement),
@@ -288,7 +301,11 @@ impl Router {
     }
 
     /// PathFinder A* routing with negotiated congestion
-    fn pathfinder_astar_route(&mut self, design: &LirDesign, placement: &super::placer::PlacementResult) -> Result<RoutingResult, RoutingError> {
+    fn pathfinder_astar_route(
+        &mut self,
+        design: &LirDesign,
+        placement: &super::placer::PlacementResult,
+    ) -> Result<RoutingResult, RoutingError> {
         let mut routes = HashMap::new();
         let mut nets = self.extract_nets(design, placement);
 
@@ -322,7 +339,10 @@ impl Router {
                             rerouted_nets += 1;
                         }
                         Err(_) => {
-                            return Err(RoutingError::Failed(format!("Cannot route net {}", net.id)));
+                            return Err(RoutingError::Failed(format!(
+                                "Cannot route net {}",
+                                net.id
+                            )));
                         }
                     }
                 }
@@ -331,8 +351,12 @@ impl Router {
             // Update congestion costs
             let max_congestion = self.update_congestion_costs();
 
-            println!("   Iteration {}: {} nets rerouted, max congestion: {:.2}",
-                    iteration + 1, rerouted_nets, max_congestion);
+            println!(
+                "   Iteration {}: {} nets rerouted, max congestion: {:.2}",
+                iteration + 1,
+                rerouted_nets,
+                max_congestion
+            );
 
             // Check for convergence
             if max_congestion <= self.config.max_congestion && rerouted_nets == 0 {
@@ -346,9 +370,7 @@ impl Router {
         }
 
         // Calculate final metrics
-        let total_wirelength = routes.values()
-            .map(|route| route.len())
-            .sum();
+        let total_wirelength = routes.values().map(|route| route.len()).sum();
 
         Ok(RoutingResult {
             routes: self.convert_routes_to_coordinates(&routes),
@@ -424,7 +446,7 @@ impl Router {
     fn heuristic_cost(&self, from: usize, to: usize) -> f64 {
         if let (Some(from_node), Some(to_node)) = (
             self.resource_graph.nodes.get(from),
-            self.resource_graph.nodes.get(to)
+            self.resource_graph.nodes.get(to),
         ) {
             let (fx, fy, _) = from_node.position;
             let (tx, ty, _) = to_node.position;
@@ -439,7 +461,10 @@ impl Router {
         let base_cost = self.resource_graph.nodes[edge.to].base_cost;
         let usage = *self.resource_graph.usage.get(&edge.to).unwrap_or(&0) as f64;
         let capacity = *self.resource_graph.capacity.get(&edge.to).unwrap_or(&1) as f64;
-        let history_cost = *self.history_costs.get(&(edge.from, edge.to)).unwrap_or(&0.0);
+        let history_cost = *self
+            .history_costs
+            .get(&(edge.from, edge.to))
+            .unwrap_or(&0.0);
 
         // PathFinder cost function
         let present_congestion = if usage > capacity {
@@ -453,7 +478,9 @@ impl Router {
 
     /// Get edges from a node
     fn get_node_edges(&self, node_id: usize) -> Vec<&RoutingEdge> {
-        self.resource_graph.edges.iter()
+        self.resource_graph
+            .edges
+            .iter()
             .filter(|edge| edge.from == node_id)
             .collect()
     }
@@ -473,7 +500,11 @@ impl Router {
     }
 
     /// Extract nets from design and placement
-    fn extract_nets(&self, design: &LirDesign, placement: &super::placer::PlacementResult) -> Vec<NetToRoute> {
+    fn extract_nets(
+        &self,
+        design: &LirDesign,
+        placement: &super::placer::PlacementResult,
+    ) -> Vec<NetToRoute> {
         let mut nets = Vec::new();
 
         for module in &design.modules {
@@ -498,7 +529,11 @@ impl Router {
     }
 
     /// Calculate net criticality for timing-driven routing
-    fn calculate_net_criticality(&self, _net: &NetToRoute, _placement: &super::placer::PlacementResult) -> f64 {
+    fn calculate_net_criticality(
+        &self,
+        _net: &NetToRoute,
+        _placement: &super::placer::PlacementResult,
+    ) -> f64 {
         // Simplified criticality - would use actual timing analysis
         1.0
     }
@@ -506,16 +541,27 @@ impl Router {
     /// Check if net needs rerouting due to congestion
     fn needs_rerouting(&self, _net: &NetToRoute, _routes: &HashMap<String, Vec<usize>>) -> bool {
         // Simplified check - always reroute if congestion exists
-        self.resource_graph.usage.values().any(|&usage| {
-            usage > *self.resource_graph.capacity.get(&0).unwrap_or(&1)
-        })
+        self.resource_graph
+            .usage
+            .values()
+            .any(|&usage| usage > *self.resource_graph.capacity.get(&0).unwrap_or(&1))
     }
 
     /// Find nearest routing node to a placement position
     fn find_nearest_routing_node(&self, position: (usize, usize)) -> Result<usize, RoutingError> {
         // Find first available routing node at this position
-        for track in 0..self.device.routing.channels.0.max(self.device.routing.channels.1) {
-            if let Some(&node_id) = self.resource_graph.node_map.get(&(position.0, position.1, track)) {
+        for track in 0..self
+            .device
+            .routing
+            .channels
+            .0
+            .max(self.device.routing.channels.1)
+        {
+            if let Some(&node_id) = self
+                .resource_graph
+                .node_map
+                .get(&(position.0, position.1, track))
+            {
                 return Ok(node_id);
             }
         }
@@ -562,13 +608,19 @@ impl Router {
     }
 
     /// Convert node-based routes to coordinate-based routes
-    fn convert_routes_to_coordinates(&self, routes: &HashMap<String, Vec<usize>>) -> HashMap<String, Vec<(usize, usize)>> {
+    fn convert_routes_to_coordinates(
+        &self,
+        routes: &HashMap<String, Vec<usize>>,
+    ) -> HashMap<String, Vec<(usize, usize)>> {
         let mut coord_routes = HashMap::new();
 
         for (net_id, route) in routes {
-            let coords: Vec<(usize, usize)> = route.iter()
+            let coords: Vec<(usize, usize)> = route
+                .iter()
                 .filter_map(|&node_id| {
-                    self.resource_graph.nodes.get(node_id)
+                    self.resource_graph
+                        .nodes
+                        .get(node_id)
                         .map(|node| (node.position.0, node.position.1))
                 })
                 .collect();
@@ -599,7 +651,11 @@ impl Router {
     }
 
     /// Simple maze routing (fallback algorithm)
-    fn maze_route(&mut self, design: &LirDesign, placement: &super::placer::PlacementResult) -> Result<RoutingResult, RoutingError> {
+    fn maze_route(
+        &mut self,
+        design: &LirDesign,
+        placement: &super::placer::PlacementResult,
+    ) -> Result<RoutingResult, RoutingError> {
         println!("   Using simplified maze routing");
 
         let nets = self.extract_nets(design, placement);
@@ -618,7 +674,11 @@ impl Router {
     }
 
     /// Timing-driven routing
-    fn timing_driven_route(&mut self, design: &LirDesign, placement: &super::placer::PlacementResult) -> Result<RoutingResult, RoutingError> {
+    fn timing_driven_route(
+        &mut self,
+        design: &LirDesign,
+        placement: &super::placer::PlacementResult,
+    ) -> Result<RoutingResult, RoutingError> {
         println!("   Using timing-driven routing");
 
         // For now, use PathFinder with higher timing weight

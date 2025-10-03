@@ -7,16 +7,16 @@
 //! - Constrained random testing
 //! - Hardware-specific generators
 
-pub mod generators;
 pub mod constraints;
 pub mod coverage;
-pub mod strategies;
-pub mod harness;
+pub mod generators;
 pub mod golden;
+pub mod harness;
+pub mod strategies;
 
 use skalp_lir::LirDesign;
-use thiserror::Error;
 use std::collections::HashMap;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum TestingError {
@@ -125,7 +125,10 @@ impl PropertyTester {
 
     /// Run property-based tests on a design
     pub async fn test_design(&mut self, design: &LirDesign) -> TestingResult<TestResults> {
-        log::info!("Starting property-based testing for design: {}", design.name);
+        log::info!(
+            "Starting property-based testing for design: {}",
+            design.name
+        );
 
         let mut results = TestResults::new(design.name.clone());
         let mut rng = self.create_rng();
@@ -135,7 +138,11 @@ impl PropertyTester {
 
         // Generate and run test cases
         for test_num in 0..self.config.num_tests {
-            log::debug!("Generating test case {}/{}", test_num + 1, self.config.num_tests);
+            log::debug!(
+                "Generating test case {}/{}",
+                test_num + 1,
+                self.config.num_tests
+            );
 
             // Generate test inputs
             let test_case = self.generate_test_case(design, &mut rng)?;
@@ -164,8 +171,11 @@ impl PropertyTester {
         // Generate coverage report
         results.coverage_report = self.coverage.generate_report()?;
 
-        log::info!("Testing completed: {} tests run, {} failures",
-            results.tests_run, results.failures.len());
+        log::info!(
+            "Testing completed: {} tests run, {} failures",
+            results.tests_run,
+            results.failures.len()
+        );
 
         Ok(results)
     }
@@ -190,11 +200,12 @@ impl PropertyTester {
         for module in &design.modules {
             for signal in &module.signals {
                 if signal.is_input {
-                    let generator = self.generators
-                        .get(&signal.signal_type)
-                        .ok_or_else(|| TestingError::GenerationFailed(
-                            format!("No generator for signal type: {}", signal.signal_type)
-                        ))?;
+                    let generator = self.generators.get(&signal.signal_type).ok_or_else(|| {
+                        TestingError::GenerationFailed(format!(
+                            "No generator for signal type: {}",
+                            signal.signal_type
+                        ))
+                    })?;
 
                     let stimulus = generator.generate(rng)?;
                     test_case.add_stimulus(signal.name.clone(), stimulus);
@@ -263,10 +274,7 @@ impl TestCase {
 #[derive(Debug, Clone)]
 pub enum Stimulus {
     /// Single value
-    Value {
-        value: u64,
-        width: usize,
-    },
+    Value { value: u64, width: usize },
     /// Constant value
     Constant(u64),
     /// Sequence of values over time
@@ -284,10 +292,7 @@ pub enum Stimulus {
         num_cycles: usize,
     },
     /// Clock signal
-    Clock {
-        period_ns: u64,
-        duty_cycle: f64,
-    },
+    Clock { period_ns: u64, duty_cycle: f64 },
     /// Bus transaction
     Transaction {
         transaction_type: generators::TransactionType,
@@ -390,7 +395,7 @@ mod tests {
             Stimulus::Clock {
                 period_ns: 10,
                 duty_cycle: 0.5,
-            }
+            },
         );
 
         assert_eq!(test_case.stimuli.len(), 1);

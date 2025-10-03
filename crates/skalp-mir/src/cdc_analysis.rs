@@ -4,9 +4,9 @@
 //! CDC violations occur when signals from different clock domains are used together without
 //! proper synchronization, which can lead to metastability and data corruption.
 
-use crate::mir::{Module, Signal, Process, Statement, Expression, LValue, ClockDomainId};
+use crate::mir::{ClockDomainId, Expression, LValue, Module, Process, Signal, Statement};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use serde::{Serialize, Deserialize};
 
 /// CDC violation severity levels
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,10 +70,8 @@ impl CdcAnalyzer {
     pub fn analyze_module(&mut self, module: &Module) -> Vec<CdcViolation> {
         let mut violations = Vec::new();
 
-
         // First, collect all clock domain information from signals
         self.collect_clock_domains(module);
-
 
         // Analyze each process for CDC violations
         for (i, process) in module.processes.iter().enumerate() {
@@ -125,7 +123,11 @@ impl CdcAnalyzer {
         let process_domain = self.get_process_clock_domain(process);
 
         // Analyze all statements in the process
-        violations.extend(self.analyze_statements(&process.body.statements, process_domain, module));
+        violations.extend(self.analyze_statements(
+            &process.body.statements,
+            process_domain,
+            module,
+        ));
 
         violations
     }
@@ -249,23 +251,43 @@ impl CdcAnalyzer {
             }
 
             Statement::If(if_stmt) => {
-                violations.extend(self.analyze_statements(&if_stmt.then_block.statements, process_domain, module));
+                violations.extend(self.analyze_statements(
+                    &if_stmt.then_block.statements,
+                    process_domain,
+                    module,
+                ));
                 if let Some(else_block) = &if_stmt.else_block {
-                    violations.extend(self.analyze_statements(&else_block.statements, process_domain, module));
+                    violations.extend(self.analyze_statements(
+                        &else_block.statements,
+                        process_domain,
+                        module,
+                    ));
                 }
             }
 
             Statement::Case(case_stmt) => {
                 for item in &case_stmt.items {
-                    violations.extend(self.analyze_statements(&item.block.statements, process_domain, module));
+                    violations.extend(self.analyze_statements(
+                        &item.block.statements,
+                        process_domain,
+                        module,
+                    ));
                 }
                 if let Some(default_block) = &case_stmt.default {
-                    violations.extend(self.analyze_statements(&default_block.statements, process_domain, module));
+                    violations.extend(self.analyze_statements(
+                        &default_block.statements,
+                        process_domain,
+                        module,
+                    ));
                 }
             }
 
             Statement::Block(block) => {
-                violations.extend(self.analyze_statements(&block.statements, process_domain, module));
+                violations.extend(self.analyze_statements(
+                    &block.statements,
+                    process_domain,
+                    module,
+                ));
             }
 
             Statement::Loop(_) => {
@@ -397,7 +419,11 @@ impl CdcAnalyzer {
             Expression::Unary { operand, .. } => {
                 domains.extend(self.get_expression_clock_domains(operand));
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 domains.extend(self.get_expression_clock_domains(cond));
                 domains.extend(self.get_expression_clock_domains(then_expr));
                 domains.extend(self.get_expression_clock_domains(else_expr));

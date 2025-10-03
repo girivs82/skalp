@@ -1,6 +1,6 @@
 //! Build cache implementation
 
-use crate::{IncrementalResult, BuildResults, CacheStats};
+use crate::{BuildResults, CacheStats, IncrementalResult};
 use std::path::Path;
 
 pub struct BuildCache {
@@ -24,7 +24,11 @@ impl BuildCache {
         Ok("abc123".to_string())
     }
 
-    pub fn store_build_results(&self, _target: &str, _results: &BuildResults) -> IncrementalResult<()> {
+    pub fn store_build_results(
+        &self,
+        _target: &str,
+        _results: &BuildResults,
+    ) -> IncrementalResult<()> {
         Ok(())
     }
 

@@ -1,7 +1,10 @@
-pub mod sir;
-pub mod mir_to_sir;
 pub mod metal_codegen;
+pub mod mir_to_sir;
+pub mod sir;
 
-pub use sir::{SirModule, SirNode, SirNodeKind, SirPort, SirSignal, CombinationalCone, StateElement, ClockDomain, ClockEdge, SignalRef};
-pub use mir_to_sir::convert_mir_to_sir;
 pub use metal_codegen::generate_metal_shader;
+pub use mir_to_sir::convert_mir_to_sir;
+pub use sir::{
+    ClockDomain, ClockEdge, CombinationalCone, SignalRef, SirModule, SirNode, SirNodeKind, SirPort,
+    SirSignal, StateElement,
+};

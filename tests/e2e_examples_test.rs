@@ -9,8 +9,8 @@
 //! - Full compilation pipeline
 //! - Output validation
 
-use skalp_frontend::parse::parse;
 use skalp_frontend::hir_builder::build_hir;
+use skalp_frontend::parse::parse;
 use skalp_mir::compile_hir_to_verilog;
 
 // ============================================================================
@@ -24,7 +24,8 @@ fn compile_to_verilog(source: &str) -> Result<String, String> {
 
     // Build HIR
     let hir = build_hir(&tree).map_err(|errors| {
-        errors.iter()
+        errors
+            .iter()
             .map(|e| e.message.clone())
             .collect::<Vec<_>>()
             .join("\n")
@@ -138,7 +139,10 @@ fn test_example_pipelined_processor() {
     let verilog = assert_compiles(source);
 
     // Verify module exists
-    assert!(verilog.contains("module"), "Should contain module declaration");
+    assert!(
+        verilog.contains("module"),
+        "Should contain module declaration"
+    );
 }
 
 #[test]
@@ -204,7 +208,10 @@ fn test_stdlib_uart() {
 
     assert_verilog_contains(&verilog, "module");
     // UART should have rx/tx or similar
-    assert!(verilog.len() > 200, "UART should generate substantial Verilog");
+    assert!(
+        verilog.len() > 200,
+        "UART should generate substantial Verilog"
+    );
 }
 
 #[test]
@@ -214,7 +221,10 @@ fn test_stdlib_axi4_lite() {
 
     assert_verilog_contains(&verilog, "module");
     // AXI4-Lite is complex, should generate significant code
-    assert!(verilog.len() > 200, "AXI4-Lite should generate substantial Verilog");
+    assert!(
+        verilog.len() > 200,
+        "AXI4-Lite should generate substantial Verilog"
+    );
 }
 
 // ============================================================================

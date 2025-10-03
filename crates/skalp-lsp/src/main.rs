@@ -16,8 +16,7 @@ async fn main() {
         .with_writer(std::io::stderr)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     info!("Starting SKALP Language Server");
 
@@ -29,9 +28,7 @@ async fn main() {
 
     if args.len() > 1 && args[1] == "--tcp" {
         // TCP mode for debugging
-        let addr = args.get(2)
-            .map(|s| s.as_str())
-            .unwrap_or("127.0.0.1:9257");
+        let addr = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:9257");
 
         info!("Running in TCP mode on {}", addr);
 
@@ -41,7 +38,10 @@ async fn main() {
 
         info!("Listening for connections...");
 
-        let (stream, addr) = listener.accept().await.expect("Failed to accept connection");
+        let (stream, addr) = listener
+            .accept()
+            .await
+            .expect("Failed to accept connection");
         info!("Client connected from: {}", addr);
 
         let (read, write) = tokio::io::split(stream);

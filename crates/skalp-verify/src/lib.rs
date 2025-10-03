@@ -17,11 +17,11 @@ pub mod testbench;
 #[cfg(feature = "formal")]
 pub mod formal;
 
-pub use assertions::{Assertion, AssertionKind, ImmediateAssertion, ConcurrentAssertion};
+pub use assertions::{Assertion, AssertionKind, ConcurrentAssertion, ImmediateAssertion};
 pub use coverage::{Coverage, CoverageMetrics, CoverageReport};
 pub use properties::{Property, Sequence, TemporalOperator};
 pub use requirements::{Requirement, RequirementStatus, RequirementTracker};
-pub use testbench::{TestbenchBuilder, AsyncTask};
+pub use testbench::{AsyncTask, TestbenchBuilder};
 
 use thiserror::Error;
 

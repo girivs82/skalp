@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod improved_optimization_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
-    use skalp_lir::{transform_mir_to_lir};
     use skalp_lir::optimization::{DeadCodeElimination, OptimizationPass};
+    use skalp_lir::transform_mir_to_lir;
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn debug_dead_code_elimination_issue() {
@@ -30,8 +30,14 @@ mod improved_optimization_tests {
             println!("Before Dead Code Elimination:");
             println!("Gates: {}", lir.gates.len());
             for (i, gate) in lir.gates.iter().enumerate() {
-                println!("  Gate {}: {} ({:?}) - {} inputs -> {} outputs",
-                        i, gate.id, gate.gate_type, gate.inputs.len(), gate.outputs.len());
+                println!(
+                    "  Gate {}: {} ({:?}) - {} inputs -> {} outputs",
+                    i,
+                    gate.id,
+                    gate.gate_type,
+                    gate.inputs.len(),
+                    gate.outputs.len()
+                );
                 println!("    Inputs: {:?}", gate.inputs);
                 println!("    Outputs: {:?}", gate.outputs);
             }

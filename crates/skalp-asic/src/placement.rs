@@ -3,11 +3,11 @@
 //! Implements analytical placement with simulated annealing optimization
 //! for standard cell placement without external tools.
 
-use crate::{AsicError, DesignRules, Technology};
 use crate::sky130::StandardCellLibrary;
+use crate::{AsicError, DesignRules, Technology};
 use nalgebra::{DMatrix, DVector};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 /// Netlist representation
 #[derive(Debug, Clone)]
@@ -60,12 +60,12 @@ pub struct Placement {
 /// Cell orientation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Orientation {
-    R0,     // No rotation
-    R90,    // 90 degree rotation
-    R180,   // 180 degree rotation
-    R270,   // 270 degree rotation
-    MX,     // Mirror X
-    MY,     // Mirror Y
+    R0,   // No rotation
+    R90,  // 90 degree rotation
+    R180, // 180 degree rotation
+    R270, // 270 degree rotation
+    MX,   // Mirror X
+    MY,   // Mirror Y
 }
 
 /// Placement row
@@ -196,8 +196,8 @@ impl Default for PlacementConfig {
     fn default() -> Self {
         Self {
             utilization: 0.7,
-            row_height: 2.72,  // SKY130 standard row height
-            site_width: 0.46,   // SKY130 site width
+            row_height: 2.72, // SKY130 standard row height
+            site_width: 0.46, // SKY130 site width
             iterations: 10000,
             temperature: TemperatureSchedule {
                 initial: 1000.0,
@@ -233,13 +233,20 @@ impl Placer {
         // Step 4: Final legalization and alignment
         let final_placement = self.final_legalization(&optimized, floorplan)?;
 
-        println!("   Placement complete: {} cells placed", final_placement.cell_positions.len());
+        println!(
+            "   Placement complete: {} cells placed",
+            final_placement.cell_positions.len()
+        );
 
         Ok(final_placement)
     }
 
     /// Quadratic placement for initial solution
-    fn quadratic_placement(&self, netlist: &Netlist, floorplan: &Floorplan) -> Result<Placement, AsicError> {
+    fn quadratic_placement(
+        &self,
+        netlist: &Netlist,
+        floorplan: &Floorplan,
+    ) -> Result<Placement, AsicError> {
         let n = netlist.cells.len();
 
         // Build connectivity matrix (Laplacian)
@@ -253,7 +260,7 @@ impl Placer {
             let weight = 1.0 / connections.len().max(2) as f64;
 
             for i in 0..connections.len() {
-                for j in i+1..connections.len() {
+                for j in i + 1..connections.len() {
                     let ci = connections[i].0;
                     let cj = connections[j].0;
 
@@ -298,19 +305,28 @@ impl Placer {
             cell_positions: cell_positions.clone(),
             orientation,
             rows,
-            positions: cell_positions.iter()
+            positions: cell_positions
+                .iter()
                 .enumerate()
                 .map(|(i, pos)| (netlist.cells[i].name.clone(), *pos))
                 .collect(),
-            cells: netlist.cells.iter().map(|c| CellInstance {
-                instance_name: c.name.clone(),
-                cell_type: c.cell_type.clone(),
-            }).collect(),
+            cells: netlist
+                .cells
+                .iter()
+                .map(|c| CellInstance {
+                    instance_name: c.name.clone(),
+                    cell_type: c.cell_type.clone(),
+                })
+                .collect(),
         })
     }
 
     /// Solve linear system using conjugate gradient
-    fn solve_linear_system(&self, a: &DMatrix<f64>, b: &DVector<f64>) -> Result<Vec<f64>, AsicError> {
+    fn solve_linear_system(
+        &self,
+        a: &DMatrix<f64>,
+        b: &DVector<f64>,
+    ) -> Result<Vec<f64>, AsicError> {
         let n = b.len();
         let mut x = DVector::<f64>::zeros(n);
         let mut r = b - a * &x;
@@ -335,9 +351,12 @@ impl Placer {
     }
 
     /// Legalize placement to valid sites
-    fn legalize_placement(&self, placement: &Placement, netlist: &Netlist, floorplan: &Floorplan)
-        -> Result<Placement, AsicError> {
-
+    fn legalize_placement(
+        &self,
+        placement: &Placement,
+        netlist: &Netlist,
+        floorplan: &Floorplan,
+    ) -> Result<Placement, AsicError> {
         let mut legal_positions = Vec::new();
         let mut orientation = Vec::new();
         let mut occupied = HashMap::new();
@@ -345,7 +364,8 @@ impl Placer {
         // Sort cells by X position for left-to-right legalization
         let mut cell_order: Vec<_> = (0..netlist.cells.len()).collect();
         cell_order.sort_by(|&a, &b| {
-            placement.cell_positions[a].0
+            placement.cell_positions[a]
+                .0
                 .partial_cmp(&placement.cell_positions[b].0)
                 .unwrap()
         });
@@ -356,16 +376,12 @@ impl Placer {
             let (desired_x, desired_y) = placement.cell_positions[cell_idx];
 
             // Find nearest valid site
-            let (legal_x, legal_y, row_idx) = self.find_nearest_site(
-                desired_x,
-                desired_y,
-                cell,
-                &occupied,
-                &placement.rows
-            )?;
+            let (legal_x, legal_y, row_idx) =
+                self.find_nearest_site(desired_x, desired_y, cell, &occupied, &placement.rows)?;
 
             // Mark sites as occupied
-            let width_in_sites = (cell.area / self.config.row_height / self.config.site_width).ceil() as usize;
+            let width_in_sites =
+                (cell.area / self.config.row_height / self.config.site_width).ceil() as usize;
             for site in 0..width_in_sites {
                 let site_x = legal_x + site as f64 * self.config.site_width;
                 occupied.insert((row_idx, site_x.to_bits()), cell_idx);
@@ -386,29 +402,39 @@ impl Placer {
             cell_positions: legal_positions.clone(),
             orientation,
             rows: placement.rows.clone(),
-            positions: legal_positions.iter()
+            positions: legal_positions
+                .iter()
                 .enumerate()
                 .map(|(i, pos)| (netlist.cells[i].name.clone(), *pos))
                 .collect(),
-            cells: netlist.cells.iter().map(|c| CellInstance {
-                instance_name: c.name.clone(),
-                cell_type: c.cell_type.clone(),
-            }).collect(),
+            cells: netlist
+                .cells
+                .iter()
+                .map(|c| CellInstance {
+                    instance_name: c.name.clone(),
+                    cell_type: c.cell_type.clone(),
+                })
+                .collect(),
         })
     }
 
     /// Find nearest valid site for a cell
-    fn find_nearest_site(&self, x: f64, y: f64, cell: &StandardCell,
-                         occupied: &HashMap<(usize, u64), usize>,
-                         rows: &[PlacementRow]) -> Result<(f64, f64, usize), AsicError> {
-
+    fn find_nearest_site(
+        &self,
+        x: f64,
+        y: f64,
+        cell: &StandardCell,
+        occupied: &HashMap<(usize, u64), usize>,
+        rows: &[PlacementRow],
+    ) -> Result<(f64, f64, usize), AsicError> {
         // Find nearest row
         let row_idx = ((y / self.config.row_height).round() as usize).min(rows.len() - 1);
         let row = &rows[row_idx];
 
         // Snap to site grid
         let site_x = (x / self.config.site_width).round() * self.config.site_width;
-        let width_in_sites = (cell.area / self.config.row_height / self.config.site_width).ceil() as usize;
+        let width_in_sites =
+            (cell.area / self.config.row_height / self.config.site_width).ceil() as usize;
 
         // Search for free space
         let mut best_x = site_x;
@@ -419,7 +445,8 @@ impl Placer {
                 let test_x = site_x + offset as f64 * direction * self.config.site_width;
 
                 // Check if position is valid and unoccupied
-                if test_x >= 0.0 && self.is_position_free(test_x, row_idx, width_in_sites, occupied) {
+                if test_x >= 0.0 && self.is_position_free(test_x, row_idx, width_in_sites, occupied)
+                {
                     let displacement = (test_x - x).abs();
                     if displacement < min_displacement {
                         min_displacement = displacement;
@@ -437,8 +464,13 @@ impl Placer {
     }
 
     /// Check if position is free
-    fn is_position_free(&self, x: f64, row: usize, width: usize,
-                       occupied: &HashMap<(usize, u64), usize>) -> bool {
+    fn is_position_free(
+        &self,
+        x: f64,
+        row: usize,
+        width: usize,
+        occupied: &HashMap<(usize, u64), usize>,
+    ) -> bool {
         for site in 0..width {
             let site_x = x + site as f64 * self.config.site_width;
             if occupied.contains_key(&(row, site_x.to_bits())) {
@@ -449,8 +481,12 @@ impl Placer {
     }
 
     /// Optimize placement with simulated annealing
-    fn simulated_annealing(&self, mut placement: Placement, netlist: &Netlist,
-                           floorplan: &Floorplan) -> Result<Placement, AsicError> {
+    fn simulated_annealing(
+        &self,
+        mut placement: Placement,
+        netlist: &Netlist,
+        floorplan: &Floorplan,
+    ) -> Result<Placement, AsicError> {
         use rand::Rng;
 
         let mut rng = rand::thread_rng();
@@ -492,8 +528,10 @@ impl Placer {
                 temperature *= self.config.temperature.cooling_rate;
 
                 if iteration % 1000 == 0 {
-                    println!("   Iteration {}: cost = {:.2}, temp = {:.2}",
-                            iteration, current_cost, temperature);
+                    println!(
+                        "   Iteration {}: cost = {:.2}, temp = {:.2}",
+                        iteration, current_cost, temperature
+                    );
                 }
             }
 
@@ -557,7 +595,11 @@ impl Placer {
     }
 
     /// Apply a move operation
-    fn apply_move(&self, placement: &Placement, move_op: &MoveOperation) -> Result<Placement, AsicError> {
+    fn apply_move(
+        &self,
+        placement: &Placement,
+        move_op: &MoveOperation,
+    ) -> Result<Placement, AsicError> {
         let mut new_placement = placement.clone();
 
         match move_op {
@@ -575,7 +617,11 @@ impl Placer {
     }
 
     /// Final legalization and alignment
-    fn final_legalization(&self, placement: &Placement, floorplan: &Floorplan) -> Result<Placement, AsicError> {
+    fn final_legalization(
+        &self,
+        placement: &Placement,
+        floorplan: &Floorplan,
+    ) -> Result<Placement, AsicError> {
         let mut final_placement = placement.clone();
 
         // Ensure all cells are on valid sites
@@ -671,14 +717,38 @@ impl Floorplanner {
     fn create_power_grid(&self, die_size: f64) -> PowerGrid {
         PowerGrid {
             vdd_rails: vec![
-                PowerRail { layer: 1, width: 0.48, pitch: 10.0 },
-                PowerRail { layer: 2, width: 0.48, pitch: 20.0 },
-                PowerRail { layer: 3, width: 0.96, pitch: 40.0 },
+                PowerRail {
+                    layer: 1,
+                    width: 0.48,
+                    pitch: 10.0,
+                },
+                PowerRail {
+                    layer: 2,
+                    width: 0.48,
+                    pitch: 20.0,
+                },
+                PowerRail {
+                    layer: 3,
+                    width: 0.96,
+                    pitch: 40.0,
+                },
             ],
             gnd_rails: vec![
-                PowerRail { layer: 1, width: 0.48, pitch: 10.0 },
-                PowerRail { layer: 2, width: 0.48, pitch: 20.0 },
-                PowerRail { layer: 3, width: 0.96, pitch: 40.0 },
+                PowerRail {
+                    layer: 1,
+                    width: 0.48,
+                    pitch: 10.0,
+                },
+                PowerRail {
+                    layer: 2,
+                    width: 0.48,
+                    pitch: 20.0,
+                },
+                PowerRail {
+                    layer: 3,
+                    width: 0.96,
+                    pitch: 40.0,
+                },
             ],
         }
     }
@@ -693,18 +763,22 @@ impl Floorplanner {
 
         for i in 0..num_pads {
             let (x, y) = match i * 4 / num_pads {
-                0 => (i as f64 * pad_pitch, 0.0), // Bottom
-                1 => (die_size, (i % (num_pads/4)) as f64 * pad_pitch), // Right
-                2 => ((num_pads - i) as f64 * pad_pitch, die_size), // Top
-                _ => (0.0, (num_pads - i) as f64 * pad_pitch), // Left
+                0 => (i as f64 * pad_pitch, 0.0),                         // Bottom
+                1 => (die_size, (i % (num_pads / 4)) as f64 * pad_pitch), // Right
+                2 => ((num_pads - i) as f64 * pad_pitch, die_size),       // Top
+                _ => (0.0, (num_pads - i) as f64 * pad_pitch),            // Left
             };
 
             pads.push(IoPad {
                 name: format!("pad_{}", i),
                 position: (x, y),
-                pad_type: if i % 3 == 0 { PadType::Input }
-                         else if i % 3 == 1 { PadType::Output }
-                         else { PadType::Bidirectional },
+                pad_type: if i % 3 == 0 {
+                    PadType::Input
+                } else if i % 3 == 1 {
+                    PadType::Output
+                } else {
+                    PadType::Bidirectional
+                },
             });
         }
 

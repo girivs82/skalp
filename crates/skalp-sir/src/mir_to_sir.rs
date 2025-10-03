@@ -1,12 +1,17 @@
 use crate::sir::*;
-use skalp_mir::{Module, Statement, Expression, ProcessKind, EdgeType, DataType,
-                SensitivityList, Value, LValue, IfStatement, Block};
-use skalp_mir::mir::PriorityMux;
 use skalp_mir::mir::PortDirection as MirPortDirection;
+use skalp_mir::mir::PriorityMux;
+use skalp_mir::{
+    Block, DataType, EdgeType, Expression, IfStatement, LValue, Module, ProcessKind,
+    SensitivityList, Statement, Value,
+};
 use std::collections::HashMap;
 
 pub fn convert_mir_to_sir(mir_module: &Module) -> SirModule {
-    println!("🌟 MIR TO SIR: Starting conversion for module '{}'", mir_module.name);
+    println!(
+        "🌟 MIR TO SIR: Starting conversion for module '{}'",
+        mir_module.name
+    );
 
     let mut sir = SirModule::new(mir_module.name.clone());
     let mut converter = MirToSirConverter::new(&mut sir, mir_module);
@@ -113,7 +118,11 @@ impl<'a> MirToSirConverter<'a> {
         false
     }
 
-    fn is_signal_assigned_in_block(&self, block: &skalp_mir::Block, signal_id: skalp_mir::SignalId) -> bool {
+    fn is_signal_assigned_in_block(
+        &self,
+        block: &skalp_mir::Block,
+        signal_id: skalp_mir::SignalId,
+    ) -> bool {
         for stmt in &block.statements {
             match stmt {
                 Statement::Assignment(assign) => {
@@ -153,28 +162,42 @@ impl<'a> MirToSirConverter<'a> {
             LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => {
                 self.lvalue_contains_signal(base, signal_id)
             }
-            LValue::Concat(parts) => {
-                parts.iter().any(|part| self.lvalue_contains_signal(part, signal_id))
-            }
+            LValue::Concat(parts) => parts
+                .iter()
+                .any(|part| self.lvalue_contains_signal(part, signal_id)),
             _ => false,
         }
     }
 
     fn convert_logic(&mut self) {
-        println!("🔧 CONVERTING LOGIC: Found {} processes", self.mir.processes.len());
+        println!(
+            "🔧 CONVERTING LOGIC: Found {} processes",
+            self.mir.processes.len()
+        );
 
         // Convert processes
         for (i, process) in self.mir.processes.iter().enumerate() {
-            println!("   Process {}: kind={:?}, statements={}", i, process.kind, process.body.statements.len());
+            println!(
+                "   Process {}: kind={:?}, statements={}",
+                i,
+                process.kind,
+                process.body.statements.len()
+            );
 
             match &process.kind {
                 ProcessKind::Combinational => {
-                    println!("      ⚡ COMBINATIONAL: Processing {} statements", process.body.statements.len());
+                    println!(
+                        "      ⚡ COMBINATIONAL: Processing {} statements",
+                        process.body.statements.len()
+                    );
                     self.convert_combinational_block(&process.body.statements);
                 }
                 ProcessKind::Sequential => {
-                    println!("      🔄 SEQUENTIAL: Processing {} statements", process.body.statements.len());
-                    eprintln!("SEQUENTIAL PROCESS FOUND!");  // Force stderr output
+                    println!(
+                        "      🔄 SEQUENTIAL: Processing {} statements",
+                        process.body.statements.len()
+                    );
+                    eprintln!("SEQUENTIAL PROCESS FOUND!"); // Force stderr output
                     if let SensitivityList::Edge(edges) = &process.sensitivity {
                         if let Some(edge_sens) = edges.first() {
                             let edge = match edge_sens.edge {
@@ -185,8 +208,12 @@ impl<'a> MirToSirConverter<'a> {
                             };
                             let signal_name = self.lvalue_to_string(&edge_sens.signal);
                             println!("         Clock: {}, edge: {:?}", signal_name, edge);
-                            eprintln!("CALLING convert_sequential_block");  // Force stderr output
-                            self.convert_sequential_block(&process.body.statements, &signal_name, edge);
+                            eprintln!("CALLING convert_sequential_block"); // Force stderr output
+                            self.convert_sequential_block(
+                                &process.body.statements,
+                                &signal_name,
+                                edge,
+                            );
                         }
                     }
                 }
@@ -197,7 +224,10 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Convert continuous assignments
-        eprintln!("📡 CONTINUOUS ASSIGNMENTS: Processing {} assignments", self.mir.assignments.len());
+        eprintln!(
+            "📡 CONTINUOUS ASSIGNMENTS: Processing {} assignments",
+            self.mir.assignments.len()
+        );
         for assign in &self.mir.assignments {
             let target = self.lvalue_to_string(&assign.lhs);
             eprintln!("   📡 CONTINUOUS: {} <= expression", target);
@@ -206,7 +236,10 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_combinational_block(&mut self, statements: &[Statement]) {
-        eprintln!("🔧 COMBINATIONAL BLOCK: Processing {} statements", statements.len());
+        eprintln!(
+            "🔧 COMBINATIONAL BLOCK: Processing {} statements",
+            statements.len()
+        );
 
         // CRITICAL FIX: Use shared context for dependency tracking in combinational blocks
         let mut local_context = std::collections::HashMap::new();
@@ -218,7 +251,8 @@ impl<'a> MirToSirConverter<'a> {
                     eprintln!("   📝 ASSIGNMENT: {} <= expression", target);
 
                     // Create expression with current local context
-                    let node_id = self.create_expression_with_local_context(&assign.rhs, &local_context);
+                    let node_id =
+                        self.create_expression_with_local_context(&assign.rhs, &local_context);
 
                     // Store in local context for future references
                     local_context.insert(target.clone(), node_id);
@@ -241,10 +275,14 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 Statement::ResolvedConditional(resolved) => {
                     let target = self.lvalue_to_string(&resolved.target);
-                    eprintln!("   🔄 RESOLVED CONDITIONAL: {} <= priority mux (WITH CONTEXT)", target);
+                    eprintln!(
+                        "   🔄 RESOLVED CONDITIONAL: {} <= priority mux (WITH CONTEXT)",
+                        target
+                    );
 
                     // CRITICAL FIX: Use shared context to create the priority mux
-                    let mux_node = self.create_priority_mux_with_context(&resolved.resolved, &local_context);
+                    let mux_node =
+                        self.create_priority_mux_with_context(&resolved.resolved, &local_context);
 
                     // Store in local context for future references
                     local_context.insert(target.clone(), mux_node);
@@ -257,11 +295,19 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
 
-        eprintln!("🏁 COMBINATIONAL BLOCK: Processed {} statements with shared context", statements.len());
+        eprintln!(
+            "🏁 COMBINATIONAL BLOCK: Processed {} statements with shared context",
+            statements.len()
+        );
     }
 
     fn convert_sequential_block(&mut self, statements: &[Statement], clock: &str, edge: ClockEdge) {
-        println!("🚀 SEQUENTIAL BLOCK: Starting conversion with {} statements, clock={}, edge={:?}", statements.len(), clock, edge);
+        println!(
+            "🚀 SEQUENTIAL BLOCK: Starting conversion with {} statements, clock={}, edge={:?}",
+            statements.len(),
+            clock,
+            edge
+        );
 
         // CRITICAL FIX: Process ALL statements sequentially with shared context
         // This handles ResolvedConditional statements with proper dependency tracking
@@ -274,7 +320,8 @@ impl<'a> MirToSirConverter<'a> {
                     println!("   📝 ASSIGNMENT: {} <= expression", target);
 
                     // Create expression with current local context
-                    let value = self.create_expression_with_local_context(&assign.rhs, &local_context);
+                    let value =
+                        self.create_expression_with_local_context(&assign.rhs, &local_context);
 
                     // Store in local context for future references
                     local_context.insert(target.clone(), value);
@@ -288,7 +335,8 @@ impl<'a> MirToSirConverter<'a> {
                     println!("   🔄 RESOLVED CONDITIONAL: {} <= priority mux", target);
 
                     // CRITICAL: Use shared context to create the priority mux
-                    let mux_value = self.create_priority_mux_with_context(&resolved.resolved, &local_context);
+                    let mux_value =
+                        self.create_priority_mux_with_context(&resolved.resolved, &local_context);
 
                     // Store in local context for future references
                     local_context.insert(target.clone(), mux_value);
@@ -307,15 +355,25 @@ impl<'a> MirToSirConverter<'a> {
                     self.convert_if_in_sequential(if_stmt, clock, edge.clone());
                 }
                 _ => {
-                    println!("   ❓ OTHER: Statement type not handled in sequential context: {:?}", stmt);
+                    println!(
+                        "   ❓ OTHER: Statement type not handled in sequential context: {:?}",
+                        stmt
+                    );
                 }
             }
         }
 
-        println!("🏁 SEQUENTIAL BLOCK: Processed {} statements with shared context", statements.len());
+        println!(
+            "🏁 SEQUENTIAL BLOCK: Processed {} statements with shared context",
+            statements.len()
+        );
     }
 
-    fn collect_all_assignment_targets_from_block(&self, statements: &[Statement], targets: &mut std::collections::HashSet<String>) {
+    fn collect_all_assignment_targets_from_block(
+        &self,
+        statements: &[Statement],
+        targets: &mut std::collections::HashSet<String>,
+    ) {
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
@@ -341,10 +399,21 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn group_targets_by_conditionals(&mut self, statements: &[Statement], all_targets: &std::collections::HashSet<String>,
-                                     conditional_groups: &mut std::collections::HashMap<usize, std::collections::HashSet<String>>,
-                                     simple_assignments: &mut Vec<(String, usize)>) {
-        println!("🎯 GROUPING: Processing {} statements, tracking targets: {:?}", statements.len(), all_targets);
+    fn group_targets_by_conditionals(
+        &mut self,
+        statements: &[Statement],
+        all_targets: &std::collections::HashSet<String>,
+        conditional_groups: &mut std::collections::HashMap<
+            usize,
+            std::collections::HashSet<String>,
+        >,
+        simple_assignments: &mut Vec<(String, usize)>,
+    ) {
+        println!(
+            "🎯 GROUPING: Processing {} statements, tracking targets: {:?}",
+            statements.len(),
+            all_targets
+        );
 
         for stmt in statements {
             match stmt {
@@ -363,19 +432,36 @@ impl<'a> MirToSirConverter<'a> {
                     self.collect_targets_from_if(if_stmt, &mut if_targets);
 
                     // Filter to only targets we care about
-                    let relevant_targets: std::collections::HashSet<String> = if_targets.intersection(all_targets).cloned().collect();
+                    let relevant_targets: std::collections::HashSet<String> =
+                        if_targets.intersection(all_targets).cloned().collect();
 
-                    println!("   🔄 IF STMT: Found {} targets in if: {:?}, relevant: {:?}", if_targets.len(), if_targets, relevant_targets);
+                    println!(
+                        "   🔄 IF STMT: Found {} targets in if: {:?}, relevant: {:?}",
+                        if_targets.len(),
+                        if_targets,
+                        relevant_targets
+                    );
 
                     if !relevant_targets.is_empty() {
                         let if_stmt_ptr = if_stmt as *const _ as usize;
                         conditional_groups.insert(if_stmt_ptr, relevant_targets);
-                        println!("   ✅ GROUPED: Conditional group created with {} targets", conditional_groups.get(&if_stmt_ptr).unwrap().len());
+                        println!(
+                            "   ✅ GROUPED: Conditional group created with {} targets",
+                            conditional_groups.get(&if_stmt_ptr).unwrap().len()
+                        );
                     }
                 }
                 Statement::Block(block) => {
-                    println!("   📦 BLOCK: Recursing into block with {} statements", block.statements.len());
-                    self.group_targets_by_conditionals(&block.statements, all_targets, conditional_groups, simple_assignments);
+                    println!(
+                        "   📦 BLOCK: Recursing into block with {} statements",
+                        block.statements.len()
+                    );
+                    self.group_targets_by_conditionals(
+                        &block.statements,
+                        all_targets,
+                        conditional_groups,
+                        simple_assignments,
+                    );
                 }
                 _ => {
                     println!("   ❓ OTHER: Statement type not handled");
@@ -383,10 +469,18 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
 
-        println!("🏁 GROUPING: Final groups: {}, simple: {}", conditional_groups.len(), simple_assignments.len());
+        println!(
+            "🏁 GROUPING: Final groups: {}, simple: {}",
+            conditional_groups.len(),
+            simple_assignments.len()
+        );
     }
 
-    fn collect_targets_from_if(&self, if_stmt: &IfStatement, targets: &mut std::collections::HashSet<String>) {
+    fn collect_targets_from_if(
+        &self,
+        if_stmt: &IfStatement,
+        targets: &mut std::collections::HashSet<String>,
+    ) {
         // Collect from then branch
         for stmt in &if_stmt.then_block.statements {
             if let Statement::Assignment(assign) = stmt {
@@ -406,7 +500,11 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn process_conditional_group_with_shared_context(&mut self, if_stmt: &IfStatement, targets: &std::collections::HashSet<String>) -> Vec<(String, usize)> {
+    fn process_conditional_group_with_shared_context(
+        &mut self,
+        if_stmt: &IfStatement,
+        targets: &std::collections::HashSet<String>,
+    ) -> Vec<(String, usize)> {
         let mut results = Vec::new();
 
         // CRITICAL FIX: Process all assignments in each branch with SHARED context
@@ -414,7 +512,11 @@ impl<'a> MirToSirConverter<'a> {
 
         // Process then branch with shared context - compute ALL assignments together
         let mut then_context = std::collections::HashMap::new();
-        let then_values = self.process_branch_for_all_targets(&if_stmt.then_block.statements, targets, &mut then_context);
+        let then_values = self.process_branch_for_all_targets(
+            &if_stmt.then_block.statements,
+            targets,
+            &mut then_context,
+        );
 
         // Process else branch with shared context - compute ALL assignments together
         let mut else_context = std::collections::HashMap::new();
@@ -429,8 +531,14 @@ impl<'a> MirToSirConverter<'a> {
 
         // Create muxes using the EXACT SAME computed nodes - no recomputation
         for target in targets {
-            let then_value = then_values.get(target).copied().unwrap_or_else(|| self.create_signal_ref(target));
-            let else_value = else_values.get(target).copied().unwrap_or_else(|| self.create_signal_ref(target));
+            let then_value = then_values
+                .get(target)
+                .copied()
+                .unwrap_or_else(|| self.create_signal_ref(target));
+            let else_value = else_values
+                .get(target)
+                .copied()
+                .unwrap_or_else(|| self.create_signal_ref(target));
 
             // CRITICAL: Use the exact computed values, don't create new computation
             let mux_value = if then_value == else_value {
@@ -446,11 +554,19 @@ impl<'a> MirToSirConverter<'a> {
         results
     }
 
-    fn process_branch_for_all_targets(&mut self, statements: &[Statement], targets: &std::collections::HashSet<String>,
-                                     local_context: &mut std::collections::HashMap<String, usize>) -> std::collections::HashMap<String, usize> {
+    fn process_branch_for_all_targets(
+        &mut self,
+        statements: &[Statement],
+        targets: &std::collections::HashSet<String>,
+        local_context: &mut std::collections::HashMap<String, usize>,
+    ) -> std::collections::HashMap<String, usize> {
         let mut target_values = std::collections::HashMap::new();
 
-        println!("🔄 SHARED CONTEXT: Processing {} statements, tracking {} targets", statements.len(), targets.len());
+        println!(
+            "🔄 SHARED CONTEXT: Processing {} statements, tracking {} targets",
+            statements.len(),
+            targets.len()
+        );
 
         // Process all assignments in order, building up context
         for stmt in statements {
@@ -460,7 +576,10 @@ impl<'a> MirToSirConverter<'a> {
                 // Create expression with current local context
                 let value = self.create_expression_with_local_context(&assign.rhs, local_context);
 
-                println!("   📝 ASSIGN: {} <= expression -> node_{}", assign_target, value);
+                println!(
+                    "   📝 ASSIGN: {} <= expression -> node_{}",
+                    assign_target, value
+                );
                 if assign_target == "decode_operand" {
                     println!("      🎯 DECODE_OPERAND computed as node_{}", value);
                 }
@@ -476,22 +595,38 @@ impl<'a> MirToSirConverter<'a> {
 
                 // Debug the local context state
                 if assign_target == "decode_operand" || assign_target == "execute_result" {
-                    println!("      📚 Context after {}: {:?}", assign_target, local_context.keys().collect::<Vec<_>>());
+                    println!(
+                        "      📚 Context after {}: {:?}",
+                        assign_target,
+                        local_context.keys().collect::<Vec<_>>()
+                    );
                 }
             }
         }
 
-        println!("🏁 SHARED CONTEXT: Returning {} target values", target_values.len());
+        println!(
+            "🏁 SHARED CONTEXT: Returning {} target values",
+            target_values.len()
+        );
         target_values
     }
 
-    fn synthesize_sequential_assignment_for_target(&mut self, statements: &[Statement], target: &str) -> usize {
+    fn synthesize_sequential_assignment_for_target(
+        &mut self,
+        statements: &[Statement],
+        target: &str,
+    ) -> usize {
         // Build the logic that determines what value gets assigned to this target
         // This needs to respect the order of statements and conditional priorities
         self.synthesize_assignment_value_from_block(statements, target, None)
     }
 
-    fn synthesize_assignment_value_from_block(&mut self, statements: &[Statement], target: &str, default_value: Option<usize>) -> usize {
+    fn synthesize_assignment_value_from_block(
+        &mut self,
+        statements: &[Statement],
+        target: &str,
+        default_value: Option<usize>,
+    ) -> usize {
         // Process statements in order, with later assignments taking priority
         let mut result_value = default_value;
 
@@ -506,13 +641,18 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 Statement::Block(block) => {
                     // Process nested block
-                    result_value = Some(self.synthesize_assignment_value_from_block(&block.statements, target, result_value));
+                    result_value = Some(self.synthesize_assignment_value_from_block(
+                        &block.statements,
+                        target,
+                        result_value,
+                    ));
                 }
                 Statement::If(if_stmt) => {
                     // If this if-statement assigns to our target, create conditional logic
                     if self.if_assigns_to_target(if_stmt, target) {
                         // Always use the new dependency-aware approach
-                        result_value = Some(self.synthesize_conditional_assignment(if_stmt, target));
+                        result_value =
+                            Some(self.synthesize_conditional_assignment(if_stmt, target));
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
@@ -531,12 +671,12 @@ impl<'a> MirToSirConverter<'a> {
 
     fn if_assigns_to_target(&self, if_stmt: &IfStatement, target: &str) -> bool {
         // Check if this if-statement assigns to the target signal anywhere
-        self.block_assigns_to_target(&if_stmt.then_block.statements, target) ||
-        if let Some(else_block) = &if_stmt.else_block {
-            self.block_assigns_to_target(&else_block.statements, target)
-        } else {
-            false
-        }
+        self.block_assigns_to_target(&if_stmt.then_block.statements, target)
+            || if let Some(else_block) = &if_stmt.else_block {
+                self.block_assigns_to_target(&else_block.statements, target)
+            } else {
+                false
+            }
     }
 
     fn block_assigns_to_target(&self, statements: &[Statement], target: &str) -> bool {
@@ -576,22 +716,30 @@ impl<'a> MirToSirConverter<'a> {
         self.collect_assigned_signals_from_if(&if_stmt, &mut assigned_signals);
 
         // Check if any assignment references another assigned signal
-        self.check_block_for_inter_dependencies(&if_stmt.then_block.statements, &assigned_signals) ||
-        if let Some(else_block) = &if_stmt.else_block {
-            self.check_block_for_inter_dependencies(&else_block.statements, &assigned_signals)
-        } else {
-            false
-        }
+        self.check_block_for_inter_dependencies(&if_stmt.then_block.statements, &assigned_signals)
+            || if let Some(else_block) = &if_stmt.else_block {
+                self.check_block_for_inter_dependencies(&else_block.statements, &assigned_signals)
+            } else {
+                false
+            }
     }
 
-    fn collect_assigned_signals_from_if(&self, if_stmt: &IfStatement, signals: &mut std::collections::HashSet<String>) {
+    fn collect_assigned_signals_from_if(
+        &self,
+        if_stmt: &IfStatement,
+        signals: &mut std::collections::HashSet<String>,
+    ) {
         self.collect_assigned_signals_from_block(&if_stmt.then_block.statements, signals);
         if let Some(else_block) = &if_stmt.else_block {
             self.collect_assigned_signals_from_block(&else_block.statements, signals);
         }
     }
 
-    fn collect_assigned_signals_from_block(&self, statements: &[Statement], signals: &mut std::collections::HashSet<String>) {
+    fn collect_assigned_signals_from_block(
+        &self,
+        statements: &[Statement],
+        signals: &mut std::collections::HashSet<String>,
+    ) {
         for stmt in statements {
             if let Statement::Assignment(assign) = stmt {
                 let target = self.lvalue_to_string(&assign.lhs);
@@ -600,7 +748,11 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn check_block_for_inter_dependencies(&self, statements: &[Statement], assigned_signals: &std::collections::HashSet<String>) -> bool {
+    fn check_block_for_inter_dependencies(
+        &self,
+        statements: &[Statement],
+        assigned_signals: &std::collections::HashSet<String>,
+    ) -> bool {
         for stmt in statements {
             if let Statement::Assignment(assign) = stmt {
                 if self.expression_references_signals(&assign.rhs, assigned_signals) {
@@ -611,7 +763,11 @@ impl<'a> MirToSirConverter<'a> {
         false
     }
 
-    fn expression_references_signals(&self, expr: &Expression, signals: &std::collections::HashSet<String>) -> bool {
+    fn expression_references_signals(
+        &self,
+        expr: &Expression,
+        signals: &std::collections::HashSet<String>,
+    ) -> bool {
         match expr {
             Expression::Ref(lvalue) => {
                 let signal_name = self.lvalue_to_string(lvalue);
@@ -620,39 +776,44 @@ impl<'a> MirToSirConverter<'a> {
                 signals.contains(&signal_name) || signals.contains(&base_signal)
             }
             Expression::Binary { left, right, .. } => {
-                self.expression_references_signals(left, signals) ||
-                self.expression_references_signals(right, signals)
+                self.expression_references_signals(left, signals)
+                    || self.expression_references_signals(right, signals)
             }
             Expression::Unary { operand, .. } => {
                 self.expression_references_signals(operand, signals)
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
-                self.expression_references_signals(cond, signals) ||
-                self.expression_references_signals(then_expr, signals) ||
-                self.expression_references_signals(else_expr, signals)
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.expression_references_signals(cond, signals)
+                    || self.expression_references_signals(then_expr, signals)
+                    || self.expression_references_signals(else_expr, signals)
             }
-            Expression::Concat(exprs) => {
-                exprs.iter().any(|e| self.expression_references_signals(e, signals))
-            }
+            Expression::Concat(exprs) => exprs
+                .iter()
+                .any(|e| self.expression_references_signals(e, signals)),
             Expression::Replicate { count, value } => {
-                self.expression_references_signals(count, signals) ||
-                self.expression_references_signals(value, signals)
+                self.expression_references_signals(count, signals)
+                    || self.expression_references_signals(value, signals)
             }
-            Expression::FunctionCall { args, .. } => {
-                args.iter().any(|e| self.expression_references_signals(e, signals))
-            }
+            Expression::FunctionCall { args, .. } => args
+                .iter()
+                .any(|e| self.expression_references_signals(e, signals)),
             _ => false,
         }
     }
 
     fn get_base_signal_name(&self, lvalue: &LValue) -> String {
         match lvalue {
-            LValue::Signal(id) => {
-                self.mir.signals.iter()
-                    .find(|s| s.id == *id)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_else(|| format!("signal_{}", id.0))
-            }
+            LValue::Signal(id) => self
+                .mir
+                .signals
+                .iter()
+                .find(|s| s.id == *id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| format!("signal_{}", id.0)),
             LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => {
                 self.get_base_signal_name(base)
             }
@@ -668,16 +829,24 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn synthesize_conditional_assignment_with_shared_context(&mut self, if_stmt: &IfStatement, target: &str) -> usize {
+    fn synthesize_conditional_assignment_with_shared_context(
+        &mut self,
+        if_stmt: &IfStatement,
+        target: &str,
+    ) -> usize {
         // Process all assignments in the conditional with shared context
         // First collect all assigned signals
         let mut assigned_signals = std::collections::HashSet::new();
         self.collect_assigned_signals_from_if(if_stmt, &mut assigned_signals);
 
         // Build shared context for all signals
-        if !self.conditional_contexts.contains_key(&(if_stmt as *const _ as usize)) {
+        if !self
+            .conditional_contexts
+            .contains_key(&(if_stmt as *const _ as usize))
+        {
             let context = self.build_shared_conditional_context(if_stmt, &assigned_signals);
-            self.conditional_contexts.insert(if_stmt as *const _ as usize, context);
+            self.conditional_contexts
+                .insert(if_stmt as *const _ as usize, context);
         }
 
         // Get the value for our target from the shared context
@@ -692,7 +861,11 @@ impl<'a> MirToSirConverter<'a> {
         self.synthesize_conditional_assignment(if_stmt, target)
     }
 
-    fn build_shared_conditional_context(&mut self, if_stmt: &IfStatement, assigned_signals: &std::collections::HashSet<String>) -> std::collections::HashMap<String, usize> {
+    fn build_shared_conditional_context(
+        &mut self,
+        if_stmt: &IfStatement,
+        assigned_signals: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<String, usize> {
         let mut result = std::collections::HashMap::new();
 
         // Process each assigned signal with shared context
@@ -742,11 +915,17 @@ impl<'a> MirToSirConverter<'a> {
         default
     }
 
-    fn convert_if_to_sequential_mux(&mut self, if_stmt: &IfStatement, target: &str, default: usize) -> usize {
+    fn convert_if_to_sequential_mux(
+        &mut self,
+        if_stmt: &IfStatement,
+        target: &str,
+        default: usize,
+    ) -> usize {
         let cond_node = self.create_expression_node(&if_stmt.condition);
 
         // Find the assignment in the then branch
-        let then_value = self.find_assignment_in_block(&if_stmt.then_block, target)
+        let then_value = self
+            .find_assignment_in_block(&if_stmt.then_block, target)
             .unwrap_or(default);
 
         // Handle the else branch
@@ -775,7 +954,11 @@ impl<'a> MirToSirConverter<'a> {
         None
     }
 
-    fn collect_assignment_targets(&self, if_stmt: &IfStatement, targets: &mut std::collections::HashSet<String>) {
+    fn collect_assignment_targets(
+        &self,
+        if_stmt: &IfStatement,
+        targets: &mut std::collections::HashSet<String>,
+    ) {
         // Collect targets from then branch
         for stmt in &if_stmt.then_block.statements {
             if let Statement::Assignment(assign) = stmt {
@@ -819,14 +1002,18 @@ impl<'a> MirToSirConverter<'a> {
         let mut cases = Vec::new();
 
         // Process then branch with local context
-        if let Some(then_value) = self.process_branch_with_dependencies(&if_stmt.then_block.statements, target) {
+        if let Some(then_value) =
+            self.process_branch_with_dependencies(&if_stmt.then_block.statements, target)
+        {
             let condition = self.create_expression_node(&if_stmt.condition);
             cases.push((condition, then_value));
         }
 
         // Process else branch with local context
         if let Some(else_block) = &if_stmt.else_block {
-            if let Some(else_value) = self.process_branch_with_dependencies(&else_block.statements, target) {
+            if let Some(else_value) =
+                self.process_branch_with_dependencies(&else_block.statements, target)
+            {
                 cases.push((0, else_value)); // condition=0 means "default case"
             }
         }
@@ -840,7 +1027,11 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn process_branch_with_dependencies(&mut self, statements: &[Statement], target: &str) -> Option<usize> {
+    fn process_branch_with_dependencies(
+        &mut self,
+        statements: &[Statement],
+        target: &str,
+    ) -> Option<usize> {
         // Process assignments in order, building up a local context for dependencies
         let mut local_computed_values = std::collections::HashMap::new();
         let mut target_value = None;
@@ -850,7 +1041,8 @@ impl<'a> MirToSirConverter<'a> {
                 let assign_target = self.lvalue_to_string(&assign.lhs);
 
                 // Create expression with local context
-                let value = self.create_expression_with_local_context(&assign.rhs, &local_computed_values);
+                let value =
+                    self.create_expression_with_local_context(&assign.rhs, &local_computed_values);
 
                 // Store this computed value for future references
                 local_computed_values.insert(assign_target.clone(), value);
@@ -865,27 +1057,38 @@ impl<'a> MirToSirConverter<'a> {
         target_value
     }
 
-    fn create_expression_with_local_context(&mut self, expr: &Expression, local_context: &std::collections::HashMap<String, usize>) -> usize {
+    fn create_expression_with_local_context(
+        &mut self,
+        expr: &Expression,
+        local_context: &std::collections::HashMap<String, usize>,
+    ) -> usize {
         match expr {
-            Expression::Literal(value) => {
-                self.create_literal_node(value)
-            }
+            Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => {
                 let signal_name = self.lvalue_to_string(lvalue);
 
                 // Check if this signal has a computed value in the local context
                 if let Some(&computed_value) = local_context.get(&signal_name) {
-                    println!("      🔍 CONTEXT HIT: {} -> node_{}", signal_name, computed_value);
+                    println!(
+                        "      🔍 CONTEXT HIT: {} -> node_{}",
+                        signal_name, computed_value
+                    );
                     computed_value
                 } else {
                     // Check for range selects of locally computed values
                     let base_signal = self.get_base_signal_name(lvalue);
                     if let Some(&base_value) = local_context.get(&base_signal) {
-                        println!("      🔍 RANGE SELECT: {} on node_{}", signal_name, base_value);
+                        println!(
+                            "      🔍 RANGE SELECT: {} on node_{}",
+                            signal_name, base_value
+                        );
                         // Create range select on the computed value
                         self.create_range_select_on_node(lvalue, base_value)
                     } else {
-                        println!("      🔍 CONTEXT MISS: {} -> fallback to register", signal_name);
+                        println!(
+                            "      🔍 CONTEXT MISS: {} -> fallback to register",
+                            signal_name
+                        );
                         // Fall back to register reference
                         self.create_lvalue_ref_node(lvalue)
                     }
@@ -893,13 +1096,23 @@ impl<'a> MirToSirConverter<'a> {
             }
             Expression::Binary { op, left, right } => {
                 // CRITICAL FIX: Check for decode_operand + data_in pattern
-                if let (Expression::Ref(LValue::Signal(sig_id)), Expression::Ref(LValue::Port(port_id))) = (left.as_ref(), right.as_ref()) {
-                    let signal_name = self.mir.signals.iter()
+                if let (
+                    Expression::Ref(LValue::Signal(sig_id)),
+                    Expression::Ref(LValue::Port(port_id)),
+                ) = (left.as_ref(), right.as_ref())
+                {
+                    let signal_name = self
+                        .mir
+                        .signals
+                        .iter()
                         .find(|s| s.id == *sig_id)
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
 
-                    let port_name = self.mir.ports.iter()
+                    let port_name = self
+                        .mir
+                        .ports
+                        .iter()
                         .find(|p| p.id == *port_id)
                         .map(|p| p.name.clone())
                         .unwrap_or_default();
@@ -907,7 +1120,10 @@ impl<'a> MirToSirConverter<'a> {
                     if signal_name == "decode_operand" && port_name == "data_in" {
                         eprintln!("🎯 DECODE_OPERAND FIX: Using range select for decode_operand + data_in");
                         // Create instruction[7:0] + data_in directly
-                        let instruction_port = self.mir.ports.iter()
+                        let instruction_port = self
+                            .mir
+                            .ports
+                            .iter()
                             .find(|p| p.name == "instruction")
                             .map(|p| LValue::Port(p.id))
                             .unwrap_or_else(|| panic!("instruction port not found"));
@@ -920,7 +1136,8 @@ impl<'a> MirToSirConverter<'a> {
                         };
 
                         let range_node = self.create_lvalue_ref_node(&range_select);
-                        let right_node = self.create_expression_with_local_context(right, local_context);
+                        let right_node =
+                            self.create_expression_with_local_context(right, local_context);
                         return self.create_binary_op_node(op, range_node, right_node);
                     }
                 }
@@ -930,17 +1147,23 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_binary_op_node(op, left_node, right_node)
             }
             Expression::Unary { op, operand } => {
-                let operand_node = self.create_expression_with_local_context(operand, local_context);
+                let operand_node =
+                    self.create_expression_with_local_context(operand, local_context);
                 self.create_unary_op_node(op, operand_node)
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 let cond_node = self.create_expression_with_local_context(cond, local_context);
                 let then_node = self.create_expression_with_local_context(then_expr, local_context);
                 let else_node = self.create_expression_with_local_context(else_expr, local_context);
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             Expression::Concat(exprs) => {
-                let part_nodes: Vec<usize> = exprs.iter()
+                let part_nodes: Vec<usize> = exprs
+                    .iter()
                     .map(|e| self.create_expression_with_local_context(e, local_context))
                     .collect();
                 self.create_concat_node(part_nodes)
@@ -980,22 +1203,28 @@ impl<'a> MirToSirConverter<'a> {
 
     fn evaluate_const_expr(&self, expr: &Expression) -> usize {
         match expr {
-            Expression::Literal(value) => {
-                match value {
-                    skalp_mir::Value::Integer(i) => *i as usize,
-                    skalp_mir::Value::BitVector { value, .. } => *value as usize,
-                    _ => 0,
-                }
-            }
+            Expression::Literal(value) => match value {
+                skalp_mir::Value::Integer(i) => *i as usize,
+                skalp_mir::Value::BitVector { value, .. } => *value as usize,
+                _ => 0,
+            },
             _ => 0, // For non-constant expressions, return 0 as fallback
         }
     }
 
-
-    fn collect_conditional_cases_with_context(&mut self, if_stmt: &IfStatement, target: &str, cases: &mut Vec<(usize, usize)>) {
+    fn collect_conditional_cases_with_context(
+        &mut self,
+        if_stmt: &IfStatement,
+        target: &str,
+        cases: &mut Vec<(usize, usize)>,
+    ) {
         // Process then branch with context tracking
         let mut then_context = std::collections::HashMap::new();
-        let then_value = self.process_conditional_branch_with_context(&if_stmt.then_block.statements, target, &mut then_context);
+        let then_value = self.process_conditional_branch_with_context(
+            &if_stmt.then_block.statements,
+            target,
+            &mut then_context,
+        );
         if let Some(value) = then_value {
             let condition = self.create_expression_node(&if_stmt.condition);
             cases.push((condition, value));
@@ -1004,14 +1233,23 @@ impl<'a> MirToSirConverter<'a> {
         // Process else branch with context tracking
         if let Some(else_block) = &if_stmt.else_block {
             let mut else_context = std::collections::HashMap::new();
-            let else_value = self.process_conditional_branch_with_context(&else_block.statements, target, &mut else_context);
+            let else_value = self.process_conditional_branch_with_context(
+                &else_block.statements,
+                target,
+                &mut else_context,
+            );
             if let Some(value) = else_value {
                 cases.push((0, value)); // condition=0 means "default case"
             }
         }
     }
 
-    fn process_conditional_branch_with_context(&mut self, statements: &[Statement], target: &str, context: &mut std::collections::HashMap<String, usize>) -> Option<usize> {
+    fn process_conditional_branch_with_context(
+        &mut self,
+        statements: &[Statement],
+        target: &str,
+        context: &mut std::collections::HashMap<String, usize>,
+    ) -> Option<usize> {
         // Process statements in order, building up context of computed values
         for stmt in statements {
             if let Statement::Assignment(assign) = stmt {
@@ -1029,11 +1267,13 @@ impl<'a> MirToSirConverter<'a> {
         None
     }
 
-    fn create_expression_node_with_context(&mut self, expr: &Expression, context: &std::collections::HashMap<String, usize>) -> usize {
+    fn create_expression_node_with_context(
+        &mut self,
+        expr: &Expression,
+        context: &std::collections::HashMap<String, usize>,
+    ) -> usize {
         match expr {
-            Expression::Literal(value) => {
-                self.create_literal_node(value)
-            }
+            Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => {
                 let signal_name = self.lvalue_to_string(lvalue);
                 // Check if this signal has a computed value in the current context
@@ -1053,7 +1293,11 @@ impl<'a> MirToSirConverter<'a> {
                 let operand_node = self.create_expression_node_with_context(operand, context);
                 self.create_unary_op_node(op, operand_node)
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 let cond_node = self.create_expression_node_with_context(cond, context);
                 let then_node = self.create_expression_node_with_context(then_expr, context);
                 let else_node = self.create_expression_node_with_context(else_expr, context);
@@ -1066,7 +1310,12 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn collect_conditional_cases(&mut self, if_stmt: &IfStatement, target: &str, cases: &mut Vec<(usize, usize)>) {
+    fn collect_conditional_cases(
+        &mut self,
+        if_stmt: &IfStatement,
+        target: &str,
+        cases: &mut Vec<(usize, usize)>,
+    ) {
         // Check then branch for assignment to target
         let mut found_in_then = false;
         for stmt in &if_stmt.then_block.statements {
@@ -1150,9 +1399,14 @@ impl<'a> MirToSirConverter<'a> {
 
         let sir_node = SirNode {
             id: node_id,
-            kind: SirNodeKind::SignalRef { signal: signal_name.to_string() },
+            kind: SirNodeKind::SignalRef {
+                signal: signal_name.to_string(),
+            },
             inputs: vec![],
-            outputs: vec![SignalRef { signal_id: signal_id.clone(), bit_range: None }],
+            outputs: vec![SignalRef {
+                signal_id: signal_id.clone(),
+                bit_range: None,
+            }],
             clock_domain: None,
         };
 
@@ -1168,7 +1422,6 @@ impl<'a> MirToSirConverter<'a> {
         node_id
     }
 
-
     fn convert_continuous_assign(&mut self, target: &str, value: &Expression) {
         let node_id = self.create_expression_node(value);
         self.connect_node_to_signal(node_id, target);
@@ -1176,24 +1429,27 @@ impl<'a> MirToSirConverter<'a> {
 
     fn lvalue_to_string(&self, lvalue: &LValue) -> String {
         match lvalue {
-            LValue::Port(port_id) => {
-                self.mir.ports.iter()
-                    .find(|p| p.id == *port_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| format!("port_{}", port_id.0))
-            }
-            LValue::Signal(sig_id) => {
-                self.mir.signals.iter()
-                    .find(|s| s.id == *sig_id)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_else(|| format!("signal_{}", sig_id.0))
-            }
-            LValue::Variable(var_id) => {
-                self.mir.variables.iter()
-                    .find(|v| v.id == *var_id)
-                    .map(|v| v.name.clone())
-                    .unwrap_or_else(|| format!("var_{}", var_id.0))
-            }
+            LValue::Port(port_id) => self
+                .mir
+                .ports
+                .iter()
+                .find(|p| p.id == *port_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| format!("port_{}", port_id.0)),
+            LValue::Signal(sig_id) => self
+                .mir
+                .signals
+                .iter()
+                .find(|s| s.id == *sig_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| format!("signal_{}", sig_id.0)),
+            LValue::Variable(var_id) => self
+                .mir
+                .variables
+                .iter()
+                .find(|v| v.id == *var_id)
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| format!("var_{}", var_id.0)),
             LValue::BitSelect { base, .. } => {
                 // For bit select, use the base signal name
                 self.lvalue_to_string(base)
@@ -1225,21 +1481,27 @@ impl<'a> MirToSirConverter<'a> {
             _ => eprintln!("🔍 EXPR: Other"),
         }
         match expr {
-            Expression::Literal(value) => {
-                self.create_literal_node(value)
-            }
-            Expression::Ref(lvalue) => {
-                self.create_lvalue_ref_node(lvalue)
-            }
+            Expression::Literal(value) => self.create_literal_node(value),
+            Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
             Expression::Binary { op, left, right } => {
                 // CRITICAL FIX: Check for decode_operand + data_in pattern
-                if let (Expression::Ref(LValue::Signal(sig_id)), Expression::Ref(LValue::Port(port_id))) = (left.as_ref(), right.as_ref()) {
-                    let signal_name = self.mir.signals.iter()
+                if let (
+                    Expression::Ref(LValue::Signal(sig_id)),
+                    Expression::Ref(LValue::Port(port_id)),
+                ) = (left.as_ref(), right.as_ref())
+                {
+                    let signal_name = self
+                        .mir
+                        .signals
+                        .iter()
                         .find(|s| s.id == *sig_id)
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
 
-                    let port_name = self.mir.ports.iter()
+                    let port_name = self
+                        .mir
+                        .ports
+                        .iter()
                         .find(|p| p.id == *port_id)
                         .map(|p| p.name.clone())
                         .unwrap_or_default();
@@ -1247,7 +1509,10 @@ impl<'a> MirToSirConverter<'a> {
                     if signal_name == "decode_operand" && port_name == "data_in" {
                         eprintln!("🎯 DECODE_OPERAND FIX: Using range select for decode_operand + data_in");
                         // Create instruction[7:0] + data_in directly
-                        let instruction_port = self.mir.ports.iter()
+                        let instruction_port = self
+                            .mir
+                            .ports
+                            .iter()
                             .find(|p| p.name == "instruction")
                             .map(|p| LValue::Port(p.id))
                             .unwrap_or_else(|| panic!("instruction port not found"));
@@ -1273,7 +1538,11 @@ impl<'a> MirToSirConverter<'a> {
                 let operand_node = self.create_expression_node(operand);
                 self.create_unary_op_node(op, operand_node)
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 eprintln!("⚠️ CONDITIONAL EXPRESSION WITHOUT CONTEXT!");
                 let cond_node = self.create_expression_node(cond);
                 let then_node = self.create_expression_node(then_expr);
@@ -1281,7 +1550,8 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             Expression::Concat(parts) => {
-                let part_nodes: Vec<usize> = parts.iter()
+                let part_nodes: Vec<usize> = parts
+                    .iter()
                     .map(|p| self.create_expression_node(p))
                     .collect();
                 self.create_concat_node(part_nodes)
@@ -1334,14 +1604,20 @@ impl<'a> MirToSirConverter<'a> {
     fn create_lvalue_ref_node(&mut self, lvalue: &LValue) -> usize {
         match lvalue {
             LValue::Signal(sig_id) => {
-                let signal_name = self.mir.signals.iter()
+                let signal_name = self
+                    .mir
+                    .signals
+                    .iter()
                     .find(|s| s.id == *sig_id)
                     .map(|s| s.name.clone())
                     .unwrap_or_else(|| format!("signal_{}", sig_id.0));
                 self.get_or_create_signal_driver(&signal_name)
             }
             LValue::Port(port_id) => {
-                let port = self.mir.ports.iter()
+                let port = self
+                    .mir
+                    .ports
+                    .iter()
                     .find(|p| p.id == *port_id)
                     .unwrap_or_else(|| panic!("Port {:?} not found", port_id));
 
@@ -1354,7 +1630,10 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
             LValue::Variable(var_id) => {
-                let var_name = self.mir.variables.iter()
+                let var_name = self
+                    .mir
+                    .variables
+                    .iter()
                     .find(|v| v.id == *var_id)
                     .map(|v| v.name.clone())
                     .unwrap_or_else(|| format!("var_{}", var_id.0));
@@ -1379,7 +1658,8 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_slice_node(base_node, high_val, low_val)
             }
             LValue::Concat(parts) => {
-                let part_nodes: Vec<usize> = parts.iter()
+                let part_nodes: Vec<usize> = parts
+                    .iter()
                     .map(|p| self.create_lvalue_ref_node(p))
                     .collect();
                 self.create_concat_node(part_nodes)
@@ -1387,7 +1667,12 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn create_binary_op_node(&mut self, op: &skalp_mir::BinaryOp, left: usize, right: usize) -> usize {
+    fn create_binary_op_node(
+        &mut self,
+        op: &skalp_mir::BinaryOp,
+        left: usize,
+        right: usize,
+    ) -> usize {
         let node_id = self.next_node_id();
         let bin_op = self.convert_binary_op(op);
 
@@ -1395,9 +1680,9 @@ impl<'a> MirToSirConverter<'a> {
         let right_signal = self.node_to_signal_ref(right);
 
         // Determine width from input signals
-        let width = self.get_signal_width(&left_signal.signal_id).max(
-            self.get_signal_width(&right_signal.signal_id)
-        );
+        let width = self
+            .get_signal_width(&left_signal.signal_id)
+            .max(self.get_signal_width(&right_signal.signal_id));
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -1471,9 +1756,9 @@ impl<'a> MirToSirConverter<'a> {
         let false_signal = self.node_to_signal_ref(false_val);
 
         // Get width from true/false branches
-        let width = self.get_signal_width(&true_signal.signal_id).max(
-            self.get_signal_width(&false_signal.signal_id)
-        );
+        let width = self
+            .get_signal_width(&true_signal.signal_id)
+            .max(self.get_signal_width(&false_signal.signal_id));
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -1505,12 +1790,14 @@ impl<'a> MirToSirConverter<'a> {
     fn create_concat_node(&mut self, parts: Vec<usize>) -> usize {
         let node_id = self.next_node_id();
 
-        let part_signals: Vec<SignalRef> = parts.iter()
-            .map(|&p| self.node_to_signal_ref(p))
-            .collect();
+        let part_signals: Vec<SignalRef> =
+            parts.iter().map(|&p| self.node_to_signal_ref(p)).collect();
 
         // Calculate total width as sum of input widths
-        let width = part_signals.iter().map(|s| self.get_signal_width(&s.signal_id)).sum();
+        let width = part_signals
+            .iter()
+            .map(|s| self.get_signal_width(&s.signal_id))
+            .sum();
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -1539,7 +1826,10 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_slice_node(&mut self, base: usize, start: usize, end: usize) -> usize {
-        eprintln!("✂️ SLICE: Creating slice node from base={} with [{}:{}]", base, start, end);
+        eprintln!(
+            "✂️ SLICE: Creating slice node from base={} with [{}:{}]",
+            base, start, end
+        );
         let node_id = self.next_node_id();
 
         let base_signal = self.node_to_signal_ref(base);
@@ -1661,7 +1951,8 @@ impl<'a> MirToSirConverter<'a> {
                     for (signal_name, expr) in then_assignments {
                         let then_value_node = self.create_expression_node(&expr);
                         let else_value_node = self.get_or_create_signal_driver(&signal_name);
-                        let mux_node_id = self.create_mux_node(cond_node, then_value_node, else_value_node);
+                        let mux_node_id =
+                            self.create_mux_node(cond_node, then_value_node, else_value_node);
                         self.connect_node_to_signal(mux_node_id, &signal_name);
                     }
                     return;
@@ -1704,7 +1995,11 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn extract_assignments_from_block(&self, statements: &[Statement], assignments: &mut HashMap<String, Expression>) {
+    fn extract_assignments_from_block(
+        &self,
+        statements: &[Statement],
+        assignments: &mut HashMap<String, Expression>,
+    ) {
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
@@ -1741,15 +2036,22 @@ impl<'a> MirToSirConverter<'a> {
         // Update signal to have this node as driver
         if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
             signal.driver_node = Some(node_id);
-            eprintln!("   ✅ Signal '{}' now driven by node {}", signal_name, node_id);
+            eprintln!(
+                "   ✅ Signal '{}' now driven by node {}",
+                signal_name, node_id
+            );
         } else {
             eprintln!("   ❌ Signal '{}' not found!", signal_name);
         }
 
         // Update node to output to this signal
-        if let Some(node) = self.sir.combinational_nodes.iter_mut()
+        if let Some(node) = self
+            .sir
+            .combinational_nodes
+            .iter_mut()
             .chain(self.sir.sequential_nodes.iter_mut())
-            .find(|n| n.id == node_id) {
+            .find(|n| n.id == node_id)
+        {
             node.outputs.push(SignalRef {
                 signal_id: signal_name.to_string(),
                 bit_range: None,
@@ -1768,7 +2070,10 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         // Get port width from MIR
-        let port_width = self.mir.ports.iter()
+        let port_width = self
+            .mir
+            .ports
+            .iter()
             .find(|p| p.name == port_name)
             .map(|p| self.get_width(&p.port_type))
             .unwrap_or(8);
@@ -1785,7 +2090,9 @@ impl<'a> MirToSirConverter<'a> {
         // Create a SignalRef node that directly references the input port
         let node = SirNode {
             id: node_id,
-            kind: SirNodeKind::SignalRef { signal: port_name.to_string() },
+            kind: SirNodeKind::SignalRef {
+                signal: port_name.to_string(),
+            },
             inputs: vec![],
             outputs: vec![output_signal],
             clock_domain: None,
@@ -1832,8 +2139,13 @@ impl<'a> MirToSirConverter<'a> {
         // Create a signal reader node
         let node = SirNode {
             id: node_id,
-            kind: SirNodeKind::SignalRef { signal: name.to_string() },
-            inputs: vec![SignalRef { signal_id: name.to_string(), bit_range: None }],
+            kind: SirNodeKind::SignalRef {
+                signal: name.to_string(),
+            },
+            inputs: vec![SignalRef {
+                signal_id: name.to_string(),
+                bit_range: None,
+            }],
             outputs: vec![output_signal],
             clock_domain: None,
         };
@@ -1885,10 +2197,10 @@ impl<'a> MirToSirConverter<'a> {
             DataType::Int(w) | DataType::Nat(w) => *w,
             DataType::Clock { .. } | DataType::Reset { .. } => 1,
             DataType::Array(dt, size) => self.get_width(dt) * size,
-            DataType::BitParam { default, .. } |
-            DataType::LogicParam { default, .. } |
-            DataType::IntParam { default, .. } |
-            DataType::NatParam { default, .. } => *default,
+            DataType::BitParam { default, .. }
+            | DataType::LogicParam { default, .. }
+            | DataType::IntParam { default, .. }
+            | DataType::NatParam { default, .. } => *default,
             _ => 1,
         }
     }
@@ -1916,14 +2228,14 @@ impl<'a> MirToSirConverter<'a> {
                 if let SensitivityList::Edge(edges) = &process.sensitivity {
                     if let Some(edge_sens) = edges.first() {
                         let clock_name = self.lvalue_to_string(&edge_sens.signal);
-                        domains.entry(clock_name.clone()).or_insert_with(|| {
-                            ClockDomain {
+                        domains
+                            .entry(clock_name.clone())
+                            .or_insert_with(|| ClockDomain {
                                 name: clock_name.clone(),
                                 frequency_hz: None,
                                 phase_offset: 0.0,
                                 state_elements: Vec::new(),
-                            }
-                        });
+                            });
                     }
                 }
             }
@@ -1958,7 +2270,11 @@ impl<'a> MirToSirConverter<'a> {
         self.create_expression_node(&result_expr)
     }
 
-    fn create_priority_mux_with_context(&mut self, mux: &PriorityMux, local_context: &std::collections::HashMap<String, usize>) -> usize {
+    fn create_priority_mux_with_context(
+        &mut self,
+        mux: &PriorityMux,
+        local_context: &std::collections::HashMap<String, usize>,
+    ) -> usize {
         // Build nested ternary expression from priority mux
         let mut result_expr = mux.default.clone();
 
@@ -1984,13 +2300,11 @@ impl<'a> MirToSirConverter<'a> {
     /// Evaluate a constant expression to get a compile-time constant value
     fn evaluate_constant_expression(&self, expr: &Expression) -> Option<u64> {
         match expr {
-            Expression::Literal(value) => {
-                match value {
-                    Value::Integer(i) => Some(*i as u64),
-                    Value::BitVector { value, .. } => Some(*value),
-                    _ => None,
-                }
-            }
+            Expression::Literal(value) => match value {
+                Value::Integer(i) => Some(*i as u64),
+                Value::BitVector { value, .. } => Some(*value),
+                _ => None,
+            },
             _ => None, // Only literals can be evaluated as constants for now
         }
     }

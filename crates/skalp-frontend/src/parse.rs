@@ -87,7 +87,6 @@ impl<'a> ParseState<'a> {
         // Entity name
         self.expect(SyntaxKind::Ident);
 
-
         // Optional generic parameters
         if self.at(SyntaxKind::Lt) {
             self.parse_generic_params();
@@ -240,7 +239,6 @@ impl<'a> ParseState<'a> {
 
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
             self.skip_trivia();
-
 
             if self.at_port_direction() {
                 self.parse_port_decl();
@@ -481,9 +479,10 @@ impl<'a> ParseState<'a> {
         self.parse_expression();
 
         // Assignment operator
-        if self.at(SyntaxKind::NonBlockingAssign) ||
-           self.at(SyntaxKind::BlockingAssign) ||
-           self.at(SyntaxKind::Assign) {
+        if self.at(SyntaxKind::NonBlockingAssign)
+            || self.at(SyntaxKind::BlockingAssign)
+            || self.at(SyntaxKind::Assign)
+        {
             self.bump();
         } else {
             self.error("expected assignment operator");
@@ -688,8 +687,10 @@ impl<'a> ParseState<'a> {
                     self.finish_node();
                 }
             }
-            Some(SyntaxKind::IntLiteral) | Some(SyntaxKind::BinLiteral) |
-            Some(SyntaxKind::HexLiteral) | Some(SyntaxKind::StringLiteral) => {
+            Some(SyntaxKind::IntLiteral)
+            | Some(SyntaxKind::BinLiteral)
+            | Some(SyntaxKind::HexLiteral)
+            | Some(SyntaxKind::StringLiteral) => {
                 // Literal pattern
                 self.start_node(SyntaxKind::LiteralPattern);
                 self.bump(); // consume the literal token
@@ -1017,9 +1018,10 @@ impl<'a> ParseState<'a> {
         self.parse_sequence_primary();
 
         // Handle repetition operators
-        while self.at(SyntaxKind::RepeatOpen) ||
-              self.at(SyntaxKind::RepeatPlusOpen) ||
-              self.at(SyntaxKind::RepeatEqualOpen) {
+        while self.at(SyntaxKind::RepeatOpen)
+            || self.at(SyntaxKind::RepeatPlusOpen)
+            || self.at(SyntaxKind::RepeatEqualOpen)
+        {
             self.parse_repetition();
         }
 
@@ -2403,10 +2405,15 @@ impl<'a> ParseState<'a> {
                 self.bump();
 
                 // Check if next token indicates a type (nat, bit, etc.) or a trait bound
-                if matches!(self.current_kind(),
-                    Some(SyntaxKind::NatKw) | Some(SyntaxKind::BitKw) |
-                    Some(SyntaxKind::IntKw) | Some(SyntaxKind::LogicKw) |
-                    Some(SyntaxKind::ClockKw) | Some(SyntaxKind::ResetKw)) {
+                if matches!(
+                    self.current_kind(),
+                    Some(SyntaxKind::NatKw)
+                        | Some(SyntaxKind::BitKw)
+                        | Some(SyntaxKind::IntKw)
+                        | Some(SyntaxKind::LogicKw)
+                        | Some(SyntaxKind::ClockKw)
+                        | Some(SyntaxKind::ResetKw)
+                ) {
                     // Parse type constraint (WIDTH: nat)
                     self.parse_type();
 
@@ -2472,9 +2479,13 @@ impl<'a> ParseState<'a> {
     fn parse_relational_expr(&mut self) {
         self.parse_bitwise_or_expr();
 
-        while matches!(self.current_kind(),
-                Some(SyntaxKind::Lt) | Some(SyntaxKind::Gt) |
-                Some(SyntaxKind::Le) | Some(SyntaxKind::Ge)) {
+        while matches!(
+            self.current_kind(),
+            Some(SyntaxKind::Lt)
+                | Some(SyntaxKind::Gt)
+                | Some(SyntaxKind::Le)
+                | Some(SyntaxKind::Ge)
+        ) {
             self.start_node(SyntaxKind::BinaryExpr);
             self.bump(); // consume relational operator
             self.parse_bitwise_or_expr();
@@ -2546,8 +2557,10 @@ impl<'a> ParseState<'a> {
     fn parse_multiplicative_expr(&mut self) {
         self.parse_unary_expr();
 
-        while matches!(self.current_kind(),
-                Some(SyntaxKind::Star) | Some(SyntaxKind::Slash) | Some(SyntaxKind::Percent)) {
+        while matches!(
+            self.current_kind(),
+            Some(SyntaxKind::Star) | Some(SyntaxKind::Slash) | Some(SyntaxKind::Percent)
+        ) {
             self.start_node(SyntaxKind::BinaryExpr);
             self.bump(); // consume *, /, or %
             self.parse_unary_expr();
@@ -2557,8 +2570,10 @@ impl<'a> ParseState<'a> {
 
     /// Parse unary expression (! ~ -)
     fn parse_unary_expr(&mut self) {
-        if matches!(self.current_kind(),
-                Some(SyntaxKind::Bang) | Some(SyntaxKind::Tilde) | Some(SyntaxKind::Minus)) {
+        if matches!(
+            self.current_kind(),
+            Some(SyntaxKind::Bang) | Some(SyntaxKind::Tilde) | Some(SyntaxKind::Minus)
+        ) {
             self.start_node(SyntaxKind::UnaryExpr);
             self.bump(); // consume unary operator
             self.parse_unary_expr(); // right-associative
@@ -2571,8 +2586,12 @@ impl<'a> ParseState<'a> {
     /// Parse primary expression
     fn parse_primary_expression(&mut self) {
         match self.current_kind() {
-            Some(SyntaxKind::IntLiteral | SyntaxKind::BinLiteral |
-                 SyntaxKind::HexLiteral | SyntaxKind::StringLiteral) => {
+            Some(
+                SyntaxKind::IntLiteral
+                | SyntaxKind::BinLiteral
+                | SyntaxKind::HexLiteral
+                | SyntaxKind::StringLiteral,
+            ) => {
                 self.start_node(SyntaxKind::LiteralExpr);
                 self.bump();
                 self.finish_node();
@@ -2611,8 +2630,8 @@ impl<'a> ParseState<'a> {
     /// Parse identifier expression with possible postfix operations
     fn parse_identifier_expression(&mut self) {
         // Check for :: ahead to determine if this is a path expression
-        let is_path = self.current_kind() == Some(SyntaxKind::Ident) &&
-                      self.peek_kind(1) == Some(SyntaxKind::ColonColon);
+        let is_path = self.current_kind() == Some(SyntaxKind::Ident)
+            && self.peek_kind(1) == Some(SyntaxKind::ColonColon);
 
         if is_path {
             // Parse as path expression (Type::Variant)
@@ -2830,7 +2849,8 @@ impl<'a> ParseState<'a> {
         // Check if we have a partially consumed >> token
         if self.partial_shr {
             // We already consumed one > from >>, now consume the second
-            self.builder.token(rowan::SyntaxKind(SyntaxKind::Gt as u16), ">");
+            self.builder
+                .token(rowan::SyntaxKind(SyntaxKind::Gt as u16), ">");
             self.partial_shr = false;
             // NOW consume the >> token that we deferred earlier
             self.current += 1;
@@ -2844,7 +2864,8 @@ impl<'a> ParseState<'a> {
             Some(SyntaxKind::Shr) => {
                 // Handle >> as two separate > tokens
                 // Emit the first > but DON'T consume the token yet
-                self.builder.token(rowan::SyntaxKind(SyntaxKind::Gt as u16), ">");
+                self.builder
+                    .token(rowan::SyntaxKind(SyntaxKind::Gt as u16), ">");
 
                 // Mark that we've consumed one > from >>
                 // The actual token consumption will happen on the next call
@@ -2979,7 +3000,9 @@ mod tests {
         let (_, errors) = parse_with_errors(source);
 
         // Should report missing opening brace
-        assert!(errors.iter().any(|e| e.kind == ParseErrorKind::MissingToken));
+        assert!(errors
+            .iter()
+            .any(|e| e.kind == ParseErrorKind::MissingToken));
     }
 
     #[test]
@@ -3031,10 +3054,13 @@ mod tests {
         let mut lexer = crate::lexer::Lexer::new(":: =>");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        assert_eq!(tokens, vec![
-            crate::lexer::Token::ColonColon,
-            crate::lexer::Token::FatArrow,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                crate::lexer::Token::ColonColon,
+                crate::lexer::Token::FatArrow,
+            ]
+        );
 
         // Note: Full pattern matching parsing will be integrated with event block parsing in Week 2
         // The core enhancements (ColonColon, FatArrow tokens, path pattern support) are implemented

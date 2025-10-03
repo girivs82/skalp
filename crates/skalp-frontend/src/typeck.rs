@@ -3,7 +3,10 @@
 //! This module implements the type checker that operates on the syntax tree
 
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
-use crate::types::{self, Type, Width, TypeEnv, TypeInference, TypeError, TypeScheme, ResetPolarity, StructType, StructField, EnumType, EnumVariant};
+use crate::types::{
+    self, EnumType, EnumVariant, ResetPolarity, StructField, StructType, Type, TypeEnv, TypeError,
+    TypeInference, TypeScheme, Width,
+};
 use std::collections::HashMap;
 
 /// Type checker for SKALP
@@ -121,13 +124,17 @@ impl TypeChecker {
         };
 
         // Add struct type to environment
-        self.env.define_type(struct_name.clone(), Type::Struct(struct_type));
+        self.env
+            .define_type(struct_name.clone(), Type::Struct(struct_type));
 
         // Cache the type
-        self.node_types.insert(node.text_range().start().into(), Type::Struct(StructType {
-            name: struct_name,
-            fields: vec![], // Simplified for caching
-        }));
+        self.node_types.insert(
+            node.text_range().start().into(),
+            Type::Struct(StructType {
+                name: struct_name,
+                fields: vec![], // Simplified for caching
+            }),
+        );
     }
 
     /// Check enum declaration
@@ -136,11 +143,12 @@ impl TypeChecker {
         let enum_name = self.get_enum_name(node);
 
         // Check base type if specified
-        let base_type = if let Some(base_type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
-            self.extract_type(&base_type_node)
-        } else {
-            Type::Nat(Width::Fixed(32)) // Default to 32-bit nat
-        };
+        let base_type =
+            if let Some(base_type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+                self.extract_type(&base_type_node)
+            } else {
+                Type::Nat(Width::Fixed(32)) // Default to 32-bit nat
+            };
 
         // Create enum type
         let mut variants = Vec::new();
@@ -151,14 +159,19 @@ impl TypeChecker {
                 let variant_name = self.get_variant_name(&variant_node);
 
                 // Check for duplicate variant names
-                if variants.iter().any(|v: &EnumVariant| v.name == variant_name) {
+                if variants
+                    .iter()
+                    .any(|v: &EnumVariant| v.name == variant_name)
+                {
                     self.errors.push(TypeCheckError {
                         error: TypeError::DuplicateDefinition(format!("variant {}", variant_name)),
                         location: None,
                     });
                 } else {
                     // Check for payload type if specified
-                    let payload = if let Some(payload_node) = variant_node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+                    let payload = if let Some(payload_node) =
+                        variant_node.first_child_of_kind(SyntaxKind::TypeAnnotation)
+                    {
                         Some(self.extract_type(&payload_node))
                     } else {
                         None
@@ -178,13 +191,17 @@ impl TypeChecker {
         };
 
         // Add enum type to environment
-        self.env.define_type(enum_name.clone(), Type::Enum(enum_type));
+        self.env
+            .define_type(enum_name.clone(), Type::Enum(enum_type));
 
         // Cache the type
-        self.node_types.insert(node.text_range().start().into(), Type::Enum(EnumType {
-            name: enum_name,
-            variants: vec![], // Simplified for caching
-        }));
+        self.node_types.insert(
+            node.text_range().start().into(),
+            Type::Enum(EnumType {
+                name: enum_name,
+                variants: vec![], // Simplified for caching
+            }),
+        );
     }
 
     /// Check entity declaration
@@ -297,7 +314,8 @@ impl TypeChecker {
         self.env.bind(name.clone(), scheme);
 
         // Cache the type
-        self.node_types.insert(node.text_range().start().into(), port_type);
+        self.node_types
+            .insert(node.text_range().start().into(), port_type);
     }
 
     /// Check signal declaration
@@ -326,7 +344,8 @@ impl TypeChecker {
         };
         self.env.bind(name.clone(), scheme);
 
-        self.node_types.insert(node.text_range().start().into(), signal_type);
+        self.node_types
+            .insert(node.text_range().start().into(), signal_type);
     }
 
     /// Check variable declaration
@@ -354,7 +373,8 @@ impl TypeChecker {
         };
         self.env.bind(name.clone(), scheme);
 
-        self.node_types.insert(node.text_range().start().into(), var_type);
+        self.node_types
+            .insert(node.text_range().start().into(), var_type);
     }
 
     /// Check constant declaration
@@ -387,7 +407,8 @@ impl TypeChecker {
         };
         self.env.bind(name.clone(), scheme);
 
-        self.node_types.insert(node.text_range().start().into(), const_type);
+        self.node_types
+            .insert(node.text_range().start().into(), const_type);
     }
 
     /// Check event block
@@ -474,28 +495,29 @@ impl TypeChecker {
     /// Check if statement
     fn check_if_stmt(&mut self, node: &SyntaxNode) {
         // Check condition is boolean/bit
-        if let Some(cond_expr) = node.children().find(|n|
-            matches!(n.kind(),
-                SyntaxKind::LiteralExpr |
-                SyntaxKind::IdentExpr |
-                SyntaxKind::BinaryExpr |
-                SyntaxKind::UnaryExpr)
-        ) {
+        if let Some(cond_expr) = node.children().find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::LiteralExpr
+                    | SyntaxKind::IdentExpr
+                    | SyntaxKind::BinaryExpr
+                    | SyntaxKind::UnaryExpr
+            )
+        }) {
             let cond_type = self.check_expression(&cond_expr);
 
             // Condition should be bit[1], boolean, or reset (resets are implicitly boolean)
             match &cond_type {
                 Type::Bit(Width::Fixed(1)) => {} // OK
-                Type::Reset { .. } => {} // OK - resets can be used as booleans
+                Type::Reset { .. } => {}         // OK - resets can be used as booleans
                 Type::Clock { .. } => {} // OK - clocks can be used as booleans (for gated logic)
                 _ => {
                     // Try to coerce to bit[1]
-                    self.inference.add_constraint(
-                        crate::types::TypeConstraint::Equal(
+                    self.inference
+                        .add_constraint(crate::types::TypeConstraint::Equal(
                             cond_type,
-                            Type::Bit(Width::Fixed(1))
-                        )
-                    );
+                            Type::Bit(Width::Fixed(1)),
+                        ));
                 }
             }
         }
@@ -509,21 +531,29 @@ impl TypeChecker {
     /// Check match statement
     fn check_match_stmt(&mut self, node: &SyntaxNode) {
         // Get expression being matched
-        let expr_type = if let Some(expr_node) = node.children().find(|n|
-            matches!(n.kind(),
-                SyntaxKind::LiteralExpr |
-                SyntaxKind::IdentExpr |
-                SyntaxKind::BinaryExpr |
-                SyntaxKind::UnaryExpr)
-        ) {
+        let expr_type = if let Some(expr_node) = node.children().find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::LiteralExpr
+                    | SyntaxKind::IdentExpr
+                    | SyntaxKind::BinaryExpr
+                    | SyntaxKind::UnaryExpr
+            )
+        }) {
             self.check_expression(&expr_node)
         } else {
             Type::Error
         };
 
         // Check match arms
-        if let Some(arm_list) = node.children().find(|n| n.kind() == SyntaxKind::MatchArmList) {
-            for arm in arm_list.children().filter(|n| n.kind() == SyntaxKind::MatchArm) {
+        if let Some(arm_list) = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::MatchArmList)
+        {
+            for arm in arm_list
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::MatchArm)
+            {
                 self.check_match_arm(&arm, &expr_type);
             }
         }
@@ -532,17 +562,22 @@ impl TypeChecker {
     /// Check match arm
     fn check_match_arm(&mut self, node: &SyntaxNode, match_expr_type: &Type) {
         // Check pattern matches the expression type
-        if let Some(pattern_node) = node.children().find(|n|
-            matches!(n.kind(),
-                SyntaxKind::LiteralPattern |
-                SyntaxKind::IdentPattern |
-                SyntaxKind::WildcardPattern |
-                SyntaxKind::TuplePattern)
-        ) {
+        if let Some(pattern_node) = node.children().find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::LiteralPattern
+                    | SyntaxKind::IdentPattern
+                    | SyntaxKind::WildcardPattern
+                    | SyntaxKind::TuplePattern
+            )
+        }) {
             let pattern_type = self.check_pattern(&pattern_node);
 
             // Ensure pattern type matches expression type
-            if let Err(e) = self.inference.check_assignment(match_expr_type, &pattern_type) {
+            if let Err(e) = self
+                .inference
+                .check_assignment(match_expr_type, &pattern_type)
+            {
                 self.errors.push(TypeCheckError {
                     error: e,
                     location: None,
@@ -555,13 +590,15 @@ impl TypeChecker {
         self.env = TypeEnv::child(parent_env.clone());
 
         // Add pattern variables to scope
-        if let Some(pattern_node) = node.children().find(|n|
-            matches!(n.kind(),
-                SyntaxKind::LiteralPattern |
-                SyntaxKind::IdentPattern |
-                SyntaxKind::WildcardPattern |
-                SyntaxKind::TuplePattern)
-        ) {
+        if let Some(pattern_node) = node.children().find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::LiteralPattern
+                    | SyntaxKind::IdentPattern
+                    | SyntaxKind::WildcardPattern
+                    | SyntaxKind::TuplePattern
+            )
+        }) {
             self.bind_pattern_variables(&pattern_node, &match_expr_type);
         }
 
@@ -617,13 +654,15 @@ impl TypeChecker {
         match node.kind() {
             SyntaxKind::LiteralPattern => {
                 // Find the literal and check its type
-                if let Some(literal_child) = node.children().find(|n|
-                    matches!(n.kind(),
-                        SyntaxKind::IntLiteral |
-                        SyntaxKind::BinLiteral |
-                        SyntaxKind::HexLiteral |
-                        SyntaxKind::StringLiteral)
-                ) {
+                if let Some(literal_child) = node.children().find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IntLiteral
+                            | SyntaxKind::BinLiteral
+                            | SyntaxKind::HexLiteral
+                            | SyntaxKind::StringLiteral
+                    )
+                }) {
                     self.check_literal_expr(&literal_child)
                 } else {
                     Type::Error
@@ -655,13 +694,15 @@ impl TypeChecker {
             SyntaxKind::UnaryExpr => self.check_unary_expr(node),
             SyntaxKind::ParenExpr => {
                 // Check inner expression
-                if let Some(inner) = node.children().find(|n|
-                    matches!(n.kind(),
-                        SyntaxKind::LiteralExpr |
-                        SyntaxKind::IdentExpr |
-                        SyntaxKind::BinaryExpr |
-                        SyntaxKind::UnaryExpr)
-                ) {
+                if let Some(inner) = node.children().find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                    )
+                }) {
                     self.check_expression(&inner)
                 } else {
                     Type::Error
@@ -730,7 +771,8 @@ impl TypeChecker {
             let right_type = self.check_expression(&children[1]);
 
             // Get operator
-            let op_token = node.children_with_tokens()
+            let op_token = node
+                .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
                 .find(|t| t.kind().is_operator());
 
@@ -750,10 +792,15 @@ impl TypeChecker {
             let operand_type = self.check_expression(&operand);
 
             // Get operator
-            let op_token = node.children_with_tokens()
+            let op_token = node
+                .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
-                .find(|t| matches!(t.kind(),
-                    SyntaxKind::Bang | SyntaxKind::Tilde | SyntaxKind::Minus));
+                .find(|t| {
+                    matches!(
+                        t.kind(),
+                        SyntaxKind::Bang | SyntaxKind::Tilde | SyntaxKind::Minus
+                    )
+                });
 
             if let Some(op) = op_token {
                 self.check_unary_op(op.kind(), operand_type)
@@ -771,37 +818,55 @@ impl TypeChecker {
             // Arithmetic operators
             SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash => {
                 // Both operands must be numeric and same type
-                self.inference.add_constraint(crate::types::TypeConstraint::Numeric(left.clone()));
-                self.inference.add_constraint(crate::types::TypeConstraint::Numeric(right.clone()));
-                self.inference.add_constraint(crate::types::TypeConstraint::Equal(left.clone(), right.clone()));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Numeric(left.clone()));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Numeric(right.clone()));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Equal(
+                        left.clone(),
+                        right.clone(),
+                    ));
                 left // Result has same type as operands
             }
 
             // Comparison operators
-            SyntaxKind::Eq | SyntaxKind::Neq |
-            SyntaxKind::Lt | SyntaxKind::Gt |
-            SyntaxKind::Le | SyntaxKind::Ge => {
+            SyntaxKind::Eq
+            | SyntaxKind::Neq
+            | SyntaxKind::Lt
+            | SyntaxKind::Gt
+            | SyntaxKind::Le
+            | SyntaxKind::Ge => {
                 // Operands must match, result is bit[1]
-                self.inference.add_constraint(crate::types::TypeConstraint::Equal(left, right));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Equal(left, right));
                 Type::Bit(Width::Fixed(1))
             }
 
             // Logical operators
             SyntaxKind::AmpAmp | SyntaxKind::PipePipe => {
                 // Operands must be bit[1], result is bit[1]
-                self.inference.add_constraint(
-                    crate::types::TypeConstraint::Equal(left, Type::Bit(Width::Fixed(1)))
-                );
-                self.inference.add_constraint(
-                    crate::types::TypeConstraint::Equal(right, Type::Bit(Width::Fixed(1)))
-                );
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Equal(
+                        left,
+                        Type::Bit(Width::Fixed(1)),
+                    ));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Equal(
+                        right,
+                        Type::Bit(Width::Fixed(1)),
+                    ));
                 Type::Bit(Width::Fixed(1))
             }
 
             // Bitwise operators
             SyntaxKind::Amp | SyntaxKind::Pipe | SyntaxKind::Caret => {
                 // Both operands must be same bit/logic type
-                self.inference.add_constraint(crate::types::TypeConstraint::Equal(left.clone(), right.clone()));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Equal(
+                        left.clone(),
+                        right.clone(),
+                    ));
                 left
             }
 
@@ -809,11 +874,12 @@ impl TypeChecker {
             SyntaxKind::Shl | SyntaxKind::Shr => {
                 // Left operand determines result type
                 // Right operand should be unsigned
-                self.inference.add_constraint(crate::types::TypeConstraint::Numeric(right));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Numeric(right));
                 left
             }
 
-            _ => Type::Error
+            _ => Type::Error,
         }
     }
 
@@ -822,25 +888,29 @@ impl TypeChecker {
         match op {
             SyntaxKind::Bang => {
                 // Logical not - operand must be bit[1]
-                self.inference.add_constraint(
-                    crate::types::TypeConstraint::Equal(operand, Type::Bit(Width::Fixed(1)))
-                );
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Equal(
+                        operand,
+                        Type::Bit(Width::Fixed(1)),
+                    ));
                 Type::Bit(Width::Fixed(1))
             }
 
             SyntaxKind::Tilde => {
                 // Bitwise not - preserves type
-                self.inference.add_constraint(crate::types::TypeConstraint::Numeric(operand.clone()));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Numeric(operand.clone()));
                 operand
             }
 
             SyntaxKind::Minus => {
                 // Arithmetic negation
-                self.inference.add_constraint(crate::types::TypeConstraint::Numeric(operand.clone()));
+                self.inference
+                    .add_constraint(crate::types::TypeConstraint::Numeric(operand.clone()));
                 operand
             }
 
-            _ => Type::Error
+            _ => Type::Error,
         }
     }
 
@@ -853,10 +923,15 @@ impl TypeChecker {
         } else {
             // Try to find type in children
             for child in node.children() {
-                if matches!(child.kind(),
-                    SyntaxKind::BitType | SyntaxKind::LogicType |
-                    SyntaxKind::IntType | SyntaxKind::NatType |
-                    SyntaxKind::ClockType | SyntaxKind::ResetType) {
+                if matches!(
+                    child.kind(),
+                    SyntaxKind::BitType
+                        | SyntaxKind::LogicType
+                        | SyntaxKind::IntType
+                        | SyntaxKind::NatType
+                        | SyntaxKind::ClockType
+                        | SyntaxKind::ResetType
+                ) {
                     return self.parse_type_node(&child);
                 }
             }
@@ -909,7 +984,7 @@ impl TypeChecker {
                     Type::Unknown
                 }
             }
-            _ => Type::Unknown
+            _ => Type::Unknown,
         }
     }
 
@@ -931,11 +1006,15 @@ impl TypeChecker {
         // Look for expression after assignment operator
         let mut found_assign = false;
         for child in node.children() {
-            if found_assign && matches!(child.kind(),
-                    SyntaxKind::LiteralExpr |
-                    SyntaxKind::IdentExpr |
-                    SyntaxKind::BinaryExpr |
-                    SyntaxKind::UnaryExpr) {
+            if found_assign
+                && matches!(
+                    child.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                )
+            {
                 return Some(child);
             }
             if child.kind() == SyntaxKind::Assign {
@@ -1164,9 +1243,7 @@ impl TypeChecker {
         }
 
         match base_type {
-            Type::Array { element_type, .. } => {
-                (**element_type).clone()
-            }
+            Type::Array { element_type, .. } => (**element_type).clone(),
             Type::Bit(_) | Type::Logic(_) => {
                 // Bit indexing returns a single bit
                 Type::Bit(Width::Fixed(1))
@@ -1192,7 +1269,11 @@ impl TypeChecker {
         // Range indices must be integers
         if !high_type.is_numeric() || !low_type.is_numeric() {
             self.errors.push(TypeCheckError {
-                error: TypeError::NotNumeric(if !high_type.is_numeric() { high_type.clone() } else { low_type.clone() }),
+                error: TypeError::NotNumeric(if !high_type.is_numeric() {
+                    high_type.clone()
+                } else {
+                    low_type.clone()
+                }),
                 location: None,
             });
         }

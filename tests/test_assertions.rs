@@ -38,7 +38,7 @@ mod assertion_tests {
 
                 // For now, just check that parsing doesn't fail
                 // We'll implement actual assertion parsing in the next step
-            },
+            }
             Err(e) => {
                 println!("❌ Assertion parsing failed: {:?}", e);
                 panic!("Failed to parse assertion syntax");
@@ -68,7 +68,7 @@ mod assertion_tests {
                 println!("✅ Property syntax parsed successfully!");
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Property parsing failed: {:?}", e);
                 // For now, we expect this to fail since we haven't implemented property parsing yet
@@ -96,7 +96,7 @@ mod assertion_tests {
                 println!("✅ Cover syntax parsed successfully!");
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Cover parsing failed: {:?}", e);
                 // For now, we expect this to fail since we haven't implemented cover parsing yet

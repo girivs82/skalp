@@ -18,11 +18,11 @@
 //! - Combinational logic (gate generation)
 //! - Real-world patterns (ALU, counter, mux)
 
-use skalp_frontend::parse::parse;
 use skalp_frontend::hir_builder::build_hir;
-use skalp_mir::hir_to_mir::HirToMir;
+use skalp_frontend::parse::parse;
 use skalp_lir::lir::*;
 use skalp_lir::mir_to_lir::transform_mir_to_lir;
+use skalp_mir::hir_to_mir::HirToMir;
 
 // ============================================================================
 // Helper Functions
@@ -35,7 +35,10 @@ fn compile_to_lir(source: &str) -> Lir {
     let mut transformer = HirToMir::new();
     let mir = transformer.transform(&hir);
 
-    assert!(!mir.modules.is_empty(), "MIR should have at least one module");
+    assert!(
+        !mir.modules.is_empty(),
+        "MIR should have at least one module"
+    );
     transform_mir_to_lir(&mir.modules[0])
 }
 
@@ -183,7 +186,10 @@ impl AndGate {
     let lir = compile_to_lir(source);
 
     // Should have at least one AND gate
-    let has_and = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::And));
+    let has_and = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::And));
     assert!(has_and, "Should have AND gate for & operation");
 }
 
@@ -202,7 +208,10 @@ impl OrGate {
 "#;
     let lir = compile_to_lir(source);
 
-    let has_or = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Or));
+    let has_or = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Or));
     assert!(has_or, "Should have OR gate for | operation");
 }
 
@@ -221,7 +230,10 @@ impl XorGate {
 "#;
     let lir = compile_to_lir(source);
 
-    let has_xor = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Xor));
+    let has_xor = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Xor));
     assert!(has_xor, "Should have XOR gate for ^ operation");
 }
 
@@ -242,8 +254,14 @@ impl MultiBinary {
     let lir = compile_to_lir(source);
 
     // Should have both AND and OR gates
-    let has_and = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::And));
-    let has_or = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Or));
+    let has_and = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::And));
+    let has_or = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Or));
 
     assert!(has_and, "Should have AND gate");
     assert!(has_or, "Should have OR gate");
@@ -267,7 +285,10 @@ impl NotGate {
 "#;
     let lir = compile_to_lir(source);
 
-    let has_not = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Not));
+    let has_not = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Not));
     assert!(has_not, "Should have NOT gate for ~ operation");
 }
 
@@ -287,8 +308,14 @@ impl NotAnd {
     let lir = compile_to_lir(source);
 
     // Should have AND gate and NOT gate
-    let has_and = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::And));
-    let has_not = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Not));
+    let has_and = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::And));
+    let has_not = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Not));
 
     assert!(has_and || has_not, "Should have AND or NOT gate (or both)");
 }
@@ -314,7 +341,10 @@ impl Nested {
     let lir = compile_to_lir(source);
 
     // Should have multiple gates for the nested expression
-    assert!(lir.gates.len() >= 2, "Should have multiple gates for nested expression");
+    assert!(
+        lir.gates.len() >= 2,
+        "Should have multiple gates for nested expression"
+    );
 }
 
 #[test]
@@ -335,7 +365,10 @@ impl DeepNested {
     let lir = compile_to_lir(source);
 
     // Should decompose into multiple gates
-    assert!(lir.gates.len() >= 3, "Should have multiple gates for deeply nested expression");
+    assert!(
+        lir.gates.len() >= 3,
+        "Should have multiple gates for deeply nested expression"
+    );
 }
 
 #[test]
@@ -355,7 +388,10 @@ impl Chained {
     let lir = compile_to_lir(source);
 
     // Should have gates for chained operations
-    assert!(!lir.gates.is_empty(), "Should have gates for chained operations");
+    assert!(
+        !lir.gates.is_empty(),
+        "Should have gates for chained operations"
+    );
 }
 
 // ============================================================================
@@ -384,7 +420,10 @@ impl DFF {
     let lir = compile_to_lir(source);
 
     // Should have gates (may include DFF or other sequential elements)
-    assert!(!lir.gates.is_empty(), "Should have gates for sequential logic");
+    assert!(
+        !lir.gates.is_empty(),
+        "Should have gates for sequential logic"
+    );
 }
 
 #[test]
@@ -432,7 +471,10 @@ impl Comb {
     let lir = compile_to_lir(source);
 
     // Should have gates for combinational logic
-    assert!(!lir.gates.is_empty(), "Should have gates for combinational logic");
+    assert!(
+        !lir.gates.is_empty(),
+        "Should have gates for combinational logic"
+    );
 }
 
 #[test]
@@ -453,7 +495,10 @@ impl ComplexComb {
     let lir = compile_to_lir(source);
 
     // Should have multiple gates
-    assert!(lir.gates.len() >= 2, "Should have multiple gates for complex combinational logic");
+    assert!(
+        lir.gates.len() >= 2,
+        "Should have multiple gates for complex combinational logic"
+    );
 }
 
 // ============================================================================
@@ -501,8 +546,14 @@ impl HalfAdder {
     assert_eq!(lir.name, "HalfAdder");
 
     // Should have XOR and AND gates
-    let has_xor = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Xor));
-    let has_and = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::And));
+    let has_xor = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Xor));
+    let has_and = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::And));
 
     assert!(has_xor, "Should have XOR gate for sum");
     assert!(has_and, "Should have AND gate for carry");
@@ -586,10 +637,22 @@ impl AllGates {
     let lir = compile_to_lir(source);
 
     // Should have gates for all basic operations
-    let has_and = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::And));
-    let has_or = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Or));
-    let has_xor = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Xor));
-    let has_not = lir.gates.iter().any(|g| matches!(g.gate_type, GateType::Not));
+    let has_and = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::And));
+    let has_or = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Or));
+    let has_xor = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Xor));
+    let has_not = lir
+        .gates
+        .iter()
+        .any(|g| matches!(g.gate_type, GateType::Not));
 
     assert!(has_and, "Should have AND gate");
     assert!(has_or, "Should have OR gate");
@@ -666,7 +729,10 @@ impl Connected {
     let lir = compile_to_lir(source);
 
     // Find the AND gate
-    let and_gate = lir.gates.iter().find(|g| matches!(g.gate_type, GateType::And));
+    let and_gate = lir
+        .gates
+        .iter()
+        .find(|g| matches!(g.gate_type, GateType::And));
 
     if let Some(gate) = and_gate {
         // AND gate should have 2 inputs and 1 output
@@ -695,7 +761,10 @@ impl Chained {
     let lir = compile_to_lir(source);
 
     // Should have at least 2 gates (AND and OR)
-    assert!(lir.gates.len() >= 2, "Should have at least 2 gates for chained operations");
+    assert!(
+        lir.gates.len() >= 2,
+        "Should have at least 2 gates for chained operations"
+    );
 }
 
 // ============================================================================
@@ -783,7 +852,11 @@ impl UniqueIds {
     // All gate IDs should be unique
     let mut gate_ids = std::collections::HashSet::new();
     for gate in &lir.gates {
-        assert!(gate_ids.insert(gate.id.clone()), "Gate ID {} is not unique", gate.id);
+        assert!(
+            gate_ids.insert(gate.id.clone()),
+            "Gate ID {} is not unique",
+            gate.id
+        );
     }
 }
 
@@ -808,6 +881,10 @@ impl UniqueNets {
     // All net IDs should be unique
     let mut net_ids = std::collections::HashSet::new();
     for net in &lir.nets {
-        assert!(net_ids.insert(net.id.clone()), "Net ID {} is not unique", net.id);
+        assert!(
+            net_ids.insert(net.id.clone()),
+            "Net ID {} is not unique",
+            net.id
+        );
     }
 }

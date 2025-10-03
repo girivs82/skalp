@@ -3,11 +3,11 @@
 //! Provides Primary Safety Mechanisms (PSM) and Latent Safety Mechanisms (LSM)
 //! for achieving required safety integrity levels.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 use crate::asil::AsilLevel;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use skalp_mir::mir::Expression;
+use std::collections::HashMap;
 
 /// Safety mechanism types according to ISO 26262
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -268,7 +268,10 @@ impl SafetyMechanism {
 
     /// Check if mechanism is verified
     pub fn is_verified(&self) -> bool {
-        matches!(self.status, MechanismStatus::Verified | MechanismStatus::Validated)
+        matches!(
+            self.status,
+            MechanismStatus::Verified | MechanismStatus::Validated
+        )
     }
 
     /// Calculate effectiveness based on coverage
@@ -378,7 +381,8 @@ impl SafetyMechanismManager {
         let mut combined_coverage = 0.0;
         for mechanism in mechanisms {
             let individual_coverage = mechanism.fault_coverage / 100.0;
-            combined_coverage = combined_coverage + individual_coverage - (combined_coverage * individual_coverage);
+            combined_coverage =
+                combined_coverage + individual_coverage - (combined_coverage * individual_coverage);
         }
 
         combined_coverage * 100.0
@@ -395,7 +399,8 @@ impl SafetyMechanismManager {
         let mut combined_coverage = 0.0;
         for mechanism in mechanisms {
             let individual_coverage = mechanism.diagnostic_coverage / 100.0;
-            combined_coverage = combined_coverage + individual_coverage - (combined_coverage * individual_coverage);
+            combined_coverage =
+                combined_coverage + individual_coverage - (combined_coverage * individual_coverage);
         }
 
         combined_coverage * 100.0
@@ -404,24 +409,26 @@ impl SafetyMechanismManager {
     /// Generate safety mechanism report
     pub fn generate_report(&self) -> MechanismReport {
         let total_mechanisms = self.mechanisms.len();
-        let verified_mechanisms = self.mechanisms
-            .values()
-            .filter(|m| m.is_verified())
-            .count();
+        let verified_mechanisms = self.mechanisms.values().filter(|m| m.is_verified()).count();
 
         let mut type_breakdown = HashMap::new();
         let mut category_breakdown = HashMap::new();
 
         for mechanism in self.mechanisms.values() {
-            *type_breakdown.entry(mechanism.mechanism_type.clone()).or_insert(0) += 1;
-            *category_breakdown.entry(mechanism.category.clone()).or_insert(0) += 1;
+            *type_breakdown
+                .entry(mechanism.mechanism_type.clone())
+                .or_insert(0) += 1;
+            *category_breakdown
+                .entry(mechanism.category.clone())
+                .or_insert(0) += 1;
         }
 
         let avg_fault_coverage = if total_mechanisms > 0 {
             self.mechanisms
                 .values()
                 .map(|m| m.fault_coverage)
-                .sum::<f64>() / total_mechanisms as f64
+                .sum::<f64>()
+                / total_mechanisms as f64
         } else {
             0.0
         };
@@ -430,7 +437,8 @@ impl SafetyMechanismManager {
             self.mechanisms
                 .values()
                 .map(|m| m.diagnostic_coverage)
-                .sum::<f64>() / total_mechanisms as f64
+                .sum::<f64>()
+                / total_mechanisms as f64
         } else {
             0.0
         };
@@ -570,8 +578,8 @@ pub mod predefined {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::predefined::*;
+    use super::*;
 
     #[test]
     fn test_safety_mechanism_creation() {

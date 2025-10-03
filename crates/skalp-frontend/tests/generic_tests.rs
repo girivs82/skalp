@@ -30,7 +30,10 @@ fn test_generic_entity_definition() {
         false
     }
     found_generics = find_generic_params(&tree);
-    assert!(found_generics, "Generic parameters not found in parsed tree");
+    assert!(
+        found_generics,
+        "Generic parameters not found in parsed tree"
+    );
 }
 
 #[test]
@@ -97,7 +100,10 @@ fn test_generic_entity_with_constraints() {
         false
     }
     found_trait_bound = find_trait_bound(&tree);
-    assert!(found_trait_bound, "Trait bound not found in generic parameters");
+    assert!(
+        found_trait_bound,
+        "Trait bound not found in generic parameters"
+    );
 }
 
 #[test]

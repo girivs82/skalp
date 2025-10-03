@@ -3,10 +3,10 @@
 //! Tests SIR generation, GPU simulation, and performance validation
 //! for various hardware designs including counter, adder, and FIFO.
 
-use skalp_sim::*;
-use skalp_sim::runtime::GpuSimRuntime;
-use skalp_sim::mir_to_sir::MirToSir;
 use skalp_mir::*;
+use skalp_sim::mir_to_sir::MirToSir;
+use skalp_sim::runtime::GpuSimRuntime;
+use skalp_sim::*;
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
 
@@ -23,7 +23,10 @@ async fn test_counter_sir_generation() {
     assert!(!sir.top_module.seq_blocks.is_empty()); // Should have sequential logic
 
     // Check for counter signal
-    let counter_signal = sir.top_module.signals.iter()
+    let counter_signal = sir
+        .top_module
+        .signals
+        .iter()
         .find(|s| s.name == "counter")
         .expect("Counter signal should exist");
     assert_eq!(counter_signal.width, 32);
@@ -105,9 +108,15 @@ async fn test_success_criteria_counter_benchmark() {
 
     // SUCCESS CRITERIA: GPU should be at least 2x faster
     if speedup >= 2.0 {
-        println!("✅ SUCCESS: GPU achieved {:.2}x speedup (≥2x required)", speedup);
+        println!(
+            "✅ SUCCESS: GPU achieved {:.2}x speedup (≥2x required)",
+            speedup
+        );
     } else if speedup >= 1.0 {
-        println!("⚠️  PARTIAL: GPU achieved {:.2}x speedup (target: ≥2x)", speedup);
+        println!(
+            "⚠️  PARTIAL: GPU achieved {:.2}x speedup (target: ≥2x)",
+            speedup
+        );
         println!("   Note: GPU overhead may dominate for small designs on this system");
     } else {
         println!("❌ FAILED: GPU slower than CPU ({:.2}x)", speedup);
@@ -169,10 +178,17 @@ async fn test_runtime_stability_under_load() {
     // Validate all results
     assert_eq!(results.len(), 10);
     for (i, result) in results.iter().enumerate() {
-        assert_eq!(result.cycles_simulated, 1000, "Simulation {} should complete 1000 cycles", i);
+        assert_eq!(
+            result.cycles_simulated, 1000,
+            "Simulation {} should complete 1000 cycles",
+            i
+        );
     }
 
-    println!("✅ Runtime stability test passed - {} concurrent simulations completed", results.len());
+    println!(
+        "✅ Runtime stability test passed - {} concurrent simulations completed",
+        results.len()
+    );
 }
 
 /// Test increasing design sizes for performance scaling
@@ -256,42 +272,34 @@ fn create_counter_mir(width: usize) -> Mir {
             edge: EdgeType::Rising,
         }]),
         body: Block {
-            statements: vec![
-                Statement::If(IfStatement {
-                    condition: Expression::Ref(LValue::Signal(rst_id)),
-                    then_block: Block {
-                        statements: vec![
-                            Statement::Assignment(Assignment {
+            statements: vec![Statement::If(IfStatement {
+                condition: Expression::Ref(LValue::Signal(rst_id)),
+                then_block: Block {
+                    statements: vec![Statement::Assignment(Assignment {
+                        lhs: LValue::Signal(counter_id),
+                        rhs: Expression::Literal(Value::Integer(0)),
+                        kind: AssignmentKind::NonBlocking,
+                    })],
+                },
+                else_block: Some(Block {
+                    statements: vec![Statement::If(IfStatement {
+                        condition: Expression::Ref(LValue::Signal(enable_id)),
+                        then_block: Block {
+                            statements: vec![Statement::Assignment(Assignment {
                                 lhs: LValue::Signal(counter_id),
-                                rhs: Expression::Literal(Value::Integer(0)),
-                                kind: AssignmentKind::NonBlocking,
-                            })
-                        ]
-                    },
-                    else_block: Some(Block {
-                        statements: vec![
-                            Statement::If(IfStatement {
-                                condition: Expression::Ref(LValue::Signal(enable_id)),
-                                then_block: Block {
-                                    statements: vec![
-                                        Statement::Assignment(Assignment {
-                                            lhs: LValue::Signal(counter_id),
-                                            rhs: Expression::Binary {
-                                                op: BinaryOp::Add,
-                                                left: Box::new(Expression::Ref(LValue::Signal(counter_id))),
-                                                right: Box::new(Expression::Literal(Value::Integer(1))),
-                                            },
-                                            kind: AssignmentKind::NonBlocking,
-                                        })
-                                    ]
+                                rhs: Expression::Binary {
+                                    op: BinaryOp::Add,
+                                    left: Box::new(Expression::Ref(LValue::Signal(counter_id))),
+                                    right: Box::new(Expression::Literal(Value::Integer(1))),
                                 },
-                                else_block: None,
-                            })
-                        ]
-                    }),
-                })
-            ]
-        }
+                                kind: AssignmentKind::NonBlocking,
+                            })],
+                        },
+                        else_block: None,
+                    })],
+                }),
+            })],
+        },
     };
 
     let module = Module {
@@ -347,18 +355,16 @@ fn create_adder_mir(width: usize) -> Mir {
             LValue::Signal(SignalId(1)),
         ]),
         body: Block {
-            statements: vec![
-                Statement::Assignment(Assignment {
-                    lhs: LValue::Signal(SignalId(2)),
-                    rhs: Expression::Binary {
-                        op: BinaryOp::Add,
-                        left: Box::new(Expression::Ref(LValue::Signal(SignalId(0)))),
-                        right: Box::new(Expression::Ref(LValue::Signal(SignalId(1)))),
-                    },
-                    kind: AssignmentKind::Blocking,
-                })
-            ]
-        }
+            statements: vec![Statement::Assignment(Assignment {
+                lhs: LValue::Signal(SignalId(2)),
+                rhs: Expression::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(Expression::Ref(LValue::Signal(SignalId(0)))),
+                    right: Box::new(Expression::Ref(LValue::Signal(SignalId(1)))),
+                },
+                kind: AssignmentKind::Blocking,
+            })],
+        },
     };
 
     let module = Module {
@@ -383,14 +389,62 @@ fn create_fifo_mir(data_width: usize, depth: usize) -> Mir {
     let mut mir = Mir::new(format!("fifo_{}x{}", data_width, depth));
 
     let signals = vec![
-        Signal { id: SignalId(0), name: "clk".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
-        Signal { id: SignalId(1), name: "rst".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
-        Signal { id: SignalId(2), name: "wr_en".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
-        Signal { id: SignalId(3), name: "rd_en".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
-        Signal { id: SignalId(4), name: "data_in".to_string(), signal_type: DataType::Bit(data_width), initial: None, clock_domain: None },
-        Signal { id: SignalId(5), name: "data_out".to_string(), signal_type: DataType::Bit(data_width), initial: None, clock_domain: None },
-        Signal { id: SignalId(6), name: "empty".to_string(), signal_type: DataType::Bit(1), initial: Some(Value::Integer(1)), clock_domain: None },
-        Signal { id: SignalId(7), name: "full".to_string(), signal_type: DataType::Bit(1), initial: Some(Value::Integer(0)), clock_domain: None },
+        Signal {
+            id: SignalId(0),
+            name: "clk".to_string(),
+            signal_type: DataType::Bit(1),
+            initial: None,
+            clock_domain: None,
+        },
+        Signal {
+            id: SignalId(1),
+            name: "rst".to_string(),
+            signal_type: DataType::Bit(1),
+            initial: None,
+            clock_domain: None,
+        },
+        Signal {
+            id: SignalId(2),
+            name: "wr_en".to_string(),
+            signal_type: DataType::Bit(1),
+            initial: None,
+            clock_domain: None,
+        },
+        Signal {
+            id: SignalId(3),
+            name: "rd_en".to_string(),
+            signal_type: DataType::Bit(1),
+            initial: None,
+            clock_domain: None,
+        },
+        Signal {
+            id: SignalId(4),
+            name: "data_in".to_string(),
+            signal_type: DataType::Bit(data_width),
+            initial: None,
+            clock_domain: None,
+        },
+        Signal {
+            id: SignalId(5),
+            name: "data_out".to_string(),
+            signal_type: DataType::Bit(data_width),
+            initial: None,
+            clock_domain: None,
+        },
+        Signal {
+            id: SignalId(6),
+            name: "empty".to_string(),
+            signal_type: DataType::Bit(1),
+            initial: Some(Value::Integer(1)),
+            clock_domain: None,
+        },
+        Signal {
+            id: SignalId(7),
+            name: "full".to_string(),
+            signal_type: DataType::Bit(1),
+            initial: Some(Value::Integer(0)),
+            clock_domain: None,
+        },
     ];
 
     // Simplified FIFO logic
@@ -402,14 +456,12 @@ fn create_fifo_mir(data_width: usize, depth: usize) -> Mir {
             edge: EdgeType::Rising,
         }]),
         body: Block {
-            statements: vec![
-                Statement::Assignment(Assignment {
-                    lhs: LValue::Signal(SignalId(5)), // data_out
-                    rhs: Expression::Ref(LValue::Signal(SignalId(4))), // data_in (simplified)
-                    kind: AssignmentKind::NonBlocking,
-                })
-            ]
-        }
+            statements: vec![Statement::Assignment(Assignment {
+                lhs: LValue::Signal(SignalId(5)),                  // data_out
+                rhs: Expression::Ref(LValue::Signal(SignalId(4))), // data_in (simplified)
+                kind: AssignmentKind::NonBlocking,
+            })],
+        },
     };
 
     let module = Module {
@@ -438,7 +490,10 @@ struct SimulationResult {
 }
 
 /// Run GPU simulation
-async fn run_gpu_simulation(mir: &Mir, cycles: u64) -> Result<SimulationResult, Box<dyn std::error::Error>> {
+async fn run_gpu_simulation(
+    mir: &Mir,
+    cycles: u64,
+) -> Result<SimulationResult, Box<dyn std::error::Error>> {
     let mut transformer = MirToSir::new();
     let sir = transformer.transform(mir);
 
@@ -459,7 +514,10 @@ async fn run_gpu_simulation(mir: &Mir, cycles: u64) -> Result<SimulationResult, 
 }
 
 /// Run CPU simulation (reference implementation)
-async fn run_cpu_simulation(mir: &Mir, cycles: u64) -> Result<SimulationResult, Box<dyn std::error::Error>> {
+async fn run_cpu_simulation(
+    mir: &Mir,
+    cycles: u64,
+) -> Result<SimulationResult, Box<dyn std::error::Error>> {
     // Simplified CPU simulation
     let start = Instant::now();
 
@@ -480,8 +538,10 @@ async fn run_cpu_simulation(mir: &Mir, cycles: u64) -> Result<SimulationResult, 
 
 /// Validate that GPU and CPU simulation results match
 fn validate_simulation_results(gpu_result: &SimulationResult, cpu_result: &SimulationResult) {
-    assert_eq!(gpu_result.cycles_simulated, cpu_result.cycles_simulated,
-               "GPU and CPU should simulate same number of cycles");
+    assert_eq!(
+        gpu_result.cycles_simulated, cpu_result.cycles_simulated,
+        "GPU and CPU should simulate same number of cycles"
+    );
 
     // In a full implementation, would compare final signal values
     // for signal_name in gpu_result.final_values.keys() {

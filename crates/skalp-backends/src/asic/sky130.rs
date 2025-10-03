@@ -2,15 +2,15 @@
 //!
 //! Implements synthesis for the open-source SkyWater 130nm process using OpenROAD flow.
 
-use crate::{
-    BackendResult, SynthesisResults, LogMessage, LogLevel, AreaMetrics, TimingResults, PowerResults,
-    OutputFile, OutputFileType, TimingSlack,
-};
 use crate::asic::AsicConfig;
+use crate::{
+    AreaMetrics, BackendResult, LogLevel, LogMessage, OutputFile, OutputFileType, PowerResults,
+    SynthesisResults, TimingResults, TimingSlack,
+};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
-use std::collections::HashMap;
 
 /// Synthesize design for SkyWater 130nm process
 pub async fn synthesize_sky130(
@@ -21,7 +21,8 @@ pub async fn synthesize_sky130(
     let mut log_messages = Vec::new();
 
     // Step 1: Run OpenROAD synthesis flow for Sky130
-    let synthesis_result = run_sky130_synthesis(verilog, temp_dir, config, &mut log_messages).await?;
+    let synthesis_result =
+        run_sky130_synthesis(verilog, temp_dir, config, &mut log_messages).await?;
 
     // Step 2: Run OpenROAD place and route
     let pnr_result = run_sky130_place_route(temp_dir, config, &mut log_messages).await?;
@@ -39,7 +40,10 @@ pub async fn synthesize_sky130(
 
     output_files.push(OutputFile {
         file_type: OutputFileType::Netlist,
-        path: temp_dir.join("design_mapped.v").to_string_lossy().to_string(),
+        path: temp_dir
+            .join("design_mapped.v")
+            .to_string_lossy()
+            .to_string(),
         description: "Sky130 technology-mapped netlist".to_string(),
     });
 
@@ -188,8 +192,10 @@ async fn run_sky130_place_route(
     tcl_script.push_str("link_design design\n");
     tcl_script.push_str("\n");
     tcl_script.push_str("# Initialize floorplan\n");
-    tcl_script.push_str(&format!("initialize_floorplan -utilization {} -aspect_ratio 1.0 -core_space 2.0\n",
-                                config.target_utilization));
+    tcl_script.push_str(&format!(
+        "initialize_floorplan -utilization {} -aspect_ratio 1.0 -core_space 2.0\n",
+        config.target_utilization
+    ));
     tcl_script.push_str("\n");
     tcl_script.push_str("# Placement\n");
     tcl_script.push_str("global_placement\n");
@@ -279,10 +285,7 @@ async fn run_sky130_layout_generation(
 }
 
 /// Analyze area utilization for Sky130
-async fn analyze_sky130_area(
-    synth_output: &str,
-    _pnr_output: &str,
-) -> BackendResult<AreaMetrics> {
+async fn analyze_sky130_area(synth_output: &str, _pnr_output: &str) -> BackendResult<AreaMetrics> {
     // Parse synthesis statistics for Sky130
     let mut cell_count = 0;
     let mut ff_count = 0;
@@ -466,7 +469,8 @@ mod tests {
     async fn test_sky130_synthesis() {
         let temp_dir = tempdir().unwrap();
         let config = AsicConfig::default();
-        let verilog = "module test(input clk, input [7:0] data_in, output [7:0] data_out); endmodule";
+        let verilog =
+            "module test(input clk, input [7:0] data_in, output [7:0] data_out); endmodule";
 
         let result = synthesize_sky130(verilog, temp_dir.path(), &config).await;
         assert!(result.is_ok());
@@ -481,7 +485,10 @@ mod tests {
 
     #[test]
     fn test_extract_number() {
-        assert_eq!(extract_number_from_line("Number of cells: 1580"), Some(1580));
+        assert_eq!(
+            extract_number_from_line("Number of cells: 1580"),
+            Some(1580)
+        );
         assert_eq!(extract_number_from_line("No numbers here"), None);
     }
 }

@@ -189,7 +189,10 @@ impl TimingAnalyzer {
     pub fn apply_constraints(&mut self, constraints: &[TimingConstraint]) -> BackendResult<()> {
         for constraint in constraints {
             match constraint {
-                TimingConstraint::ClockPeriod { clock_name, period_ns } => {
+                TimingConstraint::ClockPeriod {
+                    clock_name,
+                    period_ns,
+                } => {
                     let clock = ClockDefinition {
                         name: clock_name.clone(),
                         period_ns: *period_ns,
@@ -199,15 +202,27 @@ impl TimingAnalyzer {
                     };
                     self.add_clock(clock);
                 }
-                TimingConstraint::InputDelay { port_name, delay_ns, clock_name } => {
+                TimingConstraint::InputDelay {
+                    port_name,
+                    delay_ns,
+                    clock_name,
+                } => {
                     // Would create input delay constraint
-                    println!("Input delay constraint: {} = {} ns relative to {}",
-                            port_name, delay_ns, clock_name);
+                    println!(
+                        "Input delay constraint: {} = {} ns relative to {}",
+                        port_name, delay_ns, clock_name
+                    );
                 }
-                TimingConstraint::OutputDelay { port_name, delay_ns, clock_name } => {
+                TimingConstraint::OutputDelay {
+                    port_name,
+                    delay_ns,
+                    clock_name,
+                } => {
                     // Would create output delay constraint
-                    println!("Output delay constraint: {} = {} ns relative to {}",
-                            port_name, delay_ns, clock_name);
+                    println!(
+                        "Output delay constraint: {} = {} ns relative to {}",
+                        port_name, delay_ns, clock_name
+                    );
                 }
                 TimingConstraint::FalsePath { from, to } => {
                     // Would create false path constraint
@@ -251,7 +266,9 @@ impl TimingAnalyzer {
     /// Calculate maximum achievable frequency
     fn calculate_max_frequency(&self) -> f64 {
         // Find the most restrictive clock constraint
-        let min_period = self.clocks.values()
+        let min_period = self
+            .clocks
+            .values()
             .map(|clock| clock.period_ns)
             .min_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap_or(10.0); // Default 100 MHz
@@ -271,19 +288,38 @@ impl TimingAnalyzer {
         report.push_str("Clock Summary:\n");
         report.push_str("--------------\n");
         for clock in self.clocks.values() {
-            report.push_str(&format!("  {}: {:.3} ns ({:.1} MHz)\n",
-                                   clock.name, clock.period_ns, 1000.0 / clock.period_ns));
+            report.push_str(&format!(
+                "  {}: {:.3} ns ({:.1} MHz)\n",
+                clock.name,
+                clock.period_ns,
+                1000.0 / clock.period_ns
+            ));
         }
         report.push_str("\n");
 
         // Timing summary
         report.push_str("Timing Summary:\n");
         report.push_str("---------------\n");
-        report.push_str(&format!("  Maximum Frequency: {:.1} MHz\n", results.max_frequency_mhz));
-        report.push_str(&format!("  Critical Path Delay: {:.3} ns\n", results.critical_path_delay_ns));
-        report.push_str(&format!("  Worst Negative Slack: {:.3} ns\n", results.timing_slack.worst_negative_slack_ns));
-        report.push_str(&format!("  Setup Violations: {}\n", results.setup_violations.len()));
-        report.push_str(&format!("  Hold Violations: {}\n", results.hold_violations.len()));
+        report.push_str(&format!(
+            "  Maximum Frequency: {:.1} MHz\n",
+            results.max_frequency_mhz
+        ));
+        report.push_str(&format!(
+            "  Critical Path Delay: {:.3} ns\n",
+            results.critical_path_delay_ns
+        ));
+        report.push_str(&format!(
+            "  Worst Negative Slack: {:.3} ns\n",
+            results.timing_slack.worst_negative_slack_ns
+        ));
+        report.push_str(&format!(
+            "  Setup Violations: {}\n",
+            results.setup_violations.len()
+        ));
+        report.push_str(&format!(
+            "  Hold Violations: {}\n",
+            results.hold_violations.len()
+        ));
         report.push_str("\n");
 
         // Violations
@@ -291,8 +327,10 @@ impl TimingAnalyzer {
             report.push_str("Setup Violations:\n");
             report.push_str("-----------------\n");
             for violation in &results.setup_violations {
-                report.push_str(&format!("  {} -> {}: slack = {:.3} ns\n",
-                                       violation.from, violation.to, violation.slack_ns));
+                report.push_str(&format!(
+                    "  {} -> {}: slack = {:.3} ns\n",
+                    violation.from, violation.to, violation.slack_ns
+                ));
             }
             report.push_str("\n");
         }
@@ -301,8 +339,10 @@ impl TimingAnalyzer {
             report.push_str("Hold Violations:\n");
             report.push_str("----------------\n");
             for violation in &results.hold_violations {
-                report.push_str(&format!("  {} -> {}: slack = {:.3} ns\n",
-                                       violation.from, violation.to, violation.slack_ns));
+                report.push_str(&format!(
+                    "  {} -> {}: slack = {:.3} ns\n",
+                    violation.from, violation.to, violation.slack_ns
+                ));
             }
             report.push_str("\n");
         }

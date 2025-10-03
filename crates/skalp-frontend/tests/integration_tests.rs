@@ -2,8 +2,8 @@
 //!
 //! Tests the complete pipeline: lexer -> parser -> type checker -> HIR
 
-use skalp_frontend::parse::parse;
 use skalp_frontend::hir_builder::build_hir;
+use skalp_frontend::parse::parse;
 use skalp_frontend::typeck::TypeChecker;
 
 #[test]
@@ -307,7 +307,6 @@ fn test_flow_block_with_stages() {
         }
     "#;
 
-
     // Parse
     let tree = parse(source);
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
@@ -324,4 +323,3 @@ fn test_flow_block_with_stages() {
     // Should successfully parse flow blocks with complex stages
     assert!(hir_result.is_ok());
 }
-

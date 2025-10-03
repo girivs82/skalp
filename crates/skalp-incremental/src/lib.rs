@@ -7,15 +7,15 @@
 //! - Build cache management
 //! - Artifact versioning
 
+pub mod builder;
 pub mod cache;
 pub mod dependencies;
 pub mod fingerprint;
-pub mod builder;
 
-use thiserror::Error;
-use std::path::PathBuf;
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum IncrementalError {
@@ -113,7 +113,10 @@ impl IncrementalBuilder {
             }
         }
 
-        log::info!("Build plan: {} targets to rebuild", plan.targets_to_rebuild.len());
+        log::info!(
+            "Build plan: {} targets to rebuild",
+            plan.targets_to_rebuild.len()
+        );
         Ok(plan)
     }
 
@@ -131,8 +134,10 @@ impl IncrementalBuilder {
             log::info!("No changes detected - using cached results");
             results = self.load_cached_results(target)?;
         } else {
-            log::info!("Performing incremental rebuild of {} targets",
-                plan.targets_to_rebuild.len());
+            log::info!(
+                "Performing incremental rebuild of {} targets",
+                plan.targets_to_rebuild.len()
+            );
             results = self.incremental_rebuild(&plan).await?;
         }
 
@@ -181,7 +186,9 @@ impl IncrementalBuilder {
         let mut results = BuildResults::new(plan.main_target.clone());
 
         // Sort targets by dependency order
-        let build_order = self.dependencies.topological_sort(&plan.targets_to_rebuild)?;
+        let build_order = self
+            .dependencies
+            .topological_sort(&plan.targets_to_rebuild)?;
 
         // Build each target
         for target in build_order {
@@ -219,7 +226,7 @@ impl IncrementalBuilder {
                 size_bytes: 1024 * 1024, // 1MB
                 checksum: "abc123".to_string(),
                 created_at: Utc::now(),
-            }
+            },
         );
 
         Ok(results)

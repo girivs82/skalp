@@ -1,10 +1,10 @@
 //! Model checking algorithms and engines
 
-use crate::{FormalResult, FormalError, PropertyStatus, Counterexample, TraceStep};
-use crate::property::{Property, PropertyType};
 use crate::bmc::BoundedModelChecker;
-use crate::smt::SmtSolver;
 use crate::property::TemporalFormula;
+use crate::property::{Property, PropertyType};
+use crate::smt::SmtSolver;
+use crate::{Counterexample, FormalError, FormalResult, PropertyStatus, TraceStep};
 use skalp_lir::{LirDesign, LirModule};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -66,18 +66,10 @@ impl ModelChecker {
         let start = Instant::now();
 
         let result = match self.algorithm {
-            Algorithm::BoundedModelChecking => {
-                self.check_with_bmc(design, property).await
-            }
-            Algorithm::KInduction => {
-                self.check_with_k_induction(design, property).await
-            }
-            Algorithm::IC3 => {
-                self.check_with_ic3(design, property).await
-            }
-            Algorithm::Symbolic => {
-                self.check_with_symbolic(design, property).await
-            }
+            Algorithm::BoundedModelChecking => self.check_with_bmc(design, property).await,
+            Algorithm::KInduction => self.check_with_k_induction(design, property).await,
+            Algorithm::IC3 => self.check_with_ic3(design, property).await,
+            Algorithm::Symbolic => self.check_with_symbolic(design, property).await,
         };
 
         // Check timeout
@@ -102,7 +94,7 @@ impl ModelChecker {
                 for k in 1..=self.max_bound {
                     let formula_str = self.formula_to_string(&property.formula);
                     match bmc.check_safety_at_bound(design, &formula_str, k).await {
-                        Ok(true) => continue,  // Property holds at this bound
+                        Ok(true) => continue, // Property holds at this bound
                         Ok(false) => {
                             // Found counterexample
                             if let Some(trace) = bmc.extract_counterexample(k).await {
@@ -208,10 +200,12 @@ impl ModelChecker {
         // Symbolic model checking based on property type
         match property.property_type {
             PropertyType::Safety | PropertyType::Invariant => {
-                self.check_ctl_formula(&transition_system, &property.formula).await
+                self.check_ctl_formula(&transition_system, &property.formula)
+                    .await
             }
             PropertyType::Liveness => {
-                self.check_ltl_formula(&transition_system, &property.formula).await
+                self.check_ltl_formula(&transition_system, &property.formula)
+                    .await
             }
             _ => Ok(PropertyStatus::Unknown),
         }
@@ -273,10 +267,7 @@ impl ModelChecker {
     }
 
     /// Build transition system for symbolic model checking
-    async fn build_transition_system(
-        &self,
-        design: &LirDesign,
-    ) -> FormalResult<TransitionSystem> {
+    async fn build_transition_system(&self, design: &LirDesign) -> FormalResult<TransitionSystem> {
         Ok(TransitionSystem::new())
     }
 
@@ -286,8 +277,16 @@ impl ModelChecker {
             TemporalFormula::Atomic(s) => s.clone(),
             TemporalFormula::Always(f) => format!("G({})", self.formula_to_string(f)),
             TemporalFormula::Eventually(f) => format!("F({})", self.formula_to_string(f)),
-            TemporalFormula::And(l, r) => format!("({} & {})", self.formula_to_string(l), self.formula_to_string(r)),
-            TemporalFormula::Or(l, r) => format!("({} | {})", self.formula_to_string(l), self.formula_to_string(r)),
+            TemporalFormula::And(l, r) => format!(
+                "({} & {})",
+                self.formula_to_string(l),
+                self.formula_to_string(r)
+            ),
+            TemporalFormula::Or(l, r) => format!(
+                "({} | {})",
+                self.formula_to_string(l),
+                self.formula_to_string(r)
+            ),
             TemporalFormula::Not(f) => format!("!({})", self.formula_to_string(f)),
             _ => "true".to_string(),
         }

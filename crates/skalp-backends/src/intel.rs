@@ -1,11 +1,11 @@
 //! Intel Quartus Prime backend for SKALP
 
 use crate::{Backend, BackendError, BackendResult, SynthesisConfig, SynthesisResults};
-use skalp_lir::LirDesign;
 use async_trait::async_trait;
-use std::process::Command;
+use skalp_lir::LirDesign;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 
 /// Intel Quartus Prime backend
@@ -109,14 +109,19 @@ impl IntelBackend {
 
         // Device settings
         let (family, device) = self.get_device_info();
-        qsf.push_str(&format!("set_global_assignment -name FAMILY \"{}\"\n", family));
+        qsf.push_str(&format!(
+            "set_global_assignment -name FAMILY \"{}\"\n",
+            family
+        ));
         qsf.push_str(&format!("set_global_assignment -name DEVICE {}\n", device));
         qsf.push_str("set_global_assignment -name DEVICE_FILTER_PACKAGE FBGA\n");
         qsf.push_str("set_global_assignment -name DEVICE_FILTER_SPEED_GRADE FASTEST\n\n");
 
         // Project settings
-        qsf.push_str(&format!("set_global_assignment -name TOP_LEVEL_ENTITY {}\n",
-            lir.modules.first().map(|m| &m.name).unwrap_or(&lir.name)));
+        qsf.push_str(&format!(
+            "set_global_assignment -name TOP_LEVEL_ENTITY {}\n",
+            lir.modules.first().map(|m| &m.name).unwrap_or(&lir.name)
+        ));
         qsf.push_str("set_global_assignment -name ORIGINAL_QUARTUS_VERSION 21.3.0\n");
         qsf.push_str("set_global_assignment -name PROJECT_CREATION_TIME_DATE \"00:00:00  JANUARY 01, 2024\"\n");
         qsf.push_str("set_global_assignment -name LAST_QUARTUS_VERSION \"21.3.0 Pro Edition\"\n\n");
@@ -133,11 +138,17 @@ impl IntelBackend {
         // Optimization settings based on goal
         match self.optimization {
             OptimizationGoal::Speed => {
-                qsf.push_str("set_global_assignment -name OPTIMIZATION_MODE \"AGGRESSIVE PERFORMANCE\"\n");
+                qsf.push_str(
+                    "set_global_assignment -name OPTIMIZATION_MODE \"AGGRESSIVE PERFORMANCE\"\n",
+                );
                 qsf.push_str("set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED\n");
                 qsf.push_str("set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON\n");
-                qsf.push_str("set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON\n");
-                qsf.push_str("set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON\n");
+                qsf.push_str(
+                    "set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON\n",
+                );
+                qsf.push_str(
+                    "set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON\n",
+                );
             }
             OptimizationGoal::Area => {
                 qsf.push_str("set_global_assignment -name OPTIMIZATION_MODE \"AGGRESSIVE AREA\"\n");
@@ -146,14 +157,22 @@ impl IntelBackend {
                 qsf.push_str("set_global_assignment -name AUTO_RAM_RECOGNITION ON\n");
             }
             OptimizationGoal::Power => {
-                qsf.push_str("set_global_assignment -name OPTIMIZATION_MODE \"AGGRESSIVE POWER\"\n");
+                qsf.push_str(
+                    "set_global_assignment -name OPTIMIZATION_MODE \"AGGRESSIVE POWER\"\n",
+                );
                 qsf.push_str("set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS \"EXTRA EFFORT\"\n");
-                qsf.push_str("set_global_assignment -name OPTIMIZE_POWER_DURING_FITTING \"EXTRA EFFORT\"\n");
+                qsf.push_str(
+                    "set_global_assignment -name OPTIMIZE_POWER_DURING_FITTING \"EXTRA EFFORT\"\n",
+                );
             }
             OptimizationGoal::AggressivePerformance => {
-                qsf.push_str("set_global_assignment -name OPTIMIZATION_MODE \"AGGRESSIVE PERFORMANCE\"\n");
+                qsf.push_str(
+                    "set_global_assignment -name OPTIMIZATION_MODE \"AGGRESSIVE PERFORMANCE\"\n",
+                );
                 qsf.push_str("set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED\n");
-                qsf.push_str("set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM\n");
+                qsf.push_str(
+                    "set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM\n",
+                );
                 qsf.push_str("set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0\n");
                 qsf.push_str("set_global_assignment -name ROUTER_EFFORT_MULTIPLIER 4.0\n");
                 qsf.push_str("set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS\n");
@@ -197,10 +216,16 @@ impl IntelBackend {
         // Generate reports
         tcl.push_str("# Generate reports\n");
         tcl.push_str("load_report\n");
-        tcl.push_str("report_timing -setup -npaths 10 -detail full_path -panel_name \"Setup Summary\"\n");
-        tcl.push_str("report_timing -hold -npaths 10 -detail full_path -panel_name \"Hold Summary\"\n");
+        tcl.push_str(
+            "report_timing -setup -npaths 10 -detail full_path -panel_name \"Setup Summary\"\n",
+        );
+        tcl.push_str(
+            "report_timing -hold -npaths 10 -detail full_path -panel_name \"Hold Summary\"\n",
+        );
         tcl.push_str("report_timing -recovery -npaths 10 -detail full_path -panel_name \"Recovery Summary\"\n");
-        tcl.push_str("report_timing -removal -npaths 10 -detail full_path -panel_name \"Removal Summary\"\n");
+        tcl.push_str(
+            "report_timing -removal -npaths 10 -detail full_path -panel_name \"Removal Summary\"\n",
+        );
         tcl.push_str("unload_report\n\n");
 
         // Export reports
@@ -224,7 +249,11 @@ impl IntelBackend {
         }
     }
 
-    async fn run_quartus(&self, project_dir: &Path, tcl_file: &Path) -> Result<String, BackendError> {
+    async fn run_quartus(
+        &self,
+        project_dir: &Path,
+        tcl_file: &Path,
+    ) -> Result<String, BackendError> {
         // Run Quartus compilation
         let output = Command::new(&self.quartus_path)
             .arg("-t")
@@ -235,14 +264,18 @@ impl IntelBackend {
 
         if !output.status.success() {
             return Err(BackendError::ToolFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    fn parse_results(&self, project_dir: &Path, project_name: &str) -> Result<SynthesisResults, BackendError> {
+    fn parse_results(
+        &self,
+        project_dir: &Path,
+        project_name: &str,
+    ) -> Result<SynthesisResults, BackendError> {
         let mut results = SynthesisResults::default();
 
         // Parse fit report for utilization
@@ -251,22 +284,26 @@ impl IntelBackend {
             .join(format!("{}.fit.summary", project_name));
 
         if fit_report.exists() {
-            let content = fs::read_to_string(&fit_report)
-                .map_err(|e| BackendError::IoError(e))?;
+            let content = fs::read_to_string(&fit_report).map_err(|e| BackendError::IoError(e))?;
 
             // Extract resource usage
             if let Some(alm_line) = content.lines().find(|l| l.contains("Logic utilization")) {
                 if let Some(usage) = alm_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.area_metrics.luts_used = Some(num.replace(",", "").parse().unwrap_or(0));
+                        results.area_metrics.luts_used =
+                            Some(num.replace(",", "").parse().unwrap_or(0));
                     }
                 }
             }
 
-            if let Some(reg_line) = content.lines().find(|l| l.contains("Dedicated logic registers")) {
+            if let Some(reg_line) = content
+                .lines()
+                .find(|l| l.contains("Dedicated logic registers"))
+            {
                 if let Some(usage) = reg_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.area_metrics.flip_flops_used = num.replace(",", "").parse().unwrap_or(0);
+                        results.area_metrics.flip_flops_used =
+                            num.replace(",", "").parse().unwrap_or(0);
                     }
                 }
             }
@@ -274,7 +311,8 @@ impl IntelBackend {
             if let Some(bram_line) = content.lines().find(|l| l.contains("Memory blocks")) {
                 if let Some(usage) = bram_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.area_metrics.block_ram_used = Some(num.replace(",", "").parse().unwrap_or(0));
+                        results.area_metrics.block_ram_used =
+                            Some(num.replace(",", "").parse().unwrap_or(0));
                     }
                 }
             }
@@ -282,7 +320,8 @@ impl IntelBackend {
             if let Some(dsp_line) = content.lines().find(|l| l.contains("DSP blocks")) {
                 if let Some(usage) = dsp_line.split('/').next() {
                     if let Some(num) = usage.split_whitespace().last() {
-                        results.area_metrics.dsp_slices_used = Some(num.replace(",", "").parse().unwrap_or(0));
+                        results.area_metrics.dsp_slices_used =
+                            Some(num.replace(",", "").parse().unwrap_or(0));
                     }
                 }
             }
@@ -294,14 +333,15 @@ impl IntelBackend {
             .join(format!("{}.sta.summary", project_name));
 
         if sta_report.exists() {
-            let content = fs::read_to_string(&sta_report)
-                .map_err(|e| BackendError::IoError(e))?;
+            let content = fs::read_to_string(&sta_report).map_err(|e| BackendError::IoError(e))?;
 
             // Extract Fmax
             if let Some(fmax_line) = content.lines().find(|l| l.contains("Fmax")) {
-                if let Some(freq) = fmax_line.split_whitespace()
+                if let Some(freq) = fmax_line
+                    .split_whitespace()
                     .find(|s| s.contains("MHz"))
-                    .and_then(|s| s.replace("MHz", "").parse::<f64>().ok()) {
+                    .and_then(|s| s.replace("MHz", "").parse::<f64>().ok())
+                {
                     results.timing_results.max_frequency_mhz = freq;
                 }
             }
@@ -313,14 +353,19 @@ impl IntelBackend {
             .join(format!("{}.pow.summary", project_name));
 
         if power_report.exists() {
-            let content = fs::read_to_string(&power_report)
-                .map_err(|e| BackendError::IoError(e))?;
+            let content =
+                fs::read_to_string(&power_report).map_err(|e| BackendError::IoError(e))?;
 
             // Extract total power
-            if let Some(power_line) = content.lines().find(|l| l.contains("Total Thermal Power Dissipation")) {
-                if let Some(power) = power_line.split_whitespace()
+            if let Some(power_line) = content
+                .lines()
+                .find(|l| l.contains("Total Thermal Power Dissipation"))
+            {
+                if let Some(power) = power_line
+                    .split_whitespace()
                     .find(|s| s.contains("mW"))
-                    .and_then(|s| s.replace("mW", "").parse::<f64>().ok()) {
+                    .and_then(|s| s.replace("mW", "").parse::<f64>().ok())
+                {
                     results.power_results.total_power_mw = power;
                 }
             }
@@ -353,28 +398,24 @@ impl Backend for IntelBackend {
         _config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temp directory
-        let temp_dir = TempDir::new()
-            .map_err(|e| BackendError::IoError(e))?;
+        let temp_dir = TempDir::new().map_err(|e| BackendError::IoError(e))?;
         let work_dir = temp_dir.path();
 
         // Create project directory structure
         let project_name = &lir.name;
-        fs::create_dir_all(work_dir.join("output_files"))
-            .map_err(|e| BackendError::IoError(e))?;
+        fs::create_dir_all(work_dir.join("output_files")).map_err(|e| BackendError::IoError(e))?;
 
         // Generate Verilog files
         for module in &lir.modules {
             let verilog = crate::verilog::generate_verilog(module)?;
             let file_path = work_dir.join(&format!("{}.v", module.name));
-            fs::write(&file_path, verilog)
-                .map_err(|e| BackendError::IoError(e))?;
+            fs::write(&file_path, verilog).map_err(|e| BackendError::IoError(e))?;
         }
 
         // Generate QSF file
         let qsf_content = self.generate_qsf(lir, work_dir)?;
         let qsf_file = work_dir.join(&format!("{}.qsf", project_name));
-        fs::write(&qsf_file, qsf_content)
-            .map_err(|e| BackendError::IoError(e))?;
+        fs::write(&qsf_file, qsf_content).map_err(|e| BackendError::IoError(e))?;
 
         // Generate QPF file (project file)
         let qpf_content = format!(
@@ -383,14 +424,12 @@ impl Backend for IntelBackend {
             project_name
         );
         let qpf_file = work_dir.join(&format!("{}.qpf", project_name));
-        fs::write(&qpf_file, qpf_content)
-            .map_err(|e| BackendError::IoError(e))?;
+        fs::write(&qpf_file, qpf_content).map_err(|e| BackendError::IoError(e))?;
 
         // Generate TCL script
         let tcl_content = self.generate_tcl(project_name);
         let tcl_file = work_dir.join("compile.tcl");
-        fs::write(&tcl_file, tcl_content)
-            .map_err(|e| BackendError::IoError(e))?;
+        fs::write(&tcl_file, tcl_content).map_err(|e| BackendError::IoError(e))?;
 
         // Run Quartus
         let output = self.run_quartus(work_dir, &tcl_file).await?;
@@ -420,7 +459,7 @@ impl Backend for IntelBackend {
         // Check if Quartus is available
         if !self.quartus_path.exists() && self.quartus_path != PathBuf::from("quartus_sh") {
             return Err(BackendError::ToolNotFound(
-                "Quartus not found. Please install Intel Quartus Prime.".to_string()
+                "Quartus not found. Please install Intel Quartus Prime.".to_string(),
             ));
         }
 
@@ -507,19 +546,32 @@ impl SdcGenerator {
 
         for constraint in &self.constraints {
             match constraint {
-                SdcConstraint::CreateClock { name, period_ns, port } => {
+                SdcConstraint::CreateClock {
+                    name,
+                    period_ns,
+                    port,
+                } => {
                     sdc.push_str(&format!(
                         "create_clock -name {} -period {} [get_ports {{{}}}]\n",
                         name, period_ns, port
                     ));
                 }
-                SdcConstraint::CreateGeneratedClock { name, source, divide_by } => {
+                SdcConstraint::CreateGeneratedClock {
+                    name,
+                    source,
+                    divide_by,
+                } => {
                     sdc.push_str(&format!(
                         "create_generated_clock -name {} -source [get_pins {{{}}}] -divide_by {}\n",
                         name, source, divide_by
                     ));
                 }
-                SdcConstraint::SetInputDelay { clock, min, max, ports } => {
+                SdcConstraint::SetInputDelay {
+                    clock,
+                    min,
+                    max,
+                    ports,
+                } => {
                     for port in ports {
                         sdc.push_str(&format!(
                             "set_input_delay -clock {} -min {} [get_ports {{{}}}]\n",
@@ -531,7 +583,12 @@ impl SdcGenerator {
                         ));
                     }
                 }
-                SdcConstraint::SetOutputDelay { clock, min, max, ports } => {
+                SdcConstraint::SetOutputDelay {
+                    clock,
+                    min,
+                    max,
+                    ports,
+                } => {
                     for port in ports {
                         sdc.push_str(&format!(
                             "set_output_delay -clock {} -min {} [get_ports {{{}}}]\n",
@@ -553,7 +610,12 @@ impl SdcGenerator {
                     }
                     sdc.push_str(&format!("{}\n", cmd));
                 }
-                SdcConstraint::SetMulticyclePath { from, to, setup, hold } => {
+                SdcConstraint::SetMulticyclePath {
+                    from,
+                    to,
+                    setup,
+                    hold,
+                } => {
                     sdc.push_str(&format!(
                         "set_multicycle_path -from [get_clocks {{{}}}] -to [get_clocks {{{}}}] -setup {}\n",
                         from, to, setup

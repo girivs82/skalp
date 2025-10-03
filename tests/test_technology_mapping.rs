@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod technology_mapping_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
     use skalp_lir::{transform_mir_to_lir, TechnologyMapper, TechnologyTarget};
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn test_fpga_lut4_mapping() {
@@ -51,9 +51,18 @@ mod technology_mapping_tests {
             }
 
             // Verify reasonable resource usage (relaxed for current implementation)
-            println!("LUT usage: {}, expected: reasonable for 2 outputs", mapping_result.resource_usage.luts);
-            assert!(mapping_result.resource_usage.luts <= 10, "Should not use excessive LUTs");
-            assert!(mapping_result.efficiency >= 0.0, "Should have non-negative efficiency");
+            println!(
+                "LUT usage: {}, expected: reasonable for 2 outputs",
+                mapping_result.resource_usage.luts
+            );
+            assert!(
+                mapping_result.resource_usage.luts <= 10,
+                "Should not use excessive LUTs"
+            );
+            assert!(
+                mapping_result.efficiency >= 0.0,
+                "Should have non-negative efficiency"
+            );
 
             // Get optimization recommendations
             let recommendations = mapper.get_optimization_recommendations(&lir);
@@ -100,8 +109,14 @@ mod technology_mapping_tests {
             println!("Efficiency: {:.1}%", mapping_result.efficiency * 100.0);
 
             // LUT6 should be more efficient for wider logic
-            assert!(mapping_result.resource_usage.luts >= 1, "Should use at least 1 LUT");
-            assert!(mapping_result.efficiency > 0.0, "Should have positive efficiency");
+            assert!(
+                mapping_result.resource_usage.luts >= 1,
+                "Should use at least 1 LUT"
+            );
+            assert!(
+                mapping_result.efficiency > 0.0,
+                "Should have positive efficiency"
+            );
         }
     }
 
@@ -148,8 +163,14 @@ mod technology_mapping_tests {
             println!("Efficiency: {:.1}%", mapping_result.efficiency * 100.0);
 
             // Should have area cost for flip-flops and logic
-            assert!(mapping_result.resource_usage.area > 0.0, "Should have positive area");
-            assert!(mapping_result.efficiency > 0.0, "Should have positive efficiency");
+            assert!(
+                mapping_result.resource_usage.area > 0.0,
+                "Should have positive area"
+            );
+            assert!(
+                mapping_result.efficiency > 0.0,
+                "Should have positive efficiency"
+            );
 
             let recommendations = mapper.get_optimization_recommendations(&lir);
             println!("ASIC Optimization Recommendations:");
@@ -197,12 +218,14 @@ mod technology_mapping_tests {
                 let mut mapper = TechnologyMapper::new(target);
                 let result = mapper.map(&lir);
 
-                println!("  {:<18} | {:<4} | {:<4} | {:<5.1} | {:<8.1}%",
-                        name,
-                        result.resource_usage.luts,
-                        result.resource_usage.flip_flops,
-                        result.resource_usage.area,
-                        result.efficiency * 100.0);
+                println!(
+                    "  {:<18} | {:<4} | {:<4} | {:<5.1} | {:<8.1}%",
+                    name,
+                    result.resource_usage.luts,
+                    result.resource_usage.flip_flops,
+                    result.resource_usage.area,
+                    result.efficiency * 100.0
+                );
             }
 
             println!("✅ Technology comparison completed!");
@@ -264,8 +287,14 @@ mod technology_mapping_tests {
             println!("  Estimated Area: {:.2}", fpga_result.resource_usage.area);
 
             // Should handle complex designs reasonably
-            assert!(fpga_result.resource_usage.luts > 0, "Should use LUTs for logic");
-            assert!(fpga_result.resource_usage.flip_flops > 0, "Should use flip-flops for registers");
+            assert!(
+                fpga_result.resource_usage.luts > 0,
+                "Should use LUTs for logic"
+            );
+            assert!(
+                fpga_result.resource_usage.flip_flops > 0,
+                "Should use flip-flops for registers"
+            );
 
             // Test ASIC mapping
             let mut asic_mapper = TechnologyMapper::new(TechnologyTarget::AsicStandardCell);
@@ -275,7 +304,10 @@ mod technology_mapping_tests {
             println!("  Area: {:.2} units", asic_result.resource_usage.area);
             println!("  Flip-Flops: {}", asic_result.resource_usage.flip_flops);
 
-            assert!(asic_result.resource_usage.area > 0.0, "Should have area cost");
+            assert!(
+                asic_result.resource_usage.area > 0.0,
+                "Should have area cost"
+            );
 
             println!("✅ Complex design technology mapping completed!");
         }

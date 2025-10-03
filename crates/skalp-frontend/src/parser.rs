@@ -2,8 +2,8 @@
 //!
 //! Converts tokens into a lossless syntax tree
 
-use crate::lexer::{Lexer, TokenWithPos, Token};
 use crate::ast::SourceFile;
+use crate::lexer::{Lexer, Token, TokenWithPos};
 
 /// SKALP Parser using Rowan
 pub struct Parser {
@@ -19,18 +19,13 @@ impl Parser {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
 
-        Self {
-            tokens,
-            current: 0,
-        }
+        Self { tokens, current: 0 }
     }
 
     /// Parse the source into an AST
     pub fn parse(&mut self) -> Result<SourceFile, ParseError> {
         // Stub implementation - will be expanded in Week 2
-        Ok(SourceFile {
-            items: Vec::new(),
-        })
+        Ok(SourceFile { items: Vec::new() })
     }
 
     /// Get the current token
@@ -47,7 +42,9 @@ impl Parser {
     /// Check if current token matches expected token
     fn matches(&self, token: &Token) -> bool {
         match (self.current_token(), token) {
-            (Some(current), expected) => std::mem::discriminant(current) == std::mem::discriminant(expected),
+            (Some(current), expected) => {
+                std::mem::discriminant(current) == std::mem::discriminant(expected)
+            }
             _ => false,
         }
     }
@@ -60,7 +57,10 @@ impl Parser {
         } else {
             Err(ParseError::UnexpectedToken {
                 expected: format!("{:?}", expected),
-                found: self.current_token().map(|t| format!("{:?}", t)).unwrap_or_else(|| "EOF".to_string()),
+                found: self
+                    .current_token()
+                    .map(|t| format!("{:?}", t))
+                    .unwrap_or_else(|| "EOF".to_string()),
                 position: self.current,
             })
         }
@@ -82,24 +82,31 @@ pub enum ParseError {
         position: usize,
     },
     /// Unexpected end of file
-    UnexpectedEof {
-        expected: String,
-    },
+    UnexpectedEof { expected: String },
     /// Invalid syntax
-    InvalidSyntax {
-        message: String,
-        position: usize,
-    },
+    InvalidSyntax { message: String, position: usize },
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::UnexpectedToken { expected, found, position } => {
-                write!(f, "Parse error at position {}: expected {}, found {}", position, expected, found)
+            ParseError::UnexpectedToken {
+                expected,
+                found,
+                position,
+            } => {
+                write!(
+                    f,
+                    "Parse error at position {}: expected {}, found {}",
+                    position, expected, found
+                )
             }
             ParseError::UnexpectedEof { expected } => {
-                write!(f, "Parse error: unexpected end of file, expected {}", expected)
+                write!(
+                    f,
+                    "Parse error: unexpected end of file, expected {}",
+                    expected
+                )
             }
             ParseError::InvalidSyntax { message, position } => {
                 write!(f, "Parse error at position {}: {}", position, message)

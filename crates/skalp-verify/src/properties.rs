@@ -342,28 +342,15 @@ impl PropertyEvaluator {
         }
     }
 
-
     /// Evaluate a property expression
     fn evaluate_expr(&self, expr: &PropertyExpr) -> bool {
         match expr {
-            PropertyExpr::Atom(name) => {
-                *self.signals.get(name).unwrap_or(&false)
-            }
-            PropertyExpr::Not(e) => {
-                !self.evaluate_expr(e)
-            }
-            PropertyExpr::And(a, b) => {
-                self.evaluate_expr(a) && self.evaluate_expr(b)
-            }
-            PropertyExpr::Or(a, b) => {
-                self.evaluate_expr(a) || self.evaluate_expr(b)
-            }
-            PropertyExpr::Implies(a, b) => {
-                !self.evaluate_expr(a) || self.evaluate_expr(b)
-            }
-            PropertyExpr::Temporal(op, e) => {
-                self.evaluate_temporal(op, e)
-            }
+            PropertyExpr::Atom(name) => *self.signals.get(name).unwrap_or(&false),
+            PropertyExpr::Not(e) => !self.evaluate_expr(e),
+            PropertyExpr::And(a, b) => self.evaluate_expr(a) && self.evaluate_expr(b),
+            PropertyExpr::Or(a, b) => self.evaluate_expr(a) || self.evaluate_expr(b),
+            PropertyExpr::Implies(a, b) => !self.evaluate_expr(a) || self.evaluate_expr(b),
+            PropertyExpr::Temporal(op, e) => self.evaluate_temporal(op, e),
             _ => false, // Simplified
         }
     }
@@ -433,7 +420,10 @@ pub struct PropertyReport {
 
 impl fmt::Display for PropertyReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Properties: {} total, {} passed, {} failed, {} vacuous, {} in progress",
-               self.total, self.passed, self.failed, self.vacuous, self.in_progress)
+        write!(
+            f,
+            "Properties: {} total, {} passed, {} failed, {} vacuous, {} in progress",
+            self.total, self.passed, self.failed, self.vacuous, self.in_progress
+        )
     }
 }

@@ -1,9 +1,9 @@
 //! Placement algorithms for FPGA designs
 
-use std::collections::HashMap;
 use crate::device::{Device, LogicTile};
-use skalp_lir::{LirDesign, Gate};
 use rayon::prelude::*;
+use skalp_lir::{Gate, LirDesign};
+use std::collections::HashMap;
 
 /// Main placer struct with advanced algorithms
 pub struct Placer {
@@ -76,7 +76,10 @@ impl Placer {
 
     /// Run placement algorithm
     pub fn place(&mut self, design: &LirDesign) -> Result<PlacementResult, PlacementError> {
-        println!("🔧 Running placement with algorithm: {:?}", self.config.algorithm);
+        println!(
+            "🔧 Running placement with algorithm: {:?}",
+            self.config.algorithm
+        );
 
         // Extract gates from all modules
         let mut all_gates = Vec::new();
@@ -96,7 +99,9 @@ impl Placer {
 
         match self.config.algorithm {
             PlacementAlgorithm::Random => self.random_placement(&all_gates),
-            PlacementAlgorithm::SimulatedAnnealing => self.simulated_annealing_placement(&all_gates),
+            PlacementAlgorithm::SimulatedAnnealing => {
+                self.simulated_annealing_placement(&all_gates)
+            }
             PlacementAlgorithm::Analytical => self.analytical_placement(&all_gates),
             PlacementAlgorithm::ForceDirected => self.force_directed_placement(&all_gates),
         }
@@ -107,7 +112,9 @@ impl Placer {
         let mut available_tiles: Vec<_> = self.device.logic_tiles.iter().collect();
 
         if gates.len() > available_tiles.len() {
-            return Err(PlacementError::Failed("Not enough logic tiles for design".to_string()));
+            return Err(PlacementError::Failed(
+                "Not enough logic tiles for design".to_string(),
+            ));
         }
 
         // Simple random assignment
@@ -122,7 +129,10 @@ impl Placer {
     }
 
     /// Simulated annealing placement
-    fn simulated_annealing_placement(&mut self, gates: &[&Gate]) -> Result<PlacementResult, PlacementError> {
+    fn simulated_annealing_placement(
+        &mut self,
+        gates: &[&Gate],
+    ) -> Result<PlacementResult, PlacementError> {
         // Initial random placement
         self.random_placement(gates)?;
 
@@ -157,7 +167,10 @@ impl Placer {
             temperature *= self.config.cooling_rate;
 
             if iteration % 1000 == 0 {
-                println!("   Iteration {}: cost = {:.2}, temp = {:.2}", iteration, best_cost, temperature);
+                println!(
+                    "   Iteration {}: cost = {:.2}, temp = {:.2}",
+                    iteration, best_cost, temperature
+                );
             }
         }
 
@@ -190,7 +203,10 @@ impl Placer {
     }
 
     /// Force-directed placement
-    fn force_directed_placement(&mut self, gates: &[&Gate]) -> Result<PlacementResult, PlacementError> {
+    fn force_directed_placement(
+        &mut self,
+        gates: &[&Gate],
+    ) -> Result<PlacementResult, PlacementError> {
         println!("   Running force-directed placement");
 
         // Initial grid placement
@@ -210,7 +226,7 @@ impl Placer {
                         if let Some(&(ix, iy)) = self.placement.get(input) {
                             let dx = ix as f64 - x as f64;
                             let dy = iy as f64 - y as f64;
-                            let distance = (dx*dx + dy*dy).sqrt().max(1.0);
+                            let distance = (dx * dx + dy * dy).sqrt().max(1.0);
 
                             // Attractive force proportional to distance
                             total_force.0 += dx / distance * 0.1;
@@ -226,8 +242,14 @@ impl Placer {
             for gate in gates {
                 if let Some(&(fx, fy)) = forces.get(&gate.id) {
                     if let Some(&(x, y)) = self.placement.get(&gate.id) {
-                        let new_x = ((x as f64 + fx * 0.5).max(1.0).min((self.device.grid_size.0 - 2) as f64)) as usize;
-                        let new_y = ((y as f64 + fy * 0.5).max(1.0).min((self.device.grid_size.1 - 2) as f64)) as usize;
+                        let new_x = ((x as f64 + fx * 0.5)
+                            .max(1.0)
+                            .min((self.device.grid_size.0 - 2) as f64))
+                            as usize;
+                        let new_y = ((y as f64 + fy * 0.5)
+                            .max(1.0)
+                            .min((self.device.grid_size.1 - 2) as f64))
+                            as usize;
 
                         self.placement.insert(gate.id.clone(), (new_x, new_y));
                     }
@@ -249,9 +271,9 @@ impl Placer {
         let timing_cost = self.calculate_timing_cost(gates);
         let congestion_cost = self.calculate_congestion_cost();
 
-        self.config.wirelength_weight * wirelength +
-        self.config.timing_weight * timing_cost +
-        self.config.congestion_weight * congestion_cost
+        self.config.wirelength_weight * wirelength
+            + self.config.timing_weight * timing_cost
+            + self.config.congestion_weight * congestion_cost
     }
 
     /// Calculate total wirelength
@@ -290,14 +312,24 @@ impl Placer {
         }
 
         // Penalize overused tiles
-        tile_usage.values()
-            .map(|&usage| if usage > 1 { (usage - 1) * (usage - 1) } else { 0 })
-            .sum::<usize>() as f64 * 10.0
+        tile_usage
+            .values()
+            .map(|&usage| {
+                if usage > 1 {
+                    (usage - 1) * (usage - 1)
+                } else {
+                    0
+                }
+            })
+            .sum::<usize>() as f64
+            * 10.0
     }
 
     /// Select a random gate to move
     fn select_random_gate_to_move(&self, gates: &[&Gate]) -> Option<(String, (usize, usize))> {
-        if gates.is_empty() { return None; }
+        if gates.is_empty() {
+            return None;
+        }
 
         let index = (self.rng_seed as usize) % gates.len();
         let gate_id = &gates[index].id;
@@ -323,7 +355,9 @@ impl Placer {
 
     /// Accept or reject a move based on simulated annealing
     fn accept_move(&mut self, delta_cost: f64, temperature: f64) -> bool {
-        if temperature <= 0.0 { return false; }
+        if temperature <= 0.0 {
+            return false;
+        }
 
         let probability = (-delta_cost / temperature).exp();
 

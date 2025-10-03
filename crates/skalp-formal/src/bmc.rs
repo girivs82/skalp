@@ -1,8 +1,8 @@
 //! Bounded Model Checking implementation
 
-use crate::smt::{SmtSolver, SatResult};
 use crate::property::{Property, TemporalFormula};
-use crate::{FormalResult, FormalError, PropertyStatus, TraceStep};
+use crate::smt::{SatResult, SmtSolver};
+use crate::{FormalError, FormalResult, PropertyStatus, TraceStep};
 use skalp_lir::LirDesign;
 
 /// Bounded Model Checker
@@ -113,7 +113,10 @@ impl BoundedModelChecker {
         }
 
         // No counterexample found within bound
-        log::info!("BMC: No counterexample found up to depth {}", self.max_depth);
+        log::info!(
+            "BMC: No counterexample found up to depth {}",
+            self.max_depth
+        );
         Ok(PropertyStatus::Unknown) // Cannot prove property, only bounded check
     }
 
@@ -160,7 +163,11 @@ impl BoundedModelChecker {
             TemporalFormula::Bool(b) => b.to_string(),
             TemporalFormula::Not(f) => format!("(not {})", self.formula_to_smt(f)),
             TemporalFormula::And(l, r) => {
-                format!("(and {} {})", self.formula_to_smt(l), self.formula_to_smt(r))
+                format!(
+                    "(and {} {})",
+                    self.formula_to_smt(l),
+                    self.formula_to_smt(r)
+                )
             }
             TemporalFormula::Or(l, r) => {
                 format!("(or {} {})", self.formula_to_smt(l), self.formula_to_smt(r))
@@ -227,9 +234,8 @@ mod tests {
     fn test_property_negation() {
         let bmc = BoundedModelChecker::new(50);
 
-        let always_prop = TemporalFormula::Always(
-            Box::new(TemporalFormula::Atomic("x > 0".to_string()))
-        );
+        let always_prop =
+            TemporalFormula::Always(Box::new(TemporalFormula::Atomic("x > 0".to_string())));
 
         let negated = bmc.negate_property(&always_prop);
         assert!(negated.contains("eventually"));

@@ -1,8 +1,8 @@
 //! Tests for reset event support
 
-use skalp_mir::{HirToMir, SystemVerilogGenerator};
-use skalp_mir::mir::{ProcessKind, SensitivityList, EdgeType};
 use skalp_frontend::hir::*;
+use skalp_mir::mir::{EdgeType, ProcessKind, SensitivityList};
+use skalp_mir::{HirToMir, SystemVerilogGenerator};
 
 /// Create a counter HIR with reset event syntax
 fn create_counter_with_reset_event() -> Hir {
@@ -49,57 +49,47 @@ fn create_counter_with_reset_event() -> Hir {
     // Create implementation with reset event
     let implementation = HirImplementation {
         entity: EntityId(1),
-        signals: vec![
-            HirSignal {
-                id: SignalId(1),
-                name: "count_reg".to_string(),
-                signal_type: HirType::Bit(8),
-                clock_domain: None,
-                initial_value: None,
-            },
-        ],
+        signals: vec![HirSignal {
+            id: SignalId(1),
+            name: "count_reg".to_string(),
+            signal_type: HirType::Bit(8),
+            clock_domain: None,
+            initial_value: None,
+        }],
         variables: vec![],
         constants: vec![],
         event_blocks: vec![
             // Clock event block
             HirEventBlock {
                 id: BlockId(1),
-                triggers: vec![
-                    HirEventTrigger {
-                        signal: HirEventSignal::Signal(SignalId(101)), // clk
-                        edge: HirEdgeType::Rising,
-                    },
-                ],
-                statements: vec![
-                    HirStatement::Assignment(HirAssignment {
-                        id: AssignmentId(1),
-                        lhs: HirLValue::Signal(SignalId(1)),
-                        rhs: HirExpression::Binary(HirBinaryExpr {
-                            left: Box::new(HirExpression::Signal(SignalId(1))),
-                            op: HirBinaryOp::Add,
-                            right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
-                        }),
-                        assignment_type: HirAssignmentType::NonBlocking,
+                triggers: vec![HirEventTrigger {
+                    signal: HirEventSignal::Signal(SignalId(101)), // clk
+                    edge: HirEdgeType::Rising,
+                }],
+                statements: vec![HirStatement::Assignment(HirAssignment {
+                    id: AssignmentId(1),
+                    lhs: HirLValue::Signal(SignalId(1)),
+                    rhs: HirExpression::Binary(HirBinaryExpr {
+                        left: Box::new(HirExpression::Signal(SignalId(1))),
+                        op: HirBinaryOp::Add,
+                        right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
                     }),
-                ],
+                    assignment_type: HirAssignmentType::NonBlocking,
+                })],
             },
             // Reset event block (asynchronous reset)
             HirEventBlock {
                 id: BlockId(2),
-                triggers: vec![
-                    HirEventTrigger {
-                        signal: HirEventSignal::Signal(SignalId(102)), // reset
-                        edge: HirEdgeType::Active,
-                    },
-                ],
-                statements: vec![
-                    HirStatement::Assignment(HirAssignment {
-                        id: AssignmentId(2),
-                        lhs: HirLValue::Signal(SignalId(1)),
-                        rhs: HirExpression::Literal(HirLiteral::Integer(0)),
-                        assignment_type: HirAssignmentType::NonBlocking,
-                    }),
-                ],
+                triggers: vec![HirEventTrigger {
+                    signal: HirEventSignal::Signal(SignalId(102)), // reset
+                    edge: HirEdgeType::Active,
+                }],
+                statements: vec![HirStatement::Assignment(HirAssignment {
+                    id: AssignmentId(2),
+                    lhs: HirLValue::Signal(SignalId(1)),
+                    rhs: HirExpression::Literal(HirLiteral::Integer(0)),
+                    assignment_type: HirAssignmentType::NonBlocking,
+                })],
             },
         ],
         assignments: vec![
@@ -165,15 +155,13 @@ fn create_combined_clock_reset_event() -> Hir {
     // Implementation with combined clock and reset sensitivity
     let implementation = HirImplementation {
         entity: EntityId(1),
-        signals: vec![
-            HirSignal {
-                id: SignalId(1),
-                name: "count_reg".to_string(),
-                signal_type: HirType::Bit(8),
-                clock_domain: None,
-                initial_value: None,
-            },
-        ],
+        signals: vec![HirSignal {
+            id: SignalId(1),
+            name: "count_reg".to_string(),
+            signal_type: HirType::Bit(8),
+            clock_domain: None,
+            initial_value: None,
+        }],
         variables: vec![],
         constants: vec![],
         event_blocks: vec![
@@ -190,18 +178,16 @@ fn create_combined_clock_reset_event() -> Hir {
                         edge: HirEdgeType::Active,
                     },
                 ],
-                statements: vec![
-                    HirStatement::Assignment(HirAssignment {
-                        id: AssignmentId(1),
-                        lhs: HirLValue::Signal(SignalId(1)),
-                        rhs: HirExpression::Binary(HirBinaryExpr {
-                            left: Box::new(HirExpression::Signal(SignalId(1))),
-                            op: HirBinaryOp::Add,
-                            right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
-                        }),
-                        assignment_type: HirAssignmentType::NonBlocking,
+                statements: vec![HirStatement::Assignment(HirAssignment {
+                    id: AssignmentId(1),
+                    lhs: HirLValue::Signal(SignalId(1)),
+                    rhs: HirExpression::Binary(HirBinaryExpr {
+                        left: Box::new(HirExpression::Signal(SignalId(1))),
+                        op: HirBinaryOp::Add,
+                        right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
                     }),
-                ],
+                    assignment_type: HirAssignmentType::NonBlocking,
+                })],
             },
         ],
         assignments: vec![

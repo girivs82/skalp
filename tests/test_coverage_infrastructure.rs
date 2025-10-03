@@ -46,7 +46,7 @@ mod coverage_infrastructure_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Covergroups: {}", implementation.covergroups.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Basic covergroup parsing failed: {:?}", e);
                 // This may fail initially as we build up the HIR builder support
@@ -124,7 +124,7 @@ mod coverage_infrastructure_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Covergroups: {}", implementation.covergroups.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Functional coverage parsing failed: {:?}", e);
                 // Expected to work once full parser support is implemented
@@ -192,7 +192,7 @@ mod coverage_infrastructure_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Covergroups: {}", implementation.covergroups.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Complex bins parsing failed: {:?}", e);
                 // Expected to work once full parser support is implemented
@@ -265,7 +265,7 @@ mod coverage_infrastructure_tests {
                 let implementation = &hir.implementations[0];
                 println!("Event blocks: {}", implementation.event_blocks.len());
                 println!("Covergroups: {}", implementation.covergroups.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Coverage with assertions parsing failed: {:?}", e);
                 // Should work once we complete the implementation
@@ -315,7 +315,7 @@ mod coverage_infrastructure_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Covergroups: {}", implementation.covergroups.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Edge case coverage parsing failed: {:?}", e);
                 // Expected to work once full parser support is implemented

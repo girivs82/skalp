@@ -2,8 +2,8 @@
 //!
 //! Implements synthesis for the FreePDK45 open-source process.
 
-use crate::{BackendResult, SynthesisResults};
 use crate::asic::AsicConfig;
+use crate::{BackendResult, SynthesisResults};
 use std::path::Path;
 
 /// Synthesize design for FreePDK45 process
@@ -19,5 +19,6 @@ pub async fn synthesize_freepdk45(
         "45nm",
         temp_dir,
         config,
-    ).await
+    )
+    .await
 }

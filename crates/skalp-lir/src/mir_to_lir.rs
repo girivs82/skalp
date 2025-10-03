@@ -50,7 +50,8 @@ impl MirToLirTransform {
         // Create nets for all signals and map them by signal ID
         for (i, signal) in module.signals.iter().enumerate() {
             let net_name = self.create_net(&signal.name, 1); // Simplified: assume 1-bit
-            self.signal_map.insert(signal.name.clone(), net_name.clone());
+            self.signal_map
+                .insert(signal.name.clone(), net_name.clone());
             // Also map by signal ID for LValue resolution
             self.signal_map.insert(format!("signal_{}", i), net_name);
         }
@@ -160,8 +161,8 @@ impl MirToLirTransform {
             width,
             driver: None,
             loads: Vec::new(),
-            is_output: false,  // Default to false, will be set by specific methods
-            is_input: false,   // Default to false, will be set by specific methods
+            is_output: false, // Default to false, will be set by specific methods
+            is_input: false,  // Default to false, will be set by specific methods
         };
         self.lir.nets.push(net);
 
@@ -178,7 +179,7 @@ impl MirToLirTransform {
             width,
             driver: None,
             loads: Vec::new(),
-            is_output: true,   // Mark as output
+            is_output: true, // Mark as output
             is_input: false,
         };
         self.lir.nets.push(net);
@@ -197,7 +198,7 @@ impl MirToLirTransform {
             driver: None,
             loads: Vec::new(),
             is_output: false,
-            is_input: true,    // Mark as input
+            is_input: true, // Mark as input
         };
         self.lir.nets.push(net);
 
@@ -247,7 +248,11 @@ impl MirToLirTransform {
                 // For now, treat bit select like the base
                 self.get_lvalue_net(base)
             }
-            skalp_mir::mir::LValue::RangeSelect { base, high: _, low: _ } => {
+            skalp_mir::mir::LValue::RangeSelect {
+                base,
+                high: _,
+                low: _,
+            } => {
                 // For now, treat range select like the base
                 self.get_lvalue_net(base)
             }
@@ -316,9 +321,7 @@ impl MirToLirTransform {
                 output_net
             }
             // For other expression types, create a placeholder for now
-            _ => {
-                self.create_temp_net()
-            }
+            _ => self.create_temp_net(),
         }
     }
 

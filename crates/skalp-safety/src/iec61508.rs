@@ -218,7 +218,10 @@ impl Iec61508Checker {
         report.add_check("Probability of Failure on Demand".to_string(), pfd_ok);
 
         let pfh_ok = self.requirements.pfh <= Self::get_max_pfh(self.sil);
-        report.add_check("Probability of Dangerous Failure per Hour".to_string(), pfh_ok);
+        report.add_check(
+            "Probability of Dangerous Failure per Hour".to_string(),
+            pfh_ok,
+        );
 
         // Check hardware fault tolerance
         let hft_ok = self.requirements.hardware_fault_tolerance >= Self::get_min_hft(self.sil);
@@ -229,30 +232,62 @@ impl Iec61508Checker {
 
     fn check_software_lifecycle(&self, report: &mut Iec61508ComplianceReport) -> SafetyResult<()> {
         // Check planning phase
-        report.add_check("Software Safety Plan".to_string(), self.lifecycle.planning.software_safety_plan);
-        report.add_check("Software QA Plan".to_string(), self.lifecycle.planning.software_quality_assurance_plan);
+        report.add_check(
+            "Software Safety Plan".to_string(),
+            self.lifecycle.planning.software_safety_plan,
+        );
+        report.add_check(
+            "Software QA Plan".to_string(),
+            self.lifecycle.planning.software_quality_assurance_plan,
+        );
 
         // Check requirements phase
-        report.add_check("Safety Requirements Specification".to_string(),
-            self.lifecycle.requirements.safety_requirements_specification);
-        report.add_check("Requirements Traceability".to_string(),
-            self.lifecycle.requirements.traceability_to_system_requirements);
+        report.add_check(
+            "Safety Requirements Specification".to_string(),
+            self.lifecycle
+                .requirements
+                .safety_requirements_specification,
+        );
+        report.add_check(
+            "Requirements Traceability".to_string(),
+            self.lifecycle
+                .requirements
+                .traceability_to_system_requirements,
+        );
 
         // Check design phase
-        report.add_check("Architectural Design".to_string(), self.lifecycle.architecture.architectural_design);
-        report.add_check("Defensive Programming".to_string(), self.lifecycle.architecture.defensive_programming);
+        report.add_check(
+            "Architectural Design".to_string(),
+            self.lifecycle.architecture.architectural_design,
+        );
+        report.add_check(
+            "Defensive Programming".to_string(),
+            self.lifecycle.architecture.defensive_programming,
+        );
 
         // Check implementation phase
-        report.add_check("Coding Standards".to_string(), self.lifecycle.module_implementation.coding_standards);
-        report.add_check("Module Testing".to_string(), self.lifecycle.module_implementation.module_testing);
+        report.add_check(
+            "Coding Standards".to_string(),
+            self.lifecycle.module_implementation.coding_standards,
+        );
+        report.add_check(
+            "Module Testing".to_string(),
+            self.lifecycle.module_implementation.module_testing,
+        );
 
         // Check validation phase
-        report.add_check("Software Validation".to_string(), self.lifecycle.validation.validation_testing);
+        report.add_check(
+            "Software Validation".to_string(),
+            self.lifecycle.validation.validation_testing,
+        );
 
         Ok(())
     }
 
-    fn check_hardware_requirements(&self, report: &mut Iec61508ComplianceReport) -> SafetyResult<()> {
+    fn check_hardware_requirements(
+        &self,
+        report: &mut Iec61508ComplianceReport,
+    ) -> SafetyResult<()> {
         // Hardware-specific checks for different SIL levels
         match self.sil {
             SafetyIntegrityLevel::SIL4 => {
@@ -279,10 +314,12 @@ impl Iec61508Checker {
             SafetyIntegrityLevel::SIL4 => {
                 report.add_recommendation("Consider formal methods for verification".to_string());
                 report.add_recommendation("Implement diverse redundancy".to_string());
-                report.add_recommendation("Use proven-in-use components where possible".to_string());
+                report
+                    .add_recommendation("Use proven-in-use components where possible".to_string());
             }
             SafetyIntegrityLevel::SIL3 => {
-                report.add_recommendation("Implement comprehensive diagnostic coverage".to_string());
+                report
+                    .add_recommendation("Implement comprehensive diagnostic coverage".to_string());
                 report.add_recommendation("Use structured programming techniques".to_string());
             }
             SafetyIntegrityLevel::SIL2 => {
@@ -374,7 +411,7 @@ impl Default for SafetyMetrics {
         Self {
             safe_failure_fraction: 0.0,
             diagnostic_coverage: 0.0,
-            common_cause_factor: 0.1, // 10% typical
+            common_cause_factor: 0.1,    // 10% typical
             proof_test_interval: 8760.0, // 1 year in hours
         }
     }
@@ -451,8 +488,14 @@ mod tests {
 
     #[test]
     fn test_sil_requirements() {
-        assert_eq!(Iec61508Checker::get_required_sff(SafetyIntegrityLevel::SIL4), 0.90);
-        assert_eq!(Iec61508Checker::get_max_pfd(SafetyIntegrityLevel::SIL3), 1e-3);
+        assert_eq!(
+            Iec61508Checker::get_required_sff(SafetyIntegrityLevel::SIL4),
+            0.90
+        );
+        assert_eq!(
+            Iec61508Checker::get_max_pfd(SafetyIntegrityLevel::SIL3),
+            1e-3
+        );
         assert_eq!(Iec61508Checker::get_min_hft(SafetyIntegrityLevel::SIL3), 1);
     }
 

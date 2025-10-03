@@ -1,6 +1,6 @@
 //! Worker thread pool management
 
-use crate::{ParallelResult, scheduler::TaskScheduler};
+use crate::{scheduler::TaskScheduler, ParallelResult};
 
 pub struct WorkerPool {
     worker_count: usize,

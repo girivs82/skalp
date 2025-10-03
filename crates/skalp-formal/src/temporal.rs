@@ -46,8 +46,6 @@ pub struct TreeNode {
 
 impl ComputationTree {
     pub fn new() -> Self {
-        Self {
-            nodes: Vec::new(),
-        }
+        Self { nodes: Vec::new() }
     }
 }

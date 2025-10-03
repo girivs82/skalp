@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod phase10_backend_tests {
     use skalp_backends::{
-        BackendFactory, TargetPlatform, FpgaTarget, SynthesisConfig,
-        OptimizationGoals, OptimizationTarget, TimingConstraint,
+        BackendFactory, FpgaTarget, OptimizationGoals, OptimizationTarget, SynthesisConfig,
+        TargetPlatform, TimingConstraint,
     };
     use skalp_lir::{LirDesign, LirModule};
     use std::collections::HashMap;
@@ -26,7 +26,10 @@ mod phase10_backend_tests {
             }
         }
 
-        println!("   FPGA backends: {}, ASIC backends: {}", fpga_backends, asic_backends);
+        println!(
+            "   FPGA backends: {}, ASIC backends: {}",
+            fpga_backends, asic_backends
+        );
         assert!(!available_backends.is_empty());
         assert!(fpga_backends > 0);
         assert!(asic_backends > 0);
@@ -43,7 +46,10 @@ mod phase10_backend_tests {
 
         let backend = backend_result.as_ref().unwrap();
         println!("   Backend name: {}", backend.name());
-        println!("   Tool version: {}", backend.tool_version().unwrap_or("Unknown".to_string()));
+        println!(
+            "   Tool version: {}",
+            backend.tool_version().unwrap_or("Unknown".to_string())
+        );
 
         let supported_devices = backend.supported_devices();
         println!("   Supported devices: {:?}", supported_devices);
@@ -59,19 +65,20 @@ mod phase10_backend_tests {
                 target_frequency: Some(125.0),
                 max_power: Some(250.0),
             },
-            timing_constraints: vec![
-                TimingConstraint::ClockPeriod {
-                    clock_name: "clk".to_string(),
-                    period_ns: 8.0, // 125 MHz
-                },
-            ],
+            timing_constraints: vec![TimingConstraint::ClockPeriod {
+                clock_name: "clk".to_string(),
+                period_ns: 8.0, // 125 MHz
+            }],
             power_constraints: None,
             output_dir: "/tmp/skalp_synthesis".to_string(),
             tool_options: HashMap::new(),
         };
 
         let validation_result = backend.validate_config(&synthesis_config);
-        assert!(validation_result.is_ok(), "Synthesis config validation failed");
+        assert!(
+            validation_result.is_ok(),
+            "Synthesis config validation failed"
+        );
         println!("   Synthesis configuration validated successfully");
 
         // Test 4: LIR Design Validation
@@ -90,15 +97,57 @@ mod phase10_backend_tests {
         let design_validation_working = design_validation.is_ok();
         let comprehensive_backend_support = fpga_backends >= 3 && asic_backends >= 2;
 
-        println!("   ✅ Backend factory: {}", if backend_factory_working { "PASS" } else { "FAIL" });
-        println!("   ✅ iCE40 backend creation: {}", if ice40_backend_working { "PASS" } else { "FAIL" });
-        println!("   ✅ Configuration validation: {}", if config_validation_working { "PASS" } else { "FAIL" });
-        println!("   ✅ Design validation: {}", if design_validation_working { "PASS" } else { "FAIL" });
-        println!("   ✅ Comprehensive backend support: {}", if comprehensive_backend_support { "PASS" } else { "FAIL" });
+        println!(
+            "   ✅ Backend factory: {}",
+            if backend_factory_working {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
+        println!(
+            "   ✅ iCE40 backend creation: {}",
+            if ice40_backend_working {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
+        println!(
+            "   ✅ Configuration validation: {}",
+            if config_validation_working {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
+        println!(
+            "   ✅ Design validation: {}",
+            if design_validation_working {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
+        println!(
+            "   ✅ Comprehensive backend support: {}",
+            if comprehensive_backend_support {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
 
-        if backend_factory_working && ice40_backend_working && config_validation_working && design_validation_working {
+        if backend_factory_working
+            && ice40_backend_working
+            && config_validation_working
+            && design_validation_working
+        {
             println!("\n🎉 PHASE 10: ADVANCED BACKENDS - FOUNDATION COMPLETE!");
-            println!("   ✅ Backend factory operational with {} targets", available_backends.len());
+            println!(
+                "   ✅ Backend factory operational with {} targets",
+                available_backends.len()
+            );
             println!("   ✅ iCE40 FPGA backend functional");
             println!("   ✅ Configuration and design validation working");
             println!("   ✅ Ready for hardware synthesis testing");
@@ -109,7 +158,10 @@ mod phase10_backend_tests {
         // Test assertions
         assert!(backend_factory_working, "Backend factory should work");
         assert!(ice40_backend_working, "iCE40 backend should work");
-        assert!(config_validation_working, "Configuration validation should work");
+        assert!(
+            config_validation_working,
+            "Configuration validation should work"
+        );
         assert!(design_validation_working, "Design validation should work");
     }
 
@@ -134,12 +186,10 @@ mod phase10_backend_tests {
                 target_frequency: Some(100.0),
                 max_power: Some(300.0),
             },
-            timing_constraints: vec![
-                TimingConstraint::ClockPeriod {
-                    clock_name: "clk".to_string(),
-                    period_ns: 10.0, // 100 MHz
-                },
-            ],
+            timing_constraints: vec![TimingConstraint::ClockPeriod {
+                clock_name: "clk".to_string(),
+                period_ns: 10.0, // 100 MHz
+            }],
             power_constraints: None,
             output_dir: "/tmp/skalp_ice40_test".to_string(),
             tool_options: HashMap::new(),
@@ -153,9 +203,18 @@ mod phase10_backend_tests {
         match synthesis_result {
             Ok(results) => {
                 println!("   ✅ Synthesis completed successfully");
-                println!("   📊 Area utilization: {:.1}%", results.area_metrics.utilization_percent);
-                println!("   ⏱️  Max frequency: {:.1} MHz", results.timing_results.max_frequency_mhz);
-                println!("   ⚡ Total power: {:.1} mW", results.power_results.total_power_mw);
+                println!(
+                    "   📊 Area utilization: {:.1}%",
+                    results.area_metrics.utilization_percent
+                );
+                println!(
+                    "   ⏱️  Max frequency: {:.1} MHz",
+                    results.timing_results.max_frequency_mhz
+                );
+                println!(
+                    "   ⚡ Total power: {:.1} mW",
+                    results.power_results.total_power_mw
+                );
                 println!("   📁 Output files: {}", results.output_files.len());
 
                 // Validate synthesis results
@@ -179,56 +238,50 @@ mod phase10_backend_tests {
 
     // Helper function to create a test LIR design
     fn create_test_lir_design() -> LirDesign {
-        use skalp_lir::{LirSignal, Gate, Net, GateType};
+        use skalp_lir::{Gate, GateType, LirSignal, Net};
 
         LirDesign {
             name: "test_counter".to_string(),
-            modules: vec![
-                LirModule {
-                    name: "test_counter".to_string(),
-                    signals: vec![
-                        LirSignal {
-                            name: "clk".to_string(),
-                            signal_type: "logic".to_string(),
-                            is_input: true,
-                            is_output: false,
-                            is_register: false,
-                        },
-                        LirSignal {
-                            name: "reset".to_string(),
-                            signal_type: "logic".to_string(),
-                            is_input: true,
-                            is_output: false,
-                            is_register: false,
-                        },
-                        LirSignal {
-                            name: "count".to_string(),
-                            signal_type: "logic[31:0]".to_string(),
-                            is_input: false,
-                            is_output: true,
-                            is_register: false,
-                        },
-                    ],
-                    nets: vec![
-                        Net {
-                            id: "clk_net".to_string(),
-                            width: 1,
-                            driver: Some("clk".to_string()),
-                            loads: vec!["counter_reg".to_string()],
-                            is_output: false,
-                            is_input: true,
-                        },
-                    ],
-                    gates: vec![
-                        Gate {
-                            id: "counter_reg".to_string(),
-                            gate_type: GateType::DFF,
-                            inputs: vec!["clk_net".to_string()],
-                            outputs: vec!["count".to_string()],
-                        },
-                    ],
-                }
-            ],
+            modules: vec![LirModule {
+                name: "test_counter".to_string(),
+                signals: vec![
+                    LirSignal {
+                        name: "clk".to_string(),
+                        signal_type: "logic".to_string(),
+                        is_input: true,
+                        is_output: false,
+                        is_register: false,
+                    },
+                    LirSignal {
+                        name: "reset".to_string(),
+                        signal_type: "logic".to_string(),
+                        is_input: true,
+                        is_output: false,
+                        is_register: false,
+                    },
+                    LirSignal {
+                        name: "count".to_string(),
+                        signal_type: "logic[31:0]".to_string(),
+                        is_input: false,
+                        is_output: true,
+                        is_register: false,
+                    },
+                ],
+                nets: vec![Net {
+                    id: "clk_net".to_string(),
+                    width: 1,
+                    driver: Some("clk".to_string()),
+                    loads: vec!["counter_reg".to_string()],
+                    is_output: false,
+                    is_input: true,
+                }],
+                gates: vec![Gate {
+                    id: "counter_reg".to_string(),
+                    gate_type: GateType::DFF,
+                    inputs: vec!["clk_net".to_string()],
+                    outputs: vec!["count".to_string()],
+                }],
+            }],
         }
     }
 
@@ -263,28 +316,62 @@ mod phase10_backend_tests {
             },
         ];
 
-        println!("   📋 Testing {} timing constraint types", constraints.len());
+        println!(
+            "   📋 Testing {} timing constraint types",
+            constraints.len()
+        );
 
         for (i, constraint) in constraints.iter().enumerate() {
             match constraint {
-                TimingConstraint::ClockPeriod { clock_name, period_ns } => {
-                    println!("   {}. Clock '{}': {:.3} ns period ({:.1} MHz)",
-                           i + 1, clock_name, period_ns, 1000.0 / period_ns);
+                TimingConstraint::ClockPeriod {
+                    clock_name,
+                    period_ns,
+                } => {
+                    println!(
+                        "   {}. Clock '{}': {:.3} ns period ({:.1} MHz)",
+                        i + 1,
+                        clock_name,
+                        period_ns,
+                        1000.0 / period_ns
+                    );
                 }
-                TimingConstraint::InputDelay { port_name, delay_ns, clock_name } => {
-                    println!("   {}. Input delay '{}': {:.1} ns relative to '{}'",
-                           i + 1, port_name, delay_ns, clock_name);
+                TimingConstraint::InputDelay {
+                    port_name,
+                    delay_ns,
+                    clock_name,
+                } => {
+                    println!(
+                        "   {}. Input delay '{}': {:.1} ns relative to '{}'",
+                        i + 1,
+                        port_name,
+                        delay_ns,
+                        clock_name
+                    );
                 }
-                TimingConstraint::OutputDelay { port_name, delay_ns, clock_name } => {
-                    println!("   {}. Output delay '{}': {:.1} ns relative to '{}'",
-                           i + 1, port_name, delay_ns, clock_name);
+                TimingConstraint::OutputDelay {
+                    port_name,
+                    delay_ns,
+                    clock_name,
+                } => {
+                    println!(
+                        "   {}. Output delay '{}': {:.1} ns relative to '{}'",
+                        i + 1,
+                        port_name,
+                        delay_ns,
+                        clock_name
+                    );
                 }
                 TimingConstraint::FalsePath { from, to } => {
                     println!("   {}. False path: {} → {}", i + 1, from, to);
                 }
                 TimingConstraint::MulticyclePath { from, to, cycles } => {
-                    println!("   {}. Multicycle path: {} → {} ({} cycles)",
-                           i + 1, from, to, cycles);
+                    println!(
+                        "   {}. Multicycle path: {} → {} ({} cycles)",
+                        i + 1,
+                        from,
+                        to,
+                        cycles
+                    );
                 }
             }
         }
@@ -307,10 +394,22 @@ mod phase10_backend_tests {
             operating_temperature: 85.0,    // 85°C
         };
 
-        println!("   🔋 Max dynamic power: {} mW", power_constraints.max_dynamic_power.unwrap());
-        println!("   🔌 Max static power: {} mW", power_constraints.max_static_power.unwrap());
-        println!("   ⚡ Operating voltage: {} V", power_constraints.operating_voltage);
-        println!("   🌡️  Operating temperature: {} °C", power_constraints.operating_temperature);
+        println!(
+            "   🔋 Max dynamic power: {} mW",
+            power_constraints.max_dynamic_power.unwrap()
+        );
+        println!(
+            "   🔌 Max static power: {} mW",
+            power_constraints.max_static_power.unwrap()
+        );
+        println!(
+            "   ⚡ Operating voltage: {} V",
+            power_constraints.operating_voltage
+        );
+        println!(
+            "   🌡️  Operating temperature: {} °C",
+            power_constraints.operating_temperature
+        );
 
         // Validate power constraint ranges
         assert!(power_constraints.max_dynamic_power.unwrap() > 0.0);

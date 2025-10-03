@@ -1,5 +1,5 @@
-use crate::simulator::{Simulator, SimulationConfig, SimulationResult, SimulationError};
 use crate::clock_manager::ClockManager;
+use crate::simulator::{SimulationConfig, SimulationError, SimulationResult, Simulator};
 use skalp_sir::SirModule;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -45,7 +45,7 @@ impl Testbench {
             test_vectors: Vec::new(),
             results: Vec::new(),
             clock_manager: ClockManager::new(),
-            auto_clock: true,  // Enable auto-clocking by default
+            auto_clock: true, // Enable auto-clocking by default
         })
     }
 
@@ -58,7 +58,7 @@ impl Testbench {
         // Register clocks from the module
         for input in &module.inputs {
             if input.name.contains("clk") || input.name.contains("clock") {
-                self.clock_manager.add_clock(input.name.clone(), 10_000);  // 10ns period
+                self.clock_manager.add_clock(input.name.clone(), 10_000); // 10ns period
             }
         }
 
@@ -95,8 +95,13 @@ impl Testbench {
                     for (clock_name, _) in self.clock_manager.clocks.clone() {
                         let edge = self.clock_manager.toggle_clock(&clock_name);
                         if let Some(edge) = edge {
-                            let value = self.clock_manager.get_clock_value(&clock_name).unwrap_or(false);
-                            self.simulator.set_input(&clock_name, vec![value as u8]).await?;
+                            let value = self
+                                .clock_manager
+                                .get_clock_value(&clock_name)
+                                .unwrap_or(false);
+                            self.simulator
+                                .set_input(&clock_name, vec![value as u8])
+                                .await?;
                         }
                     }
                 }
@@ -172,7 +177,10 @@ impl Testbench {
         Ok(self.results.clone())
     }
 
-    pub async fn run_test_with_timeout(&mut self, timeout_duration: Duration) -> SimulationResult<Vec<TestResult>> {
+    pub async fn run_test_with_timeout(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> SimulationResult<Vec<TestResult>> {
         match timeout(timeout_duration, self.run_test()).await {
             Ok(result) => result,
             Err(_) => Err(SimulationError::Timeout),
@@ -207,9 +215,7 @@ impl Testbench {
                     for mismatch in &result.mismatches {
                         report.push_str(&format!(
                             "  Signal '{}' mismatch:\n    Expected: {:?}\n    Actual:   {:?}\n",
-                            mismatch.signal_name,
-                            mismatch.expected,
-                            mismatch.actual
+                            mismatch.signal_name, mismatch.expected, mismatch.actual
                         ));
                     }
                 }
@@ -250,7 +256,8 @@ impl TestVectorBuilder {
     }
 
     pub fn with_input_u32(mut self, name: &str, value: u32) -> Self {
-        self.inputs.insert(name.to_string(), value.to_le_bytes().to_vec());
+        self.inputs
+            .insert(name.to_string(), value.to_le_bytes().to_vec());
         self
     }
 

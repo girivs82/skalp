@@ -1,8 +1,8 @@
-use async_trait::async_trait;
-use metal::{Device, CommandQueue, ComputePipelineState, Buffer, MTLResourceOptions};
-use skalp_sir::{SirModule, generate_metal_shader};
-use crate::simulator::{SimulationRuntime, SimulationResult, SimulationState, SimulationError};
 use crate::clock_manager::ClockManager;
+use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, SimulationState};
+use async_trait::async_trait;
+use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
+use skalp_sir::{generate_metal_shader, SirModule};
 use std::collections::HashMap;
 
 pub struct GpuDevice {
@@ -51,16 +51,26 @@ impl GpuRuntime {
         })
     }
 
-    fn compile_shader(&mut self, shader_source: &str, function_name: &str) -> Result<ComputePipelineState, SimulationError> {
-        let library = self.device.device
+    fn compile_shader(
+        &mut self,
+        shader_source: &str,
+        function_name: &str,
+    ) -> Result<ComputePipelineState, SimulationError> {
+        let library = self
+            .device
+            .device
             .new_library_with_source(shader_source, &metal::CompileOptions::new())
-            .map_err(|e| SimulationError::GpuError(format!("Shader compilation failed: {:?}", e)))?;
+            .map_err(|e| {
+                SimulationError::GpuError(format!("Shader compilation failed: {:?}", e))
+            })?;
 
-        let function = library
-            .get_function(function_name, None)
-            .map_err(|e| SimulationError::GpuError(format!("Function '{}' not found: {}", function_name, e)))?;
+        let function = library.get_function(function_name, None).map_err(|e| {
+            SimulationError::GpuError(format!("Function '{}' not found: {}", function_name, e))
+        })?;
 
-        let pipeline = self.device.device
+        let pipeline = self
+            .device
+            .device
             .new_compute_pipeline_state_with_function(&function)
             .map_err(|e| SimulationError::GpuError(format!("Pipeline creation failed: {:?}", e)))?;
 
@@ -74,22 +84,25 @@ impl GpuRuntime {
         let signal_size = self.calculate_signal_size(module);
 
         // Allocate input buffer
-        self.input_buffer = Some(self.device.device.new_buffer(
-            input_size.max(16),
-            MTLResourceOptions::StorageModeShared,
-        ));
+        self.input_buffer = Some(
+            self.device
+                .device
+                .new_buffer(input_size.max(16), MTLResourceOptions::StorageModeShared),
+        );
 
         // Allocate register buffer (for flip-flop states)
-        self.register_buffer = Some(self.device.device.new_buffer(
-            register_size.max(16),
-            MTLResourceOptions::StorageModeShared,
-        ));
+        self.register_buffer = Some(
+            self.device
+                .device
+                .new_buffer(register_size.max(16), MTLResourceOptions::StorageModeShared),
+        );
 
         // Allocate signal buffer (for all computed values)
-        self.signal_buffer = Some(self.device.device.new_buffer(
-            signal_size.max(1024),
-            MTLResourceOptions::StorageModeShared,
-        ));
+        self.signal_buffer = Some(
+            self.device
+                .device
+                .new_buffer(signal_size.max(1024), MTLResourceOptions::StorageModeShared),
+        );
 
         // Initialize registers to zero
         if let Some(reg_buffer) = &self.register_buffer {
@@ -138,9 +151,9 @@ impl GpuRuntime {
 
     fn get_metal_type_size(&self, width: usize) -> usize {
         match width {
-            1..=32 => 4,    // uint (32-bit)
-            33..=64 => 8,   // uint2 (64-bit)
-            _ => 16,        // uint4 (128-bit)
+            1..=32 => 4,  // uint (32-bit)
+            33..=64 => 8, // uint2 (64-bit)
+            _ => 16,      // uint4 (128-bit)
         }
     }
 
@@ -148,7 +161,11 @@ impl GpuRuntime {
         // Get the number of combinational cones from the module
         let cone_count = if let Some(module) = &self.module {
             let cones = module.extract_combinational_cones();
-            if cones.is_empty() { 1 } else { cones.len() }  // Execute empty kernel if no cones
+            if cones.is_empty() {
+                1
+            } else {
+                cones.len()
+            } // Execute empty kernel if no cones
         } else {
             0
         };
@@ -175,8 +192,16 @@ impl GpuRuntime {
                     encoder.set_buffer(2, Some(signal_buffer), 0);
                 }
 
-                let thread_groups = metal::MTLSize { width: 1, height: 1, depth: 1 };
-                let threads_per_group = metal::MTLSize { width: 64, height: 1, depth: 1 };
+                let thread_groups = metal::MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                };
+                let threads_per_group = metal::MTLSize {
+                    width: 64,
+                    height: 1,
+                    depth: 1,
+                };
 
                 encoder.dispatch_thread_groups(thread_groups, threads_per_group);
                 encoder.end_encoding();
@@ -199,8 +224,12 @@ impl GpuRuntime {
                     if let Some(input_buffer) = &self.input_buffer {
                         let ptr = input_buffer.contents() as *const u32;
                         let current_value = unsafe { *ptr } != 0;
-                        let prev_value = self.clock_manager.clocks.get(&input.name)
-                            .map(|c| c.previous_value).unwrap_or(false);
+                        let prev_value = self
+                            .clock_manager
+                            .clocks
+                            .get(&input.name)
+                            .map(|c| c.previous_value)
+                            .unwrap_or(false);
 
                         if current_value && !prev_value {
                             // Rising edge detected
@@ -234,8 +263,16 @@ impl GpuRuntime {
                 encoder.set_buffer(2, Some(signal_buffer), 0);
             }
 
-            let thread_groups = metal::MTLSize { width: 1, height: 1, depth: 1 };
-            let threads_per_group = metal::MTLSize { width: 64, height: 1, depth: 1 };
+            let thread_groups = metal::MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            };
+            let threads_per_group = metal::MTLSize {
+                width: 64,
+                height: 1,
+                depth: 1,
+            };
 
             encoder.dispatch_thread_groups(thread_groups, threads_per_group);
             encoder.end_encoding();
@@ -267,7 +304,7 @@ impl GpuRuntime {
                         std::ptr::copy_nonoverlapping(
                             signal_ptr.add(offset),
                             value.as_mut_ptr(),
-                            bytes_needed.min(metal_size)
+                            bytes_needed.min(metal_size),
                         );
                     }
                     signals.insert(output.name.clone(), value);
@@ -284,7 +321,7 @@ impl GpuRuntime {
                             std::ptr::copy_nonoverlapping(
                                 signal_ptr.add(offset),
                                 value.as_mut_ptr(),
-                                bytes_needed.min(metal_size)
+                                bytes_needed.min(metal_size),
                             );
                         }
                         signals.insert(signal.name.clone(), value);
@@ -306,7 +343,7 @@ impl GpuRuntime {
                         std::ptr::copy_nonoverlapping(
                             register_ptr.add(offset),
                             value.as_mut_ptr(),
-                            bytes_needed.min(metal_size)
+                            bytes_needed.min(metal_size),
                         );
                     }
                     registers.insert(name.clone(), value);
@@ -352,12 +389,14 @@ impl SimulationRuntime for GpuRuntime {
         if cones.is_empty() {
             // If no cones, compile the empty kernel
             let pipeline = self.compile_shader(&shader_source, "combinational_cone_0")?;
-            self.pipelines.insert("combinational_0".to_string(), pipeline);
+            self.pipelines
+                .insert("combinational_0".to_string(), pipeline);
         } else {
             for (i, _cone) in cones.iter().enumerate() {
                 let function_name = format!("combinational_cone_{}", i);
                 let pipeline = self.compile_shader(&shader_source, &function_name)?;
-                self.pipelines.insert(format!("combinational_{}", i), pipeline);
+                self.pipelines
+                    .insert(format!("combinational_{}", i), pipeline);
             }
         }
 
@@ -459,9 +498,12 @@ impl SimulationRuntime for GpuRuntime {
                     let bytes_needed = ((input.width + 7) / 8) as usize;
                     if input.name == name {
                         if value.len() != bytes_needed {
-                            return Err(SimulationError::GpuError(
-                                format!("Input {} expects {} bytes, got {}", name, bytes_needed, value.len())
-                            ));
+                            return Err(SimulationError::GpuError(format!(
+                                "Input {} expects {} bytes, got {}",
+                                name,
+                                bytes_needed,
+                                value.len()
+                            )));
                         }
                         unsafe {
                             // Clear the Metal-sized buffer first
@@ -470,7 +512,7 @@ impl SimulationRuntime for GpuRuntime {
                             std::ptr::copy_nonoverlapping(
                                 value.as_ptr(),
                                 input_ptr.add(offset),
-                                bytes_needed.min(metal_size)
+                                bytes_needed.min(metal_size),
                             );
                         }
                         return Ok(());
@@ -479,7 +521,10 @@ impl SimulationRuntime for GpuRuntime {
                 }
             }
         }
-        Err(SimulationError::GpuError(format!("Input {} not found", name)))
+        Err(SimulationError::GpuError(format!(
+            "Input {} not found",
+            name
+        )))
     }
 
     async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
@@ -498,7 +543,7 @@ impl SimulationRuntime for GpuRuntime {
                             std::ptr::copy_nonoverlapping(
                                 signal_ptr.add(offset),
                                 value.as_mut_ptr(),
-                                bytes_needed.min(metal_size)
+                                bytes_needed.min(metal_size),
                             );
                         }
                         return Ok(value);
@@ -507,6 +552,9 @@ impl SimulationRuntime for GpuRuntime {
                 }
             }
         }
-        Err(SimulationError::GpuError(format!("Output {} not found", name)))
+        Err(SimulationError::GpuError(format!(
+            "Output {} not found",
+            name
+        )))
     }
 }

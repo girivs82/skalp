@@ -3,10 +3,13 @@
 //! This module generates proper SystemVerilog code from MIR,
 //! preserving sequential logic, event blocks, and assignments.
 
-use skalp_mir::{Mir, Module, Process, ProcessKind, Statement, Assignment, AssignmentKind, EdgeType, DataType, StructType, EnumType};
-use skalp_mir::mir::PriorityMux;
-use skalp_lir::LirDesign;
 use anyhow::Result;
+use skalp_lir::LirDesign;
+use skalp_mir::mir::PriorityMux;
+use skalp_mir::{
+    Assignment, AssignmentKind, DataType, EdgeType, EnumType, Mir, Module, Process, ProcessKind,
+    Statement, StructType,
+};
 use std::collections::HashSet;
 
 /// Generate SystemVerilog from MIR and LIR
@@ -50,7 +53,7 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
                     } else {
                         format!("    parameter {} = 8", param.name) // Default to 8 if no default given
                     }
-                },
+                }
                 skalp_mir::GenericParameterType::Const(_) => {
                     // Const parameters become localparam
                     if let Some(default) = &param.default {
@@ -58,7 +61,7 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
                     } else {
                         format!("    parameter {}", param.name)
                     }
-                },
+                }
                 skalp_mir::GenericParameterType::Width => {
                     // Width parameters are regular parameters
                     if let Some(default) = &param.default {
@@ -66,7 +69,7 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
                     } else {
                         format!("    parameter {} = 32", param.name)
                     }
-                },
+                }
                 skalp_mir::GenericParameterType::ClockDomain => {
                     // Clock domain parameters are not emitted as Verilog parameters
                     continue;
@@ -128,9 +131,11 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
 
     // Generate continuous assignments
     for assign in &mir_module.assignments {
-        sv.push_str(&format!("    assign {} = {};\n",
+        sv.push_str(&format!(
+            "    assign {} = {};\n",
             format_lvalue_with_context(&assign.lhs, mir_module),
-            format_expression_with_context(&assign.rhs, mir_module)));
+            format_expression_with_context(&assign.rhs, mir_module)
+        ));
     }
 
     if !mir_module.assignments.is_empty() {
@@ -188,14 +193,20 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
                 AssignmentKind::NonBlocking => "<=",
                 AssignmentKind::Blocking => "=",
             };
-            sv.push_str(&format!("{}{} {} {};\n",
+            sv.push_str(&format!(
+                "{}{} {} {};\n",
                 indent,
                 format_lvalue_with_context(&assign.lhs, module),
                 op,
-                format_expression_with_context(&assign.rhs, module)));
+                format_expression_with_context(&assign.rhs, module)
+            ));
         }
         Statement::If(if_stmt) => {
-            sv.push_str(&format!("{}if ({}) begin\n", indent, format_expression_with_context(&if_stmt.condition, module)));
+            sv.push_str(&format!(
+                "{}if ({}) begin\n",
+                indent,
+                format_expression_with_context(&if_stmt.condition, module)
+            ));
             for s in &if_stmt.then_block.statements {
                 sv.push_str(&generate_statement(s, module, indent_level + 1)?);
             }
@@ -211,13 +222,17 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
             sv.push_str("\n");
         }
         Statement::Case(case_stmt) => {
-            sv.push_str(&format!("{}case ({})\n",
+            sv.push_str(&format!(
+                "{}case ({})\n",
                 indent,
-                format_expression_with_context(&case_stmt.expr, module)));
+                format_expression_with_context(&case_stmt.expr, module)
+            ));
 
             // Generate case items
             for item in &case_stmt.items {
-                let values = item.values.iter()
+                let values = item
+                    .values
+                    .iter()
                     .map(|v| format_expression_with_context(v, module))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -260,11 +275,13 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
 
             // Build nested ternary expression from priority mux
             let ternary_expr = build_ternary_expression(&resolved.resolved, module);
-            sv.push_str(&format!("{}{} {} {};\n",
+            sv.push_str(&format!(
+                "{}{} {} {};\n",
                 indent,
                 format_lvalue_with_context(&resolved.target, module),
                 op,
-                ternary_expr));
+                ternary_expr
+            ));
         }
     }
 
@@ -277,10 +294,12 @@ fn build_ternary_expression(mux: &PriorityMux, module: &Module) -> String {
 
     // Build ternary chain from right to left (lowest to highest priority)
     for case in mux.cases.iter().rev() {
-        result = format!("({}) ? ({}) : ({})",
+        result = format!(
+            "({}) ? ({}) : ({})",
             format_expression_with_context(&case.condition, module),
             format_expression_with_context(&case.value, module),
-            result);
+            result
+        );
     }
 
     result
@@ -290,31 +309,33 @@ fn build_ternary_expression(mux: &PriorityMux, module: &Module) -> String {
 fn format_sensitivity(sensitivity: &skalp_mir::SensitivityList, module: &Module) -> String {
     match sensitivity {
         skalp_mir::SensitivityList::Always => "*".to_string(),
-        skalp_mir::SensitivityList::Level(signals) => {
-            signals.iter()
-                .map(|s| format_lvalue_with_context(s, module))
-                .collect::<Vec<_>>()
-                .join(" or ")
-        }
-        skalp_mir::SensitivityList::Edge(edges) => {
-            edges.iter()
-                .map(|e| {
-                    let edge_str = match e.edge {
-                        EdgeType::Rising => "posedge",
-                        EdgeType::Falling => "negedge",
-                        EdgeType::Both => "",
-                        EdgeType::Active => "",
-                        EdgeType::Inactive => "",
-                    };
-                    if edge_str.is_empty() {
+        skalp_mir::SensitivityList::Level(signals) => signals
+            .iter()
+            .map(|s| format_lvalue_with_context(s, module))
+            .collect::<Vec<_>>()
+            .join(" or "),
+        skalp_mir::SensitivityList::Edge(edges) => edges
+            .iter()
+            .map(|e| {
+                let edge_str = match e.edge {
+                    EdgeType::Rising => "posedge",
+                    EdgeType::Falling => "negedge",
+                    EdgeType::Both => "",
+                    EdgeType::Active => "",
+                    EdgeType::Inactive => "",
+                };
+                if edge_str.is_empty() {
+                    format_lvalue_with_context(&e.signal, module)
+                } else {
+                    format!(
+                        "{} {}",
+                        edge_str,
                         format_lvalue_with_context(&e.signal, module)
-                    } else {
-                        format!("{} {}", edge_str, format_lvalue_with_context(&e.signal, module))
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" or ")
-        }
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" or "),
     }
 }
 
@@ -323,35 +344,52 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
     match lvalue {
         skalp_mir::LValue::Signal(id) => {
             // Find the signal name by ID
-            module.signals.iter()
+            module
+                .signals
+                .iter()
                 .find(|s| s.id == *id)
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| format!("signal_{}", id.0))
         }
         skalp_mir::LValue::Variable(id) => {
             // Find the variable name by ID
-            module.variables.iter()
+            module
+                .variables
+                .iter()
                 .find(|v| v.id == *id)
                 .map(|v| v.name.clone())
                 .unwrap_or_else(|| format!("var_{}", id.0))
         }
         skalp_mir::LValue::Port(id) => {
             // Find the port name by ID
-            for port in &module.ports {
-            }
-            module.ports.iter()
+            for port in &module.ports {}
+            module
+                .ports
+                .iter()
                 .find(|p| p.id == *id)
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| format!("port_{}", id.0))
         }
         skalp_mir::LValue::BitSelect { base, index } => {
-            format!("{}[{}]", format_lvalue_with_context(base, module), format_expression_with_context(index, module))
+            format!(
+                "{}[{}]",
+                format_lvalue_with_context(base, module),
+                format_expression_with_context(index, module)
+            )
         }
         skalp_mir::LValue::RangeSelect { base, high, low } => {
-            format!("{}[{}:{}]", format_lvalue_with_context(base, module), format_expression_with_context(high, module), format_expression_with_context(low, module))
+            format!(
+                "{}[{}:{}]",
+                format_lvalue_with_context(base, module),
+                format_expression_with_context(high, module),
+                format_expression_with_context(low, module)
+            )
         }
         skalp_mir::LValue::Concat(lvalues) => {
-            let parts: Vec<_> = lvalues.iter().map(|lv| format_lvalue_with_context(lv, module)).collect();
+            let parts: Vec<_> = lvalues
+                .iter()
+                .map(|lv| format_lvalue_with_context(lv, module))
+                .collect();
             format!("{{{}}}", parts.join(", "))
         }
     }
@@ -367,7 +405,12 @@ fn format_lvalue(lvalue: &skalp_mir::LValue) -> String {
             format!("{}[{}]", format_lvalue(base), format_expression(index))
         }
         skalp_mir::LValue::RangeSelect { base, high, low } => {
-            format!("{}[{}:{}]", format_lvalue(base), format_expression(high), format_expression(low))
+            format!(
+                "{}[{}:{}]",
+                format_lvalue(base),
+                format_expression(high),
+                format_expression(low)
+            )
         }
         skalp_mir::LValue::Concat(lvalues) => {
             let parts: Vec<_> = lvalues.iter().map(|lv| format_lvalue(lv)).collect();
@@ -382,31 +425,51 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
         skalp_mir::Expression::Literal(val) => format_value(val),
         skalp_mir::Expression::Ref(lval) => format_lvalue_with_context(lval, module),
         skalp_mir::Expression::Binary { op, left, right } => {
-            format!("({} {} {})",
+            format!(
+                "({} {} {})",
                 format_expression_with_context(left, module),
                 format_binary_op(op),
-                format_expression_with_context(right, module))
+                format_expression_with_context(right, module)
+            )
         }
         skalp_mir::Expression::Unary { op, operand } => {
-            format!("{}{}",
+            format!(
+                "{}{}",
                 format_unary_op(op),
-                format_expression_with_context(operand, module))
+                format_expression_with_context(operand, module)
+            )
         }
-        skalp_mir::Expression::Conditional { cond, then_expr, else_expr } => {
-            format!("({} ? {} : {})",
+        skalp_mir::Expression::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            format!(
+                "({} ? {} : {})",
                 format_expression_with_context(cond, module),
                 format_expression_with_context(then_expr, module),
-                format_expression_with_context(else_expr, module))
+                format_expression_with_context(else_expr, module)
+            )
         }
         skalp_mir::Expression::Concat(exprs) => {
-            let parts: Vec<_> = exprs.iter().map(|e| format_expression_with_context(e, module)).collect();
+            let parts: Vec<_> = exprs
+                .iter()
+                .map(|e| format_expression_with_context(e, module))
+                .collect();
             format!("{{{}}}", parts.join(", "))
         }
         skalp_mir::Expression::Replicate { count, value } => {
-            format!("{{{}{{{}}}}}", format_expression_with_context(count, module), format_expression_with_context(value, module))
+            format!(
+                "{{{}{{{}}}}}",
+                format_expression_with_context(count, module),
+                format_expression_with_context(value, module)
+            )
         }
         skalp_mir::Expression::FunctionCall { name, args } => {
-            let arg_strs: Vec<_> = args.iter().map(|a| format_expression_with_context(a, module)).collect();
+            let arg_strs: Vec<_> = args
+                .iter()
+                .map(|a| format_expression_with_context(a, module))
+                .collect();
             format!("{}({})", name, arg_strs.join(", "))
         }
     }
@@ -418,28 +481,38 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
         skalp_mir::Expression::Literal(val) => format_value(val),
         skalp_mir::Expression::Ref(lval) => format_lvalue(lval),
         skalp_mir::Expression::Binary { op, left, right } => {
-            format!("({} {} {})",
+            format!(
+                "({} {} {})",
                 format_expression(left),
                 format_binary_op(op),
-                format_expression(right))
+                format_expression(right)
+            )
         }
         skalp_mir::Expression::Unary { op, operand } => {
-            format!("{}{}",
-                format_unary_op(op),
-                format_expression(operand))
+            format!("{}{}", format_unary_op(op), format_expression(operand))
         }
-        skalp_mir::Expression::Conditional { cond, then_expr, else_expr } => {
-            format!("({} ? {} : {})",
+        skalp_mir::Expression::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            format!(
+                "({} ? {} : {})",
                 format_expression(cond),
                 format_expression(then_expr),
-                format_expression(else_expr))
+                format_expression(else_expr)
+            )
         }
         skalp_mir::Expression::Concat(exprs) => {
             let parts: Vec<_> = exprs.iter().map(|e| format_expression(e)).collect();
             format!("{{{}}}", parts.join(", "))
         }
         skalp_mir::Expression::Replicate { count, value } => {
-            format!("{{{}{{{}}}}}", format_expression(count), format_expression(value))
+            format!(
+                "{{{}{{{}}}}}",
+                format_expression(count),
+                format_expression(value)
+            )
         }
         skalp_mir::Expression::FunctionCall { name, args } => {
             let arg_strs: Vec<_> = args.iter().map(|a| format_expression(a)).collect();
@@ -469,7 +542,7 @@ fn format_binary_op(op: &skalp_mir::BinaryOp) -> &'static str {
         skalp_mir::BinaryOp::Mul => "*",
         skalp_mir::BinaryOp::Div => "/",
         skalp_mir::BinaryOp::Mod => "%",
-        skalp_mir::BinaryOp::And => "&",  // Logical operations (same as bitwise in Verilog context)
+        skalp_mir::BinaryOp::And => "&", // Logical operations (same as bitwise in Verilog context)
         skalp_mir::BinaryOp::Or => "|",
         skalp_mir::BinaryOp::Xor => "^",
         skalp_mir::BinaryOp::BitwiseAnd => "&",
@@ -494,26 +567,24 @@ fn format_unary_op(op: &skalp_mir::UnaryOp) -> &'static str {
         skalp_mir::UnaryOp::BitwiseNot => "~",
         skalp_mir::UnaryOp::Not => "!",
         skalp_mir::UnaryOp::Negate => "-",
-        skalp_mir::UnaryOp::Reduce(reduce_op) => {
-            match reduce_op {
-                skalp_mir::ReduceOp::And => "&",
-                skalp_mir::ReduceOp::Or => "|",
-                skalp_mir::ReduceOp::Xor => "^",
-                skalp_mir::ReduceOp::Nand => "~&",
-                skalp_mir::ReduceOp::Nor => "~|",
-                skalp_mir::ReduceOp::Xnor => "~^",
-            }
-        }
+        skalp_mir::UnaryOp::Reduce(reduce_op) => match reduce_op {
+            skalp_mir::ReduceOp::And => "&",
+            skalp_mir::ReduceOp::Or => "|",
+            skalp_mir::ReduceOp::Xor => "^",
+            skalp_mir::ReduceOp::Nand => "~&",
+            skalp_mir::ReduceOp::Nor => "~|",
+            skalp_mir::ReduceOp::Xnor => "~^",
+        },
     }
 }
 
 /// Get width specification string for a data type
 fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
     match data_type {
-        skalp_mir::DataType::Bit(width) |
-        skalp_mir::DataType::Logic(width) |
-        skalp_mir::DataType::Int(width) |
-        skalp_mir::DataType::Nat(width) => {
+        skalp_mir::DataType::Bit(width)
+        | skalp_mir::DataType::Logic(width)
+        | skalp_mir::DataType::Int(width)
+        | skalp_mir::DataType::Nat(width) => {
             if *width > 1 {
                 format!("[{}:0] ", width - 1)
             } else {
@@ -521,10 +592,10 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
             }
         }
         // Parametric types use parameter expression
-        skalp_mir::DataType::BitParam { param, default } |
-        skalp_mir::DataType::LogicParam { param, default } |
-        skalp_mir::DataType::IntParam { param, default } |
-        skalp_mir::DataType::NatParam { param, default } => {
+        skalp_mir::DataType::BitParam { param, default }
+        | skalp_mir::DataType::LogicParam { param, default }
+        | skalp_mir::DataType::IntParam { param, default }
+        | skalp_mir::DataType::NatParam { param, default } => {
             if *default > 1 {
                 format!("[{}-1:0] ", param)
             } else {
@@ -533,7 +604,7 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
         }
         skalp_mir::DataType::Clock { .. } => String::new(), // Clocks are single bit
         skalp_mir::DataType::Reset { .. } => String::new(), // Resets are single bit
-        skalp_mir::DataType::Event => String::new(), // Events have no width
+        skalp_mir::DataType::Event => String::new(),        // Events have no width
         skalp_mir::DataType::Array(element_type, size) => {
             // Array format: [element_width][0:size-1]
             let element_width = get_width_spec(element_type);
@@ -580,21 +651,19 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
 /// Get the width in bits of a data type
 fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
     match data_type {
-        skalp_mir::DataType::Bit(width) |
-        skalp_mir::DataType::Logic(width) |
-        skalp_mir::DataType::Int(width) |
-        skalp_mir::DataType::Nat(width) => *width,
+        skalp_mir::DataType::Bit(width)
+        | skalp_mir::DataType::Logic(width)
+        | skalp_mir::DataType::Int(width)
+        | skalp_mir::DataType::Nat(width) => *width,
         // Parametric types use their default width for calculations
-        skalp_mir::DataType::BitParam { default, .. } |
-        skalp_mir::DataType::LogicParam { default, .. } |
-        skalp_mir::DataType::IntParam { default, .. } |
-        skalp_mir::DataType::NatParam { default, .. } => *default,
+        skalp_mir::DataType::BitParam { default, .. }
+        | skalp_mir::DataType::LogicParam { default, .. }
+        | skalp_mir::DataType::IntParam { default, .. }
+        | skalp_mir::DataType::NatParam { default, .. } => *default,
         skalp_mir::DataType::Clock { .. } => 1,
         skalp_mir::DataType::Reset { .. } => 1,
         skalp_mir::DataType::Event => 1,
-        skalp_mir::DataType::Array(element_type, size) => {
-            get_type_width(element_type) * size
-        }
+        skalp_mir::DataType::Array(element_type, size) => get_type_width(element_type) * size,
         skalp_mir::DataType::Struct(struct_type) => {
             let mut total_width = 0;
             for field in &struct_type.fields {
@@ -662,7 +731,11 @@ fn is_signal_assigned_in_block(signal_id: &skalp_mir::SignalId, block: &skalp_mi
 }
 
 /// Collect all struct and enum types used in a module
-fn collect_types_from_module(module: &Module, struct_types: &mut HashSet<String>, enum_types: &mut HashSet<String>) {
+fn collect_types_from_module(
+    module: &Module,
+    struct_types: &mut HashSet<String>,
+    enum_types: &mut HashSet<String>,
+) {
     // Collect from port types
     for port in &module.ports {
         collect_types_from_datatype(&port.port_type, struct_types, enum_types);
@@ -675,7 +748,11 @@ fn collect_types_from_module(module: &Module, struct_types: &mut HashSet<String>
 }
 
 /// Recursively collect struct and enum types from a DataType
-fn collect_types_from_datatype(data_type: &DataType, struct_types: &mut HashSet<String>, enum_types: &mut HashSet<String>) {
+fn collect_types_from_datatype(
+    data_type: &DataType,
+    struct_types: &mut HashSet<String>,
+    enum_types: &mut HashSet<String>,
+) {
     match data_type {
         DataType::Struct(struct_type) => {
             struct_types.insert(struct_type.name.clone());
@@ -703,7 +780,11 @@ fn collect_types_from_datatype(data_type: &DataType, struct_types: &mut HashSet<
 }
 
 /// Generate SystemVerilog typedefs for collected struct and enum types
-fn generate_typedefs(module: &Module, struct_type_names: &HashSet<String>, enum_type_names: &HashSet<String>) -> String {
+fn generate_typedefs(
+    module: &Module,
+    struct_type_names: &HashSet<String>,
+    enum_type_names: &HashSet<String>,
+) -> String {
     let mut typedefs = String::new();
 
     if struct_type_names.is_empty() && enum_type_names.is_empty() {
@@ -716,11 +797,25 @@ fn generate_typedefs(module: &Module, struct_type_names: &HashSet<String>, enum_
 
     // Generate struct typedefs
     for port in &module.ports {
-        generate_typedefs_for_datatype(&port.port_type, &mut typedefs, &mut generated_structs, &mut generated_enums, struct_type_names, enum_type_names);
+        generate_typedefs_for_datatype(
+            &port.port_type,
+            &mut typedefs,
+            &mut generated_structs,
+            &mut generated_enums,
+            struct_type_names,
+            enum_type_names,
+        );
     }
 
     for signal in &module.signals {
-        generate_typedefs_for_datatype(&signal.signal_type, &mut typedefs, &mut generated_structs, &mut generated_enums, struct_type_names, enum_type_names);
+        generate_typedefs_for_datatype(
+            &signal.signal_type,
+            &mut typedefs,
+            &mut generated_structs,
+            &mut generated_enums,
+            struct_type_names,
+            enum_type_names,
+        );
     }
 
     if !typedefs.is_empty() {
@@ -737,24 +832,35 @@ fn generate_typedefs_for_datatype(
     generated_structs: &mut HashSet<String>,
     generated_enums: &mut HashSet<String>,
     target_structs: &HashSet<String>,
-    target_enums: &HashSet<String>
+    target_enums: &HashSet<String>,
 ) {
     match data_type {
         DataType::Struct(struct_type) => {
-            if target_structs.contains(&struct_type.name) && !generated_structs.contains(&struct_type.name) {
+            if target_structs.contains(&struct_type.name)
+                && !generated_structs.contains(&struct_type.name)
+            {
                 // Generate struct fields first (in case they reference other types)
                 for field in &struct_type.fields {
-                    generate_typedefs_for_datatype(&field.field_type, typedefs, generated_structs, generated_enums, target_structs, target_enums);
+                    generate_typedefs_for_datatype(
+                        &field.field_type,
+                        typedefs,
+                        generated_structs,
+                        generated_enums,
+                        target_structs,
+                        target_enums,
+                    );
                 }
 
                 // Generate the struct typedef
                 typedefs.push_str(&format!("typedef struct {{\n"));
                 for field in &struct_type.fields {
                     let field_width = get_width_spec(&field.field_type);
-                    typedefs.push_str(&format!("    {}{} {};\n",
+                    typedefs.push_str(&format!(
+                        "    {}{} {};\n",
                         get_systemverilog_type(&field.field_type),
                         field_width,
-                        field.name));
+                        field.name
+                    ));
                 }
                 typedefs.push_str(&format!("}} {};\n\n", struct_type.name));
 
@@ -762,22 +868,36 @@ fn generate_typedefs_for_datatype(
             }
         }
         DataType::Enum(enum_type) => {
-            if target_enums.contains(&enum_type.name) && !generated_enums.contains(&enum_type.name) {
+            if target_enums.contains(&enum_type.name) && !generated_enums.contains(&enum_type.name)
+            {
                 // Generate base type first
-                generate_typedefs_for_datatype(&enum_type.base_type, typedefs, generated_structs, generated_enums, target_structs, target_enums);
+                generate_typedefs_for_datatype(
+                    &enum_type.base_type,
+                    typedefs,
+                    generated_structs,
+                    generated_enums,
+                    target_structs,
+                    target_enums,
+                );
 
                 // Generate the enum typedef
                 let base_width = get_width_spec(&enum_type.base_type);
-                typedefs.push_str(&format!("typedef enum {}{} {{\n",
+                typedefs.push_str(&format!(
+                    "typedef enum {}{} {{\n",
                     get_systemverilog_type(&enum_type.base_type),
-                    base_width));
+                    base_width
+                ));
 
                 for (i, variant) in enum_type.variants.iter().enumerate() {
                     if i > 0 {
                         typedefs.push_str(",\n");
                     }
                     if let Some(value) = &variant.value {
-                        typedefs.push_str(&format!("    {} = {}", variant.name, format_value(value)));
+                        typedefs.push_str(&format!(
+                            "    {} = {}",
+                            variant.name,
+                            format_value(value)
+                        ));
                     } else {
                         typedefs.push_str(&format!("    {}", variant.name));
                     }
@@ -788,12 +908,26 @@ fn generate_typedefs_for_datatype(
             }
         }
         DataType::Array(element_type, _) => {
-            generate_typedefs_for_datatype(element_type, typedefs, generated_structs, generated_enums, target_structs, target_enums);
+            generate_typedefs_for_datatype(
+                element_type,
+                typedefs,
+                generated_structs,
+                generated_enums,
+                target_structs,
+                target_enums,
+            );
         }
         DataType::Union(union_type) => {
             // Handle unions similarly to structs for now
             for field in &union_type.fields {
-                generate_typedefs_for_datatype(&field.field_type, typedefs, generated_structs, generated_enums, target_structs, target_enums);
+                generate_typedefs_for_datatype(
+                    &field.field_type,
+                    typedefs,
+                    generated_structs,
+                    generated_enums,
+                    target_structs,
+                    target_enums,
+                );
             }
         }
         _ => {} // Primitive types don't need typedef generation
@@ -807,6 +941,6 @@ fn get_systemverilog_type(data_type: &DataType) -> &'static str {
         DataType::Logic(_) | DataType::LogicParam { .. } => "logic",
         DataType::Int(_) | DataType::IntParam { .. } => "int",
         DataType::Nat(_) | DataType::NatParam { .. } => "logic", // Use logic for unsigned naturals
-        _ => "logic", // Default to logic for other types
+        _ => "logic",                                            // Default to logic for other types
     }
 }

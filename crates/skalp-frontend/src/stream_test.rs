@@ -20,7 +20,11 @@ mod stream_tests {
         // Check that stream types are in the syntax tree
         let mut found_stream_types = 0;
         fn count_stream_types(node: &crate::syntax::SyntaxNode) -> usize {
-            let mut count = if node.kind() == SyntaxKind::StreamType { 1 } else { 0 };
+            let mut count = if node.kind() == SyntaxKind::StreamType {
+                1
+            } else {
+                0
+            };
             for child in node.children() {
                 count += count_stream_types(&child);
             }

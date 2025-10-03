@@ -231,27 +231,32 @@ impl RequirementTracker {
         if req.parent.is_none() {
             self.hierarchy.roots.push(id.clone());
         } else if let Some(parent) = &req.parent {
-            self.hierarchy.children
+            self.hierarchy
+                .children
                 .entry(parent.clone())
                 .or_default()
                 .push(id.clone());
         }
 
         // Update coverage matrix
-        self.coverage_matrix.req_to_properties
+        self.coverage_matrix
+            .req_to_properties
             .insert(id.clone(), req.properties.iter().cloned().collect());
-        self.coverage_matrix.req_to_tests
+        self.coverage_matrix
+            .req_to_tests
             .insert(id.clone(), req.tests.iter().cloned().collect());
 
         for prop in &req.properties {
-            self.coverage_matrix.property_to_reqs
+            self.coverage_matrix
+                .property_to_reqs
                 .entry(prop.clone())
                 .or_default()
                 .insert(id.clone());
         }
 
         for test in &req.tests {
-            self.coverage_matrix.test_to_reqs
+            self.coverage_matrix
+                .test_to_reqs
                 .entry(test.clone())
                 .or_default()
                 .insert(id.clone());
@@ -259,11 +264,13 @@ impl RequirementTracker {
 
         // Update traceability
         if let Some(parent) = &req.parent {
-            self.traceability.forward
+            self.traceability
+                .forward
                 .entry(parent.clone())
                 .or_default()
                 .insert(id.clone());
-            self.traceability.backward
+            self.traceability
+                .backward
                 .entry(id.clone())
                 .or_default()
                 .insert(parent.clone());
@@ -276,11 +283,13 @@ impl RequirementTracker {
     pub fn link_property(&mut self, req_id: &str, property_id: &str) {
         if let Some(req) = self.requirements.get_mut(req_id) {
             req.properties.push(property_id.to_string());
-            self.coverage_matrix.req_to_properties
+            self.coverage_matrix
+                .req_to_properties
                 .entry(req_id.to_string())
                 .or_default()
                 .insert(property_id.to_string());
-            self.coverage_matrix.property_to_reqs
+            self.coverage_matrix
+                .property_to_reqs
                 .entry(property_id.to_string())
                 .or_default()
                 .insert(req_id.to_string());
@@ -291,11 +300,13 @@ impl RequirementTracker {
     pub fn link_test(&mut self, req_id: &str, test_id: &str) {
         if let Some(req) = self.requirements.get_mut(req_id) {
             req.tests.push(test_id.to_string());
-            self.coverage_matrix.req_to_tests
+            self.coverage_matrix
+                .req_to_tests
                 .entry(req_id.to_string())
                 .or_default()
                 .insert(test_id.to_string());
-            self.coverage_matrix.test_to_reqs
+            self.coverage_matrix
+                .test_to_reqs
                 .entry(test_id.to_string())
                 .or_default()
                 .insert(req_id.to_string());
@@ -316,10 +327,12 @@ impl RequirementTracker {
 
     /// Get all child requirements
     pub fn get_children(&self, id: &str) -> Vec<&Requirement> {
-        self.hierarchy.children
+        self.hierarchy
+            .children
             .get(id)
             .map(|children| {
-                children.iter()
+                children
+                    .iter()
                     .filter_map(|child_id| self.requirements.get(child_id))
                     .collect()
             })
@@ -328,10 +341,12 @@ impl RequirementTracker {
 
     /// Get requirements by property
     pub fn get_requirements_by_property(&self, property_id: &str) -> Vec<&Requirement> {
-        self.coverage_matrix.property_to_reqs
+        self.coverage_matrix
+            .property_to_reqs
             .get(property_id)
             .map(|req_ids| {
-                req_ids.iter()
+                req_ids
+                    .iter()
                     .filter_map(|id| self.requirements.get(id))
                     .collect()
             })
@@ -340,10 +355,12 @@ impl RequirementTracker {
 
     /// Get requirements by test
     pub fn get_requirements_by_test(&self, test_id: &str) -> Vec<&Requirement> {
-        self.coverage_matrix.test_to_reqs
+        self.coverage_matrix
+            .test_to_reqs
             .get(test_id)
             .map(|req_ids| {
-                req_ids.iter()
+                req_ids
+                    .iter()
                     .filter_map(|id| self.requirements.get(id))
                     .collect()
             })
@@ -354,7 +371,9 @@ impl RequirementTracker {
     pub fn check_coverage(&self, req_id: &str) -> RequirementCoverage {
         if let Some(req) = self.requirements.get(req_id) {
             let total_criteria = req.criteria.len();
-            let passed_criteria = req.criteria.iter()
+            let passed_criteria = req
+                .criteria
+                .iter()
                 .filter(|c| matches!(c.status, CriterionStatus::Passed))
                 .count();
 
@@ -422,8 +441,11 @@ impl RequirementTracker {
         self.requirements
             .values()
             .filter(|req| {
-                matches!(req.priority, Priority::Critical) &&
-                !matches!(req.status, RequirementStatus::Verified | RequirementStatus::Proven)
+                matches!(req.priority, Priority::Critical)
+                    && !matches!(
+                        req.status,
+                        RequirementStatus::Verified | RequirementStatus::Proven
+                    )
             })
             .map(|req| req.id.clone())
             .collect()
@@ -726,14 +748,22 @@ mod tests {
             let req = Requirement {
                 id: format!("REQ-{:03}", i),
                 description: format!("Requirement {}", i),
-                priority: if i == 0 { Priority::Critical } else { Priority::Medium },
+                priority: if i == 0 {
+                    Priority::Critical
+                } else {
+                    Priority::Medium
+                },
                 req_type: RequirementType::Functional,
                 parent: None,
                 children: vec![],
                 criteria: vec![],
                 properties: vec![],
                 tests: vec![],
-                status: if i < 2 { RequirementStatus::Verified } else { RequirementStatus::NotImplemented },
+                status: if i < 2 {
+                    RequirementStatus::Verified
+                } else {
+                    RequirementStatus::NotImplemented
+                },
                 notes: vec![],
             };
             tracker.add_requirement(req);
@@ -742,8 +772,17 @@ mod tests {
         let report = tracker.generate_report();
         assert_eq!(report.total_requirements, 3);
         assert_eq!(report.coverage_percentage, 66.66666666666667); // 2 out of 3 verified
-        assert_eq!(*report.by_status.get(&RequirementStatus::Verified).unwrap(), 2);
-        assert_eq!(*report.by_status.get(&RequirementStatus::NotImplemented).unwrap(), 1);
+        assert_eq!(
+            *report.by_status.get(&RequirementStatus::Verified).unwrap(),
+            2
+        );
+        assert_eq!(
+            *report
+                .by_status
+                .get(&RequirementStatus::NotImplemented)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

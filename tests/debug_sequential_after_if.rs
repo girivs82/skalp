@@ -36,16 +36,20 @@ mod sequential_debug_tests {
         let hir = parse_and_build_hir(simple_source).expect("Failed to parse");
 
         // Compile to MIR
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         // Convert to SIR
         let sir = convert_mir_to_sir(&mir.modules[0]);
 
         println!("\n=== SIR Analysis ===");
         println!("Module: {}", sir.name);
-        println!("State elements: {:?}", sir.state_elements.keys().collect::<Vec<_>>());
+        println!(
+            "State elements: {:?}",
+            sir.state_elements.keys().collect::<Vec<_>>()
+        );
         println!("Combinational nodes: {}", sir.combinational_nodes.len());
         println!("Sequential nodes: {}", sir.sequential_nodes.len());
 
@@ -55,8 +59,8 @@ mod sequential_debug_tests {
         println!("{}", &shader_code);
 
         // Check if pipeline_valid assignment is present and correct
-        let has_pipeline_addition = shader_code.contains("pipeline_valid") &&
-                                   (shader_code.contains("+ uint(1)") || shader_code.contains("+ signals->"));
+        let has_pipeline_addition = shader_code.contains("pipeline_valid")
+            && (shader_code.contains("+ uint(1)") || shader_code.contains("+ signals->"));
 
         if has_pipeline_addition {
             println!("\n✅ pipeline_valid assignment found and appears to have addition operation");

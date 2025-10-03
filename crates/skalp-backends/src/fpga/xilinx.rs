@@ -2,15 +2,15 @@
 //!
 //! Implements synthesis flow for Xilinx 7-Series and newer FPGAs using Vivado Design Suite.
 
-use crate::{
-    BackendResult, SynthesisResults, AreaMetrics, TimingResults, PowerResults,
-    OutputFile, OutputFileType, LogMessage, LogLevel, TimingSlack, TimingViolation,
-};
 use crate::fpga::FpgaConfig;
+use crate::{
+    AreaMetrics, BackendResult, LogLevel, LogMessage, OutputFile, OutputFileType, PowerResults,
+    SynthesisResults, TimingResults, TimingSlack, TimingViolation,
+};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
-use std::collections::HashMap;
 
 /// Xilinx device information
 #[derive(Debug, Clone)]
@@ -66,10 +66,12 @@ pub async fn synthesize_xilinx(
     let mut log_messages = Vec::new();
 
     // Step 1: Create Vivado project and run synthesis
-    let synth_result = run_vivado_synthesis(verilog, &device, temp_dir, config, &mut log_messages).await?;
+    let synth_result =
+        run_vivado_synthesis(verilog, &device, temp_dir, config, &mut log_messages).await?;
 
     // Step 2: Run implementation (place and route)
-    let impl_result = run_vivado_implementation(&device, temp_dir, config, &mut log_messages).await?;
+    let impl_result =
+        run_vivado_implementation(&device, temp_dir, config, &mut log_messages).await?;
 
     // Step 3: Generate bitstream
     let bitstream_result = run_vivado_bitstream(temp_dir, &mut log_messages).await?;
@@ -146,18 +148,25 @@ async fn run_vivado_synthesis(
 
     // Create Vivado TCL script for synthesis
     let mut tcl_script = String::new();
-    tcl_script.push_str(&format!("create_project -force synth_project {} -part {}{}\n",
-        temp_dir.display(), device.part, device.package));
+    tcl_script.push_str(&format!(
+        "create_project -force synth_project {} -part {}{}\n",
+        temp_dir.display(),
+        device.part,
+        device.package
+    ));
     tcl_script.push_str(&format!("add_files {}\n", verilog_file.display()));
     tcl_script.push_str("set_property top design [current_fileset]\n");
     tcl_script.push_str("update_compile_order -fileset sources_1\n");
 
     // Synthesis settings
     if config.use_dsp {
-        tcl_script.push_str("set_property STEPS.SYNTH_DESIGN.ARGS.RESOURCE_SHARING auto [get_runs synth_1]\n");
+        tcl_script.push_str(
+            "set_property STEPS.SYNTH_DESIGN.ARGS.RESOURCE_SHARING auto [get_runs synth_1]\n",
+        );
     }
     if config.enable_retiming {
-        tcl_script.push_str("set_property STEPS.SYNTH_DESIGN.ARGS.RETIMING true [get_runs synth_1]\n");
+        tcl_script
+            .push_str("set_property STEPS.SYNTH_DESIGN.ARGS.RETIMING true [get_runs synth_1]\n");
     }
 
     tcl_script.push_str("launch_runs synth_1 -jobs 4\n");
@@ -214,8 +223,11 @@ async fn run_vivado_synthesis(
 
             // Create mock checkpoint and reports
             tokio::fs::write(temp_dir.join("design.dcp"), b"MOCK_DCP").await?;
-            tokio::fs::write(temp_dir.join("utilization.rpt"),
-                "Mock utilization report\nLUTs: 2500\nFFs: 1200\nBRAMs: 15\nDSPs: 8").await?;
+            tokio::fs::write(
+                temp_dir.join("utilization.rpt"),
+                "Mock utilization report\nLUTs: 2500\nFFs: 1200\nBRAMs: 15\nDSPs: 8",
+            )
+            .await?;
 
             Ok("Mock Vivado synthesis completed".to_string())
         }
@@ -238,8 +250,12 @@ async fn run_vivado_implementation(
 
     // Implementation settings
     if config.frequency_driven {
-        tcl_script.push_str("set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE ExtraTimingOpt [get_runs impl_1]\n");
-        tcl_script.push_str("set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]\n");
+        tcl_script.push_str(
+            "set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE ExtraTimingOpt [get_runs impl_1]\n",
+        );
+        tcl_script.push_str(
+            "set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]\n",
+        );
     }
 
     tcl_script.push_str("launch_runs impl_1 -jobs 4\n");
@@ -295,10 +311,16 @@ async fn run_vivado_implementation(
 
             // Create mock outputs
             tokio::fs::write(temp_dir.join("impl.dcp"), b"MOCK_IMPL_DCP").await?;
-            tokio::fs::write(temp_dir.join("timing.rpt"),
-                "Mock timing report\nSetup slack: 2.5ns\nMax frequency: 150.0 MHz").await?;
-            tokio::fs::write(temp_dir.join("power.rpt"),
-                "Mock power report\nTotal power: 1.25W\nDynamic: 0.85W\nStatic: 0.40W").await?;
+            tokio::fs::write(
+                temp_dir.join("timing.rpt"),
+                "Mock timing report\nSetup slack: 2.5ns\nMax frequency: 150.0 MHz",
+            )
+            .await?;
+            tokio::fs::write(
+                temp_dir.join("power.rpt"),
+                "Mock power report\nTotal power: 1.25W\nDynamic: 0.85W\nStatic: 0.40W",
+            )
+            .await?;
 
             Ok("Mock Vivado implementation completed".to_string())
         }
@@ -555,8 +577,14 @@ mod tests {
     #[test]
     fn test_extract_functions() {
         assert_eq!(extract_number_from_line("LUTs: 2500"), Some(2500));
-        assert_eq!(extract_number_from_line_f64("Setup slack: 2.5ns"), Some(2.5));
-        assert_eq!(extract_frequency_from_line("Max frequency: 150.0 MHz"), Some(150.0));
+        assert_eq!(
+            extract_number_from_line_f64("Setup slack: 2.5ns"),
+            Some(2.5)
+        );
+        assert_eq!(
+            extract_frequency_from_line("Max frequency: 150.0 MHz"),
+            Some(150.0)
+        );
     }
 
     #[tokio::test]
@@ -565,7 +593,8 @@ mod tests {
         let config = FpgaConfig::default();
         let verilog = "module test(input clk, input a, output reg b); always @(posedge clk) b <= a; endmodule";
 
-        let result = synthesize_xilinx(verilog, "xc7a35t", "cpg236", temp_dir.path(), &config).await;
+        let result =
+            synthesize_xilinx(verilog, "xc7a35t", "cpg236", temp_dir.path(), &config).await;
         assert!(result.is_ok());
 
         let synthesis_result = result.unwrap();

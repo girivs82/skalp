@@ -57,8 +57,8 @@ impl GoldenTest {
     /// `tests/golden/alu_basic.sv`.
     pub fn new(name: &str) -> Self {
         // Determine the golden directory relative to workspace root
-        let manifest_dir = env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR should be set");
+        let manifest_dir =
+            env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
         let workspace_root = PathBuf::from(manifest_dir)
             .parent()
             .and_then(|p| p.parent())
@@ -119,8 +119,9 @@ impl GoldenTest {
     fn update_golden(&self, path: &Path, content: &str) {
         // Create directory if it doesn't exist
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .unwrap_or_else(|e| panic!("Failed to create golden directory {:?}: {}", parent, e));
+            fs::create_dir_all(parent).unwrap_or_else(|e| {
+                panic!("Failed to create golden directory {:?}: {}", parent, e)
+            });
         }
 
         // Write the golden file
@@ -180,7 +181,8 @@ impl GoldenTest {
 
             if exp_line != act_line {
                 diff_count += 1;
-                if diff_count <= 10 {  // Show first 10 differences
+                if diff_count <= 10 {
+                    // Show first 10 differences
                     diff.push_str(&format!("Line {}:\n", i + 1));
                     diff.push_str(&format!("  Expected: {}\n", exp_line));
                     diff.push_str(&format!("  Actual:   {}\n", act_line));
@@ -193,8 +195,11 @@ impl GoldenTest {
             diff.push_str(&format!("... and {} more differences\n", diff_count - 10));
         }
 
-        diff.push_str(&format!("\nTotal lines: expected={}, actual={}\n",
-                              expected_lines.len(), actual_lines.len()));
+        diff.push_str(&format!(
+            "\nTotal lines: expected={}, actual={}\n",
+            expected_lines.len(),
+            actual_lines.len()
+        ));
         diff.push_str(&format!("Different lines: {}\n", diff_count));
 
         diff

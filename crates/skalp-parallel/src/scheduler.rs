@@ -31,7 +31,8 @@ impl TaskScheduler {
     }
 
     pub fn completed_count(&self) -> u64 {
-        self.completed_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.completed_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn failed_count(&self) -> u64 {

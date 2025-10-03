@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod lir_synthesis_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
     use skalp_lir::{lower_to_lir, transform_mir_to_lir};
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn test_basic_mir_to_lir_conversion() {
@@ -41,7 +41,10 @@ mod lir_synthesis_tests {
         println!("Signals: {}", module.signals.len());
 
         // Should have signals for the ports
-        assert!(module.signals.len() >= 3, "Should have at least 3 signals (a, b, y)");
+        assert!(
+            module.signals.len() >= 3,
+            "Should have at least 3 signals (a, b, y)"
+        );
 
         // Check that we have input and output signals
         let input_signals: Vec<_> = module.signals.iter().filter(|s| s.is_input).collect();
@@ -128,8 +131,10 @@ mod lir_synthesis_tests {
         let module = &lir_design.modules[0];
         println!("Module signals:");
         for signal in &module.signals {
-            println!("  - {} (input: {}, output: {}, register: {})",
-                    signal.name, signal.is_input, signal.is_output, signal.is_register);
+            println!(
+                "  - {} (input: {}, output: {}, register: {})",
+                signal.name, signal.is_input, signal.is_output, signal.is_register
+            );
         }
 
         // Should have proper signal classification
@@ -165,11 +170,20 @@ mod lir_synthesis_tests {
         println!("Modules: {}", lir_design.modules.len());
 
         // Even simple designs should create at least one module
-        assert!(lir_design.modules.len() >= 1, "Should have at least one module");
+        assert!(
+            lir_design.modules.len() >= 1,
+            "Should have at least one module"
+        );
 
         for (i, module) in lir_design.modules.iter().enumerate() {
-            println!("Module {}: {} (signals: {}, gates: {}, nets: {})",
-                    i, module.name, module.signals.len(), module.gates.len(), module.nets.len());
+            println!(
+                "Module {}: {} (signals: {}, gates: {}, nets: {})",
+                i,
+                module.name,
+                module.signals.len(),
+                module.gates.len(),
+                module.nets.len()
+            );
         }
     }
 
@@ -201,8 +215,14 @@ mod lir_synthesis_tests {
 
             // Print out the gates that were created
             for (i, gate) in lir.gates.iter().enumerate() {
-                println!("Gate {}: {} ({:?}) - inputs: {}, outputs: {}",
-                        i, gate.id, gate.gate_type, gate.inputs.len(), gate.outputs.len());
+                println!(
+                    "Gate {}: {} ({:?}) - inputs: {}, outputs: {}",
+                    i,
+                    gate.id,
+                    gate.gate_type,
+                    gate.inputs.len(),
+                    gate.outputs.len()
+                );
             }
 
             // Print out the nets
@@ -211,7 +231,10 @@ mod lir_synthesis_tests {
             }
 
             // Should have created some structure
-            assert!(lir.gates.len() > 0 || lir.nets.len() > 0, "Should have created gates or nets");
+            assert!(
+                lir.gates.len() > 0 || lir.nets.len() > 0,
+                "Should have created gates or nets"
+            );
         }
     }
 }

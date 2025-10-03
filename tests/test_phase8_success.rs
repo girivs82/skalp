@@ -1,9 +1,11 @@
 #[cfg(test)]
 mod phase8_success_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
+    use skalp_lir::optimization::{
+        ConstantFolding, DeadCodeElimination, OptimizationPass, OptimizationPipeline,
+    };
     use skalp_lir::{lower_to_lir, transform_mir_to_lir};
-    use skalp_lir::optimization::{OptimizationPipeline, OptimizationPass, ConstantFolding, DeadCodeElimination};
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn test_phase8_synthesis_success() {
@@ -40,9 +42,14 @@ mod phase8_success_tests {
         println!("✅ MIR lowering successful!");
         println!("   Modules: {}", mir.modules.len());
         if let Some(module) = mir.modules.first() {
-            println!("   Module '{}': {} ports, {} signals, {} assignments, {} processes",
-                    module.name, module.ports.len(), module.signals.len(),
-                    module.assignments.len(), module.processes.len());
+            println!(
+                "   Module '{}': {} ports, {} signals, {} assignments, {} processes",
+                module.name,
+                module.ports.len(),
+                module.signals.len(),
+                module.assignments.len(),
+                module.processes.len()
+            );
         }
 
         // Step 3: Transform to LIR
@@ -63,8 +70,10 @@ mod phase8_success_tests {
             let output_signals = module.signals.iter().filter(|s| s.is_output).count();
             let register_signals = module.signals.iter().filter(|s| s.is_register).count();
 
-            println!("     Signal breakdown: {} inputs, {} outputs, {} registers",
-                    input_signals, output_signals, register_signals);
+            println!(
+                "     Signal breakdown: {} inputs, {} outputs, {} registers",
+                input_signals, output_signals, register_signals
+            );
         }
 
         // Step 4: Test module-level transformation
@@ -78,8 +87,14 @@ mod phase8_success_tests {
 
             // Print gate details
             for (i, gate) in lir.gates.iter().enumerate() {
-                println!("   Gate {}: {} ({:?}) - {} inputs -> {} outputs",
-                        i, gate.id, gate.gate_type, gate.inputs.len(), gate.outputs.len());
+                println!(
+                    "   Gate {}: {} ({:?}) - {} inputs -> {} outputs",
+                    i,
+                    gate.id,
+                    gate.gate_type,
+                    gate.inputs.len(),
+                    gate.outputs.len()
+                );
             }
 
             // Print net details
@@ -95,26 +110,54 @@ mod phase8_success_tests {
             // Apply individual optimizations
             let mut constant_folder = ConstantFolding;
             let cf_result = constant_folder.optimize(&mut lir);
-            println!("   Constant Folding: {} -> {} gates ({})",
-                    cf_result.gates_before, cf_result.gates_after,
-                    if cf_result.success { "success" } else { "no change" });
+            println!(
+                "   Constant Folding: {} -> {} gates ({})",
+                cf_result.gates_before,
+                cf_result.gates_after,
+                if cf_result.success {
+                    "success"
+                } else {
+                    "no change"
+                }
+            );
 
             let mut dce = DeadCodeElimination;
             let dce_result = dce.optimize(&mut lir);
-            println!("   Dead Code Elimination: {} -> {} gates ({})",
-                    dce_result.gates_before, dce_result.gates_after,
-                    if dce_result.success { "success" } else { "no change" });
+            println!(
+                "   Dead Code Elimination: {} -> {} gates ({})",
+                dce_result.gates_before,
+                dce_result.gates_after,
+                if dce_result.success {
+                    "success"
+                } else {
+                    "no change"
+                }
+            );
 
             let final_gates = lir.gates.len();
             let final_nets = lir.nets.len();
 
             println!("✅ Optimization completed!");
-            println!("   Gates: {} -> {} ({} change)",
-                    initial_gates, final_gates,
-                    if final_gates == initial_gates { "no" } else { "reduced" });
-            println!("   Nets: {} -> {} ({} change)",
-                    initial_nets, final_nets,
-                    if final_nets == initial_nets { "no" } else { "reduced" });
+            println!(
+                "   Gates: {} -> {} ({} change)",
+                initial_gates,
+                final_gates,
+                if final_gates == initial_gates {
+                    "no"
+                } else {
+                    "reduced"
+                }
+            );
+            println!(
+                "   Nets: {} -> {} ({} change)",
+                initial_nets,
+                final_nets,
+                if final_nets == initial_nets {
+                    "no"
+                } else {
+                    "reduced"
+                }
+            );
 
             // Step 6: Summary
             println!("\n6️⃣ Phase 8 Success Summary:");
@@ -129,12 +172,33 @@ mod phase8_success_tests {
             println!("\n🏆 Phase 8 Achievement Check:");
             let has_gates = final_gates > 0 || initial_gates > 0;
             let has_nets = final_nets > 0 || initial_nets > 0;
-            let has_signals = !lir_design.modules.is_empty() &&
-                              lir_design.modules[0].signals.len() >= 3; // At least a, b, result
+            let has_signals =
+                !lir_design.modules.is_empty() && lir_design.modules[0].signals.len() >= 3; // At least a, b, result
 
-            println!("   Gate-level synthesis: {}", if has_gates { "✅ WORKING" } else { "🔧 Needs improvement" });
-            println!("   Net creation: {}", if has_nets { "✅ WORKING" } else { "🔧 Needs improvement" });
-            println!("   Signal mapping: {}", if has_signals { "✅ WORKING" } else { "🔧 Needs improvement" });
+            println!(
+                "   Gate-level synthesis: {}",
+                if has_gates {
+                    "✅ WORKING"
+                } else {
+                    "🔧 Needs improvement"
+                }
+            );
+            println!(
+                "   Net creation: {}",
+                if has_nets {
+                    "✅ WORKING"
+                } else {
+                    "🔧 Needs improvement"
+                }
+            );
+            println!(
+                "   Signal mapping: {}",
+                if has_signals {
+                    "✅ WORKING"
+                } else {
+                    "🔧 Needs improvement"
+                }
+            );
             println!("   Optimization passes: ✅ WORKING");
 
             if has_signals {
@@ -151,8 +215,14 @@ mod phase8_success_tests {
             assert!(hir.entities.len() > 0, "Should have parsed entities");
             assert!(mir.modules.len() > 0, "Should have MIR modules");
             assert!(lir_design.modules.len() > 0, "Should have LIR modules");
-            assert!(lir_design.modules[0].signals.len() >= 3, "Should have signals");
-            assert!(cf_result.success || dce_result.success, "At least one optimization should succeed");
+            assert!(
+                lir_design.modules[0].signals.len() >= 3,
+                "Should have signals"
+            );
+            assert!(
+                cf_result.success || dce_result.success,
+                "At least one optimization should succeed"
+            );
         }
     }
 

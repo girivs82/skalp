@@ -7,12 +7,12 @@
 //! - Manufacturing rules (resolution, OPC)
 //! - Electrical rules (resistance, capacitance)
 
-use crate::{AsicError, Technology, DesignRules};
+use crate::gdsii::GdsiiStream;
 use crate::placement::Placement;
 use crate::routing::RoutingResult;
-use crate::gdsii::GdsiiStream;
+use crate::{AsicError, DesignRules, Technology};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use serde::{Serialize, Deserialize};
 
 /// Advanced DRC engine with comprehensive rule checking
 pub struct AdvancedDrcEngine {
@@ -537,11 +537,12 @@ impl AdvancedDrcEngine {
     }
 
     /// Run comprehensive DRC check
-    pub fn check_design(&self,
-                       placement: &Placement,
-                       routing: &RoutingResult,
-                       gds_stream: Option<&GdsiiStream>) -> Result<DrcReport, AsicError> {
-
+    pub fn check_design(
+        &self,
+        placement: &Placement,
+        routing: &RoutingResult,
+        gds_stream: Option<&GdsiiStream>,
+    ) -> Result<DrcReport, AsicError> {
         let start_time = std::time::Instant::now();
         let mut violations = HashMap::new();
         let mut layer_stats = HashMap::new();
@@ -565,12 +566,20 @@ impl AdvancedDrcEngine {
         self.check_connectivity_rules(routing, &mut violations)?;
 
         // Check process rules
-        if matches!(self.config.check_level, CheckLevel::Comprehensive | CheckLevel::Signoff) {
+        if matches!(
+            self.config.check_level,
+            CheckLevel::Comprehensive | CheckLevel::Signoff
+        ) {
             self.check_process_rules(placement, routing, &mut violations)?;
         }
 
         // Check electrical rules
-        if self.advanced_rules.electrical_rules.resistance_rules.enabled {
+        if self
+            .advanced_rules
+            .electrical_rules
+            .resistance_rules
+            .enabled
+        {
             self.check_electrical_rules(routing, &mut violations)?;
         }
 
@@ -600,33 +609,58 @@ impl AdvancedDrcEngine {
     }
 
     /// Check geometric design rules
-    fn check_geometric_rules(&self,
-                            _placement: &Placement,
-                            routing: &RoutingResult,
-                            violations: &mut HashMap<ViolationType, Vec<DrcViolation>>) -> Result<(), AsicError> {
-
+    fn check_geometric_rules(
+        &self,
+        _placement: &Placement,
+        routing: &RoutingResult,
+        violations: &mut HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> Result<(), AsicError> {
         // Check minimum width violations
         for net in &routing.routed_nets {
             for segment in &net.segments {
                 let width = segment.width;
-                let layer_rules = &self.advanced_rules.metal_rules.get(segment.layer)
-                    .ok_or_else(|| AsicError::DrcError(format!("No rules for layer {}", segment.layer)))?;
+                let layer_rules = &self
+                    .advanced_rules
+                    .metal_rules
+                    .get(segment.layer)
+                    .ok_or_else(|| {
+                        AsicError::DrcError(format!("No rules for layer {}", segment.layer))
+                    })?;
 
                 if width < layer_rules.min_width {
-                    let violation_id = format!("MW_{}_{}_{}", net.name, segment.layer,
-                        violations.get(&ViolationType::MinWidth).map(|v| v.len()).unwrap_or(0));
-                    violations.get_mut(&ViolationType::MinWidth).unwrap().push(DrcViolation {
-                        id: violation_id,
-                        violation_type: ViolationType::MinWidth,
-                        severity: ViolationSeverity::Error,
-                        location: if segment.points.len() > 0 { segment.points[0] } else { (0.0, 0.0) },
-                        layer: segment.layer,
-                        measured: width,
-                        required: layer_rules.min_width,
-                        description: format!("Wire width {:.3} < minimum {:.3}", width, layer_rules.min_width),
-                        suggested_fix: Some("Increase wire width or use wider metal layer".to_string()),
-                        waiver: None,
-                    });
+                    let violation_id = format!(
+                        "MW_{}_{}_{}",
+                        net.name,
+                        segment.layer,
+                        violations
+                            .get(&ViolationType::MinWidth)
+                            .map(|v| v.len())
+                            .unwrap_or(0)
+                    );
+                    violations
+                        .get_mut(&ViolationType::MinWidth)
+                        .unwrap()
+                        .push(DrcViolation {
+                            id: violation_id,
+                            violation_type: ViolationType::MinWidth,
+                            severity: ViolationSeverity::Error,
+                            location: if segment.points.len() > 0 {
+                                segment.points[0]
+                            } else {
+                                (0.0, 0.0)
+                            },
+                            layer: segment.layer,
+                            measured: width,
+                            required: layer_rules.min_width,
+                            description: format!(
+                                "Wire width {:.3} < minimum {:.3}",
+                                width, layer_rules.min_width
+                            ),
+                            suggested_fix: Some(
+                                "Increase wire width or use wider metal layer".to_string(),
+                            ),
+                            waiver: None,
+                        });
                 }
             }
         }
@@ -641,16 +675,20 @@ impl AdvancedDrcEngine {
     }
 
     /// Check spacing violations
-    fn check_spacing_violations(&self,
-                               routing: &RoutingResult,
-                               violations: &mut HashMap<ViolationType, Vec<DrcViolation>>) -> Result<(), AsicError> {
-
+    fn check_spacing_violations(
+        &self,
+        routing: &RoutingResult,
+        violations: &mut HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> Result<(), AsicError> {
         // For each layer, check spacing between all wire segments
         let mut layer_segments: HashMap<usize, Vec<_>> = HashMap::new();
 
         for net in &routing.routed_nets {
             for segment in &net.segments {
-                layer_segments.entry(segment.layer).or_default().push((net, segment));
+                layer_segments
+                    .entry(segment.layer)
+                    .or_default()
+                    .push((net, segment));
             }
         }
 
@@ -661,7 +699,7 @@ impl AdvancedDrcEngine {
             };
 
             for i in 0..segments.len() {
-                for j in i+1..segments.len() {
+                for j in i + 1..segments.len() {
                     let (net1, seg1) = segments[i];
                     let (net2, seg2) = segments[j];
 
@@ -673,21 +711,40 @@ impl AdvancedDrcEngine {
                     };
 
                     if spacing < required_spacing {
-                        let violation_id = format!("SP_{}_{}_{}_{}", net1.name, net2.name, layer,
-                            violations.get(&ViolationType::MinSpacing).map(|v| v.len()).unwrap_or(0));
-                        violations.get_mut(&ViolationType::MinSpacing).unwrap().push(DrcViolation {
-                            id: violation_id,
-                            violation_type: ViolationType::MinSpacing,
-                            severity: if net1.name == net2.name { ViolationSeverity::Warning } else { ViolationSeverity::Error },
-                            location: self.get_closest_points(seg1, seg2),
+                        let violation_id = format!(
+                            "SP_{}_{}_{}_{}",
+                            net1.name,
+                            net2.name,
                             layer,
-                            measured: spacing,
-                            required: required_spacing,
-                            description: format!("Spacing {:.3} < minimum {:.3} between {} and {}",
-                                               spacing, required_spacing, net1.name, net2.name),
-                            suggested_fix: Some("Increase spacing or reroute wires".to_string()),
-                            waiver: None,
-                        });
+                            violations
+                                .get(&ViolationType::MinSpacing)
+                                .map(|v| v.len())
+                                .unwrap_or(0)
+                        );
+                        violations
+                            .get_mut(&ViolationType::MinSpacing)
+                            .unwrap()
+                            .push(DrcViolation {
+                                id: violation_id,
+                                violation_type: ViolationType::MinSpacing,
+                                severity: if net1.name == net2.name {
+                                    ViolationSeverity::Warning
+                                } else {
+                                    ViolationSeverity::Error
+                                },
+                                location: self.get_closest_points(seg1, seg2),
+                                layer,
+                                measured: spacing,
+                                required: required_spacing,
+                                description: format!(
+                                    "Spacing {:.3} < minimum {:.3} between {} and {}",
+                                    spacing, required_spacing, net1.name, net2.name
+                                ),
+                                suggested_fix: Some(
+                                    "Increase spacing or reroute wires".to_string(),
+                                ),
+                                waiver: None,
+                            });
                     }
                 }
             }
@@ -697,10 +754,11 @@ impl AdvancedDrcEngine {
     }
 
     /// Check area violations
-    fn check_area_violations(&self,
-                            routing: &RoutingResult,
-                            violations: &mut HashMap<ViolationType, Vec<DrcViolation>>) -> Result<(), AsicError> {
-
+    fn check_area_violations(
+        &self,
+        routing: &RoutingResult,
+        violations: &mut HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> Result<(), AsicError> {
         for net in &routing.routed_nets {
             let mut layer_areas: HashMap<usize, f64> = HashMap::new();
 
@@ -715,21 +773,36 @@ impl AdvancedDrcEngine {
             for (layer, area) in layer_areas {
                 if let Some(layer_rules) = self.advanced_rules.metal_rules.get(layer) {
                     if area < layer_rules.min_area {
-                        let violation_id = format!("MA_{}_{}_{}_{}", net.name, layer, area as u32,
-                            violations.get(&ViolationType::MinArea).map(|v| v.len()).unwrap_or(0));
-                        violations.get_mut(&ViolationType::MinArea).unwrap().push(DrcViolation {
-                            id: violation_id,
-                            violation_type: ViolationType::MinArea,
-                            severity: ViolationSeverity::Warning,
-                            location: (0.0, 0.0), // Would need to calculate centroid
+                        let violation_id = format!(
+                            "MA_{}_{}_{}_{}",
+                            net.name,
                             layer,
-                            measured: area,
-                            required: layer_rules.min_area,
-                            description: format!("Metal area {:.3} < minimum {:.3} for net {}",
-                                               area, layer_rules.min_area, net.name),
-                            suggested_fix: Some("Add fill shapes or merge with nearby metal".to_string()),
-                            waiver: None,
-                        });
+                            area as u32,
+                            violations
+                                .get(&ViolationType::MinArea)
+                                .map(|v| v.len())
+                                .unwrap_or(0)
+                        );
+                        violations
+                            .get_mut(&ViolationType::MinArea)
+                            .unwrap()
+                            .push(DrcViolation {
+                                id: violation_id,
+                                violation_type: ViolationType::MinArea,
+                                severity: ViolationSeverity::Warning,
+                                location: (0.0, 0.0), // Would need to calculate centroid
+                                layer,
+                                measured: area,
+                                required: layer_rules.min_area,
+                                description: format!(
+                                    "Metal area {:.3} < minimum {:.3} for net {}",
+                                    area, layer_rules.min_area, net.name
+                                ),
+                                suggested_fix: Some(
+                                    "Add fill shapes or merge with nearby metal".to_string(),
+                                ),
+                                waiver: None,
+                            });
                     }
                 }
             }
@@ -739,32 +812,42 @@ impl AdvancedDrcEngine {
     }
 
     /// Check connectivity rules
-    fn check_connectivity_rules(&self,
-                               _routing: &RoutingResult,
-                               _violations: &mut HashMap<ViolationType, Vec<DrcViolation>>) -> Result<(), AsicError> {
+    fn check_connectivity_rules(
+        &self,
+        _routing: &RoutingResult,
+        _violations: &mut HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> Result<(), AsicError> {
         // Implementation would check via enclosure, overlap, etc.
         Ok(())
     }
 
     /// Check process-specific rules
-    fn check_process_rules(&self,
-                          _placement: &Placement,
-                          _routing: &RoutingResult,
-                          _violations: &mut HashMap<ViolationType, Vec<DrcViolation>>) -> Result<(), AsicError> {
+    fn check_process_rules(
+        &self,
+        _placement: &Placement,
+        _routing: &RoutingResult,
+        _violations: &mut HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> Result<(), AsicError> {
         // Implementation would check density, antenna, etc.
         Ok(())
     }
 
     /// Check electrical rules
-    fn check_electrical_rules(&self,
-                             _routing: &RoutingResult,
-                             _violations: &mut HashMap<ViolationType, Vec<DrcViolation>>) -> Result<(), AsicError> {
+    fn check_electrical_rules(
+        &self,
+        _routing: &RoutingResult,
+        _violations: &mut HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> Result<(), AsicError> {
         // Implementation would check resistance, capacitance, etc.
         Ok(())
     }
 
     /// Calculate spacing between two segments
-    fn calculate_segment_spacing(&self, seg1: &crate::routing::WireSegment, seg2: &crate::routing::WireSegment) -> f64 {
+    fn calculate_segment_spacing(
+        &self,
+        seg1: &crate::routing::WireSegment,
+        seg2: &crate::routing::WireSegment,
+    ) -> f64 {
         // Simplified - would need proper geometric calculation
         if seg1.points.len() < 2 || seg2.points.len() < 2 {
             return f64::INFINITY;
@@ -776,7 +859,11 @@ impl AdvancedDrcEngine {
     }
 
     /// Get closest points between two segments
-    fn get_closest_points(&self, seg1: &crate::routing::WireSegment, seg2: &crate::routing::WireSegment) -> (f64, f64) {
+    fn get_closest_points(
+        &self,
+        seg1: &crate::routing::WireSegment,
+        seg2: &crate::routing::WireSegment,
+    ) -> (f64, f64) {
         // Simplified - return midpoint
         if seg1.points.len() > 0 && seg2.points.len() > 0 {
             let p1 = seg1.points[0];
@@ -795,7 +882,7 @@ impl AdvancedDrcEngine {
 
         let mut total_length = 0.0;
         for i in 1..segment.points.len() {
-            let p1 = segment.points[i-1];
+            let p1 = segment.points[i - 1];
             let p2 = segment.points[i];
             total_length += ((p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2)).sqrt();
         }
@@ -803,11 +890,12 @@ impl AdvancedDrcEngine {
     }
 
     /// Calculate layer statistics
-    fn calculate_layer_stats(&self,
-                            _placement: &Placement,
-                            routing: &RoutingResult,
-                            layer_stats: &mut HashMap<usize, LayerStats>) -> Result<(), AsicError> {
-
+    fn calculate_layer_stats(
+        &self,
+        _placement: &Placement,
+        routing: &RoutingResult,
+        layer_stats: &mut HashMap<usize, LayerStats>,
+    ) -> Result<(), AsicError> {
         for net in &routing.routed_nets {
             for segment in &net.segments {
                 let stats = layer_stats.entry(segment.layer).or_insert(LayerStats {
@@ -822,7 +910,9 @@ impl AdvancedDrcEngine {
                 stats.shape_count += 1;
                 let length = self.calculate_segment_length(segment);
                 stats.utilized_area += length * segment.width;
-                stats.avg_width = (stats.avg_width * (stats.shape_count - 1) as f64 + segment.width) / stats.shape_count as f64;
+                stats.avg_width = (stats.avg_width * (stats.shape_count - 1) as f64
+                    + segment.width)
+                    / stats.shape_count as f64;
             }
         }
 
@@ -837,7 +927,10 @@ impl AdvancedDrcEngine {
     }
 
     /// Generate optimization recommendations
-    fn generate_recommendations(&self, violations: &HashMap<ViolationType, Vec<DrcViolation>>) -> Result<Vec<DrcRecommendation>, AsicError> {
+    fn generate_recommendations(
+        &self,
+        violations: &HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> Result<Vec<DrcRecommendation>, AsicError> {
         let mut recommendations = Vec::new();
 
         // Analyze violation patterns and suggest fixes
@@ -858,7 +951,8 @@ impl AdvancedDrcEngine {
                 recommendations.push(DrcRecommendation {
                     rec_type: RecommendationType::FloorplanRevision,
                     priority: 8,
-                    description: "Multiple spacing violations indicate congested routing".to_string(),
+                    description: "Multiple spacing violations indicate congested routing"
+                        .to_string(),
                     impact: "Reduced crosstalk and improved signal integrity".to_string(),
                     effort: EffortLevel::Medium,
                 });
@@ -869,7 +963,10 @@ impl AdvancedDrcEngine {
     }
 
     /// Calculate severity statistics
-    fn calculate_severity_stats(&self, violations: &HashMap<ViolationType, Vec<DrcViolation>>) -> HashMap<ViolationSeverity, usize> {
+    fn calculate_severity_stats(
+        &self,
+        violations: &HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> HashMap<ViolationSeverity, usize> {
         let mut stats = HashMap::new();
 
         for violation_list in violations.values() {
@@ -882,7 +979,10 @@ impl AdvancedDrcEngine {
     }
 
     /// Calculate layer violation statistics
-    fn calculate_layer_violation_stats(&self, violations: &HashMap<ViolationType, Vec<DrcViolation>>) -> HashMap<usize, usize> {
+    fn calculate_layer_violation_stats(
+        &self,
+        violations: &HashMap<ViolationType, Vec<DrcViolation>>,
+    ) -> HashMap<usize, usize> {
         let mut stats = HashMap::new();
 
         for violation_list in violations.values() {
@@ -919,34 +1019,32 @@ impl AdvancedRuleSet {
     /// SKY130 specific rules
     fn sky130_rules() -> Self {
         Self {
-            metal_rules: vec![
-                MetalLayerRules {
-                    layer: 1,
-                    min_width: 0.14,
-                    min_spacing: 0.14,
-                    min_spacing_diff: 0.14,
-                    min_area: 0.083,
-                    max_width: None,
-                    slot_rules: SlotRules {
-                        enabled: true,
-                        max_length: 1.27,
-                        slot_width: 0.14,
-                        slot_spacing: 0.14,
-                    },
-                    eol_rules: EndOfLineRules {
-                        enabled: true,
-                        eol_spacing: 0.07,
-                        eol_length: 0.28,
-                        parallel_length: 0.14,
-                    },
-                    antenna_rules: AntennaRules {
-                        enabled: true,
-                        max_ratio: 5.0,
-                        max_cumulative_ratio: 5.0,
-                        gate_factor: 1.0,
-                    },
+            metal_rules: vec![MetalLayerRules {
+                layer: 1,
+                min_width: 0.14,
+                min_spacing: 0.14,
+                min_spacing_diff: 0.14,
+                min_area: 0.083,
+                max_width: None,
+                slot_rules: SlotRules {
+                    enabled: true,
+                    max_length: 1.27,
+                    slot_width: 0.14,
+                    slot_spacing: 0.14,
                 },
-            ],
+                eol_rules: EndOfLineRules {
+                    enabled: true,
+                    eol_spacing: 0.07,
+                    eol_length: 0.28,
+                    parallel_length: 0.14,
+                },
+                antenna_rules: AntennaRules {
+                    enabled: true,
+                    max_ratio: 5.0,
+                    max_cumulative_ratio: 5.0,
+                    gate_factor: 1.0,
+                },
+            }],
             via_rules: vec![],
             poly_rules: PolyRules {
                 min_width: 0.15,
@@ -1061,6 +1159,9 @@ pub struct DrcEngine {
 
 impl DrcEngine {
     pub fn new(technology: Technology, design_rules: DesignRules) -> Self {
-        Self { technology, design_rules }
+        Self {
+            technology,
+            design_rules,
+        }
     }
 }

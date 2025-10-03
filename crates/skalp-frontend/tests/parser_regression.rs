@@ -28,8 +28,12 @@ fn assert_parses(expr: &str) {
     let tree = parse(&source);
 
     // Verify the source file parsed
-    assert_eq!(tree.kind(), SyntaxKind::SourceFile,
-               "Should parse as SourceFile for expression: {}", expr);
+    assert_eq!(
+        tree.kind(),
+        SyntaxKind::SourceFile,
+        "Should parse as SourceFile for expression: {}",
+        expr
+    );
 
     // Check for any error nodes in the tree
     fn has_errors(node: &rowan::SyntaxNode<skalp_frontend::syntax::SkalplLanguage>) -> bool {
@@ -44,8 +48,11 @@ fn assert_parses(expr: &str) {
         false
     }
 
-    assert!(!has_errors(&tree),
-            "Expression should parse without errors: {}", expr);
+    assert!(
+        !has_errors(&tree),
+        "Expression should parse without errors: {}",
+        expr
+    );
 }
 
 /// Verify expression has expected root kind by parsing and inspecting structure
@@ -58,7 +65,10 @@ fn assert_expr_kind(expr: &str, expected: SyntaxKind) {
 
     // Navigate to find the expression
     // This is a simplified check - we just verify the tree contains the expected kind
-    fn find_kind(node: &rowan::SyntaxNode<skalp_frontend::syntax::SkalplLanguage>, target: SyntaxKind) -> bool {
+    fn find_kind(
+        node: &rowan::SyntaxNode<skalp_frontend::syntax::SkalplLanguage>,
+        target: SyntaxKind,
+    ) -> bool {
         if node.kind() == target {
             return true;
         }
@@ -70,8 +80,12 @@ fn assert_expr_kind(expr: &str, expected: SyntaxKind) {
         false
     }
 
-    assert!(find_kind(&tree, expected),
-            "Expression '{}' should contain {:?}", expr, expected);
+    assert!(
+        find_kind(&tree, expected),
+        "Expression '{}' should contain {:?}",
+        expr,
+        expected
+    );
 }
 
 // =============================================================================

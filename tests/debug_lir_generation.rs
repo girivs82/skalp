@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod debug_lir_tests {
     use skalp_frontend::parse_and_build_hir;
+    use skalp_lir::transform_mir_to_lir;
     use skalp_mir::lower_to_mir;
-    use skalp_lir::{transform_mir_to_lir};
 
     #[test]
     fn debug_lir_generation_detailed() {
@@ -28,7 +28,10 @@ mod debug_lir_tests {
             println!("Module: {}", module.name);
             println!("Ports ({}):", module.ports.len());
             for port in &module.ports {
-                println!("  - {} ({:?}, {:?})", port.name, port.direction, port.port_type);
+                println!(
+                    "  - {} ({:?}, {:?})",
+                    port.name, port.direction, port.port_type
+                );
             }
 
             println!("Assignments ({}):", module.assignments.len());
@@ -55,8 +58,10 @@ mod debug_lir_tests {
 
             println!("Nets ({}):", lir.nets.len());
             for (i, net) in lir.nets.iter().enumerate() {
-                println!("  Net {}: {} (width: {}, driver: {:?})",
-                        i, net.id, net.width, net.driver);
+                println!(
+                    "  Net {}: {} (width: {}, driver: {:?})",
+                    i, net.id, net.width, net.driver
+                );
                 println!("    Loads: {:?}", net.loads);
             }
 

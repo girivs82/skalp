@@ -54,16 +54,12 @@ impl TypeSubstitution {
                     ty.clone()
                 }
             }
-            Type::Array(elem, size) => {
-                Type::Array(Box::new(self.apply(elem)), *size)
-            }
-            Type::Generic(base, args) => {
-                Type::Generic(
-                    base.clone(),
-                    args.iter().map(|arg| self.apply(arg)).collect()
-                )
-            }
-            _ => ty.clone()
+            Type::Array(elem, size) => Type::Array(Box::new(self.apply(elem)), *size),
+            Type::Generic(base, args) => Type::Generic(
+                base.clone(),
+                args.iter().map(|arg| self.apply(arg)).collect(),
+            ),
+            _ => ty.clone(),
         }
     }
 }
@@ -107,7 +103,8 @@ impl TypeInference {
 
     /// Add a trait bound constraint
     pub fn constrain_trait(&mut self, type_param: String, trait_name: String) {
-        self.constraints.push(Constraint::TraitBound(type_param, trait_name));
+        self.constraints
+            .push(Constraint::TraitBound(type_param, trait_name));
     }
 
     /// Solve all constraints and return substitution
@@ -157,13 +154,11 @@ impl TypeInference {
                 Ok(Some((param.clone(), concrete.clone())))
             }
             (Type::Bit(w1), Type::Bit(w2)) if w1 == w2 => Ok(None),
-            (Type::Array(e1, s1), Type::Array(e2, s2)) if s1 == s2 => {
-                self.unify(e1, e2)
-            }
+            (Type::Array(e1, s1), Type::Array(e2, s2)) if s1 == s2 => self.unify(e1, e2),
             _ => Err(GenericError::TypeMismatch {
                 expected: format!("{:?}", t1),
                 actual: format!("{:?}", t2),
-            })
+            }),
         }
     }
 
@@ -192,7 +187,10 @@ pub struct Instantiator {
 
 impl Instantiator {
     pub fn new(generics: Vec<Generic>, type_args: Vec<Type>) -> Self {
-        Self { generics, type_args }
+        Self {
+            generics,
+            type_args,
+        }
     }
 
     /// Create substitution from generic parameters and arguments
@@ -275,10 +273,7 @@ mod tests {
     #[test]
     fn test_type_inference() {
         let mut inf = TypeInference::new();
-        inf.constrain_equal(
-            Type::Named("T".to_string()),
-            Type::Bit(Some(16))
-        );
+        inf.constrain_equal(Type::Named("T".to_string()), Type::Bit(Some(16)));
 
         let substitution = inf.solve().unwrap();
         assert!(substitution.types.contains_key("T"));
@@ -297,10 +292,7 @@ mod tests {
             },
         ];
 
-        let type_args = vec![
-            Type::Bit(Some(8)),
-            Type::Bit(Some(32)),
-        ];
+        let type_args = vec![Type::Bit(Some(8)), Type::Bit(Some(32))];
 
         let inst = Instantiator::new(generics, type_args);
         let substitution = inst.create_substitution().unwrap();

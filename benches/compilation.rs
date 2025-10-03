@@ -1,6 +1,6 @@
 //! Compilation performance benchmarks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
 
 fn benchmark_lexing(c: &mut Criterion) {
@@ -12,18 +12,14 @@ fn benchmark_lexing(c: &mut Criterion) {
     let mut group = c.benchmark_group("lexing");
 
     for (name, source) in sources {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(name),
-            &source,
-            |b, source| {
-                use skalp_frontend::lexer::Lexer;
-                b.iter(|| {
-                    let mut lexer = Lexer::new(source);
-                    let tokens = lexer.tokenize();
-                    black_box(tokens.len())
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(name), &source, |b, source| {
+            use skalp_frontend::lexer::Lexer;
+            b.iter(|| {
+                let mut lexer = Lexer::new(source);
+                let tokens = lexer.tokenize();
+                black_box(tokens.len())
+            });
+        });
     }
     group.finish();
 }
@@ -37,18 +33,14 @@ fn benchmark_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("parsing");
 
     for (name, source) in sources {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(name),
-            &source,
-            |b, source| {
-                use skalp_frontend::parser::Parser;
-                b.iter(|| {
-                    let mut parser = Parser::new(source);
-                    let ast = parser.parse();
-                    black_box(ast.is_ok())
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(name), &source, |b, source| {
+            use skalp_frontend::parser::Parser;
+            b.iter(|| {
+                let mut parser = Parser::new(source);
+                let ast = parser.parse();
+                black_box(ast.is_ok())
+            });
+        });
     }
     group.finish();
 }
@@ -95,35 +87,31 @@ fn benchmark_end_to_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("end_to_end");
 
     for (name, source) in sources {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(name),
-            &source,
-            |b, source| {
-                use skalp_frontend::parser::Parser;
-                b.iter(|| {
-                    // Parse the source
-                    let mut parser = Parser::new(source);
-                    let result = parser.parse();
+        group.bench_with_input(BenchmarkId::from_parameter(name), &source, |b, source| {
+            use skalp_frontend::parser::Parser;
+            b.iter(|| {
+                // Parse the source
+                let mut parser = Parser::new(source);
+                let result = parser.parse();
 
-                    // Simulate rest of compilation pipeline
-                    if result.is_ok() {
-                        // Simulate HIR generation
-                        for _ in 0..10 {
-                            black_box(format!("node_{}", 1));
-                        }
-
-                        // Simulate code generation
-                        let mut output = String::new();
-                        for i in 0..20 {
-                            output.push_str(&format!("wire sig_{};\n", i));
-                        }
-                        black_box(output.len())
-                    } else {
-                        black_box(0)
+                // Simulate rest of compilation pipeline
+                if result.is_ok() {
+                    // Simulate HIR generation
+                    for _ in 0..10 {
+                        black_box(format!("node_{}", 1));
                     }
-                });
-            },
-        );
+
+                    // Simulate code generation
+                    let mut output = String::new();
+                    for i in 0..20 {
+                        output.push_str(&format!("wire sig_{};\n", i));
+                    }
+                    black_box(output.len())
+                } else {
+                    black_box(0)
+                }
+            });
+        });
     }
 
     group.finish();

@@ -47,7 +47,11 @@ impl DeadCodeElimination {
             Expression::Unary { operand, .. } => {
                 self.mark_used_in_expression(operand);
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 self.mark_used_in_expression(cond);
                 self.mark_used_in_expression(then_expr);
                 self.mark_used_in_expression(else_expr);
@@ -125,7 +129,12 @@ impl DeadCodeElimination {
             }
             Statement::Loop(loop_stmt) => {
                 match loop_stmt {
-                    LoopStatement::For { init, condition, update, body } => {
+                    LoopStatement::For {
+                        init,
+                        condition,
+                        update,
+                        body,
+                    } => {
                         // Mark init assignment as used
                         self.mark_used_in_expression(&init.rhs);
 
@@ -165,16 +174,16 @@ impl DeadCodeElimination {
 
     /// Remove unused signals from a module
     fn remove_unused_signals(&self, module: &mut Module) {
-        module.signals.retain(|signal| {
-            self.used_signals.contains(&signal.id)
-        });
+        module
+            .signals
+            .retain(|signal| self.used_signals.contains(&signal.id));
     }
 
     /// Remove unused variables from a module
     fn remove_unused_variables(&self, module: &mut Module) {
-        module.variables.retain(|var| {
-            self.used_variables.contains(&var.id)
-        });
+        module
+            .variables
+            .retain(|var| self.used_variables.contains(&var.id));
     }
 }
 
@@ -237,7 +246,12 @@ impl ConstantFolding {
     }
 
     /// Try to fold a binary expression
-    fn fold_binary(&self, op: &BinaryOp, left: &Expression, right: &Expression) -> Option<Expression> {
+    fn fold_binary(
+        &self,
+        op: &BinaryOp,
+        left: &Expression,
+        right: &Expression,
+    ) -> Option<Expression> {
         match (left, right) {
             (Expression::Literal(Value::Integer(l)), Expression::Literal(Value::Integer(r))) => {
                 let result = match op {
@@ -259,14 +273,12 @@ impl ConstantFolding {
     /// Try to fold a unary expression
     fn fold_unary(&self, op: &UnaryOp, operand: &Expression) -> Option<Expression> {
         match operand {
-            Expression::Literal(Value::Integer(n)) => {
-                match op {
-                    UnaryOp::Negate => Some(Expression::Literal(Value::Integer(-n))),
-                    UnaryOp::Not if *n == 0 => Some(Expression::Literal(Value::Integer(1))),
-                    UnaryOp::Not => Some(Expression::Literal(Value::Integer(0))),
-                    _ => None,
-                }
-            }
+            Expression::Literal(Value::Integer(n)) => match op {
+                UnaryOp::Negate => Some(Expression::Literal(Value::Integer(-n))),
+                UnaryOp::Not if *n == 0 => Some(Expression::Literal(Value::Integer(1))),
+                UnaryOp::Not => Some(Expression::Literal(Value::Integer(0))),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -293,7 +305,11 @@ impl ConstantFolding {
                     *expr = folded;
                 }
             }
-            Expression::Conditional { cond, then_expr, else_expr } => {
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 self.fold_expression(cond);
                 self.fold_expression(then_expr);
                 self.fold_expression(else_expr);

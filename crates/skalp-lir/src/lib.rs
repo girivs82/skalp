@@ -20,14 +20,16 @@ pub mod technology;
 pub mod technology_mapping;
 pub mod timing;
 
-pub use lir::{Gate, GateType, Lir, Net, LirDesign, LirModule, LirSignal};
+pub use lir::{Gate, GateType, Lir, LirDesign, LirModule, LirSignal, Net};
 pub use mir_to_lir::transform_mir_to_lir;
-pub use optimization::{OptimizationPipeline, OptimizationResult};
 pub use netlist::Netlist;
-pub use technology_mapping::{TechnologyMapper, TechnologyTarget, TechnologyMappingResult, ResourceUsage};
+pub use optimization::{OptimizationPipeline, OptimizationResult};
+pub use technology_mapping::{
+    ResourceUsage, TechnologyMapper, TechnologyMappingResult, TechnologyTarget,
+};
 
-use skalp_mir::Mir;
 use anyhow::Result;
+use skalp_mir::Mir;
 
 /// Lower MIR to LIR
 pub fn lower_to_lir(mir: &Mir) -> Result<LirDesign> {
@@ -83,8 +85,7 @@ pub fn lower_to_lir(mir: &Mir) -> Result<LirDesign> {
         });
     }
 
-    if !lir_modules.is_empty() {
-    }
+    if !lir_modules.is_empty() {}
 
     Ok(LirDesign {
         name: mir.name.clone(),

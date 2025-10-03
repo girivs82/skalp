@@ -4,9 +4,9 @@
 
 use crate::AsicError;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::fs::File;
-use std::io::{Write, BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 
 /// SDC constraint manager
 pub struct SDCManager {
@@ -340,7 +340,8 @@ impl SDCManager {
         let mut line_num = 0;
         for line in reader.lines() {
             line_num += 1;
-            let line = line.map_err(|e| AsicError::TechnologyError(format!("Read error: {}", e)))?;
+            let line =
+                line.map_err(|e| AsicError::TechnologyError(format!("Read error: {}", e)))?;
 
             // Skip comments and empty lines
             let line = line.trim();
@@ -399,14 +400,14 @@ impl SDCManager {
                     if i < args.len() {
                         name = args[i].to_string();
                     }
-                },
+                }
                 "-period" => {
                     i += 1;
                     if i < args.len() {
                         period = args[i].parse().unwrap_or(0.0);
                         waveform[1] = period / 2.0;
                     }
-                },
+                }
                 "-waveform" => {
                     i += 1;
                     if i + 1 < args.len() {
@@ -414,7 +415,7 @@ impl SDCManager {
                         waveform[1] = args[i + 1].parse().unwrap_or(period / 2.0);
                         i += 1;
                     }
-                },
+                }
                 _ => {
                     if !args[i].starts_with('-') {
                         source = args[i].to_string();
@@ -460,30 +461,38 @@ impl SDCManager {
                     if i + 1 < args.len() {
                         name = args[i + 1].to_string();
                         i += 2;
-                    } else { i += 1; }
-                },
+                    } else {
+                        i += 1;
+                    }
+                }
                 "-source" => {
                     if i + 1 < args.len() {
                         master_pin = args[i + 1].to_string();
                         i += 2;
-                    } else { i += 1; }
-                },
+                    } else {
+                        i += 1;
+                    }
+                }
                 "-divide_by" => {
                     if i + 1 < args.len() && args[i + 1].parse::<u32>().is_ok() {
                         divide_by = Some(args[i + 1].parse().unwrap());
                         i += 2;
-                    } else { i += 1; }
-                },
+                    } else {
+                        i += 1;
+                    }
+                }
                 "-multiply_by" => {
                     if i + 1 < args.len() && args[i + 1].parse::<u32>().is_ok() {
                         multiply_by = Some(args[i + 1].parse().unwrap());
                         i += 2;
-                    } else { i += 1; }
-                },
+                    } else {
+                        i += 1;
+                    }
+                }
                 "-invert" => {
                     invert = true;
                     i += 1;
-                },
+                }
                 _ => {
                     if source.is_empty() {
                         source = args[i].to_string();
@@ -526,11 +535,11 @@ impl SDCManager {
                     } else {
                         return Err(AsicError::TechnologyError("Missing clock name".to_string()));
                     }
-                },
+                }
                 arg if arg.parse::<f64>().is_ok() => {
                     delay = arg.parse().unwrap();
                     i += 1;
-                },
+                }
                 _ if args[i].starts_with("[get_ports") => {
                     // Extract port name from [get_ports {port_name}]
                     if i + 1 < args.len() {
@@ -539,7 +548,7 @@ impl SDCManager {
                     } else {
                         i += 1;
                     }
-                },
+                }
                 _ => i += 1,
             }
         }
@@ -575,11 +584,11 @@ impl SDCManager {
                     } else {
                         return Err(AsicError::TechnologyError("Missing clock name".to_string()));
                     }
-                },
+                }
                 arg if arg.parse::<f64>().is_ok() => {
                     delay = arg.parse().unwrap();
                     i += 1;
-                },
+                }
                 _ if args[i].starts_with("[get_ports") => {
                     // Extract port name from [get_ports {port_name}]
                     if i + 1 < args.len() {
@@ -588,7 +597,7 @@ impl SDCManager {
                     } else {
                         i += 1;
                     }
-                },
+                }
                 _ => i += 1,
             }
         }
@@ -623,7 +632,7 @@ impl SDCManager {
                         i += 1;
                     }
                     i -= 1;
-                },
+                }
                 "-through" => {
                     i += 1;
                     while i < args.len() && !args[i].starts_with('-') {
@@ -631,7 +640,7 @@ impl SDCManager {
                         i += 1;
                     }
                     i -= 1;
-                },
+                }
                 "-to" => {
                     i += 1;
                     while i < args.len() && !args[i].starts_with('-') {
@@ -639,7 +648,7 @@ impl SDCManager {
                         i += 1;
                     }
                     i -= 1;
-                },
+                }
                 _ => {}
             }
             i += 1;
@@ -694,7 +703,8 @@ impl SDCManager {
 
     fn parse_variable(&mut self, args: &[&str]) -> Result<(), AsicError> {
         if args.len() >= 2 {
-            self.variables.insert(args[0].to_string(), args[1].to_string());
+            self.variables
+                .insert(args[0].to_string(), args[1].to_string());
         }
         Ok(())
     }
@@ -705,39 +715,70 @@ impl SDCManager {
             .map_err(|e| AsicError::TechnologyError(format!("Failed to create SDC: {}", e)))?;
 
         writeln!(file, "# SDC Constraints Generated by SKALP")?;
-        writeln!(file, "# Date: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))?;
+        writeln!(
+            file,
+            "# Date: {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        )?;
         writeln!(file)?;
 
         // Write operating conditions
         writeln!(file, "# Operating Conditions")?;
-        writeln!(file, "set_operating_conditions -library {} \\",
-                self.operating_conditions.library.as_ref().unwrap_or(&"default".to_string()))?;
-        writeln!(file, "  -process {:?} -voltage {} -temperature {}",
-                self.operating_conditions.process,
-                self.operating_conditions.voltage,
-                self.operating_conditions.temperature)?;
+        writeln!(
+            file,
+            "set_operating_conditions -library {} \\",
+            self.operating_conditions
+                .library
+                .as_ref()
+                .unwrap_or(&"default".to_string())
+        )?;
+        writeln!(
+            file,
+            "  -process {:?} -voltage {} -temperature {}",
+            self.operating_conditions.process,
+            self.operating_conditions.voltage,
+            self.operating_conditions.temperature
+        )?;
         writeln!(file)?;
 
         // Write clocks
         writeln!(file, "# Clock Definitions")?;
         for clock in &self.clocks {
-            writeln!(file, "create_clock -name {} -period {:.3} \\",
-                    clock.name, clock.period)?;
-            writeln!(file, "  -waveform {{{:.3} {:.3}}} [get_ports {}]",
-                    clock.waveform[0], clock.waveform[1], clock.source)?;
+            writeln!(
+                file,
+                "create_clock -name {} -period {:.3} \\",
+                clock.name, clock.period
+            )?;
+            writeln!(
+                file,
+                "  -waveform {{{:.3} {:.3}}} [get_ports {}]",
+                clock.waveform[0], clock.waveform[1], clock.source
+            )?;
 
             if let Some(ref unc) = clock.uncertainty {
-                writeln!(file, "set_clock_uncertainty -setup {:.3} [get_clocks {}]",
-                        unc.setup, clock.name)?;
-                writeln!(file, "set_clock_uncertainty -hold {:.3} [get_clocks {}]",
-                        unc.hold, clock.name)?;
+                writeln!(
+                    file,
+                    "set_clock_uncertainty -setup {:.3} [get_clocks {}]",
+                    unc.setup, clock.name
+                )?;
+                writeln!(
+                    file,
+                    "set_clock_uncertainty -hold {:.3} [get_clocks {}]",
+                    unc.hold, clock.name
+                )?;
             }
 
             if let Some(ref lat) = clock.latency {
-                writeln!(file, "set_clock_latency -source {:.3} [get_clocks {}]",
-                        lat.source, clock.name)?;
-                writeln!(file, "set_clock_latency {:.3} [get_clocks {}]",
-                        lat.network, clock.name)?;
+                writeln!(
+                    file,
+                    "set_clock_latency -source {:.3} [get_clocks {}]",
+                    lat.source, clock.name
+                )?;
+                writeln!(
+                    file,
+                    "set_clock_latency {:.3} [get_clocks {}]",
+                    lat.network, clock.name
+                )?;
             }
         }
         writeln!(file)?;
@@ -757,8 +798,11 @@ impl SDCManager {
                     write!(file, "-invert ")?;
                 }
                 writeln!(file, "-source {} \\", gclock.master_pin)?;
-                writeln!(file, "  -master_clock {} [get_pins {}]",
-                        gclock.master_clock, gclock.source)?;
+                writeln!(
+                    file,
+                    "  -master_clock {} [get_pins {}]",
+                    gclock.master_clock, gclock.source
+                )?;
             }
             writeln!(file)?;
         }
@@ -767,8 +811,11 @@ impl SDCManager {
         if !self.input_delays.is_empty() {
             writeln!(file, "# Input Delays")?;
             for delay in &self.input_delays {
-                writeln!(file, "set_input_delay {:.3} -clock {} [get_ports {}]",
-                        delay.delay, delay.clock, delay.port)?;
+                writeln!(
+                    file,
+                    "set_input_delay {:.3} -clock {} [get_ports {}]",
+                    delay.delay, delay.clock, delay.port
+                )?;
             }
             writeln!(file)?;
         }
@@ -777,8 +824,11 @@ impl SDCManager {
         if !self.output_delays.is_empty() {
             writeln!(file, "# Output Delays")?;
             for delay in &self.output_delays {
-                writeln!(file, "set_output_delay {:.3} -clock {} [get_ports {}]",
-                        delay.delay, delay.clock, delay.port)?;
+                writeln!(
+                    file,
+                    "set_output_delay {:.3} -clock {} [get_ports {}]",
+                    delay.delay, delay.clock, delay.port
+                )?;
             }
             writeln!(file)?;
         }
@@ -877,20 +927,35 @@ impl SDCManager {
 
         summary.push_str("=== SDC Constraint Summary ===\n\n");
         summary.push_str(&format!("Clocks: {}\n", self.clocks.len()));
-        summary.push_str(&format!("Generated Clocks: {}\n", self.generated_clocks.len()));
+        summary.push_str(&format!(
+            "Generated Clocks: {}\n",
+            self.generated_clocks.len()
+        ));
         summary.push_str(&format!("Input Delays: {}\n", self.input_delays.len()));
         summary.push_str(&format!("Output Delays: {}\n", self.output_delays.len()));
         summary.push_str(&format!("False Paths: {}\n", self.false_paths.len()));
-        summary.push_str(&format!("Multicycle Paths: {}\n", self.multicycle_paths.len()));
-        summary.push_str(&format!("Max Delay Constraints: {}\n", self.max_delays.len()));
-        summary.push_str(&format!("Min Delay Constraints: {}\n", self.min_delays.len()));
+        summary.push_str(&format!(
+            "Multicycle Paths: {}\n",
+            self.multicycle_paths.len()
+        ));
+        summary.push_str(&format!(
+            "Max Delay Constraints: {}\n",
+            self.max_delays.len()
+        ));
+        summary.push_str(&format!(
+            "Min Delay Constraints: {}\n",
+            self.min_delays.len()
+        ));
 
         if !self.clocks.is_empty() {
             summary.push_str("\nClock Details:\n");
             for clock in &self.clocks {
-                summary.push_str(&format!("  {} : {:.3} ns ({:.1} MHz)\n",
-                                        clock.name, clock.period,
-                                        1000.0 / clock.period));
+                summary.push_str(&format!(
+                    "  {} : {:.3} ns ({:.1} MHz)\n",
+                    clock.name,
+                    clock.period,
+                    1000.0 / clock.period
+                ));
             }
         }
 

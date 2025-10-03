@@ -8,12 +8,12 @@
 //! - Property verification
 //! - Assertion generation
 
-pub mod property;
-pub mod model_checker;
-pub mod smt;
-pub mod temporal;
 pub mod assertions;
 pub mod bmc;
+pub mod model_checker;
+pub mod property;
+pub mod smt;
+pub mod temporal;
 
 use skalp_frontend::ast::Item;
 use skalp_lir::LirDesign;
@@ -183,7 +183,10 @@ impl VerificationResults {
                 self.status = VerificationStatus::SomeFailed;
             }
             PropertyStatus::Unknown | PropertyStatus::Timeout => {
-                if !matches!(self.status, VerificationStatus::SomeFailed | VerificationStatus::Error) {
+                if !matches!(
+                    self.status,
+                    VerificationStatus::SomeFailed | VerificationStatus::Error
+                ) {
                     self.status = VerificationStatus::AllUnknown;
                 }
             }
@@ -197,16 +200,24 @@ impl VerificationResults {
     /// Get summary of results
     pub fn summary(&self) -> String {
         let total = self.results.len();
-        let passed = self.results.iter()
+        let passed = self
+            .results
+            .iter()
             .filter(|r| matches!(r.status, PropertyStatus::Verified))
             .count();
-        let failed = self.results.iter()
+        let failed = self
+            .results
+            .iter()
             .filter(|r| matches!(r.status, PropertyStatus::Violated))
             .count();
-        let unknown = self.results.iter()
+        let unknown = self
+            .results
+            .iter()
             .filter(|r| matches!(r.status, PropertyStatus::Unknown | PropertyStatus::Timeout))
             .count();
-        let errors = self.results.iter()
+        let errors = self
+            .results
+            .iter()
             .filter(|r| matches!(r.status, PropertyStatus::Error(_)))
             .count();
 
@@ -226,10 +237,8 @@ mod tests {
         let mut engine = FormalEngine::new();
 
         // Add a simple safety property
-        let property = property::Property::safety(
-            "no_overflow".to_string(),
-            "counter < 256".to_string(),
-        );
+        let property =
+            property::Property::safety("no_overflow".to_string(), "counter < 256".to_string());
         engine.add_property(property);
 
         // This would normally verify against a real design

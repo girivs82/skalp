@@ -4,7 +4,7 @@ mod range_debug_tests {
 
     #[test]
     fn test_range_parsing() {
-    let simple_source = r#"
+        let simple_source = r#"
         entity TestRange {
             in clk: clock
             out result: nat[8]
@@ -25,19 +25,22 @@ mod range_debug_tests {
         }
     "#;
 
-    println!("=== Testing range parsing ===");
-    let hir = parse_and_build_hir(simple_source).expect("Failed to parse");
+        println!("=== Testing range parsing ===");
+        let hir = parse_and_build_hir(simple_source).expect("Failed to parse");
 
-    println!("=== HIR Event Block Assignments ===");
-    for implementation in &hir.implementations {
-        for event_block in &implementation.event_blocks {
-            println!("Event block has {} statements", event_block.statements.len());
-            for stmt in &event_block.statements {
-                if let skalp_frontend::hir::HirStatement::Assignment(assign) = stmt {
-                    println!("Assignment: {:?} <= {:?}", assign.lhs, assign.rhs);
+        println!("=== HIR Event Block Assignments ===");
+        for implementation in &hir.implementations {
+            for event_block in &implementation.event_blocks {
+                println!(
+                    "Event block has {} statements",
+                    event_block.statements.len()
+                );
+                for stmt in &event_block.statements {
+                    if let skalp_frontend::hir::HirStatement::Assignment(assign) = stmt {
+                        println!("Assignment: {:?} <= {:?}", assign.lhs, assign.rhs);
+                    }
                 }
             }
         }
-    }
     }
 }

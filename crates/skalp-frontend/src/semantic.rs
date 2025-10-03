@@ -84,10 +84,7 @@ pub struct SemanticResult {
 #[derive(Debug, Clone)]
 pub enum SemanticError {
     /// Undefined symbol
-    UndefinedSymbol {
-        name: String,
-        position: usize,
-    },
+    UndefinedSymbol { name: String, position: usize },
     /// Type mismatch
     TypeMismatch {
         expected: Type,
@@ -101,24 +98,16 @@ pub enum SemanticError {
         second_position: usize,
     },
     /// Invalid assignment
-    InvalidAssignment {
-        message: String,
-        position: usize,
-    },
+    InvalidAssignment { message: String, position: usize },
 }
 
 /// Semantic warnings
 #[derive(Debug, Clone)]
 pub enum SemanticWarning {
     /// Unused symbol
-    UnusedSymbol {
-        name: String,
-        position: usize,
-    },
+    UnusedSymbol { name: String, position: usize },
     /// Dead code
-    DeadCode {
-        position: usize,
-    },
+    DeadCode { position: usize },
 }
 
 impl SemanticAnalyzer {
@@ -264,14 +253,34 @@ impl std::fmt::Display for SemanticError {
             SemanticError::UndefinedSymbol { name, position } => {
                 write!(f, "Undefined symbol '{}' at position {}", name, position)
             }
-            SemanticError::TypeMismatch { expected, found, position } => {
-                write!(f, "Type mismatch at position {}: expected {:?}, found {:?}", position, expected, found)
+            SemanticError::TypeMismatch {
+                expected,
+                found,
+                position,
+            } => {
+                write!(
+                    f,
+                    "Type mismatch at position {}: expected {:?}, found {:?}",
+                    position, expected, found
+                )
             }
-            SemanticError::DuplicateDefinition { name, first_position, second_position } => {
-                write!(f, "Duplicate definition of '{}': first at {}, second at {}", name, first_position, second_position)
+            SemanticError::DuplicateDefinition {
+                name,
+                first_position,
+                second_position,
+            } => {
+                write!(
+                    f,
+                    "Duplicate definition of '{}': first at {}, second at {}",
+                    name, first_position, second_position
+                )
             }
             SemanticError::InvalidAssignment { message, position } => {
-                write!(f, "Invalid assignment at position {}: {}", position, message)
+                write!(
+                    f,
+                    "Invalid assignment at position {}: {}",
+                    position, message
+                )
             }
         }
     }

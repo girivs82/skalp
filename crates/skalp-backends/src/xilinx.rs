@@ -1,11 +1,11 @@
 //! Xilinx Vivado backend for SKALP
 
 use crate::{Backend, BackendError, BackendResult, SynthesisConfig, SynthesisResults};
-use skalp_lir::LirDesign;
 use async_trait::async_trait;
-use std::process::Command;
+use skalp_lir::LirDesign;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 
 /// Xilinx Vivado backend
@@ -125,14 +125,19 @@ impl XilinxBackend {
 
         // Set top module
         if let Some(top) = lir.modules.first() {
-            tcl.push_str(&format!("set_property top {} [current_fileset]\n\n", top.name));
+            tcl.push_str(&format!(
+                "set_property top {} [current_fileset]\n\n",
+                top.name
+            ));
         }
 
         // Synthesis settings based on strategy
         tcl.push_str("# Synthesis settings\n");
         match self.strategy {
             SynthesisStrategy::Performance => {
-                tcl.push_str("set_property strategy Performance_ExploreWithRemap [get_runs synth_1]\n");
+                tcl.push_str(
+                    "set_property strategy Performance_ExploreWithRemap [get_runs synth_1]\n",
+                );
             }
             SynthesisStrategy::Area => {
                 tcl.push_str("set_property strategy Area_OptimizedRegBalance [get_runs synth_1]\n");
@@ -141,7 +146,9 @@ impl XilinxBackend {
                 tcl.push_str("set_property strategy Power_DefaultOpt [get_runs synth_1]\n");
             }
             SynthesisStrategy::HighEffort => {
-                tcl.push_str("set_property strategy Performance_ExtraTimingOpt [get_runs synth_1]\n");
+                tcl.push_str(
+                    "set_property strategy Performance_ExtraTimingOpt [get_runs synth_1]\n",
+                );
                 tcl.push_str("set_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE ExtraNetDelay [get_runs synth_1]\n");
             }
             _ => {}
@@ -156,7 +163,9 @@ impl XilinxBackend {
         tcl.push_str("# Implementation settings\n");
         match self.strategy {
             SynthesisStrategy::Performance => {
-                tcl.push_str("set_property strategy Performance_ExtraTimingOpt [get_runs impl_1]\n");
+                tcl.push_str(
+                    "set_property strategy Performance_ExtraTimingOpt [get_runs impl_1]\n",
+                );
             }
             SynthesisStrategy::Area => {
                 tcl.push_str("set_property strategy Area_Explore [get_runs impl_1]\n");
@@ -218,7 +227,7 @@ impl XilinxBackend {
 
         if !output.status.success() {
             return Err(BackendError::ToolFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
@@ -231,8 +240,7 @@ impl XilinxBackend {
         // Parse utilization report
         let util_report = output_dir.join("utilization.rpt");
         if util_report.exists() {
-            let content = fs::read_to_string(&util_report)
-                .map_err(|e| BackendError::IoError(e))?;
+            let content = fs::read_to_string(&util_report).map_err(|e| BackendError::IoError(e))?;
 
             // Extract resource usage (simplified parsing)
             if let Some(lut_line) = content.lines().find(|l| l.contains("Slice LUTs")) {
@@ -250,8 +258,8 @@ impl XilinxBackend {
         // Parse timing report
         let timing_report = output_dir.join("timing.rpt");
         if timing_report.exists() {
-            let content = fs::read_to_string(&timing_report)
-                .map_err(|e| BackendError::IoError(e))?;
+            let content =
+                fs::read_to_string(&timing_report).map_err(|e| BackendError::IoError(e))?;
 
             // Extract max frequency (simplified parsing)
             if let Some(wns_line) = content.lines().find(|l| l.contains("WNS(ns)")) {
@@ -269,8 +277,8 @@ impl XilinxBackend {
         // Parse power report
         let power_report = output_dir.join("power.rpt");
         if power_report.exists() {
-            let content = fs::read_to_string(&power_report)
-                .map_err(|e| BackendError::IoError(e))?;
+            let content =
+                fs::read_to_string(&power_report).map_err(|e| BackendError::IoError(e))?;
 
             // Extract total power (simplified parsing)
             if let Some(power_line) = content.lines().find(|l| l.contains("Total On-Chip Power")) {
@@ -302,23 +310,20 @@ impl Backend for XilinxBackend {
         _config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temp directory for synthesis
-        let temp_dir = TempDir::new()
-            .map_err(|e| BackendError::IoError(e))?;
+        let temp_dir = TempDir::new().map_err(|e| BackendError::IoError(e))?;
         let work_dir = temp_dir.path();
 
         // Generate Verilog files
         for module in &lir.modules {
             let verilog = crate::verilog::generate_verilog(module)?;
             let file_path = work_dir.join(&format!("{}.v", module.name));
-            fs::write(&file_path, verilog)
-                .map_err(|e| BackendError::IoError(e))?;
+            fs::write(&file_path, verilog).map_err(|e| BackendError::IoError(e))?;
         }
 
         // Generate TCL script
         let tcl_content = self.generate_tcl(lir, work_dir)?;
         let tcl_file = work_dir.join("synthesis.tcl");
-        fs::write(&tcl_file, tcl_content)
-            .map_err(|e| BackendError::IoError(e))?;
+        fs::write(&tcl_file, tcl_content).map_err(|e| BackendError::IoError(e))?;
 
         // Run Vivado
         let output = self.run_vivado(&tcl_file).await?;
@@ -350,7 +355,7 @@ impl Backend for XilinxBackend {
         // Check if Vivado is available
         if !self.vivado_path.exists() && self.vivado_path != PathBuf::from("vivado") {
             return Err(BackendError::ToolNotFound(
-                "Vivado not found. Please install Xilinx Vivado.".to_string()
+                "Vivado not found. Please install Xilinx Vivado.".to_string(),
             ));
         }
 
@@ -358,10 +363,12 @@ impl Backend for XilinxBackend {
     }
 
     fn supported_targets(&self) -> Vec<crate::TargetPlatform> {
-        vec![crate::TargetPlatform::Fpga(crate::FpgaTarget::Xilinx7Series {
-            part: self.get_device_part().to_string(),
-            package: "ffg1761".to_string(),
-        })]
+        vec![crate::TargetPlatform::Fpga(
+            crate::FpgaTarget::Xilinx7Series {
+                part: self.get_device_part().to_string(),
+                package: "ffg1761".to_string(),
+            },
+        )]
     }
 
     fn validate_config(&self, _config: &SynthesisConfig) -> BackendResult<()> {
@@ -389,7 +396,11 @@ pub enum XdcConstraint {
     /// False path
     FalsePath { from: String, to: String },
     /// Multi-cycle path
-    MultiCyclePath { from: String, to: String, cycles: u32 },
+    MultiCyclePath {
+        from: String,
+        to: String,
+        cycles: u32,
+    },
 }
 
 impl XdcGenerator {
@@ -410,16 +421,28 @@ impl XdcGenerator {
         for constraint in &self.constraints {
             match constraint {
                 XdcConstraint::PinLocation { port, pin } => {
-                    xdc.push_str(&format!("set_property PACKAGE_PIN {} [get_ports {{{}}}]\n", pin, port));
+                    xdc.push_str(&format!(
+                        "set_property PACKAGE_PIN {} [get_ports {{{}}}]\n",
+                        pin, port
+                    ));
                 }
                 XdcConstraint::IoStandard { port, standard } => {
-                    xdc.push_str(&format!("set_property IOSTANDARD {} [get_ports {{{}}}]\n", standard, port));
+                    xdc.push_str(&format!(
+                        "set_property IOSTANDARD {} [get_ports {{{}}}]\n",
+                        standard, port
+                    ));
                 }
                 XdcConstraint::Clock { port, period_ns } => {
-                    xdc.push_str(&format!("create_clock -period {} [get_ports {{{}}}]\n", period_ns, port));
+                    xdc.push_str(&format!(
+                        "create_clock -period {} [get_ports {{{}}}]\n",
+                        period_ns, port
+                    ));
                 }
                 XdcConstraint::FalsePath { from, to } => {
-                    xdc.push_str(&format!("set_false_path -from [get_pins {{{}}}] -to [get_pins {{{}}}]\n", from, to));
+                    xdc.push_str(&format!(
+                        "set_false_path -from [get_pins {{{}}}] -to [get_pins {{{}}}]\n",
+                        from, to
+                    ));
                 }
                 XdcConstraint::MultiCyclePath { from, to, cycles } => {
                     xdc.push_str(&format!(

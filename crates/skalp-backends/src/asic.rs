@@ -3,16 +3,16 @@
 //! Provides synthesis support for ASIC targets using standard cell libraries.
 
 use crate::{
-    Backend, BackendError, BackendResult, AsicTarget, SynthesisConfig,
-    SynthesisResults, TargetPlatform,
+    AsicTarget, Backend, BackendError, BackendResult, SynthesisConfig, SynthesisResults,
+    TargetPlatform,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tempfile::TempDir;
 
+pub mod freepdk45;
 pub mod generic;
 pub mod sky130;
-pub mod freepdk45;
 
 /// ASIC-specific synthesis configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,17 +73,29 @@ impl AsicBackend {
     }
 
     /// Run ASIC synthesis flow
-    async fn run_asic_synthesis(&self, verilog: &str, temp_dir: &Path) -> BackendResult<SynthesisResults> {
+    async fn run_asic_synthesis(
+        &self,
+        verilog: &str,
+        temp_dir: &Path,
+    ) -> BackendResult<SynthesisResults> {
         match &self.target {
-            AsicTarget::Generic { library_name, process_node } => {
-                generic::synthesize_generic(verilog, library_name, process_node, temp_dir, &self.config).await
+            AsicTarget::Generic {
+                library_name,
+                process_node,
+            } => {
+                generic::synthesize_generic(
+                    verilog,
+                    library_name,
+                    process_node,
+                    temp_dir,
+                    &self.config,
+                )
+                .await
             }
             AsicTarget::FreePdk45 => {
                 freepdk45::synthesize_freepdk45(verilog, temp_dir, &self.config).await
             }
-            AsicTarget::Sky130 => {
-                sky130::synthesize_sky130(verilog, temp_dir, &self.config).await
-            }
+            AsicTarget::Sky130 => sky130::synthesize_sky130(verilog, temp_dir, &self.config).await,
         }
     }
 }
@@ -123,15 +135,11 @@ impl Backend for AsicBackend {
         match &config.target {
             TargetPlatform::Asic(asic_target) => {
                 if asic_target != &self.target {
-                    return Err(BackendError::AsicError(
-                        "Target mismatch".to_string()
-                    ));
+                    return Err(BackendError::AsicError("Target mismatch".to_string()));
                 }
                 Ok(())
             }
-            _ => Err(BackendError::AsicError(
-                "Not an ASIC target".to_string()
-            )),
+            _ => Err(BackendError::AsicError("Not an ASIC target".to_string())),
         }
     }
 

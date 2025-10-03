@@ -184,8 +184,8 @@ pub enum HirEdgeType {
     Rising,
     Falling,
     Both,
-    Active,    // For reset.active (active level)
-    Inactive,  // For reset.inactive (inactive level)
+    Active,   // For reset.active (active level)
+    Inactive, // For reset.inactive (inactive level)
 }
 
 /// Assignment in HIR
@@ -420,20 +420,20 @@ pub enum HirType {
     Logic(u32),
     Int(u32),
     Nat(u32),
-    Clock(Option<ClockDomainId>),   // Clock with optional domain
-    Reset(Option<ClockDomainId>),   // Reset with optional domain
+    Clock(Option<ClockDomainId>), // Clock with optional domain
+    Reset(Option<ClockDomainId>), // Reset with optional domain
     Event,
-    Stream(Box<HirType>),           // Stream<T> for streaming data with handshaking
+    Stream(Box<HirType>), // Stream<T> for streaming data with handshaking
     Array(Box<HirType>, u32),
     Custom(String),
     Struct(HirStructType),
     Enum(Box<HirEnumType>),
     Union(HirUnionType),
     // Parameterized types for generics
-    BitParam(String),               // bit[WIDTH] where WIDTH is a parameter
-    LogicParam(String),             // logic[WIDTH] where WIDTH is a parameter
-    IntParam(String),               // int[WIDTH] where WIDTH is a parameter
-    NatParam(String),               // nat[WIDTH] where WIDTH is a parameter
+    BitParam(String),   // bit[WIDTH] where WIDTH is a parameter
+    LogicParam(String), // logic[WIDTH] where WIDTH is a parameter
+    IntParam(String),   // int[WIDTH] where WIDTH is a parameter
+    NatParam(String),   // nat[WIDTH] where WIDTH is a parameter
 }
 
 /// Patterns in HIR
@@ -463,7 +463,7 @@ pub enum HirGenericType {
     Type,
     Const(HirType),
     Width,
-    ClockDomain,  // Clock domain lifetime parameter
+    ClockDomain, // Clock domain lifetime parameter
 }
 
 /// Clock domain in HIR

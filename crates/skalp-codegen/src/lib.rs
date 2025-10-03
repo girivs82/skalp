@@ -29,8 +29,8 @@ pub mod generator {
     }
 }
 
-use skalp_lir::LirDesign;
 use anyhow::Result;
+use skalp_lir::LirDesign;
 
 /// Generate Verilog from LIR
 pub fn generate_verilog(lir: &LirDesign) -> Result<String> {
@@ -75,8 +75,7 @@ pub fn generate_verilog(lir: &LirDesign) -> Result<String> {
         }
 
         // Add blank line if we had internal signals
-        let has_internal_signals = module.signals.iter()
-            .any(|s| !s.is_input && !s.is_output);
+        let has_internal_signals = module.signals.iter().any(|s| !s.is_input && !s.is_output);
         if has_internal_signals {
             verilog.push_str("\n");
         }

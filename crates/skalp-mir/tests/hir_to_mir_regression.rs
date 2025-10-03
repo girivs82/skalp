@@ -14,8 +14,8 @@
 //! - Type conversion
 //! - Complex nested structures
 
-use skalp_frontend::parse::parse;
 use skalp_frontend::hir_builder::build_hir;
+use skalp_frontend::parse::parse;
 use skalp_mir::hir_to_mir::HirToMir;
 use skalp_mir::mir::*;
 
@@ -33,7 +33,10 @@ fn compile_to_mir(source: &str) -> Mir {
 
 /// Get first module from MIR design
 fn get_first_module(design: &Mir) -> &Module {
-    assert!(!design.modules.is_empty(), "Design should have at least one module");
+    assert!(
+        !design.modules.is_empty(),
+        "Design should have at least one module"
+    );
     &design.modules[0]
 }
 
@@ -456,7 +459,9 @@ impl Test {
     let module = get_first_module(&mir);
 
     // Should have at least one sequential process
-    let has_sequential = module.processes.iter()
+    let has_sequential = module
+        .processes
+        .iter()
         .any(|p| matches!(p.kind, ProcessKind::Sequential));
     assert!(has_sequential);
 }

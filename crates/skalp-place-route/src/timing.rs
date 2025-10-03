@@ -1,10 +1,10 @@
 //! Timing analysis and closure for FPGA designs
 
-use std::collections::{HashMap, HashSet, VecDeque};
 use crate::device::{Device, LogicTile, WireSegment};
 use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
-use skalp_lir::{LirDesign, Gate, GateType};
+use skalp_lir::{Gate, GateType, LirDesign};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Static timing analyzer for FPGA designs
 pub struct TimingAnalyzer {
@@ -249,12 +249,18 @@ impl TimingAnalyzer {
 
         // Step 1: Build timing graph
         self.build_timing_graph(design, placement, routing)?;
-        println!("   Built timing graph: {} nodes, {} edges",
-                self.timing_graph.nodes.len(), self.timing_graph.edges.len());
+        println!(
+            "   Built timing graph: {} nodes, {} edges",
+            self.timing_graph.nodes.len(),
+            self.timing_graph.edges.len()
+        );
 
         // Step 2: Extract clock domains
         self.extract_clock_domains(design)?;
-        println!("   Identified {} clock domains", self.timing_graph.clock_domains.len());
+        println!(
+            "   Identified {} clock domains",
+            self.timing_graph.clock_domains.len()
+        );
 
         // Step 3: Calculate delays
         self.calculate_delays(placement, routing)?;
@@ -268,7 +274,11 @@ impl TimingAnalyzer {
         let (wns, tns, failing_paths) = self.calculate_slack_metrics(&critical_paths);
 
         // Sort critical paths by slack (worst first)
-        critical_paths.sort_by(|a, b| a.slack.partial_cmp(&b.slack).unwrap_or(std::cmp::Ordering::Equal));
+        critical_paths.sort_by(|a, b| {
+            a.slack
+                .partial_cmp(&b.slack)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         critical_paths.truncate(self.config.max_critical_paths);
 
         let design_frequency = if wns < 0.0 {
@@ -315,7 +325,9 @@ impl TimingAnalyzer {
                         slack: 0.0,
                         clock_domain: 0,
                     };
-                    self.timing_graph.node_map.insert(signal.name.clone(), node_id);
+                    self.timing_graph
+                        .node_map
+                        .insert(signal.name.clone(), node_id);
                     self.timing_graph.nodes.push(node);
                     node_id += 1;
                 }
@@ -331,7 +343,9 @@ impl TimingAnalyzer {
                         slack: 0.0,
                         clock_domain: 0,
                     };
-                    self.timing_graph.node_map.insert(signal.name.clone(), node_id);
+                    self.timing_graph
+                        .node_map
+                        .insert(signal.name.clone(), node_id);
                     self.timing_graph.nodes.push(node);
                     node_id += 1;
                 }
@@ -423,9 +437,10 @@ impl TimingAnalyzer {
         // Find clock signals (simplified - look for signals named 'clk' or 'clock')
         for module in &design.modules {
             for signal in &module.signals {
-                if signal.is_input &&
-                   (signal.name.to_lowercase().contains("clk") ||
-                    signal.name.to_lowercase().contains("clock")) {
+                if signal.is_input
+                    && (signal.name.to_lowercase().contains("clk")
+                        || signal.name.to_lowercase().contains("clock"))
+                {
                     let domain = ClockDomain {
                         id: domain_id,
                         clock_signal: signal.name.clone(),
@@ -473,25 +488,22 @@ impl TimingAnalyzer {
             let delay = match edge_type {
                 TimingEdgeType::Combinational => {
                     // Logic delay + interconnect delay
-                    let logic_delay = self.calculate_logic_delay(&from_node.signal, &to_node.signal);
+                    let logic_delay =
+                        self.calculate_logic_delay(&from_node.signal, &to_node.signal);
                     let interconnect_delay = self.calculate_interconnect_delay(
-                        from_node.position, to_node.position, routing
+                        from_node.position,
+                        to_node.position,
+                        routing,
                     );
                     logic_delay + interconnect_delay
                 }
-                TimingEdgeType::Setup => {
-                    self.get_setup_time(&to_node.signal)
-                }
-                TimingEdgeType::Hold => {
-                    self.get_hold_time(&to_node.signal)
-                }
+                TimingEdgeType::Setup => self.get_setup_time(&to_node.signal),
+                TimingEdgeType::Hold => self.get_hold_time(&to_node.signal),
                 TimingEdgeType::Clock => {
                     self.calculate_clock_delay(from_node.position, to_node.position)
                 }
                 TimingEdgeType::Interconnect => {
-                    self.calculate_interconnect_delay(
-                        from_node.position, to_node.position, routing
-                    )
+                    self.calculate_interconnect_delay(from_node.position, to_node.position, routing)
                 }
             };
 
@@ -527,7 +539,8 @@ impl TimingAnalyzer {
     ) -> f64 {
         match (from_pos, to_pos) {
             (Some((fx, fy)), Some((tx, ty))) => {
-                let manhattan_dist = ((fx as i32 - tx as i32).abs() + (fy as i32 - ty as i32).abs()) as f64;
+                let manhattan_dist =
+                    ((fx as i32 - tx as i32).abs() + (fy as i32 - ty as i32).abs()) as f64;
 
                 // Base delay of 50 ps per tile + wire segments
                 let base_delay = manhattan_dist * 0.05;
@@ -540,7 +553,7 @@ impl TimingAnalyzer {
 
                 base_delay + wire_delay.min(1.0) // Cap at 1ns
             }
-            _ => 0.1 // Default 100 ps if position unknown
+            _ => 0.1, // Default 100 ps if position unknown
         }
     }
 
@@ -573,7 +586,7 @@ impl TimingAnalyzer {
         // Clock tree delay (simplified)
         match (from_pos, to_pos) {
             (Some(_), Some(_)) => 0.2, // 200 ps clock tree delay
-            _ => 0.1, // 100 ps default
+            _ => 0.1,                  // 100 ps default
         }
     }
 
@@ -594,7 +607,12 @@ impl TimingAnalyzer {
 
         // Find paths with negative slack
         for node in &self.timing_graph.nodes {
-            if node.slack < 0.0 && matches!(node.node_type, TimingNodeType::RegisterInput | TimingNodeType::PrimaryOutput) {
+            if node.slack < 0.0
+                && matches!(
+                    node.node_type,
+                    TimingNodeType::RegisterInput | TimingNodeType::PrimaryOutput
+                )
+            {
                 if let Ok(path) = self.trace_critical_path(node.id) {
                     critical_paths.push(path);
                 }
@@ -701,7 +719,9 @@ impl TimingAnalyzer {
         }
 
         if sorted.len() != self.timing_graph.nodes.len() {
-            return Err(TimingError::CyclicGraph("Timing graph contains cycles".to_string()));
+            return Err(TimingError::CyclicGraph(
+                "Timing graph contains cycles".to_string(),
+            ));
         }
 
         Ok(sorted)
@@ -729,7 +749,10 @@ impl TimingAnalyzer {
             current_node = critical_edge.from;
 
             // Stop at primary inputs or register outputs
-            if matches!(from_node.node_type, TimingNodeType::PrimaryInput | TimingNodeType::RegisterOutput) {
+            if matches!(
+                from_node.node_type,
+                TimingNodeType::PrimaryInput | TimingNodeType::RegisterOutput
+            ) {
                 break;
             }
         }
@@ -837,18 +860,18 @@ impl TimingAnalyzer {
 
     /// Calculate overall slack metrics
     fn calculate_slack_metrics(&self, critical_paths: &[CriticalPath]) -> (f64, f64, usize) {
-        let wns = critical_paths.iter()
+        let wns = critical_paths
+            .iter()
             .map(|p| p.slack)
             .fold(f64::INFINITY, f64::min);
 
-        let tns = critical_paths.iter()
+        let tns = critical_paths
+            .iter()
             .filter(|p| p.slack < 0.0)
             .map(|p| p.slack)
             .sum();
 
-        let failing_paths = critical_paths.iter()
-            .filter(|p| p.slack < 0.0)
-            .count();
+        let failing_paths = critical_paths.iter().filter(|p| p.slack < 0.0).count();
 
         (wns, tns, failing_paths)
     }
@@ -861,31 +884,56 @@ impl TimingAnalyzer {
     /// Print timing analysis summary
     fn print_timing_summary(&self, report: &TimingReport) {
         println!("\n📊 Timing Analysis Results:");
-        println!("   Target Frequency: {:.1} MHz", self.config.target_frequency);
+        println!(
+            "   Target Frequency: {:.1} MHz",
+            self.config.target_frequency
+        );
         println!("   Design Frequency: {:.1} MHz", report.design_frequency);
-        println!("   Timing Status: {}", if report.meets_timing { "✅ PASS" } else { "❌ FAIL" });
+        println!(
+            "   Timing Status: {}",
+            if report.meets_timing {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            }
+        );
 
         if !report.meets_timing {
-            println!("   Worst Negative Slack: {:.3} ns", report.worst_negative_slack);
-            println!("   Total Negative Slack: {:.3} ns", report.total_negative_slack);
+            println!(
+                "   Worst Negative Slack: {:.3} ns",
+                report.worst_negative_slack
+            );
+            println!(
+                "   Total Negative Slack: {:.3} ns",
+                report.total_negative_slack
+            );
             println!("   Failing Paths: {}", report.failing_paths);
         }
 
         println!("\n   Clock Domain Summary:");
         for summary in &report.clock_summaries {
-            println!("     {}: {:.1} MHz, {} registers",
-                    summary.clock_name, summary.frequency, summary.register_count);
+            println!(
+                "     {}: {:.1} MHz, {} registers",
+                summary.clock_name, summary.frequency, summary.register_count
+            );
             if summary.setup_slack.failing_endpoints > 0 {
-                println!("       Setup violations: {} (worst: {:.3} ns)",
-                        summary.setup_slack.failing_endpoints, summary.setup_slack.worst);
+                println!(
+                    "       Setup violations: {} (worst: {:.3} ns)",
+                    summary.setup_slack.failing_endpoints, summary.setup_slack.worst
+                );
             }
         }
 
         if !report.critical_paths.is_empty() {
             println!("\n   Critical Paths:");
             for (i, path) in report.critical_paths.iter().take(3).enumerate() {
-                println!("     #{}: {} → {} ({:.3} ns slack)",
-                        i + 1, path.start_point, path.end_point, path.slack);
+                println!(
+                    "     #{}: {} → {} ({:.3} ns slack)",
+                    i + 1,
+                    path.start_point,
+                    path.end_point,
+                    path.slack
+                );
             }
         }
     }
@@ -934,8 +982,12 @@ impl TimingDrivenPlacer {
         println!("🎯 Running Timing-Driven Placement");
 
         // Start with regular placement
-        let mut placer = crate::placer::Placer::new(self.base_config.clone(), self.timing_analyzer.device.clone());
-        let mut placement = placer.place(design)
+        let mut placer = crate::placer::Placer::new(
+            self.base_config.clone(),
+            self.timing_analyzer.device.clone(),
+        );
+        let mut placement = placer
+            .place(design)
             .map_err(|e| TimingError::Failed(format!("Placement failed: {}", e)))?;
 
         println!("   Initial placement cost: {:.2}", placement.cost);
@@ -950,14 +1002,23 @@ impl TimingDrivenPlacer {
             };
 
             // Analyze timing
-            let timing_report = self.timing_analyzer.analyze_timing(design, &placement, &dummy_routing)?;
+            let timing_report =
+                self.timing_analyzer
+                    .analyze_timing(design, &placement, &dummy_routing)?;
 
             if timing_report.meets_timing {
-                println!("   Timing closure achieved in {} iterations!", iteration + 1);
+                println!(
+                    "   Timing closure achieved in {} iterations!",
+                    iteration + 1
+                );
                 return Ok((placement, timing_report));
             }
 
-            println!("   Iteration {}: WNS = {:.3} ns", iteration + 1, timing_report.worst_negative_slack);
+            println!(
+                "   Iteration {}: WNS = {:.3} ns",
+                iteration + 1,
+                timing_report.worst_negative_slack
+            );
 
             // Optimize critical paths
             placement = self.optimize_critical_paths(design, placement, &timing_report)?;
@@ -969,7 +1030,9 @@ impl TimingDrivenPlacer {
             congestion: 0.0,
             wirelength: 0,
         };
-        let final_timing = self.timing_analyzer.analyze_timing(design, &placement, &dummy_routing)?;
+        let final_timing =
+            self.timing_analyzer
+                .analyze_timing(design, &placement, &dummy_routing)?;
 
         Ok((placement, final_timing))
     }
@@ -983,11 +1046,14 @@ impl TimingDrivenPlacer {
     ) -> Result<PlacementResult, TimingError> {
         // Simple optimization: try to place critical path gates closer together
         for path in &timing_report.critical_paths {
-            if path.slack < -0.1 { // Focus on paths with >100ps violation
+            if path.slack < -0.1 {
+                // Focus on paths with >100ps violation
                 // This is a simplified optimization - a real implementation would
                 // use more sophisticated algorithms like force-directed placement
-                println!("     Optimizing critical path: {} → {} ({:.3} ns slack)",
-                        path.start_point, path.end_point, path.slack);
+                println!(
+                    "     Optimizing critical path: {} → {} ({:.3} ns slack)",
+                    path.start_point, path.end_point, path.slack
+                );
             }
         }
 

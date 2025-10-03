@@ -1,9 +1,9 @@
 //! Symbol support for SKALP (document symbols, go-to-definition, find references)
 
+use crate::DocumentState;
 use tower_lsp::lsp_types::{
     GotoDefinitionResponse, Location, Position, Range, SymbolInformation, SymbolKind, Url,
 };
-use crate::DocumentState;
 
 /// Get all symbols in a document
 pub fn get_document_symbols(doc: &DocumentState) -> Vec<SymbolInformation> {
@@ -319,13 +319,14 @@ fn is_definition_of(word: &str, line: &str) -> bool {
         format!("inout {}: ", word),
     ];
 
-    patterns.iter().any(|pattern| line.trim().starts_with(pattern))
+    patterns
+        .iter()
+        .any(|pattern| line.trim().starts_with(pattern))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_parse_entity_symbol() {

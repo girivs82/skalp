@@ -391,10 +391,10 @@ impl AssertionReport {
         if !self.failures.is_empty() {
             println!("\nFailures:");
             for failure in &self.failures {
-                println!("  [{}] {} at time {}",
-                         failure.assertion.id,
-                         failure.message,
-                         failure.time);
+                println!(
+                    "  [{}] {} at time {}",
+                    failure.assertion.id, failure.message, failure.time
+                );
             }
         }
 
@@ -402,6 +402,9 @@ impl AssertionReport {
         println!("Coverage points: {}", self.coverage_summary.total_points);
         println!("Total bins: {}", self.coverage_summary.total_bins);
         println!("Covered bins: {}", self.coverage_summary.covered_bins);
-        println!("Coverage: {:.1}%", self.coverage_summary.coverage_percentage);
+        println!(
+            "Coverage: {:.1}%",
+            self.coverage_summary.coverage_percentage
+        );
     }
 }

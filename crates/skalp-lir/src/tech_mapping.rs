@@ -44,47 +44,65 @@ impl TechMapper {
         let mut rules = HashMap::new();
 
         // Map basic gates to LUTs
-        rules.insert(GateType::And, MappingRule {
-            primitive: "LUT2".to_string(),
-            area: 1.0,
-            delay: 0.5,
-            power: 0.1,
-        });
+        rules.insert(
+            GateType::And,
+            MappingRule {
+                primitive: "LUT2".to_string(),
+                area: 1.0,
+                delay: 0.5,
+                power: 0.1,
+            },
+        );
 
-        rules.insert(GateType::Or, MappingRule {
-            primitive: "LUT2".to_string(),
-            area: 1.0,
-            delay: 0.5,
-            power: 0.1,
-        });
+        rules.insert(
+            GateType::Or,
+            MappingRule {
+                primitive: "LUT2".to_string(),
+                area: 1.0,
+                delay: 0.5,
+                power: 0.1,
+            },
+        );
 
-        rules.insert(GateType::Not, MappingRule {
-            primitive: "LUT1".to_string(),
-            area: 0.5,
-            delay: 0.3,
-            power: 0.05,
-        });
+        rules.insert(
+            GateType::Not,
+            MappingRule {
+                primitive: "LUT1".to_string(),
+                area: 0.5,
+                delay: 0.3,
+                power: 0.05,
+            },
+        );
 
-        rules.insert(GateType::Xor, MappingRule {
-            primitive: "LUT2".to_string(),
-            area: 1.0,
-            delay: 0.6,
-            power: 0.12,
-        });
+        rules.insert(
+            GateType::Xor,
+            MappingRule {
+                primitive: "LUT2".to_string(),
+                area: 1.0,
+                delay: 0.6,
+                power: 0.12,
+            },
+        );
 
-        rules.insert(GateType::DFF, MappingRule {
-            primitive: "FDRE".to_string(), // Xilinx flip-flop
-            area: 2.0,
-            delay: 1.0,
-            power: 0.2,
-        });
+        rules.insert(
+            GateType::DFF,
+            MappingRule {
+                primitive: "FDRE".to_string(), // Xilinx flip-flop
+                area: 2.0,
+                delay: 1.0,
+                power: 0.2,
+            },
+        );
 
-        rules.insert(GateType::Buffer, MappingRule {
-            primitive: "BUF".to_string(),
-            area: 0.5,
-            delay: 0.2,
-            power: 0.05,
-        });
+        rules.insert(
+            GateType::Buffer,
+            MappingRule {
+                primitive: "BUF".to_string(),
+                area: 0.5,
+                delay: 0.2,
+                power: 0.05,
+            },
+        );
 
         rules
     }
@@ -93,61 +111,85 @@ impl TechMapper {
     fn asic_rules() -> HashMap<GateType, MappingRule> {
         let mut rules = HashMap::new();
 
-        rules.insert(GateType::And, MappingRule {
-            primitive: "AND2X1".to_string(),
-            area: 2.0,
-            delay: 0.05,
-            power: 0.01,
-        });
+        rules.insert(
+            GateType::And,
+            MappingRule {
+                primitive: "AND2X1".to_string(),
+                area: 2.0,
+                delay: 0.05,
+                power: 0.01,
+            },
+        );
 
-        rules.insert(GateType::Or, MappingRule {
-            primitive: "OR2X1".to_string(),
-            area: 2.0,
-            delay: 0.05,
-            power: 0.01,
-        });
+        rules.insert(
+            GateType::Or,
+            MappingRule {
+                primitive: "OR2X1".to_string(),
+                area: 2.0,
+                delay: 0.05,
+                power: 0.01,
+            },
+        );
 
-        rules.insert(GateType::Not, MappingRule {
-            primitive: "INVX1".to_string(),
-            area: 1.0,
-            delay: 0.03,
-            power: 0.005,
-        });
+        rules.insert(
+            GateType::Not,
+            MappingRule {
+                primitive: "INVX1".to_string(),
+                area: 1.0,
+                delay: 0.03,
+                power: 0.005,
+            },
+        );
 
-        rules.insert(GateType::Nand, MappingRule {
-            primitive: "NAND2X1".to_string(),
-            area: 1.5,
-            delay: 0.04,
-            power: 0.008,
-        });
+        rules.insert(
+            GateType::Nand,
+            MappingRule {
+                primitive: "NAND2X1".to_string(),
+                area: 1.5,
+                delay: 0.04,
+                power: 0.008,
+            },
+        );
 
-        rules.insert(GateType::Nor, MappingRule {
-            primitive: "NOR2X1".to_string(),
-            area: 1.5,
-            delay: 0.04,
-            power: 0.008,
-        });
+        rules.insert(
+            GateType::Nor,
+            MappingRule {
+                primitive: "NOR2X1".to_string(),
+                area: 1.5,
+                delay: 0.04,
+                power: 0.008,
+            },
+        );
 
-        rules.insert(GateType::Xor, MappingRule {
-            primitive: "XOR2X1".to_string(),
-            area: 3.0,
-            delay: 0.06,
-            power: 0.012,
-        });
+        rules.insert(
+            GateType::Xor,
+            MappingRule {
+                primitive: "XOR2X1".to_string(),
+                area: 3.0,
+                delay: 0.06,
+                power: 0.012,
+            },
+        );
 
-        rules.insert(GateType::DFF, MappingRule {
-            primitive: "DFFX1".to_string(),
-            area: 6.0,
-            delay: 0.1,
-            power: 0.02,
-        });
+        rules.insert(
+            GateType::DFF,
+            MappingRule {
+                primitive: "DFFX1".to_string(),
+                area: 6.0,
+                delay: 0.1,
+                power: 0.02,
+            },
+        );
 
-        rules.insert(GateType::Buffer, MappingRule {
-            primitive: "BUFX1".to_string(),
-            area: 1.0,
-            delay: 0.02,
-            power: 0.005,
-        });
+        rules.insert(
+            GateType::Buffer,
+            MappingRule {
+                primitive: "BUFX1".to_string(),
+                area: 1.0,
+                delay: 0.02,
+                power: 0.005,
+            },
+        );
 
         rules
     }
@@ -168,12 +210,15 @@ impl TechMapper {
             GateType::DFF,
             GateType::Latch,
         ] {
-            rules.insert(gate_type.clone(), MappingRule {
-                primitive: format!("{:?}", gate_type),
-                area: 1.0,
-                delay: 1.0,
-                power: 1.0,
-            });
+            rules.insert(
+                gate_type.clone(),
+                MappingRule {
+                    primitive: format!("{:?}", gate_type),
+                    area: 1.0,
+                    delay: 1.0,
+                    power: 1.0,
+                },
+            );
         }
 
         rules

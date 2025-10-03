@@ -40,7 +40,7 @@ pub struct AsilRequirements {
     pub level: AsilLevel,
     /// Hardware architectural metrics requirements
     pub spfm_target: Option<f64>, // Single Point Fault Metric
-    pub lf_target: Option<f64>,   // Latent Fault Metric
+    pub lf_target: Option<f64>, // Latent Fault Metric
     /// Verification requirements
     pub verification_methods: Vec<VerificationMethod>,
     /// Safety analysis requirements
@@ -118,9 +118,7 @@ impl AsilLevel {
                     VerificationMethod::Walkthrough,
                     VerificationMethod::Simulation,
                 ],
-                safety_analyses: vec![
-                    SafetyAnalysis::Fmea,
-                ],
+                safety_analyses: vec![SafetyAnalysis::Fmea],
                 tool_confidence_level: ToolConfidenceLevel::Tcl1,
             },
             AsilLevel::B => AsilRequirements {
@@ -133,10 +131,7 @@ impl AsilLevel {
                     VerificationMethod::Review,
                     VerificationMethod::Simulation,
                 ],
-                safety_analyses: vec![
-                    SafetyAnalysis::Fmea,
-                    SafetyAnalysis::Fmeda,
-                ],
+                safety_analyses: vec![SafetyAnalysis::Fmea, SafetyAnalysis::Fmeda],
                 tool_confidence_level: ToolConfidenceLevel::Tcl2,
             },
             AsilLevel::C => AsilRequirements {
@@ -191,17 +186,9 @@ impl AsilLevel {
     /// Decompose this ASIL level into multiple lower levels
     pub fn decompose(&self) -> Vec<(AsilLevel, AsilLevel)> {
         match self {
-            AsilLevel::D => vec![
-                (AsilLevel::B, AsilLevel::B),
-                (AsilLevel::C, AsilLevel::A),
-            ],
-            AsilLevel::C => vec![
-                (AsilLevel::A, AsilLevel::A),
-                (AsilLevel::B, AsilLevel::QM),
-            ],
-            AsilLevel::B => vec![
-                (AsilLevel::A, AsilLevel::QM),
-            ],
+            AsilLevel::D => vec![(AsilLevel::B, AsilLevel::B), (AsilLevel::C, AsilLevel::A)],
+            AsilLevel::C => vec![(AsilLevel::A, AsilLevel::A), (AsilLevel::B, AsilLevel::QM)],
+            AsilLevel::B => vec![(AsilLevel::A, AsilLevel::QM)],
             AsilLevel::A | AsilLevel::QM => vec![],
         }
     }
@@ -272,7 +259,9 @@ mod tests {
         let asil_d = AsilLevel::D.requirements();
         assert_eq!(asil_d.spfm_target, Some(99.0));
         assert_eq!(asil_d.lf_target, Some(90.0));
-        assert!(asil_d.verification_methods.contains(&VerificationMethod::FormalVerification));
+        assert!(asil_d
+            .verification_methods
+            .contains(&VerificationMethod::FormalVerification));
         assert!(asil_d.safety_analyses.contains(&SafetyAnalysis::Fmeda));
     }
 

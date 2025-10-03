@@ -263,7 +263,9 @@ fn parse_temporal_formula(spec: &str) -> Result<TemporalFormula, String> {
         } else {
             &spec[3..]
         };
-        return Ok(TemporalFormula::Always(Box::new(parse_temporal_formula(inner)?)));
+        return Ok(TemporalFormula::Always(Box::new(parse_temporal_formula(
+            inner,
+        )?)));
     }
 
     if spec.starts_with("F ") || spec.starts_with("<> ") {
@@ -272,12 +274,16 @@ fn parse_temporal_formula(spec: &str) -> Result<TemporalFormula, String> {
         } else {
             &spec[3..]
         };
-        return Ok(TemporalFormula::Eventually(Box::new(parse_temporal_formula(inner)?)));
+        return Ok(TemporalFormula::Eventually(Box::new(
+            parse_temporal_formula(inner)?,
+        )));
     }
 
     if spec.starts_with("X ") {
         let inner = &spec[2..];
-        return Ok(TemporalFormula::Next(Box::new(parse_temporal_formula(inner)?)));
+        return Ok(TemporalFormula::Next(Box::new(parse_temporal_formula(
+            inner,
+        )?)));
     }
 
     // Handle boolean operators
@@ -301,7 +307,9 @@ fn parse_temporal_formula(spec: &str) -> Result<TemporalFormula, String> {
 
     if spec.starts_with("! ") {
         let inner = &spec[2..];
-        return Ok(TemporalFormula::Not(Box::new(parse_temporal_formula(inner)?)));
+        return Ok(TemporalFormula::Not(Box::new(parse_temporal_formula(
+            inner,
+        )?)));
     }
 
     // Otherwise treat as atomic proposition
@@ -391,7 +399,7 @@ impl PropertyLibrary {
             Property::safety(
                 "cdc_no_metastability".to_string(),
                 "!metastable_state".to_string(),
-            )
+            ),
         );
 
         // Reset properties
@@ -400,7 +408,7 @@ impl PropertyLibrary {
             Property::invariant(
                 "reset_synchronous".to_string(),
                 "reset -> (X !ready)".to_string(),
-            )
+            ),
         );
 
         // FIFO properties
@@ -409,7 +417,7 @@ impl PropertyLibrary {
             Property::safety(
                 "fifo_no_overflow".to_string(),
                 "!(full && push)".to_string(),
-            )
+            ),
         );
 
         self.add_property(
@@ -417,7 +425,7 @@ impl PropertyLibrary {
             Property::safety(
                 "fifo_no_underflow".to_string(),
                 "!(empty && pop)".to_string(),
-            )
+            ),
         );
 
         // Handshake protocol properties
@@ -426,7 +434,7 @@ impl PropertyLibrary {
             Property::safety(
                 "handshake_valid_ready".to_string(),
                 "valid -> F ready".to_string(),
-            )
+            ),
         );
 
         // Memory interface properties
@@ -434,8 +442,9 @@ impl PropertyLibrary {
             "memory_write_read_consistency".to_string(),
             Property::liveness(
                 "memory_write_read_consistency".to_string(),
-                "(write_enable && write_addr == read_addr) -> X (read_data == write_data)".to_string(),
-            )
+                "(write_enable && write_addr == read_addr) -> X (read_data == write_data)"
+                    .to_string(),
+            ),
         );
 
         // Pipeline properties
@@ -444,7 +453,7 @@ impl PropertyLibrary {
             Property::liveness(
                 "pipeline_no_stall_deadlock".to_string(),
                 "stall -> F !stall".to_string(),
-            )
+            ),
         );
     }
 
@@ -464,7 +473,9 @@ impl PropertyLibrary {
     pub fn get_properties_by_type(&self, prop_type: PropertyType) -> Vec<&Property> {
         self.properties
             .values()
-            .filter(|p| std::mem::discriminant(&p.property_type) == std::mem::discriminant(&prop_type))
+            .filter(|p| {
+                std::mem::discriminant(&p.property_type) == std::mem::discriminant(&prop_type)
+            })
             .collect()
     }
 }
@@ -475,10 +486,7 @@ mod tests {
 
     #[test]
     fn test_property_creation() {
-        let prop = Property::safety(
-            "test_safety".to_string(),
-            "counter < 256".to_string(),
-        );
+        let prop = Property::safety("test_safety".to_string(), "counter < 256".to_string());
 
         assert_eq!(prop.name, "test_safety");
         assert!(matches!(prop.property_type, PropertyType::Safety));
@@ -489,17 +497,14 @@ mod tests {
         let formula = parse_temporal_formula("G (counter < 256)").unwrap();
 
         match formula {
-            TemporalFormula::Always(_) => {}, // Expected
+            TemporalFormula::Always(_) => {} // Expected
             _ => panic!("Expected Always formula"),
         }
     }
 
     #[test]
     fn test_smt_conversion() {
-        let prop = Property::safety(
-            "test".to_string(),
-            "x > 0".to_string(),
-        );
+        let prop = Property::safety("test".to_string(), "x > 0".to_string());
 
         let smt = prop.to_smt();
         assert!(smt.contains("(assert"));

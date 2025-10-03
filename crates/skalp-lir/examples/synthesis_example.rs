@@ -23,10 +23,10 @@ fn main() {
     let opt_results = pipeline.optimize(&mut lir);
 
     for result in &opt_results {
-        println!("  {}: {} -> {} gates",
-                 result.pass_name,
-                 result.gates_before,
-                 result.gates_after);
+        println!(
+            "  {}: {} -> {} gates",
+            result.pass_name, result.gates_before, result.gates_after
+        );
     }
 
     println!("\nOptimized design:");
@@ -67,8 +67,10 @@ fn main() {
     println!("\n--- Synthesis Comparison ---");
     println!("FPGA area: {:.2} LUTs", fpga_report.total_area);
     println!("ASIC area: {:.2} gate equivalents", asic_report.total_area);
-    println!("Area ratio (ASIC/FPGA): {:.2}x",
-             asic_report.total_area / fpga_report.total_area);
+    println!(
+        "Area ratio (ASIC/FPGA): {:.2}x",
+        asic_report.total_area / fpga_report.total_area
+    );
 
     // Check if we met our optimization goal (20% area reduction)
     let original_gates = create_example_design().gates.len();
@@ -92,7 +94,9 @@ fn create_example_design() -> Lir {
     let mut lir = Lir::new("example_alu".to_string());
 
     // Create nets
-    for name in &["a", "b", "c", "d", "sel", "out1", "out2", "temp1", "temp2", "temp3"] {
+    for name in &[
+        "a", "b", "c", "d", "sel", "out1", "out2", "temp1", "temp2", "temp3",
+    ] {
         lir.nets.push(Net {
             id: name.to_string(),
             width: 1,

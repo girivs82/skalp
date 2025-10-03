@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Write, BufWriter};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -185,7 +185,8 @@ impl Waveform {
         println!("\nSignals:");
 
         for (name, signal) in &self.signals {
-            println!("  {} (width: {} bits, {} transitions)",
+            println!(
+                "  {} (width: {} bits, {} transitions)",
                 name,
                 signal.width,
                 signal.values.len()

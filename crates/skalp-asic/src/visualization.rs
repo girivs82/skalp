@@ -2,13 +2,13 @@
 //!
 //! Generates visual feedback for placement, routing, and timing
 
-use crate::{AsicError};
-use crate::placement::{Placement, Netlist};
-use crate::routing::{RoutingResult, CongestionMap};
 use crate::cts::ClockTree;
-use std::path::Path;
+use crate::placement::{Netlist, Placement};
+use crate::routing::{CongestionMap, RoutingResult};
+use crate::AsicError;
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 
 /// Visualization generator
 pub struct Visualizer {
@@ -59,8 +59,12 @@ impl Visualizer {
     }
 
     /// Generate placement visualization
-    pub fn visualize_placement(&self, placement: &Placement, netlist: &Netlist,
-                               output: &Path) -> Result<(), AsicError> {
+    pub fn visualize_placement(
+        &self,
+        placement: &Placement,
+        netlist: &Netlist,
+        output: &Path,
+    ) -> Result<(), AsicError> {
         match self.format {
             OutputFormat::SVG => self.generate_placement_svg(placement, netlist, output)?,
             OutputFormat::ASCII => self.generate_placement_ascii(placement, netlist)?,
@@ -70,8 +74,12 @@ impl Visualizer {
     }
 
     /// Generate SVG placement view
-    fn generate_placement_svg(&self, placement: &Placement, netlist: &Netlist,
-                              output: &Path) -> Result<(), AsicError> {
+    fn generate_placement_svg(
+        &self,
+        placement: &Placement,
+        netlist: &Netlist,
+        output: &Path,
+    ) -> Result<(), AsicError> {
         let mut file = File::create(output)
             .map_err(|e| AsicError::TechnologyError(format!("Failed to create SVG: {}", e)))?;
 
@@ -82,8 +90,12 @@ impl Visualizer {
 
         // SVG header
         writeln!(file, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
-        writeln!(file, r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">"#,
-                 width, height).unwrap();
+        writeln!(
+            file,
+            r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">"#,
+            width, height
+        )
+        .unwrap();
 
         // Background
         writeln!(file, r#"<rect width="100%" height="100%" fill="black"/>"#).unwrap();
@@ -91,9 +103,16 @@ impl Visualizer {
         // Draw placement rows
         writeln!(file, r#"<g id="rows" opacity="0.3">"#).unwrap();
         for row in &placement.rows {
-            writeln!(file, r#"<rect x="{}" y="{}" width="{}" height="{}"
+            writeln!(
+                file,
+                r#"<rect x="{}" y="{}" width="{}" height="{}"
                              fill="none" stroke="gray" stroke-width="0.5"/>"#,
-                    min_x, row.y - min_y, width, row.height).unwrap();
+                min_x,
+                row.y - min_y,
+                width,
+                row.height
+            )
+            .unwrap();
         }
         writeln!(file, "</g>").unwrap();
 
@@ -104,13 +123,23 @@ impl Visualizer {
                 let color = self.get_cell_color(&cell.cell_type);
                 let std_cell = &netlist.cells[i];
 
-                writeln!(file, r#"<rect x="{}" y="{}" width="{}" height="{}"
+                writeln!(
+                    file,
+                    r#"<rect x="{}" y="{}" width="{}" height="{}"
                                  fill="{}" stroke="white" stroke-width="0.2" opacity="0.8">
                                  <title>{}: {} @ ({:.2}, {:.2})</title>
                                  </rect>"#,
-                        pos.0 - min_x, pos.1 - min_y,
-                        std_cell.width, std_cell.height,
-                        color, cell.instance_name, cell.cell_type, pos.0, pos.1).unwrap();
+                    pos.0 - min_x,
+                    pos.1 - min_y,
+                    std_cell.width,
+                    std_cell.height,
+                    color,
+                    cell.instance_name,
+                    cell.cell_type,
+                    pos.0,
+                    pos.1
+                )
+                .unwrap();
             }
         }
         writeln!(file, "</g>").unwrap();
@@ -143,11 +172,17 @@ impl Visualizer {
                     for (cell_idx, _pin) in &net.connections {
                         if *cell_idx < placement.cell_positions.len() {
                             let pos = placement.cell_positions[*cell_idx];
-                            writeln!(file, r#"<line x1="{}" y1="{}" x2="{}" y2="{}"
+                            writeln!(
+                                file,
+                                r#"<line x1="{}" y1="{}" x2="{}" y2="{}"
                                            stroke="{}" stroke-width="0.1"/>"#,
-                                    cx - min_x, cy - min_y,
-                                    pos.0 - min_x, pos.1 - min_y,
-                                    color).unwrap();
+                                cx - min_x,
+                                cy - min_y,
+                                pos.0 - min_x,
+                                pos.1 - min_y,
+                                color
+                            )
+                            .unwrap();
                         }
                     }
                 }
@@ -156,7 +191,9 @@ impl Visualizer {
         writeln!(file, "</g>").unwrap();
 
         // Interactive elements
-        writeln!(file, r#"
+        writeln!(
+            file,
+            r#"
             <script>
                 // Enable cell highlighting on hover
                 document.querySelectorAll('rect').forEach(rect => {{
@@ -170,7 +207,9 @@ impl Visualizer {
                     }});
                 }});
             </script>
-        "#).unwrap();
+        "#
+        )
+        .unwrap();
 
         writeln!(file, "</svg>").unwrap();
 
@@ -178,7 +217,11 @@ impl Visualizer {
     }
 
     /// Generate ASCII placement view
-    fn generate_placement_ascii(&self, placement: &Placement, _netlist: &Netlist) -> Result<(), AsicError> {
+    fn generate_placement_ascii(
+        &self,
+        placement: &Placement,
+        _netlist: &Netlist,
+    ) -> Result<(), AsicError> {
         let (min_x, min_y, max_x, max_y) = self.find_bounds(placement);
 
         // Scale to terminal size (80x24)
@@ -217,7 +260,11 @@ impl Visualizer {
     }
 
     /// Generate routing congestion heatmap
-    pub fn visualize_congestion(&self, routing: &RoutingResult, output: &Path) -> Result<(), AsicError> {
+    pub fn visualize_congestion(
+        &self,
+        routing: &RoutingResult,
+        output: &Path,
+    ) -> Result<(), AsicError> {
         let mut file = File::create(output)
             .map_err(|e| AsicError::TechnologyError(format!("Failed to create heatmap: {}", e)))?;
 
@@ -225,8 +272,13 @@ impl Visualizer {
         let (height, width) = congestion.grid_size;
 
         writeln!(file, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
-        writeln!(file, r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">"#,
-                 width * 10, height * 10).unwrap();
+        writeln!(
+            file,
+            r#"<svg width="{}" height="{}" xmlns="http://www.w3.org/2000/svg">"#,
+            width * 10,
+            height * 10
+        )
+        .unwrap();
 
         // Draw congestion grid
         for y in 0..height {
@@ -234,22 +286,46 @@ impl Visualizer {
                 let congestion_value = congestion.values[y][x];
                 let color = self.get_congestion_color(congestion_value);
 
-                writeln!(file, r#"<rect x="{}" y="{}" width="10" height="10"
+                writeln!(
+                    file,
+                    r#"<rect x="{}" y="{}" width="10" height="10"
                                  fill="{}" opacity="0.8">
                                  <title>Congestion at ({}, {}): {:.2}%</title>
                                  </rect>"#,
-                        x * 10, y * 10, color, x, y, congestion_value * 100.0).unwrap();
+                    x * 10,
+                    y * 10,
+                    color,
+                    x,
+                    y,
+                    congestion_value * 100.0
+                )
+                .unwrap();
             }
         }
 
         // Add color legend
-        writeln!(file, r#"<g id="legend" transform="translate({}, 10)">"#, width * 10 + 10).unwrap();
+        writeln!(
+            file,
+            r#"<g id="legend" transform="translate({}, 10)">"#,
+            width * 10 + 10
+        )
+        .unwrap();
         for i in 0..10 {
             let color = self.get_congestion_color(i as f64 / 10.0);
-            writeln!(file, r#"<rect x="0" y="{}" width="20" height="20" fill="{}"/>"#,
-                    i * 20, color).unwrap();
-            writeln!(file, r#"<text x="25" y="{}" font-size="12" fill="white">{}%</text>"#,
-                    i * 20 + 15, i * 10).unwrap();
+            writeln!(
+                file,
+                r#"<rect x="0" y="{}" width="20" height="20" fill="{}"/>"#,
+                i * 20,
+                color
+            )
+            .unwrap();
+            writeln!(
+                file,
+                r#"<text x="25" y="{}" font-size="12" fill="white">{}%</text>"#,
+                i * 20 + 15,
+                i * 10
+            )
+            .unwrap();
         }
         writeln!(file, "</g>").unwrap();
 
@@ -259,34 +335,58 @@ impl Visualizer {
     }
 
     /// Generate clock tree visualization
-    pub fn visualize_clock_tree(&self, clock_tree: &ClockTree, output: &Path) -> Result<(), AsicError> {
-        let mut file = File::create(output)
-            .map_err(|e| AsicError::TechnologyError(format!("Failed to create clock view: {}", e)))?;
+    pub fn visualize_clock_tree(
+        &self,
+        clock_tree: &ClockTree,
+        output: &Path,
+    ) -> Result<(), AsicError> {
+        let mut file = File::create(output).map_err(|e| {
+            AsicError::TechnologyError(format!("Failed to create clock view: {}", e))
+        })?;
 
         writeln!(file, "digraph ClockTree {{").unwrap();
         writeln!(file, "  rankdir=TB;").unwrap();
         writeln!(file, "  node [shape=box];").unwrap();
 
         // Clock source
-        writeln!(file, r#"  source [label="{}\nf={:.1}MHz" color="red"];"#,
-                clock_tree.source.name, clock_tree.source.frequency).unwrap();
+        writeln!(
+            file,
+            r#"  source [label="{}\nf={:.1}MHz" color="red"];"#,
+            clock_tree.source.name, clock_tree.source.frequency
+        )
+        .unwrap();
 
         // Clock buffers
         for buffer in &clock_tree.buffers {
-            let delay_color = if buffer.delay < 0.05 { "green" }
-                            else if buffer.delay < 0.1 { "yellow" }
-                            else { "red" };
+            let delay_color = if buffer.delay < 0.05 {
+                "green"
+            } else if buffer.delay < 0.1 {
+                "yellow"
+            } else {
+                "red"
+            };
 
-            writeln!(file, r#"  "{}" [label="{}\ndelay={:.2}ps\ndrive={:.1}" color="{}"];"#,
-                    buffer.name, buffer.cell_type, buffer.delay * 1000.0,
-                    buffer.drive_strength, delay_color).unwrap();
+            writeln!(
+                file,
+                r#"  "{}" [label="{}\ndelay={:.2}ps\ndrive={:.1}" color="{}"];"#,
+                buffer.name,
+                buffer.cell_type,
+                buffer.delay * 1000.0,
+                buffer.drive_strength,
+                delay_color
+            )
+            .unwrap();
         }
 
         // Clock nets
         for net in &clock_tree.nets {
             for sink in &net.sinks {
-                writeln!(file, r#"  "{}" -> "{}" [label="L={:.1}um"];"#,
-                        net.source, sink, net.length).unwrap();
+                writeln!(
+                    file,
+                    r#"  "{}" -> "{}" [label="L={:.1}um"];"#,
+                    net.source, sink, net.length
+                )
+                .unwrap();
             }
         }
 
@@ -311,17 +411,35 @@ impl Visualizer {
         println!("\n┌─────────────────────────────────────┐");
         println!("│ Skew Analysis                       │");
         println!("├─────────────────────────────────────┤");
-        println!("│ Max Skew:     {:.3} ps              │", clock_tree.timing.max_skew * 1000.0);
-        println!("│ Min Delay:    {:.3} ps              │", clock_tree.timing.min_delay * 1000.0);
-        println!("│ Max Delay:    {:.3} ps              │", clock_tree.timing.max_delay * 1000.0);
+        println!(
+            "│ Max Skew:     {:.3} ps              │",
+            clock_tree.timing.max_skew * 1000.0
+        );
+        println!(
+            "│ Min Delay:    {:.3} ps              │",
+            clock_tree.timing.min_delay * 1000.0
+        );
+        println!(
+            "│ Max Delay:    {:.3} ps              │",
+            clock_tree.timing.max_delay * 1000.0
+        );
         println!("└─────────────────────────────────────┘");
 
         println!("\n┌─────────────────────────────────────┐");
         println!("│ Power Analysis                      │");
         println!("├─────────────────────────────────────┤");
-        println!("│ Clock Power:  {:.3} mW              │", clock_tree.timing.power);
-        println!("│ Buffer Count: {}                    │", clock_tree.buffers.len());
-        println!("│ Total Sinks:  {}                    │", clock_tree.sinks.len());
+        println!(
+            "│ Clock Power:  {:.3} mW              │",
+            clock_tree.timing.power
+        );
+        println!(
+            "│ Buffer Count: {}                    │",
+            clock_tree.buffers.len()
+        );
+        println!(
+            "│ Total Sinks:  {}                    │",
+            clock_tree.sinks.len()
+        );
         println!("└─────────────────────────────────────┘");
 
         // Worst slack paths
@@ -375,20 +493,33 @@ impl Visualizer {
     }
 
     fn get_congestion_color(&self, value: f64) -> &str {
-        if value < 0.5 { "#00FF00" }
-        else if value < 0.7 { "#FFFF00" }
-        else if value < 0.85 { "#FFA500" }
-        else if value < 0.95 { "#FF4500" }
-        else { "#FF0000" }
+        if value < 0.5 {
+            "#00FF00"
+        } else if value < 0.7 {
+            "#FFFF00"
+        } else if value < 0.85 {
+            "#FFA500"
+        } else if value < 0.95 {
+            "#FF4500"
+        } else {
+            "#FF0000"
+        }
     }
 
     fn get_cell_char(&self, cell_type: &str) -> char {
-        if cell_type.contains("INV") { 'I' }
-        else if cell_type.contains("NAND") { 'N' }
-        else if cell_type.contains("NOR") { 'O' }
-        else if cell_type.contains("DFF") { 'D' }
-        else if cell_type.contains("BUF") { 'B' }
-        else { 'X' }
+        if cell_type.contains("INV") {
+            'I'
+        } else if cell_type.contains("NAND") {
+            'N'
+        } else if cell_type.contains("NOR") {
+            'O'
+        } else if cell_type.contains("DFF") {
+            'D'
+        } else if cell_type.contains("BUF") {
+            'B'
+        } else {
+            'X'
+        }
     }
 }
 

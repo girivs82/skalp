@@ -7,14 +7,14 @@
 //! - Critical path identification
 //! - Timing optimization
 
-use crate::{AsicError, DesignRules};
-use crate::placement::{Placement, Netlist, Net};
-use crate::routing::RoutingResult;
 use crate::cts::ClockTree;
-use crate::sdc::{SDCManager, ClockDefinition, InputDelay, OutputDelay};
-use std::collections::{HashMap, HashSet, BinaryHeap};
+use crate::placement::{Net, Netlist, Placement};
+use crate::routing::RoutingResult;
+use crate::sdc::{ClockDefinition, InputDelay, OutputDelay, SDCManager};
+use crate::{AsicError, DesignRules};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use serde::{Serialize, Deserialize};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Timing analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -681,12 +681,13 @@ impl StaticTimingAnalyzer {
     }
 
     /// Run multi-corner timing analysis
-    pub fn analyze_multicorner(&self,
-                              placement: &Placement,
-                              routing: &RoutingResult,
-                              clock_tree: &ClockTree,
-                              constraints: &SDCManager) -> Result<MultiCornerTimingResult, AsicError> {
-
+    pub fn analyze_multicorner(
+        &self,
+        placement: &Placement,
+        routing: &RoutingResult,
+        clock_tree: &ClockTree,
+        constraints: &SDCManager,
+    ) -> Result<MultiCornerTimingResult, AsicError> {
         if !self.multicorner_config.enabled {
             // Fall back to single corner analysis
             let single_result = self.analyze(placement, routing, clock_tree, constraints)?;
@@ -764,24 +765,26 @@ impl StaticTimingAnalyzer {
     }
 
     /// Merge results from multiple corners
-    fn merge_corner_results(&self,
-                           corner_results: &HashMap<String, TimingAnalysisResult>) -> Result<TimingAnalysisResult, AsicError> {
-
+    fn merge_corner_results(
+        &self,
+        corner_results: &HashMap<String, TimingAnalysisResult>,
+    ) -> Result<TimingAnalysisResult, AsicError> {
         match self.multicorner_config.merge_strategy {
             CornerMergeStrategy::WorstCase => self.merge_worst_case(corner_results),
             CornerMergeStrategy::BestCase => self.merge_best_case(corner_results),
             CornerMergeStrategy::PerCorner => {
                 // Return the first corner's result as representative
                 Ok(corner_results.values().next().unwrap().clone())
-            },
+            }
             CornerMergeStrategy::Statistical => self.merge_statistical(corner_results),
         }
     }
 
     /// Merge using worst-case analysis
-    fn merge_worst_case(&self,
-                       corner_results: &HashMap<String, TimingAnalysisResult>) -> Result<TimingAnalysisResult, AsicError> {
-
+    fn merge_worst_case(
+        &self,
+        corner_results: &HashMap<String, TimingAnalysisResult>,
+    ) -> Result<TimingAnalysisResult, AsicError> {
         let mut worst_result = corner_results.values().next().unwrap().clone();
 
         for result in corner_results.values() {
@@ -791,8 +794,12 @@ impl StaticTimingAnalyzer {
             }
 
             // Accumulate violations
-            worst_result.setup_violations.extend(result.setup_violations.clone());
-            worst_result.hold_violations.extend(result.hold_violations.clone());
+            worst_result
+                .setup_violations
+                .extend(result.setup_violations.clone());
+            worst_result
+                .hold_violations
+                .extend(result.hold_violations.clone());
 
             // Take worst power
             if result.power_analysis.total_power > worst_result.power_analysis.total_power {
@@ -804,9 +811,10 @@ impl StaticTimingAnalyzer {
     }
 
     /// Merge using best-case analysis
-    fn merge_best_case(&self,
-                      corner_results: &HashMap<String, TimingAnalysisResult>) -> Result<TimingAnalysisResult, AsicError> {
-
+    fn merge_best_case(
+        &self,
+        corner_results: &HashMap<String, TimingAnalysisResult>,
+    ) -> Result<TimingAnalysisResult, AsicError> {
         let mut best_result = corner_results.values().next().unwrap().clone();
 
         for result in corner_results.values() {
@@ -833,18 +841,20 @@ impl StaticTimingAnalyzer {
     }
 
     /// Merge using statistical methods
-    fn merge_statistical(&self,
-                        corner_results: &HashMap<String, TimingAnalysisResult>) -> Result<TimingAnalysisResult, AsicError> {
-
+    fn merge_statistical(
+        &self,
+        corner_results: &HashMap<String, TimingAnalysisResult>,
+    ) -> Result<TimingAnalysisResult, AsicError> {
         // For now, use worst-case as approximation
         // Real statistical merging would use RSS (Root Sum Squares) or similar
         self.merge_worst_case(corner_results)
     }
 
     /// Compare results across corners
-    fn compare_corners(&self,
-                      corner_results: &HashMap<String, TimingAnalysisResult>) -> Result<CornerComparison, AsicError> {
-
+    fn compare_corners(
+        &self,
+        corner_results: &HashMap<String, TimingAnalysisResult>,
+    ) -> Result<CornerComparison, AsicError> {
         let mut worst_setup_corner = String::new();
         let mut best_setup_corner = String::new();
         let mut worst_hold_corner = String::new();
@@ -881,7 +891,7 @@ impl StaticTimingAnalyzer {
         let spread_analysis = SpreadAnalysis {
             setup_spread: best_setup_slack - worst_setup_slack,
             hold_spread: best_hold_slack - worst_hold_slack,
-            skew_spread: 0.0, // Would calculate from clock skew data
+            skew_spread: 0.0,  // Would calculate from clock skew data
             power_spread: 0.0, // Would calculate from power data
         };
 
@@ -895,9 +905,10 @@ impl StaticTimingAnalyzer {
     }
 
     /// Perform statistical timing analysis
-    fn perform_statistical_analysis(&self,
-                                   corner_results: &HashMap<String, TimingAnalysisResult>) -> Result<StatisticalTimingResult, AsicError> {
-
+    fn perform_statistical_analysis(
+        &self,
+        corner_results: &HashMap<String, TimingAnalysisResult>,
+    ) -> Result<StatisticalTimingResult, AsicError> {
         // Collect delay samples from all corners
         let mut delay_samples: Vec<f64> = Vec::new();
 
@@ -909,9 +920,11 @@ impl StaticTimingAnalyzer {
 
         // Calculate statistics
         let mean = delay_samples.iter().sum::<f64>() / delay_samples.len() as f64;
-        let variance = delay_samples.iter()
+        let variance = delay_samples
+            .iter()
             .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / delay_samples.len() as f64;
+            .sum::<f64>()
+            / delay_samples.len() as f64;
         let std_dev = variance.sqrt();
 
         // Calculate percentiles
@@ -963,11 +976,12 @@ impl StaticTimingAnalyzer {
     }
 
     /// Perform on-chip variation analysis
-    fn perform_ocv_analysis(&self,
-                           _placement: &Placement,
-                           _routing: &RoutingResult,
-                           corner_results: &HashMap<String, TimingAnalysisResult>) -> Result<OcvAnalysisResult, AsicError> {
-
+    fn perform_ocv_analysis(
+        &self,
+        _placement: &Placement,
+        _routing: &RoutingResult,
+        corner_results: &HashMap<String, TimingAnalysisResult>,
+    ) -> Result<OcvAnalysisResult, AsicError> {
         // Simplified OCV analysis
         let local_variation = LocalVariation {
             within_die_variation: 0.05, // 5% variation
@@ -995,12 +1009,13 @@ impl StaticTimingAnalyzer {
     }
 
     /// Perform complete timing analysis
-    pub fn analyze(&self,
-                   placement: &Placement,
-                   routing: &RoutingResult,
-                   clock_tree: &ClockTree,
-                   constraints: &SDCManager) -> Result<TimingAnalysisResult, AsicError> {
-
+    pub fn analyze(
+        &self,
+        placement: &Placement,
+        routing: &RoutingResult,
+        clock_tree: &ClockTree,
+        constraints: &SDCManager,
+    ) -> Result<TimingAnalysisResult, AsicError> {
         // Build timing graph
         let timing_graph = self.build_timing_graph(placement, routing, clock_tree)?;
 
@@ -1009,11 +1024,14 @@ impl StaticTimingAnalyzer {
         let required_times = self.compute_required_times(&timing_graph, constraints)?;
 
         // Find critical paths
-        let critical_paths = self.find_critical_paths(&timing_graph, &arrival_times, &required_times)?;
+        let critical_paths =
+            self.find_critical_paths(&timing_graph, &arrival_times, &required_times)?;
 
         // Check for violations
-        let setup_violations = self.check_setup_violations(&arrival_times, &required_times, constraints)?;
-        let hold_violations = self.check_hold_violations(&arrival_times, &required_times, constraints)?;
+        let setup_violations =
+            self.check_setup_violations(&arrival_times, &required_times, constraints)?;
+        let hold_violations =
+            self.check_hold_violations(&arrival_times, &required_times, constraints)?;
 
         // Analyze clock domains
         let clock_summary = self.analyze_clock_domains(&timing_graph, constraints)?;
@@ -1045,10 +1063,12 @@ impl StaticTimingAnalyzer {
     }
 
     /// Build timing graph from placement and routing
-    fn build_timing_graph(&self,
-                          _placement: &Placement,
-                          _routing: &RoutingResult,
-                          _clock_tree: &ClockTree) -> Result<TimingGraph, AsicError> {
+    fn build_timing_graph(
+        &self,
+        _placement: &Placement,
+        _routing: &RoutingResult,
+        _clock_tree: &ClockTree,
+    ) -> Result<TimingGraph, AsicError> {
         // In a real implementation, this would:
         // 1. Create nodes for all pins and ports
         // 2. Create timing arcs for all cells and nets
@@ -1059,9 +1079,11 @@ impl StaticTimingAnalyzer {
     }
 
     /// Compute arrival times using forward propagation
-    fn compute_arrival_times(&self,
-                            _timing_graph: &TimingGraph,
-                            _constraints: &SDCManager) -> Result<HashMap<String, f64>, AsicError> {
+    fn compute_arrival_times(
+        &self,
+        _timing_graph: &TimingGraph,
+        _constraints: &SDCManager,
+    ) -> Result<HashMap<String, f64>, AsicError> {
         let mut arrival_times = HashMap::new();
 
         // Simplified implementation - would use topological sort and propagation
@@ -1073,9 +1095,11 @@ impl StaticTimingAnalyzer {
     }
 
     /// Compute required times using backward propagation
-    fn compute_required_times(&self,
-                             _timing_graph: &TimingGraph,
-                             _constraints: &SDCManager) -> Result<HashMap<String, f64>, AsicError> {
+    fn compute_required_times(
+        &self,
+        _timing_graph: &TimingGraph,
+        _constraints: &SDCManager,
+    ) -> Result<HashMap<String, f64>, AsicError> {
         let mut required_times = HashMap::new();
 
         // Simplified implementation
@@ -1087,16 +1111,18 @@ impl StaticTimingAnalyzer {
     }
 
     /// Find critical timing paths
-    fn find_critical_paths(&self,
-                          _timing_graph: &TimingGraph,
-                          arrival_times: &HashMap<String, f64>,
-                          required_times: &HashMap<String, f64>) -> Result<Vec<TimingPath>, AsicError> {
+    fn find_critical_paths(
+        &self,
+        _timing_graph: &TimingGraph,
+        arrival_times: &HashMap<String, f64>,
+        required_times: &HashMap<String, f64>,
+    ) -> Result<Vec<TimingPath>, AsicError> {
         let mut paths = Vec::new();
 
         // Example critical path
         if let (Some(&arrival), Some(&required)) = (
             arrival_times.get("output_port"),
-            required_times.get("output_port")
+            required_times.get("output_port"),
         ) {
             paths.push(TimingPath {
                 id: "path_1".to_string(),
@@ -1134,10 +1160,12 @@ impl StaticTimingAnalyzer {
     }
 
     /// Check for setup timing violations
-    fn check_setup_violations(&self,
-                             arrival_times: &HashMap<String, f64>,
-                             required_times: &HashMap<String, f64>,
-                             _constraints: &SDCManager) -> Result<Vec<TimingViolation>, AsicError> {
+    fn check_setup_violations(
+        &self,
+        arrival_times: &HashMap<String, f64>,
+        required_times: &HashMap<String, f64>,
+        _constraints: &SDCManager,
+    ) -> Result<Vec<TimingViolation>, AsicError> {
         let mut violations = Vec::new();
 
         for (endpoint, &arrival) in arrival_times {
@@ -1174,10 +1202,12 @@ impl StaticTimingAnalyzer {
     }
 
     /// Check for hold timing violations
-    fn check_hold_violations(&self,
-                            arrival_times: &HashMap<String, f64>,
-                            required_times: &HashMap<String, f64>,
-                            _constraints: &SDCManager) -> Result<Vec<TimingViolation>, AsicError> {
+    fn check_hold_violations(
+        &self,
+        arrival_times: &HashMap<String, f64>,
+        required_times: &HashMap<String, f64>,
+        _constraints: &SDCManager,
+    ) -> Result<Vec<TimingViolation>, AsicError> {
         let mut violations = Vec::new();
 
         // Hold analysis typically uses min delays
@@ -1192,14 +1222,12 @@ impl StaticTimingAnalyzer {
                         clock_domain: "clk".to_string(),
                         required,
                         actual: arrival,
-                        suggestions: vec![
-                            TimingFix {
-                                fix_type: FixType::BufferInsertion,
-                                description: "Insert delay buffer".to_string(),
-                                improvement: -hold_slack,
-                                cost: 0.5,
-                            },
-                        ],
+                        suggestions: vec![TimingFix {
+                            fix_type: FixType::BufferInsertion,
+                            description: "Insert delay buffer".to_string(),
+                            improvement: -hold_slack,
+                            cost: 0.5,
+                        }],
                     });
                 }
             }
@@ -1209,9 +1237,11 @@ impl StaticTimingAnalyzer {
     }
 
     /// Analyze clock domains
-    fn analyze_clock_domains(&self,
-                            _timing_graph: &TimingGraph,
-                            constraints: &SDCManager) -> Result<Vec<ClockDomain>, AsicError> {
+    fn analyze_clock_domains(
+        &self,
+        _timing_graph: &TimingGraph,
+        constraints: &SDCManager,
+    ) -> Result<Vec<ClockDomain>, AsicError> {
         let mut domains = Vec::new();
 
         for clock in &constraints.clocks {
@@ -1219,7 +1249,7 @@ impl StaticTimingAnalyzer {
                 name: clock.name.clone(),
                 period: clock.period,
                 frequency: 1000.0 / clock.period, // MHz
-                register_count: 100, // Would count from timing graph
+                register_count: 100,              // Would count from timing graph
                 setup_wns: -0.1,
                 hold_wns: 0.05,
                 uncertainty: 0.1,
@@ -1231,7 +1261,8 @@ impl StaticTimingAnalyzer {
 
     /// Compute worst negative slack
     fn compute_worst_negative_slack(&self, violations: &[TimingViolation]) -> f64 {
-        violations.iter()
+        violations
+            .iter()
             .filter(|v| matches!(v.violation_type, ViolationType::Setup))
             .map(|v| -(v.severity))
             .fold(0.0, f64::min)
@@ -1239,72 +1270,70 @@ impl StaticTimingAnalyzer {
 
     /// Compute total negative slack
     fn compute_total_negative_slack(&self, violations: &[TimingViolation]) -> f64 {
-        violations.iter()
+        violations
+            .iter()
             .filter(|v| matches!(v.violation_type, ViolationType::Setup))
             .map(|v| v.severity)
             .sum()
     }
 
     /// Analyze clock skew
-    fn analyze_clock_skew(&self,
-                         _clock_tree: &ClockTree,
-                         _placement: &Placement) -> Result<ClockSkewAnalysis, AsicError> {
+    fn analyze_clock_skew(
+        &self,
+        _clock_tree: &ClockTree,
+        _placement: &Placement,
+    ) -> Result<ClockSkewAnalysis, AsicError> {
         // Simplified skew analysis
         Ok(ClockSkewAnalysis {
             max_skew: 0.15,
             avg_skew: 0.05,
-            skew_histogram: vec![
-                (0.0, 50),
-                (0.05, 30),
-                (0.10, 15),
-                (0.15, 5),
-            ],
-            critical_pairs: vec![
-                SkewPair {
-                    launch: "reg1".to_string(),
-                    capture: "reg2".to_string(),
-                    skew: 0.12,
-                    timing_impact: -0.08,
-                },
-            ],
+            skew_histogram: vec![(0.0, 50), (0.05, 30), (0.10, 15), (0.15, 5)],
+            critical_pairs: vec![SkewPair {
+                launch: "reg1".to_string(),
+                capture: "reg2".to_string(),
+                skew: 0.12,
+                timing_impact: -0.08,
+            }],
         })
     }
 
     /// Analyze power consumption
-    fn analyze_power(&self,
-                    _placement: &Placement,
-                    _routing: &RoutingResult,
-                    _timing_graph: &TimingGraph) -> Result<PowerAnalysis, AsicError> {
+    fn analyze_power(
+        &self,
+        _placement: &Placement,
+        _routing: &RoutingResult,
+        _timing_graph: &TimingGraph,
+    ) -> Result<PowerAnalysis, AsicError> {
         Ok(PowerAnalysis {
             total_power: 150.5,
             dynamic_power: 120.3,
             static_power: 30.2,
             clock_power: 45.8,
             power_density: 0.25,
-            hotspots: vec![
-                ThermalHotspot {
-                    location: (100.0, 200.0),
-                    temperature: 85.0,
-                    power_density: 0.8,
-                    cells: vec!["cpu_core".to_string(), "cache_mem".to_string()],
-                },
-            ],
+            hotspots: vec![ThermalHotspot {
+                location: (100.0, 200.0),
+                temperature: 85.0,
+                power_density: 0.8,
+                cells: vec!["cpu_core".to_string(), "cache_mem".to_string()],
+            }],
         })
     }
 
     /// Generate timing optimization suggestions
-    pub fn suggest_optimizations(&self,
-                                result: &TimingAnalysisResult) -> Vec<TimingOptimization> {
+    pub fn suggest_optimizations(&self, result: &TimingAnalysisResult) -> Vec<TimingOptimization> {
         let mut optimizations = Vec::new();
 
         // Analyze violations and suggest fixes
         for violation in &result.setup_violations {
-            if violation.severity > 0.1 { // Significant violation
+            if violation.severity > 0.1 {
+                // Significant violation
                 optimizations.push(TimingOptimization {
                     optimization_type: OptimizationType::CriticalPath,
                     target: violation.endpoint.clone(),
-                    description: format!("Fix setup violation of {:.3}ns on {}",
-                                       violation.severity, violation.endpoint),
+                    description: format!(
+                        "Fix setup violation of {:.3}ns on {}",
+                        violation.severity, violation.endpoint
+                    ),
                     expected_improvement: violation.severity * 0.7,
                     implementation_effort: EffortLevel::Medium,
                     suggested_actions: violation.suggestions.clone(),
@@ -1320,14 +1349,12 @@ impl StaticTimingAnalyzer {
                 description: "Reduce clock skew through buffer sizing".to_string(),
                 expected_improvement: result.clock_skew.max_skew * 0.5,
                 implementation_effort: EffortLevel::High,
-                suggested_actions: vec![
-                    TimingFix {
-                        fix_type: FixType::ClockSkewOptimization,
-                        description: "Rebalance clock tree".to_string(),
-                        improvement: 0.05,
-                        cost: 10.0,
-                    },
-                ],
+                suggested_actions: vec![TimingFix {
+                    fix_type: FixType::ClockSkewOptimization,
+                    description: "Rebalance clock tree".to_string(),
+                    improvement: 0.05,
+                    cost: 10.0,
+                }],
             });
         }
 

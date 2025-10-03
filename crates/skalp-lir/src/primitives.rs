@@ -51,12 +51,26 @@ pub enum StoragePrimitive {
 /// Arithmetic primitive units
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ArithmeticPrimitive {
-    Adder { width: usize },
-    Subtractor { width: usize },
-    Multiplier { width: usize },
-    Divider { width: usize },
-    Comparator { width: usize, operation: CompareOp },
-    Shifter { width: usize, direction: ShiftDirection },
+    Adder {
+        width: usize,
+    },
+    Subtractor {
+        width: usize,
+    },
+    Multiplier {
+        width: usize,
+    },
+    Divider {
+        width: usize,
+    },
+    Comparator {
+        width: usize,
+        operation: CompareOp,
+    },
+    Shifter {
+        width: usize,
+        direction: ShiftDirection,
+    },
 }
 
 /// Comparison operations

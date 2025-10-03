@@ -89,7 +89,11 @@ impl OptimizationPass for ConstantFolding {
 
 impl ConstantFolding {
     /// Evaluate if a gate has constant output
-    fn evaluate_constant_gate(&self, gate: &Gate, constants: &HashMap<String, bool>) -> Option<bool> {
+    fn evaluate_constant_gate(
+        &self,
+        gate: &Gate,
+        constants: &HashMap<String, bool>,
+    ) -> Option<bool> {
         match gate.gate_type {
             GateType::And => {
                 let result = true;
@@ -173,7 +177,9 @@ impl OptimizationPass for DeadCodeElimination {
         }
 
         // Remove dead gates
-        let dead_gates: Vec<_> = lir.gates.iter()
+        let dead_gates: Vec<_> = lir
+            .gates
+            .iter()
             .filter(|g| !g.outputs.iter().any(|o| live_nets.contains(o)))
             .map(|g| g.id.clone())
             .collect();
@@ -212,7 +218,8 @@ impl OptimizationPass for CommonSubexpressionElimination {
 
         for gate in &lir.gates {
             let signature = self.gate_signature(gate);
-            gate_signatures.entry(signature)
+            gate_signatures
+                .entry(signature)
                 .or_insert_with(Vec::new)
                 .push(gate.id.clone());
         }
@@ -232,7 +239,9 @@ impl OptimizationPass for CommonSubexpressionElimination {
                     if let Some(dup_gate) = lir.gates.iter().find(|g| g.id == *duplicate) {
                         if let Some(keeper_gate) = lir.gates.iter().find(|g| g.id == *keeper) {
                             // Map duplicate outputs to keeper outputs
-                            for (dup_out, keep_out) in dup_gate.outputs.iter().zip(keeper_gate.outputs.iter()) {
+                            for (dup_out, keep_out) in
+                                dup_gate.outputs.iter().zip(keeper_gate.outputs.iter())
+                            {
                                 gate_replacements.insert(dup_out.clone(), keep_out.clone());
                             }
                         }
@@ -260,7 +269,10 @@ impl OptimizationPass for CommonSubexpressionElimination {
             nets_before,
             nets_after: lir.nets.len(),
             success: true,
-            message: Some(format!("Eliminated {} duplicate gates", gates_to_remove.len())),
+            message: Some(format!(
+                "Eliminated {} duplicate gates",
+                gates_to_remove.len()
+            )),
         }
     }
 }
@@ -294,9 +306,11 @@ impl OptimizationPass for BooleanSimplification {
         for gate in &lir.gates {
             // Look for patterns like double negation
             if gate.gate_type == GateType::Not {
-                if let Some(input_gate) = lir.gates.iter().find(|g| {
-                    g.outputs.contains(&gate.inputs[0]) && g.gate_type == GateType::Not
-                }) {
+                if let Some(input_gate) = lir
+                    .gates
+                    .iter()
+                    .find(|g| g.outputs.contains(&gate.inputs[0]) && g.gate_type == GateType::Not)
+                {
                     // Double negation found - replace with buffer
                     let new_gate = Gate {
                         id: format!("{}_simplified", gate.id),
@@ -357,9 +371,7 @@ pub struct OptimizationPipeline {
 impl OptimizationPipeline {
     /// Create a new optimization pipeline
     pub fn new() -> Self {
-        Self {
-            passes: Vec::new(),
-        }
+        Self { passes: Vec::new() }
     }
 
     /// Add an optimization pass to the pipeline
@@ -383,8 +395,10 @@ impl OptimizationPipeline {
 
         for pass in &mut self.passes {
             let result = pass.optimize(lir);
-            println!("Optimization pass '{}': {} gates -> {} gates",
-                     result.pass_name, result.gates_before, result.gates_after);
+            println!(
+                "Optimization pass '{}': {} gates -> {} gates",
+                result.pass_name, result.gates_before, result.gates_after
+            );
             if let Some(msg) = &result.message {
                 println!("  {}", msg);
             }

@@ -8,9 +8,9 @@
 //! SKALP_UPDATE_GOLDEN=1 cargo test
 //! ```
 
-use skalp_testing::golden::GoldenTest;
-use skalp_frontend::parse::parse;
 use skalp_frontend::hir_builder::build_hir;
+use skalp_frontend::parse::parse;
+use skalp_testing::golden::GoldenTest;
 
 /// Helper to compile a SKALP file to SystemVerilog
 fn compile_to_verilog(source: &str) -> String {

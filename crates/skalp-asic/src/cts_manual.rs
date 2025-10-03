@@ -2,13 +2,14 @@
 //!
 //! Interactive clock tree synthesis with manual buffer insertion
 
-use crate::{AsicError};
-use crate::cts::{ClockTree, ClockTreeSynthesizer, ClockSpec, ClockTopology,
-                  ClockBuffer, ClockNet, ClockTreeTiming, ClockSink,
-                  ClockSource};
-use crate::cts::{ClockSpecification as CtsClockSpec, BufferStrategy as CtsBufferStrategy};
+use crate::cts::{BufferStrategy as CtsBufferStrategy, ClockSpecification as CtsClockSpec};
+use crate::cts::{
+    ClockBuffer, ClockNet, ClockSink, ClockSource, ClockSpec, ClockTopology, ClockTree,
+    ClockTreeSynthesizer, ClockTreeTiming,
+};
 use crate::placement::Placement;
-use crate::routing::{RoutingResult, CongestionMap};
+use crate::routing::{CongestionMap, RoutingResult};
+use crate::AsicError;
 use std::collections::{HashMap, HashSet};
 
 /// Manual CTS controller
@@ -432,12 +433,9 @@ impl ManualCTS {
     }
 
     /// Build clock tree with manual guidance
-    pub fn build_guided_tree(&self, placement: &Placement)
-                           -> Result<ClockTree, AsicError> {
-        let mut synthesizer = ClockTreeSynthesizer::new(
-            crate::Technology::Sky130,
-            crate::DesignRules::default()
-        );
+    pub fn build_guided_tree(&self, placement: &Placement) -> Result<ClockTree, AsicError> {
+        let mut synthesizer =
+            ClockTreeSynthesizer::new(crate::Technology::Sky130, crate::DesignRules::default());
 
         // Apply manual buffers
         for (name, buffer_placement) in &self.manual_buffers {
@@ -467,7 +465,7 @@ impl ManualCTS {
                 frequency: clock_spec.frequency,
             },
             max_skew: clock_spec.max_skew,
-            target_delay: 0.1, // Default
+            target_delay: 0.1,   // Default
             max_transition: 0.2, // Default
             buffer_strategy: CtsBufferStrategy::MinSkew,
         };
@@ -476,9 +474,12 @@ impl ManualCTS {
     }
 
     /// Apply manual buffer placement
-    fn apply_manual_buffer(&self, synthesizer: &mut ClockTreeSynthesizer,
-                          name: &str, placement: &BufferPlacement)
-                        -> Result<(), AsicError> {
+    fn apply_manual_buffer(
+        &self,
+        synthesizer: &mut ClockTreeSynthesizer,
+        name: &str,
+        placement: &BufferPlacement,
+    ) -> Result<(), AsicError> {
         // TODO: Integrate with synthesizer
         Ok(())
     }
@@ -546,7 +547,8 @@ impl ManualCTS {
             for i in 0..bins {
                 let bin_start = min + i as f64 * bin_width;
                 let bin_end = bin_start + bin_width;
-                let count = delays.iter()
+                let count = delays
+                    .iter()
                     .filter(|&&d| d >= bin_start && d < bin_end)
                     .count();
                 distribution.push((bin_start, count));
@@ -606,8 +608,11 @@ impl ManualCTS {
     }
 
     /// Generate improvement suggestions
-    fn generate_suggestions(&self, _clock_tree: &ClockTree,
-                          violations: &[CTSViolation]) -> Vec<CTSSuggestion> {
+    fn generate_suggestions(
+        &self,
+        _clock_tree: &ClockTree,
+        violations: &[CTSViolation],
+    ) -> Vec<CTSSuggestion> {
         let mut suggestions = Vec::new();
 
         for violation in violations {
@@ -619,7 +624,7 @@ impl ManualCTS {
                         estimated_improvement: 0.1,
                         description: "Add buffer to balance delays".to_string(),
                     });
-                },
+                }
                 _ => {}
             }
         }
@@ -636,21 +641,28 @@ impl ManualCTS {
 
         // Clock definition
         for spec in &self.clock_specs {
-            script.push_str(&format!("create_clock -name {} -period {:.3}\n",
-                                   spec.name, 1.0 / spec.frequency));
+            script.push_str(&format!(
+                "create_clock -name {} -period {:.3}\n",
+                spec.name,
+                1.0 / spec.frequency
+            ));
         }
 
         // Constraints
         script.push_str("\n# CTS Constraints\n");
-        script.push_str(&format!("set_clock_tree_options -max_skew {:.3}\n",
-                              self.clock_specs[0].max_skew));
+        script.push_str(&format!(
+            "set_clock_tree_options -max_skew {:.3}\n",
+            self.clock_specs[0].max_skew
+        ));
 
         // Manual buffers
         if !self.manual_buffers.is_empty() {
             script.push_str("\n# Manual Buffer Placements\n");
             for (name, placement) in &self.manual_buffers {
-                script.push_str(&format!("place_buffer {} -location ({:.2}, {:.2})\n",
-                                       name, placement.position.0, placement.position.1));
+                script.push_str(&format!(
+                    "place_buffer {} -location ({:.2}, {:.2})\n",
+                    name, placement.position.0, placement.position.1
+                ));
             }
         }
 

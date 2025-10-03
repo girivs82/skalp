@@ -6,16 +6,16 @@
 //! - Load balancing
 //! - Power optimization
 
-use crate::{AsicError, Technology, DesignRules};
+use crate::placement::CellInstance;
 use crate::placement::Placement;
 use crate::routing::RoutingResult;
 use crate::sky130::StandardCellLibrary;
-use crate::placement::CellInstance;
-use nalgebra::{DVector, DMatrix};
+use crate::{AsicError, DesignRules, Technology};
+use nalgebra::{DMatrix, DVector};
 use petgraph::graph::{Graph, NodeIndex};
-use std::collections::{HashMap, HashSet, BinaryHeap};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use serde::{Serialize, Deserialize};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Clock specification for synthesis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,10 +234,10 @@ impl ClockTreeSynthesizer {
     ) -> Result<ClockTree, AsicError> {
         // Extract clock sinks from placement
         let sinks = self.extract_clock_sinks(placement)?;
-        
+
         // Determine optimal topology
         let topology = self.select_topology(&sinks, clock_spec)?;
-        
+
         // Build clock tree structure
         let (buffers, nets) = match &topology {
             ClockTopology::HTree { .. } => self.build_htree(&sinks, clock_spec)?,
@@ -245,16 +245,16 @@ impl ClockTreeSynthesizer {
             ClockTopology::Mesh { .. } => self.build_mesh(&sinks, clock_spec)?,
             ClockTopology::Hybrid { .. } => self.build_hybrid(&sinks, clock_spec)?,
         };
-        
+
         // Perform buffer insertion
         let buffers = self.insert_buffers(buffers, &nets, clock_spec)?;
-        
+
         // Balance clock tree for minimal skew
         let (buffers, nets) = self.balance_tree(buffers, nets, &sinks, clock_spec)?;
-        
+
         // Analyze timing
         let timing = self.analyze_timing(&buffers, &nets, &sinks, clock_spec)?;
-        
+
         Ok(ClockTree {
             source: clock_spec.source.clone(),
             sinks,
@@ -268,10 +268,14 @@ impl ClockTreeSynthesizer {
     /// Extract clock sinks from placement
     fn extract_clock_sinks(&self, placement: &Placement) -> Result<Vec<ClockSink>, AsicError> {
         let mut sinks = Vec::new();
-        
+
         for (instance, position) in &placement.positions {
             // Check if instance is a flip-flop or latch
-            if let Some(cell) = placement.cells.iter().find(|c| &c.instance_name == instance) {
+            if let Some(cell) = placement
+                .cells
+                .iter()
+                .find(|c| &c.instance_name == instance)
+            {
                 if cell.cell_type.contains("DFF") || cell.cell_type.contains("LATCH") {
                     sinks.push(ClockSink {
                         instance: instance.clone(),
@@ -283,11 +287,13 @@ impl ClockTreeSynthesizer {
                 }
             }
         }
-        
+
         if sinks.is_empty() {
-            return Err(AsicError::PlacementError("No clock sinks found".to_string()));
+            return Err(AsicError::PlacementError(
+                "No clock sinks found".to_string(),
+            ));
         }
-        
+
         Ok(sinks)
     }
 
@@ -298,12 +304,12 @@ impl ClockTreeSynthesizer {
         _spec: &ClockSpecification,
     ) -> Result<ClockTopology, AsicError> {
         let num_sinks = sinks.len();
-        
+
         // For small designs, use balanced tree
         if num_sinks < 100 {
             let fanout = 4; // Optimal fanout for most technologies
             let levels = (num_sinks as f64).log(fanout as f64).ceil() as usize;
-            
+
             Ok(ClockTopology::BalancedTree {
                 fanout,
                 levels,
@@ -313,7 +319,7 @@ impl ClockTreeSynthesizer {
         // For medium designs, use H-tree
         else if num_sinks < 10000 {
             let levels = ((num_sinks as f64).log2() / 2.0).ceil() as usize;
-            
+
             Ok(ClockTopology::HTree {
                 levels,
                 branches: Vec::new(),
@@ -325,13 +331,13 @@ impl ClockTreeSynthesizer {
                 levels: 3,
                 branches: Vec::new(),
             });
-            
+
             let local = Box::new(ClockTopology::BalancedTree {
                 fanout: 4,
                 levels: 3,
                 nodes: Vec::new(),
             });
-            
+
             Ok(ClockTopology::Hybrid {
                 global_topology: global,
                 local_topology: local,
@@ -347,12 +353,12 @@ impl ClockTreeSynthesizer {
     ) -> Result<(Vec<ClockBuffer>, Vec<ClockNet>), AsicError> {
         let mut buffers = Vec::new();
         let mut nets = Vec::new();
-        
+
         // Find bounding box of all sinks
         let (min_x, min_y, max_x, max_y) = self.find_bounding_box(sinks);
         let center_x = (min_x + max_x) / 2.0;
         let center_y = (min_y + max_y) / 2.0;
-        
+
         // Build H-tree recursively
         self.build_htree_recursive(
             (center_x, center_y),
@@ -364,7 +370,7 @@ impl ClockTreeSynthesizer {
             &mut nets,
             sinks,
         )?;
-        
+
         Ok((buffers, nets))
     }
 
@@ -382,7 +388,8 @@ impl ClockTreeSynthesizer {
     ) -> Result<(), AsicError> {
         if level >= max_level {
             // Connect to local sinks
-            let local_sinks = self.find_local_sinks(center, half_width * 2.0, half_height * 2.0, sinks);
+            let local_sinks =
+                self.find_local_sinks(center, half_width * 2.0, half_height * 2.0, sinks);
             if !local_sinks.is_empty() {
                 // Add buffer at this point
                 let buffer_name = format!("clk_buf_{}_{}", level, buffers.len());
@@ -394,7 +401,7 @@ impl ClockTreeSynthesizer {
                     drive_strength: 4.0,
                     delay: 0.05,
                 });
-                
+
                 // Create net connecting buffer to local sinks
                 let net = ClockNet {
                     name: format!("clk_net_{}", nets.len()),
@@ -409,7 +416,7 @@ impl ClockTreeSynthesizer {
             }
             return Ok(());
         }
-        
+
         // Add buffer at center
         let buffer_name = format!("clk_buf_{}_{}", level, buffers.len());
         buffers.push(ClockBuffer {
@@ -420,15 +427,15 @@ impl ClockTreeSynthesizer {
             drive_strength: 8.0,
             delay: 0.04,
         });
-        
+
         // Create four branches
         let branches = [
-            (center.0 - half_width/2.0, center.1 - half_height/2.0),
-            (center.0 + half_width/2.0, center.1 - half_height/2.0),
-            (center.0 - half_width/2.0, center.1 + half_height/2.0),
-            (center.0 + half_width/2.0, center.1 + half_height/2.0),
+            (center.0 - half_width / 2.0, center.1 - half_height / 2.0),
+            (center.0 + half_width / 2.0, center.1 - half_height / 2.0),
+            (center.0 - half_width / 2.0, center.1 + half_height / 2.0),
+            (center.0 + half_width / 2.0, center.1 + half_height / 2.0),
         ];
-        
+
         for branch_center in &branches {
             self.build_htree_recursive(
                 *branch_center,
@@ -441,7 +448,7 @@ impl ClockTreeSynthesizer {
                 sinks,
             )?;
         }
-        
+
         Ok(())
     }
 
@@ -454,21 +461,21 @@ impl ClockTreeSynthesizer {
         let mut buffers = Vec::new();
         let mut nets = Vec::new();
         let fanout = 4;
-        
+
         // Cluster sinks using k-means
         let clusters = self.cluster_sinks(sinks, fanout)?;
-        
+
         // Build tree bottom-up
         let mut current_level = clusters;
         let mut level = 0;
-        
+
         while current_level.len() > 1 {
             let mut next_level = Vec::new();
-            
+
             for chunk in current_level.chunks(fanout) {
                 // Find center of this cluster
                 let center = self.find_cluster_center(chunk);
-                
+
                 // Add buffer at center
                 let buffer_name = format!("clk_buf_l{}_n{}", level, buffers.len());
                 buffers.push(ClockBuffer {
@@ -479,7 +486,7 @@ impl ClockTreeSynthesizer {
                     drive_strength: 2.0 * chunk.len() as f64,
                     delay: 0.05,
                 });
-                
+
                 // Create net connecting to children
                 let net = ClockNet {
                     name: format!("clk_net_l{}_n{}", level, nets.len()),
@@ -491,14 +498,14 @@ impl ClockTreeSynthesizer {
                     resistance: 0.0,
                 };
                 nets.push(net);
-                
+
                 next_level.push((buffer_name, center));
             }
-            
+
             current_level = next_level;
             level += 1;
         }
-        
+
         Ok((buffers, nets))
     }
 
@@ -510,23 +517,23 @@ impl ClockTreeSynthesizer {
     ) -> Result<(Vec<ClockBuffer>, Vec<ClockNet>), AsicError> {
         let mut buffers = Vec::new();
         let mut nets = Vec::new();
-        
+
         // Determine mesh dimensions
         let num_sinks = sinks.len();
         let rows = (num_sinks as f64).sqrt().ceil() as usize;
         let cols = rows;
-        
+
         // Find bounding box
         let (min_x, min_y, max_x, max_y) = self.find_bounding_box(sinks);
         let step_x = (max_x - min_x) / cols as f64;
         let step_y = (max_y - min_y) / rows as f64;
-        
+
         // Create mesh grid points with buffers
         for row in 0..rows {
             for col in 0..cols {
                 let x = min_x + (col as f64 + 0.5) * step_x;
                 let y = min_y + (row as f64 + 0.5) * step_y;
-                
+
                 let buffer_name = format!("clk_mesh_buf_r{}_c{}", row, col);
                 buffers.push(ClockBuffer {
                     name: buffer_name.clone(),
@@ -536,16 +543,16 @@ impl ClockTreeSynthesizer {
                     drive_strength: 4.0,
                     delay: 0.05,
                 });
-                
+
                 // Connect to adjacent mesh points
                 let mut adjacent = Vec::new();
                 if col > 0 {
-                    adjacent.push(format!("clk_mesh_buf_r{}_c{}", row, col-1));
+                    adjacent.push(format!("clk_mesh_buf_r{}_c{}", row, col - 1));
                 }
                 if row > 0 {
-                    adjacent.push(format!("clk_mesh_buf_r{}_c{}", row-1, col));
+                    adjacent.push(format!("clk_mesh_buf_r{}_c{}", row - 1, col));
                 }
-                
+
                 if !adjacent.is_empty() {
                     nets.push(ClockNet {
                         name: format!("clk_mesh_net_r{}_c{}", row, col),
@@ -559,7 +566,7 @@ impl ClockTreeSynthesizer {
                 }
             }
         }
-        
+
         // Connect sinks to nearest mesh points
         for sink in sinks {
             let nearest_buffer = self.find_nearest_buffer(&buffers, sink.position)?;
@@ -573,7 +580,7 @@ impl ClockTreeSynthesizer {
                 resistance: 0.0,
             });
         }
-        
+
         Ok((buffers, nets))
     }
 
@@ -591,19 +598,19 @@ impl ClockTreeSynthesizer {
 
         for (region_id, region_sinks) in local_regions.iter().enumerate() {
             let (local_buffers, local_nets) = self.build_balanced_tree(region_sinks, spec)?;
-            
+
             // Offset buffer names to avoid conflicts
             for mut buffer in local_buffers {
                 buffer.name = format!("region_{}__{}", region_id, buffer.name);
                 global_buffers.push(buffer);
             }
-            
+
             for mut net in local_nets {
                 net.name = format!("region_{}__{}", region_id, net.name);
                 global_nets.push(net);
             }
         }
-        
+
         Ok((global_buffers, global_nets))
     }
 
@@ -629,7 +636,7 @@ impl ClockTreeSynthesizer {
                     // Need to insert additional buffers
                     let num_buffers = (load_cap / max_load).ceil() as usize;
 
-                    for i in 0..num_buffers-1 {
+                    for i in 0..num_buffers - 1 {
                         let new_buffer = ClockBuffer {
                             name: format!("{}_extra_{}", buffer.name, i),
                             position: buffer.position,
@@ -658,26 +665,28 @@ impl ClockTreeSynthesizer {
     ) -> Result<(Vec<ClockBuffer>, Vec<ClockNet>), AsicError> {
         let mut balanced_buffers = buffers.clone();
         let mut balanced_nets = nets.clone();
-        
+
         // Calculate path delay to each sink
         let mut sink_delays = HashMap::new();
         for sink in sinks {
-            let delay = self.calculate_path_delay(&sink.instance, &balanced_buffers, &balanced_nets)?;
+            let delay =
+                self.calculate_path_delay(&sink.instance, &balanced_buffers, &balanced_nets)?;
             sink_delays.insert(sink.instance.clone(), delay);
         }
-        
+
         // Find max and min delays
         let max_delay = sink_delays.values().cloned().fold(0.0, f64::max);
         let min_delay = sink_delays.values().cloned().fold(f64::INFINITY, f64::min);
         let skew = max_delay - min_delay;
-        
+
         // Add delay buffers to balance paths
         if skew > spec.max_skew {
             for (sink_name, delay) in &sink_delays {
                 let delay_needed = max_delay - delay;
-                if delay_needed > 0.01 { // 10ps threshold
+                if delay_needed > 0.01 {
+                    // 10ps threshold
                     let num_delay_bufs = (delay_needed / 0.05).ceil() as usize; // 50ps per buffer
-                    
+
                     for i in 0..num_delay_bufs {
                         let buffer = ClockBuffer {
                             name: format!("delay_buf_{}_{}", sink_name, i),
@@ -692,7 +701,7 @@ impl ClockTreeSynthesizer {
                 }
             }
         }
-        
+
         Ok((balanced_buffers, balanced_nets))
     }
 
@@ -706,25 +715,25 @@ impl ClockTreeSynthesizer {
     ) -> Result<ClockTiming, AsicError> {
         let mut sink_slack = HashMap::new();
         let mut delays = Vec::new();
-        
+
         // Calculate delay to each sink
         for sink in sinks {
             let delay = self.calculate_path_delay(&sink.instance, buffers, nets)?;
             delays.push(delay);
-            
+
             // Calculate slack (positive is good)
             let period = 1000.0 / spec.source.frequency; // ns
             let slack = period - delay - sink.setup_time;
             sink_slack.insert(sink.instance.clone(), slack);
         }
-        
+
         let max_delay = delays.iter().cloned().fold(0.0, f64::max);
         let min_delay = delays.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_skew = max_delay - min_delay;
-        
+
         // Calculate power
         let power = self.calculate_clock_power(buffers, nets, spec.source.frequency)?;
-        
+
         Ok(ClockTiming {
             max_skew,
             min_delay,
@@ -738,8 +747,14 @@ impl ClockTreeSynthesizer {
 
     /// Helper: Find bounding box of sinks
     fn find_bounding_box(&self, sinks: &[ClockSink]) -> (f64, f64, f64, f64) {
-        let min_x = sinks.iter().map(|s| s.position.0).fold(f64::INFINITY, f64::min);
-        let min_y = sinks.iter().map(|s| s.position.1).fold(f64::INFINITY, f64::min);
+        let min_x = sinks
+            .iter()
+            .map(|s| s.position.0)
+            .fold(f64::INFINITY, f64::min);
+        let min_y = sinks
+            .iter()
+            .map(|s| s.position.1)
+            .fold(f64::INFINITY, f64::min);
         let max_x = sinks.iter().map(|s| s.position.0).fold(0.0, f64::max);
         let max_y = sinks.iter().map(|s| s.position.1).fold(0.0, f64::max);
         (min_x, min_y, max_x, max_y)
@@ -753,10 +768,11 @@ impl ClockTreeSynthesizer {
         height: f64,
         sinks: &'a [ClockSink],
     ) -> Vec<&'a ClockSink> {
-        sinks.iter()
+        sinks
+            .iter()
             .filter(|s| {
-                (s.position.0 - center.0).abs() <= width/2.0 &&
-                (s.position.1 - center.1).abs() <= height/2.0
+                (s.position.0 - center.0).abs() <= width / 2.0
+                    && (s.position.1 - center.1).abs() <= height / 2.0
             })
             .collect()
     }
@@ -770,19 +786,19 @@ impl ClockTreeSynthesizer {
         // Simple clustering - divide into equal groups
         let mut clusters = Vec::new();
         let chunk_size = (sinks.len() + num_clusters - 1) / num_clusters;
-        
+
         for (i, chunk) in sinks.chunks(chunk_size).enumerate() {
             let center = self.find_cluster_center_sinks(chunk);
             clusters.push((format!("cluster_{}", i), center));
         }
-        
+
         Ok(clusters)
     }
 
     /// Helper: Find center of cluster
     fn find_cluster_center(&self, cluster: &[(String, (f64, f64))]) -> (f64, f64) {
-        let sum_x: f64 = cluster.iter().map(|c| c.1.0).sum();
-        let sum_y: f64 = cluster.iter().map(|c| c.1.1).sum();
+        let sum_x: f64 = cluster.iter().map(|c| c.1 .0).sum();
+        let sum_y: f64 = cluster.iter().map(|c| c.1 .1).sum();
         let count = cluster.len() as f64;
         (sum_x / count, sum_y / count)
     }
@@ -802,7 +818,8 @@ impl ClockTreeSynthesizer {
             2..=4 => "sky130_fd_sc_hd__buf_4",
             5..=8 => "sky130_fd_sc_hd__buf_8",
             _ => "sky130_fd_sc_hd__buf_16",
-        }.to_string()
+        }
+        .to_string()
     }
 
     /// Helper: Find nearest buffer to position
@@ -811,12 +828,15 @@ impl ClockTreeSynthesizer {
         buffers: &[ClockBuffer],
         position: (f64, f64),
     ) -> Result<String, AsicError> {
-        buffers.iter()
+        buffers
+            .iter()
             .min_by(|a, b| {
-                let dist_a = ((a.position.0 - position.0).powi(2) +
-                             (a.position.1 - position.1).powi(2)).sqrt();
-                let dist_b = ((b.position.0 - position.0).powi(2) +
-                             (b.position.1 - position.1).powi(2)).sqrt();
+                let dist_a = ((a.position.0 - position.0).powi(2)
+                    + (a.position.1 - position.1).powi(2))
+                .sqrt();
+                let dist_b = ((b.position.0 - position.0).powi(2)
+                    + (b.position.1 - position.1).powi(2))
+                .sqrt();
                 dist_a.partial_cmp(&dist_b).unwrap()
             })
             .map(|b| b.name.clone())
@@ -831,12 +851,12 @@ impl ClockTreeSynthesizer {
     ) -> Result<Vec<Vec<ClockSink>>, AsicError> {
         let mut regions = vec![Vec::new(); num_regions];
         let region_size = (sinks.len() + num_regions - 1) / num_regions;
-        
+
         for (i, sink) in sinks.iter().enumerate() {
             let region_id = i / region_size;
             regions[region_id].push(sink.clone());
         }
-        
+
         Ok(regions)
     }
 
@@ -858,21 +878,21 @@ impl ClockTreeSynthesizer {
         // Simple RC delay model
         let mut total_delay = 0.0;
         let mut current = sink.to_string();
-        
+
         // Trace back to source
         while let Some(net) = nets.iter().find(|n| n.sinks.contains(&current)) {
             // Wire delay
             let wire_delay = net.resistance * net.capacitance;
             total_delay += wire_delay;
-            
+
             // Buffer delay
             if let Some(buffer) = buffers.iter().find(|b| b.name == net.source) {
                 total_delay += buffer.delay;
             }
-            
+
             current = net.source.clone();
         }
-        
+
         Ok(total_delay)
     }
 
@@ -886,17 +906,17 @@ impl ClockTreeSynthesizer {
         // P = C * V^2 * f
         let vdd = 1.8; // V for SKY130
         let mut total_cap = 0.0;
-        
+
         // Buffer capacitances
         for buffer in buffers {
             total_cap += buffer.input_cap;
         }
-        
+
         // Wire capacitances
         for net in nets {
             total_cap += net.capacitance;
         }
-        
+
         let power = total_cap * vdd * vdd * frequency * 1e-3; // mW
         Ok(power)
     }
@@ -935,11 +955,10 @@ pub enum BufferStrategy {
 pub enum CtsError {
     #[error("Clock tree synthesis error: {0}")]
     SynthesisError(String),
-    
+
     #[error("Timing constraint violation: {0}")]
     TimingViolation(String),
-    
+
     #[error("Buffer insertion failed: {0}")]
     BufferError(String),
 }
-

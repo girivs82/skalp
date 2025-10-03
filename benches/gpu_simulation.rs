@@ -1,8 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use skalp_frontend::parse_and_build_hir;
 use skalp_mir::{MirCompiler, OptimizationLevel};
+use skalp_sim::{SimulationConfig, Simulator};
 use skalp_sir::convert_mir_to_sir;
-use skalp_sim::{Simulator, SimulationConfig};
 use tokio::runtime::Runtime;
 
 const COUNTER_SOURCE: &str = r#"
@@ -30,8 +30,7 @@ impl Counter {
 async fn benchmark_simulation(use_gpu: bool, cycles: u64) -> u64 {
     // Parse and compile
     let hir = parse_and_build_hir(COUNTER_SOURCE).unwrap();
-    let compiler = MirCompiler::new()
-        .with_optimization_level(OptimizationLevel::Basic);
+    let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
     let mir = compiler.compile_to_mir(&hir).unwrap();
     let sir = convert_mir_to_sir(&mir.modules[0]);
 
@@ -40,7 +39,7 @@ async fn benchmark_simulation(use_gpu: bool, cycles: u64) -> u64 {
         use_gpu,
         max_cycles: cycles,
         timeout_ms: 60000,
-        capture_waveforms: false,  // Disable for benchmarking
+        capture_waveforms: false, // Disable for benchmarking
         parallel_threads: 4,
     };
 
@@ -53,7 +52,10 @@ async fn benchmark_simulation(use_gpu: bool, cycles: u64) -> u64 {
 
     // Run simulation
     for i in 0..cycles {
-        simulator.set_input("clk", vec![(i % 2) as u8]).await.unwrap();
+        simulator
+            .set_input("clk", vec![(i % 2) as u8])
+            .await
+            .unwrap();
         simulator.step_simulation().await.unwrap();
     }
 
@@ -65,29 +67,13 @@ fn bench_gpu_vs_cpu(c: &mut Criterion) {
     let mut group = c.benchmark_group("gpu_vs_cpu_real");
 
     for cycles in [100, 500, 1000].iter() {
-        group.bench_with_input(
-            BenchmarkId::new("CPU", cycles),
-            cycles,
-            |b, &cycles| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        benchmark_simulation(false, cycles).await
-                    })
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("CPU", cycles), cycles, |b, &cycles| {
+            b.iter(|| rt.block_on(async { benchmark_simulation(false, cycles).await }));
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("GPU", cycles),
-            cycles,
-            |b, &cycles| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        benchmark_simulation(true, cycles).await
-                    })
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("GPU", cycles), cycles, |b, &cycles| {
+            b.iter(|| rt.block_on(async { benchmark_simulation(true, cycles).await }));
+        });
     }
 
     group.finish();

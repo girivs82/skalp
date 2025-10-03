@@ -14,9 +14,9 @@
 //! - Error handling and recovery
 //! - Complex nested structures
 
-use skalp_frontend::parse::parse;
-use skalp_frontend::hir_builder::build_hir;
 use skalp_frontend::hir::*;
+use skalp_frontend::hir_builder::build_hir;
+use skalp_frontend::parse::parse;
 
 // ============================================================================
 // Helper Functions
@@ -50,13 +50,19 @@ fn assert_fails(source: &str) {
 
 /// Helper to get the first entity from HIR
 fn get_first_entity(hir: &Hir) -> &HirEntity {
-    assert!(!hir.entities.is_empty(), "HIR should contain at least one entity");
+    assert!(
+        !hir.entities.is_empty(),
+        "HIR should contain at least one entity"
+    );
     &hir.entities[0]
 }
 
 /// Helper to get the first implementation from HIR
 fn get_first_impl(hir: &Hir) -> &HirImplementation {
-    assert!(!hir.implementations.is_empty(), "HIR should contain at least one implementation");
+    assert!(
+        !hir.implementations.is_empty(),
+        "HIR should contain at least one implementation"
+    );
     &hir.implementations[0]
 }
 
@@ -108,8 +114,14 @@ impl Adder {
     assert!(matches!(entity.ports[0].direction, HirPortDirection::Input));
     assert!(matches!(entity.ports[1].direction, HirPortDirection::Input));
     assert!(matches!(entity.ports[2].direction, HirPortDirection::Input));
-    assert!(matches!(entity.ports[3].direction, HirPortDirection::Output));
-    assert!(matches!(entity.ports[4].direction, HirPortDirection::Output));
+    assert!(matches!(
+        entity.ports[3].direction,
+        HirPortDirection::Output
+    ));
+    assert!(matches!(
+        entity.ports[4].direction,
+        HirPortDirection::Output
+    ));
 }
 
 #[test]
@@ -126,7 +138,10 @@ impl BiDir {
     let entity = get_first_entity(&hir);
 
     assert_eq!(entity.ports.len(), 1);
-    assert!(matches!(entity.ports[0].direction, HirPortDirection::Bidirectional));
+    assert!(matches!(
+        entity.ports[0].direction,
+        HirPortDirection::Bidirectional
+    ));
 }
 
 #[test]
@@ -205,7 +220,10 @@ impl Wire {
     let implementation = get_first_impl(&hir);
 
     assert_eq!(implementation.assignments.len(), 1);
-    assert!(matches!(implementation.assignments[0].assignment_type, HirAssignmentType::Combinational));
+    assert!(matches!(
+        implementation.assignments[0].assignment_type,
+        HirAssignmentType::Combinational
+    ));
 }
 
 #[test]
@@ -300,7 +318,10 @@ impl DFF {
 
     assert_eq!(implementation.event_blocks.len(), 1);
     assert_eq!(implementation.event_blocks[0].triggers.len(), 1);
-    assert!(matches!(implementation.event_blocks[0].triggers[0].edge, HirEdgeType::Rising));
+    assert!(matches!(
+        implementation.event_blocks[0].triggers[0].edge,
+        HirEdgeType::Rising
+    ));
 }
 
 #[test]
@@ -327,7 +348,10 @@ impl Test {
 
     assert_eq!(implementation.event_blocks.len(), 1);
     assert_eq!(implementation.event_blocks[0].triggers.len(), 1);
-    assert!(matches!(implementation.event_blocks[0].triggers[0].edge, HirEdgeType::Falling));
+    assert!(matches!(
+        implementation.event_blocks[0].triggers[0].edge,
+        HirEdgeType::Falling
+    ));
 }
 
 #[test]

@@ -58,7 +58,7 @@ mod formal_verification_tests {
                 let implementation = &hir.implementations[0];
                 println!("Formal blocks: {}", implementation.formal_blocks.len());
                 println!("Event blocks: {}", implementation.event_blocks.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Basic formal verification parsing failed: {:?}", e);
                 // This may fail initially as we build up the HIR builder support
@@ -154,7 +154,7 @@ mod formal_verification_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Formal blocks: {}", implementation.formal_blocks.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Advanced formal properties parsing failed: {:?}", e);
                 // Expected to work once full parser support is implemented
@@ -229,7 +229,7 @@ mod formal_verification_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Formal blocks: {}", implementation.formal_blocks.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Bounded model checking parsing failed: {:?}", e);
                 // Expected to work once full parser support is implemented
@@ -374,9 +374,12 @@ mod formal_verification_tests {
                 println!("Event blocks: {}", implementation.event_blocks.len());
                 println!("Covergroups: {}", implementation.covergroups.len());
                 println!("Formal blocks: {}", implementation.formal_blocks.len());
-            },
+            }
             Err(e) => {
-                println!("❌ Comprehensive verification suite parsing failed: {:?}", e);
+                println!(
+                    "❌ Comprehensive verification suite parsing failed: {:?}",
+                    e
+                );
                 // Should work once we complete the implementation
             }
         }
@@ -430,7 +433,7 @@ mod formal_verification_tests {
 
                 let implementation = &hir.implementations[0];
                 println!("Formal blocks: {}", implementation.formal_blocks.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Formal verification edge cases parsing failed: {:?}", e);
                 // Expected to work once full parser support is implemented

@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod complete_hardware_flow_tests {
     use skalp_backends::{
-        BackendFactory, TargetPlatform, FpgaTarget, AsicTarget, SynthesisConfig,
-        OptimizationGoals, OptimizationTarget, TimingConstraint, PowerConstraints,
-        constraints::{ConstraintManager, ConstraintFormat},
+        constraints::{ConstraintFormat, ConstraintManager},
+        AsicTarget, BackendFactory, FpgaTarget, OptimizationGoals, OptimizationTarget,
+        PowerConstraints, SynthesisConfig, TargetPlatform, TimingConstraint,
     };
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::MirCompiler;
     use skalp_lir::lower_to_lir;
+    use skalp_mir::MirCompiler;
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -56,7 +56,9 @@ mod complete_hardware_flow_tests {
         // Step 2: Compile to MIR
         println!("2️⃣ Compiling to MIR...");
         let mir_compiler = MirCompiler::new();
-        let mir = mir_compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let mir = mir_compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
         println!("   MIR modules: {}", mir.modules.len());
 
         // Step 3: Lower to LIR
@@ -64,8 +66,12 @@ mod complete_hardware_flow_tests {
         let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
         println!("   LIR modules: {}", lir.modules.len());
         if let Some(module) = lir.modules.first() {
-            println!("   Gates: {}, Nets: {}, Signals: {}",
-                module.gates.len(), module.nets.len(), module.signals.len());
+            println!(
+                "   Gates: {}, Nets: {}, Signals: {}",
+                module.gates.len(),
+                module.nets.len(),
+                module.signals.len()
+            );
         }
 
         // Step 4: Create timing constraints
@@ -126,22 +132,39 @@ mod complete_hardware_flow_tests {
 
         // Step 6: Run synthesis
         println!("6️⃣ Running iCE40 synthesis...");
-        let backend = BackendFactory::create_backend(&ice40_target)
-            .expect("Failed to create iCE40 backend");
+        let backend =
+            BackendFactory::create_backend(&ice40_target).expect("Failed to create iCE40 backend");
 
-        let synthesis_results = backend.synthesize(&lir, &synthesis_config).await
+        let synthesis_results = backend
+            .synthesize(&lir, &synthesis_config)
+            .await
             .expect("Failed to run synthesis");
 
         // Step 7: Analyze results
         println!("7️⃣ Analyzing synthesis results...");
         println!("   ✅ Synthesis success: {}", synthesis_results.success);
-        println!("   📊 Area utilization: {:.1}%", synthesis_results.area_metrics.utilization_percent);
-        println!("   ⏱️  Max frequency: {:.1} MHz", synthesis_results.timing_results.max_frequency_mhz);
-        println!("   ⚡ Total power: {:.1} mW", synthesis_results.power_results.total_power_mw);
-        println!("   📁 Output files generated: {}", synthesis_results.output_files.len());
+        println!(
+            "   📊 Area utilization: {:.1}%",
+            synthesis_results.area_metrics.utilization_percent
+        );
+        println!(
+            "   ⏱️  Max frequency: {:.1} MHz",
+            synthesis_results.timing_results.max_frequency_mhz
+        );
+        println!(
+            "   ⚡ Total power: {:.1} mW",
+            synthesis_results.power_results.total_power_mw
+        );
+        println!(
+            "   📁 Output files generated: {}",
+            synthesis_results.output_files.len()
+        );
 
         for output_file in &synthesis_results.output_files {
-            println!("     {:?}: {}", output_file.file_type, output_file.description);
+            println!(
+                "     {:?}: {}",
+                output_file.file_type, output_file.description
+            );
         }
 
         // Validate results
@@ -152,11 +175,17 @@ mod complete_hardware_flow_tests {
 
         // Check if we meet timing constraints
         let timing_slack = &synthesis_results.timing_results.timing_slack;
-        println!("   🕐 Timing slack: {:.2} ns", timing_slack.worst_negative_slack_ns);
+        println!(
+            "   🕐 Timing slack: {:.2} ns",
+            timing_slack.worst_negative_slack_ns
+        );
         if timing_slack.failing_endpoints == 0 {
             println!("   ✅ All timing constraints met!");
         } else {
-            println!("   ⚠️  {} timing violations", timing_slack.failing_endpoints);
+            println!(
+                "   ⚠️  {} timing violations",
+                timing_slack.failing_endpoints
+            );
         }
 
         println!("\n🎉 COMPLETE SKALP TO iCE40 FLOW - SUCCESS!");
@@ -191,7 +220,10 @@ mod complete_hardware_flow_tests {
 
             let backend = backend_result.unwrap();
             println!("   Backend: {}", backend.name());
-            println!("   Tool version: {}", backend.tool_version().unwrap_or("Unknown".to_string()));
+            println!(
+                "   Tool version: {}",
+                backend.tool_version().unwrap_or("Unknown".to_string())
+            );
 
             let synthesis_config = SynthesisConfig {
                 target: target.clone(),
@@ -201,12 +233,10 @@ mod complete_hardware_flow_tests {
                     target_frequency: Some(500.0), // 500 MHz for ASIC
                     max_power: Some(100.0),
                 },
-                timing_constraints: vec![
-                    TimingConstraint::ClockPeriod {
-                        clock_name: "clk".to_string(),
-                        period_ns: 2.0, // 500 MHz
-                    },
-                ],
+                timing_constraints: vec![TimingConstraint::ClockPeriod {
+                    clock_name: "clk".to_string(),
+                    period_ns: 2.0, // 500 MHz
+                }],
                 power_constraints: Some(PowerConstraints {
                     max_dynamic_power: Some(80.0),
                     max_static_power: Some(20.0),
@@ -221,10 +251,18 @@ mod complete_hardware_flow_tests {
             match synthesis_result {
                 Ok(results) => {
                     println!("   ✅ Synthesis completed");
-                    println!("   📊 Cell area: {:.1} μm²",
-                        results.area_metrics.cell_area_um2.unwrap_or(0.0));
-                    println!("   ⏱️  Max frequency: {:.1} MHz", results.timing_results.max_frequency_mhz);
-                    println!("   ⚡ Power: {:.1} mW", results.power_results.total_power_mw);
+                    println!(
+                        "   📊 Cell area: {:.1} μm²",
+                        results.area_metrics.cell_area_um2.unwrap_or(0.0)
+                    );
+                    println!(
+                        "   ⏱️  Max frequency: {:.1} MHz",
+                        results.timing_results.max_frequency_mhz
+                    );
+                    println!(
+                        "   ⚡ Power: {:.1} mW",
+                        results.power_results.total_power_mw
+                    );
                 }
                 Err(e) => {
                     println!("   ⚠️  Synthesis failed: {:?}", e);
@@ -274,7 +312,10 @@ mod complete_hardware_flow_tests {
         for format in formats {
             println!("\n{:?} Format:", format);
             let constraints = constraint_manager.generate_constraints(format);
-            println!("Generated {} lines of constraints", constraints.lines().count());
+            println!(
+                "Generated {} lines of constraints",
+                constraints.lines().count()
+            );
 
             // Print first few lines as sample
             for (i, line) in constraints.lines().take(3).enumerate() {
@@ -304,14 +345,22 @@ mod complete_hardware_flow_tests {
                     println!("  FPGA: {:?}", fpga_target);
 
                     let backend_result = BackendFactory::create_backend(backend_target);
-                    assert!(backend_result.is_ok(), "Failed to create FPGA backend: {:?}", fpga_target);
+                    assert!(
+                        backend_result.is_ok(),
+                        "Failed to create FPGA backend: {:?}",
+                        fpga_target
+                    );
                 }
                 TargetPlatform::Asic(asic_target) => {
                     asic_count += 1;
                     println!("  ASIC: {:?}", asic_target);
 
                     let backend_result = BackendFactory::create_backend(backend_target);
-                    assert!(backend_result.is_ok(), "Failed to create ASIC backend: {:?}", asic_target);
+                    assert!(
+                        backend_result.is_ok(),
+                        "Failed to create ASIC backend: {:?}",
+                        asic_target
+                    );
                 }
             }
         }
@@ -329,79 +378,75 @@ mod complete_hardware_flow_tests {
 
     // Helper function to create a test LIR design
     fn create_test_adder_lir() -> skalp_lir::LirDesign {
-        use skalp_lir::{LirSignal, Gate, Net, GateType};
+        use skalp_lir::{Gate, GateType, LirSignal, Net};
 
         skalp_lir::LirDesign {
             name: "test_adder".to_string(),
-            modules: vec![
-                skalp_lir::LirModule {
-                    name: "test_adder".to_string(),
-                    signals: vec![
-                        LirSignal {
-                            name: "a".to_string(),
-                            signal_type: "logic[7:0]".to_string(),
-                            is_input: true,
-                            is_output: false,
-                            is_register: false,
-                        },
-                        LirSignal {
-                            name: "b".to_string(),
-                            signal_type: "logic[7:0]".to_string(),
-                            is_input: true,
-                            is_output: false,
-                            is_register: false,
-                        },
-                        LirSignal {
-                            name: "sum".to_string(),
-                            signal_type: "logic[8:0]".to_string(),
-                            is_input: false,
-                            is_output: true,
-                            is_register: false,
-                        },
-                        LirSignal {
-                            name: "clk".to_string(),
-                            signal_type: "logic".to_string(),
-                            is_input: true,
-                            is_output: false,
-                            is_register: false,
-                        },
-                    ],
-                    nets: vec![
-                        Net {
-                            id: "a_net".to_string(),
-                            width: 8,
-                            driver: Some("a".to_string()),
-                            loads: vec!["adder".to_string()],
-                            is_output: false,
-                            is_input: true,
-                        },
-                        Net {
-                            id: "b_net".to_string(),
-                            width: 8,
-                            driver: Some("b".to_string()),
-                            loads: vec!["adder".to_string()],
-                            is_output: false,
-                            is_input: true,
-                        },
-                        Net {
-                            id: "sum_net".to_string(),
-                            width: 9,
-                            driver: Some("adder".to_string()),
-                            loads: vec!["sum".to_string()],
-                            is_output: true,
-                            is_input: false,
-                        },
-                    ],
-                    gates: vec![
-                        Gate {
-                            id: "adder".to_string(),
-                            gate_type: GateType::And, // Simplified - would be proper adder logic
-                            inputs: vec!["a_net".to_string(), "b_net".to_string()],
-                            outputs: vec!["sum_net".to_string()],
-                        },
-                    ],
-                }
-            ],
+            modules: vec![skalp_lir::LirModule {
+                name: "test_adder".to_string(),
+                signals: vec![
+                    LirSignal {
+                        name: "a".to_string(),
+                        signal_type: "logic[7:0]".to_string(),
+                        is_input: true,
+                        is_output: false,
+                        is_register: false,
+                    },
+                    LirSignal {
+                        name: "b".to_string(),
+                        signal_type: "logic[7:0]".to_string(),
+                        is_input: true,
+                        is_output: false,
+                        is_register: false,
+                    },
+                    LirSignal {
+                        name: "sum".to_string(),
+                        signal_type: "logic[8:0]".to_string(),
+                        is_input: false,
+                        is_output: true,
+                        is_register: false,
+                    },
+                    LirSignal {
+                        name: "clk".to_string(),
+                        signal_type: "logic".to_string(),
+                        is_input: true,
+                        is_output: false,
+                        is_register: false,
+                    },
+                ],
+                nets: vec![
+                    Net {
+                        id: "a_net".to_string(),
+                        width: 8,
+                        driver: Some("a".to_string()),
+                        loads: vec!["adder".to_string()],
+                        is_output: false,
+                        is_input: true,
+                    },
+                    Net {
+                        id: "b_net".to_string(),
+                        width: 8,
+                        driver: Some("b".to_string()),
+                        loads: vec!["adder".to_string()],
+                        is_output: false,
+                        is_input: true,
+                    },
+                    Net {
+                        id: "sum_net".to_string(),
+                        width: 9,
+                        driver: Some("adder".to_string()),
+                        loads: vec!["sum".to_string()],
+                        is_output: true,
+                        is_input: false,
+                    },
+                ],
+                gates: vec![Gate {
+                    id: "adder".to_string(),
+                    gate_type: GateType::And, // Simplified - would be proper adder logic
+                    inputs: vec!["a_net".to_string(), "b_net".to_string()],
+                    outputs: vec!["sum_net".to_string()],
+                }],
+            }],
         }
     }
 }

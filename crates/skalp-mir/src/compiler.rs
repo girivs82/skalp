@@ -2,11 +2,11 @@
 //!
 //! This module provides the main compilation pipeline from HIR to SystemVerilog
 
-use crate::hir_to_mir::HirToMir;
-use crate::optimize::{OptimizationPass, DeadCodeElimination, ConstantFolding};
+use crate::cdc_analysis::{CdcAnalyzer, CdcSeverity, CdcViolation};
 use crate::codegen::SystemVerilogGenerator;
-use crate::cdc_analysis::{CdcAnalyzer, CdcViolation, CdcSeverity};
+use crate::hir_to_mir::HirToMir;
 use crate::mir::Mir;
+use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 use skalp_frontend::hir::Hir;
 
 /// Optimization level
@@ -69,18 +69,25 @@ impl MirCompiler {
             self.report_cdc_violations(&violations);
 
             // Fail compilation if there are critical violations
-            let critical_violations: Vec<_> = violations.iter()
+            let critical_violations: Vec<_> = violations
+                .iter()
                 .filter(|v| v.severity == CdcSeverity::Critical)
                 .collect();
 
             if !critical_violations.is_empty() {
-                return Err(format!("Compilation failed due to {} critical CDC violations", critical_violations.len()));
+                return Err(format!(
+                    "Compilation failed due to {} critical CDC violations",
+                    critical_violations.len()
+                ));
             }
         }
 
         // Step 3: Apply optimizations
         if self.verbose {
-            println!("Phase 3: Applying optimizations (level: {:?})", self.opt_level);
+            println!(
+                "Phase 3: Applying optimizations (level: {:?})",
+                self.opt_level
+            );
         }
         self.apply_optimizations(&mut mir);
 
@@ -105,7 +112,7 @@ impl MirCompiler {
     /// Apply optimization passes based on optimization level
     fn apply_optimizations(&self, mir: &mut Mir) {
         match self.opt_level {
-            OptimizationLevel::None => {},
+            OptimizationLevel::None => {}
             OptimizationLevel::Basic => {
                 // Apply dead code elimination
                 self.apply_pass(mir, &mut DeadCodeElimination::new());
@@ -145,7 +152,6 @@ impl MirCompiler {
             return;
         }
 
-
         for (i, violation) in violations.iter().enumerate() {
             let severity_str = match violation.severity {
                 CdcSeverity::Critical => "CRITICAL",
@@ -154,21 +160,32 @@ impl MirCompiler {
             };
 
             let violation_type_str = match violation.violation_type {
-                crate::cdc_analysis::CdcViolationType::DirectCrossing => "Direct Clock Domain Crossing",
-                crate::cdc_analysis::CdcViolationType::CombinationalMixing => "Combinational Logic Mixing",
+                crate::cdc_analysis::CdcViolationType::DirectCrossing => {
+                    "Direct Clock Domain Crossing"
+                }
+                crate::cdc_analysis::CdcViolationType::CombinationalMixing => {
+                    "Combinational Logic Mixing"
+                }
                 crate::cdc_analysis::CdcViolationType::AsyncResetCrossing => "Async Reset Crossing",
                 crate::cdc_analysis::CdcViolationType::ArithmeticMixing => "Arithmetic Mixing",
             };
 
             // Violation details removed
-
         }
 
         // Summary
-        let critical_count = violations.iter().filter(|v| v.severity == CdcSeverity::Critical).count();
-        let warning_count = violations.iter().filter(|v| v.severity == CdcSeverity::Warning).count();
-        let info_count = violations.iter().filter(|v| v.severity == CdcSeverity::Info).count();
-
+        let critical_count = violations
+            .iter()
+            .filter(|v| v.severity == CdcSeverity::Critical)
+            .count();
+        let warning_count = violations
+            .iter()
+            .filter(|v| v.severity == CdcSeverity::Warning)
+            .count();
+        let info_count = violations
+            .iter()
+            .filter(|v| v.severity == CdcSeverity::Info)
+            .count();
 
         // Summary removed
     }
@@ -188,7 +205,6 @@ pub fn compile_hir_to_verilog(hir: &Hir) -> Result<String, String> {
 
 /// Compile HIR to SystemVerilog with full optimizations
 pub fn compile_hir_to_verilog_optimized(hir: &Hir) -> Result<String, String> {
-    let compiler = MirCompiler::new()
-        .with_optimization_level(OptimizationLevel::Full);
+    let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Full);
     compiler.compile(hir)
 }

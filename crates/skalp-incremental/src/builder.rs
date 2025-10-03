@@ -1,6 +1,6 @@
 //! Build orchestration
 
-use crate::{IncrementalResult, BuildResults};
+use crate::{BuildResults, IncrementalResult};
 
 pub struct Builder {
     config: crate::BuildConfig,

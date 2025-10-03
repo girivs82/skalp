@@ -127,22 +127,18 @@ fn create_module_with_constants() -> Mir {
                 Statement::If(IfStatement {
                     condition: Expression::Literal(Value::Integer(1)), // Always true
                     then_block: Block {
-                        statements: vec![
-                            Statement::Assignment(Assignment {
-                                lhs: LValue::Port(PortId(0)),
-                                rhs: Expression::Literal(Value::Integer(42)),
-                                kind: AssignmentKind::Blocking,
-                            }),
-                        ],
+                        statements: vec![Statement::Assignment(Assignment {
+                            lhs: LValue::Port(PortId(0)),
+                            rhs: Expression::Literal(Value::Integer(42)),
+                            kind: AssignmentKind::Blocking,
+                        })],
                     },
                     else_block: Some(Block {
-                        statements: vec![
-                            Statement::Assignment(Assignment {
-                                lhs: LValue::Port(PortId(0)),
-                                rhs: Expression::Literal(Value::Integer(0)),
-                                kind: AssignmentKind::Blocking,
-                            }),
-                        ],
+                        statements: vec![Statement::Assignment(Assignment {
+                            lhs: LValue::Port(PortId(0)),
+                            rhs: Expression::Literal(Value::Integer(0)),
+                            kind: AssignmentKind::Blocking,
+                        })],
                     }),
                 }),
             ],
@@ -314,13 +310,11 @@ fn test_constant_folding_conditional() {
         kind: ProcessKind::Combinational,
         sensitivity: SensitivityList::Always,
         body: Block {
-            statements: vec![
-                Statement::Assignment(Assignment {
-                    lhs: LValue::Signal(SignalId(0)),
-                    rhs: cond_expr,
-                    kind: AssignmentKind::Blocking,
-                }),
-            ],
+            statements: vec![Statement::Assignment(Assignment {
+                lhs: LValue::Signal(SignalId(0)),
+                rhs: cond_expr,
+                kind: AssignmentKind::Blocking,
+            })],
         },
     };
     module.processes.push(process);

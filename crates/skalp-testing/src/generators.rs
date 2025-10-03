@@ -1,8 +1,8 @@
 //! Test generators for hardware signals
 
-use crate::{TestGenerator, TestingResult, Stimulus};
-use rand::Rng;
+use crate::{Stimulus, TestGenerator, TestingResult};
 use rand::rngs::StdRng;
+use rand::Rng;
 use rand_distr::Distribution as _;
 use std::collections::HashMap;
 
@@ -104,7 +104,10 @@ impl TestGenerator for RandomGenerator {
             }
         };
 
-        Ok(Stimulus::Value { value, width: self.width })
+        Ok(Stimulus::Value {
+            value,
+            width: self.width,
+        })
     }
 }
 
@@ -214,13 +217,19 @@ impl TestGenerator for ConstrainedRandomGenerator {
         for _ in 0..max_attempts {
             let value = rng.gen_range(0..=max_value);
             if self.satisfies_constraints(value) {
-                return Ok(Stimulus::Value { value, width: self.width });
+                return Ok(Stimulus::Value {
+                    value,
+                    width: self.width,
+                });
             }
         }
 
         // If we can't find a valid value, use constraint solving
         let value = self.solve_constraints();
-        Ok(Stimulus::Value { value, width: self.width })
+        Ok(Stimulus::Value {
+            value,
+            width: self.width,
+        })
     }
 }
 
@@ -242,7 +251,10 @@ pub enum Distribution {
 /// Constraint for constrained random generation
 #[derive(Clone)]
 pub enum Constraint {
-    Range { min: u64, max: u64 },
+    Range {
+        min: u64,
+        max: u64,
+    },
     NotEqual(u64),
     OneOf(Vec<u64>),
     #[allow(dead_code)]

@@ -1,6 +1,6 @@
 //! Test harness for executing hardware tests
 
-use crate::{TestingResult, Stimulus};
+use crate::{Stimulus, TestingResult};
 use std::collections::HashMap;
 
 pub struct TestHarness {

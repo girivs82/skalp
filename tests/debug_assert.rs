@@ -23,12 +23,18 @@ mod debug_assert {
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
                 if !hir.implementations.is_empty() {
-                    println!("Event blocks: {}", hir.implementations[0].event_blocks.len());
+                    println!(
+                        "Event blocks: {}",
+                        hir.implementations[0].event_blocks.len()
+                    );
                     if !hir.implementations[0].event_blocks.is_empty() {
-                        println!("Statements in first event block: {}", hir.implementations[0].event_blocks[0].statements.len());
+                        println!(
+                            "Statements in first event block: {}",
+                            hir.implementations[0].event_blocks[0].statements.len()
+                        );
                     }
                 }
-            },
+            }
             Err(e) => {
                 println!("❌ Simple assert failed: {:?}", e);
             }
@@ -55,7 +61,7 @@ mod debug_assert {
                 println!("✅ Entity without assert parsed successfully!");
                 println!("Entities: {}", hir.entities.len());
                 println!("Implementations: {}", hir.implementations.len());
-            },
+            }
             Err(e) => {
                 println!("❌ Entity without assert failed: {:?}", e);
             }

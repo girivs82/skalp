@@ -15,8 +15,8 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService};
 
-pub mod diagnostics;
 pub mod completion;
+pub mod diagnostics;
 pub mod hover;
 pub mod symbols;
 
@@ -229,7 +229,10 @@ mod tests {
         };
 
         assert_eq!(state.version, 1);
-        assert_eq!(state.content.to_string(), "entity counter { in clk: clock; }");
+        assert_eq!(
+            state.content.to_string(),
+            "entity counter { in clk: clock; }"
+        );
         assert!(state.diagnostics.is_empty());
     }
 }

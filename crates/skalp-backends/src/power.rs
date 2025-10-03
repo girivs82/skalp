@@ -2,7 +2,7 @@
 //!
 //! Provides power analysis capabilities for both FPGA and ASIC flows.
 
-use crate::{BackendResult, PowerResults, PowerConstraints};
+use crate::{BackendResult, PowerConstraints, PowerResults};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -182,20 +182,26 @@ impl PowerAnalyzer {
                 switching_activity: 0.15,
             },
             cell_params: HashMap::from([
-                ("SB_LUT4".to_string(), CellPowerParams {
-                    name: "SB_LUT4".to_string(),
-                    static_power_nw: 5.0,
-                    dynamic_power_per_mhz_nw: 0.1,
-                    input_cap_ff: 2.0,
-                    area_um2: 25.0,
-                }),
-                ("SB_DFF".to_string(), CellPowerParams {
-                    name: "SB_DFF".to_string(),
-                    static_power_nw: 8.0,
-                    dynamic_power_per_mhz_nw: 0.15,
-                    input_cap_ff: 1.5,
-                    area_um2: 20.0,
-                }),
+                (
+                    "SB_LUT4".to_string(),
+                    CellPowerParams {
+                        name: "SB_LUT4".to_string(),
+                        static_power_nw: 5.0,
+                        dynamic_power_per_mhz_nw: 0.1,
+                        input_cap_ff: 2.0,
+                        area_um2: 25.0,
+                    },
+                ),
+                (
+                    "SB_DFF".to_string(),
+                    CellPowerParams {
+                        name: "SB_DFF".to_string(),
+                        static_power_nw: 8.0,
+                        dynamic_power_per_mhz_nw: 0.15,
+                        input_cap_ff: 1.5,
+                        area_um2: 20.0,
+                    },
+                ),
             ]),
         };
         self.models.insert("iCE40".to_string(), ice40_model);
@@ -211,20 +217,26 @@ impl PowerAnalyzer {
                 switching_activity: 0.15,
             },
             cell_params: HashMap::from([
-                ("AND2_X1".to_string(), CellPowerParams {
-                    name: "AND2_X1".to_string(),
-                    static_power_nw: 2.0,
-                    dynamic_power_per_mhz_nw: 0.05,
-                    input_cap_ff: 1.0,
-                    area_um2: 2.5,
-                }),
-                ("DFF_X1".to_string(), CellPowerParams {
-                    name: "DFF_X1".to_string(),
-                    static_power_nw: 15.0,
-                    dynamic_power_per_mhz_nw: 0.2,
-                    input_cap_ff: 1.2,
-                    area_um2: 8.0,
-                }),
+                (
+                    "AND2_X1".to_string(),
+                    CellPowerParams {
+                        name: "AND2_X1".to_string(),
+                        static_power_nw: 2.0,
+                        dynamic_power_per_mhz_nw: 0.05,
+                        input_cap_ff: 1.0,
+                        area_um2: 2.5,
+                    },
+                ),
+                (
+                    "DFF_X1".to_string(),
+                    CellPowerParams {
+                        name: "DFF_X1".to_string(),
+                        static_power_nw: 15.0,
+                        dynamic_power_per_mhz_nw: 0.2,
+                        input_cap_ff: 1.2,
+                        area_um2: 8.0,
+                    },
+                ),
             ]),
         };
         self.models.insert("ASIC_45nm".to_string(), asic_45nm_model);
@@ -243,10 +255,12 @@ impl PowerAnalyzer {
         frequency_mhz: f64,
         area_um2: Option<f64>,
     ) -> BackendResult<PowerResults> {
-        let model = self.models.get(technology)
-            .ok_or_else(|| crate::BackendError::PowerError(
-                format!("Power model not found for technology: {}", technology)
-            ))?;
+        let model = self.models.get(technology).ok_or_else(|| {
+            crate::BackendError::PowerError(format!(
+                "Power model not found for technology: {}",
+                technology
+            ))
+        })?;
 
         let mut total_static_power = 0.0;
         let mut total_dynamic_power = 0.0;
@@ -256,15 +270,14 @@ impl PowerAnalyzer {
         for (cell_type, count) in cell_counts {
             if let Some(cell_params) = model.cell_params.get(cell_type) {
                 let static_power = (cell_params.static_power_nw * *count as f64) / 1_000_000.0; // Convert to mW
-                let dynamic_power = (cell_params.dynamic_power_per_mhz_nw * *count as f64 * frequency_mhz) / 1_000_000.0; // Convert to mW
+                let dynamic_power =
+                    (cell_params.dynamic_power_per_mhz_nw * *count as f64 * frequency_mhz)
+                        / 1_000_000.0; // Convert to mW
 
                 total_static_power += static_power;
                 total_dynamic_power += dynamic_power;
 
-                power_breakdown.insert(
-                    cell_type.clone(),
-                    static_power + dynamic_power
-                );
+                power_breakdown.insert(cell_type.clone(), static_power + dynamic_power);
             }
         }
 
@@ -278,7 +291,7 @@ impl PowerAnalyzer {
         // Apply temperature scaling
         let temp_scaling = self.calculate_temperature_scaling(
             model.base_params.temperature_c,
-            25.0 // Reference temperature
+            25.0, // Reference temperature
         );
         total_static_power *= temp_scaling;
 
@@ -346,13 +359,20 @@ impl PowerAnalyzer {
         // Power summary
         report.push_str("Power Summary:\n");
         report.push_str("--------------\n");
-        report.push_str(&format!("  Total Power: {:.3} mW\n", results.total_power_mw));
-        report.push_str(&format!("  Dynamic Power: {:.3} mW ({:.1}%)\n",
-                               results.dynamic_power_mw,
-                               (results.dynamic_power_mw / results.total_power_mw) * 100.0));
-        report.push_str(&format!("  Static Power: {:.3} mW ({:.1}%)\n",
-                               results.static_power_mw,
-                               (results.static_power_mw / results.total_power_mw) * 100.0));
+        report.push_str(&format!(
+            "  Total Power: {:.3} mW\n",
+            results.total_power_mw
+        ));
+        report.push_str(&format!(
+            "  Dynamic Power: {:.3} mW ({:.1}%)\n",
+            results.dynamic_power_mw,
+            (results.dynamic_power_mw / results.total_power_mw) * 100.0
+        ));
+        report.push_str(&format!(
+            "  Static Power: {:.3} mW ({:.1}%)\n",
+            results.static_power_mw,
+            (results.static_power_mw / results.total_power_mw) * 100.0
+        ));
         report.push_str("\n");
 
         // Power breakdown
@@ -365,8 +385,10 @@ impl PowerAnalyzer {
 
             for (component, power) in breakdown_vec {
                 let percentage = (power / results.total_power_mw) * 100.0;
-                report.push_str(&format!("  {:20}: {:8.3} mW ({:5.1}%)\n",
-                                       component, power, percentage));
+                report.push_str(&format!(
+                    "  {:20}: {:8.3} mW ({:5.1}%)\n",
+                    component, power, percentage
+                ));
             }
             report.push_str("\n");
         }
@@ -414,12 +436,14 @@ mod tests {
         cell_counts.insert("AND2_X1".to_string(), 100);
         cell_counts.insert("DFF_X1".to_string(), 50);
 
-        let results = analyzer.analyze_power(
-            "ASIC_45nm",
-            &cell_counts,
-            100.0, // 100 MHz
-            Some(1000.0) // 1000 um^2
-        ).unwrap();
+        let results = analyzer
+            .analyze_power(
+                "ASIC_45nm",
+                &cell_counts,
+                100.0,        // 100 MHz
+                Some(1000.0), // 1000 um^2
+            )
+            .unwrap();
 
         assert!(results.total_power_mw > 0.0);
         assert!(results.dynamic_power_mw > 0.0);

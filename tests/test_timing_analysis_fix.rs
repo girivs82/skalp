@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod timing_analysis_fix_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::lower_to_mir;
-    use skalp_lir::{transform_mir_to_lir};
     use skalp_lir::timing::TimingAnalyzer;
+    use skalp_lir::transform_mir_to_lir;
+    use skalp_mir::lower_to_mir;
 
     #[test]
     fn test_timing_analysis_simple() {
@@ -45,11 +45,20 @@ mod timing_analysis_fix_tests {
             timing_report.print();
 
             // Basic sanity checks
-            assert!(timing_report.clock_period > 0.0, "Clock period should be positive");
-            assert!(timing_report.critical_path_delay >= 0.0, "Critical path delay should be non-negative");
+            assert!(
+                timing_report.clock_period > 0.0,
+                "Clock period should be positive"
+            );
+            assert!(
+                timing_report.critical_path_delay >= 0.0,
+                "Critical path delay should be non-negative"
+            );
 
             println!("Clock period: {:.2} ps", timing_report.clock_period);
-            println!("Critical path delay: {:.2} ps", timing_report.critical_path_delay);
+            println!(
+                "Critical path delay: {:.2} ps",
+                timing_report.critical_path_delay
+            );
             println!("Worst slack: {:.2} ps", timing_report.worst_slack);
         }
     }
@@ -86,12 +95,13 @@ mod timing_analysis_fix_tests {
                 analyzer.build_graph(&lir);
 
                 // Wrap in a catch for overflow
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    analyzer.analyze()
-                })) {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyzer.analyze()))
+                {
                     Ok(timing_report) => {
-                        println!("  ✅ Success - Critical path: {:.2}ps, Slack: {:.2}ps",
-                                timing_report.critical_path_delay, timing_report.worst_slack);
+                        println!(
+                            "  ✅ Success - Critical path: {:.2}ps, Slack: {:.2}ps",
+                            timing_report.critical_path_delay, timing_report.worst_slack
+                        );
                     }
                     Err(_) => {
                         println!("  ❌ Failed - Overflow or panic at {}ps period", period);
@@ -132,12 +142,21 @@ mod timing_analysis_fix_tests {
 
             let timing_report = analyzer.analyze();
             println!("✅ Minimal circuit timing analysis passed");
-            println!("  Critical path: {:.2}ps", timing_report.critical_path_delay);
+            println!(
+                "  Critical path: {:.2}ps",
+                timing_report.critical_path_delay
+            );
             println!("  Slack: {:.2}ps", timing_report.worst_slack);
 
             // Verify reasonable results
-            assert!(timing_report.critical_path_delay < 1000.0, "Critical path should be reasonable for simple buffer");
-            assert!(timing_report.worst_slack > 0.0, "Should have positive slack with large clock period");
+            assert!(
+                timing_report.critical_path_delay < 1000.0,
+                "Critical path should be reasonable for simple buffer"
+            );
+            assert!(
+                timing_report.worst_slack > 0.0,
+                "Should have positive slack with large clock period"
+            );
         }
     }
 }
