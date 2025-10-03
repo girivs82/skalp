@@ -200,7 +200,7 @@ mod complete_hardware_flow_tests {
         let test_lir = create_test_adder_lir();
 
         // Test multiple ASIC targets
-        let asic_targets = vec![
+        let asic_targets = [
             TargetPlatform::Asic(AsicTarget::FreePdk45),
             TargetPlatform::Asic(AsicTarget::Sky130),
             TargetPlatform::Asic(AsicTarget::Generic {

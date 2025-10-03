@@ -28,7 +28,7 @@ fn compile_to_verilog(source: &str) -> String {
 fn test_alu_codegen_golden() {
     let source = include_str!("../examples/alu.sk");
 
-    let mut golden = GoldenTest::new("alu");
+    let golden = GoldenTest::new("alu");
     let verilog = compile_to_verilog(source);
 
     // This will compare against tests/golden/alu.sv
@@ -40,7 +40,7 @@ fn test_alu_codegen_golden() {
 fn test_counter_codegen_golden() {
     let source = include_str!("../examples/counter.sk");
 
-    let mut golden = GoldenTest::new("counter");
+    let golden = GoldenTest::new("counter");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -60,7 +60,7 @@ impl Adder {
 }
 "#;
 
-    let mut golden = GoldenTest::new("simple_adder");
+    let golden = GoldenTest::new("simple_adder");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -81,7 +81,7 @@ impl Mux2to1 {
 }
 "#;
 
-    let mut golden = GoldenTest::new("mux_2to1");
+    let golden = GoldenTest::new("mux_2to1");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -110,7 +110,7 @@ impl Mux4to1 {
 }
 "#;
 
-    let mut golden = GoldenTest::new("mux_4to1");
+    let golden = GoldenTest::new("mux_4to1");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -136,7 +136,7 @@ impl BitOps {
 }
 "#;
 
-    let mut golden = GoldenTest::new("bit_operations");
+    let golden = GoldenTest::new("bit_operations");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -158,7 +158,7 @@ impl ShiftOps {
 }
 "#;
 
-    let mut golden = GoldenTest::new("shift_operations");
+    let golden = GoldenTest::new("shift_operations");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -184,7 +184,7 @@ impl Comparisons {
 }
 "#;
 
-    let mut golden = GoldenTest::new("comparisons");
+    let golden = GoldenTest::new("comparisons");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -209,7 +209,7 @@ impl BitIndexing {
 }
 "#;
 
-    let mut golden = GoldenTest::new("bit_indexing");
+    let golden = GoldenTest::new("bit_indexing");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -236,7 +236,7 @@ impl NestedIf {
 }
 "#;
 
-    let mut golden = GoldenTest::new("nested_if");
+    let golden = GoldenTest::new("nested_if");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);
@@ -258,7 +258,7 @@ impl ComplexExpr {
 }
 "#;
 
-    let mut golden = GoldenTest::new("complex_expression");
+    let golden = GoldenTest::new("complex_expression");
     let verilog = compile_to_verilog(source);
 
     golden.assert_eq("sv", &verilog);

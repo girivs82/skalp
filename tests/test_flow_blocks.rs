@@ -138,7 +138,7 @@ mod flow_block_tests {
                         || if_stmt
                             .else_statements
                             .as_ref()
-                            .map_or(false, |else_stmts| has_flow_in_statements(else_stmts))
+                            .is_some_and(|else_stmts| has_flow_in_statements(else_stmts))
                 }
                 _ => false,
             })

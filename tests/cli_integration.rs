@@ -14,7 +14,7 @@ fn skalp_binary() -> PathBuf {
 #[test]
 fn test_cli_help() {
     let output = Command::new(skalp_binary())
-        .args(&["--help"])
+        .args(["--help"])
         .output()
         .expect("Failed to execute command");
 
@@ -34,7 +34,7 @@ fn test_new_project_creation() {
     let project_name = "test_project";
 
     let output = Command::new(skalp_binary())
-        .args(&["new", project_name])
+        .args(["new", project_name])
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to execute command");
@@ -63,7 +63,7 @@ fn test_build_systemverilog() {
 
     // Create project
     Command::new(skalp_binary())
-        .args(&["new", project_name])
+        .args(["new", project_name])
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to create project");
@@ -72,7 +72,7 @@ fn test_build_systemverilog() {
 
     // Build project
     let output = Command::new(skalp_binary())
-        .args(&["build"])
+        .args(["build"])
         .current_dir(&project_path)
         .output()
         .expect("Failed to build project");
@@ -95,7 +95,7 @@ fn test_build_vhdl() {
     let project_name = "vhdl_test";
 
     Command::new(skalp_binary())
-        .args(&["new", project_name])
+        .args(["new", project_name])
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to create project");
@@ -103,7 +103,7 @@ fn test_build_vhdl() {
     let project_path = temp_dir.path().join(project_name);
 
     let output = Command::new(skalp_binary())
-        .args(&["build", "--target", "vhdl"])
+        .args(["build", "--target", "vhdl"])
         .current_dir(&project_path)
         .output()
         .expect("Failed to build project");
@@ -126,7 +126,7 @@ fn test_build_lir() {
     let project_name = "lir_test";
 
     Command::new(skalp_binary())
-        .args(&["new", project_name])
+        .args(["new", project_name])
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to create project");
@@ -134,7 +134,7 @@ fn test_build_lir() {
     let project_path = temp_dir.path().join(project_name);
 
     let output = Command::new(skalp_binary())
-        .args(&["build", "--target", "lir"])
+        .args(["build", "--target", "lir"])
         .current_dir(&project_path)
         .output()
         .expect("Failed to build project");
@@ -155,7 +155,7 @@ fn test_simulation_command() {
     let project_name = "sim_test";
 
     Command::new(skalp_binary())
-        .args(&["new", project_name])
+        .args(["new", project_name])
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to create project");
@@ -164,14 +164,14 @@ fn test_simulation_command() {
 
     // Build LIR first
     Command::new(skalp_binary())
-        .args(&["build", "--target", "lir"])
+        .args(["build", "--target", "lir"])
         .current_dir(&project_path)
         .output()
         .expect("Failed to build LIR");
 
     // Run simulation
     let output = Command::new(skalp_binary())
-        .args(&["sim", "build/design.lir", "--duration", "100"])
+        .args(["sim", "build/design.lir", "--duration", "100"])
         .current_dir(&project_path)
         .output()
         .expect("Failed to run simulation");
@@ -188,7 +188,7 @@ fn test_synthesis_command() {
     let project_name = "synth_test";
 
     Command::new(skalp_binary())
-        .args(&["new", project_name])
+        .args(["new", project_name])
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to create project");
@@ -196,7 +196,7 @@ fn test_synthesis_command() {
     let project_path = temp_dir.path().join(project_name);
 
     let output = Command::new(skalp_binary())
-        .args(&["synth", "src/main.sk", "--device", "ice40-hx8k"])
+        .args(["synth", "src/main.sk", "--device", "ice40-hx8k"])
         .current_dir(&project_path)
         .output()
         .expect("Failed to run synthesis");

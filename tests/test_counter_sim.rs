@@ -96,7 +96,7 @@ mod counter_sim_tests {
             println!("  Cone {}: nodes={:?}", i, cone.nodes);
         }
         assert!(
-            cones.len() > 0,
+            !cones.is_empty(),
             "Should have at least one combinational cone"
         );
 
@@ -240,6 +240,6 @@ mod counter_sim_tests {
 
         // Assert all tests passed
         assert!(testbench.all_tests_passed(), "Some tests failed");
-        assert!(results.len() > 0, "Should have test results");
+        assert!(!results.is_empty(), "Should have test results");
     }
 }

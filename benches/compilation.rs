@@ -1,7 +1,6 @@
 //! Compilation performance benchmarks
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::time::Duration;
 
 fn benchmark_lexing(c: &mut Criterion) {
     let sources = vec![
@@ -51,7 +50,7 @@ fn benchmark_optimization_passes(c: &mut Criterion) {
     group.bench_function("constant_folding", |b| {
         b.iter(|| {
             // Simulate constant folding
-            let mut values = vec![1, 2, 3, 4, 5];
+            let mut values = [1, 2, 3, 4, 5];
             for _ in 0..100 {
                 values[0] = black_box((values[1] + values[2]) * 2);
                 values[1] = black_box(values[0] / 2);

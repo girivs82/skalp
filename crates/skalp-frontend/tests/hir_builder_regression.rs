@@ -41,6 +41,7 @@ fn assert_builds(source: &str) -> Hir {
 }
 
 /// Helper to build HIR and expect errors
+#[allow(dead_code)]
 fn assert_fails(source: &str) {
     let tree = parse(source);
     let result = build_hir(&tree);
@@ -287,11 +288,11 @@ impl Test {
 }
 "#;
     let hir = assert_builds(source);
-    let implementation = get_first_impl(&hir);
+    let _implementation = get_first_impl(&hir);
 
     // Constant declarations might not be fully implemented yet
     // Just verify it builds successfully
-    assert!(hir.entities.len() >= 1);
+    assert!(!hir.entities.is_empty());
 }
 
 #[test]

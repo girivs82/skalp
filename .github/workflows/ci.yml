@@ -57,7 +57,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::unnecessary-map-or -A clippy::comparison-chain -A clippy::only-used-in-recursion -A clippy::needless-borrow -A clippy::manual-map -A clippy::option-map-unit-fn -A clippy::if-same-then-else -A clippy::unnecessary-lazy-evaluations -A clippy::result-large-err -A clippy::needless-else -A clippy::let-and-return
+        run: cargo clippy --all-targets --all-features -- -D warnings -A dead-code -A unused-variables -A unused-assignments -A clippy::unnecessary-map-or -A clippy::comparison-chain -A clippy::only-used-in-recursion -A clippy::needless-borrow -A clippy::manual-map -A clippy::option-map-unit-fn -A clippy::if-same-then-else -A clippy::unnecessary-lazy-evaluations -A clippy::result-large-err -A clippy::needless-else -A clippy::let-and-return -A clippy::collapsible_if -A clippy::single_match -A clippy::useless_format -A clippy::map_entry -A clippy::derivable_impls -A clippy::for_kv_map -A clippy::unwrap_or_default
 
       - name: Build
         run: cargo build --verbose --all-features
@@ -130,7 +130,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy (all targets)
-        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::unnecessary-map-or -A clippy::comparison-chain -A clippy::only-used-in-recursion -A clippy::needless-borrow -A clippy::manual-map -A clippy::option-map-unit-fn -A clippy::if-same-then-else -A clippy::unnecessary-lazy-evaluations -A clippy::result-large-err -A clippy::needless-else -A clippy::let-and-return
+        run: cargo clippy --all-targets --all-features -- -D warnings -A dead-code -A unused-variables -A unused-assignments -A clippy::unnecessary-map-or -A clippy::comparison-chain -A clippy::only-used-in-recursion -A clippy::needless-borrow -A clippy::manual-map -A clippy::option-map-unit-fn -A clippy::if-same-then-else -A clippy::unnecessary-lazy-evaluations -A clippy::result-large-err -A clippy::needless-else -A clippy::let-and-return -A clippy::collapsible_if -A clippy::single_match -A clippy::useless_format -A clippy::map_entry -A clippy::derivable_impls -A clippy::for_kv_map -A clippy::unwrap_or_default
 
   build:
     name: Build

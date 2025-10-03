@@ -253,7 +253,7 @@ mod phase8_final_success_tests {
             }
 
             // Final success criteria
-            let synthesis_works = lir_design.modules.len() > 0;
+            let synthesis_works = !lir_design.modules.is_empty();
             let optimization_works = !opt_results.is_empty();
             let timing_works = timing_report.clock_period > 0.0;
             let tech_mapping_works = fpga_result.resource_usage.area >= 0.0;

@@ -1102,6 +1102,7 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Get the width in bits of a HIR type
+    #[allow(clippy::only_used_in_recursion)]
     fn get_hir_type_width(&self, hir_type: &hir::HirType) -> usize {
         match hir_type {
             hir::HirType::Bit(width) => *width as usize,
@@ -1157,7 +1158,7 @@ impl<'hir> HirToMir<'hir> {
             for port in &entity.ports {
                 if let hir::HirType::Enum(ref enum_def) = &port.port_type {
                     if enum_def.name == enum_type {
-                        return self.find_variant_value(&enum_def, variant);
+                        return self.find_variant_value(enum_def, variant);
                     }
                 }
             }
@@ -1167,7 +1168,7 @@ impl<'hir> HirToMir<'hir> {
             for signal in &impl_block.signals {
                 if let hir::HirType::Enum(ref enum_def) = &signal.signal_type {
                     if enum_def.name == enum_type {
-                        return self.find_variant_value(&enum_def, variant);
+                        return self.find_variant_value(enum_def, variant);
                     }
                 }
             }
@@ -1462,6 +1463,7 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Count the number of conditions in an if-else-if chain
+    #[allow(clippy::only_used_in_recursion)]
     fn count_if_else_conditions(&self, if_stmt: &hir::HirIfStatement) -> usize {
         let mut count = 1; // Count the initial if condition
 
@@ -1479,7 +1481,7 @@ impl<'hir> HirToMir<'hir> {
     }
 }
 
-impl<'hir> Default for HirToMir<'hir> {
+impl Default for HirToMir<'_> {
     fn default() -> Self {
         Self::new()
     }

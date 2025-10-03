@@ -17,7 +17,7 @@ fn test_generic_entity_definition() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find generic parameters
-    let mut found_generics = false;
+    let found_generics;
     fn find_generic_params(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::GenericParamList {
             return true;
@@ -87,7 +87,7 @@ fn test_generic_entity_with_constraints() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse generic parameters with trait bounds
-    let mut found_trait_bound = false;
+    let found_trait_bound;
     fn find_trait_bound(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitBound {
             return true;
@@ -137,7 +137,7 @@ fn test_const_generic_parameters() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find const generic parameters
-    let mut found_const_param = false;
+    let found_const_param;
     fn check_for_const(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         // Check if this is a generic parameter node
         if node.kind() == skalp_frontend::syntax::SyntaxKind::GenericParam {
