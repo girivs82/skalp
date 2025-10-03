@@ -237,18 +237,16 @@ impl<'a> MetalShaderGenerator<'a> {
 
         // Check clock edges and update registers
         for node in &sir.sequential_nodes {
-            match &node.kind {
-                SirNodeKind::FlipFlop { clock_edge } => {
-                    self.generate_flipflop_update_v2(sir, node, clock_edge);
-                }
-                _ => {}
+            if let SirNodeKind::FlipFlop { clock_edge } = &node.kind {
+                self.generate_flipflop_update_v2(sir, node, clock_edge);
             }
         }
 
         self.indent -= 1;
         writeln!(self.output, "}}\n").unwrap();
     }
-
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn generate_node_computation(&mut self, node: &SirNode) {
         match &node.kind {
             SirNodeKind::BinaryOp(op) => {
@@ -401,7 +399,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 {
                     if let Ok(node_id) = node_id_str.parse::<usize>() {
                         // Find which register this node drives
-                        for (reg_name, _) in &sir.state_elements {
+                        for reg_name in sir.state_elements.keys() {
                             if let Some(signal) = sir.signals.iter().find(|s| s.name == *reg_name) {
                                 if signal.driver_node == Some(node_id) {
                                     eprintln!("   🎯 MAPPED: {} -> registers->{}", input, reg_name);
@@ -466,37 +464,6 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
-    fn generate_flipflop_update(&mut self, node: &SirNode, edge: &ClockEdge) {
-        if node.inputs.len() >= 2 && !node.outputs.is_empty() {
-            // Input 0 is clock, input 1 is data
-            let data_input = &node.inputs[1].signal_id;
-
-            let edge_check = match edge {
-                ClockEdge::Rising => "clock_edges[tid] == 1",
-                ClockEdge::Falling => "clock_edges[tid] == 2",
-                ClockEdge::Both => "clock_edges[tid] != 0",
-            };
-
-            self.write_indented(&format!("if ({}) {{\n", edge_check));
-            self.indent += 1;
-
-            // Update all outputs with the data input value
-            for output in &node.outputs {
-                let output_signal = &output.signal_id;
-                // Check if this output is a state element
-                if output_signal == "counter" || output_signal == "count" {
-                    self.write_indented(&format!(
-                        "next_state->{} = signals->{};\n",
-                        output_signal, data_input
-                    ));
-                }
-            }
-
-            self.indent -= 1;
-            self.write_indented("}\n");
-        }
-    }
-
     fn generate_flipflop_update_v2(&mut self, sir: &SirModule, node: &SirNode, edge: &ClockEdge) {
         if node.inputs.len() >= 2 && !node.outputs.is_empty() {
             let clock_signal = &node.inputs[0].signal_id;
@@ -513,7 +480,7 @@ impl<'a> MetalShaderGenerator<'a> {
                         format!("inputs->{} == 0", clock_input.name)
                     }
                     ClockEdge::Both => {
-                        format!("true")
+                        "true".to_string()
                     }
                 };
 
@@ -634,13 +601,6 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
-    fn get_metal_type_width(&self, width: usize) -> &str {
-        match width {
-            1..=32 => "",   // uint is 32-bit
-            33..=64 => "2", // uint2 is 64-bit
-            _ => "4",       // uint4 is 128-bit
-        }
-    }
 
     fn get_metal_type_name(&self, width: usize) -> &str {
         match width {

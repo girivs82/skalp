@@ -2,15 +2,15 @@
 //!
 //! Provides visualization, constraints, and manual control for PAR and CTS
 
-use crate::cts::{ClockSpecification, ClockTree};
-use crate::placement::{Floorplan, Netlist, Placement, StandardCell};
-use crate::routing::{DetailedRouting, GlobalRouting, RoutingResult};
+use crate::cts::ClockTree;
+use crate::placement::Placement;
+use crate::routing::RoutingResult;
 use crate::sdc::SDCManager;
 use crate::timing::{StaticTimingAnalyzer, TimingAnalysisResult, TimingOptimization};
-use crate::{AsicError, DesignRules, Technology};
+use crate::{AsicError, DesignRules};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// Interactive design session
@@ -478,6 +478,12 @@ pub struct TimingSummary {
     pub max_frequency: f64,
     /// Total power consumption (mW)
     pub power_consumption: f64,
+}
+
+impl Default for InteractiveDesign {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InteractiveDesign {
@@ -1035,7 +1041,7 @@ impl InteractiveDesign {
         // Buffer restrictions
         let buffers = &self.constraints.clock.buffer_restrictions;
         script.push_str("\n# Buffer configuration\n");
-        script.push_str(&format!("set_cts_buffer_list \\\n"));
+        script.push_str(&"set_cts_buffer_list \\\n".to_string());
         for buf in &buffers.allowed_buffers {
             script.push_str(&format!("  {} \\\n", buf));
         }

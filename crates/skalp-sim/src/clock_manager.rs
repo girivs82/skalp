@@ -52,6 +52,12 @@ pub struct ClockManager {
     auto_toggle: bool,
 }
 
+impl Default for ClockManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClockManager {
     pub fn new() -> Self {
         ClockManager {

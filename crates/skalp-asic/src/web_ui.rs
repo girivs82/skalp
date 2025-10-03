@@ -2,17 +2,13 @@
 //!
 //! Provides real-time visualization and manual adjustment capabilities
 
-use crate::cts::ClockTree;
 use crate::interactive::{
     BufferInsertion, DesignCheckpoint, DesignConstraints, InteractiveDesign, RoutingPoint,
 };
-use crate::placement::{Netlist, Placement};
-use crate::routing::RoutingResult;
 use crate::visualization::Visualizer;
 use crate::AsicError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Web UI server for interactive ASIC design
@@ -578,7 +574,7 @@ impl WebUIServer {
                     net.segments.iter().map(|seg| WireData {
                         net_name: net.name.clone(),
                         layer: seg.layer,
-                        start: if seg.points.len() >= 1 {
+                        start: if !seg.points.is_empty() {
                             seg.points[0]
                         } else {
                             (0.0, 0.0)
@@ -635,7 +631,7 @@ impl WebUIServer {
                         .iter()
                         .map(|seg| {
                             RouteSegment {
-                                start: if seg.points.len() >= 1 {
+                                start: if !seg.points.is_empty() {
                                     seg.points[0]
                                 } else {
                                     (0.0, 0.0)
@@ -654,7 +650,7 @@ impl WebUIServer {
                     RouteData {
                         net: net.name.clone(),
                         segments,
-                        layer: net.segments.get(0).map(|s| s.layer).unwrap_or(1),
+                        layer: net.segments.first().map(|s| s.layer).unwrap_or(1),
                         length: net
                             .segments
                             .iter()

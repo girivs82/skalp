@@ -84,7 +84,7 @@ mod improved_optimization_tests {
         let mir = lower_to_mir(&hir).expect("Should build MIR");
 
         if let Some(module) = mir.modules.first() {
-            let mut lir = transform_mir_to_lir(module);
+            let lir = transform_mir_to_lir(module);
 
             let initial_gates = lir.gates.len();
             println!("Initial gates: {}", initial_gates);

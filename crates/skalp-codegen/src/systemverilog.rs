@@ -99,7 +99,7 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
 
     if !ports.is_empty() {
         sv.push_str(&ports.join(",\n"));
-        sv.push_str("\n");
+        sv.push('\n');
     }
 
     sv.push_str(");\n\n");
@@ -126,7 +126,7 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
     }
 
     if !mir_module.signals.is_empty() {
-        sv.push_str("\n");
+        sv.push('\n');
     }
 
     // Generate continuous assignments
@@ -139,13 +139,13 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
     }
 
     if !mir_module.assignments.is_empty() {
-        sv.push_str("\n");
+        sv.push('\n');
     }
 
     // Generate processes (always blocks)
     for process in &mir_module.processes {
         sv.push_str(&generate_process(process, mir_module)?);
-        sv.push_str("\n");
+        sv.push('\n');
     }
 
     sv.push_str("endmodule\n");
@@ -219,7 +219,7 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
                 }
                 sv.push_str(&format!("{}end", indent));
             }
-            sv.push_str("\n");
+            sv.push('\n');
         }
         Statement::Case(case_stmt) => {
             sv.push_str(&format!(
@@ -413,7 +413,7 @@ fn format_lvalue(lvalue: &skalp_mir::LValue) -> String {
             )
         }
         skalp_mir::LValue::Concat(lvalues) => {
-            let parts: Vec<_> = lvalues.iter().map(|lv| format_lvalue(lv)).collect();
+            let parts: Vec<_> = lvalues.iter().map(format_lvalue).collect();
             format!("{{{}}}", parts.join(", "))
         }
     }
@@ -504,7 +504,7 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             )
         }
         skalp_mir::Expression::Concat(exprs) => {
-            let parts: Vec<_> = exprs.iter().map(|e| format_expression(e)).collect();
+            let parts: Vec<_> = exprs.iter().map(format_expression).collect();
             format!("{{{}}}", parts.join(", "))
         }
         skalp_mir::Expression::Replicate { count, value } => {
@@ -515,7 +515,7 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             )
         }
         skalp_mir::Expression::FunctionCall { name, args } => {
-            let arg_strs: Vec<_> = args.iter().map(|a| format_expression(a)).collect();
+            let arg_strs: Vec<_> = args.iter().map(format_expression).collect();
             format!("{}({})", name, arg_strs.join(", "))
         }
     }
@@ -628,7 +628,7 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
         }
         skalp_mir::DataType::Enum(_) => {
             // Enums default to 32-bit
-            format!("[31:0] ")
+            "[31:0] ".to_string()
         }
         skalp_mir::DataType::Union(union_type) => {
             // Unions use the width of the largest field
@@ -689,10 +689,8 @@ fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
 fn is_register(signal: &skalp_mir::Signal, module: &Module) -> bool {
     // A signal is a register if it's assigned in any sequential process
     for process in &module.processes {
-        if process.kind == ProcessKind::Sequential {
-            if is_signal_assigned_in_block(&signal.id, &process.body) {
-                return true;
-            }
+        if process.kind == ProcessKind::Sequential && is_signal_assigned_in_block(&signal.id, &process.body) {
+            return true;
         }
     }
     false
@@ -819,7 +817,7 @@ fn generate_typedefs(
     }
 
     if !typedefs.is_empty() {
-        typedefs.push_str("\n");
+        typedefs.push('\n');
     }
 
     typedefs
@@ -852,7 +850,7 @@ fn generate_typedefs_for_datatype(
                 }
 
                 // Generate the struct typedef
-                typedefs.push_str(&format!("typedef struct {{\n"));
+                typedefs.push_str("typedef struct {\n");
                 for field in &struct_type.fields {
                     let field_width = get_width_spec(&field.field_type);
                     typedefs.push_str(&format!(

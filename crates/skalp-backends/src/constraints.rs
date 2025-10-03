@@ -270,7 +270,7 @@ impl ConstraintManager {
         }
 
         let constraints: SkalpConstraints = serde_json::from_str(content)
-            .map_err(|e| crate::BackendError::SerializationError(e))?;
+            .map_err(crate::BackendError::SerializationError)?;
 
         if let Some(timing) = constraints.timing {
             self.timing_constraints.extend(timing);
@@ -305,11 +305,7 @@ impl ConstraintManager {
             if let Some(period_str) = parts.first() {
                 if let Ok(period) = period_str.parse::<f64>() {
                     // Extract clock name (simplified)
-                    let clock_name = if line.contains("[get_ports") {
-                        "clk" // Default name
-                    } else {
-                        "clk"
-                    };
+                    let clock_name = "clk"; // Default name regardless of syntax
 
                     let constraint = TimingConstraint::ClockPeriod {
                         clock_name: clock_name.to_string(),

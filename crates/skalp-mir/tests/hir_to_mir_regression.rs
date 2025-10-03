@@ -489,7 +489,7 @@ impl Test {
     let module = get_first_module(&mir);
 
     // Should have both sequential and combinational processes
-    assert!(module.processes.len() >= 1);
+    assert!(!module.processes.is_empty());
 }
 
 // ============================================================================

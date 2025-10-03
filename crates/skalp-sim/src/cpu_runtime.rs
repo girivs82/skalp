@@ -11,6 +11,12 @@ pub struct CpuRuntime {
     current_cycle: u64,
 }
 
+impl Default for CpuRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuRuntime {
     pub fn new() -> Self {
         CpuRuntime {
@@ -38,7 +44,7 @@ impl CpuRuntime {
 
     fn evaluate_cone(
         &mut self,
-        cone: &skalp_sir::CombinationalCone,
+        _cone: &skalp_sir::CombinationalCone,
     ) -> Result<(), SimulationError> {
         // TODO: Implement actual cone evaluation
         // For now, just a placeholder
@@ -48,18 +54,15 @@ impl CpuRuntime {
     fn evaluate_sequential(&mut self) -> Result<(), SimulationError> {
         if let Some(module) = &self.module {
             for node in &module.sequential_nodes {
-                match &node.kind {
-                    skalp_sir::SirNodeKind::FlipFlop { clock_edge } => {
-                        // Update flip-flop state on clock edge
-                        for output in &node.outputs {
-                            let signal_name = &output.signal_id;
-                            if let Some(current_val) = self.signals.get(signal_name) {
-                                self.next_state
-                                    .insert(signal_name.clone(), current_val.clone());
-                            }
+                if let skalp_sir::SirNodeKind::FlipFlop { clock_edge: _ } = &node.kind {
+                    // Update flip-flop state on clock edge
+                    for output in &node.outputs {
+                        let signal_name = &output.signal_id;
+                        if let Some(current_val) = self.signals.get(signal_name) {
+                            self.next_state
+                                .insert(signal_name.clone(), current_val.clone());
                         }
                     }
-                    _ => {}
                 }
             }
 
@@ -97,8 +100,8 @@ impl CpuRuntime {
             let initial_value = if let Some(reset_val) = element.reset_value {
                 let mut bytes = vec![0u8; byte_size];
                 // Convert reset value to bytes
-                for i in 0..byte_size {
-                    bytes[i] = ((reset_val >> (i * 8)) & 0xFF) as u8;
+                for (i, byte) in bytes.iter_mut().enumerate().take(byte_size) {
+                    *byte = ((reset_val >> (i * 8)) & 0xFF) as u8;
                 }
                 bytes
             } else {
@@ -159,8 +162,8 @@ impl SimulationRuntime for CpuRuntime {
                 let byte_size = (element.width + 7) / 8;
                 let reset_value = if let Some(val) = element.reset_value {
                     let mut bytes = vec![0u8; byte_size];
-                    for i in 0..byte_size {
-                        bytes[i] = ((val >> (i * 8)) & 0xFF) as u8;
+                    for (i, byte) in bytes.iter_mut().enumerate().take(byte_size) {
+                        *byte = ((val >> (i * 8)) & 0xFF) as u8;
                     }
                     bytes
                 } else {

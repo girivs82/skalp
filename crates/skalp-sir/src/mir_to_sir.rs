@@ -29,8 +29,8 @@ struct MirToSirConverter<'a> {
     sir: &'a mut SirModule,
     mir: &'a Module,
     node_counter: usize,
-    signal_map: HashMap<String, String>,
-    conditional_contexts: HashMap<usize, HashMap<String, usize>>,
+    #[allow(dead_code)]    signal_map: HashMap<String, String>,
+    #[allow(dead_code)]    conditional_contexts: HashMap<usize, HashMap<String, usize>>,
 }
 
 impl<'a> MirToSirConverter<'a> {
@@ -109,10 +109,10 @@ impl<'a> MirToSirConverter<'a> {
     fn is_signal_sequential(&self, signal_id: skalp_mir::SignalId) -> bool {
         // Check if this signal is assigned in any sequential process
         for process in &self.mir.processes {
-            if process.kind == ProcessKind::Sequential {
-                if self.is_signal_assigned_in_block(&process.body, signal_id) {
-                    return true;
-                }
+            if process.kind == ProcessKind::Sequential
+                && self.is_signal_assigned_in_block(&process.body, signal_id)
+            {
+                return true;
             }
         }
         false
@@ -156,6 +156,7 @@ impl<'a> MirToSirConverter<'a> {
         false
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn lvalue_contains_signal(&self, lvalue: &LValue, signal_id: skalp_mir::SignalId) -> bool {
         match lvalue {
             LValue::Signal(id) => *id == signal_id,
@@ -368,7 +369,7 @@ impl<'a> MirToSirConverter<'a> {
             statements.len()
         );
     }
-
+    #[allow(dead_code)]
     fn collect_all_assignment_targets_from_block(
         &self,
         statements: &[Statement],
@@ -399,6 +400,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn group_targets_by_conditionals(
         &mut self,
         statements: &[Statement],
@@ -476,6 +478,7 @@ impl<'a> MirToSirConverter<'a> {
         );
     }
 
+    #[allow(dead_code)]
     fn collect_targets_from_if(
         &self,
         if_stmt: &IfStatement,
@@ -500,6 +503,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn process_conditional_group_with_shared_context(
         &mut self,
         if_stmt: &IfStatement,
@@ -611,6 +615,7 @@ impl<'a> MirToSirConverter<'a> {
         target_values
     }
 
+    #[allow(dead_code)]
     fn synthesize_sequential_assignment_for_target(
         &mut self,
         statements: &[Statement],
@@ -710,10 +715,11 @@ impl<'a> MirToSirConverter<'a> {
         false
     }
 
+    #[allow(dead_code)]
     fn if_has_inter_signal_dependencies(&self, if_stmt: &IfStatement) -> bool {
         // Check if any assignment in the if-statement references other signals assigned in the same block
         let mut assigned_signals = std::collections::HashSet::new();
-        self.collect_assigned_signals_from_if(&if_stmt, &mut assigned_signals);
+        self.collect_assigned_signals_from_if(if_stmt, &mut assigned_signals);
 
         // Check if any assignment references another assigned signal
         self.check_block_for_inter_dependencies(&if_stmt.then_block.statements, &assigned_signals)
@@ -829,6 +835,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn synthesize_conditional_assignment_with_shared_context(
         &mut self,
         if_stmt: &IfStatement,
@@ -840,13 +847,11 @@ impl<'a> MirToSirConverter<'a> {
         self.collect_assigned_signals_from_if(if_stmt, &mut assigned_signals);
 
         // Build shared context for all signals
-        if !self
-            .conditional_contexts
-            .contains_key(&(if_stmt as *const _ as usize))
-        {
+        let context_key = if_stmt as *const _ as usize;
+        #[allow(clippy::map_entry)]
+        if !self.conditional_contexts.contains_key(&context_key) {
             let context = self.build_shared_conditional_context(if_stmt, &assigned_signals);
-            self.conditional_contexts
-                .insert(if_stmt as *const _ as usize, context);
+            self.conditional_contexts.insert(context_key, context);
         }
 
         // Get the value for our target from the shared context
@@ -896,6 +901,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn find_else_value(&mut self, else_block: &Block, target: &str, default: usize) -> usize {
         for stmt in &else_block.statements {
             match stmt {
@@ -915,6 +921,7 @@ impl<'a> MirToSirConverter<'a> {
         default
     }
 
+    #[allow(dead_code)]
     fn convert_if_to_sequential_mux(
         &mut self,
         if_stmt: &IfStatement,
@@ -939,16 +946,14 @@ impl<'a> MirToSirConverter<'a> {
         self.create_mux_node(cond_node, then_value, else_value)
     }
 
+    #[allow(dead_code)]
     fn find_assignment_in_block(&mut self, block: &Block, target: &str) -> Option<usize> {
         for stmt in &block.statements {
-            match stmt {
-                Statement::Assignment(assign) => {
-                    let assign_target = self.lvalue_to_string(&assign.lhs);
-                    if assign_target == target {
-                        return Some(self.create_expression_node(&assign.rhs));
-                    }
+            if let Statement::Assignment(assign) = stmt {
+                let assign_target = self.lvalue_to_string(&assign.lhs);
+                if assign_target == target {
+                    return Some(self.create_expression_node(&assign.rhs));
                 }
-                _ => {}
             }
         }
         None
@@ -1170,9 +1175,8 @@ impl<'a> MirToSirConverter<'a> {
             }
             Expression::Replicate { count, value } => {
                 let _count_node = self.create_expression_with_local_context(count, local_context);
-                let value_node = self.create_expression_with_local_context(value, local_context);
                 // For now, just return the value (replication logic would be more complex)
-                value_node
+                self.create_expression_with_local_context(value, local_context)
             }
             Expression::FunctionCall { .. } => {
                 // Fall back to original implementation for function calls
@@ -1310,6 +1314,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_conditional_cases(
         &mut self,
         if_stmt: &IfStatement,
@@ -2191,6 +2196,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn get_width(&self, data_type: &DataType) -> usize {
         match data_type {
             DataType::Bit(w) | DataType::Logic(w) => *w,

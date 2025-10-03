@@ -241,7 +241,7 @@ impl TimingAnalyzer {
             .graph
             .backward_arcs
             .keys()
-            .filter(|id| self.graph.nodes.get(*id).map_or(false, |n| n.is_register))
+            .filter(|id| self.graph.nodes.get(*id).is_some_and(|n| n.is_register))
             .cloned()
             .collect();
 

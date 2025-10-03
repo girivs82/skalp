@@ -171,7 +171,7 @@ mod match_expression_tests {
 
         // Test MIR compilation
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        let mir = compiler
+        let _mir = compiler
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
 

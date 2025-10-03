@@ -19,7 +19,7 @@ fn test_trait_definition() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find the trait definition
-    let found_trait;
+    
     fn find_trait_def(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitDef {
             return true;
@@ -31,7 +31,7 @@ fn test_trait_definition() {
         }
         false
     }
-    found_trait = find_trait_def(&tree);
+    let found_trait = find_trait_def(&tree);
     assert!(found_trait, "Trait definition not found in parsed tree");
 }
 
@@ -63,7 +63,7 @@ fn test_trait_implementation() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find both trait definition and implementation
-    let found_trait_impl;
+    
     fn find_trait_impl(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitImpl {
             return true;
@@ -75,7 +75,7 @@ fn test_trait_implementation() {
         }
         false
     }
-    found_trait_impl = find_trait_impl(&tree);
+    let found_trait_impl = find_trait_impl(&tree);
     assert!(
         found_trait_impl,
         "Trait implementation not found in parsed tree"
@@ -110,7 +110,7 @@ fn test_trait_with_where_clause() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse where clauses
-    let found_where_clause;
+    
     fn find_where_clause(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::WhereClause {
             return true;
@@ -122,7 +122,7 @@ fn test_trait_with_where_clause() {
         }
         false
     }
-    found_where_clause = find_where_clause(&tree);
+    let found_where_clause = find_where_clause(&tree);
     assert!(found_where_clause, "Where clause not found in parsed tree");
 }
 
@@ -147,7 +147,7 @@ fn test_trait_with_super_traits() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse trait bounds
-    let found_trait_bounds;
+    
     fn find_trait_bounds(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitBoundList {
             return true;
@@ -159,6 +159,6 @@ fn test_trait_with_super_traits() {
         }
         false
     }
-    found_trait_bounds = find_trait_bounds(&tree);
+    let found_trait_bounds = find_trait_bounds(&tree);
     assert!(found_trait_bounds, "Trait bounds not found in parsed tree");
 }

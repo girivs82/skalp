@@ -121,7 +121,7 @@ impl XilinxBackend {
             let verilog_file = format!("{}.v", module.name);
             tcl.push_str(&format!("add_files {}\n", verilog_file));
         }
-        tcl.push_str("\n");
+        tcl.push('\n');
 
         // Set top module
         if let Some(top) = lir.modules.first() {
@@ -240,7 +240,7 @@ impl XilinxBackend {
         // Parse utilization report
         let util_report = output_dir.join("utilization.rpt");
         if util_report.exists() {
-            let content = fs::read_to_string(&util_report).map_err(|e| BackendError::IoError(e))?;
+            let content = fs::read_to_string(&util_report).map_err(BackendError::IoError)?;
 
             // Extract resource usage (simplified parsing)
             if let Some(lut_line) = content.lines().find(|l| l.contains("Slice LUTs")) {
@@ -259,7 +259,7 @@ impl XilinxBackend {
         let timing_report = output_dir.join("timing.rpt");
         if timing_report.exists() {
             let content =
-                fs::read_to_string(&timing_report).map_err(|e| BackendError::IoError(e))?;
+                fs::read_to_string(&timing_report).map_err(BackendError::IoError)?;
 
             // Extract max frequency (simplified parsing)
             if let Some(wns_line) = content.lines().find(|l| l.contains("WNS(ns)")) {
@@ -278,7 +278,7 @@ impl XilinxBackend {
         let power_report = output_dir.join("power.rpt");
         if power_report.exists() {
             let content =
-                fs::read_to_string(&power_report).map_err(|e| BackendError::IoError(e))?;
+                fs::read_to_string(&power_report).map_err(BackendError::IoError)?;
 
             // Extract total power (simplified parsing)
             if let Some(power_line) = content.lines().find(|l| l.contains("Total On-Chip Power")) {
@@ -310,20 +310,20 @@ impl Backend for XilinxBackend {
         _config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temp directory for synthesis
-        let temp_dir = TempDir::new().map_err(|e| BackendError::IoError(e))?;
+        let temp_dir = TempDir::new().map_err(BackendError::IoError)?;
         let work_dir = temp_dir.path();
 
         // Generate Verilog files
         for module in &lir.modules {
             let verilog = crate::verilog::generate_verilog(module)?;
-            let file_path = work_dir.join(&format!("{}.v", module.name));
-            fs::write(&file_path, verilog).map_err(|e| BackendError::IoError(e))?;
+            let file_path = work_dir.join(format!("{}.v", module.name));
+            fs::write(&file_path, verilog).map_err(BackendError::IoError)?;
         }
 
         // Generate TCL script
         let tcl_content = self.generate_tcl(lir, work_dir)?;
         let tcl_file = work_dir.join("synthesis.tcl");
-        fs::write(&tcl_file, tcl_content).map_err(|e| BackendError::IoError(e))?;
+        fs::write(&tcl_file, tcl_content).map_err(BackendError::IoError)?;
 
         // Run Vivado
         let output = self.run_vivado(&tcl_file).await?;
@@ -401,6 +401,12 @@ pub enum XdcConstraint {
         to: String,
         cycles: u32,
     },
+}
+
+impl Default for XdcGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl XdcGenerator {

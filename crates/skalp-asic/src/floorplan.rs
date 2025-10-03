@@ -2,10 +2,8 @@
 //!
 //! Interactive floorplanning with hierarchical design support
 
-use crate::placement::{Placement, PlacementRow};
 use crate::AsicError;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 
 /// Floorplan manager
 pub struct FloorplanManager {
@@ -606,7 +604,7 @@ impl FloorplanManager {
             .map_err(|e| AsicError::PlacementError(format!("Failed to create DEF: {}", e)))?;
 
         writeln!(file, "VERSION 5.8 ;")?;
-        writeln!(file, "DESIGN {} ;", "top")?;
+        writeln!(file, "DESIGN top ;")?;
         writeln!(file, "UNITS DISTANCE MICRONS 1000 ;")?;
         writeln!(file)?;
 

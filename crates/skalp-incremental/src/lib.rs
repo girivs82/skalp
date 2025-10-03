@@ -312,7 +312,7 @@ impl BuildResults {
 
     pub fn merge(&mut self, other: BuildResults) {
         self.success &= other.success;
-        self.build_time = self.build_time + other.build_time;
+        self.build_time += other.build_time;
         self.artifacts.extend(other.artifacts);
         self.errors.extend(other.errors);
         self.warnings.extend(other.warnings);

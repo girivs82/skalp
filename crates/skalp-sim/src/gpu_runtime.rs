@@ -125,7 +125,7 @@ impl GpuRuntime {
 
     fn calculate_register_size(&self, module: &SirModule) -> u64 {
         let mut size = 0u64;
-        for (_, state) in &module.state_elements {
+        for state in module.state_elements.values() {
             size += self.get_metal_type_size(state.width) as u64;
         }
         size
@@ -177,7 +177,7 @@ impl GpuRuntime {
                 let command_buffer = self.device.command_queue.new_command_buffer();
                 let encoder = command_buffer.new_compute_command_encoder();
 
-                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_compute_pipeline_state(pipeline);
 
                 // Set buffers: inputs, registers, signals
                 if let Some(input_buffer) = &self.input_buffer {
@@ -248,7 +248,7 @@ impl GpuRuntime {
             let command_buffer = self.device.command_queue.new_command_buffer();
             let encoder = command_buffer.new_compute_command_encoder();
 
-            encoder.set_compute_pipeline_state(&pipeline);
+            encoder.set_compute_pipeline_state(pipeline);
 
             // Set buffers: inputs, registers (in/out), signals
             if let Some(input_buffer) = &self.input_buffer {
@@ -298,7 +298,7 @@ impl GpuRuntime {
                 // Read outputs first
                 for output in &module.outputs {
                     let metal_size = self.get_metal_type_size(output.width);
-                    let bytes_needed = ((output.width + 7) / 8) as usize;
+                    let bytes_needed = (output.width + 7) / 8;
                     let mut value = vec![0u8; bytes_needed];
                     unsafe {
                         std::ptr::copy_nonoverlapping(
@@ -315,7 +315,7 @@ impl GpuRuntime {
                 for signal in &module.signals {
                     if !signal.is_state {
                         let metal_size = self.get_metal_type_size(signal.width);
-                        let bytes_needed = ((signal.width + 7) / 8) as usize;
+                        let bytes_needed = (signal.width + 7) / 8;
                         let mut value = vec![0u8; bytes_needed];
                         unsafe {
                             std::ptr::copy_nonoverlapping(
@@ -337,7 +337,7 @@ impl GpuRuntime {
 
                 for (name, state_elem) in &module.state_elements {
                     let metal_size = self.get_metal_type_size(state_elem.width);
-                    let bytes_needed = ((state_elem.width + 7) / 8) as usize;
+                    let bytes_needed = (state_elem.width + 7) / 8;
                     let mut value = vec![0u8; bytes_needed];
                     unsafe {
                         std::ptr::copy_nonoverlapping(
@@ -366,7 +366,7 @@ impl SimulationRuntime for GpuRuntime {
         self.module = Some(module.clone());
 
         // Register clocks from the module
-        for (name, _domain) in &module.clock_domains {
+        for name in module.clock_domains.keys() {
             // Default to 10ns period (100MHz)
             self.clock_manager.add_clock(name.clone(), 10_000);
         }
@@ -495,7 +495,7 @@ impl SimulationRuntime for GpuRuntime {
                 // Find the input and write to its location
                 for input in &module.inputs {
                     let metal_size = self.get_metal_type_size(input.width);
-                    let bytes_needed = ((input.width + 7) / 8) as usize;
+                    let bytes_needed = (input.width + 7) / 8;
                     if input.name == name {
                         if value.len() != bytes_needed {
                             return Err(SimulationError::GpuError(format!(
@@ -536,7 +536,7 @@ impl SimulationRuntime for GpuRuntime {
                 // Find the output in the signals buffer
                 for output in &module.outputs {
                     let metal_size = self.get_metal_type_size(output.width);
-                    let bytes_needed = ((output.width + 7) / 8) as usize;
+                    let bytes_needed = (output.width + 7) / 8;
                     if output.name == name {
                         let mut value = vec![0u8; bytes_needed];
                         unsafe {

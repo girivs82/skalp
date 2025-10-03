@@ -13,6 +13,12 @@ pub struct CoverageTracker {
     metrics: HashMap<String, f64>,
 }
 
+impl Default for CoverageTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoverageTracker {
     pub fn new() -> Self {
         Self {

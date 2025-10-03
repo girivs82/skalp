@@ -10,6 +10,12 @@ pub struct ConstraintSolver {
     constraints: Vec<Constraint>,
 }
 
+impl Default for ConstraintSolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConstraintSolver {
     pub fn new() -> Self {
         Self {

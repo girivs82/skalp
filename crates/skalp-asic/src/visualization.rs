@@ -4,7 +4,7 @@
 
 use crate::cts::ClockTree;
 use crate::placement::{Netlist, Placement};
-use crate::routing::{CongestionMap, RoutingResult};
+use crate::routing::RoutingResult;
 use crate::AsicError;
 use std::fs::File;
 use std::io::Write;
@@ -46,6 +46,12 @@ pub struct ColorScheme {
     pub congestion_gradient: Vec<String>,
     /// Clock tree colors
     pub clock_colors: Vec<String>,
+}
+
+impl Default for Visualizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Visualizer {
@@ -231,7 +237,7 @@ impl Visualizer {
         let mut grid = vec![vec![' '; 80]; 24];
 
         // Place cells
-        for (_i, cell) in placement.cells.iter().enumerate() {
+        for cell in placement.cells.iter() {
             if let Some(pos) = placement.positions.get(&cell.instance_name) {
                 let x = ((pos.0 - min_x) * scale_x) as usize;
                 let y = ((pos.1 - min_y) * scale_y) as usize;

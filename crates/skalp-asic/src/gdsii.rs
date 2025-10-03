@@ -7,12 +7,11 @@
 //! - Text labels and properties
 
 use crate::cts::ClockTree;
-use crate::placement::CellInstance;
 use crate::placement::Placement;
 use crate::routing::RoutingResult;
 use crate::sky130::StandardCellLibrary;
 use crate::{AsicError, DesignRules, Technology};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -258,10 +257,10 @@ impl GdsiiGenerator {
         };
 
         // Add standard cell structures
-        let mut std_cell_structures = self.create_std_cell_structures()?;
+        let std_cell_structures = self.create_std_cell_structures()?;
 
         // Create GDSII stream
-        let mut stream = GdsiiStream {
+        let stream = GdsiiStream {
             name: design_name.to_string(),
             timestamp: self.current_timestamp(),
             libraries: vec![library],
@@ -520,7 +519,7 @@ impl GdsiiGenerator {
 
         // Create a structure for each unique cell type
         let mut cell_types = HashSet::new();
-        for (name, _) in &std_cells.cells {
+        for name in std_cells.cells.keys() {
             cell_types.insert(name.clone());
         }
 

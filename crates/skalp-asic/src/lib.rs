@@ -23,7 +23,6 @@ pub mod timing;
 pub mod visualization;
 pub mod web_ui;
 
-use skalp_lir::LirDesign;
 use thiserror::Error;
 
 /// Error type for ASIC operations

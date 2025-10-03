@@ -80,7 +80,7 @@ impl Test {
     let sir = compile_to_sir(source);
 
     assert_eq!(sir.inputs.len(), 1);
-    assert!(sir.outputs.len() >= 1); // b + possibly c
+    assert!(!sir.outputs.is_empty()); // b + possibly c
     assert!(matches!(sir.inputs[0].direction, PortDirection::Input));
 }
 
@@ -422,7 +422,7 @@ impl ALU {
 
     assert_eq!(sir.name, "ALU");
     assert!(sir.inputs.len() >= 3);
-    assert!(sir.outputs.len() >= 1);
+    assert!(!sir.outputs.is_empty());
     assert!(!sir.combinational_nodes.is_empty() || !sir.sequential_nodes.is_empty());
 }
 

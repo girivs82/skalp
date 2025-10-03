@@ -961,7 +961,7 @@ mod native_place_route_tests {
         );
 
         // Test different ECP5 bitstream sections
-        let data_str = String::from_utf8_lossy(&bitstream.data);
+        let _data_str = String::from_utf8_lossy(&bitstream.data);
         // Note: These are binary data, so we check the raw bytes
         assert!(
             bitstream.data.windows(5).any(|w| w == b"TILES"),

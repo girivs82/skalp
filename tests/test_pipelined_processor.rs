@@ -296,7 +296,7 @@ mod pipelined_processor_tests {
 
         // Assert all tests passed
         assert!(testbench.all_tests_passed(), "Some tests failed");
-        assert!(results.len() > 0, "Should have test results");
+        assert!(!results.is_empty(), "Should have test results");
 
         println!("\n✅ Pipelined processor GPU simulation passed!");
     }

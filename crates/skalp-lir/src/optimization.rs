@@ -220,7 +220,7 @@ impl OptimizationPass for CommonSubexpressionElimination {
             let signature = self.gate_signature(gate);
             gate_signatures
                 .entry(signature)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(gate.id.clone());
         }
 
@@ -364,15 +364,11 @@ impl OptimizationPass for BooleanSimplification {
 }
 
 /// Optimization pipeline that runs multiple passes
+#[derive(Default)]
 pub struct OptimizationPipeline {
     passes: Vec<Box<dyn OptimizationPass>>,
 }
 
-impl Default for OptimizationPipeline {
-    fn default() -> Self {
-        Self { passes: Vec::new() }
-    }
-}
 
 impl OptimizationPipeline {
     /// Create a new optimization pipeline

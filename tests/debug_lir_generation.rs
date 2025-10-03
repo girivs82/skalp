@@ -121,7 +121,7 @@ mod debug_lir_tests {
             println!("3. Area models based on actual gate sizes");
 
             // For now, let's measure what we can
-            let has_structure = lir.gates.len() > 0 || lir.nets.len() > 0;
+            let has_structure = !lir.gates.is_empty() || !lir.nets.is_empty();
             println!("Infrastructure working: {}", has_structure);
 
             assert!(has_structure, "Should generate some LIR structure");

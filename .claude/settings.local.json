@@ -58,7 +58,9 @@
       "Bash(gh run view:*)",
       "Bash(gh run watch:*)",
       "Bash(gh api:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(tee:*)",
+      "Bash(paste:*)"
     ],
     "deny": [],
     "ask": []

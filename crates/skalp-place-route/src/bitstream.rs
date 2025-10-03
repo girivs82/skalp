@@ -158,7 +158,7 @@ impl BitstreamGenerator {
             // Limit for demo
             let (x, y) = io_tile.position;
             bitstream_text.push_str(&format!(".io {} {} input\n", x, y));
-            bitstream_text.push_str(&format!(".io_standard LVCMOS33\n"));
+            bitstream_text.push_str(".io_standard LVCMOS33\n");
         }
 
         // Footer
@@ -648,8 +648,7 @@ impl BitstreamGenerator {
                 "    <max_frequency>{:.1}</max_frequency>\n",
                 self.device
                     .clock_resources
-                    .clock_domains
-                    .get(0)
+                    .clock_domains.first()
                     .map(|cd| cd.max_frequency / 1e6)
                     .unwrap_or(0.0)
             )); // MHz
@@ -800,7 +799,7 @@ impl Bitstream {
                 }
 
                 // Check sync pattern
-                if &self.data[0..4] != [0xFF, 0x00, 0x00, 0xFF] {
+                if self.data[0..4] != [0xFF, 0x00, 0x00, 0xFF] {
                     return Err(BitstreamError::CorruptedBitstream(
                         "Invalid sync pattern".to_string(),
                     ));

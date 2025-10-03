@@ -32,7 +32,7 @@ mod lir_synthesis_tests {
         println!("Modules: {}", lir_design.modules.len());
 
         // Verify we have expected structure
-        assert!(lir_design.modules.len() > 0, "Should have modules");
+        assert!(!lir_design.modules.is_empty(), "Should have modules");
 
         let module = &lir_design.modules[0];
         println!("Module: {}", module.name);
@@ -93,7 +93,7 @@ mod lir_synthesis_tests {
 
             // Should have created some gates for the logic
             // Even with simplified implementation, should have at least buffer gates
-            assert!(lir.nets.len() > 0, "Should have created nets");
+            assert!(!lir.nets.is_empty(), "Should have created nets");
         }
     }
 
@@ -125,7 +125,7 @@ mod lir_synthesis_tests {
 
         // Test design structure
         assert_eq!(lir_design.name, "TestDesign");
-        assert!(lir_design.modules.len() > 0, "Should have modules");
+        assert!(!lir_design.modules.is_empty(), "Should have modules");
 
         // Test module structure
         let module = &lir_design.modules[0];
@@ -171,7 +171,7 @@ mod lir_synthesis_tests {
 
         // Even simple designs should create at least one module
         assert!(
-            lir_design.modules.len() >= 1,
+            !lir_design.modules.is_empty(),
             "Should have at least one module"
         );
 
@@ -232,7 +232,7 @@ mod lir_synthesis_tests {
 
             // Should have created some structure
             assert!(
-                lir.gates.len() > 0 || lir.nets.len() > 0,
+                !lir.gates.is_empty() || !lir.nets.is_empty(),
                 "Should have created gates or nets"
             );
         }

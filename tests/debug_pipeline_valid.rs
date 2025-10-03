@@ -101,7 +101,7 @@ mod debug_pipeline_valid_tests {
         );
 
         // Run test
-        let results = testbench.run_test().await.expect("Failed to run test");
+        let _results = testbench.run_test().await.expect("Failed to run test");
         println!("\n{}", testbench.generate_report());
 
         assert!(testbench.all_tests_passed(), "Counter test failed");

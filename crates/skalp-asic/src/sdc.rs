@@ -3,7 +3,7 @@
 //! Industry-standard constraint format for timing and design rules
 
 use crate::AsicError;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -277,6 +277,7 @@ pub enum ProcessCorner {
 
 /// Design rules
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct DesignRules {
     /// Max fanout
     pub max_fanout: Option<f64>,
@@ -308,6 +309,12 @@ pub enum ExceptionType {
     IdealNetwork,
     IdealLatency,
     PropagatedClock,
+}
+
+impl Default for SDCManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SDCManager {
@@ -350,7 +357,7 @@ impl SDCManager {
             }
 
             // Parse command
-            self.parse_command(&line, line_num)?;
+            self.parse_command(line, line_num)?;
         }
 
         Ok(())
@@ -448,7 +455,7 @@ impl SDCManager {
         // Parse: create_generated_clock -name <name> -source <source> [-divide_by <div>] [-multiply_by <mult>] [-invert] <pin>
         let mut name = String::new();
         let mut source = String::new();
-        let mut master_clock = String::new();
+        let master_clock = String::new();
         let mut master_pin = String::new();
         let mut divide_by = None;
         let mut multiply_by = None;
@@ -1000,14 +1007,3 @@ impl Default for OperatingConditions {
     }
 }
 
-impl Default for DesignRules {
-    fn default() -> Self {
-        Self {
-            max_fanout: None,
-            max_transition: None,
-            max_capacitance: None,
-            min_capacitance: None,
-            max_area: None,
-        }
-    }
-}

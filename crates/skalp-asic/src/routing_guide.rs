@@ -3,7 +3,7 @@
 //! Provides interactive routing control with congestion-aware guidance
 
 use crate::placement::Placement;
-use crate::routing::{DetailedRouting, GlobalRouting, RouteSegment, Router, RoutingResult};
+use crate::routing::{Router, RoutingResult};
 use crate::AsicError;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -202,6 +202,12 @@ pub struct RoutingHistory {
     pub max_size: usize,
 }
 
+impl Default for RoutingGuide {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RoutingGuide {
     /// Create new routing guide
     pub fn new() -> Self {
@@ -219,7 +225,7 @@ impl RoutingGuide {
     pub fn add_constraint(&mut self, net: String, constraint: RouteConstraint) {
         self.manual_routes
             .entry(net)
-            .or_insert(Vec::new())
+            .or_default()
             .push(constraint);
     }
 
@@ -237,10 +243,7 @@ impl RoutingGuide {
     pub fn is_blocked(&self, x: f64, y: f64, layer: usize) -> bool {
         for blockage in &self.blockages {
             if blockage.layers.contains(&layer) && self.in_region(x, y, &blockage.region) {
-                match blockage.blockage_type {
-                    BlockageType::Hard => return true,
-                    _ => {}
-                }
+                if let BlockageType::Hard = blockage.blockage_type { return true }
             }
         }
         false
@@ -253,10 +256,7 @@ impl RoutingGuide {
         // Check blockages
         for blockage in &self.blockages {
             if blockage.layers.contains(&layer) && self.in_region(x, y, &blockage.region) {
-                match &blockage.blockage_type {
-                    BlockageType::Soft { penalty: p } => penalty *= p,
-                    _ => {}
-                }
+                if let BlockageType::Soft { penalty: p } = &blockage.blockage_type { penalty *= p }
             }
         }
 
@@ -308,7 +308,7 @@ impl RoutingGuide {
                     let value = congestion.values[y][x];
                     total_congestion += value;
                     count += 1;
-                    peak = peak.max(value as f64);
+                    peak = peak.max(value);
 
                     if value > self.congestion_limits.warning {
                         // Identify affected nets
@@ -660,7 +660,7 @@ impl InteractiveRouter {
                 // Simplified - in practice would use detailed pathfinding
                 crate::routing::WireSegment {
                     points: vec![(0.0, 0.0), (10.0, 10.0)],
-                    layer: preferred_layers.get(0).copied().unwrap_or(1),
+                    layer: preferred_layers.first().copied().unwrap_or(1),
                     width: 0.14, // Min width for SKY130
                 },
             ],

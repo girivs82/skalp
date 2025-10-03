@@ -3,8 +3,7 @@
 //! Implements analytical placement with simulated annealing optimization
 //! for standard cell placement without external tools.
 
-use crate::sky130::StandardCellLibrary;
-use crate::{AsicError, DesignRules, Technology};
+use crate::{AsicError, DesignRules};
 use nalgebra::{DMatrix, DVector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

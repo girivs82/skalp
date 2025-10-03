@@ -495,13 +495,13 @@ impl Device {
         }
 
         // Skip EBR columns (simplified pattern)
-        let ebr_columns = vec![10, 20, 30, 40, 50, 60, 70];
+        let ebr_columns = [10, 20, 30, 40, 50, 60, 70];
         if ebr_columns.contains(&x) && y % 8 < 4 {
             return false;
         }
 
         // Skip DSP columns
-        let dsp_columns = vec![15, 35, 55, 75];
+        let dsp_columns = [15, 35, 55, 75];
         if dsp_columns.contains(&x) && y % 10 < 2 {
             return false;
         }
@@ -1186,13 +1186,13 @@ impl Device {
         }
 
         // Skip BRAM columns
-        let bram_columns = vec![20, 41, 62];
+        let bram_columns = [20, 41, 62];
         if bram_columns.contains(&x) && y % 8 < 4 {
             return false;
         }
 
         // Skip DSP columns
-        let dsp_columns = vec![25, 56];
+        let dsp_columns = [25, 56];
         if dsp_columns.contains(&x) && y % 10 < 2 {
             return false;
         }
@@ -1208,7 +1208,7 @@ impl Device {
         }
 
         // Skip BRAM columns
-        let bram_columns = vec![15, 25];
+        let bram_columns = [15, 25];
         if bram_columns.contains(&x) && y % 6 < 3 {
             return false;
         }

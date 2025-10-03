@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use skalp_frontend::parse_and_build_hir;
 use skalp_mir::{MirCompiler, OptimizationLevel};
 use skalp_sim::{SimulationConfig, Simulator};

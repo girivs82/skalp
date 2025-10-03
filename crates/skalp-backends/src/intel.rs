@@ -133,7 +133,7 @@ impl IntelBackend {
                 module.name
             ));
         }
-        qsf.push_str("\n");
+        qsf.push('\n');
 
         // Optimization settings based on goal
         match self.optimization {
@@ -181,7 +181,7 @@ impl IntelBackend {
                 qsf.push_str("set_global_assignment -name OPTIMIZATION_MODE BALANCED\n");
             }
         }
-        qsf.push_str("\n");
+        qsf.push('\n');
 
         // Timing settings
         qsf.push_str("# Timing Settings\n");
@@ -284,7 +284,7 @@ impl IntelBackend {
             .join(format!("{}.fit.summary", project_name));
 
         if fit_report.exists() {
-            let content = fs::read_to_string(&fit_report).map_err(|e| BackendError::IoError(e))?;
+            let content = fs::read_to_string(&fit_report).map_err(BackendError::IoError)?;
 
             // Extract resource usage
             if let Some(alm_line) = content.lines().find(|l| l.contains("Logic utilization")) {
@@ -333,7 +333,7 @@ impl IntelBackend {
             .join(format!("{}.sta.summary", project_name));
 
         if sta_report.exists() {
-            let content = fs::read_to_string(&sta_report).map_err(|e| BackendError::IoError(e))?;
+            let content = fs::read_to_string(&sta_report).map_err(BackendError::IoError)?;
 
             // Extract Fmax
             if let Some(fmax_line) = content.lines().find(|l| l.contains("Fmax")) {
@@ -354,7 +354,7 @@ impl IntelBackend {
 
         if power_report.exists() {
             let content =
-                fs::read_to_string(&power_report).map_err(|e| BackendError::IoError(e))?;
+                fs::read_to_string(&power_report).map_err(BackendError::IoError)?;
 
             // Extract total power
             if let Some(power_line) = content
@@ -398,24 +398,24 @@ impl Backend for IntelBackend {
         _config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temp directory
-        let temp_dir = TempDir::new().map_err(|e| BackendError::IoError(e))?;
+        let temp_dir = TempDir::new().map_err(BackendError::IoError)?;
         let work_dir = temp_dir.path();
 
         // Create project directory structure
         let project_name = &lir.name;
-        fs::create_dir_all(work_dir.join("output_files")).map_err(|e| BackendError::IoError(e))?;
+        fs::create_dir_all(work_dir.join("output_files")).map_err(BackendError::IoError)?;
 
         // Generate Verilog files
         for module in &lir.modules {
             let verilog = crate::verilog::generate_verilog(module)?;
-            let file_path = work_dir.join(&format!("{}.v", module.name));
-            fs::write(&file_path, verilog).map_err(|e| BackendError::IoError(e))?;
+            let file_path = work_dir.join(format!("{}.v", module.name));
+            fs::write(&file_path, verilog).map_err(BackendError::IoError)?;
         }
 
         // Generate QSF file
         let qsf_content = self.generate_qsf(lir, work_dir)?;
-        let qsf_file = work_dir.join(&format!("{}.qsf", project_name));
-        fs::write(&qsf_file, qsf_content).map_err(|e| BackendError::IoError(e))?;
+        let qsf_file = work_dir.join(format!("{}.qsf", project_name));
+        fs::write(&qsf_file, qsf_content).map_err(BackendError::IoError)?;
 
         // Generate QPF file (project file)
         let qpf_content = format!(
@@ -423,13 +423,13 @@ impl Backend for IntelBackend {
              PROJECT_REVISION = \"{}\"\n",
             project_name
         );
-        let qpf_file = work_dir.join(&format!("{}.qpf", project_name));
-        fs::write(&qpf_file, qpf_content).map_err(|e| BackendError::IoError(e))?;
+        let qpf_file = work_dir.join(format!("{}.qpf", project_name));
+        fs::write(&qpf_file, qpf_content).map_err(BackendError::IoError)?;
 
         // Generate TCL script
         let tcl_content = self.generate_tcl(project_name);
         let tcl_file = work_dir.join("compile.tcl");
-        fs::write(&tcl_file, tcl_content).map_err(|e| BackendError::IoError(e))?;
+        fs::write(&tcl_file, tcl_content).map_err(BackendError::IoError)?;
 
         // Run Quartus
         let output = self.run_quartus(work_dir, &tcl_file).await?;
@@ -527,6 +527,12 @@ pub enum SdcConstraint {
         setup: u32,
         hold: u32,
     },
+}
+
+impl Default for SdcGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SdcGenerator {

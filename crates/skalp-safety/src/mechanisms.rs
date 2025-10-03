@@ -310,13 +310,13 @@ impl SafetyMechanismManager {
             self.fault_coverage
                 .fault_to_mechanisms
                 .entry(fault_mode.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(id.clone());
 
             self.fault_coverage
                 .mechanism_to_faults
                 .entry(id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(fault_mode.clone());
         }
 
@@ -353,7 +353,7 @@ impl SafetyMechanismManager {
     pub fn assign_mechanism(&mut self, design_element: String, mechanism_id: String) {
         self.assignments
             .entry(design_element)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(mechanism_id);
     }
 

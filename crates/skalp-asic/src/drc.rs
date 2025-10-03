@@ -12,7 +12,7 @@ use crate::placement::Placement;
 use crate::routing::RoutingResult;
 use crate::{AsicError, DesignRules, Technology};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Advanced DRC engine with comprehensive rule checking
 pub struct AdvancedDrcEngine {
@@ -644,7 +644,7 @@ impl AdvancedDrcEngine {
                             id: violation_id,
                             violation_type: ViolationType::MinWidth,
                             severity: ViolationSeverity::Error,
-                            location: if segment.points.len() > 0 {
+                            location: if !segment.points.is_empty() {
                                 segment.points[0]
                             } else {
                                 (0.0, 0.0)
@@ -865,7 +865,7 @@ impl AdvancedDrcEngine {
         seg2: &crate::routing::WireSegment,
     ) -> (f64, f64) {
         // Simplified - return midpoint
-        if seg1.points.len() > 0 && seg2.points.len() > 0 {
+        if !seg1.points.is_empty() && !seg2.points.is_empty() {
             let p1 = seg1.points[0];
             let p2 = seg2.points[0];
             ((p1.0 + p2.0) / 2.0, (p1.1 + p2.1) / 2.0)

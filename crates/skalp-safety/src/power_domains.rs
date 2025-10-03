@@ -693,7 +693,7 @@ impl PowerDomainManager {
         self.hierarchy
             .parent_child
             .entry(source.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(target.to_string());
 
         Ok(())

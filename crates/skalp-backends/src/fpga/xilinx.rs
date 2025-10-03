@@ -181,7 +181,7 @@ async fn run_vivado_synthesis(
 
     // Run Vivado in batch mode
     let output = Command::new("vivado")
-        .args(&["-mode", "batch", "-source"])
+        .args(["-mode", "batch", "-source"])
         .arg(&script_file)
         .current_dir(temp_dir)
         .stdout(Stdio::piped())
@@ -270,7 +270,7 @@ async fn run_vivado_implementation(
     tokio::fs::write(&script_file, &tcl_script).await?;
 
     let output = Command::new("vivado")
-        .args(&["-mode", "batch", "-source"])
+        .args(["-mode", "batch", "-source"])
         .arg(&script_file)
         .current_dir(temp_dir)
         .stdout(Stdio::piped())
@@ -337,7 +337,7 @@ async fn run_vivado_bitstream(
     tokio::fs::write(&script_file, tcl_script).await?;
 
     let output = Command::new("vivado")
-        .args(&["-mode", "batch", "-source"])
+        .args(["-mode", "batch", "-source"])
         .arg(&script_file)
         .current_dir(temp_dir)
         .stdout(Stdio::piped())

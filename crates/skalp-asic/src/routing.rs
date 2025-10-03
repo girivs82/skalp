@@ -4,18 +4,14 @@
 //! Uses a combination of maze routing, channel routing, and track assignment.
 
 use crate::placement::{Net, Netlist, Placement};
-use crate::sky130::StandardCellLibrary;
-use crate::{AsicError, DesignRules, Technology};
-use petgraph::algo::dijkstra;
-use petgraph::graph::{EdgeReference, Graph, NodeIndex};
+use crate::{AsicError, DesignRules};
+use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use petgraph::Direction;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 
 /// Routing result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,7 +372,7 @@ impl GlobalRouter {
 
         if terminals.len() < 2 {
             return Ok(GlobalWire {
-                net_idx: net_idx,
+                net_idx,
                 path: vec![],
             });
         }
@@ -396,7 +392,7 @@ impl GlobalRouter {
         }
 
         Ok(GlobalWire {
-            net_idx: net_idx,
+            net_idx,
             path: steiner_path,
         })
     }
@@ -966,9 +962,14 @@ impl CongestionTracker {
 }
 
 // Add missing trait for rand
-use rand::Rng;
 
 // Router implementation
+impl Default for Router {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Router {
     /// Create new router
     pub fn new() -> Self {
@@ -1030,7 +1031,7 @@ impl Router {
                 };
                 segments.push(segment);
                 total_wirelength +=
-                    ((seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs());
+                    (seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs();
             }
 
             // For now, we don't track which vias belong to which net
@@ -1126,7 +1127,7 @@ impl Router {
         // Convert to RoutingResult
         let mut routed_nets = Vec::new();
         let mut total_wirelength = 0.0;
-        let mut num_vias = 0;
+        let num_vias = 0;
 
         for (idx, wire) in detailed_result.wires.iter().enumerate() {
             let mut segments = Vec::new();
@@ -1138,7 +1139,7 @@ impl Router {
                 };
                 segments.push(segment);
                 total_wirelength +=
-                    ((seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs());
+                    (seg.end.0 - seg.start.0).abs() + (seg.end.1 - seg.start.1).abs();
             }
 
             routed_nets.push(RoutedNet {

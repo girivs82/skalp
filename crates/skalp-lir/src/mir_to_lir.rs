@@ -268,10 +268,10 @@ impl MirToLirTransform {
         match expr {
             skalp_mir::mir::Expression::Literal(value) => {
                 // For literals, create a constant driver net
-                let const_net = self.create_temp_net();
+                
                 // In a real implementation, we'd create tie-high/tie-low cells
                 // For now, just return the net name
-                const_net
+                self.create_temp_net()
             }
             skalp_mir::mir::Expression::Ref(lvalue) => {
                 // Reference to a signal/port - return its net

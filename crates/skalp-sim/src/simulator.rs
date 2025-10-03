@@ -65,6 +65,7 @@ pub struct Simulator {
     control_rx: mpsc::Receiver<SimulatorCommand>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum SimulatorCommand {
     Start,
@@ -113,7 +114,7 @@ impl Simulator {
 
         let mut runtime = Box::new(crate::cpu_runtime::CpuRuntime::new());
         let state_history = self.state_history.clone();
-        let control_rx = self.control_rx.try_recv();
+        let _control_rx = self.control_rx.try_recv();
 
         // Start simulation loop
         tokio::spawn(async move {

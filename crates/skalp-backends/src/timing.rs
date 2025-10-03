@@ -295,7 +295,7 @@ impl TimingAnalyzer {
                 1000.0 / clock.period_ns
             ));
         }
-        report.push_str("\n");
+        report.push('\n');
 
         // Timing summary
         report.push_str("Timing Summary:\n");
@@ -320,7 +320,7 @@ impl TimingAnalyzer {
             "  Hold Violations: {}\n",
             results.hold_violations.len()
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         // Violations
         if !results.setup_violations.is_empty() {
@@ -332,7 +332,7 @@ impl TimingAnalyzer {
                     violation.from, violation.to, violation.slack_ns
                 ));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         if !results.hold_violations.is_empty() {
@@ -344,7 +344,7 @@ impl TimingAnalyzer {
                     violation.from, violation.to, violation.slack_ns
                 ));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         report.push_str("===============================================\n");

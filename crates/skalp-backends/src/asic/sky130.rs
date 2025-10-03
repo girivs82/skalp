@@ -36,34 +36,31 @@ pub async fn synthesize_sky130(
     let power_results = analyze_sky130_power(&area_metrics, &timing_results).await?;
 
     // Collect output files
-    let mut output_files = Vec::new();
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::Netlist,
-        path: temp_dir
-            .join("design_mapped.v")
-            .to_string_lossy()
-            .to_string(),
-        description: "Sky130 technology-mapped netlist".to_string(),
-    });
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::PlaceRouteDb,
-        path: temp_dir.join("design.def").to_string_lossy().to_string(),
-        description: "DEF layout database".to_string(),
-    });
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::TimingReport,
-        path: temp_dir.join("timing.rpt").to_string_lossy().to_string(),
-        description: "OpenSTA timing report".to_string(),
-    });
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::PowerReport,
-        path: temp_dir.join("power.rpt").to_string_lossy().to_string(),
-        description: "Power analysis report".to_string(),
-    });
+    let mut output_files = vec![
+        OutputFile {
+            file_type: OutputFileType::Netlist,
+            path: temp_dir
+                .join("design_mapped.v")
+                .to_string_lossy()
+                .to_string(),
+            description: "Sky130 technology-mapped netlist".to_string(),
+        },
+        OutputFile {
+            file_type: OutputFileType::PlaceRouteDb,
+            path: temp_dir.join("design.def").to_string_lossy().to_string(),
+            description: "DEF layout database".to_string(),
+        },
+        OutputFile {
+            file_type: OutputFileType::TimingReport,
+            path: temp_dir.join("timing.rpt").to_string_lossy().to_string(),
+            description: "OpenSTA timing report".to_string(),
+        },
+        OutputFile {
+            file_type: OutputFileType::PowerReport,
+            path: temp_dir.join("power.rpt").to_string_lossy().to_string(),
+            description: "Power analysis report".to_string(),
+        },
+    ];
 
     // Add GDS layout if successful
     if layout_result {
@@ -101,21 +98,21 @@ async fn run_sky130_synthesis(
     tcl_script.push_str("# Sky130 synthesis script\n");
     tcl_script.push_str("set LIB_PATH /usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/lib\n");
     tcl_script.push_str("set LEF_PATH /usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/lef\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str(&format!("read_verilog {}\n", verilog_file.display()));
     tcl_script.push_str("hierarchy -check -top design\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Synthesis passes\n");
     tcl_script.push_str("proc; memory; opt; fsm; opt\n");
     tcl_script.push_str("techmap; opt\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Technology mapping\n");
     tcl_script.push_str("dfflibmap -liberty $LIB_PATH/sky130_fd_sc_hd__tt_025C_1v80.lib\n");
     tcl_script.push_str("abc -liberty $LIB_PATH/sky130_fd_sc_hd__tt_025C_1v80.lib\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Clean up\n");
     tcl_script.push_str("clean\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Write mapped netlist\n");
     tcl_script.push_str("write_verilog design_mapped.v\n");
     tcl_script.push_str("stat\n");
@@ -183,31 +180,31 @@ async fn run_sky130_place_route(
     tcl_script.push_str("set PDK_PATH /usr/local/share/pdk/sky130A\n");
     tcl_script.push_str("set LIB_PATH $PDK_PATH/libs.ref/sky130_fd_sc_hd/lib\n");
     tcl_script.push_str("set LEF_PATH $PDK_PATH/libs.ref/sky130_fd_sc_hd/lef\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Read design\n");
     tcl_script.push_str("read_lef $LEF_PATH/sky130_fd_sc_hd.tlef\n");
     tcl_script.push_str("read_lef $LEF_PATH/sky130_fd_sc_hd_merged.lef\n");
     tcl_script.push_str("read_liberty $LIB_PATH/sky130_fd_sc_hd__tt_025C_1v80.lib\n");
     tcl_script.push_str("read_verilog design_mapped.v\n");
     tcl_script.push_str("link_design design\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Initialize floorplan\n");
     tcl_script.push_str(&format!(
         "initialize_floorplan -utilization {} -aspect_ratio 1.0 -core_space 2.0\n",
         config.target_utilization
     ));
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Placement\n");
     tcl_script.push_str("global_placement\n");
     tcl_script.push_str("detailed_placement\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Clock tree synthesis\n");
     tcl_script.push_str("clock_tree_synthesis\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Routing\n");
     tcl_script.push_str("global_route\n");
     tcl_script.push_str("detailed_route\n");
-    tcl_script.push_str("\n");
+    tcl_script.push('\n');
     tcl_script.push_str("# Write results\n");
     tcl_script.push_str("write_def design.def\n");
     tcl_script.push_str("report_checks\n");

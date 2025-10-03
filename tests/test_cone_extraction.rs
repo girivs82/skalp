@@ -102,7 +102,7 @@ mod cone_extraction_tests {
 
         // Verify we have the increment logic
         assert!(
-            sir.combinational_nodes.len() > 0 || sir.sequential_nodes.len() > 0,
+            !sir.combinational_nodes.is_empty() || !sir.sequential_nodes.is_empty(),
             "Should have some nodes"
         );
 
@@ -118,7 +118,7 @@ mod cone_extraction_tests {
         // 1. A combinational ADD node for counter + 1
         // 2. Or the increment should be in sequential logic
         assert!(
-            has_add || sir.sequential_nodes.len() > 0,
+            has_add || !sir.sequential_nodes.is_empty(),
             "Counter should have increment logic"
         );
     }

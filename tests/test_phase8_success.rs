@@ -212,9 +212,9 @@ mod phase8_success_tests {
             }
 
             // Basic assertions to ensure test passes
-            assert!(hir.entities.len() > 0, "Should have parsed entities");
-            assert!(mir.modules.len() > 0, "Should have MIR modules");
-            assert!(lir_design.modules.len() > 0, "Should have LIR modules");
+            assert!(!hir.entities.is_empty(), "Should have parsed entities");
+            assert!(!mir.modules.is_empty(), "Should have MIR modules");
+            assert!(!lir_design.modules.is_empty(), "Should have LIR modules");
             assert!(
                 lir_design.modules[0].signals.len() >= 3,
                 "Should have signals"

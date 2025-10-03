@@ -109,7 +109,7 @@ impl Placer {
 
     /// Simple random placement
     fn random_placement(&mut self, gates: &[&Gate]) -> Result<PlacementResult, PlacementError> {
-        let mut available_tiles: Vec<_> = self.device.logic_tiles.iter().collect();
+        let available_tiles: Vec<_> = self.device.logic_tiles.iter().collect();
 
         if gates.len() > available_tiles.len() {
             return Err(PlacementError::Failed(

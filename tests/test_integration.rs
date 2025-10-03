@@ -215,7 +215,7 @@ mod integration_tests {
         if let Ok(hir) = parse_and_build_hir(bad_semantics) {
             let compiler = MirCompiler::new();
             // This might fail during MIR compilation or type checking
-            let result = compiler.compile_to_mir(&hir);
+            let _result = compiler.compile_to_mir(&hir);
             // Depending on where type checking happens, this might or might not fail
         }
     }

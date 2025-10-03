@@ -4,8 +4,8 @@
 //! Based on the open-source SKY130 PDK.
 
 use crate::placement::{Net, Netlist, StandardCell};
-use crate::{AsicError, DesignRules, Technology};
-use skalp_lir::{Gate, GateType, LirDesign, LirModule};
+use crate::AsicError;
+use skalp_lir::{Gate, GateType, LirDesign};
 use std::collections::HashMap;
 
 /// SKY130 Standard Cell Library
@@ -145,6 +145,12 @@ pub enum LayerType {
     Metal3,
     Metal4,
     Metal5,
+}
+
+impl Default for StandardCellLibrary {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StandardCellLibrary {

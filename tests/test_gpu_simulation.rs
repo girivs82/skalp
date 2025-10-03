@@ -215,7 +215,7 @@ mod gpu_simulation_tests {
         testbench.add_test_vectors(vectors);
 
         // Run the test
-        let results = testbench.run_test().await.expect("Failed to run testbench");
+        let _results = testbench.run_test().await.expect("Failed to run testbench");
 
         // Check results
         let report = testbench.generate_report();

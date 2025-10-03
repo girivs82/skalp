@@ -2,7 +2,7 @@
 mod synthesis_optimization_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_lir::optimization::{
-        BooleanSimplification, CommonSubexpressionElimination, ConstantFolding,
+        CommonSubexpressionElimination, ConstantFolding,
         DeadCodeElimination, OptimizationPass, OptimizationPipeline,
     };
     use skalp_lir::timing::TimingAnalyzer;

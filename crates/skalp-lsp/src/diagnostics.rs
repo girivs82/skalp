@@ -183,7 +183,7 @@ mod tests {
         let content = "signal data: bit<8>\ndata <= 0xFF";
         let diagnostics = analyze_document(content);
         // Should have parse errors since this isn't valid SKALP syntax
-        assert!(diagnostics.len() > 0);
+        assert!(!diagnostics.is_empty());
         // Check if any diagnostic mentions parsing issues or missing semicolons
         assert!(diagnostics
             .iter()

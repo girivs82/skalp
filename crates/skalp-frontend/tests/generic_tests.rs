@@ -17,7 +17,7 @@ fn test_generic_entity_definition() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find generic parameters
-    let found_generics;
+    
     fn find_generic_params(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::GenericParamList {
             return true;
@@ -29,7 +29,7 @@ fn test_generic_entity_definition() {
         }
         false
     }
-    found_generics = find_generic_params(&tree);
+    let found_generics = find_generic_params(&tree);
     assert!(
         found_generics,
         "Generic parameters not found in parsed tree"
@@ -87,7 +87,7 @@ fn test_generic_entity_with_constraints() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse generic parameters with trait bounds
-    let found_trait_bound;
+    
     fn find_trait_bound(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::TraitBound {
             return true;
@@ -99,7 +99,7 @@ fn test_generic_entity_with_constraints() {
         }
         false
     }
-    found_trait_bound = find_trait_bound(&tree);
+    let found_trait_bound = find_trait_bound(&tree);
     assert!(
         found_trait_bound,
         "Trait bound not found in generic parameters"
@@ -137,7 +137,7 @@ fn test_const_generic_parameters() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find const generic parameters
-    let found_const_param;
+    
     fn check_for_const(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         // Check if this is a generic parameter node
         if node.kind() == skalp_frontend::syntax::SyntaxKind::GenericParam {
@@ -157,7 +157,7 @@ fn test_const_generic_parameters() {
         }
         false
     }
-    found_const_param = check_for_const(&tree);
+    let found_const_param = check_for_const(&tree);
     assert!(found_const_param, "Const generic parameter not found");
 }
 

@@ -503,7 +503,7 @@ pub enum EntryStatus {
 }
 
 /// FMEA summary statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FmeaSummary {
     /// Total number of entries
     pub total_entries: usize,
@@ -1049,20 +1049,6 @@ impl Default for FailureModeDatabase {
         );
 
         db
-    }
-}
-
-impl Default for FmeaSummary {
-    fn default() -> Self {
-        Self {
-            total_entries: 0,
-            criticality_breakdown: HashMap::new(),
-            asil_breakdown: HashMap::new(),
-            failure_class_breakdown: HashMap::new(),
-            average_rpn: None,
-            highest_risk_entries: vec![],
-            open_actions: 0,
-        }
     }
 }
 

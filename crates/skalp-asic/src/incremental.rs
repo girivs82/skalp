@@ -3,13 +3,13 @@
 //! Enables incremental changes and design state management
 
 use crate::cts::{ClockTree, ClockTreeSynthesizer};
-use crate::placement::{Netlist, Placement, Placer};
+use crate::placement::{Placement, Placer};
 use crate::routing::{Router, RoutingResult};
 use crate::{AsicError, DesignRules, Technology};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Incremental PAR engine
@@ -565,14 +565,11 @@ impl IncrementalPAR {
         let mut max_y = f64::NEG_INFINITY;
 
         for change in changes {
-            match &change.change_type {
-                ChangeType::CellMove { from, to } => {
-                    min_x = min_x.min(from.0).min(to.0);
-                    min_y = min_y.min(from.1).min(to.1);
-                    max_x = max_x.max(from.0).max(to.0);
-                    max_y = max_y.max(from.1).max(to.1);
-                }
-                _ => {}
+            if let ChangeType::CellMove { from, to } = &change.change_type {
+                min_x = min_x.min(from.0).min(to.0);
+                min_y = min_y.min(from.1).min(to.1);
+                max_x = max_x.max(from.0).max(to.0);
+                max_y = max_y.max(from.1).max(to.1);
             }
         }
 
@@ -684,6 +681,12 @@ pub struct CheckpointComparison {
 
 // Implementation stubs for sub-components
 
+impl Default for ChangeTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChangeTracker {
     pub fn new() -> Self {
         Self {
@@ -738,6 +741,12 @@ impl CheckpointManager {
     }
 }
 
+impl Default for IncrementalAlgorithms {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IncrementalAlgorithms {
     pub fn new() -> Self {
         Self {
@@ -745,6 +754,12 @@ impl IncrementalAlgorithms {
             router: IncrementalRouter::new(),
             cts: IncrementalCTS::new(),
         }
+    }
+}
+
+impl Default for IncrementalPlacer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -772,6 +787,12 @@ impl IncrementalPlacer {
     ) -> Result<(), AsicError> {
         // TODO: Implement incremental placement
         Ok(())
+    }
+}
+
+impl Default for IncrementalRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -807,6 +828,12 @@ impl IncrementalRouter {
     }
 }
 
+impl Default for IncrementalCTS {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IncrementalCTS {
     pub fn new() -> Self {
         Self {
@@ -816,6 +843,12 @@ impl IncrementalCTS {
                 types: HashMap::new(),
             },
         }
+    }
+}
+
+impl Default for PerformanceMonitor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

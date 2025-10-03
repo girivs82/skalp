@@ -104,6 +104,12 @@ impl Default for TestConfig {
     }
 }
 
+impl Default for PropertyTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PropertyTester {
     pub fn new() -> Self {
         Self {
@@ -256,6 +262,12 @@ impl PropertyTester {
 pub struct TestCase {
     /// Stimulus values for each input signal
     pub stimuli: HashMap<String, Stimulus>,
+}
+
+impl Default for TestCase {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestCase {

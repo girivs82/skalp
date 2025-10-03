@@ -17,6 +17,12 @@ pub mod generator {
 
     pub struct CodeGenerator;
 
+    impl Default for CodeGenerator {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl CodeGenerator {
         pub fn new() -> Self {
             CodeGenerator
@@ -54,7 +60,7 @@ pub fn generate_verilog(lir: &LirDesign) -> Result<String> {
         // Join ports with commas and newlines
         if !ports.is_empty() {
             verilog.push_str(&ports.join(",\n"));
-            verilog.push_str("\n");
+            verilog.push('\n');
         }
     }
 
@@ -77,7 +83,7 @@ pub fn generate_verilog(lir: &LirDesign) -> Result<String> {
         // Add blank line if we had internal signals
         let has_internal_signals = module.signals.iter().any(|s| !s.is_input && !s.is_output);
         if has_internal_signals {
-            verilog.push_str("\n");
+            verilog.push('\n');
         }
     }
 

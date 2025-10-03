@@ -6,16 +6,12 @@
 //! - Load balancing
 //! - Power optimization
 
-use crate::placement::CellInstance;
 use crate::placement::Placement;
 use crate::routing::RoutingResult;
 use crate::sky130::StandardCellLibrary;
 use crate::{AsicError, DesignRules, Technology};
-use nalgebra::{DMatrix, DVector};
-use petgraph::graph::{Graph, NodeIndex};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Clock specification for synthesis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -664,7 +660,7 @@ impl ClockTreeSynthesizer {
         spec: &ClockSpecification,
     ) -> Result<(Vec<ClockBuffer>, Vec<ClockNet>), AsicError> {
         let mut balanced_buffers = buffers.clone();
-        let mut balanced_nets = nets.clone();
+        let balanced_nets = nets.clone();
 
         // Calculate path delay to each sink
         let mut sink_delays = HashMap::new();
@@ -785,7 +781,7 @@ impl ClockTreeSynthesizer {
     ) -> Result<Vec<(String, (f64, f64))>, AsicError> {
         // Simple clustering - divide into equal groups
         let mut clusters = Vec::new();
-        let chunk_size = (sinks.len() + num_clusters - 1) / num_clusters;
+        let chunk_size = sinks.len().div_ceil(num_clusters);
 
         for (i, chunk) in sinks.chunks(chunk_size).enumerate() {
             let center = self.find_cluster_center_sinks(chunk);
@@ -850,7 +846,7 @@ impl ClockTreeSynthesizer {
         num_regions: usize,
     ) -> Result<Vec<Vec<ClockSink>>, AsicError> {
         let mut regions = vec![Vec::new(); num_regions];
-        let region_size = (sinks.len() + num_regions - 1) / num_regions;
+        let region_size = sinks.len().div_ceil(num_regions);
 
         for (i, sink) in sinks.iter().enumerate() {
             let region_id = i / region_size;

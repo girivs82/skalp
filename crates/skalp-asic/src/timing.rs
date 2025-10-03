@@ -8,13 +8,12 @@
 //! - Timing optimization
 
 use crate::cts::ClockTree;
-use crate::placement::{Net, Netlist, Placement};
+use crate::placement::Placement;
 use crate::routing::RoutingResult;
-use crate::sdc::{ClockDefinition, InputDelay, OutputDelay, SDCManager};
+use crate::sdc::SDCManager;
 use crate::{AsicError, DesignRules};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Timing analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +231,7 @@ pub struct StaticTimingAnalyzer {
 
 /// Timing library with cell models
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct TimingLibrary {
     /// Cell timing models
     pub cells: HashMap<String, CellTimingModel>,
@@ -709,7 +709,7 @@ impl StaticTimingAnalyzer {
         // Analyze each corner
         for corner in &self.multicorner_config.corners {
             // Configure analyzer for this corner
-            let mut corner_analyzer = self.clone_for_corner(corner)?;
+            let corner_analyzer = self.clone_for_corner(corner)?;
 
             // Run timing analysis for this corner
             let result = corner_analyzer.analyze(placement, routing, clock_tree, constraints)?;
@@ -1424,15 +1424,6 @@ pub enum EffortLevel {
 }
 
 // Default implementations
-impl Default for TimingLibrary {
-    fn default() -> Self {
-        Self {
-            cells: HashMap::new(),
-            wire_models: HashMap::new(),
-            operating_conditions: OperatingConditions::default(),
-        }
-    }
-}
 
 impl Default for OperatingConditions {
     fn default() -> Self {
@@ -1527,7 +1518,7 @@ impl TimingLibrary {
 
         // Scale timing would modify all timing arcs in cells
         // This is a simplified placeholder
-        for (_name, cell) in &mut self.cells {
+        for cell in self.cells.values_mut() {
             for arc in &mut cell.timing_arcs {
                 // Scale delay tables based on corner conditions
                 for row in &mut arc.delay_table.values {

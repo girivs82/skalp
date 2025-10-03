@@ -40,34 +40,31 @@ pub async fn synthesize_generic(
     let power_results = analyze_power(&area_metrics, &timing_results, process_node).await?;
 
     // Collect output files
-    let mut output_files = Vec::new();
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::Netlist,
-        path: temp_dir
-            .join("design_mapped.v")
-            .to_string_lossy()
-            .to_string(),
-        description: "Technology-mapped netlist".to_string(),
-    });
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::PlaceRouteDb,
-        path: temp_dir.join("design.def").to_string_lossy().to_string(),
-        description: "DEF placement and routing database".to_string(),
-    });
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::TimingReport,
-        path: temp_dir.join("timing.rpt").to_string_lossy().to_string(),
-        description: "Static timing analysis report".to_string(),
-    });
-
-    output_files.push(OutputFile {
-        file_type: OutputFileType::PowerReport,
-        path: temp_dir.join("power.rpt").to_string_lossy().to_string(),
-        description: "Power analysis report".to_string(),
-    });
+    let output_files = vec![
+        OutputFile {
+            file_type: OutputFileType::Netlist,
+            path: temp_dir
+                .join("design_mapped.v")
+                .to_string_lossy()
+                .to_string(),
+            description: "Technology-mapped netlist".to_string(),
+        },
+        OutputFile {
+            file_type: OutputFileType::PlaceRouteDb,
+            path: temp_dir.join("design.def").to_string_lossy().to_string(),
+            description: "DEF placement and routing database".to_string(),
+        },
+        OutputFile {
+            file_type: OutputFileType::TimingReport,
+            path: temp_dir.join("timing.rpt").to_string_lossy().to_string(),
+            description: "Static timing analysis report".to_string(),
+        },
+        OutputFile {
+            file_type: OutputFileType::PowerReport,
+            path: temp_dir.join("power.rpt").to_string_lossy().to_string(),
+            description: "Power analysis report".to_string(),
+        },
+    ];
 
     Ok(SynthesisResults {
         success: true,

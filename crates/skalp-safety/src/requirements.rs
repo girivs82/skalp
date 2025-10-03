@@ -213,7 +213,7 @@ impl SafetyRequirementManager {
             self.hierarchy
                 .relationships
                 .entry(parent_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(id.clone());
         } else {
             self.hierarchy.roots.push(id.clone());
@@ -278,7 +278,7 @@ impl SafetyRequirementManager {
         self.traceability
             .req_to_design
             .entry(req_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(design_element);
     }
 
@@ -287,7 +287,7 @@ impl SafetyRequirementManager {
         self.traceability
             .req_to_verification
             .entry(req_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(verification_activity);
     }
 
@@ -296,7 +296,7 @@ impl SafetyRequirementManager {
         self.traceability
             .req_to_mechanisms
             .entry(req_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(mechanism);
     }
 

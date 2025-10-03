@@ -4,13 +4,13 @@
 
 use crate::cts::{BufferStrategy as CtsBufferStrategy, ClockSpecification as CtsClockSpec};
 use crate::cts::{
-    ClockBuffer, ClockNet, ClockSink, ClockSource, ClockSpec, ClockTopology, ClockTree,
-    ClockTreeSynthesizer, ClockTreeTiming,
+    ClockSource, ClockSpec, ClockTopology, ClockTree,
+    ClockTreeSynthesizer,
 };
 use crate::placement::Placement;
 use crate::routing::{CongestionMap, RoutingResult};
 use crate::AsicError;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Manual CTS controller
 pub struct ManualCTS {
@@ -398,6 +398,12 @@ pub enum SuggestionType {
     CreateSkewGroup,
 }
 
+impl Default for ManualCTS {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ManualCTS {
     /// Create new manual CTS controller
     pub fn new() -> Self {
@@ -520,11 +526,11 @@ impl ManualCTS {
 
     /// Analyze skew
     fn analyze_skew(&self, clock_tree: &ClockTree) -> SkewAnalysis {
-        let mut worst_paths = Vec::new();
+        let worst_paths = Vec::new();
         let mut delays: Vec<f64> = Vec::new();
 
         // Use sink_slack to estimate delays
-        for (_sink, slack) in &clock_tree.timing.sink_slack {
+        for slack in clock_tree.timing.sink_slack.values() {
             // Convert slack to effective delay (assuming period - slack)
             delays.push(clock_tree.timing.period - slack);
         }
@@ -616,16 +622,13 @@ impl ManualCTS {
         let mut suggestions = Vec::new();
 
         for violation in violations {
-            match violation.violation_type {
-                ViolationType::SkewViolation => {
-                    suggestions.push(CTSSuggestion {
-                        suggestion_type: SuggestionType::AddBuffer,
-                        priority: 1,
-                        estimated_improvement: 0.1,
-                        description: "Add buffer to balance delays".to_string(),
-                    });
-                }
-                _ => {}
+            if let ViolationType::SkewViolation = violation.violation_type {
+                suggestions.push(CTSSuggestion {
+                    suggestion_type: SuggestionType::AddBuffer,
+                    priority: 1,
+                    estimated_improvement: 0.1,
+                    description: "Add buffer to balance delays".to_string(),
+                });
             }
         }
 

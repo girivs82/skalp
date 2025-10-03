@@ -6,6 +6,12 @@ pub struct DependencyTracker {
     dependencies: std::collections::HashMap<String, Vec<String>>,
 }
 
+impl Default for DependencyTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DependencyTracker {
     pub fn new() -> Self {
         Self {

@@ -94,7 +94,7 @@ impl Testbench {
                 if self.auto_clock {
                     for (clock_name, _) in self.clock_manager.clocks.clone() {
                         let edge = self.clock_manager.toggle_clock(&clock_name);
-                        if let Some(edge) = edge {
+                        if let Some(_edge) = edge {
                             let value = self
                                 .clock_manager
                                 .get_clock_value(&clock_name)

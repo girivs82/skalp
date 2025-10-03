@@ -373,7 +373,7 @@ impl PowerAnalyzer {
             results.static_power_mw,
             (results.static_power_mw / results.total_power_mw) * 100.0
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         // Power breakdown
         if !results.power_breakdown.is_empty() {
@@ -390,7 +390,7 @@ impl PowerAnalyzer {
                     component, power, percentage
                 ));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         report.push_str("===============================================\n");
