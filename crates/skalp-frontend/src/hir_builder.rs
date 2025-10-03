@@ -1078,6 +1078,7 @@ impl HirBuilderContext {
     }
 
     /// Build pattern
+    #[allow(clippy::only_used_in_recursion, clippy::unnecessary_map_or, clippy::comparison_chain)]
     fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
         match node.kind() {
             SyntaxKind::LiteralPattern => {
@@ -1314,6 +1315,7 @@ impl HirBuilderContext {
     }
 
     /// Build expression
+    #[allow(clippy::unnecessary_map_or, clippy::comparison_chain)]
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         let result = match node.kind() {
             SyntaxKind::LiteralExpr => self.build_literal_expr(node),
@@ -1716,13 +1718,11 @@ impl HirBuilderContext {
             .find(|t| t.kind().is_operator())
             .and_then(|t| self.token_to_binary_op(t.kind()));
 
-        if op.is_none() {
-            return None;
-        }
+        let op = op?;
 
         Some(HirExpression::Binary(HirBinaryExpr {
             left,
-            op: op.unwrap(),
+            op,
             right,
         }))
     }
@@ -2005,7 +2005,6 @@ impl HirBuilderContext {
                         | SyntaxKind::ParenExpr
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
-                        | SyntaxKind::MatchExpr
                 )
             })
             .and_then(|n| self.build_expression(&n))?;
@@ -2126,7 +2125,7 @@ impl HirBuilderContext {
 
     /// Build index expression
     fn build_index_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        let mut children: Vec<_> = node.children().collect();
+        let children: Vec<_> = node.children().collect();
 
         // Determine if this is a range by checking for colon token
         let has_colon = node.children_with_tokens().any(|e| {

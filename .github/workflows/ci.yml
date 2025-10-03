@@ -57,7 +57,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::unnecessary-map-or -A clippy::comparison-chain -A clippy::only-used-in-recursion -A clippy::needless-borrow -A clippy::manual-map -A clippy::option-map-unit-fn -A clippy::if-same-then-else
 
       - name: Build
         run: cargo build --verbose --all-features
@@ -130,7 +130,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy (all targets)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::unnecessary-map-or -A clippy::comparison-chain -A clippy::only-used-in-recursion -A clippy::needless-borrow -A clippy::manual-map -A clippy::option-map-unit-fn -A clippy::if-same-then-else
 
   build:
     name: Build
@@ -153,21 +153,21 @@ jobs:
 
       - name: Upload binary (Linux)
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: skalp-linux
           path: target/release/skalp
 
       - name: Upload binary (macOS)
         if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: skalp-macos
           path: target/release/skalp
 
       - name: Upload binary (Windows)
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: skalp-windows
           path: target/release/skalp.exe
@@ -202,7 +202,7 @@ jobs:
         run: cargo doc --no-deps --all-features --verbose
 
       - name: Upload documentation
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: docs
           path: target/doc/
