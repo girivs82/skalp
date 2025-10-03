@@ -78,7 +78,14 @@ enum SimulatorCommand {
 impl Simulator {
     pub async fn new(config: SimulationConfig) -> SimulationResult<Self> {
         let runtime: Box<dyn SimulationRuntime> = if config.use_gpu {
-            Box::new(crate::gpu_runtime::GpuRuntime::new().await?)
+            #[cfg(target_os = "macos")]
+            {
+                Box::new(crate::gpu_runtime::GpuRuntime::new().await?)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                return Err(SimulationError::GpuError("GPU simulation only available on macOS".into()));
+            }
         } else {
             Box::new(crate::cpu_runtime::CpuRuntime::new())
         };
