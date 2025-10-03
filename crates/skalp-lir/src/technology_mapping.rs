@@ -241,7 +241,7 @@ impl TechnologyMapper {
                     TechnologyTarget::FpgaLut6 => 6,
                     _ => 4,
                 };
-                let theoretical_luts = (total_inputs + max_lut_inputs - 1) / max_lut_inputs;
+                let theoretical_luts = total_inputs.div_ceil(max_lut_inputs);
                 if theoretical_luts == 0 {
                     1.0
                 } else {

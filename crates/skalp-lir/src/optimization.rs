@@ -368,10 +368,16 @@ pub struct OptimizationPipeline {
     passes: Vec<Box<dyn OptimizationPass>>,
 }
 
+impl Default for OptimizationPipeline {
+    fn default() -> Self {
+        Self { passes: Vec::new() }
+    }
+}
+
 impl OptimizationPipeline {
     /// Create a new optimization pipeline
     pub fn new() -> Self {
-        Self { passes: Vec::new() }
+        Self::default()
     }
 
     /// Add an optimization pass to the pipeline

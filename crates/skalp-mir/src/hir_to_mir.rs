@@ -256,7 +256,6 @@ impl<'hir> HirToMir<'hir> {
         for hir_stmt in hir_stmts {
             if let Some(stmt) = self.convert_statement(hir_stmt) {
                 statements.push(stmt);
-            } else {
             }
         }
 
@@ -666,8 +665,7 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Convert struct field access to bit slice (range select)
-                let result = self.convert_field_access(base, field);
-                result
+                self.convert_field_access(base, field)
             }
             hir::HirExpression::EnumVariant { enum_type, variant } => {
                 // Look up the enum variant value

@@ -135,14 +135,14 @@ impl TimingAnalyzer {
                     self.graph
                         .forward_arcs
                         .entry(input.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(arc.clone());
 
                     // Add to backward arcs
                     self.graph
                         .backward_arcs
                         .entry(output.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(arc);
                 }
             }
@@ -432,9 +432,8 @@ pub struct SlackHistogram {
     pub buckets: Vec<(f64, f64, usize)>, // (min, max, count)
 }
 
-impl SlackHistogram {
-    /// Create a new histogram
-    pub fn new() -> Self {
+impl Default for SlackHistogram {
+    fn default() -> Self {
         Self {
             buckets: vec![
                 (f64::NEG_INFINITY, -100.0, 0),
@@ -449,6 +448,13 @@ impl SlackHistogram {
                 (100.0, f64::INFINITY, 0),
             ],
         }
+    }
+}
+
+impl SlackHistogram {
+    /// Create a new histogram
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Add a slack value to the histogram

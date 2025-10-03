@@ -323,28 +323,28 @@ impl TechMapper {
         for i in 0..lir.gates.len() {
             if lir.gates[i].gate_type == GateType::And {
                 for j in 0..lir.gates.len() {
-                    if lir.gates[j].gate_type == GateType::Or {
-                        if lir.gates[j].inputs.contains(&lir.gates[i].outputs[0]) {
-                            // Found AOI pattern
-                            gates_to_remove.push(lir.gates[i].id.clone());
-                            gates_to_remove.push(lir.gates[j].id.clone());
+                    if lir.gates[j].gate_type == GateType::Or
+                        && lir.gates[j].inputs.contains(&lir.gates[i].outputs[0])
+                    {
+                        // Found AOI pattern
+                        gates_to_remove.push(lir.gates[i].id.clone());
+                        gates_to_remove.push(lir.gates[j].id.clone());
 
-                            // Create AOI gate (represented as Buffer for simplicity)
-                            let mut inputs = lir.gates[i].inputs.clone();
-                            for input in &lir.gates[j].inputs {
-                                if input != &lir.gates[i].outputs[0] {
-                                    inputs.push(input.clone());
-                                }
+                        // Create AOI gate (represented as Buffer for simplicity)
+                        let mut inputs = lir.gates[i].inputs.clone();
+                        for input in &lir.gates[j].inputs {
+                            if input != &lir.gates[i].outputs[0] {
+                                inputs.push(input.clone());
                             }
-
-                            new_gates.push(Gate {
-                                id: format!("aoi21_{}", i),
-                                gate_type: GateType::Buffer, // Represents AOI21
-                                inputs,
-                                outputs: lir.gates[j].outputs.clone(),
-                            });
-                            break;
                         }
+
+                        new_gates.push(Gate {
+                            id: format!("aoi21_{}", i),
+                            gate_type: GateType::Buffer, // Represents AOI21
+                            inputs,
+                            outputs: lir.gates[j].outputs.clone(),
+                        });
+                        break;
                     }
                 }
             }

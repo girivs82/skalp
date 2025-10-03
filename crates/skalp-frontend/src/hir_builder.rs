@@ -1277,7 +1277,7 @@ impl HirBuilderContext {
                 let has_colon = node.children_with_tokens().any(|element| {
                     element
                         .as_token()
-                        .map_or(false, |t| t.kind() == SyntaxKind::Colon)
+                        .is_some_and(|t| t.kind() == SyntaxKind::Colon)
                 });
 
                 if has_colon && index_exprs.len() >= 2 {
@@ -1758,7 +1758,7 @@ impl HirBuilderContext {
             // Check if last is IndexExpr and previous is IdentExpr/FieldExpr/PathExpr
             if expr_children
                 .last()
-                .map_or(false, |n| n.kind() == SyntaxKind::IndexExpr)
+                .is_some_and(|n| n.kind() == SyntaxKind::IndexExpr)
                 && expr_children.len() >= 2
                 && matches!(
                     expr_children[expr_children.len() - 2].kind(),
@@ -1871,7 +1871,7 @@ impl HirBuilderContext {
         let has_colon = index_node.children_with_tokens().any(|element| {
             element
                 .as_token()
-                .map_or(false, |t| t.kind() == SyntaxKind::Colon)
+                .is_some_and(|t| t.kind() == SyntaxKind::Colon)
         });
 
         if has_colon && indices.len() >= 2 {
@@ -2087,7 +2087,7 @@ impl HirBuilderContext {
             .children_with_tokens()
             .skip_while(|e| {
                 !e.as_token()
-                    .map_or(false, |t| t.kind() == SyntaxKind::FatArrow)
+                    .is_some_and(|t| t.kind() == SyntaxKind::FatArrow)
             })
             .skip(1) // Skip the arrow itself
             .filter_map(|e| {
@@ -2114,7 +2114,7 @@ impl HirBuilderContext {
             .collect();
 
         let expr_node = expr_nodes_after_arrow.last()?;
-        let expr = self.build_expression(&expr_node)?;
+        let expr = self.build_expression(expr_node)?;
 
         Some(HirMatchArmExpr {
             pattern,
@@ -2130,7 +2130,7 @@ impl HirBuilderContext {
         // Determine if this is a range by checking for colon token
         let has_colon = node.children_with_tokens().any(|e| {
             e.as_token()
-                .map_or(false, |t| t.kind() == SyntaxKind::Colon)
+                .is_some_and(|t| t.kind() == SyntaxKind::Colon)
         });
 
         // WORKAROUND FOR PARSER BUG: The base expression is ALWAYS a sibling, not a child
@@ -2299,7 +2299,7 @@ impl HirBuilderContext {
                 )
             })
             .and_then(|expr_node| self.build_expression(&expr_node))
-            .unwrap_or_else(|| {
+            .unwrap_or({
                 // Default expression if parsing fails
                 HirExpression::Literal(HirLiteral::Integer(0))
             });

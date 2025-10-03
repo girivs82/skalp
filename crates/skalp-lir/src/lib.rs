@@ -85,7 +85,7 @@ pub fn lower_to_lir(mir: &Mir) -> Result<LirDesign> {
         });
     }
 
-    if !lir_modules.is_empty() {}
+    let _ = !lir_modules.is_empty();
 
     Ok(LirDesign {
         name: mir.name.clone(),
