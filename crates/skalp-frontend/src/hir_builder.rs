@@ -646,7 +646,7 @@ impl HirBuilderContext {
                 SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
                 SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
                 SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
-                SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                SyntaxKind::PathExpr | SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr |
                 SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
             .collect();
 
@@ -801,7 +801,7 @@ impl HirBuilderContext {
                         SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
                         SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
                         SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
-                        SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                        SyntaxKind::PathExpr | SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr |
                         SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
                     .and_then(|n| self.build_expression(&n))
             });
@@ -994,13 +994,46 @@ impl HirBuilderContext {
     fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
         match node.kind() {
             SyntaxKind::LiteralPattern => {
-                // Find literal child
-                let literal_node = node.children()
-                    .find(|n| matches!(n.kind(),
+                // Find literal token (it's a token, not a node)
+                let literal_token = node.children_with_tokens()
+                    .find(|element| element.as_token().map_or(false, |t| matches!(t.kind(),
                         SyntaxKind::IntLiteral | SyntaxKind::BinLiteral |
-                        SyntaxKind::HexLiteral | SyntaxKind::StringLiteral))?;
-                let literal = self.build_literal_for_pattern(&literal_node)?;
-                Some(HirPattern::Literal(literal))
+                        SyntaxKind::HexLiteral | SyntaxKind::StringLiteral)))?;
+
+                if let Some(token) = literal_token.as_token() {
+                    let literal = match token.kind() {
+                        SyntaxKind::IntLiteral => {
+                            let text = token.text();
+                            let value = text.parse::<u64>().ok()?;
+                            HirLiteral::Integer(value)
+                        }
+                        SyntaxKind::BinLiteral => {
+                            let text = token.text();
+                            let value = parse_binary(text)?;
+                            // Convert to bit vector
+                            let bits = format!("{:b}", value)
+                                .chars()
+                                .map(|c| c == '1')
+                                .collect();
+                            HirLiteral::BitVector(bits)
+                        }
+                        SyntaxKind::HexLiteral => {
+                            let text = token.text();
+                            let value = parse_hex(text)?;
+                            HirLiteral::Integer(value)
+                        }
+                        SyntaxKind::StringLiteral => {
+                            let text = token.text();
+                            // Remove quotes
+                            let s = text.trim_start_matches('"').trim_end_matches('"').to_string();
+                            HirLiteral::String(s)
+                        }
+                        _ => return None,
+                    };
+                    Some(HirPattern::Literal(literal))
+                } else {
+                    None
+                }
             }
             SyntaxKind::IdentPattern => {
                 // Check if this is a path pattern (Enum::Variant) or just a variable
@@ -1184,16 +1217,39 @@ impl HirBuilderContext {
             SyntaxKind::FieldExpr => self.build_field_expr(node),
             SyntaxKind::IndexExpr => self.build_index_expr(node),
             SyntaxKind::PathExpr => self.build_path_expr(node),
+            SyntaxKind::IfExpr => self.build_if_expr(node),
+            SyntaxKind::MatchExpr => self.build_match_expr(node),
             SyntaxKind::ParenExpr => {
-                // Unwrap parentheses - recursively process any expression inside
-                node.children()
-                    .find(|n| matches!(n.kind(),
-                        SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
-                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
-                        SyntaxKind::CallExpr | SyntaxKind::FieldExpr |
-                        SyntaxKind::IndexExpr | SyntaxKind::ArrayLiteral |
-                        SyntaxKind::PathExpr | SyntaxKind::ParenExpr))
-                    .and_then(|n| self.build_expression(&n))
+                // Unwrap parentheses - but handle parser bug where complex expressions
+                // inside parens are represented as multiple sibling BinaryExpr nodes
+                // For example: (a & b & c) becomes:
+                //   ParenExpr
+                //     IdentExpr(a)
+                //     BinaryExpr(& b)
+                //     BinaryExpr(& c)
+
+                let children: Vec<_> = node.children().collect();
+                let binary_count = children.iter().filter(|n| n.kind() == SyntaxKind::BinaryExpr).count();
+
+                if binary_count > 1 {
+                    // Multiple binary expressions - need to combine them
+                    // Treat the ParenExpr itself as a BinaryExpr for building
+                    self.build_binary_expr(node)
+                } else if binary_count == 1 {
+                    // Single binary expression - just process it
+                    let binary = children.iter().find(|n| n.kind() == SyntaxKind::BinaryExpr)?;
+                    self.build_expression(binary)
+                } else {
+                    // No binary expressions - just unwrap to the single expression inside
+                    node.children()
+                        .find(|n| matches!(n.kind(),
+                            SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                            SyntaxKind::UnaryExpr |
+                            SyntaxKind::CallExpr | SyntaxKind::FieldExpr |
+                            SyntaxKind::IndexExpr | SyntaxKind::ArrayLiteral |
+                            SyntaxKind::PathExpr | SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr))
+                        .and_then(|n| self.build_expression(&n))
+                }
             }
             _ => None,
         };
@@ -1266,14 +1322,191 @@ impl HirBuilderContext {
     /// Build binary expression
     fn build_binary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // Find all expression children (filter out tokens and other nodes)
-        let expr_children: Vec<_> = node.children()
+        let mut expr_children: Vec<_> = node.children()
             .filter(|n| matches!(n.kind(),
                 SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
                 SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
                 SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
-                SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                SyntaxKind::PathExpr | SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr |
                 SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
             .collect();
+
+        // SPECIAL CASE: If we're being called on a ParenExpr with multiple BinaryExpr children,
+        // we need to handle the flattened structure where each BinaryExpr only contains operator + right operand
+        if node.kind() == SyntaxKind::ParenExpr {
+            let binary_children: Vec<_> = expr_children.iter()
+                .filter(|n| n.kind() == SyntaxKind::BinaryExpr)
+                .collect();
+
+            if binary_children.len() > 1 || (binary_children.len() == 1 && expr_children.len() > 1) {
+                // First, clean up IdentExpr + IndexExpr pairs (parser bug)
+                // For example: [(IdentExpr, "a"), (IndexExpr, "[31]")] should be treated as one IndexExpr
+                let mut indices_to_skip = Vec::new();
+                for i in 0..expr_children.len() {
+                    if expr_children[i].kind() == SyntaxKind::IndexExpr && i > 0 {
+                        let prev = &expr_children[i - 1];
+                        if matches!(prev.kind(), SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr) {
+                            // Check if they're adjacent
+                            if let (Some(prev_parent), Some(index_parent)) = (prev.parent(), expr_children[i].parent()) {
+                                if prev_parent == index_parent {
+                                    let siblings: Vec<_> = prev_parent.children().collect();
+                                    if let (Some(prev_pos), Some(index_pos)) = (
+                                        siblings.iter().position(|n| n == prev),
+                                        siblings.iter().position(|n| n == &expr_children[i])
+                                    ) {
+                                        if index_pos == prev_pos + 1 {
+                                            // Mark the IdentExpr for skipping, keep the IndexExpr
+                                            indices_to_skip.push(i - 1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // We have a flattened expression like: first_operand BinaryExpr(op operand) BinaryExpr(op operand) ...
+                // Build it left-associatively
+                let mut result_expr = None;
+
+                for (idx, child) in expr_children.iter().enumerate() {
+                    // Skip IdentExprs that are part of IndexExprs
+                    if indices_to_skip.contains(&idx) {
+                        continue;
+                    }
+
+                    if child.kind() == SyntaxKind::BinaryExpr {
+                        // This is an operator + operand
+                        // Extract the operator
+                        let op_token = child.children_with_tokens()
+                            .filter_map(|e| e.into_token())
+                            .find(|t| matches!(t.kind(),
+                                SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash |
+                                SyntaxKind::Percent | SyntaxKind::Amp | SyntaxKind::Pipe | SyntaxKind::Caret |
+                                SyntaxKind::Shl | SyntaxKind::Shr | SyntaxKind::Eq | SyntaxKind::Neq |
+                                SyntaxKind::Lt | SyntaxKind::Le | SyntaxKind::Gt | SyntaxKind::Ge |
+                                SyntaxKind::AmpAmp | SyntaxKind::PipePipe));
+
+                        // Extract the right operand from this BinaryExpr's children
+                        let binary_expr_children: Vec<_> = child.children()
+                            .filter(|n| matches!(n.kind(),
+                                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
+                                SyntaxKind::PathExpr | SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr |
+                                SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
+                            .collect();
+
+                        // Parser bug: If we have [(IdentExpr, "x"), (IndexExpr, "[i]")], use the IndexExpr
+                        let right_node = if binary_expr_children.len() >= 2 {
+                            if binary_expr_children[1].kind() == SyntaxKind::IndexExpr &&
+                               matches!(binary_expr_children[0].kind(),
+                                   SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr) {
+                                &binary_expr_children[1]
+                            } else {
+                                binary_expr_children.first()?
+                            }
+                        } else {
+                            binary_expr_children.first()?
+                        };
+
+                        if let Some(op_tok) = op_token {
+                            let op = self.token_to_binary_op(op_tok.kind())?;
+                            let right = Box::new(self.build_expression(right_node)?);
+
+                            if let Some(left_expr) = result_expr {
+                                // Chain: (previous result) op right
+                                result_expr = Some(HirExpression::Binary(HirBinaryExpr {
+                                    left: Box::new(left_expr),
+                                    op,
+                                    right,
+                                }));
+                            } else {
+                                return None; // Error: found BinaryExpr but no left operand yet
+                            }
+                        }
+                    } else {
+                        // This is a regular operand
+                        let operand = self.build_expression(child)?;
+                        if result_expr.is_none() {
+                            // First operand
+                            result_expr = Some(operand);
+                        } else {
+                            // Unexpected: operand after we already have a result?
+                            // This shouldn't happen in well-formed expressions
+                            eprintln!("WARNING: Unexpected operand after result in ParenExpr");
+                        }
+                    }
+                }
+
+                return result_expr;
+            }
+        }
+
+        // WORKAROUND FOR PARSER BUG: If we have an IndexExpr as a child, the base might also be a child
+        // For example: "a << b[2:0]" might have children [IdentExpr(b), IndexExpr([2:0])]
+        // We need to identify which IdentExprs are actually bases of IndexExprs (adjacent siblings)
+        // and which are separate operands
+
+        // Build a list of indices to remove (IdentExpr/FieldExpr that immediately precede IndexExpr in tree order)
+        let mut indices_to_remove = Vec::new();
+
+        for i in 0..expr_children.len() {
+            if expr_children[i].kind() == SyntaxKind::IndexExpr && i > 0 {
+                // Check if the previous child is likely the base
+                let prev = &expr_children[i - 1];
+                if matches!(prev.kind(), SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr) {
+                    // Check if they're adjacent in the CST (no nodes/tokens between them)
+                    // We can check this by seeing if prev's next sibling is the IndexExpr
+                    if let (Some(prev_parent), Some(index_parent)) = (prev.parent(), expr_children[i].parent()) {
+                        if prev_parent == index_parent {
+                            // They share the same parent (this BinaryExpr node)
+                            // Check if prev immediately precedes index in the sibling list
+                            let siblings: Vec<_> = prev_parent.children().collect();
+                            if let (Some(prev_pos), Some(index_pos)) = (
+                                siblings.iter().position(|n| n == prev),
+                                siblings.iter().position(|n| n == &expr_children[i])
+                            ) {
+                                // Only remove if they're immediately adjacent (no other nodes between)
+                                if index_pos == prev_pos + 1 {
+                                    indices_to_remove.push(i - 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove in reverse order to maintain correct indices
+        for &idx in indices_to_remove.iter().rev() {
+            expr_children.remove(idx);
+        }
+
+        // WORKAROUND FOR PARSER BUG: Due to how the parser implements Pratt parsing,
+        // the left operand of a binary expression may be a SIBLING of the BinaryExpr node
+        // instead of a child. If we only have 1 child, look for the left operand in the parent.
+        if expr_children.len() == 1 {
+            if let Some(parent) = node.parent() {
+                // Find the previous sibling expression node
+                let siblings: Vec<_> = parent.children().collect();
+                if let Some(pos) = siblings.iter().position(|n| n == node) {
+                    if pos > 0 {
+                        // Check if the previous sibling is an expression
+                        let prev = &siblings[pos - 1];
+                        if matches!(prev.kind(),
+                            SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                            SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                            SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
+                            SyntaxKind::PathExpr | SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr |
+                            SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral) {
+                            // Insert the previous sibling as the left operand
+                            expr_children.insert(0, prev.clone());
+                        }
+                    }
+                }
+            }
+        }
 
         if expr_children.len() < 2 {
             return None;
@@ -1304,8 +1537,34 @@ impl HirBuilderContext {
 
     /// Build unary expression
     fn build_unary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        let operand = node.children().next()
-            .and_then(|n| self.build_expression(&n))?;
+        // WORKAROUND FOR PARSER BUG: Similar to binary expressions, if we have an IndexExpr,
+        // the base might also be a child. For "~a[3]", we might have [IdentExpr(a), IndexExpr([3])]
+        // We want to use IndexExpr, not IdentExpr
+        let expr_children: Vec<_> = node.children()
+            .filter(|n| matches!(n.kind(),
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
+                SyntaxKind::PathExpr | SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr |
+                SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral))
+            .collect();
+
+        // If we have both IdentExpr and IndexExpr, use the IndexExpr (it's the complete expression)
+        let operand_node = if expr_children.len() > 1 {
+            // Check if last is IndexExpr and previous is IdentExpr/FieldExpr/PathExpr
+            if expr_children.last().map_or(false, |n| n.kind() == SyntaxKind::IndexExpr) &&
+               expr_children.len() >= 2 &&
+               matches!(expr_children[expr_children.len() - 2].kind(),
+                   SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr) {
+                expr_children.last()?
+            } else {
+                expr_children.first()?
+            }
+        } else {
+            expr_children.first()?
+        };
+
+        let operand = self.build_expression(operand_node)?;
 
         // Get operator
         let op = node.children_with_tokens()
@@ -1423,21 +1682,205 @@ impl HirBuilderContext {
         }
     }
 
-    /// Build index expression
-    fn build_index_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        let children: Vec<_> = node.children().collect();
-        if children.len() < 2 {
-            return None;
+    /// Build if expression
+    fn build_if_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Parse structure: if <condition> { <then_expr> } else { <else_expr> } or else if ...
+        // Due to parser bug, sub-expressions may appear as siblings.
+        // We need to filter based on tokens to find the correct expressions.
+
+        // Find expressions by looking at tokens:
+        // Structure: if <cond> { <then> } else { <else> }
+
+        let mut found_if = false;
+        let mut found_lbrace1 = false;
+        let mut found_rbrace1 = false;
+        let mut found_else = false;
+        let mut found_lbrace2 = false;
+
+        let mut condition_expr = None;
+        let mut then_expr = None;
+        let mut else_expr = None;
+
+        for element in node.children_with_tokens() {
+            match element {
+                rowan::NodeOrToken::Token(t) => {
+                    match t.kind() {
+                        SyntaxKind::IfKw => found_if = true,
+                        SyntaxKind::LBrace if !found_lbrace1 => found_lbrace1 = true,
+                        SyntaxKind::RBrace if !found_rbrace1 => found_rbrace1 = true,
+                        SyntaxKind::ElseKw => found_else = true,
+                        SyntaxKind::LBrace if found_else && !found_lbrace2 => found_lbrace2 = true,
+                        _ => {}
+                    }
+                }
+                rowan::NodeOrToken::Node(n) => {
+                    if matches!(n.kind(),
+                        SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                        SyntaxKind::CallExpr | SyntaxKind::FieldExpr |
+                        SyntaxKind::IndexExpr | SyntaxKind::PathExpr |
+                        SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr) {
+
+                        if found_if && !found_lbrace1 {
+                            // Take the LAST expression before the first brace (to handle sub-expressions)
+                            condition_expr = Some(n);
+                        } else if found_lbrace1 && !found_rbrace1 {
+                            // Take the LAST expression between braces
+                            then_expr = Some(n);
+                        } else if found_else {
+                            // Take the LAST expression after else (works for both { expr } and else if)
+                            else_expr = Some(n);
+                        }
+                    }
+                }
+            }
         }
 
-        let base = Box::new(self.build_expression(&children[0])?);
-        let index = Box::new(self.build_expression(&children[1])?);
+        // Now build the expressions, taking the LAST occurrence of each to handle sub-expressions
+        // (similar to the match arm fix)
+        let condition = self.build_expression(&condition_expr?)?;
+        let then = self.build_expression(&then_expr?)?;
+        let else_val = self.build_expression(&else_expr?)?;
 
-        // Check if it's a range access [start:end]
-        if children.len() >= 3 {
-            let end = Box::new(self.build_expression(&children[2])?);
-            Some(HirExpression::Range(base, index, end))
+        Some(HirExpression::If(HirIfExpr {
+            condition: Box::new(condition),
+            then_expr: Box::new(then),
+            else_expr: Box::new(else_val),
+        }))
+    }
+
+    /// Build match expression
+    fn build_match_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Parse structure: match <expr> { <arms> }
+
+        // First child should be the expression being matched
+        let expr = node.children()
+            .find(|n| matches!(n.kind(),
+                SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                SyntaxKind::CallExpr | SyntaxKind::FieldExpr |
+                SyntaxKind::IndexExpr | SyntaxKind::PathExpr |
+                SyntaxKind::ParenExpr | SyntaxKind::IfExpr | SyntaxKind::MatchExpr | SyntaxKind::MatchExpr))
+            .and_then(|n| self.build_expression(&n))?;
+
+        // Build match arms from MATCH_ARM_LIST
+        let mut arms = Vec::new();
+        if let Some(arm_list) = node.children().find(|n| n.kind() == SyntaxKind::MatchArmList) {
+            for arm_node in arm_list.children().filter(|n| n.kind() == SyntaxKind::MatchArm) {
+                if let Some(arm) = self.build_match_arm_expr(&arm_node) {
+                    arms.push(arm);
+                }
+            }
+        }
+
+        Some(HirExpression::Match(HirMatchExpr {
+            expr: Box::new(expr),
+            arms,
+        }))
+    }
+
+    /// Build match arm for match expressions
+    fn build_match_arm_expr(&mut self, node: &SyntaxNode) -> Option<HirMatchArmExpr> {
+        // Find pattern
+        let pattern = node.children()
+            .find(|n| matches!(n.kind(),
+                SyntaxKind::LiteralPattern | SyntaxKind::IdentPattern |
+                SyntaxKind::WildcardPattern | SyntaxKind::TuplePattern))
+            .and_then(|n| self.build_pattern(&n))?;
+
+        // Find optional guard
+        let guard = node.children()
+            .find(|n| n.kind() == SyntaxKind::MatchGuard)
+            .and_then(|guard_node| {
+                guard_node.children()
+                    .find(|n| matches!(n.kind(),
+                        SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
+                        SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                        SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral |
+                        SyntaxKind::IfExpr | SyntaxKind::MatchExpr))
+                    .and_then(|n| self.build_expression(&n))
+            });
+
+        // Find the arm expression (after the arrow)
+        // The parser structure is: MatchArm contains pattern, optional guard, and expression
+        // Due to Rowan's CST, sub-expressions may appear as direct children
+        // We need to find the ROOT expression node by looking at children_with_tokens
+        // and finding the first expression node that comes AFTER the FatArrow (=>)
+
+        // Find all expression nodes after the arrow
+        // Take the LAST one, as it will be the outermost expression
+        // (Earlier ones are sub-expressions that are also children of the outermost one)
+        let expr_nodes_after_arrow: Vec<_> = node.children_with_tokens()
+            .skip_while(|e| !e.as_token().map_or(false, |t| t.kind() == SyntaxKind::FatArrow))
+            .skip(1)  // Skip the arrow itself
+            .filter_map(|e| e.as_node()
+                .filter(|n| matches!(n.kind(),
+                    SyntaxKind::LiteralExpr | SyntaxKind::IdentExpr |
+                    SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr |
+                    SyntaxKind::FieldExpr | SyntaxKind::IndexExpr |
+                    SyntaxKind::PathExpr | SyntaxKind::ParenExpr |
+                    SyntaxKind::CallExpr | SyntaxKind::ArrayLiteral |
+                    SyntaxKind::IfExpr | SyntaxKind::MatchExpr))
+                .cloned())
+            .collect();
+
+        let expr_node = expr_nodes_after_arrow.last()?;
+        let expr = self.build_expression(&expr_node)?;
+
+        Some(HirMatchArmExpr {
+            pattern,
+            guard,
+            expr,
+        })
+    }
+
+    /// Build index expression
+    fn build_index_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        let mut children: Vec<_> = node.children().collect();
+
+        // Determine if this is a range by checking for colon token
+        let has_colon = node.children_with_tokens()
+            .any(|e| e.as_token().map_or(false, |t| t.kind() == SyntaxKind::Colon));
+
+        // WORKAROUND FOR PARSER BUG: The base expression is ALWAYS a sibling, not a child
+        // Look for base in parent/siblings
+        let mut base_expr = None;
+        if let Some(parent) = node.parent() {
+            let siblings: Vec<_> = parent.children().collect();
+            if let Some(pos) = siblings.iter().position(|n| n == node) {
+                if pos > 0 {
+                    let prev = &siblings[pos - 1];
+                    if matches!(prev.kind(),
+                        SyntaxKind::IdentExpr | SyntaxKind::FieldExpr |
+                        SyntaxKind::IndexExpr | SyntaxKind::PathExpr) {
+                        base_expr = Some(prev.clone());
+                    }
+                }
+            }
+        }
+
+        let base_expr = base_expr?;
+
+        if has_colon {
+            // Range expression: base[high:low]
+            // children should be [high, low]
+            if children.len() < 2 {
+                return None;
+            }
+            let base = Box::new(self.build_expression(&base_expr)?);
+            let high = Box::new(self.build_expression(&children[0])?);
+            let low = Box::new(self.build_expression(&children[1])?);
+            Some(HirExpression::Range(base, high, low))
         } else {
+            // Single index: base[index]
+            // children should be [index]
+            if children.is_empty() {
+                return None;
+            }
+            let base = Box::new(self.build_expression(&base_expr)?);
+            let index = Box::new(self.build_expression(&children[0])?);
             Some(HirExpression::Index(base, index))
         }
     }
