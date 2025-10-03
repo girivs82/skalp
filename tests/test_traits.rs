@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod trait_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_mir::{MirCompiler, OptimizationLevel};
+    
 
     #[test]
     fn test_simple_trait_definition() {

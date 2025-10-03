@@ -309,6 +309,28 @@ pub enum HirExpression {
         enum_type: String,
         variant: String,
     },
+    If(HirIfExpr),
+    Match(HirMatchExpr),
+}
+
+/// Match expression in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirMatchExpr {
+    /// Expression to match on
+    pub expr: Box<HirExpression>,
+    /// Match arms
+    pub arms: Vec<HirMatchArmExpr>,
+}
+
+/// Match arm for match expressions (contains expressions, not statements)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirMatchArmExpr {
+    /// Pattern
+    pub pattern: HirPattern,
+    /// Optional guard expression
+    pub guard: Option<HirExpression>,
+    /// Arm expression (value of this arm)
+    pub expr: HirExpression,
 }
 
 /// Literals in HIR
@@ -378,6 +400,17 @@ pub struct HirCallExpr {
     pub function: String,
     /// Arguments
     pub args: Vec<HirExpression>,
+}
+
+/// If expression in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirIfExpr {
+    /// Condition
+    pub condition: Box<HirExpression>,
+    /// Then expression
+    pub then_expr: Box<HirExpression>,
+    /// Else expression
+    pub else_expr: Box<HirExpression>,
 }
 
 /// Types in HIR

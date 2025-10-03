@@ -1,0 +1,32 @@
+// SKALP LSP Test File
+// This file tests language server functionality
+
+entity Counter {
+    input clock clk;
+    input reset rst;
+    input bit enable;
+    output bit[8] count;
+}
+
+impl Counter {
+    signal bit[8] count_reg = 0;
+
+    event clk {
+        when rst {
+            count_reg <= 0;
+        } else {
+            when enable {
+                count_reg <= count_reg + 1;
+            }
+        }
+    }
+
+    // Continuous assignment
+    count = count_reg;
+}
+
+// Test function with error to check diagnostics
+fn test_function() -> bit[32] {
+    let invalid_var = unknown_variable; // This should trigger an error
+    return 42;
+}

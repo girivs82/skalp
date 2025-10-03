@@ -649,7 +649,95 @@ impl<'hir> HirToMir<'hir> {
                 // Look up the enum variant value
                 self.resolve_enum_variant_value(enum_type, variant)
             }
+            hir::HirExpression::If(if_expr) => {
+                // Convert if-expression to a conditional (ternary) expression in MIR
+                // MIR represents this as: condition ? then_expr : else_expr
+                let cond = Box::new(self.convert_expression(&if_expr.condition)?);
+                let then_expr = Box::new(self.convert_expression(&if_expr.then_expr)?);
+                let else_expr = Box::new(self.convert_expression(&if_expr.else_expr)?);
+
+                Some(Expression::Conditional {
+                    cond,
+                    then_expr,
+                    else_expr,
+                })
+            }
+            hir::HirExpression::Match(match_expr) => {
+                // Convert match-expression to nested conditionals
+                // match x { 1 => a, 2 => b, _ => c } becomes: (x == 1) ? a : ((x == 2) ? b : c)
+                self.convert_match_to_conditionals(&match_expr.expr, &match_expr.arms)
+            }
         }
+    }
+
+    /// Convert match expression to nested conditional expressions
+    fn convert_match_to_conditionals(
+        &mut self,
+        match_value: &hir::HirExpression,
+        arms: &[hir::HirMatchArmExpr],
+    ) -> Option<Expression> {
+        if arms.is_empty() {
+            return None;
+        }
+
+        // Build nested conditionals from right to left
+        // Start with the last arm as the default (usually wildcard)
+        let mut result = self.convert_expression(&arms.last()?.expr)?;
+
+        // Work backwards through the arms (excluding the last one which is the default)
+        for arm in arms[..arms.len()-1].iter().rev() {
+            // Build condition: match_value == pattern
+            let condition = match &arm.pattern {
+                hir::HirPattern::Literal(lit) => {
+                    // Compare match_value with literal
+                    let left = Box::new(self.convert_expression(match_value)?);
+                    let right = Box::new(Expression::Literal(self.convert_literal(lit)?));
+                    Some(Expression::Binary {
+                        op: BinaryOp::Equal,
+                        left,
+                        right,
+                    })
+                }
+                hir::HirPattern::Wildcard => {
+                    // Wildcard always matches - shouldn't appear except as last arm
+                    // Skip it
+                    None
+                }
+                _ => {
+                    // For other patterns, we'll need more complex logic
+                    // For now, skip them
+                    None
+                }
+            };
+
+            // Skip if we couldn't build a condition
+            let condition = match condition {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Apply guard if present
+            let final_condition = if let Some(guard) = &arm.guard {
+                let guard_expr = Box::new(self.convert_expression(guard)?);
+                let cond_expr = Box::new(condition);
+                Expression::Binary {
+                    op: BinaryOp::LogicalAnd,
+                    left: cond_expr,
+                    right: guard_expr,
+                }
+            } else {
+                condition
+            };
+
+            // Build conditional: (condition) ? arm_expr : rest
+            result = Expression::Conditional {
+                cond: Box::new(final_condition),
+                then_expr: Box::new(self.convert_expression(&arm.expr)?),
+                else_expr: Box::new(result),
+            };
+        }
+
+        Some(result)
     }
 
     /// Convert literal expression (for initial values)

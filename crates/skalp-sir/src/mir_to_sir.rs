@@ -1,7 +1,7 @@
 use crate::sir::*;
 use skalp_mir::{Module, Statement, Expression, ProcessKind, EdgeType, DataType,
                 SensitivityList, Value, LValue, IfStatement, Block};
-use skalp_mir::mir::{ResolvedConditional, PriorityMux};
+use skalp_mir::mir::PriorityMux;
 use skalp_mir::mir::PortDirection as MirPortDirection;
 use std::collections::HashMap;
 
@@ -946,17 +946,13 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_concat_node(part_nodes)
             }
             Expression::Replicate { count, value } => {
-                let count_node = self.create_expression_with_local_context(count, local_context);
+                let _count_node = self.create_expression_with_local_context(count, local_context);
                 let value_node = self.create_expression_with_local_context(value, local_context);
                 // For now, just return the value (replication logic would be more complex)
                 value_node
             }
             Expression::FunctionCall { .. } => {
                 // Fall back to original implementation for function calls
-                self.create_expression_node(expr)
-            }
-            _ => {
-                // Fall back for any other types
                 self.create_expression_node(expr)
             }
         }

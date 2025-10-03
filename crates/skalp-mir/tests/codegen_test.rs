@@ -14,13 +14,13 @@ fn create_counter_mir() -> Mir {
         id: PortId(0),
         name: "clk".to_string(),
         direction: PortDirection::Input,
-        port_type: DataType::Clock,
+        port_type: DataType::Clock { domain: None },
     });
     module.ports.push(Port {
         id: PortId(1),
         name: "rst".to_string(),
         direction: PortDirection::Input,
-        port_type: DataType::Reset { active_high: true },
+        port_type: DataType::Reset { active_high: true, domain: None },
     });
     module.ports.push(Port {
         id: PortId(2),
@@ -35,6 +35,7 @@ fn create_counter_mir() -> Mir {
         name: "count_reg".to_string(),
         signal_type: DataType::Logic(8),
         initial: Some(Value::Integer(0)),
+        clock_domain: None,
     });
 
     // Create synchronous process

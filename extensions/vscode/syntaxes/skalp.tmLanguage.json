@@ -1,0 +1,111 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "SKALP",
+  "patterns": [
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#functions"
+    }
+  ],
+  "repository": {
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.skalp",
+          "match": "\\b(entity|impl|event|when|if|else|for|while|match|case|default|return|break|continue)\\b"
+        },
+        {
+          "name": "keyword.declaration.skalp",
+          "match": "\\b(let|const|signal|variable|port|clock|reset)\\b"
+        },
+        {
+          "name": "keyword.modifier.skalp",
+          "match": "\\b(input|output|inout|reg|wire|async|sync)\\b"
+        },
+        {
+          "name": "keyword.operator.skalp",
+          "match": "\\b(and|or|not|xor|nand|nor)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.skalp",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.skalp",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.skalp",
+          "match": "//.*"
+        },
+        {
+          "name": "comment.block.skalp",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.binary.skalp",
+          "match": "\\b0b[01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.skalp",
+          "match": "\\b0o[0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.hex.skalp",
+          "match": "\\b0x[0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.skalp",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.skalp",
+          "match": "\\b(bit|logic|uint|int|bool|clock|reset)\\b"
+        },
+        {
+          "name": "storage.type.sized.skalp",
+          "match": "\\b(bit|logic|uint|int)\\s*\\[\\s*[0-9]+\\s*\\]"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.skalp",
+          "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\s*(?=\\()"
+        }
+      ]
+    }
+  },
+  "scopeName": "source.skalp"
+}

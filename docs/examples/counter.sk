@@ -1,0 +1,24 @@
+// Simple counter example - basic sequential logic
+entity counter {
+    in clk: clock;
+    in rst: reset;
+    in enable: bit;
+    out count: bit<32>;
+    out overflow: bit;
+}
+
+impl counter {
+    signal counter_reg: bit<32>;
+    
+    on(clk.rise) {
+        if rst.active {
+            counter_reg <= 0;
+        } else if enable {
+            counter_reg <= counter_reg + 1;
+        }
+    }
+    
+    // Combinational outputs
+    count = counter_reg;
+    overflow = (counter_reg == 0xFFFFFFFF) && enable;
+}

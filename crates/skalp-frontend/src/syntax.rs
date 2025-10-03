@@ -273,6 +273,8 @@ pub enum SyntaxKind {
     ParenExpr,
     ArrayLiteral,
     PathExpr,
+    IfExpr,
+    MatchExpr,
 
     // Types
     TypeExpr,

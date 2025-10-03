@@ -7,7 +7,7 @@ mod integration_tests {
     use skalp_sir::convert_mir_to_sir;
     use skalp_sim::{Simulator, SimulationConfig};
     use std::fs;
-    use std::path::PathBuf;
+    
     use tempfile::TempDir;
 
     #[test]

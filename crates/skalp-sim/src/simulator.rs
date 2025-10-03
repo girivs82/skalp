@@ -40,7 +40,7 @@ impl Default for SimulationConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SimulationState {
     pub cycle: u64,
     pub signals: HashMap<String, Vec<u8>>,
@@ -104,7 +104,7 @@ impl Simulator {
 
         let mut runtime = Box::new(crate::cpu_runtime::CpuRuntime::new());
         let state_history = self.state_history.clone();
-        let mut control_rx = self.control_rx.try_recv();
+        let control_rx = self.control_rx.try_recv();
 
         // Start simulation loop
         tokio::spawn(async move {

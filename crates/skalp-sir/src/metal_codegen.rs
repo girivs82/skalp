@@ -438,7 +438,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
             // Find which clock input this is
             if let Some(clock_input) = sir.inputs.iter().find(|i| i.name == *clock_signal) {
-                let edge_condition = match edge {
+                let _edge_condition = match edge {
                     ClockEdge::Rising => {
                         // Check for rising edge: was 0, now 1
                         format!("inputs->{} == 1", clock_input.name)

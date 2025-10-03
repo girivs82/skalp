@@ -13,6 +13,7 @@ pub fn get_components() -> Vec<(&'static str, &'static str)> {
         ("uart", UART_SK),
         ("adder", ADDER_SK),
         ("multiplier", MULTIPLIER_SK),
+        ("axi4_lite", AXI4_LITE_SK),
     ]
 }
 
@@ -25,6 +26,7 @@ pub const SHIFT_REGISTER_SK: &str = include_str!("../components/shift_register.s
 pub const UART_SK: &str = include_str!("../components/uart.sk");
 pub const ADDER_SK: &str = include_str!("../components/adder.sk");
 pub const MULTIPLIER_SK: &str = include_str!("../components/multiplier.sk");
+pub const AXI4_LITE_SK: &str = include_str!("../components/axi4_lite.sk");
 
 #[cfg(test)]
 mod tests {

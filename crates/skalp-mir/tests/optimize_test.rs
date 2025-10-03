@@ -27,12 +27,14 @@ fn create_module_with_unused() -> Mir {
         id: SignalId(0),
         name: "used_signal".to_string(),
         signal_type: DataType::Logic(8),
+        clock_domain: None,
         initial: None,
     });
     module.signals.push(Signal {
         id: SignalId(1),
         name: "unused_signal".to_string(),
         signal_type: DataType::Logic(8),
+        clock_domain: None,
         initial: None,
     });
 
@@ -100,6 +102,7 @@ fn create_module_with_constants() -> Mir {
         id: SignalId(0),
         name: "result".to_string(),
         signal_type: DataType::Logic(8),
+        clock_domain: None,
         initial: None,
     });
 
@@ -202,6 +205,7 @@ fn test_constant_folding_arithmetic() {
         id: SignalId(0),
         name: "s".to_string(),
         signal_type: DataType::Logic(8),
+        clock_domain: None,
         initial: None,
     });
 
@@ -294,6 +298,7 @@ fn test_constant_folding_conditional() {
         id: SignalId(0),
         name: "s".to_string(),
         signal_type: DataType::Logic(8),
+        clock_domain: None,
         initial: None,
     });
 

@@ -556,9 +556,57 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse if expression (for use in expressions, not statements)
+    fn parse_if_expression(&mut self) {
+        self.start_node(SyntaxKind::IfExpr);
+
+        self.expect(SyntaxKind::IfKw);
+        // Condition expression (without parens for expression form)
+        self.parse_expression();
+
+        // Then block
+        self.expect(SyntaxKind::LBrace);
+        self.parse_expression();
+        self.expect(SyntaxKind::RBrace);
+
+        // Else block (required for expressions to have a value)
+        self.expect(SyntaxKind::ElseKw);
+
+        // Check if else is followed by another if (else if chain)
+        if self.at(SyntaxKind::IfKw) {
+            self.parse_if_expression();
+        } else {
+            self.expect(SyntaxKind::LBrace);
+            self.parse_expression();
+            self.expect(SyntaxKind::RBrace);
+        }
+
+        self.finish_node();
+    }
+
     /// Parse match statement
     fn parse_match_statement(&mut self) {
         self.start_node(SyntaxKind::MatchStmt);
+
+        self.expect(SyntaxKind::MatchKw);
+        self.parse_expression();
+        self.expect(SyntaxKind::LBrace);
+
+        // Parse match arms
+        self.start_node(SyntaxKind::MatchArmList);
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.parse_match_arm();
+        }
+        self.finish_node();
+
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse match expression (for use in expressions, not statements)
+    fn parse_match_expression(&mut self) {
+        self.start_node(SyntaxKind::MatchExpr);
 
         self.expect(SyntaxKind::MatchKw);
         self.parse_expression();
@@ -594,11 +642,11 @@ impl<'a> ParseState<'a> {
         // Expect fat arrow (=>)
         self.expect(SyntaxKind::FatArrow);
 
-        // Parse arm body (statement or block)
+        // Parse arm body (expression or block)
         if self.at(SyntaxKind::LBrace) {
             self.parse_block_statement();
         } else {
-            self.parse_assignment_or_statement();
+            self.parse_expression();
         }
 
         // Optional comma
@@ -2547,6 +2595,12 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::LBracket) => {
                 self.parse_array_literal();
+            }
+            Some(SyntaxKind::IfKw) => {
+                self.parse_if_expression();
+            }
+            Some(SyntaxKind::MatchKw) => {
+                self.parse_match_expression();
             }
             _ => {
                 self.error("expected expression");

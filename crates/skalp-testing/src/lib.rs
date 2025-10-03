@@ -12,6 +12,7 @@ pub mod constraints;
 pub mod coverage;
 pub mod strategies;
 pub mod harness;
+pub mod golden;
 
 use skalp_lir::LirDesign;
 use thiserror::Error;

@@ -676,8 +676,8 @@ impl StaticTimingAnalyzer {
 
     /// Configure multi-corner analysis
     pub fn configure_multicorner(&mut self, config: MultiCornerConfig) {
-        self.multicorner_config = config;
         self.config.multicorner = config.enabled;
+        self.multicorner_config = config;
     }
 
     /// Run multi-corner timing analysis
@@ -932,8 +932,8 @@ impl StaticTimingAnalyzer {
         };
 
         // Yield analysis (simplified)
-        let setup_yield = 95.0; // Would calculate based on violations vs total paths
-        let hold_yield = 98.0;
+        let setup_yield = 95.0f64; // Would calculate based on violations vs total paths
+        let hold_yield = 98.0f64;
         let overall_yield = setup_yield.min(hold_yield);
 
         let yield_analysis = YieldAnalysis {

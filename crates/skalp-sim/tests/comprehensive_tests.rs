@@ -5,6 +5,7 @@
 
 use skalp_sim::*;
 use skalp_sim::runtime::GpuSimRuntime;
+use skalp_sim::mir_to_sir::MirToSir;
 use skalp_mir::*;
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
@@ -221,24 +222,28 @@ fn create_counter_mir(width: usize) -> Mir {
             name: "clk".to_string(),
             signal_type: DataType::Bit(1),
             initial: None,
+            clock_domain: None,
         },
         Signal {
             id: rst_id,
             name: "rst".to_string(),
             signal_type: DataType::Bit(1),
             initial: None,
+            clock_domain: None,
         },
         Signal {
             id: enable_id,
             name: "enable".to_string(),
             signal_type: DataType::Bit(1),
             initial: None,
+            clock_domain: None,
         },
         Signal {
             id: counter_id,
             name: "counter".to_string(),
             signal_type: DataType::Bit(width),
             initial: Some(Value::Integer(0)),
+            clock_domain: None,
         },
     ];
 
@@ -316,18 +321,21 @@ fn create_adder_mir(width: usize) -> Mir {
             name: "a".to_string(),
             signal_type: DataType::Bit(width),
             initial: None,
+            clock_domain: None,
         },
         Signal {
             id: SignalId(1),
             name: "b".to_string(),
             signal_type: DataType::Bit(width),
             initial: None,
+            clock_domain: None,
         },
         Signal {
             id: SignalId(2),
             name: "sum".to_string(),
             signal_type: DataType::Bit(width + 1),
             initial: None,
+            clock_domain: None,
         },
     ];
 
@@ -375,14 +383,14 @@ fn create_fifo_mir(data_width: usize, depth: usize) -> Mir {
     let mut mir = Mir::new(format!("fifo_{}x{}", data_width, depth));
 
     let signals = vec![
-        Signal { id: SignalId(0), name: "clk".to_string(), signal_type: DataType::Bit(1), initial: None },
-        Signal { id: SignalId(1), name: "rst".to_string(), signal_type: DataType::Bit(1), initial: None },
-        Signal { id: SignalId(2), name: "wr_en".to_string(), signal_type: DataType::Bit(1), initial: None },
-        Signal { id: SignalId(3), name: "rd_en".to_string(), signal_type: DataType::Bit(1), initial: None },
-        Signal { id: SignalId(4), name: "data_in".to_string(), signal_type: DataType::Bit(data_width), initial: None },
-        Signal { id: SignalId(5), name: "data_out".to_string(), signal_type: DataType::Bit(data_width), initial: None },
-        Signal { id: SignalId(6), name: "empty".to_string(), signal_type: DataType::Bit(1), initial: Some(Value::Integer(1)) },
-        Signal { id: SignalId(7), name: "full".to_string(), signal_type: DataType::Bit(1), initial: Some(Value::Integer(0)) },
+        Signal { id: SignalId(0), name: "clk".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
+        Signal { id: SignalId(1), name: "rst".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
+        Signal { id: SignalId(2), name: "wr_en".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
+        Signal { id: SignalId(3), name: "rd_en".to_string(), signal_type: DataType::Bit(1), initial: None, clock_domain: None },
+        Signal { id: SignalId(4), name: "data_in".to_string(), signal_type: DataType::Bit(data_width), initial: None, clock_domain: None },
+        Signal { id: SignalId(5), name: "data_out".to_string(), signal_type: DataType::Bit(data_width), initial: None, clock_domain: None },
+        Signal { id: SignalId(6), name: "empty".to_string(), signal_type: DataType::Bit(1), initial: Some(Value::Integer(1)), clock_domain: None },
+        Signal { id: SignalId(7), name: "full".to_string(), signal_type: DataType::Bit(1), initial: Some(Value::Integer(0)), clock_domain: None },
     ];
 
     // Simplified FIFO logic

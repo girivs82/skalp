@@ -12,6 +12,8 @@ fn create_counter_hir() -> Hir {
         protocols: vec![],
         intents: vec![],
         requirements: vec![],
+        trait_definitions: vec![],
+        trait_implementations: vec![],
     };
 
     // Create counter entity
@@ -59,6 +61,7 @@ fn create_counter_hir() -> Hir {
                 name: "count_reg".to_string(),
                 signal_type: HirType::Bit(8),
                 initial_value: Some(HirExpression::Literal(HirLiteral::Integer(0))),
+                clock_domain: None,
             },
         ],
         variables: vec![],
@@ -68,7 +71,7 @@ fn create_counter_hir() -> Hir {
                 id: BlockId(1),
                 triggers: vec![
                     HirEventTrigger {
-                        signal: SignalId(100), // clk - would be mapped properly in real code
+                        signal: HirEventSignal::Signal(SignalId(100)), // clk - would be mapped properly in real code
                         edge: HirEdgeType::Rising,
                     },
                 ],
@@ -115,6 +118,8 @@ fn create_counter_hir() -> Hir {
             },
         ],
         instances: vec![],
+        covergroups: vec![],
+        formal_blocks: vec![],
     };
 
     hir.implementations.push(implementation);

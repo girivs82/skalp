@@ -13,6 +13,8 @@ fn create_counter_with_reset_event() -> Hir {
         protocols: vec![],
         intents: vec![],
         requirements: vec![],
+        trait_definitions: vec![],
+        trait_implementations: vec![],
     };
 
     // Create counter entity
@@ -52,6 +54,7 @@ fn create_counter_with_reset_event() -> Hir {
                 id: SignalId(1),
                 name: "count_reg".to_string(),
                 signal_type: HirType::Bit(8),
+                clock_domain: None,
                 initial_value: None,
             },
         ],
@@ -63,7 +66,7 @@ fn create_counter_with_reset_event() -> Hir {
                 id: BlockId(1),
                 triggers: vec![
                     HirEventTrigger {
-                        signal: SignalId(101), // clk
+                        signal: HirEventSignal::Signal(SignalId(101)), // clk
                         edge: HirEdgeType::Rising,
                     },
                 ],
@@ -85,7 +88,7 @@ fn create_counter_with_reset_event() -> Hir {
                 id: BlockId(2),
                 triggers: vec![
                     HirEventTrigger {
-                        signal: SignalId(102), // reset
+                        signal: HirEventSignal::Signal(SignalId(102)), // reset
                         edge: HirEdgeType::Active,
                     },
                 ],
@@ -109,6 +112,8 @@ fn create_counter_with_reset_event() -> Hir {
             },
         ],
         instances: vec![],
+        covergroups: vec![],
+        formal_blocks: vec![],
     };
     hir.implementations.push(implementation);
 
@@ -124,6 +129,8 @@ fn create_combined_clock_reset_event() -> Hir {
         protocols: vec![],
         intents: vec![],
         requirements: vec![],
+        trait_definitions: vec![],
+        trait_implementations: vec![],
     };
 
     // Create entity
@@ -163,6 +170,7 @@ fn create_combined_clock_reset_event() -> Hir {
                 id: SignalId(1),
                 name: "count_reg".to_string(),
                 signal_type: HirType::Bit(8),
+                clock_domain: None,
                 initial_value: None,
             },
         ],
@@ -174,11 +182,11 @@ fn create_combined_clock_reset_event() -> Hir {
                 id: BlockId(1),
                 triggers: vec![
                     HirEventTrigger {
-                        signal: SignalId(101), // clk
+                        signal: HirEventSignal::Signal(SignalId(101)), // clk
                         edge: HirEdgeType::Rising,
                     },
                     HirEventTrigger {
-                        signal: SignalId(102), // reset
+                        signal: HirEventSignal::Signal(SignalId(102)), // reset
                         edge: HirEdgeType::Active,
                     },
                 ],
@@ -206,6 +214,8 @@ fn create_combined_clock_reset_event() -> Hir {
             },
         ],
         instances: vec![],
+        covergroups: vec![],
+        formal_blocks: vec![],
     };
     hir.implementations.push(implementation);
 

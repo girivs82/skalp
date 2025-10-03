@@ -1,71 +1,69 @@
-// Parameterized Pipelined Multiplier
-// Configurable width multiplier with optional pipelining
-
-@intent("high_throughput")
-entity Multiplier<const WIDTH: nat = 16, const PIPELINE_STAGES: nat = 3> {
+// Standard library multiplier component
+entity std_multiplier<const WIDTH: usize> {
     in clk: clock;
-    in rst: reset(active_high);
-
+    in rst: reset;
     in a: bit<WIDTH>;
     in b: bit<WIDTH>;
-    in valid_in: bit;
-
+    in start: bit;
     out product: bit<WIDTH*2>;
-    out valid_out: bit;
+    out ready: bit;
+    out busy: bit;
 }
 
-impl Multiplier<const WIDTH: nat, const PIPELINE_STAGES: nat> {
-    // Pipeline registers
-    signal pipe_a: array<bit<WIDTH>, PIPELINE_STAGES>;
-    signal pipe_b: array<bit<WIDTH>, PIPELINE_STAGES>;
-    signal pipe_valid: array<bit, PIPELINE_STAGES>;
-    signal partial_products: array<bit<WIDTH*2>, PIPELINE_STAGES>;
-
-    // Combinational multiplier output
-    signal mult_result: bit<WIDTH*2>;
-
-    // Simple combinational multiply
-    mult_result = {0[WIDTH], a} * {0[WIDTH], b};
-
-    on(rst.active) {
-        for i in 0..PIPELINE_STAGES {
-            pipe_valid[i] <= 0;
-            partial_products[i] <= 0;
-        }
-        valid_out <= 0;
-    }
-
+impl std_multiplier {
+    // Pipelined multiplier stages
+    signal stage1_a: bit<WIDTH>;
+    signal stage1_b: bit<WIDTH>;
+    signal stage1_valid: bit;
+    
+    signal stage2_partial: bit<WIDTH*2>;
+    signal stage2_valid: bit;
+    
+    signal stage3_product: bit<WIDTH*2>;
+    signal stage3_valid: bit;
+    
     on(clk.rise) {
-        if PIPELINE_STAGES == 0 {
-            // No pipelining - combinational
-            product <= mult_result;
-            valid_out <= valid_in;
+        if rst.active {
+            stage1_valid <= 0;
+            stage2_valid <= 0;
+            stage3_valid <= 0;
+            stage1_a <= 0;
+            stage1_b <= 0;
+            stage2_partial <= 0;
+            stage3_product <= 0;
         } else {
-            // First stage
-            pipe_a[0] <= a;
-            pipe_b[0] <= b;
-            pipe_valid[0] <= valid_in;
-
-            // Intermediate stages
-            for i in 1..PIPELINE_STAGES {
-                pipe_a[i] <= pipe_a[i-1];
-                pipe_b[i] <= pipe_b[i-1];
-                pipe_valid[i] <= pipe_valid[i-1];
+            // Stage 1: Input registration
+            if start {
+                stage1_a <= a;
+                stage1_b <= b;
+                stage1_valid <= 1;
+            } else {
+                stage1_valid <= 0;
             }
-
-            // Compute partial products at different stages
-            // This is a simplified model - real implementation would
-            // distribute the multiplication across stages
-            partial_products[PIPELINE_STAGES-1] <=
-                {0[WIDTH], pipe_a[PIPELINE_STAGES-1]} *
-                {0[WIDTH], pipe_b[PIPELINE_STAGES-1]};
-
-            // Output stage
-            product <= partial_products[PIPELINE_STAGES-1];
-            valid_out <= pipe_valid[PIPELINE_STAGES-1];
+            
+            // Stage 2: Partial product calculation
+            if stage1_valid {
+                stage2_partial <= stage1_a * stage1_b;
+                stage2_valid <= 1;
+            } else {
+                stage2_valid <= 0;
+            }
+            
+            // Stage 3: Output registration
+            if stage2_valid {
+                stage3_product <= stage2_partial;
+                stage3_valid <= 1;
+            } else {
+                stage3_valid <= 0;
+            }
         }
     }
-
-    // Performance assertion
-    assert property (valid_in |-> ##PIPELINE_STAGES valid_out);
+    
+    product = stage3_product;
+    ready = stage3_valid;
+    busy = stage1_valid || stage2_valid || stage3_valid;
+    
+    // Verification
+    assert property (start |=> ##3 ready) @(posedge clk);
+    assert property (ready -> product == $past(a, 3) * $past(b, 3)) @(posedge clk);
 }

@@ -1,6 +1,5 @@
 //! FIFO verification example demonstrating comprehensive verification features
 
-use skalp_verify::*;
 use skalp_verify::assertions::*;
 use skalp_verify::coverage::*;
 use skalp_verify::properties::*;

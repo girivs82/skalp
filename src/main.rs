@@ -249,7 +249,7 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
     // Lower to MIR with CDC analysis
     info!("Lowering to MIR with CDC analysis...");
     let compiler = skalp_mir::MirCompiler::new()
-        .with_optimization_level(skalp_mir::OptimizationLevel::Basic)
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
         .with_verbose(true); // Enable verbose output for CDC analysis
     let mir = compiler.compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR with CDC analysis: {}", e))?;
@@ -293,8 +293,15 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
             fs::write(&output_path, lir_json)?;
             output_path
         }
+        "mir" => {
+            info!("Saving MIR...");
+            let output_path = output_dir.join("design.mir");
+            let mir_json = serde_json::to_string_pretty(&mir)?;
+            fs::write(&output_path, mir_json)?;
+            output_path
+        }
         _ => {
-            anyhow::bail!("Unsupported target: {}. Use 'sv', 'v', 'vhdl', or 'lir'", target);
+            anyhow::bail!("Unsupported target: {}. Use 'sv', 'v', 'vhdl', 'lir', or 'mir'", target);
         }
     };
 

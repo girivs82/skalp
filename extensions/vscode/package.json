@@ -1,0 +1,83 @@
+{
+  "name": "skalp-language-support",
+  "displayName": "SKALP Language Support",
+  "description": "Language support for SKALP Hardware Description Language",
+  "version": "0.1.0",
+  "publisher": "skalp-hls",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Debuggers"
+  ],
+  "keywords": [
+    "hardware",
+    "HDL",
+    "SKALP",
+    "FPGA",
+    "ASIC",
+    "synthesis"
+  ],
+  "activationEvents": [
+    "onLanguage:skalp"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "skalp",
+        "aliases": [
+          "SKALP",
+          "skalp"
+        ],
+        "extensions": [
+          ".sk"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "skalp",
+        "scopeName": "source.skalp",
+        "path": "./syntaxes/skalp.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "SKALP",
+      "properties": {
+        "skalp.lsp.path": {
+          "type": "string",
+          "default": "skalp-lsp",
+          "description": "Path to the SKALP Language Server executable"
+        },
+        "skalp.lsp.trace": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace communications with the language server"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.1.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "16.x",
+    "typescript": "^4.9.4"
+  }
+}

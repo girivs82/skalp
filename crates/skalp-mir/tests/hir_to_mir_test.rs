@@ -12,6 +12,8 @@ fn create_simple_entity() -> Hir {
         protocols: vec![],
         intents: vec![],
         requirements: vec![],
+        trait_definitions: vec![],
+        trait_implementations: vec![],
     };
 
     // Create entity
@@ -53,6 +55,7 @@ fn create_simple_entity() -> Hir {
                 name: "next_count".to_string(),
                 signal_type: HirType::Bit(8),
                 initial_value: None,
+                clock_domain: None,
             },
         ],
         variables: vec![],
@@ -62,7 +65,7 @@ fn create_simple_entity() -> Hir {
                 id: BlockId(1),
                 triggers: vec![
                     HirEventTrigger {
-                        signal: SignalId(1),  // clk (actually should be mapped to port)
+                        signal: HirEventSignal::Signal(SignalId(1)),  // clk (actually should be mapped to port)
                         edge: HirEdgeType::Rising,
                     },
                 ],
@@ -82,6 +85,8 @@ fn create_simple_entity() -> Hir {
         ],
         assignments: vec![],
         instances: vec![],
+        covergroups: vec![],
+        formal_blocks: vec![],
     };
 
     hir.implementations.push(implementation);
@@ -117,7 +122,7 @@ fn test_port_conversion() {
     // Check clock port
     assert_eq!(module.ports[0].name, "clk");
     assert!(matches!(module.ports[0].direction, skalp_mir::mir::PortDirection::Input));
-    assert!(matches!(module.ports[0].port_type, skalp_mir::mir::DataType::Clock));
+    assert!(matches!(module.ports[0].port_type, skalp_mir::mir::DataType::Clock { domain: _ }));
 
     // Check reset port
     assert_eq!(module.ports[1].name, "rst");

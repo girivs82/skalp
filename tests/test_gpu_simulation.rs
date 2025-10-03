@@ -5,7 +5,7 @@ mod gpu_simulation_tests {
     use skalp_sir::convert_mir_to_sir;
     use skalp_sim::{Simulator, SimulationConfig};
     use skalp_sim::testbench::{Testbench, TestVectorBuilder};
-    use skalp_sim::waveform::{Waveform, Signal};
+    use skalp_sim::waveform::Waveform;
     use std::fs;
     use std::path::PathBuf;
 

@@ -2354,6 +2354,7 @@ dependencies = [
  "indexmap",
  "petgraph",
  "serde",
+ "skalp-frontend",
  "skalp-mir",
  "thiserror 1.0.69",
 ]

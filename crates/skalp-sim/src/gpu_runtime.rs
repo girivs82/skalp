@@ -1,10 +1,9 @@
 use async_trait::async_trait;
-use metal::{Device, CommandQueue, ComputePipelineState, Buffer, CommandBufferRef, MTLResourceOptions};
+use metal::{Device, CommandQueue, ComputePipelineState, Buffer, MTLResourceOptions};
 use skalp_sir::{SirModule, generate_metal_shader};
 use crate::simulator::{SimulationRuntime, SimulationResult, SimulationState, SimulationError};
-use crate::clock_manager::{ClockManager, ClockEdge};
+use crate::clock_manager::ClockManager;
 use std::collections::HashMap;
-use std::mem;
 
 pub struct GpuDevice {
     device: Device,

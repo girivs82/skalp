@@ -1,57 +1,31 @@
-// Parameterized Shift Register
-// Universal shift register with parallel load
-
-@intent("data_shifting")
-entity ShiftRegister<const WIDTH: nat = 8> {
+// Standard library shift register component
+entity std_shift_register<const WIDTH: usize, const DEPTH: usize> {
     in clk: clock;
-    in rst: reset(active_high);
-
-    // Control signals
-    in mode: bit<2>;  // 00: hold, 01: shift left, 10: shift right, 11: parallel load
+    in rst: reset;
     in enable: bit;
-
-    // Data inputs
-    in serial_in_left: bit;
-    in serial_in_right: bit;
-    in parallel_in: bit<WIDTH>;
-
-    // Data outputs
-    out data_out: bit<WIDTH>;
-    out serial_out_left: bit;
-    out serial_out_right: bit;
+    in serial_in: bit;
+    in parallel_load: bit;
+    in parallel_data: bit<WIDTH>;
+    out serial_out: bit;
+    out parallel_out: bit<WIDTH>;
 }
 
-impl ShiftRegister<const WIDTH: nat> {
-    signal register: bit<WIDTH>;
-
-    // Output assignments
-    data_out = register;
-    serial_out_left = register[WIDTH-1];
-    serial_out_right = register[0];
-
-    on(rst.active) {
-        register <= 0;
-    }
-
+impl std_shift_register {
+    signal shift_reg: bit<WIDTH>;
+    
     on(clk.rise) {
-        if enable {
-            match mode {
-                0b00 => {
-                    // Hold - no change
-                }
-                0b01 => {
-                    // Shift left
-                    register <= {register[WIDTH-2:0], serial_in_right};
-                }
-                0b10 => {
-                    // Shift right
-                    register <= {serial_in_left, register[WIDTH-1:1]};
-                }
-                0b11 => {
-                    // Parallel load
-                    register <= parallel_in;
-                }
-            }
+        if rst.active {
+            shift_reg <= 0;
+        } else if parallel_load {
+            shift_reg <= parallel_data;
+        } else if enable {
+            shift_reg <= {serial_in, shift_reg[WIDTH-1:1]};
         }
     }
+    
+    serial_out = shift_reg[0];
+    parallel_out = shift_reg;
+    
+    assert property (rst.active |=> shift_reg == 0) @(posedge clk);
+    assert property (parallel_load |=> shift_reg == parallel_data) @(posedge clk);
 }

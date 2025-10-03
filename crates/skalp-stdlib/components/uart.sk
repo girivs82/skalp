@@ -1,192 +1,154 @@
-// UART (Universal Asynchronous Receiver-Transmitter)
-// Simple UART with configurable baud rate
-
-@intent("serial_communication")
-entity UART<const CLK_FREQ: nat = 50000000, const BAUD_RATE: nat = 115200> {
+// Standard library UART component
+entity std_uart<const CLK_FREQ: usize, const BAUD_RATE: usize> {
     in clk: clock;
-    in rst: reset(active_high);
-
-    // Transmitter interface
-    in tx_valid: bit;
+    in rst: reset;
+    
+    // Transmit interface
     in tx_data: bit<8>;
-    out tx_ready: bit;
-    out tx_serial: bit;
-
-    // Receiver interface
-    in rx_serial: bit;
-    out rx_valid: bit;
+    in tx_start: bit;
+    out tx_busy: bit;
+    out tx: bit;
+    
+    // Receive interface
+    in rx: bit;
     out rx_data: bit<8>;
-    out rx_error: bit;  // Framing error
+    out rx_ready: bit;
+    out rx_error: bit;
 }
 
-impl UART<const CLK_FREQ: nat, const BAUD_RATE: nat> {
-    const CLKS_PER_BIT: nat = CLK_FREQ / BAUD_RATE;
-
-    // Transmitter state machine
-    enum TxState {
-        IDLE,
-        START_BIT,
-        DATA_BITS,
-        STOP_BIT
-    }
-
+impl std_uart {
+    const BAUD_DIV: usize = CLK_FREQ / BAUD_RATE;
+    
+    // Transmitter
+    enum TxState { Idle, StartBit, DataBits, StopBit }
     signal tx_state: TxState;
-    signal tx_clk_count: nat<$clog2(CLKS_PER_BIT)>;
-    signal tx_bit_index: nat<3>;
-    signal tx_data_reg: bit<8>;
-
-    // Receiver state machine
-    enum RxState {
-        IDLE,
-        START_BIT,
-        DATA_BITS,
-        STOP_BIT
-    }
-
+    signal tx_baud_counter: bit<log2(BAUD_DIV)>;
+    signal tx_bit_counter: bit<3>;
+    signal tx_shift_reg: bit<8>;
+    signal tx_baud_tick: bit;
+    
+    // Receiver  
+    enum RxState { Idle, StartBit, DataBits, StopBit }
     signal rx_state: RxState;
-    signal rx_clk_count: nat<$clog2(CLKS_PER_BIT)>;
-    signal rx_bit_index: nat<3>;
-    signal rx_data_reg: bit<8>;
-    signal rx_serial_sync: bit<2>;  // Synchronizer
-
-    // Synchronize RX input
+    signal rx_baud_counter: bit<log2(BAUD_DIV)>;
+    signal rx_bit_counter: bit<3>;
+    signal rx_shift_reg: bit<8>;
+    signal rx_baud_tick: bit;
+    signal rx_sync: bit<2>;
+    
     on(clk.rise) {
-        rx_serial_sync <= {rx_serial_sync[0], rx_serial};
-    }
-
-    // Transmitter logic
-    on(rst.active) {
-        tx_state <= TxState::IDLE;
-        tx_serial <= 1;
-        tx_ready <= 1;
-        tx_clk_count <= 0;
-        tx_bit_index <= 0;
-    }
-
-    on(clk.rise) {
-        match tx_state {
-            TxState::IDLE => {
-                tx_serial <= 1;
-                tx_ready <= 1;
-                tx_clk_count <= 0;
-                tx_bit_index <= 0;
-
-                if tx_valid {
-                    tx_data_reg <= tx_data;
-                    tx_state <= TxState::START_BIT;
-                    tx_ready <= 0;
-                }
+        if rst.active {
+            // Reset transmitter
+            tx_state <= TxState::Idle;
+            tx_baud_counter <= 0;
+            tx_bit_counter <= 0;
+            tx_shift_reg <= 0;
+            
+            // Reset receiver
+            rx_state <= RxState::Idle;
+            rx_baud_counter <= 0;
+            rx_bit_counter <= 0;
+            rx_shift_reg <= 0;
+            rx_sync <= 2'b11;
+        } else {
+            // Synchronize RX input
+            rx_sync <= {rx_sync[0], rx};
+            
+            // Transmitter baud rate generator
+            if tx_baud_counter == BAUD_DIV - 1 {
+                tx_baud_counter <= 0;
+            } else {
+                tx_baud_counter <= tx_baud_counter + 1;
             }
-
-            TxState::START_BIT => {
-                tx_serial <= 0;  // Start bit is 0
-
-                if tx_clk_count < CLKS_PER_BIT - 1 {
-                    tx_clk_count <= tx_clk_count + 1;
-                } else {
-                    tx_clk_count <= 0;
-                    tx_state <= TxState::DATA_BITS;
-                }
+            
+            // Receiver baud rate generator
+            if rx_baud_counter == BAUD_DIV - 1 {
+                rx_baud_counter <= 0;
+            } else {
+                rx_baud_counter <= rx_baud_counter + 1;
             }
-
-            TxState::DATA_BITS => {
-                tx_serial <= tx_data_reg[tx_bit_index];
-
-                if tx_clk_count < CLKS_PER_BIT - 1 {
-                    tx_clk_count <= tx_clk_count + 1;
-                } else {
-                    tx_clk_count <= 0;
-
-                    if tx_bit_index < 7 {
-                        tx_bit_index <= tx_bit_index + 1;
-                    } else {
-                        tx_bit_index <= 0;
-                        tx_state <= TxState::STOP_BIT;
+            
+            // Transmitter state machine
+            if tx_baud_tick {
+                match tx_state {
+                    TxState::Idle => {
+                        if tx_start {
+                            tx_state <= TxState::StartBit;
+                            tx_shift_reg <= tx_data;
+                            tx_bit_counter <= 0;
+                        }
+                    },
+                    TxState::StartBit => {
+                        tx_state <= TxState::DataBits;
+                    },
+                    TxState::DataBits => {
+                        tx_shift_reg <= {1'b0, tx_shift_reg[7:1]};
+                        if tx_bit_counter == 7 {
+                            tx_state <= TxState::StopBit;
+                        } else {
+                            tx_bit_counter <= tx_bit_counter + 1;
+                        }
+                    },
+                    TxState::StopBit => {
+                        tx_state <= TxState::Idle;
                     }
                 }
             }
-
-            TxState::STOP_BIT => {
-                tx_serial <= 1;  // Stop bit is 1
-
-                if tx_clk_count < CLKS_PER_BIT - 1 {
-                    tx_clk_count <= tx_clk_count + 1;
-                } else {
-                    tx_clk_count <= 0;
-                    tx_state <= TxState::IDLE;
-                    tx_ready <= 1;
+            
+            // Receiver state machine
+            match rx_state {
+                RxState::Idle => {
+                    if rx_sync == 2'b01 {  // Falling edge detected
+                        rx_state <= RxState::StartBit;
+                        rx_baud_counter <= BAUD_DIV / 2;  // Sample in middle
+                    }
+                },
+                RxState::StartBit => {
+                    if rx_baud_tick {
+                        if rx_sync[1] == 0 {  // Valid start bit
+                            rx_state <= RxState::DataBits;
+                            rx_bit_counter <= 0;
+                        } else {
+                            rx_state <= RxState::Idle;  // False start
+                        }
+                    }
+                },
+                RxState::DataBits => {
+                    if rx_baud_tick {
+                        rx_shift_reg <= {rx_sync[1], rx_shift_reg[7:1]};
+                        if rx_bit_counter == 7 {
+                            rx_state <= RxState::StopBit;
+                        } else {
+                            rx_bit_counter <= rx_bit_counter + 1;
+                        }
+                    }
+                },
+                RxState::StopBit => {
+                    if rx_baud_tick {
+                        rx_state <= RxState::Idle;
+                    }
                 }
             }
         }
     }
-
-    // Receiver logic
-    on(rst.active) {
-        rx_state <= RxState::IDLE;
-        rx_valid <= 0;
-        rx_error <= 0;
-        rx_clk_count <= 0;
-        rx_bit_index <= 0;
-    }
-
-    on(clk.rise) {
-        match rx_state {
-            RxState::IDLE => {
-                rx_valid <= 0;
-                rx_clk_count <= 0;
-                rx_bit_index <= 0;
-
-                // Detect start bit (falling edge)
-                if rx_serial_sync[1] == 0 {
-                    rx_state <= RxState::START_BIT;
-                }
-            }
-
-            RxState::START_BIT => {
-                // Sample in the middle of the bit period
-                if rx_clk_count == (CLKS_PER_BIT - 1) / 2 {
-                    if rx_serial_sync[1] == 0 {
-                        // Valid start bit
-                        rx_clk_count <= 0;
-                        rx_state <= RxState::DATA_BITS;
-                    } else {
-                        // False start bit
-                        rx_state <= RxState::IDLE;
-                    }
-                } else {
-                    rx_clk_count <= rx_clk_count + 1;
-                }
-            }
-
-            RxState::DATA_BITS => {
-                if rx_clk_count < CLKS_PER_BIT - 1 {
-                    rx_clk_count <= rx_clk_count + 1;
-                } else {
-                    rx_clk_count <= 0;
-                    rx_data_reg[rx_bit_index] <= rx_serial_sync[1];
-
-                    if rx_bit_index < 7 {
-                        rx_bit_index <= rx_bit_index + 1;
-                    } else {
-                        rx_bit_index <= 0;
-                        rx_state <= RxState::STOP_BIT;
-                    }
-                }
-            }
-
-            RxState::STOP_BIT => {
-                if rx_clk_count < CLKS_PER_BIT - 1 {
-                    rx_clk_count <= rx_clk_count + 1;
-                } else {
-                    rx_clk_count <= 0;
-                    rx_state <= RxState::IDLE;
-                    rx_valid <= 1;
-                    rx_data <= rx_data_reg;
-
-                    // Check for framing error (stop bit should be 1)
-                    rx_error <= !rx_serial_sync[1];
-                }
-            }
-        }
-    }
+    
+    // Transmitter outputs
+    tx_baud_tick = (tx_baud_counter == BAUD_DIV - 1);
+    tx_busy = (tx_state != TxState::Idle);
+    tx = match tx_state {
+        TxState::Idle => 1,
+        TxState::StartBit => 0,
+        TxState::DataBits => tx_shift_reg[0],
+        TxState::StopBit => 1
+    };
+    
+    // Receiver outputs
+    rx_baud_tick = (rx_baud_counter == BAUD_DIV - 1);
+    rx_data = rx_shift_reg;
+    rx_ready = (rx_state == RxState::StopBit) && rx_baud_tick && (rx_sync[1] == 1);
+    rx_error = (rx_state == RxState::StopBit) && rx_baud_tick && (rx_sync[1] == 0);
+    
+    // Verification properties
+    assert property (tx_start && !tx_busy |=> tx_busy) @(posedge clk);
+    assert property (rx_ready -> !rx_error) @(posedge clk);
 }

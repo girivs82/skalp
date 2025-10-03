@@ -683,11 +683,11 @@ entity Counter {
         let mut lexer = Lexer::new("entity @ invalid $ Counter");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        // Should handle errors gracefully
+        // Should handle tokens gracefully
         assert_eq!(tokens[0], Token::Entity);
-        assert_eq!(tokens[1], Token::Error); // @
+        assert_eq!(tokens[1], Token::At); // @ is a valid token
         assert_eq!(tokens[2], Token::Identifier("invalid".to_string()));
-        assert_eq!(tokens[3], Token::Error); // $
+        assert_eq!(tokens[3], Token::Dollar); // $ is a valid token
         assert_eq!(tokens[4], Token::Identifier("Counter".to_string()));
     }
 }

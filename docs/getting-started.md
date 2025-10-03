@@ -1,275 +1,122 @@
 # Getting Started with SKALP
 
-This guide will help you get up and running with SKALP in minutes.
-
-## Prerequisites
-
-- Rust 1.70+ (for building from source)
-- VS Code (recommended for IDE support)
-- Verilator or another HDL simulator (optional, for simulation)
+This guide will get you up and running with SKALP in under 30 minutes.
 
 ## Installation
 
-### Building from Source
+### Prerequisites
+- Rust 1.70+ 
+- Metal-compatible GPU (for simulation)
+- Optional: VSCode for IDE support
+
+### Install SKALP
 
 ```bash
 # Clone the repository
-git clone https://github.com/skalp-lang/skalp.git
+git clone https://github.com/your-org/skalp.git
 cd skalp
 
-# Build all components
+# Build the compiler
 cargo build --release
 
-# Run tests to verify installation
-cargo test
-
-# Install globally (optional)
-cargo install --path .
+# Add to PATH
+export PATH=$PATH:$(pwd)/target/release
 ```
 
-### Setting up VS Code
+### Verify Installation
 
-1. Build the language server:
 ```bash
-cd crates/skalp-lsp
-cargo build --release
+skalp --version
+# Should output: SKALP 0.1.0
 ```
-
-2. Install the VS Code extension:
-```bash
-cd vscode-skalp
-npm install
-npm run compile
-```
-
-3. Open VS Code and press F5 to run the extension in development mode
 
 ## Your First SKALP Design
 
-### 1. Create a Simple Counter
-
-Create a file named `counter.sk`:
+Create a file called `counter.sk`:
 
 ```skalp
-// A simple 8-bit counter with reset
-entity Counter {
+entity counter {
     in clk: clock;
-    in rst: reset(active_high);
-    in enable: bit;
-    out count: bit<8>;
+    in rst: reset;
+    out count: bit<32>;
 }
 
-impl Counter {
-    on(rst.active) {
-        count <= 0;
-    }
+impl counter {
+    signal counter_reg: bit<32>;
 
     on(clk.rise) {
-        if enable {
-            count <= count + 1;
+        if rst.active {
+            counter_reg <= 0;
+        } else {
+            counter_reg <= counter_reg + 1;
         }
     }
+
+    count = counter_reg;
 }
 ```
 
-### 2. Compile to SystemVerilog
+## Compile and Simulate
 
 ```bash
-skalp compile counter.sk -o counter.sv
+# Build to SystemVerilog (for synthesis)
+skalp build -s counter.sk -o build -t sv
+
+# Build to MIR (for simulation)
+skalp build -s counter.sk -o build -t mir
+
+# Run GPU-accelerated simulation
+skalp sim build/design.mir --duration 100
+
+# Build to other formats
+skalp build -s counter.sk -o build -t vhdl  # VHDL output
+skalp build -s counter.sk -o build -t lir   # LIR output
+
+# Format the code
+skalp fmt counter.sk
+
+# Synthesize for FPGA
+skalp synth counter.sk --device ice40-hx8k
+
+# Program the FPGA device (if connected)
+skalp program bitstream.bin
 ```
 
-This generates SystemVerilog code that can be used with any standard tools.
+## IDE Setup
 
-### 3. Create a Testbench
+### VSCode Extension
 
-Create `counter_tb.sk`:
+1. Install the SKALP extension from the marketplace
+2. Open a `.sk` file
+3. Get syntax highlighting, error checking, and auto-completion
 
-```skalp
-testbench CounterTest {
-    signal clk: clock;
-    signal rst: reset(active_high);
-    signal enable: bit;
-    signal count: bit<8>;
+### Language Server
 
-    // Instantiate the counter
-    Counter dut {
-        .clk(clk),
-        .rst(rst),
-        .enable(enable),
-        .count(count)
-    };
-
-    // Clock generation
-    initial {
-        clk = 0;
-        forever #5 clk = !clk;
-    }
-
-    // Test sequence
-    async test "basic_counting" {
-        // Reset
-        rst = 1;
-        enable = 0;
-        await clk.rise;
-        await clk.rise;
-
-        // Release reset
-        rst = 0;
-        await clk.rise;
-
-        // Enable counting
-        enable = 1;
-
-        // Check counting
-        for i in 0..10 {
-            assert count == i;
-            await clk.rise;
-        }
-
-        // Disable counting
-        enable = 0;
-        let prev_count = count;
-        await clk.rise;
-        assert count == prev_count;
-
-        $display("Test passed!");
-    }
-}
-```
-
-### 4. Run Simulation
-
-```bash
-skalp sim counter_tb.sk
-```
-
-## Key Concepts
-
-### Event-Driven Blocks
-
-SKALP uses `on()` blocks for sequential logic:
-
-```skalp
-on(clk.rise) {
-    // Synchronous logic on rising edge
-}
-
-on(clk.fall) {
-    // Synchronous logic on falling edge
-}
-
-on(rst.active) {
-    // Reset logic
-}
-```
-
-### Clock Domain Safety
-
-SKALP automatically tracks clock domains:
-
-```skalp
-entity CDCExample<'fast, 'slow> {
-    in fast_clk: clock<'fast>;
-    in slow_clk: clock<'slow>;
-    in data<'fast>: bit<8>;
-    out synced<'slow>: bit<8>;
-}
-```
-
-### Pattern Matching
-
-Use `match` for clear conditional logic:
-
-```skalp
-match state {
-    IDLE => next_state = START;
-    START => next_state = PROCESS;
-    PROCESS => {
-        if done {
-            next_state = IDLE;
-        }
-    }
-    _ => next_state = IDLE;
-}
-```
-
-### Generics
-
-Create reusable components with generics:
-
-```skalp
-entity FIFO<const WIDTH: nat = 8, const DEPTH: nat = 16> {
-    in wr_data: bit<WIDTH>;
-    // ...
-}
-
-// Instantiate with specific parameters
-FIFO<16, 32> data_fifo { /* ... */ };
-```
+The LSP server provides:
+- **Real-time error checking** - See syntax and type errors as you type
+- **Code completion** - Auto-complete entities, signals, and types
+- **Go to definition** - Navigate to signal and entity definitions
+- **Hover information** - See type information and documentation
 
 ## Next Steps
 
-- Read the [Language Reference](reference/README.md) for complete syntax
-- Explore the [Standard Library](stdlib/README.md) for pre-built components
-- Check out [Examples](examples/README.md) for more complex designs
-- Learn about [Verification](verification.md) features
-- Understand [Safety Features](safety.md) for critical designs
+- [Language Tutorial](tutorial.md) - Learn SKALP syntax and concepts
+- [Examples](examples/) - Explore example designs
+- [Language Specification](language-spec.md) - Complete reference
 
-## Common Commands
+## Common Issues
 
-```bash
-# Compile to SystemVerilog
-skalp compile design.sk -o design.sv
+### GPU Simulation Not Working
+- Ensure you have a Metal-compatible GPU
+- Check that Metal development tools are installed
+- Try CPU simulation with `--cpu` flag
 
-# Run simulation
-skalp sim testbench.sk
+### Compilation Errors
+- Check syntax against the [language specification](language-spec.md)
+- Ensure all signals and entities are properly declared
+- Use `skalp check` for detailed error information
 
-# Generate FPGA bitstream (iCE40)
-skalp synth design.sk --target ice40 -o design.bit
-
-# Check design for errors
-skalp check design.sk
-
-# Format code
-skalp fmt design.sk
-
-# Generate documentation
-skalp doc design.sk -o docs/
-```
-
-## Troubleshooting
-
-### Clock Domain Errors
-
-If you see clock domain crossing errors, ensure proper synchronization:
-
-```skalp
-// Use explicit clock domain annotations
-signal data<'clk1>: bit<8>;
-signal synced<'clk2>: bit<8>;
-
-// Use proper CDC techniques
-sync #(.STAGES(2)) cdc {
-    .in(data),
-    .out(synced)
-};
-```
-
-### Simulation Issues
-
-- Ensure Verilator is installed: `verilator --version`
-- Check that all files are in the correct path
-- Use `--verbose` flag for detailed output
-
-### VS Code Extension
-
-- Verify the language server is built: `skalp-lsp --version`
-- Check the server path in VS Code settings
-- View the output panel for LSP logs
-
-## Getting Help
-
-- **Documentation**: This guide and reference materials
-- **Examples**: Working code in the `examples/` directory
-- **Community**: Discord and forums
-- **Issues**: GitHub issue tracker
+### Performance Issues
+- Large designs may need optimization passes
+- Consider using `--opt-level 2` for better performance
+- See [Performance Guide](performance.md) for tuning tips
