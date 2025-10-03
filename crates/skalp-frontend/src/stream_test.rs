@@ -18,7 +18,6 @@ mod stream_tests {
         assert!(errors.is_empty(), "Parse errors: {:?}", errors);
 
         // Check that stream types are in the syntax tree
-        let mut found_stream_types = 0;
         fn count_stream_types(node: &crate::syntax::SyntaxNode) -> usize {
             let mut count = if node.kind() == SyntaxKind::StreamType {
                 1
@@ -31,7 +30,7 @@ mod stream_tests {
             count
         }
 
-        found_stream_types = count_stream_types(&tree);
+        let found_stream_types = count_stream_types(&tree);
         assert_eq!(found_stream_types, 2, "Should have found 2 stream types");
     }
 

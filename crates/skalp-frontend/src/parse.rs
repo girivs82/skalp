@@ -258,13 +258,11 @@ impl<'a> ParseState<'a> {
 
         // Port direction
         self.start_node(SyntaxKind::PortDirection);
-        if self.at(SyntaxKind::InKw) {
-            self.bump();
-        } else if self.at(SyntaxKind::OutKw) {
-            self.bump();
-        } else if self.at(SyntaxKind::InoutKw) {
-            self.bump();
-        } else if self.at(SyntaxKind::PortKw) {
+        if self.at(SyntaxKind::InKw)
+            || self.at(SyntaxKind::OutKw)
+            || self.at(SyntaxKind::InoutKw)
+            || self.at(SyntaxKind::PortKw)
+        {
             self.bump();
         }
         self.finish_node();

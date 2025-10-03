@@ -2086,8 +2086,8 @@ impl HirBuilderContext {
         let expr_nodes_after_arrow: Vec<_> = node
             .children_with_tokens()
             .skip_while(|e| {
-                !e.as_token()
-                    .is_some_and(|t| t.kind() == SyntaxKind::FatArrow)
+                e.as_token()
+                    .is_none_or(|t| t.kind() != SyntaxKind::FatArrow)
             })
             .skip(1) // Skip the arrow itself
             .filter_map(|e| {
@@ -3129,12 +3129,9 @@ impl HirBuilderContext {
         };
 
         // Check if it has a default implementation
-        let default_implementation =
-            if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
-                Some(self.build_statements(&block))
-            } else {
-                None
-            };
+        let default_implementation = node
+            .first_child_of_kind(SyntaxKind::BlockStmt)
+            .map(|block| self.build_statements(&block));
 
         Some(HirTraitMethod {
             name,
@@ -3336,6 +3333,7 @@ impl HirBuilderContext {
     }
 
     /// Collect all signals that are assigned to in a list of statements
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_assigned_signals(&self, statements: &[HirStatement]) -> Vec<SignalId> {
         let mut signals = Vec::new();
 

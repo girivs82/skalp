@@ -169,13 +169,9 @@ impl TypeChecker {
                     });
                 } else {
                     // Check for payload type if specified
-                    let payload = if let Some(payload_node) =
-                        variant_node.first_child_of_kind(SyntaxKind::TypeAnnotation)
-                    {
-                        Some(self.extract_type(&payload_node))
-                    } else {
-                        None
-                    };
+                    let payload = variant_node
+                        .first_child_of_kind(SyntaxKind::TypeAnnotation)
+                        .map(|payload_node| self.extract_type(&payload_node));
 
                     variants.push(EnumVariant {
                         name: variant_name,
@@ -599,7 +595,7 @@ impl TypeChecker {
                     | SyntaxKind::TuplePattern
             )
         }) {
-            self.bind_pattern_variables(&pattern_node, &match_expr_type);
+            self.bind_pattern_variables(&pattern_node, match_expr_type);
         }
 
         // Check statements in arm
