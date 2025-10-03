@@ -2128,10 +2128,9 @@ impl HirBuilderContext {
         let children: Vec<_> = node.children().collect();
 
         // Determine if this is a range by checking for colon token
-        let has_colon = node.children_with_tokens().any(|e| {
-            e.as_token()
-                .is_some_and(|t| t.kind() == SyntaxKind::Colon)
-        });
+        let has_colon = node
+            .children_with_tokens()
+            .any(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
         // WORKAROUND FOR PARSER BUG: The base expression is ALWAYS a sibling, not a child
         // Look for base in parent/siblings
