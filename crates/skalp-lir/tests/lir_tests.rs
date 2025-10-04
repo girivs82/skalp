@@ -15,6 +15,8 @@ fn test_lir_creation() {
         width: 1,
         driver: Some("gate1".to_string()),
         loads: vec!["gate2".to_string()],
+        is_input: true,
+        is_output: false,
     });
 
     lir.nets.push(Net {
@@ -22,6 +24,8 @@ fn test_lir_creation() {
         width: 1,
         driver: Some("gate1".to_string()),
         loads: vec!["gate2".to_string()],
+        is_input: true,
+        is_output: false,
     });
 
     lir.nets.push(Net {
@@ -29,6 +33,8 @@ fn test_lir_creation() {
         width: 1,
         driver: Some("gate2".to_string()),
         loads: vec![],
+        is_input: false,
+        is_output: true,
     });
 
     // Add gates
@@ -73,6 +79,8 @@ fn test_dead_code_elimination() {
         width: 1,
         driver: Some("gate1".to_string()),
         loads: vec![],
+        is_input: false,
+        is_output: true,
     });
 
     // Add intermediate net
@@ -81,6 +89,8 @@ fn test_dead_code_elimination() {
         width: 1,
         driver: Some("gate2".to_string()),
         loads: vec![],
+        is_input: false,
+        is_output: false,
     });
 
     // Live gate (drives output)
@@ -208,6 +218,8 @@ fn test_timing_analysis() {
         width: 1,
         driver: None,
         loads: vec!["gate1".to_string()],
+        is_input: true,
+        is_output: false,
     });
 
     lir.nets.push(Net {
@@ -215,6 +227,8 @@ fn test_timing_analysis() {
         width: 1,
         driver: Some("gate1".to_string()),
         loads: vec!["gate2".to_string()],
+        is_input: false,
+        is_output: false,
     });
 
     lir.nets.push(Net {
@@ -222,6 +236,8 @@ fn test_timing_analysis() {
         width: 1,
         driver: Some("gate2".to_string()),
         loads: vec![],
+        is_input: false,
+        is_output: true,
     });
 
     lir.gates.push(Gate {
