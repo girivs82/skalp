@@ -1,3 +1,8 @@
+// Allow manual_is_multiple_of lint because is_multiple_of() is not yet stable
+// Also allow unknown_lints because this lint doesn't exist in stable Rust
+#![allow(unknown_lints)]
+#![allow(clippy::manual_is_multiple_of)]
+
 pub mod clock_manager;
 pub mod cpu_runtime;
 #[cfg(target_os = "macos")]
