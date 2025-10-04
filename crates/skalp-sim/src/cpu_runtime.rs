@@ -77,26 +77,26 @@ impl CpuRuntime {
     fn initialize_signals(&mut self, module: &SirModule) {
         // Initialize all signals to zero
         for signal in &module.signals {
-            let byte_size = (signal.width + 7) / 8;
+            let byte_size = signal.width.div_ceil(8);
             self.signals
                 .insert(signal.name.clone(), vec![0u8; byte_size]);
         }
 
         // Initialize input ports
         for input in &module.inputs {
-            let byte_size = (input.width + 7) / 8;
+            let byte_size = input.width.div_ceil(8);
             self.state.insert(input.name.clone(), vec![0u8; byte_size]);
         }
 
         // Initialize output ports
         for output in &module.outputs {
-            let byte_size = (output.width + 7) / 8;
+            let byte_size = output.width.div_ceil(8);
             self.state.insert(output.name.clone(), vec![0u8; byte_size]);
         }
 
         // Initialize state elements
         for (name, element) in &module.state_elements {
-            let byte_size = (element.width + 7) / 8;
+            let byte_size = element.width.div_ceil(8);
             let initial_value = if let Some(reset_val) = element.reset_value {
                 let mut bytes = vec![0u8; byte_size];
                 // Convert reset value to bytes
@@ -159,7 +159,7 @@ impl SimulationRuntime for CpuRuntime {
         // Reset all state elements to initial values
         if let Some(module) = &self.module {
             for (name, element) in &module.state_elements {
-                let byte_size = (element.width + 7) / 8;
+                let byte_size = element.width.div_ceil(8);
                 let reset_value = if let Some(val) = element.reset_value {
                     let mut bytes = vec![0u8; byte_size];
                     for (i, byte) in bytes.iter_mut().enumerate().take(byte_size) {
