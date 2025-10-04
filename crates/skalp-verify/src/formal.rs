@@ -18,10 +18,12 @@ struct FormalEngineInner {
 
     /// Solver instance
     #[borrows(context)]
+    #[not_covariant]
     solver: Solver<'this>,
 
     /// Variable mapping
     #[borrows(context)]
+    #[covariant]
     variables: HashMap<String, Dynamic<'this>>,
 }
 
