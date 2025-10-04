@@ -6,15 +6,15 @@ use std::collections::HashMap;
 use z3::{ast::*, Config, Context, SatResult, Solver};
 
 /// Formal verification engine
-pub struct FormalEngine {
+pub struct FormalEngine<'a> {
     /// Z3 context
     context: Context,
 
     /// Solver instance
-    solver: Solver,
+    solver: Solver<'a>,
 
     /// Variable mapping
-    variables: HashMap<String, Dynamic>,
+    variables: HashMap<String, Dynamic<'a>>,
 
     /// Properties to verify
     properties: Vec<Property>,
@@ -54,7 +54,7 @@ impl Default for FormalConfig {
     }
 }
 
-impl FormalEngine {
+impl<'a> FormalEngine<'a> {
     /// Create a new formal engine
     pub fn new(config: FormalConfig) -> Self {
         let z3_config = Config::new();

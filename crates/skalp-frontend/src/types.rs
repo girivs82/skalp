@@ -637,7 +637,10 @@ impl TypeInference {
 #[derive(Debug, Clone)]
 pub enum TypeError {
     /// Type mismatch
-    TypeMismatch { expected: Box<Type>, found: Box<Type> },
+    TypeMismatch {
+        expected: Box<Type>,
+        found: Box<Type>,
+    },
 
     /// Width mismatch
     WidthMismatch { expected: Width, found: Width },
