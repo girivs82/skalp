@@ -65,7 +65,15 @@
       "Bash(do echo \"=== $f ===\")",
       "Bash(rg:*)",
       "Bash(head:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(export HOMEBREW_NO_AUTO_UPDATE=1)",
+      "Bash(brew list:*)",
+      "Bash(/dev/null)",
+      "Bash(brew install:*)",
+      "Bash(./scripts/ci_check.sh:*)",
+      "Read(//opt/homebrew/Cellar/z3/**)",
+      "Bash(export:*)",
+      "Bash(echo:*)"
     ],
     "deny": [],
     "ask": []

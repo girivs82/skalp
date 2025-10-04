@@ -16,6 +16,9 @@ cargo +beta clippy --all-targets --all-features -- -D warnings
 echo -e "\n=== Running build ==="
 cargo build --verbose --all-features
 
+echo -e "\n=== Running tests ==="
+cargo test --all-features --workspace
+
 # Optional: Run tarpaulin coverage check (requires cargo-tarpaulin and z3)
 # Note: This will fail if you don't have z3 installed (required for skalp-verify formal feature)
 # To skip this check, don't pass --with-coverage flag

@@ -20,6 +20,7 @@ Local validation script that runs the same checks as CI before you push.
 - Clippy lints on stable toolchain
 - Clippy lints on beta toolchain
 - Build with all features
+- All tests (including regression tests)
 - Code coverage with tarpaulin (optional, with `--with-coverage` flag)
 
 **Requirements:**

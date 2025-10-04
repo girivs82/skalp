@@ -4,9 +4,8 @@
 //! for various hardware designs including counter, adder, and FIFO.
 
 use skalp_mir::*;
-use skalp_sim::mir_to_sir::MirToSir;
-use skalp_sim::runtime::GpuSimRuntime;
 use skalp_sim::*;
+use skalp_sir::mir_to_sir::MirToSir;
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
 
