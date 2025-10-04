@@ -636,14 +636,41 @@ impl<'a> ParseState<'a> {
             self.finish_node();
         }
 
-        // Expect fat arrow (=>)
-        self.expect(SyntaxKind::FatArrow);
+        // Expect arrow (->)
+        self.expect(SyntaxKind::Arrow);
 
-        // Parse arm body (expression or block)
+        // Parse arm body (can be statement(s) or block)
         if self.at(SyntaxKind::LBrace) {
             self.parse_block_statement();
         } else {
-            self.parse_expression();
+            // Parse a single statement (assignment, if, match, etc.)
+            // We need to check what kind of statement this is
+            match self.current_kind() {
+                Some(SyntaxKind::Ident) => {
+                    // Could be assignment or expression
+                    // Look ahead to see if there's an assignment operator
+                    if self.peek_kind(1) == Some(SyntaxKind::Assign)
+                        || self.peek_kind(1) == Some(SyntaxKind::LBracket)
+                        || self.peek_kind(1) == Some(SyntaxKind::Dot)
+                    {
+                        // Parse as assignment statement
+                        self.parse_assignment_stmt();
+                    } else {
+                        // Parse as expression
+                        self.parse_expression();
+                    }
+                }
+                Some(SyntaxKind::IfKw) => {
+                    self.parse_if_statement();
+                }
+                Some(SyntaxKind::MatchKw) => {
+                    self.parse_match_statement();
+                }
+                _ => {
+                    // Default to expression
+                    self.parse_expression();
+                }
+            }
         }
 
         // Optional comma

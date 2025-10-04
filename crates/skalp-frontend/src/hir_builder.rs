@@ -8,6 +8,9 @@ use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
 use std::collections::HashMap;
 
+/// Maximum recursion depth to prevent stack overflow
+const MAX_RECURSION_DEPTH: usize = 100;
+
 /// HIR builder context
 pub struct HirBuilderContext {
     /// Next IDs for various HIR elements
@@ -38,6 +41,9 @@ pub struct HirBuilderContext {
 
     /// Built entities (for accessing ports during impl building)
     built_entities: HashMap<String, HirEntity>,
+
+    /// Recursion depth counter to prevent infinite loops
+    recursion_depth: usize,
 }
 
 /// Symbol table for name resolution
@@ -98,6 +104,7 @@ impl HirBuilderContext {
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
             built_entities: HashMap::new(),
+            recursion_depth: 0,
         }
     }
 
@@ -581,6 +588,19 @@ impl HirBuilderContext {
 
     /// Build statements from block
     fn build_statements(&mut self, node: &SyntaxNode) -> Vec<HirStatement> {
+        // Check recursion depth to prevent infinite loops
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            self.errors.push(HirError {
+                message: format!(
+                    "Maximum recursion depth ({}) exceeded while building statements",
+                    MAX_RECURSION_DEPTH
+                ),
+                location: None,
+            });
+            return Vec::new();
+        }
+
+        self.recursion_depth += 1;
         let mut statements = Vec::new();
 
         for child in node.children() {
@@ -615,12 +635,26 @@ impl HirBuilderContext {
             }
         }
 
+        self.recursion_depth -= 1;
         statements
     }
 
     /// Build single statement
     fn build_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
-        match node.kind() {
+        // Check recursion depth to prevent infinite loops
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            self.errors.push(HirError {
+                message: format!(
+                    "Maximum recursion depth ({}) exceeded while building statement",
+                    MAX_RECURSION_DEPTH
+                ),
+                location: None,
+            });
+            return None;
+        }
+
+        self.recursion_depth += 1;
+        let result = match node.kind() {
             SyntaxKind::AssignmentStmt => {
                 let assignment_type = self.determine_assignment_type(node);
                 self.build_assignment(node, assignment_type)
@@ -639,7 +673,9 @@ impl HirBuilderContext {
                 Some(HirStatement::Block(block_stmts))
             }
             _ => None,
-        }
+        };
+        self.recursion_depth -= 1;
+        result
     }
 
     /// Build assignment
@@ -1080,7 +1116,20 @@ impl HirBuilderContext {
     /// Build pattern
     #[allow(clippy::only_used_in_recursion, clippy::comparison_chain)]
     fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
-        match node.kind() {
+        // Check recursion depth to prevent infinite loops
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            self.errors.push(HirError {
+                message: format!(
+                    "Maximum recursion depth ({}) exceeded while building pattern",
+                    MAX_RECURSION_DEPTH
+                ),
+                location: None,
+            });
+            return None;
+        }
+
+        self.recursion_depth += 1;
+        let result = match node.kind() {
             SyntaxKind::LiteralPattern => {
                 // Find literal token (it's a token, not a node)
                 let literal_token = node.children_with_tokens().find(|element| {
@@ -1179,7 +1228,9 @@ impl HirBuilderContext {
                 Some(HirPattern::Tuple(patterns))
             }
             _ => None,
-        }
+        };
+        self.recursion_depth -= 1;
+        result
     }
 
     /// Build literal for pattern matching
@@ -1320,6 +1371,19 @@ impl HirBuilderContext {
     /// Build expression
     #[allow(clippy::comparison_chain)]
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Check recursion depth to prevent infinite loops
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            self.errors.push(HirError {
+                message: format!(
+                    "Maximum recursion depth ({}) exceeded while building expression",
+                    MAX_RECURSION_DEPTH
+                ),
+                location: None,
+            });
+            return None;
+        }
+
+        self.recursion_depth += 1;
         let result = match node.kind() {
             SyntaxKind::LiteralExpr => self.build_literal_expr(node),
             SyntaxKind::IdentExpr => self.build_ident_expr(node),
@@ -1379,6 +1443,7 @@ impl HirBuilderContext {
             }
             _ => None,
         };
+        self.recursion_depth -= 1;
         result
     }
 
