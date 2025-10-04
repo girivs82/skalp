@@ -1080,7 +1080,6 @@ impl HirBuilderContext {
     /// Build pattern
     #[allow(
         clippy::only_used_in_recursion,
-        clippy::unnecessary_map_or,
         clippy::comparison_chain
     )]
     fn build_pattern(&mut self, node: &SyntaxNode) -> Option<HirPattern> {
@@ -1088,15 +1087,18 @@ impl HirBuilderContext {
             SyntaxKind::LiteralPattern => {
                 // Find literal token (it's a token, not a node)
                 let literal_token = node.children_with_tokens().find(|element| {
-                    element.as_token().map_or(false, |t| {
-                        matches!(
-                            t.kind(),
-                            SyntaxKind::IntLiteral
-                                | SyntaxKind::BinLiteral
-                                | SyntaxKind::HexLiteral
-                                | SyntaxKind::StringLiteral
-                        )
-                    })
+                    #[allow(unknown_lints, clippy::unnecessary_map_or)]
+                    {
+                        element.as_token().map_or(false, |t| {
+                            matches!(
+                                t.kind(),
+                                SyntaxKind::IntLiteral
+                                    | SyntaxKind::BinLiteral
+                                    | SyntaxKind::HexLiteral
+                                    | SyntaxKind::StringLiteral
+                            )
+                        })
+                    }
                 })?;
 
                 if let Some(token) = literal_token.as_token() {
@@ -1319,7 +1321,7 @@ impl HirBuilderContext {
     }
 
     /// Build expression
-    #[allow(clippy::unnecessary_map_or, clippy::comparison_chain)]
+    #[allow(clippy::comparison_chain)]
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         let result = match node.kind() {
             SyntaxKind::LiteralExpr => self.build_literal_expr(node),
@@ -2086,8 +2088,11 @@ impl HirBuilderContext {
         let expr_nodes_after_arrow: Vec<_> = node
             .children_with_tokens()
             .skip_while(|e| {
-                e.as_token()
-                    .is_none_or(|t| t.kind() != SyntaxKind::FatArrow)
+                #[allow(unknown_lints, clippy::unnecessary_map_or)]
+                {
+                    e.as_token()
+                        .map_or(true, |t| t.kind() != SyntaxKind::FatArrow)
+                }
             })
             .skip(1) // Skip the arrow itself
             .filter_map(|e| {
