@@ -76,7 +76,7 @@ jobs:
         run: cargo test -p skalp-frontend --test integration_tests --verbose
 
       - name: Run all unit tests
-        run: cargo test --lib --all-features --verbose
+        run: cargo test --workspace --lib --all-features --verbose
 
       - name: Run MIR tests
         run: cargo test -p skalp-mir --verbose
