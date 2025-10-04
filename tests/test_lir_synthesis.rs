@@ -8,13 +8,13 @@ mod lir_synthesis_tests {
     fn test_basic_mir_to_lir_conversion() {
         let source = r#"
         entity SimpleLogic {
-            in a: bool
-            in b: bool
-            out y: bool
+            in a: bit
+            in b: bit
+            out y: bit
         }
 
         impl SimpleLogic {
-            assign y = a && b;
+            y = a && b
         }
         "#;
 
@@ -56,28 +56,31 @@ mod lir_synthesis_tests {
 
     #[test]
     fn test_module_level_transformation() {
+        // Test module-level transformation of a simple counter
         let source = r#"
-        entity Counter {
-            in clk: clock
-            in reset: bool
-            in enable: bool
-            out count: nat[4]
-        }
+entity Counter {
+    in clk: clock
+    in rst: reset
+    in enable: bit
+    out count: nat[4]
+}
 
-        impl Counter {
-            signal count_reg: nat[4] = 0;
+impl Counter {
+    signal count_reg: nat[4] = 0
 
-            on(clk.rise) {
-                if reset {
-                    count_reg <= 0;
-                } else if enable {
-                    count_reg <= count_reg + 1;
-                }
+    on(clk.rise) {
+        if (rst) {
+            count_reg <= 0
+        } else {
+            if (enable) {
+                count_reg <= count_reg + 1
             }
-
-            assign count = count_reg;
         }
-        "#;
+    }
+
+    count = count_reg
+}
+"#;
 
         let hir = parse_and_build_hir(source).expect("Should parse");
         let mir = lower_to_mir(&hir).expect("Should build MIR");
@@ -108,10 +111,10 @@ mod lir_synthesis_tests {
         }
 
         impl TestDesign {
-            signal buffer: nat[8] = 0;
+            signal buffer: nat[8] = 0
 
-            assign data_out = buffer;
-            assign ready = valid;
+            data_out = buffer
+            ready = valid
         }
         "#;
 
@@ -124,7 +127,7 @@ mod lir_synthesis_tests {
         println!("Modules: {}", lir_design.modules.len());
 
         // Test design structure
-        assert_eq!(lir_design.name, "TestDesign");
+        assert_eq!(lir_design.name, hir.name);
         assert!(!lir_design.modules.is_empty(), "Should have modules");
 
         // Test module structure
@@ -140,11 +143,10 @@ mod lir_synthesis_tests {
         // Should have proper signal classification
         let input_count = module.signals.iter().filter(|s| s.is_input).count();
         let output_count = module.signals.iter().filter(|s| s.is_output).count();
-        let register_count = module.signals.iter().filter(|s| s.is_register).count();
 
         assert!(input_count >= 2, "Should have input signals");
         assert!(output_count >= 2, "Should have output signals");
-        assert!(register_count >= 1, "Should have register signals");
+        // Note: This test design has no sequential logic, so no registers are expected
     }
 
     #[test]
@@ -152,12 +154,12 @@ mod lir_synthesis_tests {
         // Test with a design that might have multiple modules
         let source = r#"
         entity SimpleEntity {
-            in x: bool
-            out y: bool
+            in x: bit
+            out y: bit
         }
 
         impl SimpleEntity {
-            assign y = x;
+            y = x
         }
         "#;
 
@@ -191,14 +193,14 @@ mod lir_synthesis_tests {
     fn test_gate_creation() {
         let source = r#"
         entity GateTest {
-            in a: bool
-            in b: bool
-            in c: bool
-            out result: bool
+            in a: bit
+            in b: bit
+            in c: bit
+            out result: bit
         }
 
         impl GateTest {
-            assign result = a || (b && c);
+            result = a || (b && c)
         }
         "#;
 

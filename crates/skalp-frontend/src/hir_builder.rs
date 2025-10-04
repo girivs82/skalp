@@ -627,6 +627,21 @@ impl HirBuilderContext {
                         statements.push(HirStatement::Flow(flow_stmt));
                     }
                 }
+                SyntaxKind::AssertStmt => {
+                    if let Some(assert_stmt) = self.build_assert_statement(&child) {
+                        statements.push(HirStatement::Assert(assert_stmt));
+                    }
+                }
+                SyntaxKind::PropertyStmt => {
+                    if let Some(property_stmt) = self.build_property_statement(&child) {
+                        statements.push(HirStatement::Property(property_stmt));
+                    }
+                }
+                SyntaxKind::CoverStmt => {
+                    if let Some(cover_stmt) = self.build_cover_statement(&child) {
+                        statements.push(HirStatement::Cover(cover_stmt));
+                    }
+                }
                 SyntaxKind::BlockStmt => {
                     let block_stmts = self.build_statements(&child);
                     statements.push(HirStatement::Block(block_stmts));
@@ -1005,6 +1020,11 @@ impl HirBuilderContext {
                         | SyntaxKind::UnaryExpr
                         | SyntaxKind::FieldExpr
                         | SyntaxKind::IndexExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::PathExpr
                 )
             })
             .collect();

@@ -119,7 +119,11 @@ impl TypeInference {
             for constraint in &constraints {
                 match constraint {
                     Constraint::Equal(t1, t2) => {
-                        if let Some(sub) = self.unify(t1, t2)? {
+                        // Apply current substitution to both sides
+                        let t1_sub = self.substitution.apply(t1);
+                        let t2_sub = self.substitution.apply(t2);
+
+                        if let Some(sub) = self.unify(&t1_sub, &t2_sub)? {
                             self.apply_substitution(sub);
                             changed = true;
                         }

@@ -12,12 +12,12 @@ mod assertion_tests {
         }
 
         impl TestModule {
-            signal counter: nat[8] = 0;
+            signal counter: nat[8] = 0
 
             on(clk.rise) {
-                counter <= counter + 1;
-                assert(counter < 255, "Counter overflow");
-                valid <= true;
+                counter <= counter + 1
+                assert(counter < 255, "Counter overflow")
+                valid <= 1
             }
         }
         "#;

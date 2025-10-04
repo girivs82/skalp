@@ -31,17 +31,30 @@ use anyhow::{Context, Result};
 
 /// Parse and build HIR directly from source
 pub fn parse_and_build_hir(source: &str) -> Result<Hir> {
-    // Parse source to syntax tree
-    let syntax_tree = parse::parse(source);
+    // Parse source to syntax tree with error reporting
+    let (syntax_tree, parse_errors) = parse::parse_with_errors(source);
+
+    // Check for parse errors
+    if !parse_errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Parsing failed with {} errors: {}",
+            parse_errors.len(),
+            parse_errors[0].message
+        ));
+    }
 
     // Build HIR from syntax tree
     let mut builder = hir_builder::HirBuilderContext::new();
     let hir = match builder.build(&syntax_tree) {
         Ok(hir) => hir,
         Err(errors) => {
+            let error_messages: Vec<String> = errors.iter()
+                .map(|e| e.message.clone())
+                .collect();
             return Err(anyhow::anyhow!(
-                "HIR building failed with {} errors",
-                errors.len()
+                "HIR building failed with {} errors:\n  {}",
+                errors.len(),
+                error_messages.join("\n  ")
             ));
         }
     };

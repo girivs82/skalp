@@ -40,14 +40,14 @@ fn main() {
     // 3. Setup Coverage
     let mut coverage = setup_coverage();
     println!("Coverage collection configured");
-    println!("  Goal: {:.0}%", coverage.config.goal);
+    println!("  Goal: {:.0}%", coverage.config().goal);
     println!();
 
     // 4. Create Testbench
     let mut tb = create_testbench();
-    println!("Testbench created: {}", tb.name);
-    println!("  Clock period: {}ns", tb.clock_period);
-    println!("  Timeout: {}ns", tb.timeout.unwrap_or(0));
+    println!("Testbench created: {}", tb.name());
+    println!("  Clock period: {}ns", tb.clock_period());
+    println!("  Timeout: {}ns", tb.timeout().unwrap_or(0));
     println!();
 
     // 5. Run Simulation
@@ -479,7 +479,7 @@ fn check_assertions() -> AssertionReport {
     checker.add_assertion(Assertion {
         id: "no_overflow".to_string(),
         kind: AssertionKind::Immediate(ImmediateAssertion {
-            condition: Expression::Literal(Value::Boolean(true)), // Simplified for example
+            condition: Expression::Literal(Value::Integer(1)), // Simplified for example
             timing: AssertionTiming::Always,
             action: FailureAction::Error,
         }),
@@ -495,7 +495,7 @@ fn check_assertions() -> AssertionReport {
     checker.add_assertion(Assertion {
         id: "no_underflow".to_string(),
         kind: AssertionKind::Immediate(ImmediateAssertion {
-            condition: Expression::Literal(Value::Boolean(true)), // Simplified for example
+            condition: Expression::Literal(Value::Integer(1)), // Simplified for example
             timing: AssertionTiming::Always,
             action: FailureAction::Error,
         }),
@@ -514,12 +514,12 @@ fn check_assertions() -> AssertionReport {
         kind: AssertionKind::Concurrent(ConcurrentAssertion {
             property: PropertyExpression::Implication {
                 antecedent: Box::new(PropertyExpression::Boolean(
-                    Expression::Literal(Value::Boolean(true)), // Simplified
+                    Expression::Literal(Value::Integer(1)), // Simplified
                 )),
                 consequent: Box::new(PropertyExpression::Delay {
                     cycles: 1,
                     property: Box::new(PropertyExpression::Boolean(
-                        Expression::Literal(Value::Boolean(true)), // Simplified
+                        Expression::Literal(Value::Integer(1)), // Simplified
                     )),
                 }),
             },
@@ -527,7 +527,7 @@ fn check_assertions() -> AssertionReport {
                 signal: "clk".to_string(),
                 edge: EdgeType::Rising,
             },
-            reset: Some(Expression::Literal(Value::Boolean(false))),
+            reset: Some(Expression::Literal(Value::Integer(0))),
             action: FailureAction::Error,
         }),
         location: SourceLocation {
@@ -544,7 +544,7 @@ fn check_assertions() -> AssertionReport {
         id: "cover_full".to_string(),
         kind: AssertionKind::Cover(CoverPoint {
             name: "full_condition".to_string(),
-            expression: Expression::Literal(Value::Boolean(false)), // Simplified
+            expression: Expression::Literal(Value::Integer(0)), // Simplified
             bins: vec![
                 CoverageBin {
                     name: "full_true".to_string(),

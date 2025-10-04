@@ -111,8 +111,9 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "// No combinational logic - empty kernel").unwrap();
         writeln!(self.output, "kernel void combinational_cone_0(").unwrap();
         self.indent += 1;
-        self.write_indented("device ModuleState* state [[buffer(0)]],\n");
-        self.write_indented("device Signals* signals [[buffer(1)]],\n");
+        self.write_indented("device const Inputs* inputs [[buffer(0)]],\n");
+        self.write_indented("device const Registers* registers [[buffer(1)]],\n");
+        self.write_indented("device Signals* signals [[buffer(2)]],\n");
         self.write_indented("uint tid [[thread_position_in_grid]]\n");
         self.indent -= 1;
         writeln!(self.output, ") {{").unwrap();

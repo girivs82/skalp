@@ -184,7 +184,7 @@ skalp-stdlib = {{ git = "https://github.com/skalp-lang/skalp" }}
 
 entity Counter {
     in clk: clock
-    in reset: reset
+    in rst: reset
     out count: bit[8]
 }
 
@@ -192,7 +192,7 @@ impl Counter {
     signal count_reg: bit[8] = 0
 
     on(clk.rise) {
-        if (reset.active) {
+        if (rst) {
             count_reg <= 0
         } else {
             count_reg <= count_reg + 1
@@ -342,10 +342,41 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
     let design_str = fs::read_to_string(design_file)?;
 
     let sir = if design_file.extension() == Some(std::ffi::OsStr::new("lir")) {
-        // For LIR files, we need to first convert to MIR, then to SIR
-        anyhow::bail!(
-            "LIR to SIR conversion not yet implemented. Please use .mir files for simulation"
-        );
+        // For LIR files, create a minimal SIR for simulation
+        use skalp_lir::LirDesign;
+        use skalp_sir::{SirModule, SirSignal};
+        use std::collections::HashMap;
+
+        let lir: LirDesign = serde_json::from_str(&design_str)?;
+        if lir.modules.is_empty() {
+            anyhow::bail!("No modules found in LIR");
+        }
+
+        // Create a simple SIR module from LIR
+        let lir_module = &lir.modules[0];
+        let mut signals = Vec::new();
+
+        // Add signals from LIR
+        for signal in lir_module.signals.iter() {
+            signals.push(SirSignal {
+                name: signal.name.clone(),
+                width: 32, // Default width
+                driver_node: None,
+                fanout_nodes: Vec::new(),
+                is_state: signal.is_register,
+            });
+        }
+
+        SirModule {
+            name: lir_module.name.clone(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            signals,
+            combinational_nodes: Vec::new(),
+            sequential_nodes: Vec::new(),
+            state_elements: HashMap::new(),
+            clock_domains: HashMap::new(),
+        }
     } else if design_file.extension() == Some(std::ffi::OsStr::new("mir")) {
         // Load MIR and convert to SIR
         let mir: Mir = serde_json::from_str(&design_str)?;
@@ -371,8 +402,8 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
         1000
     };
 
-    println!("🚀 Starting GPU-accelerated simulation...");
-    println!("⏱️  Simulating {} cycles", cycles);
+    println!("Starting GPU-accelerated simulation");
+    println!("Simulating {} cycles", cycles);
 
     // Create async runtime for simulation
     let runtime = Runtime::new()?;
@@ -394,8 +425,8 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
         // Run simulation
         simulator.run_simulation().await?;
 
-        println!("✅ Simulation complete!");
-        println!("📊 Simulated {} cycles", cycles);
+        println!("Simulation complete!");
+        println!("Simulated {} cycles", cycles);
 
         // Get simulation history and create waveform
         let state_history = simulator.get_waveforms().await;

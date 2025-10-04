@@ -413,11 +413,11 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn step(&mut self) -> SimulationResult<SimulationState> {
-        // Execute combinational logic first
-        self.execute_combinational().await?;
-
-        // Execute sequential logic (depends on combinational results)
+        // Execute sequential logic first (registers update on clock edge)
         self.execute_sequential().await?;
+
+        // Then execute combinational logic (propagates from updated register values)
+        self.execute_combinational().await?;
 
         self.current_cycle += 1;
 

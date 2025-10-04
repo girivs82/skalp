@@ -89,8 +89,20 @@ jobs:
       - name: Run verification tests
         run: cargo test -p skalp-verify --verbose
 
+      - name: Run CLI integration tests
+        run: cargo test --test cli_integration --verbose
+
+      - name: Run E2E example tests
+        run: cargo test --test e2e_examples_test --verbose
+
+      - name: Run all other integration tests
+        run: cargo test --workspace --tests --verbose
+
       - name: Run doc tests
         run: cargo test --doc --all-features --verbose
+
+      - name: Run all tests (comprehensive)
+        run: cargo test --workspace --all-targets --all-features --verbose
 
   coverage:
     name: Code Coverage

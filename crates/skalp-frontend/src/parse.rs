@@ -636,8 +636,12 @@ impl<'a> ParseState<'a> {
             self.finish_node();
         }
 
-        // Expect arrow (->)
-        self.expect(SyntaxKind::Arrow);
+        // Expect arrow (-> or =>)
+        if !self.at(SyntaxKind::Arrow) && !self.at(SyntaxKind::FatArrow) {
+            self.error("Expected '->' or '=>' after pattern");
+        } else {
+            self.bump(); // consume arrow
+        }
 
         // Parse arm body (can be statement(s) or block)
         if self.at(SyntaxKind::LBrace) {
@@ -817,8 +821,8 @@ impl<'a> ParseState<'a> {
         // Expect closing parenthesis
         self.expect(SyntaxKind::RParen);
 
-        // Expect semicolon
-        self.expect(SyntaxKind::Semicolon);
+        // Optional semicolon
+        self.consume_semicolon();
 
         self.finish_node();
     }

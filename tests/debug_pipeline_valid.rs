@@ -86,9 +86,14 @@ mod debug_pipeline_valid_tests {
         );
 
         // Release reset and wait for counter to reach 8
-        // From debug: counter reaches 7 at cycle 15, so it reaches 8 at cycle 17
+        // Testbench applies vector at cycle X, then steps twice (rising+falling edge)
+        // The output is checked after the first step (at clock=1)
+        // counter increments at odd cycles when clock goes high
+        // counter: cycle 3->0, 5->1, 7->2, 9->3, 11->4, 13->5, 15->6, 17->7, 19->8, 21->9
+        // Vector at cycle 18: step to 19 (counter becomes 9), check output
+        // So we expect valid=1 starting at vector cycle 18
         for cycle in 1..12 {
-            let expected_valid = if cycle >= 9 { 1 } else { 0 }; // counter reaches 8 at GPU cycle 17 = testbench cycle 34
+            let expected_valid = if cycle * 2 >= 18 { 1 } else { 0 };
             testbench.add_test_vector(
                 TestVectorBuilder::new(cycle * 2)
                     .with_input("rst", vec![0])
@@ -96,14 +101,6 @@ mod debug_pipeline_valid_tests {
                     .build(),
             );
         }
-
-        // Add test at the correct timing where counter=8
-        testbench.add_test_vector(
-            TestVectorBuilder::new(34) // GPU cycle 17
-                .with_input("rst", vec![0])
-                .with_expected_output("valid", vec![1])
-                .build(),
-        );
 
         // Run test
         let _results = testbench.run_test().await.expect("Failed to run test");

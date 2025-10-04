@@ -71,7 +71,7 @@ impl Default for CoverageConfig {
 #[derive(Debug, Clone)]
 pub struct StatementCoverage {
     /// Total statements
-    total: usize,
+    pub total: usize,
 
     /// Covered statements
     covered: HashSet<StatementId>,
@@ -104,7 +104,7 @@ pub struct ConditionCoverage {
 #[derive(Debug, Clone)]
 pub struct FSMCoverage {
     /// FSMs in the design
-    fsms: Vec<FSM>,
+    pub fsms: Vec<FSM>,
 
     /// Covered states
     covered_states: HashSet<(FsmId, StateId)>,
@@ -117,7 +117,7 @@ pub struct FSMCoverage {
 #[derive(Debug, Clone)]
 pub struct ToggleCoverage {
     /// Signals to track
-    signals: Vec<Signal>,
+    pub signals: Vec<Signal>,
 
     /// Toggle counts (0->1 and 1->0)
     toggles: HashMap<SignalId, ToggleCount>,
@@ -127,7 +127,7 @@ pub struct ToggleCoverage {
 #[derive(Debug, Clone)]
 pub struct CrossCoverage {
     /// Cross coverage points
-    cross_points: Vec<CrossPoint>,
+    pub cross_points: Vec<CrossPoint>,
 
     /// Covered combinations
     covered: HashSet<CrossValue>,
@@ -293,6 +293,11 @@ impl Coverage {
             cross: CrossCoverage::new(),
             config,
         }
+    }
+
+    /// Get coverage configuration
+    pub fn config(&self) -> &CoverageConfig {
+        &self.config
     }
 
     /// Record statement execution

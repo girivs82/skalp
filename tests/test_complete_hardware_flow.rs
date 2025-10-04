@@ -18,35 +18,36 @@ mod complete_hardware_flow_tests {
         println!("\n1️⃣ Parsing SKALP source code and building HIR...");
         let skalp_source = r#"
             entity Counter {
-                inputs {
-                    clk: clock,
-                    reset: logic,
-                    enable: logic,
-                }
-                outputs {
-                    count: logic[31:0],
-                    overflow: logic,
-                }
+                in clk: clock
+                in rst: reset
+                in enable: bit
+                out count: nat[32]
+                out overflow: bit
+            }
 
-                on(reset.active) {
-                    counter <= 0;
-                    overflow <= false;
-                }
+            impl Counter {
+                signal counter: nat[32] = 0
+                signal overflow_reg: bit = 0
 
                 on(clk.rise) {
-                    if enable {
-                        if counter == 0xFFFFFFFF {
-                            counter <= 0;
-                            overflow <= true;
-                        } else {
-                            counter <= counter + 1;
-                            overflow <= false;
+                    if (rst) {
+                        counter <= 0
+                        overflow_reg <= 0
+                    } else {
+                        if (enable) {
+                            if (counter == 0xFFFFFFFF) {
+                                counter <= 0
+                                overflow_reg <= 1
+                            } else {
+                                counter <= counter + 1
+                                overflow_reg <= 0
+                            }
                         }
                     }
                 }
 
-                // Continuous assignment for output
-                count = counter;
+                count = counter
+                overflow = overflow_reg
             }
         "#;
 
@@ -86,7 +87,7 @@ mod complete_hardware_flow_tests {
 
         // Add input/output delays
         constraint_manager.add_timing_constraint(TimingConstraint::InputDelay {
-            port_name: "reset".to_string(),
+            port_name: "rst".to_string(),
             delay_ns: 1.0,
             clock_name: "clk".to_string(),
         });

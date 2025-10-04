@@ -167,6 +167,21 @@ impl Testbench {
             cycles: sim_time / self.clock_period,
         }
     }
+
+    /// Get the testbench name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the clock period in nanoseconds
+    pub fn clock_period(&self) -> u64 {
+        self.clock_period
+    }
+
+    /// Get the timeout in nanoseconds
+    pub fn timeout(&self) -> Option<u64> {
+        self.timeout
+    }
 }
 
 /// Task scheduler

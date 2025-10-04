@@ -75,6 +75,16 @@ The project uses GitHub Actions with multiple jobs:
 
 ## Best Practices
 
+### General Philosophy
+**ALWAYS do it the right way: no shortcuts, no workarounds, no simplifications. Don't worry about token usage.**
+
+When fixing issues:
+- Fix the root cause, not the symptoms
+- Don't ignore tests or add workarounds - fix them properly
+- Don't simplify tests to make them pass - fix the implementation
+- Take the time to understand and properly resolve issues
+- Token usage is not a constraint - quality and correctness are paramount
+
 ### Commits
 - Run `./scripts/ci_check.sh` before every push
 - Use conventional commit messages
@@ -85,6 +95,7 @@ The project uses GitHub Actions with multiple jobs:
 - Write tests for new features
 - Ensure tests pass on all platforms
 - Use `#[cfg(test)]` and `#[cfg(target_os = "...")]` appropriately
+- **Never ignore or skip tests** - fix them properly instead
 
 ### Dependencies
 - Prefer stable, well-maintained crates
