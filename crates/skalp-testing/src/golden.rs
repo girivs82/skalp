@@ -57,15 +57,37 @@ impl GoldenTest {
     /// `tests/golden/alu_basic.sv`.
     pub fn new(name: &str) -> Self {
         // Determine the golden directory relative to workspace root
-        let manifest_dir =
-            env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
-        let workspace_root = PathBuf::from(manifest_dir)
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("Should be in workspace")
-            .to_path_buf();
+        // Use CARGO_WORKSPACE_DIR if available (Rust 1.83+), otherwise use CARGO_MANIFEST_DIR
+        let workspace_root = env::var("CARGO_WORKSPACE_DIR")
+            .unwrap_or_else(|_| {
+                // Fallback: traverse up from manifest dir to find Cargo.toml with [workspace]
+                let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+                    .expect("CARGO_MANIFEST_DIR should be set");
+                let mut current = PathBuf::from(&manifest_dir);
 
-        let golden_dir = workspace_root.join("tests").join("golden");
+                // Check current directory and all parents
+                loop {
+                    let cargo_toml = current.join("Cargo.toml");
+                    if cargo_toml.exists() {
+                        if let Ok(contents) = fs::read_to_string(&cargo_toml) {
+                            if contents.contains("[workspace]") {
+                                return current.to_string_lossy().to_string();
+                            }
+                        }
+                    }
+
+                    // Move to parent directory
+                    if let Some(parent) = current.parent() {
+                        current = parent.to_path_buf();
+                    } else {
+                        break;
+                    }
+                }
+
+                panic!("Could not find workspace root (started from {})", manifest_dir)
+            });
+
+        let golden_dir = PathBuf::from(workspace_root).join("tests").join("golden");
 
         // Check if we should update golden files
         let update_mode = env::var("SKALP_UPDATE_GOLDEN")
