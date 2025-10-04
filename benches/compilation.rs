@@ -64,9 +64,9 @@ fn benchmark_optimization_passes(c: &mut Criterion) {
             // Simulate dead code elimination
             let mut live_blocks = vec![true; 1000];
             let mut removed = 0;
-            for i in 0..1000 {
+            for (i, block) in live_blocks.iter_mut().enumerate() {
                 if i % 3 == 0 {
-                    live_blocks[i] = false;
+                    *block = false;
                     removed += 1;
                 }
             }
@@ -103,7 +103,7 @@ fn benchmark_end_to_end(c: &mut Criterion) {
                     // Simulate code generation
                     let mut output = String::new();
                     for i in 0..20 {
-                        output.push_str(&format!("wire sig_{};\n", i));
+                        output.push_str(&format!("wire sig_{i};\n"));
                     }
                     black_box(output.len())
                 } else {

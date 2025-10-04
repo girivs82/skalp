@@ -44,11 +44,13 @@ fn assert_compiles(source: &str) -> String {
 }
 
 /// Try to compile, but don't fail if there are known limitations
+#[allow(dead_code)]
 fn try_compile(source: &str) -> Option<String> {
     compile_to_verilog(source).ok()
 }
 
 /// Assert that parsing and HIR building work (more lenient than full compilation)
+#[allow(dead_code)]
 fn assert_parses_and_builds_hir(source: &str) {
     // Parse
     let tree = parse(source);
@@ -58,6 +60,7 @@ fn assert_parses_and_builds_hir(source: &str) {
 }
 
 /// Assert that parsing works (most lenient - just verify no parse errors)
+#[allow(dead_code)]
 fn assert_parses(source: &str) {
     let _ = parse(source);
 }

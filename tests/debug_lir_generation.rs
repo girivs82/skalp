@@ -35,7 +35,7 @@ mod debug_lir_tests {
             }
 
             println!("Assignments ({}):", module.assignments.len());
-            for (i, assign) in module.assignments.iter().enumerate() {
+            for (i, _assign) in module.assignments.iter().enumerate() {
                 println!("  Assignment {}: <lhs> = <rhs>", i);
                 // Note: ContinuousAssign has 'lhs' and 'rhs' fields, not 'target'
             }

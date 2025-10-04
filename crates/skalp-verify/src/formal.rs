@@ -14,17 +14,14 @@ struct FormalEngineInner {
 
     /// Z3 context
     #[borrows(config_z3)]
-    #[covariant]
     context: Context,
 
     /// Solver instance
     #[borrows(context)]
-    #[covariant]
     solver: Solver<'this>,
 
     /// Variable mapping
     #[borrows(context)]
-    #[not_covariant]
     variables: HashMap<String, Dynamic<'this>>,
 }
 

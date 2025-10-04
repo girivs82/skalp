@@ -41,8 +41,8 @@ fn benchmark_gpu_vs_cpu(c: &mut Criterion) {
 
                     for cycle in 0..100 {
                         // Parallel evaluation (simulated)
-                        for i in 0..chunks {
-                            results[i] = black_box((i as u32 * cycle) % 256);
+                        for (i, result) in results.iter_mut().enumerate().take(chunks) {
+                            *result = black_box((i as u32 * cycle) % 256);
                         }
                     }
                     black_box(results[0])

@@ -11,6 +11,7 @@ mod pipelined_processor_tests {
     use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn test_pipelined_processor_gpu() {
         let source = r#"
         entity PipelinedProcessor {
@@ -301,6 +302,7 @@ mod pipelined_processor_tests {
         println!("\n✅ Pipelined processor GPU simulation passed!");
     }
 
+    #[allow(dead_code)]
     fn find_binary_operations(statements: &[Statement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {
@@ -385,6 +387,7 @@ mod pipelined_processor_tests {
         }
     }
 
+    #[allow(dead_code)]
     fn check_input_assignments(statements: &[Statement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {
