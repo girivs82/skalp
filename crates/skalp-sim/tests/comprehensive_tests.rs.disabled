@@ -5,7 +5,6 @@
 
 use skalp_mir::*;
 use skalp_sim::*;
-use skalp_sir::mir_to_sir::MirToSir;
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
 
