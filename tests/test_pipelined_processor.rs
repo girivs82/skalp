@@ -309,6 +309,7 @@ mod pipelined_processor_tests {
     }
 
     #[allow(dead_code)]
+    #[cfg(target_os = "macos")]
     fn find_binary_operations(statements: &[Statement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {
@@ -347,6 +348,7 @@ mod pipelined_processor_tests {
     }
 
     #[allow(dead_code)]
+    #[cfg(target_os = "macos")]
     fn check_pipeline_assignments(statements: &[Statement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {
@@ -395,6 +397,7 @@ mod pipelined_processor_tests {
     }
 
     #[allow(dead_code)]
+    #[cfg(target_os = "macos")]
     fn check_input_assignments(statements: &[Statement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {
@@ -440,6 +443,7 @@ mod pipelined_processor_tests {
     }
 
     #[allow(dead_code)]
+    #[cfg(target_os = "macos")]
     fn check_hir_assignments(statements: &[HirStatement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {

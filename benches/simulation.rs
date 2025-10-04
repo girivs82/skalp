@@ -21,8 +21,8 @@ fn benchmark_gpu_vs_cpu(c: &mut Criterion) {
                 // Simulate CPU-based evaluation
                 let mut state = vec![0u32; size];
                 for cycle in 0..100 {
-                    for i in 0..size {
-                        state[i] = black_box((state[i] + cycle) % 256);
+                    for item in state.iter_mut().take(size) {
+                        *item = black_box((*item + cycle) % 256);
                     }
                 }
                 black_box(state[0])
