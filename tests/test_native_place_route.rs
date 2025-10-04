@@ -1,6 +1,4 @@
-// TODO: This test module uses an outdated API and needs to be updated
 #[cfg(test)]
-#[cfg(feature = "disabled_outdated_test")]
 mod native_place_route_tests {
     use skalp_lir::{Gate, GateType, LirDesign, LirModule, LirSignal, Net};
     use skalp_place_route::{
@@ -218,7 +216,7 @@ mod native_place_route_tests {
 
         // Validate routing results
         assert!(routing_result.congestion >= 0.0);
-        assert!(routing_result.wirelength >= 0);
+        // wirelength is always non-negative (unsigned type)
 
         println!("✅ Routing algorithms working correctly");
     }
@@ -556,7 +554,7 @@ mod native_place_route_tests {
         // Validate complete flow
         assert!(placement_result.placements.len() > 0);
         assert!(placement_result.utilization > 0.0);
-        assert!(routing_result.routes.len() >= 0);
+        // routes.len() is always non-negative (unsigned type)
         assert!(bitstream.data.len() > 0);
 
         // Calculate flow statistics
@@ -636,10 +634,7 @@ mod native_place_route_tests {
             routing_result.congestion <= 1.5,
             "Congestion should be manageable"
         );
-        assert!(
-            routing_result.wirelength >= 0,
-            "Should have non-negative wirelength"
-        );
+        // wirelength is always non-negative (unsigned type)
 
         // Test different routing algorithms
         let algorithms = vec![
@@ -1267,7 +1262,7 @@ mod native_place_route_tests {
         println!("   🔧 Running VTR place & route flow");
         let design = create_test_counter_design();
 
-        let mut placer = Placer::new(vtr_device.clone());
+        let mut placer = Placer::new(PlacerConfig::default(), vtr_device.clone());
         let placement_result = placer.place(&design).expect("VTR placement should succeed");
         assert!(
             placement_result.placements.len() > 0,
@@ -1278,7 +1273,7 @@ mod native_place_route_tests {
             "VTR should have positive utilization"
         );
 
-        let mut router = Router::new(vtr_device.clone());
+        let mut router = Router::new(RouterConfig::default(), vtr_device.clone());
         let routing_result = router
             .route(&design, &placement_result)
             .expect("VTR routing should succeed");
@@ -1291,11 +1286,13 @@ mod native_place_route_tests {
         let timing_config = TimingConfig {
             target_frequency: 350.0e6, // 350 MHz target
             clock_uncertainty: 0.1e-9,
-            input_delay: 2.0e-9,
-            output_delay: 2.0e-9,
+            setup_margin: 0.1e-9,
+            hold_margin: 0.05e-9,
+            multicycle_analysis: true,
+            max_critical_paths: 100,
         };
 
-        let mut timing_analyzer = TimingAnalyzer::new(vtr_device.clone(), timing_config);
+        let mut timing_analyzer = TimingAnalyzer::new(timing_config, vtr_device.clone());
         let timing_report = timing_analyzer
             .analyze_timing(&design, &placement_result, &routing_result)
             .expect("VTR timing analysis should succeed");
@@ -1315,14 +1312,14 @@ mod native_place_route_tests {
         );
 
         // Test VTR bitstream generation
-        let bitstream_config = BitstreamConfig {
+        let _bitstream_config = BitstreamConfig {
             format: BitstreamFormat::VtrBitstream,
             include_routing: true,
             compress: false,
             timing_annotations: true,
         };
 
-        let bitstream_generator = BitstreamGenerator::new(vtr_device.clone(), bitstream_config);
+        let bitstream_generator = BitstreamGenerator::new(vtr_device.clone());
         let bitstream = bitstream_generator
             .generate(&placement_result, &routing_result)
             .expect("VTR bitstream generation should succeed");
@@ -1431,7 +1428,7 @@ mod native_place_route_tests {
         println!("   🔧 Running OpenFPGA place & route flow");
         let design = create_test_counter_design();
 
-        let mut placer = Placer::new(openfpga_k6.clone());
+        let mut placer = Placer::new(PlacerConfig::default(), openfpga_k6.clone());
         let placement_result = placer
             .place(&design)
             .expect("OpenFPGA placement should succeed");
@@ -1444,7 +1441,7 @@ mod native_place_route_tests {
             "OpenFPGA should have positive utilization"
         );
 
-        let mut router = Router::new(openfpga_k6.clone());
+        let mut router = Router::new(RouterConfig::default(), openfpga_k6.clone());
         let routing_result = router
             .route(&design, &placement_result)
             .expect("OpenFPGA routing should succeed");
@@ -1457,11 +1454,13 @@ mod native_place_route_tests {
         let timing_config = TimingConfig {
             target_frequency: 250.0e6, // 250 MHz target for academic device
             clock_uncertainty: 0.2e-9,
-            input_delay: 3.0e-9,
-            output_delay: 3.0e-9,
+            setup_margin: 0.15e-9,
+            hold_margin: 0.1e-9,
+            multicycle_analysis: true,
+            max_critical_paths: 100,
         };
 
-        let mut timing_analyzer = TimingAnalyzer::new(openfpga_k6.clone(), timing_config);
+        let mut timing_analyzer = TimingAnalyzer::new(timing_config, openfpga_k6.clone());
         let timing_report = timing_analyzer
             .analyze_timing(&design, &placement_result, &routing_result)
             .expect("OpenFPGA timing analysis should succeed");
@@ -1481,14 +1480,14 @@ mod native_place_route_tests {
         );
 
         // Test OpenFPGA native bitstream generation
-        let bitstream_config = BitstreamConfig {
+        let _bitstream_config = BitstreamConfig {
             format: BitstreamFormat::OpenFpgaBitstream,
             include_routing: true,
             compress: false,
             timing_annotations: true,
         };
 
-        let bitstream_generator = BitstreamGenerator::new(openfpga_k6.clone(), bitstream_config);
+        let bitstream_generator = BitstreamGenerator::new(openfpga_k6.clone());
         let bitstream = bitstream_generator
             .generate(&placement_result, &routing_result)
             .expect("OpenFPGA bitstream generation should succeed");
@@ -1538,7 +1537,7 @@ mod native_place_route_tests {
         );
 
         // Test OpenFPGA VTR-compatible bitstream generation
-        let vtr_bitstream_config = BitstreamConfig {
+        let _vtr_bitstream_config = BitstreamConfig {
             format: BitstreamFormat::VtrBitstream,
             include_routing: true,
             compress: false,
@@ -1546,7 +1545,7 @@ mod native_place_route_tests {
         };
 
         let vtr_bitstream_generator =
-            BitstreamGenerator::new(openfpga_k6.clone(), vtr_bitstream_config);
+            BitstreamGenerator::new(openfpga_k6.clone());
         let vtr_bitstream = vtr_bitstream_generator
             .generate(&placement_result, &routing_result)
             .expect("OpenFPGA VTR bitstream generation should succeed");
