@@ -1544,8 +1544,7 @@ mod native_place_route_tests {
             timing_annotations: false,
         };
 
-        let vtr_bitstream_generator =
-            BitstreamGenerator::new(openfpga_k6.clone());
+        let vtr_bitstream_generator = BitstreamGenerator::new(openfpga_k6.clone());
         let vtr_bitstream = vtr_bitstream_generator
             .generate(&placement_result, &routing_result)
             .expect("OpenFPGA VTR bitstream generation should succeed");
