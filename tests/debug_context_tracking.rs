@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod context_debug_tests {
+    #[cfg(target_os = "macos")]
     use skalp_frontend::parse_and_build_hir;
+    #[cfg(target_os = "macos")]
     use skalp_mir::{MirCompiler, OptimizationLevel};
+    #[cfg(target_os = "macos")]
     use skalp_sir::convert_mir_to_sir;
 
     #[test]
