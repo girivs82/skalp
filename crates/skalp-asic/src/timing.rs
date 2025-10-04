@@ -230,8 +230,7 @@ pub struct StaticTimingAnalyzer {
 }
 
 /// Timing library with cell models
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TimingLibrary {
     /// Cell timing models
     pub cells: HashMap<String, CellTimingModel>,

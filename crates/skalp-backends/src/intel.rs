@@ -353,8 +353,7 @@ impl IntelBackend {
             .join(format!("{}.pow.summary", project_name));
 
         if power_report.exists() {
-            let content =
-                fs::read_to_string(&power_report).map_err(BackendError::IoError)?;
+            let content = fs::read_to_string(&power_report).map_err(BackendError::IoError)?;
 
             // Extract total power
             if let Some(power_line) = content

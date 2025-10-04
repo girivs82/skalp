@@ -223,10 +223,7 @@ impl RoutingGuide {
 
     /// Add manual route constraint
     pub fn add_constraint(&mut self, net: String, constraint: RouteConstraint) {
-        self.manual_routes
-            .entry(net)
-            .or_default()
-            .push(constraint);
+        self.manual_routes.entry(net).or_default().push(constraint);
     }
 
     /// Add routing blockage
@@ -243,7 +240,9 @@ impl RoutingGuide {
     pub fn is_blocked(&self, x: f64, y: f64, layer: usize) -> bool {
         for blockage in &self.blockages {
             if blockage.layers.contains(&layer) && self.in_region(x, y, &blockage.region) {
-                if let BlockageType::Hard = blockage.blockage_type { return true }
+                if let BlockageType::Hard = blockage.blockage_type {
+                    return true;
+                }
             }
         }
         false
@@ -256,7 +255,9 @@ impl RoutingGuide {
         // Check blockages
         for blockage in &self.blockages {
             if blockage.layers.contains(&layer) && self.in_region(x, y, &blockage.region) {
-                if let BlockageType::Soft { penalty: p } = &blockage.blockage_type { penalty *= p }
+                if let BlockageType::Soft { penalty: p } = &blockage.blockage_type {
+                    penalty *= p
+                }
             }
         }
 

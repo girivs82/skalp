@@ -479,9 +479,7 @@ impl<'a> MetalShaderGenerator<'a> {
                     ClockEdge::Falling => {
                         format!("inputs->{} == 0", clock_input.name)
                     }
-                    ClockEdge::Both => {
-                        "true".to_string()
-                    }
+                    ClockEdge::Both => "true".to_string(),
                 };
 
                 // Note: Don't check clock value here since GPU runtime already ensures this kernel
@@ -600,7 +598,6 @@ impl<'a> MetalShaderGenerator<'a> {
             sorted
         }
     }
-
 
     fn get_metal_type_name(&self, width: usize) -> &str {
         match width {

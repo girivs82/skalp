@@ -276,8 +276,7 @@ pub enum ProcessCorner {
 }
 
 /// Design rules
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DesignRules {
     /// Max fanout
     pub max_fanout: Option<f64>,
@@ -1006,4 +1005,3 @@ impl Default for OperatingConditions {
         }
     }
 }
-

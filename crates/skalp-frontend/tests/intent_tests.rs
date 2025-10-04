@@ -17,7 +17,7 @@ fn test_basic_intent_declaration() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find intent declaration
-    
+
     fn find_intent_decl(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentDecl {
             return true;
@@ -33,7 +33,7 @@ fn test_basic_intent_declaration() {
     assert!(found_intent, "Intent declaration not found in parsed tree");
 
     // Should find intent constraints
-    
+
     fn find_constraints(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentConstraintList {
             return true;
@@ -78,7 +78,7 @@ fn test_intent_for_entity() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse intent with 'for' clause
-    
+
     fn find_intent(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentDecl {
             return true;
@@ -119,7 +119,7 @@ fn test_optimization_intents() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should parse multiple intents with different optimization goals
-    
+
     fn count_intents(node: &skalp_frontend::syntax::SyntaxNode) -> usize {
         let mut count = 0;
         if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentDecl {
@@ -151,7 +151,7 @@ fn test_complex_intent_expressions() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should handle complex constraint expressions with units and operators
-    
+
     fn check_constraints(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::IntentConstraint {
             return true;

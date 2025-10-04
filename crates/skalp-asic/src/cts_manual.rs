@@ -3,10 +3,7 @@
 //! Interactive clock tree synthesis with manual buffer insertion
 
 use crate::cts::{BufferStrategy as CtsBufferStrategy, ClockSpecification as CtsClockSpec};
-use crate::cts::{
-    ClockSource, ClockSpec, ClockTopology, ClockTree,
-    ClockTreeSynthesizer,
-};
+use crate::cts::{ClockSource, ClockSpec, ClockTopology, ClockTree, ClockTreeSynthesizer};
 use crate::placement::Placement;
 use crate::routing::{CongestionMap, RoutingResult};
 use crate::AsicError;

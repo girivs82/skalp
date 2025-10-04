@@ -648,7 +648,8 @@ impl BitstreamGenerator {
                 "    <max_frequency>{:.1}</max_frequency>\n",
                 self.device
                     .clock_resources
-                    .clock_domains.first()
+                    .clock_domains
+                    .first()
                     .map(|cd| cd.max_frequency / 1e6)
                     .unwrap_or(0.0)
             )); // MHz

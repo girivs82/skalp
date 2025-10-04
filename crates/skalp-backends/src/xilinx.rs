@@ -258,8 +258,7 @@ impl XilinxBackend {
         // Parse timing report
         let timing_report = output_dir.join("timing.rpt");
         if timing_report.exists() {
-            let content =
-                fs::read_to_string(&timing_report).map_err(BackendError::IoError)?;
+            let content = fs::read_to_string(&timing_report).map_err(BackendError::IoError)?;
 
             // Extract max frequency (simplified parsing)
             if let Some(wns_line) = content.lines().find(|l| l.contains("WNS(ns)")) {
@@ -277,8 +276,7 @@ impl XilinxBackend {
         // Parse power report
         let power_report = output_dir.join("power.rpt");
         if power_report.exists() {
-            let content =
-                fs::read_to_string(&power_report).map_err(BackendError::IoError)?;
+            let content = fs::read_to_string(&power_report).map_err(BackendError::IoError)?;
 
             // Extract total power (simplified parsing)
             if let Some(power_line) = content.lines().find(|l| l.contains("Total On-Chip Power")) {

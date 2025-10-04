@@ -689,7 +689,9 @@ fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
 fn is_register(signal: &skalp_mir::Signal, module: &Module) -> bool {
     // A signal is a register if it's assigned in any sequential process
     for process in &module.processes {
-        if process.kind == ProcessKind::Sequential && is_signal_assigned_in_block(&signal.id, &process.body) {
+        if process.kind == ProcessKind::Sequential
+            && is_signal_assigned_in_block(&signal.id, &process.body)
+        {
             return true;
         }
     }

@@ -269,8 +269,8 @@ impl ConstraintManager {
             floorplan: Option<Vec<FloorplanConstraint>>,
         }
 
-        let constraints: SkalpConstraints = serde_json::from_str(content)
-            .map_err(crate::BackendError::SerializationError)?;
+        let constraints: SkalpConstraints =
+            serde_json::from_str(content).map_err(crate::BackendError::SerializationError)?;
 
         if let Some(timing) = constraints.timing {
             self.timing_constraints.extend(timing);

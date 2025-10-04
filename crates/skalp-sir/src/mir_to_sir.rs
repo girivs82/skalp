@@ -29,8 +29,10 @@ struct MirToSirConverter<'a> {
     sir: &'a mut SirModule,
     mir: &'a Module,
     node_counter: usize,
-    #[allow(dead_code)]    signal_map: HashMap<String, String>,
-    #[allow(dead_code)]    conditional_contexts: HashMap<usize, HashMap<String, usize>>,
+    #[allow(dead_code)]
+    signal_map: HashMap<String, String>,
+    #[allow(dead_code)]
+    conditional_contexts: HashMap<usize, HashMap<String, usize>>,
 }
 
 impl<'a> MirToSirConverter<'a> {

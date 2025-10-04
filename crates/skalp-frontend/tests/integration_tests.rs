@@ -166,7 +166,7 @@ fn test_match_expression_parsing() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find the match statement in the syntax tree
-    
+
     fn find_match_stmt(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::MatchStmt {
             return true;
@@ -256,7 +256,7 @@ fn test_flow_block_parsing() {
     assert_eq!(tree.kind(), skalp_frontend::syntax::SyntaxKind::SourceFile);
 
     // Should find the flow statement in the syntax tree
-    
+
     fn find_flow_stmt(node: &skalp_frontend::syntax::SyntaxNode) -> bool {
         if node.kind() == skalp_frontend::syntax::SyntaxKind::FlowStmt {
             return true;

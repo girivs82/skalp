@@ -369,7 +369,6 @@ pub struct OptimizationPipeline {
     passes: Vec<Box<dyn OptimizationPass>>,
 }
 
-
 impl OptimizationPipeline {
     /// Create a new optimization pipeline
     pub fn new() -> Self {
