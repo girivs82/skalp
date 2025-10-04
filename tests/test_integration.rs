@@ -48,11 +48,7 @@ mod integration_tests {
 
         // Convert to SIR
         let sir = convert_mir_to_sir(&mir.modules[0]);
-        assert_eq!(
-            sir.name,
-            mir.modules[0].name,
-            "Module names should match"
-        );
+        assert_eq!(sir.name, mir.modules[0].name, "Module names should match");
 
         // Generate SystemVerilog
         let sv_code =
@@ -135,7 +131,10 @@ mod integration_tests {
         // Verify we can get waveforms (indicates simulation captured state correctly)
         let states = sim.get_waveforms().await;
         assert!(!states.is_empty(), "Should have captured simulation states");
-        assert!(states.len() >= 16, "Should have at least 16 cycles of state");
+        assert!(
+            states.len() >= 16,
+            "Should have at least 16 cycles of state"
+        );
     }
 
     #[test]
