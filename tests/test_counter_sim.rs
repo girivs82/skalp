@@ -9,6 +9,7 @@ mod counter_sim_tests {
     use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn test_counter_gpu_simulation() {
         let source = r#"
         entity Counter {

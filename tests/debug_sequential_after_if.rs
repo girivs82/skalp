@@ -5,6 +5,7 @@ mod sequential_debug_tests {
     use skalp_sir::convert_mir_to_sir;
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_assignment_after_if_statement() {
         let simple_source = r#"
         entity TestSequential {

@@ -61,7 +61,9 @@
       "Bash(git push:*)",
       "Bash(tee:*)",
       "Bash(paste:*)",
-      "WebFetch(domain:docs.rs)"
+      "WebFetch(domain:docs.rs)",
+      "Bash(do echo \"=== $f ===\")",
+      "Bash(rg:*)"
     ],
     "deny": [],
     "ask": []

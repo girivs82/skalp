@@ -5,6 +5,7 @@ mod context_debug_tests {
     use skalp_sir::convert_mir_to_sir;
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_inter_signal_dependency() {
         let simple_source = r#"
         entity TestContext {

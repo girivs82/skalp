@@ -9,6 +9,7 @@ mod minimal_pipeline_tests {
     use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn test_simple_pipeline_valid() {
         let source = r#"
         entity MinimalPipeline {

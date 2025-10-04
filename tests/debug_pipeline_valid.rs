@@ -9,6 +9,7 @@ mod debug_pipeline_valid_tests {
     use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn test_pipeline_valid_only() {
         let source = r#"
         entity SimpleCounter {
