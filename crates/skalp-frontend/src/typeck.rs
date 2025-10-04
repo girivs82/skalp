@@ -435,7 +435,7 @@ impl TypeChecker {
                 // Check that it's a clock or event type
                 if !signal_type.is_clock() && signal_type != &Type::Event {
                     self.errors.push(TypeCheckError {
-                        error: TypeError::NotClock(signal_type.clone()),
+                        error: TypeError::NotClock(Box::new(signal_type.clone())),
                         location: None,
                     });
                 }
@@ -1215,11 +1215,11 @@ impl TypeChecker {
             _ => {
                 self.errors.push(TypeCheckError {
                     error: TypeError::TypeMismatch {
-                        expected: Type::Struct(StructType {
+                        expected: Box::new(Type::Struct(StructType {
                             name: "struct or enum".to_string(),
                             fields: vec![],
-                        }),
-                        found: base_type.clone(),
+                        })),
+                        found: Box::new(base_type.clone()),
                     },
                     location: None,
                 });
@@ -1233,7 +1233,7 @@ impl TypeChecker {
         // Index must be an integer type
         if !index_type.is_numeric() {
             self.errors.push(TypeCheckError {
-                error: TypeError::NotNumeric(index_type.clone()),
+                error: TypeError::NotNumeric(Box::new(index_type.clone())),
                 location: None,
             });
         }
@@ -1247,11 +1247,11 @@ impl TypeChecker {
             _ => {
                 self.errors.push(TypeCheckError {
                     error: TypeError::TypeMismatch {
-                        expected: Type::Array {
+                        expected: Box::new(Type::Array {
                             element_type: Box::new(Type::Unknown),
                             size: 0,
-                        },
-                        found: base_type.clone(),
+                        }),
+                        found: Box::new(base_type.clone()),
                     },
                     location: None,
                 });
@@ -1265,11 +1265,11 @@ impl TypeChecker {
         // Range indices must be integers
         if !high_type.is_numeric() || !low_type.is_numeric() {
             self.errors.push(TypeCheckError {
-                error: TypeError::NotNumeric(if !high_type.is_numeric() {
+                error: TypeError::NotNumeric(Box::new(if !high_type.is_numeric() {
                     high_type.clone()
                 } else {
                     low_type.clone()
-                }),
+                })),
                 location: None,
             });
         }
@@ -1285,8 +1285,8 @@ impl TypeChecker {
             _ => {
                 self.errors.push(TypeCheckError {
                     error: TypeError::TypeMismatch {
-                        expected: Type::Bit(Width::Unknown),
-                        found: base_type.clone(),
+                        expected: Box::new(Type::Bit(Width::Unknown)),
+                        found: Box::new(base_type.clone()),
                     },
                     location: None,
                 });

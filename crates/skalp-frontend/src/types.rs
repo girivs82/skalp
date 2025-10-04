@@ -514,8 +514,8 @@ impl TypeInference {
                     Ok(())
                 } else {
                     Err(TypeError::TypeMismatch {
-                        expected: lhs_type.clone(),
-                        found: rhs_type.clone(),
+                        expected: Box::new(lhs_type.clone()),
+                        found: Box::new(rhs_type.clone()),
                     })
                 }
             }
@@ -574,8 +574,8 @@ impl TypeInference {
             _ if t1 == t2 => Ok(()),
 
             _ => Err(TypeError::TypeMismatch {
-                expected: t1.clone(),
-                found: t2.clone(),
+                expected: Box::new(t1.clone()),
+                found: Box::new(t2.clone()),
             }),
         }
     }
@@ -619,12 +619,12 @@ impl TypeInference {
                 }
                 TypeConstraint::Numeric(t) => {
                     if !t.is_numeric() {
-                        return Err(TypeError::NotNumeric(t));
+                        return Err(TypeError::NotNumeric(Box::new(t)));
                     }
                 }
                 TypeConstraint::IsClock(t) => {
                     if !t.is_clock() {
-                        return Err(TypeError::NotClock(t));
+                        return Err(TypeError::NotClock(Box::new(t)));
                     }
                 }
             }
@@ -637,7 +637,7 @@ impl TypeInference {
 #[derive(Debug, Clone)]
 pub enum TypeError {
     /// Type mismatch
-    TypeMismatch { expected: Type, found: Type },
+    TypeMismatch { expected: Box<Type>, found: Box<Type> },
 
     /// Width mismatch
     WidthMismatch { expected: Width, found: Width },
@@ -649,10 +649,10 @@ pub enum TypeError {
     ArraySizeMismatch { expected: u32, found: u32 },
 
     /// Type is not numeric
-    NotNumeric(Type),
+    NotNumeric(Box<Type>),
 
     /// Type is not a clock
-    NotClock(Type),
+    NotClock(Box<Type>),
 
     /// Undefined variable
     UndefinedVariable(String),
