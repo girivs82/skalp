@@ -1,11 +1,15 @@
 #[cfg(test)]
 mod debug_pipeline_valid_tests {
+    #[cfg(target_os = "macos")]
     use skalp_frontend::parse_and_build_hir;
+    #[cfg(target_os = "macos")]
     use skalp_mir::{MirCompiler, OptimizationLevel};
+    #[cfg(target_os = "macos")]
     use skalp_sim::{
         simulator::SimulationConfig,
         testbench::{TestVectorBuilder, Testbench},
     };
+    #[cfg(target_os = "macos")]
     use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]

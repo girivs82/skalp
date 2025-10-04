@@ -1,13 +1,19 @@
 #[cfg(test)]
 mod pipelined_processor_tests {
+    #[cfg(target_os = "macos")]
     use skalp_frontend::hir::HirStatement;
+    #[cfg(target_os = "macos")]
     use skalp_frontend::parse_and_build_hir;
+    #[cfg(target_os = "macos")]
     use skalp_mir::{Expression, Statement};
+    #[cfg(target_os = "macos")]
     use skalp_mir::{MirCompiler, OptimizationLevel};
+    #[cfg(target_os = "macos")]
     use skalp_sim::{
         simulator::SimulationConfig,
         testbench::{TestVectorBuilder, Testbench},
     };
+    #[cfg(target_os = "macos")]
     use skalp_sir::convert_mir_to_sir;
 
     #[tokio::test]
@@ -340,6 +346,7 @@ mod pipelined_processor_tests {
         }
     }
 
+    #[allow(dead_code)]
     fn check_pipeline_assignments(statements: &[Statement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {
@@ -432,6 +439,7 @@ mod pipelined_processor_tests {
         }
     }
 
+    #[allow(dead_code)]
     fn check_hir_assignments(statements: &[HirStatement], indent: usize) {
         let indent_str = "  ".repeat(indent);
         for stmt in statements {
