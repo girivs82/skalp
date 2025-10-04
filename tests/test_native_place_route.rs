@@ -44,13 +44,13 @@ mod native_place_route_tests {
         // Validate architecture
         assert_eq!(hx8k.family, DeviceFamily::Ice40);
         assert_eq!(hx8k.grid_size, (33, 33));
-        assert!(hx8k.logic_tiles.len() > 0);
-        assert!(hx8k.io_tiles.len() > 0);
+        assert!(!hx8k.logic_tiles.is_empty());
+        assert!(!hx8k.io_tiles.is_empty());
         assert!(stats.total_luts >= 7680 && stats.total_luts <= 7800); // HX8K: got 7688 LUTs (961 tiles × 8 LUTs/tile)
 
         assert_eq!(hx1k.family, DeviceFamily::Ice40);
         assert_eq!(hx1k.grid_size, (17, 17));
-        assert!(hx1k.logic_tiles.len() > 0);
+        assert!(!hx1k.logic_tiles.is_empty());
 
         println!("✅ iCE40 device architecture validated");
     }
@@ -94,7 +94,7 @@ mod native_place_route_tests {
             println!("   Utilization: {:.1}%", result.utilization * 100.0);
 
             // Validate results
-            assert!(result.placements.len() > 0);
+            assert!(!result.placements.is_empty());
             assert!(result.cost >= 0.0);
             assert!(result.utilization >= 0.0 && result.utilization <= 1.0);
 
@@ -250,7 +250,7 @@ mod native_place_route_tests {
         println!("   Target device: {}", bitstream.device);
 
         // Validate bitstream
-        assert!(bitstream.data.len() > 0);
+        assert!(!bitstream.data.is_empty());
         assert_eq!(bitstream.device, device.name);
 
         // Test writing to file
@@ -552,10 +552,10 @@ mod native_place_route_tests {
         println!("   Bitstream size: {} bytes", bitstream.data.len());
 
         // Validate complete flow
-        assert!(placement_result.placements.len() > 0);
+        assert!(!placement_result.placements.is_empty());
         assert!(placement_result.utilization > 0.0);
         // routes.len() is always non-negative (unsigned type)
-        assert!(bitstream.data.len() > 0);
+        assert!(!bitstream.data.is_empty());
 
         // Calculate flow statistics
         let device_stats = device.stats();
@@ -652,7 +652,7 @@ mod native_place_route_tests {
             let mut router = Router::new(config, device.clone());
             let result = router
                 .route(&test_design, &placement_result)
-                .expect(&format!("{} should succeed", name));
+                .unwrap_or_else(|_| panic!("{} should succeed", name));
 
             println!(
                 "   {}: {} routes, {:.3} congestion",
@@ -744,7 +744,7 @@ mod native_place_route_tests {
 
         // Verify timing analysis components
         assert!(
-            final_timing.clock_summaries.len() >= 1,
+            !final_timing.clock_summaries.is_empty(),
             "Should have at least one clock domain"
         );
         assert!(
@@ -998,7 +998,7 @@ mod native_place_route_tests {
 
         // Verify complete ECP5 flow
         assert!(
-            placement_result.placements.len() > 0,
+            !placement_result.placements.is_empty(),
             "Should have placements"
         );
         assert!(
@@ -1006,7 +1006,7 @@ mod native_place_route_tests {
             "Should have utilization"
         );
         assert!(
-            timing_report.clock_summaries.len() >= 1,
+            !timing_report.clock_summaries.is_empty(),
             "Should have clock analysis"
         );
         assert!(
@@ -1249,7 +1249,7 @@ mod native_place_route_tests {
             vtr_device
                 .clock_resources
                 .clock_domains
-                .get(0)
+                .first()
                 .map(|cd| cd.max_frequency)
                 .unwrap_or(0.0)
                 >= 400.0e6,
@@ -1265,7 +1265,7 @@ mod native_place_route_tests {
         let mut placer = Placer::new(PlacerConfig::default(), vtr_device.clone());
         let placement_result = placer.place(&design).expect("VTR placement should succeed");
         assert!(
-            placement_result.placements.len() > 0,
+            !placement_result.placements.is_empty(),
             "VTR placement should place gates"
         );
         assert!(
@@ -1278,7 +1278,7 @@ mod native_place_route_tests {
             .route(&design, &placement_result)
             .expect("VTR routing should succeed");
         assert!(
-            routing_result.routes.len() > 0,
+            !routing_result.routes.is_empty(),
             "VTR routing should create routes"
         );
 
@@ -1433,7 +1433,7 @@ mod native_place_route_tests {
             .place(&design)
             .expect("OpenFPGA placement should succeed");
         assert!(
-            placement_result.placements.len() > 0,
+            !placement_result.placements.is_empty(),
             "OpenFPGA placement should place gates"
         );
         assert!(
@@ -1446,7 +1446,7 @@ mod native_place_route_tests {
             .route(&design, &placement_result)
             .expect("OpenFPGA routing should succeed");
         assert!(
-            routing_result.routes.len() > 0,
+            !routing_result.routes.is_empty(),
             "OpenFPGA routing should create routes"
         );
 

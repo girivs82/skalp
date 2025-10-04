@@ -290,7 +290,7 @@ mod phase10_backend_tests {
         println!("⏱️ Testing Timing Constraints Support");
 
         // Test various timing constraint types
-        let constraints = vec![
+        let constraints = [
             TimingConstraint::ClockPeriod {
                 clock_name: "clk".to_string(),
                 period_ns: 8.333, // 120 MHz

@@ -64,7 +64,8 @@
       "WebFetch(domain:docs.rs)",
       "Bash(do echo \"=== $f ===\")",
       "Bash(rg:*)",
-      "Bash(head:*)"
+      "Bash(head:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []

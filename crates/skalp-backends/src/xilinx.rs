@@ -351,7 +351,7 @@ impl Backend for XilinxBackend {
 
     fn validate_design(&self, _lir: &LirDesign) -> BackendResult<()> {
         // Check if Vivado is available
-        if !self.vivado_path.exists() && self.vivado_path != PathBuf::from("vivado") {
+        if !self.vivado_path.exists() && self.vivado_path != Path::new("vivado") {
             return Err(BackendError::ToolNotFound(
                 "Vivado not found. Please install Xilinx Vivado.".to_string(),
             ));

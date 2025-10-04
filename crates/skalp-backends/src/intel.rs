@@ -456,7 +456,7 @@ impl Backend for IntelBackend {
 
     fn validate_design(&self, _lir: &LirDesign) -> BackendResult<()> {
         // Check if Quartus is available
-        if !self.quartus_path.exists() && self.quartus_path != PathBuf::from("quartus_sh") {
+        if !self.quartus_path.exists() && self.quartus_path != Path::new("quartus_sh") {
             return Err(BackendError::ToolNotFound(
                 "Quartus not found. Please install Intel Quartus Prime.".to_string(),
             ));
