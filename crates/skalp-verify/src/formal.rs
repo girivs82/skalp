@@ -23,7 +23,7 @@ struct FormalEngineInner {
 
     /// Variable mapping
     #[borrows(context)]
-    #[covariant]
+    #[not_covariant]
     variables: HashMap<String, Dynamic<'this>>,
 }
 
