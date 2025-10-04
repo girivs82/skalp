@@ -13,9 +13,10 @@ env:
 jobs:
   test:
     name: Test Suite
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, macos-latest]
         rust:
           - stable
           - beta
@@ -103,6 +104,17 @@ jobs:
 
       - name: Run all tests (comprehensive)
         run: cargo test --workspace --all-targets --all-features --verbose
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "Test run completed on ${{ matrix.os }} with Rust ${{ matrix.rust }}"
+          echo "All workspace tests executed including:"
+          echo "  - Parser and HIR tests"
+          echo "  - MIR and SIR tests"
+          echo "  - Simulation tests (GPU tests on macOS only)"
+          echo "  - Integration and E2E tests"
+          echo "  - Golden file tests"
 
   coverage:
     name: Code Coverage
