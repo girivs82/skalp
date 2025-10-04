@@ -14,7 +14,7 @@ pub mod properties;
 pub mod requirements;
 pub mod testbench;
 
-#[cfg(feature = "formal")]
+#[cfg(all(feature = "formal", not(tarpaulin)))]
 pub mod formal;
 
 pub use assertions::{Assertion, AssertionKind, ConcurrentAssertion, ImmediateAssertion};

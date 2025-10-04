@@ -10,13 +10,20 @@ This document contains guidelines for Claude Code (or developers using Claude) w
 ./scripts/ci_check.sh
 ```
 
-This script runs the exact same checks as the CI pipeline:
+This script runs the essential CI checks:
 - Code formatting (`cargo fmt --check`)
 - Clippy lints on stable toolchain
 - Clippy lints on beta toolchain
 - Build with all features
 
+Optionally, if you have z3 installed and want to test code coverage:
+```bash
+./scripts/ci_check.sh --with-coverage
+```
+
 **Why?** Running these checks locally catches issues before they reach CI, avoiding the slow push-fail-fix cycle.
+
+**Note:** The coverage check is optional and requires z3 SMT solver. The formal verification module (`skalp-verify`) is excluded from tarpaulin coverage due to ouroboros macro compatibility issues with tarpaulin's instrumentation.
 
 ## CI Pipeline Overview
 
