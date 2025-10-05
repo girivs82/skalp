@@ -1,4 +1,11 @@
-#![allow(dead_code, unused_variables, unused_imports, deprecated, clippy::non_canonical_clone_impl, clippy::uninlined_format_args)]
+#![allow(
+    dead_code,
+    unused_variables,
+    unused_imports,
+    deprecated,
+    clippy::non_canonical_clone_impl,
+    clippy::uninlined_format_args
+)]
 //! SKALP Language Server Protocol Implementation
 //!
 //! Provides IDE support for SKALP hardware description language including:
