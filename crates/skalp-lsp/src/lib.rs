@@ -4,7 +4,8 @@
     unused_imports,
     deprecated,
     clippy::non_canonical_clone_impl,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    clippy::literal_string_with_formatting_args
 )]
 //! SKALP Language Server Protocol Implementation
 //!

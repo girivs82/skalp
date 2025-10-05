@@ -6,7 +6,6 @@ mod integration_tests {
     use skalp_mir::{MirCompiler, OptimizationLevel};
     #[cfg(target_os = "macos")]
     use skalp_sim::{SimulationConfig, Simulator};
-    #[cfg(target_os = "macos")]
     use skalp_sir::convert_mir_to_sir;
     use std::fs;
 

@@ -865,7 +865,6 @@ impl GdsiiGenerator {
         text: &str,
     ) -> Result<(), AsicError> {
         let mut bytes = text.as_bytes().to_vec();
-        #[allow(clippy::manual_is_multiple_of)]
         if bytes.len() % 2 != 0 {
             bytes.push(0); // Pad to even length
         }

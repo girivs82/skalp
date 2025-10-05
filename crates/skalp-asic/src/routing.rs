@@ -854,8 +854,8 @@ impl DetailedRouter {
     /// Minimize number of vias
     fn minimize_vias(
         &self,
-        _wires: &mut Vec<DetailedWire>,
-        _vias: &mut Vec<Via>,
+        _wires: &mut [DetailedWire],
+        _vias: &mut [Via],
     ) -> Result<(), AsicError> {
         // Via minimization through layer reassignment
         // (Simplified implementation)
