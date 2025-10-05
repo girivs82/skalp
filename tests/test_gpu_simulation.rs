@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod gpu_simulation_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
