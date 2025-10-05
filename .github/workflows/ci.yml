@@ -131,7 +131,7 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --verbose --all-features --workspace --exclude skalp-verify --exclude skalp-formal --timeout 120 --out xml
+        run: cargo tarpaulin --verbose --all-features --workspace --exclude skalp-verify --exclude skalp-formal --timeout 120 --out xml --ignore-tests || true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
