@@ -271,6 +271,7 @@ mod tests {
         // Note: Can't easily test env var in unit tests without affecting other tests
         // This is more of a smoke test
         let test = GoldenTest::new("test");
-        assert!(!test.update_mode || test.update_mode); // tautology but verifies field exists
+        // Just verify the field exists and has a boolean value
+        let _mode = test.update_mode;
     }
 }

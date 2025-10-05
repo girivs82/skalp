@@ -124,23 +124,23 @@ impl IncrementalBuilder {
     pub async fn build(&mut self, target: &str) -> IncrementalResult<BuildResults> {
         let plan = self.analyze_changes(target)?;
 
-        let mut results = BuildResults::new(target.to_string());
         let start_time = Utc::now();
 
-        if plan.is_full_rebuild {
+        let results = if plan.is_full_rebuild {
             log::info!("Performing full rebuild");
-            results = self.full_rebuild(target).await?;
+            self.full_rebuild(target).await?
         } else if plan.targets_to_rebuild.is_empty() {
             log::info!("No changes detected - using cached results");
-            results = self.load_cached_results(target)?;
+            self.load_cached_results(target)?
         } else {
             log::info!(
                 "Performing incremental rebuild of {} targets",
                 plan.targets_to_rebuild.len()
             );
-            results = self.incremental_rebuild(&plan).await?;
-        }
+            self.incremental_rebuild(&plan).await?
+        };
 
+        let mut results = results;
         results.build_time = Utc::now() - start_time;
 
         // Update cache with new results

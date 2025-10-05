@@ -76,7 +76,8 @@
       "Bash(echo:*)",
       "Bash(/Users/girivs/src/hw/hls/target/debug/skalp new test_sv_gen)",
       "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test test_alu_codegen_golden)",
-      "Read(//private/tmp/**)"
+      "Read(//private/tmp/**)",
+      "Bash(rustup:*)"
     ],
     "deny": [],
     "ask": []

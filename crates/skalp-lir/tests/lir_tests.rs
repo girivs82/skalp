@@ -3,7 +3,6 @@
 use skalp_lir::lir::{Gate, GateType, Lir, Net};
 use skalp_lir::optimization::*;
 use skalp_lir::timing::TimingAnalyzer;
-use skalp_lir::*;
 
 #[test]
 fn test_lir_creation() {

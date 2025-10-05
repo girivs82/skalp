@@ -1041,7 +1041,7 @@ impl InteractiveDesign {
         // Buffer restrictions
         let buffers = &self.constraints.clock.buffer_restrictions;
         script.push_str("\n# Buffer configuration\n");
-        script.push_str(&"set_cts_buffer_list \\\n".to_string());
+        script.push_str("set_cts_buffer_list \\\n");
         for buf in &buffers.allowed_buffers {
             script.push_str(&format!("  {} \\\n", buf));
         }

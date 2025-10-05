@@ -177,7 +177,7 @@ impl Ord for RerouteTask {
 
 impl PartialOrd for RerouteTask {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.priority.partial_cmp(&other.priority)
+        Some(self.cmp(other))
     }
 }
 
@@ -679,8 +679,8 @@ impl InteractiveRouter {
         for (y, row) in congestion.values.iter().enumerate() {
             for (x, &value) in row.iter().enumerate() {
                 // Distribute across layers (simplified model)
-                for layer in 0..5 {
-                    layer_congestion[layer].1 += value / 5.0;
+                for item in layer_congestion.iter_mut().take(5) {
+                    item.1 += value / 5.0;
                 }
             }
         }

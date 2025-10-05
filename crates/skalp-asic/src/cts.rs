@@ -225,7 +225,7 @@ impl ClockTreeSynthesizer {
     pub fn synthesize(
         &self,
         placement: &Placement,
-        routing: &RoutingResult,
+        _routing: &RoutingResult,
         clock_spec: &ClockSpecification,
     ) -> Result<ClockTree, AsicError> {
         // Extract clock sinks from placement
@@ -371,6 +371,7 @@ impl ClockTreeSynthesizer {
     }
 
     /// Recursive H-tree construction
+    #[allow(clippy::too_many_arguments)]
     fn build_htree_recursive(
         &self,
         center: (f64, f64),
@@ -774,6 +775,7 @@ impl ClockTreeSynthesizer {
     }
 
     /// Helper: Cluster sinks using k-means
+    #[allow(clippy::type_complexity)]
     fn cluster_sinks(
         &self,
         sinks: &[ClockSink],

@@ -216,8 +216,8 @@ fn parse_trait_symbol(line: &str, line_num: usize) -> Option<SymbolInformation> 
 /// Parse a signal declaration
 fn parse_signal_symbol(line: &str, line_num: usize) -> Option<SymbolInformation> {
     let trimmed = line.trim();
-    if trimmed.starts_with("signal ") {
-        let parts: Vec<&str> = trimmed[7..].split(':').collect();
+    if let Some(stripped) = trimmed.strip_prefix("signal ") {
+        let parts: Vec<&str> = stripped.split(':').collect();
         if !parts.is_empty() {
             let name = parts[0].trim();
             return Some(SymbolInformation {

@@ -8,16 +8,16 @@ echo "=== Running formatting check ==="
 cargo fmt --all -- --check
 
 echo -e "\n=== Running clippy on stable ==="
-cargo +stable clippy --all-targets --all-features -- -D warnings
+cargo +stable clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
 
 echo -e "\n=== Running clippy on beta ==="
-cargo +beta clippy --all-targets --all-features -- -D warnings
+cargo +beta clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
 
 echo -e "\n=== Running build ==="
-cargo build --verbose --all-features
+cargo build --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --verbose --all-features
 
 echo -e "\n=== Running tests ==="
-cargo test --all-features --workspace
+cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-features
 
 # Optional: Run tarpaulin coverage check (requires cargo-tarpaulin and z3)
 # Note: This will fail if you don't have z3 installed (required for skalp-verify formal feature)

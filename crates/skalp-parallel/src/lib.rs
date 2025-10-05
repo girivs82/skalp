@@ -82,6 +82,12 @@ impl Default for CompilationConfig {
     }
 }
 
+impl Default for ParallelEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParallelEngine {
     pub fn new() -> Self {
         Self::with_config(CompilationConfig::default())

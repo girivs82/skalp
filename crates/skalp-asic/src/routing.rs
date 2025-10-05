@@ -605,7 +605,7 @@ impl GlobalRouter {
     /// Handle congestion with rip-up and reroute
     fn handle_congestion(
         &self,
-        wires: &mut Vec<GlobalWire>,
+        wires: &mut [GlobalWire],
         grid: &[Vec<GCell>],
         congestion: &mut CongestionTracker,
         netlist: &Netlist,

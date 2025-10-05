@@ -206,40 +206,38 @@ fn test_constant_folding_arithmetic() {
     });
 
     // Test various arithmetic operations
-    let mut statements = vec![];
-
-    // Test multiplication: 3 * 4 = 12
-    statements.push(Statement::Assignment(Assignment {
-        lhs: LValue::Signal(SignalId(0)),
-        rhs: Expression::Binary {
-            op: BinaryOp::Mul,
-            left: Box::new(Expression::Literal(Value::Integer(3))),
-            right: Box::new(Expression::Literal(Value::Integer(4))),
-        },
-        kind: AssignmentKind::Blocking,
-    }));
-
-    // Test division: 20 / 4 = 5
-    statements.push(Statement::Assignment(Assignment {
-        lhs: LValue::Signal(SignalId(0)),
-        rhs: Expression::Binary {
-            op: BinaryOp::Div,
-            left: Box::new(Expression::Literal(Value::Integer(20))),
-            right: Box::new(Expression::Literal(Value::Integer(4))),
-        },
-        kind: AssignmentKind::Blocking,
-    }));
-
-    // Test subtraction: 10 - 3 = 7
-    statements.push(Statement::Assignment(Assignment {
-        lhs: LValue::Signal(SignalId(0)),
-        rhs: Expression::Binary {
-            op: BinaryOp::Sub,
-            left: Box::new(Expression::Literal(Value::Integer(10))),
-            right: Box::new(Expression::Literal(Value::Integer(3))),
-        },
-        kind: AssignmentKind::Blocking,
-    }));
+    let statements = vec![
+        // Test multiplication: 3 * 4 = 12
+        Statement::Assignment(Assignment {
+            lhs: LValue::Signal(SignalId(0)),
+            rhs: Expression::Binary {
+                op: BinaryOp::Mul,
+                left: Box::new(Expression::Literal(Value::Integer(3))),
+                right: Box::new(Expression::Literal(Value::Integer(4))),
+            },
+            kind: AssignmentKind::Blocking,
+        }),
+        // Test division: 20 / 4 = 5
+        Statement::Assignment(Assignment {
+            lhs: LValue::Signal(SignalId(0)),
+            rhs: Expression::Binary {
+                op: BinaryOp::Div,
+                left: Box::new(Expression::Literal(Value::Integer(20))),
+                right: Box::new(Expression::Literal(Value::Integer(4))),
+            },
+            kind: AssignmentKind::Blocking,
+        }),
+        // Test subtraction: 10 - 3 = 7
+        Statement::Assignment(Assignment {
+            lhs: LValue::Signal(SignalId(0)),
+            rhs: Expression::Binary {
+                op: BinaryOp::Sub,
+                left: Box::new(Expression::Literal(Value::Integer(10))),
+                right: Box::new(Expression::Literal(Value::Integer(3))),
+            },
+            kind: AssignmentKind::Blocking,
+        }),
+    ];
 
     let process = Process {
         id: ProcessId(0),

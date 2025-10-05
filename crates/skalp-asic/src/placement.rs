@@ -488,7 +488,7 @@ impl Placer {
     ) -> Result<Placement, AsicError> {
         use rand::Rng;
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut temperature = self.config.temperature.initial;
         let mut best_cost = self.calculate_cost(&placement, netlist);
         let mut current_cost = best_cost;
@@ -510,7 +510,7 @@ impl Placer {
                 true
             } else {
                 let probability = (-delta / temperature).exp();
-                rng.gen::<f64>() < probability
+                rng.random::<f64>() < probability
             };
 
             if accept {
@@ -576,19 +576,19 @@ impl Placer {
     /// Generate a random move for annealing
     fn generate_move(&self, placement: &Placement, netlist: &Netlist) -> MoveOperation {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Choose move type
-        if rng.gen::<f64>() < 0.7 {
+        if rng.random::<f64>() < 0.7 {
             // Swap two cells
-            let cell1 = rng.gen_range(0..netlist.cells.len());
-            let cell2 = rng.gen_range(0..netlist.cells.len());
+            let cell1 = rng.random_range(0..netlist.cells.len());
+            let cell2 = rng.random_range(0..netlist.cells.len());
             MoveOperation::Swap(cell1, cell2)
         } else {
             // Displace a cell
-            let cell = rng.gen_range(0..netlist.cells.len());
-            let dx = rng.gen_range(-5..=5) as f64 * self.config.site_width;
-            let dy = rng.gen_range(-2..=2) as f64 * self.config.row_height;
+            let cell = rng.random_range(0..netlist.cells.len());
+            let dx = rng.random_range(-5..=5) as f64 * self.config.site_width;
+            let dy = rng.random_range(-2..=2) as f64 * self.config.row_height;
             MoveOperation::Displace(cell, dx, dy)
         }
     }

@@ -479,9 +479,9 @@ impl ManualCTS {
     /// Apply manual buffer placement
     fn apply_manual_buffer(
         &self,
-        synthesizer: &mut ClockTreeSynthesizer,
-        name: &str,
-        placement: &BufferPlacement,
+        _synthesizer: &mut ClockTreeSynthesizer,
+        _name: &str,
+        _placement: &BufferPlacement,
     ) -> Result<(), AsicError> {
         // TODO: Integrate with synthesizer
         Ok(())

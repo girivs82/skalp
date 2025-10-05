@@ -1493,13 +1493,13 @@ impl Default for CornerComparison {
 impl TimingLibrary {
     /// Create timing library for a specific corner
     fn for_corner(corner: &OperatingCorner) -> Result<Self, AsicError> {
-        let mut library = Self::default();
-
-        // Update operating conditions
-        library.operating_conditions = OperatingConditions {
-            voltage: corner.voltage,
-            temperature: corner.temperature,
-            process: corner.process.clone(),
+        let mut library = Self {
+            operating_conditions: OperatingConditions {
+                voltage: corner.voltage,
+                temperature: corner.temperature,
+                process: corner.process.clone(),
+            },
+            ..Default::default()
         };
 
         // In a real implementation, this would load corner-specific liberty files

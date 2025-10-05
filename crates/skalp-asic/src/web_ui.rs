@@ -145,7 +145,7 @@ pub enum UIResponse {
     DesignUpdate {
         placement: PlacementData,
         routing: Option<RoutingData>,
-        metrics: DesignMetrics,
+        metrics: Box<DesignMetrics>,
     },
     /// Constraint violation
     ConstraintViolation { violations: Vec<Violation> },
@@ -488,7 +488,7 @@ impl WebUIServer {
         Ok(UIResponse::DesignUpdate {
             placement: self.extract_placement_data(designer)?,
             routing: self.extract_routing_data(designer)?,
-            metrics: self.calculate_metrics(designer)?,
+            metrics: Box::new(self.calculate_metrics(designer)?),
         })
     }
 

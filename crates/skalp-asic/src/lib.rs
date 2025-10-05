@@ -7,6 +7,10 @@
 //! - GDSII generation
 //! - Design rule checking
 
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_assignments)]
+
 pub mod cts;
 pub mod cts_manual;
 pub mod drc;

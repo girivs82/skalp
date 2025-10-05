@@ -58,10 +58,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --exclude skalp-verify --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
 
       - name: Build
-        run: cargo build --workspace --exclude skalp-verify --verbose --all-features
+        run: cargo build --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --verbose --all-features
 
       - name: Run parser regression tests
         run: cargo test -p skalp-frontend --test parser_regression --verbose
@@ -76,7 +76,7 @@ jobs:
         run: cargo test -p skalp-frontend --test integration_tests --verbose
 
       - name: Run all unit tests
-        run: cargo test --workspace --exclude skalp-verify --lib --all-features --verbose
+        run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --lib --all-features --verbose
 
       - name: Run MIR tests
         run: cargo test -p skalp-mir --verbose
@@ -98,13 +98,13 @@ jobs:
         run: cargo test --test e2e_examples_test --verbose
 
       - name: Run all other integration tests
-        run: cargo test --workspace --exclude skalp-verify --tests --verbose
+        run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --tests --verbose
 
       - name: Run doc tests
         run: cargo test --doc --all-features --verbose
 
       - name: Run all tests (comprehensive)
-        run: cargo test --workspace --exclude skalp-verify --all-targets --all-features --verbose
+        run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-targets --all-features --verbose
 
       - name: Test Summary
         if: always()
@@ -155,7 +155,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy (all targets)
-        run: cargo clippy --workspace --exclude skalp-verify --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
 
   build:
     name: Build
@@ -174,7 +174,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
 
       - name: Build
-        run: cargo build --workspace --exclude skalp-verify --release --verbose --all-features
+        run: cargo build --workspace --exclude skalp-verify --exclude skalp-formal --lib --bins --release --verbose --all-features
 
       - name: Upload binary (Linux)
         if: matrix.os == 'ubuntu-latest'

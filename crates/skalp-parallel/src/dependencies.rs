@@ -7,6 +7,12 @@ pub struct DependencyGraph {
     edges: Vec<(String, String)>,
 }
 
+impl Default for DependencyGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DependencyGraph {
     pub fn new() -> Self {
         Self {
