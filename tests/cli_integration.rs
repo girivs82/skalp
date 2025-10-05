@@ -150,6 +150,7 @@ fn test_build_lir() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "GPU simulation only available on macOS")]
 fn test_simulation_command() {
     let temp_dir = TempDir::new().unwrap();
     let project_name = "sim_test";
