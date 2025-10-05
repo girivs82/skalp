@@ -4,7 +4,9 @@ mod integration_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_lir::lower_to_lir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
+    #[cfg(target_os = "macos")]
     use skalp_sim::{SimulationConfig, Simulator};
+    #[cfg(target_os = "macos")]
     use skalp_sir::convert_mir_to_sir;
     use std::fs;
 
