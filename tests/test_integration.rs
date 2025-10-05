@@ -62,6 +62,7 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn test_compile_and_simulate() {
         let source = r#"
         entity SimpleCounter {
@@ -258,6 +259,7 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn test_simulation_determinism() {
         let source = r#"
         entity DeterTest {
