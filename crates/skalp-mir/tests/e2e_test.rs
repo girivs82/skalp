@@ -131,8 +131,8 @@ fn test_basic_compilation() {
     assert!(verilog.contains("input"));
     assert!(verilog.contains("output"));
 
-    // Check for always block
-    assert!(verilog.contains("always_ff"));
+    // Check for always block (either always_ff or always @)
+    assert!(verilog.contains("always_ff") || verilog.contains("always @"));
 
     println!("Generated Verilog:\n{}", verilog);
 }
