@@ -43,6 +43,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "GPU simulation only available on macOS")]
     async fn test_counter_increments() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
@@ -90,6 +91,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "GPU simulation only available on macOS")]
     async fn test_alu_operations() {
         let alu_source = fs::read_to_string("examples/alu.sk").expect("Failed to read alu.sk");
 
@@ -145,6 +147,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "GPU simulation only available on macOS")]
     async fn test_fifo_operations() {
         let fifo_source = fs::read_to_string("examples/fifo.sk").expect("Failed to read fifo.sk");
 
@@ -207,6 +210,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "GPU simulation only available on macOS")]
     async fn test_cpu_vs_gpu_performance() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
@@ -264,6 +268,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "GPU simulation only available on macOS")]
     async fn test_simulation_state_consistency() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
