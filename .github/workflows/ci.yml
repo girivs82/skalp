@@ -101,7 +101,7 @@ jobs:
         run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --tests --verbose
 
       - name: Run doc tests
-        run: cargo test --doc --all-features --verbose
+        run: cargo test --doc --workspace --all-features --verbose --exclude skalp
 
       - name: Run all tests (comprehensive)
         run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-targets --all-features --verbose
