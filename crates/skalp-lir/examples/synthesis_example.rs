@@ -102,6 +102,8 @@ fn create_example_design() -> Lir {
             width: 1,
             driver: None,
             loads: Vec::new(),
+            is_output: false,
+            is_input: false,
         });
     }
 
@@ -167,6 +169,8 @@ fn create_example_design() -> Lir {
         width: 1,
         driver: Some("xor1".to_string()),
         loads: Vec::new(),
+        is_output: true,
+        is_input: false,
     });
 
     lir
