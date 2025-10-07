@@ -92,12 +92,11 @@ impl MirToLirTransform {
     fn transform_process(&mut self, process: &skalp_mir::mir::Process) {
         // For sequential processes, create flip-flops
         // For combinational processes, create logic gates
-        // This is a simplified implementation
         match process.kind {
             skalp_mir::mir::ProcessKind::Sequential => {
                 // Create DFF for sequential logic
                 for statement in &process.body.statements {
-                    self.transform_statement(statement);
+                    self.transform_statement_sequential(statement);
                 }
             }
             skalp_mir::mir::ProcessKind::Combinational => {
@@ -111,6 +110,53 @@ impl MirToLirTransform {
                 for statement in &process.body.statements {
                     self.transform_statement(statement);
                 }
+            }
+        }
+    }
+
+    /// Transform a statement in a sequential context (creates registers)
+    fn transform_statement_sequential(&mut self, stmt: &skalp_mir::mir::Statement) {
+        match stmt {
+            skalp_mir::mir::Statement::Assignment(assign) => {
+                // For non-blocking assignments in sequential processes, create DFFs
+                if matches!(assign.kind, skalp_mir::mir::AssignmentKind::NonBlocking) {
+                    // Get the target net
+                    let target_net = self.get_lvalue_net(&assign.lhs);
+
+                    // Decompose the RHS expression to get the D input
+                    let d_input_net = self.decompose_expression(&assign.rhs);
+
+                    // Create a DFF gate
+                    let gate = Gate {
+                        id: self.create_gate_id("dff"),
+                        gate_type: GateType::DFF,
+                        inputs: vec![d_input_net],
+                        outputs: vec![target_net],
+                    };
+                    self.lir.gates.push(gate);
+                } else {
+                    // Blocking assignment - treat as combinational
+                    self.transform_statement(stmt);
+                }
+            }
+            skalp_mir::mir::Statement::If(if_stmt) => {
+                // Recursively transform branches
+                for stmt in &if_stmt.then_block.statements {
+                    self.transform_statement_sequential(stmt);
+                }
+                if let Some(ref else_block) = if_stmt.else_block {
+                    for stmt in &else_block.statements {
+                        self.transform_statement_sequential(stmt);
+                    }
+                }
+            }
+            skalp_mir::mir::Statement::Case { .. } => {
+                // Handle case statements (simplified for now)
+                self.transform_statement(stmt);
+            }
+            _ => {
+                // Handle other statement types
+                self.transform_statement(stmt);
             }
         }
     }

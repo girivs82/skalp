@@ -233,7 +233,6 @@ mod technology_mapping_tests {
     }
 
     #[test]
-    #[ignore = "Technology mapper doesn't track flip-flops in LIR - needs register detection"]
     fn test_complex_design_mapping() {
         println!("🔧 Testing complex design technology mapping...");
 
