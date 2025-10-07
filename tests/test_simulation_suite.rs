@@ -19,7 +19,18 @@ mod simulation_suite {
 
         // Convert to SIR
         assert!(!mir.modules.is_empty());
+        eprintln!(
+            "DEBUG setup_simulator: module={}, ports={}, signals={}, processes={}, assignments={}",
+            mir.modules[0].name,
+            mir.modules[0].ports.len(),
+            mir.modules[0].signals.len(),
+            mir.modules[0].processes.len(),
+            mir.modules[0].assignments.len()
+        );
         let sir = convert_mir_to_sir(&mir.modules[0]);
+        eprintln!("DEBUG setup_simulator: SIR inputs={}, outputs={}, comb_nodes={}, seq_nodes={}, states={}",
+            sir.inputs.len(), sir.outputs.len(), sir.combinational_nodes.len(),
+            sir.sequential_nodes.len(), sir.state_elements.len());
 
         // Create simulator
         let config = SimulationConfig {
@@ -43,7 +54,6 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "GPU simulation tests failing - parsing errors"]
     async fn test_counter_increments() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
@@ -91,7 +101,6 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "GPU simulation tests failing - parsing errors"]
     async fn test_alu_operations() {
         let alu_source = fs::read_to_string("examples/alu.sk").expect("Failed to read alu.sk");
 
@@ -147,7 +156,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "GPU simulation tests failing - parsing errors"]
+    #[ignore = "GPU simulation test - FIFO uses generics with bit<WIDTH> syntax not yet fully supported in parsing"]
     async fn test_fifo_operations() {
         let fifo_source = fs::read_to_string("examples/fifo.sk").expect("Failed to read fifo.sk");
 
@@ -210,7 +219,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "GPU simulation tests failing - parsing errors"]
+    #[ignore = "GPU simulation performance comparison test - lower priority"]
     async fn test_cpu_vs_gpu_performance() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
@@ -268,7 +277,6 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "GPU simulation tests failing - parsing errors"]
     async fn test_simulation_state_consistency() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");

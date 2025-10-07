@@ -77,7 +77,18 @@
       "Bash(/Users/girivs/src/hw/hls/target/debug/skalp new test_sv_gen)",
       "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test test_alu_codegen_golden)",
       "Read(//private/tmp/**)",
-      "Bash(rustup:*)"
+      "Bash(rustup:*)",
+      "Bash(xargs:*)",
+      "Bash(grep:*)",
+      "Bash(/tmp/test_match_debug:*)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp build -s examples/alu.sk -o /tmp/alu_test)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp build -s /tmp/test_match_with_if.sk -o /tmp/test_match_with_if_out)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp build -s /tmp/test_bin_width.sk -o /tmp/test_bin_width_debug -t mir)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp build -s /tmp/test_bin_width.sk -o /tmp/test_bin_width_debug2)",
+      "Bash(/Users/girivs/src/hw/hls/target/debug/skalp build -s /tmp/test_bin_width.sk -o /tmp/test_bin_width_debug3)",
+      "Bash(iverilog:*)",
+      "Bash(/tmp/debug_alu_sir:*)",
+      "Bash(awk:*)"
     ],
     "deny": [],
     "ask": []

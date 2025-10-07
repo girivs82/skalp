@@ -413,10 +413,20 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn step(&mut self) -> SimulationResult<SimulationState> {
-        // Execute sequential logic first (registers update on clock edge)
+        // CRITICAL TWO-PHASE EXECUTION for correct non-blocking semantics:
+
+        // Phase 1: Combinational logic computes values that will be sampled by flip-flops
+        // This ensures that when we read from state elements in sequential assignments,
+        // we get the OLD values (before the clock edge updates them)
+        self.execute_combinational().await?;
+
+        // Phase 2: Sequential logic updates registers on clock edge
+        // Flip-flops sample their data inputs (computed in phase 1) and update register values
         self.execute_sequential().await?;
 
-        // Then execute combinational logic (propagates from updated register values)
+        // Phase 3: Re-execute combinational logic to update outputs based on new register state
+        // This ensures that outputs (which are often just wires from registers) reflect
+        // the CURRENT register state, not the old state
         self.execute_combinational().await?;
 
         self.current_cycle += 1;

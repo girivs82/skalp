@@ -36,9 +36,11 @@ pub enum Token {
     #[token("assign")]
     AssignKw,
 
-    // Type System (10) - Updated to include numeric types
+    // Type System (11) - Updated to include numeric types
     #[token("bit")]
     Bit,
+    #[token("bool")]
+    Bool,
     #[token("nat")]
     Nat,
     #[token("int")]
@@ -59,6 +61,12 @@ pub enum Token {
     Enum,
     #[token("union")]
     Union,
+
+    // Boolean Literals (2)
+    #[token("true")]
+    True,
+    #[token("false")]
+    False,
 
     // Traits and Generics (5)
     #[token("trait")]

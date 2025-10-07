@@ -15,9 +15,9 @@ wire [31:0] result_comb    ;
 wire zero_comb    ;
 wire overflow_comb    ;
 
-assign sig_0 = ((port_2 == 1'h0) ? (port_0 + port_1) : ((port_2 == 1'h1) ? (port_0 - port_1) : ((port_2 == 2'h1) ? (port_0 & port_1) : ((port_2 == 2'h3) ? (port_0 | port_1) : ((port_2 == 3'h1) ? (port_0 ^ port_1) : ((port_2 == 3'h5) ? (port_0 << port_1[4:0]) : ((port_2 == 3'h3) ? (port_0 >> port_1[4:0]) : 0)))))))    ;
+assign sig_0 = ((port_2 == 3'h0) ? (port_0 + port_1) : ((port_2 == 3'h1) ? (port_0 - port_1) : ((port_2 == 3'h2) ? (port_0 & port_1) : ((port_2 == 3'h3) ? (port_0 | port_1) : ((port_2 == 3'h4) ? (port_0 ^ port_1) : ((port_2 == 3'h5) ? (port_0 << port_1[4:0]) : ((port_2 == 3'h6) ? (port_0 >> port_1[4:0]) : ((port_2 == 3'h7) ? ((port_0 < port_1) ? 1 : 0) : 0))))))))    ;
 assign sig_1 = ((sig_0 == 0) ? 1 : 0)    ;
-assign sig_2 = ((port_2 == 1'h0) ? (((~port_0[31] & ~port_1[31]) & sig_0[31]) | ((port_0[31] & port_1[31]) & ~sig_0[31])) : ((port_2 == 1'h1) ? (((~port_0[31] & port_1[31]) & sig_0[31]) | ((port_0[31] & ~port_1[31]) & ~sig_0[31])) : 0))    ;
+assign sig_2 = ((port_2 == 3'h0) ? (((~port_0[31] & ~port_1[31]) & sig_0[31]) | ((port_0[31] & port_1[31]) & ~sig_0[31])) : ((port_2 == 3'h1) ? (((~port_0[31] & port_1[31]) & sig_0[31]) | ((port_0[31] & ~port_1[31]) & ~sig_0[31])) : 0))    ;
 
 always_ff @(posedge port_3)     begin
 port_4 <= sig_0        ;

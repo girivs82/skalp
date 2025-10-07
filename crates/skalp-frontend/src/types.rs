@@ -15,6 +15,9 @@ pub enum Type {
     /// Bit vector type - 2-state (0, 1)
     Bit(Width),
 
+    /// Boolean type - true/false (distinct from single-bit hardware signals)
+    Bool,
+
     /// Logic vector type - 4-state (0, 1, X, Z)
     Logic(Width),
 
@@ -674,6 +677,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Bit(w) => write!(f, "bit{}", w),
+            Type::Bool => write!(f, "bool"),
             Type::Logic(w) => write!(f, "logic{}", w),
             Type::Int(w) => write!(f, "int{}", w),
             Type::Nat(w) => write!(f, "nat{}", w),

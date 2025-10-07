@@ -66,16 +66,19 @@ This specification uses the following notation:
 
 ### 2.1 Keywords
 
-SKALP uses a minimal set of 40 keywords, each with a specific purpose:
+SKALP uses a minimal set of 43 keywords, each with a specific purpose:
 
 ```
 // Core Hardware Description (11)
 entity impl signal var const
 in out inout on if else
 
-// Type System (7)
-bit clock reset type stream
+// Type System (8)
+bit bool clock reset type stream
 struct enum
+
+// Boolean Literals (2)
+true false
 
 // Traits and Generics (5)
 trait protocol where self Self
@@ -139,6 +142,10 @@ identifier = [a-zA-Z_][a-zA-Z0-9_]*
 ### 2.4 Literals
 
 ```rust
+// Boolean literals
+true        // Boolean true value
+false       // Boolean false value
+
 // Numeric literals
 42          // Decimal
 0x2A        // Hexadecimal
@@ -161,6 +168,12 @@ identifier = [a-zA-Z_][a-zA-Z0-9_]*
 ### 3.1 Primitive Types
 
 ```rust
+// Boolean type (for control flow and logic)
+bool        // Boolean value (true or false)
+// Note: Distinct from bit type. Used for conditional expressions,
+//       control flow, and logical operations. Cannot be used with
+//       bitwise operations (use bit type for that).
+
 // Bit types (2-state only for performance)
 bit         // Single bit (0 or 1)
 bit[N]      // N-bit vector
@@ -177,6 +190,10 @@ reset       // Reset signal (active high/low)
 
 // Stream type for flow control
 stream<T>   // Stream with implicit handshaking
+
+// Type Conversions
+// bool -> bit: Requires explicit cast (true as bit -> 1'b1, false as bit -> 1'b0)
+// bit -> bool: Requires explicit cast (1'b0 -> false, 1'b1 -> true)
 ```
 
 ### 3.2 Composite Types
@@ -212,7 +229,12 @@ enum State {
 }
 
 entity FSM {
-    signal state: State;
+    in clk: clock
+    out busy: bit
+}
+
+impl FSM {
+    signal state: State = State::IDLE
 
     on(clk.rise) {
         match state {
@@ -220,6 +242,8 @@ entity FSM {
             State::READ => { /* ... */ }
         }
     }
+
+    busy = (state != State::IDLE)
 }
 ```
 

@@ -14,7 +14,7 @@ mod formal_verification_tests {
         }
 
         impl FormalTest {
-            signal counter_reg: nat[8] = 0
+            signal counter_reg: nat[8] = 0;
 
             on(clk.rise) {
                 if reset {
@@ -79,8 +79,8 @@ mod formal_verification_tests {
         }
 
         impl AdvancedFormal {
-            signal state: nat[2] = 0
-            signal buffer: nat[32] = 0
+            signal state: nat[2] = 0;
+            signal buffer: nat[32] = 0;
 
             on(clk.rise) {
                 if reset {
@@ -173,7 +173,7 @@ mod formal_verification_tests {
         }
 
         impl BMCTest {
-            signal active_reg: bool = false
+            signal active_reg: bool = false;
 
             on(clk.rise) {
                 if start && !stop {
@@ -251,9 +251,9 @@ mod formal_verification_tests {
         }
 
         impl VerificationSuite {
-            signal cmd_buffer: nat[16] = 0
-            signal resp_buffer: nat[16] = 0
-            signal state: nat[2] = 0
+            signal cmd_buffer: nat[16] = 0;
+            signal resp_buffer: nat[16] = 0;
+            signal state: nat[2] = 0;
 
             // Basic functionality
             on(clk.rise) {

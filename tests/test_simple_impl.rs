@@ -3,7 +3,6 @@ mod simple_impl_tests {
     use skalp_frontend::parse_and_build_hir;
 
     #[test]
-    #[ignore = "Parser fails on implementation syntax - implementation parsing incomplete"]
     fn test_simple_entity_impl() {
         let source = r#"
         entity Counter {
@@ -12,7 +11,7 @@ mod simple_impl_tests {
         }
 
         impl Counter {
-            signal internal: nat[8] = 0;
+            signal internal: nat[8] = 0
         }
         "#;
 

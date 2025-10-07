@@ -68,13 +68,31 @@ impl<'a> MirToSirConverter<'a> {
                 self.sir.outputs.push(sir_port);
             }
 
+            // Check if this output port is assigned in sequential logic
+            let is_sequential_port =
+                matches!(direction, PortDirection::Output) && self.is_port_sequential(port.id);
+
             self.sir.signals.push(SirSignal {
                 name: port.name.clone(),
                 width,
                 driver_node: None,
                 fanout_nodes: Vec::new(),
-                is_state: false,
+                is_state: is_sequential_port,
             });
+
+            // Create state element for sequential output ports
+            if is_sequential_port {
+                self.sir.state_elements.insert(
+                    port.name.clone(),
+                    StateElement {
+                        name: port.name.clone(),
+                        width,
+                        reset_value: None,
+                        clock: String::new(),
+                        reset: None,
+                    },
+                );
+            }
         }
     }
 
@@ -106,6 +124,18 @@ impl<'a> MirToSirConverter<'a> {
                 );
             }
         }
+    }
+
+    fn is_port_sequential(&self, port_id: skalp_mir::PortId) -> bool {
+        // Check if this port is assigned in any sequential process
+        for process in &self.mir.processes {
+            if process.kind == ProcessKind::Sequential
+                && self.is_port_assigned_in_block(&process.body, port_id)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn is_signal_sequential(&self, signal_id: skalp_mir::SignalId) -> bool {
@@ -152,6 +182,72 @@ impl<'a> MirToSirConverter<'a> {
                         return true;
                     }
                 }
+                Statement::Case(case_stmt) => {
+                    // Check all case arms
+                    for item in &case_stmt.items {
+                        if self.is_signal_assigned_in_block(&item.block, signal_id) {
+                            return true;
+                        }
+                    }
+                    // Check default case
+                    if let Some(default_block) = &case_stmt.default {
+                        if self.is_signal_assigned_in_block(default_block, signal_id) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn is_port_assigned_in_block(
+        &self,
+        block: &skalp_mir::Block,
+        port_id: skalp_mir::PortId,
+    ) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if self.lvalue_contains_port(&assign.lhs, port_id) {
+                        return true;
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    if self.is_port_assigned_in_block(inner_block, port_id) {
+                        return true;
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    if self.is_port_assigned_in_block(&if_stmt.then_block, port_id) {
+                        return true;
+                    }
+                    if let Some(else_block) = &if_stmt.else_block {
+                        if self.is_port_assigned_in_block(else_block, port_id) {
+                            return true;
+                        }
+                    }
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    if self.lvalue_contains_port(&resolved.target, port_id) {
+                        return true;
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    // Check all case arms
+                    for item in &case_stmt.items {
+                        if self.is_port_assigned_in_block(&item.block, port_id) {
+                            return true;
+                        }
+                    }
+                    // Check default case
+                    if let Some(default_block) = &case_stmt.default {
+                        if self.is_port_assigned_in_block(default_block, port_id) {
+                            return true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -172,11 +268,39 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
+    fn lvalue_contains_port(&self, lvalue: &LValue, port_id: skalp_mir::PortId) -> bool {
+        match lvalue {
+            LValue::Port(id) => *id == port_id,
+            LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => {
+                self.lvalue_contains_port(base, port_id)
+            }
+            LValue::Concat(parts) => parts
+                .iter()
+                .any(|part| self.lvalue_contains_port(part, port_id)),
+            _ => false,
+        }
+    }
+
     fn convert_logic(&mut self) {
         println!(
-            "🔧 CONVERTING LOGIC: Found {} processes",
-            self.mir.processes.len()
+            "🔧 CONVERTING LOGIC: Found {} processes and {} continuous assignments",
+            self.mir.processes.len(),
+            self.mir.assignments.len()
         );
+
+        // CRITICAL FIX: Convert continuous assignments BEFORE processes
+        // This ensures that when sequential processes reference combinational signals,
+        // those signals already exist with their driver nodes
+        eprintln!(
+            "📡 CONTINUOUS ASSIGNMENTS: Processing {} assignments",
+            self.mir.assignments.len()
+        );
+        for assign in &self.mir.assignments {
+            let target = self.lvalue_to_string(&assign.lhs);
+            eprintln!("   📡 CONTINUOUS: {} <= expression", target);
+            self.convert_continuous_assign(&target, &assign.rhs);
+        }
 
         // Convert processes
         for (i, process) in self.mir.processes.iter().enumerate() {
@@ -224,17 +348,6 @@ impl<'a> MirToSirConverter<'a> {
                     println!("      ❓ OTHER: Process kind not handled");
                 }
             }
-        }
-
-        // Convert continuous assignments
-        eprintln!(
-            "📡 CONTINUOUS ASSIGNMENTS: Processing {} assignments",
-            self.mir.assignments.len()
-        );
-        for assign in &self.mir.assignments {
-            let target = self.lvalue_to_string(&assign.lhs);
-            eprintln!("   📡 CONTINUOUS: {} <= expression", target);
-            self.convert_continuous_assign(&target, &assign.rhs);
         }
     }
 
@@ -312,22 +425,18 @@ impl<'a> MirToSirConverter<'a> {
             edge
         );
 
-        // CRITICAL FIX: Process ALL statements sequentially with shared context
+        // Process ALL statements sequentially
         // This handles ResolvedConditional statements with proper dependency tracking
-        let mut local_context = std::collections::HashMap::new();
-
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
                     let target = self.lvalue_to_string(&assign.lhs);
                     println!("   📝 ASSIGNMENT: {} <= expression", target);
 
-                    // Create expression with current local context
-                    let value =
-                        self.create_expression_with_local_context(&assign.rhs, &local_context);
-
-                    // Store in local context for future references
-                    local_context.insert(target.clone(), value);
+                    // CRITICAL: For sequential blocks (non-blocking assignments), all RHS
+                    // values are sampled at the beginning of the clock cycle.
+                    // We should NOT use a local context that tracks intermediate values.
+                    let value = self.create_expression_node(&assign.rhs);
 
                     // Create flip-flop
                     let ff_node = self.create_flipflop_with_input(value, clock, edge.clone());
@@ -337,12 +446,10 @@ impl<'a> MirToSirConverter<'a> {
                     let target = self.lvalue_to_string(&resolved.target);
                     println!("   🔄 RESOLVED CONDITIONAL: {} <= priority mux", target);
 
-                    // CRITICAL: Use shared context to create the priority mux
-                    let mux_value =
-                        self.create_priority_mux_with_context(&resolved.resolved, &local_context);
-
-                    // Store in local context for future references
-                    local_context.insert(target.clone(), mux_value);
+                    // CRITICAL: For sequential blocks, we should NOT use local_context
+                    // because in sequential logic (non-blocking assignments), all RHS
+                    // values are sampled at the beginning of the clock cycle.
+                    let mux_value = self.create_priority_mux_node(&resolved.resolved);
 
                     // Create flip-flop
                     let ff_node = self.create_flipflop_with_input(mux_value, clock, edge.clone());
@@ -367,7 +474,7 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         println!(
-            "🏁 SEQUENTIAL BLOCK: Processed {} statements with shared context",
+            "🏁 SEQUENTIAL BLOCK: Processed {} statements",
             statements.len()
         );
     }
@@ -1039,20 +1146,17 @@ impl<'a> MirToSirConverter<'a> {
         statements: &[Statement],
         target: &str,
     ) -> Option<usize> {
-        // Process assignments in order, building up a local context for dependencies
-        let mut local_computed_values = std::collections::HashMap::new();
+        // CRITICAL: In sequential blocks (non-blocking assignments), all RHS values
+        // are sampled at the beginning of the clock cycle. We should NOT track
+        // intermediate computed values in a local context.
         let mut target_value = None;
 
         for stmt in statements {
             if let Statement::Assignment(assign) = stmt {
                 let assign_target = self.lvalue_to_string(&assign.lhs);
 
-                // Create expression with local context
-                let value =
-                    self.create_expression_with_local_context(&assign.rhs, &local_computed_values);
-
-                // Store this computed value for future references
-                local_computed_values.insert(assign_target.clone(), value);
+                // Create expression WITHOUT local context - read from registers
+                let value = self.create_expression_node(&assign.rhs);
 
                 // If this is our target, save it
                 if assign_target == target {
@@ -1102,53 +1206,6 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
             Expression::Binary { op, left, right } => {
-                // CRITICAL FIX: Check for decode_operand + data_in pattern
-                if let (
-                    Expression::Ref(LValue::Signal(sig_id)),
-                    Expression::Ref(LValue::Port(port_id)),
-                ) = (left.as_ref(), right.as_ref())
-                {
-                    let signal_name = self
-                        .mir
-                        .signals
-                        .iter()
-                        .find(|s| s.id == *sig_id)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default();
-
-                    let port_name = self
-                        .mir
-                        .ports
-                        .iter()
-                        .find(|p| p.id == *port_id)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default();
-
-                    if signal_name == "decode_operand" && port_name == "data_in" {
-                        eprintln!("🎯 DECODE_OPERAND FIX: Using range select for decode_operand + data_in");
-                        // Create instruction[7:0] + data_in directly
-                        let instruction_port = self
-                            .mir
-                            .ports
-                            .iter()
-                            .find(|p| p.name == "instruction")
-                            .map(|p| LValue::Port(p.id))
-                            .unwrap_or_else(|| panic!("instruction port not found"));
-
-                        use skalp_mir::Value;
-                        let range_select = LValue::RangeSelect {
-                            base: Box::new(instruction_port),
-                            high: Box::new(Expression::Literal(Value::Integer(7))),
-                            low: Box::new(Expression::Literal(Value::Integer(0))),
-                        };
-
-                        let range_node = self.create_lvalue_ref_node(&range_select);
-                        let right_node =
-                            self.create_expression_with_local_context(right, local_context);
-                        return self.create_binary_op_node(op, range_node, right_node);
-                    }
-                }
-
                 let left_node = self.create_expression_with_local_context(left, local_context);
                 let right_node = self.create_expression_with_local_context(right, local_context);
                 self.create_binary_op_node(op, left_node, right_node)
@@ -1491,52 +1548,6 @@ impl<'a> MirToSirConverter<'a> {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
             Expression::Binary { op, left, right } => {
-                // CRITICAL FIX: Check for decode_operand + data_in pattern
-                if let (
-                    Expression::Ref(LValue::Signal(sig_id)),
-                    Expression::Ref(LValue::Port(port_id)),
-                ) = (left.as_ref(), right.as_ref())
-                {
-                    let signal_name = self
-                        .mir
-                        .signals
-                        .iter()
-                        .find(|s| s.id == *sig_id)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default();
-
-                    let port_name = self
-                        .mir
-                        .ports
-                        .iter()
-                        .find(|p| p.id == *port_id)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default();
-
-                    if signal_name == "decode_operand" && port_name == "data_in" {
-                        eprintln!("🎯 DECODE_OPERAND FIX: Using range select for decode_operand + data_in");
-                        // Create instruction[7:0] + data_in directly
-                        let instruction_port = self
-                            .mir
-                            .ports
-                            .iter()
-                            .find(|p| p.name == "instruction")
-                            .map(|p| LValue::Port(p.id))
-                            .unwrap_or_else(|| panic!("instruction port not found"));
-
-                        use skalp_mir::Value;
-                        let range_select = LValue::RangeSelect {
-                            base: Box::new(instruction_port),
-                            high: Box::new(Expression::Literal(Value::Integer(7))),
-                            low: Box::new(Expression::Literal(Value::Integer(0))),
-                        };
-
-                        let range_node = self.create_lvalue_ref_node(&range_select);
-                        let right_node = self.create_expression_node(right);
-                        return self.create_binary_op_node(op, range_node, right_node);
-                    }
-                }
-
                 let left_node = self.create_expression_node(left);
                 let right_node = self.create_expression_node(right);
                 self.create_binary_op_node(op, left_node, right_node)
@@ -2059,10 +2070,25 @@ impl<'a> MirToSirConverter<'a> {
             .chain(self.sir.sequential_nodes.iter_mut())
             .find(|n| n.id == node_id)
         {
-            node.outputs.push(SignalRef {
-                signal_id: signal_name.to_string(),
-                bit_range: None,
-            });
+            // For sequential nodes (FlipFlops), replace the temporary output with the actual state signal
+            // For combinational nodes, just add the output
+            let is_sequential = matches!(node.kind, SirNodeKind::FlipFlop { .. });
+            if is_sequential && !node.outputs.is_empty() {
+                // Replace the first output (node_X_out) with the actual state signal
+                node.outputs[0] = SignalRef {
+                    signal_id: signal_name.to_string(),
+                    bit_range: None,
+                };
+                eprintln!(
+                    "   🔄 SEQUENTIAL: Replaced output with state signal '{}'",
+                    signal_name
+                );
+            } else {
+                node.outputs.push(SignalRef {
+                    signal_id: signal_name.to_string(),
+                    bit_range: None,
+                });
+            }
         }
     }
 
@@ -2110,13 +2136,36 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn get_or_create_signal_driver(&mut self, name: &str) -> usize {
-        if let Some(signal) = self.sir.signals.iter().find(|s| s.name == name) {
-            if let Some(driver) = signal.driver_node {
-                return driver;
+        // CRITICAL: If this is a state element (register), we MUST create a SignalRef
+        // reader node, even if the signal already has a driver (the flip-flop).
+        // The flip-flop is the WRITER, but we need a READER node for combinational logic.
+        let is_state_element = self.sir.state_elements.contains_key(name);
+
+        if !is_state_element {
+            // For non-state signals, return existing driver if available
+            if let Some(signal) = self.sir.signals.iter().find(|s| s.name == name) {
+                if let Some(driver) = signal.driver_node {
+                    println!(
+                        "      ✅ DRIVER FOUND: {} already has driver node_{}",
+                        name, driver
+                    );
+                    return driver;
+                }
+                println!(
+                    "      ⚠️ SIGNAL EXISTS BUT NO DRIVER: {} (will create reader)",
+                    name
+                );
+            } else {
+                println!("      ❌ SIGNAL NOT FOUND: {} (will create reader)", name);
             }
+        } else {
+            println!(
+                "      📖 STATE ELEMENT READ: {} (creating SignalRef reader)",
+                name
+            );
         }
 
-        // Create a signal reader node that reads from state
+        // Create a signal reader node that reads from state or signals
         let node_id = self.next_node_id();
 
         // Create output signal for this node

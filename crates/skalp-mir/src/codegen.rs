@@ -366,6 +366,7 @@ impl SystemVerilogGenerator {
                     format!("wire [{}:0]", width - 1)
                 }
             }
+            DataType::Bool => "wire".to_string(), // Boolean represented as single-bit wire
             DataType::Logic(width) => {
                 if *width == 1 {
                     "logic".to_string()

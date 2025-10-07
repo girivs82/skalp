@@ -114,6 +114,8 @@ pub struct VariableId(pub u32);
 pub enum DataType {
     /// Bit vector (synthesis-friendly)
     Bit(usize),
+    /// Boolean type - true/false (distinct from single-bit hardware signals)
+    Bool,
     /// Logic vector (4-state for simulation)
     Logic(usize),
     /// Signed integer

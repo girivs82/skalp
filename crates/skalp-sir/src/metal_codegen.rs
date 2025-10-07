@@ -158,29 +158,20 @@ impl<'a> MetalShaderGenerator<'a> {
         if index == total_cones - 1 {
             // Assign outputs based on their drivers
             for output in &sir.outputs {
-                // Handle specific known output patterns
-                if output.name == "count" && sir.state_elements.contains_key("counter") {
+                // Check if this output is a state element (sequential output)
+                if sir.state_elements.contains_key(&output.name) {
+                    // Output is driven by a register - read from register buffer
                     self.write_indented(&format!(
-                        "signals->{} = registers->counter;\n",
-                        output.name
+                        "signals->{} = registers->{};\n",
+                        output.name, output.name
                     ));
-                } else if output.name == "result"
-                    && sir.state_elements.contains_key("writeback_data")
-                {
-                    self.write_indented(&format!(
-                        "signals->{} = registers->writeback_data;\n",
-                        output.name
-                    ));
-                } else if output.name == "valid"
-                    && sir.state_elements.contains_key("pipeline_valid")
-                {
-                    // For valid = pipeline_valid[3], we need bit extraction
-                    self.write_indented(&format!(
-                        "signals->{} = (registers->pipeline_valid >> 3) & 1;\n",
-                        output.name
-                    ));
+                    eprintln!(
+                        "🔗 OUTPUT (STATE): {} = registers->{}",
+                        output.name, output.name
+                    );
                 } else {
-                    // General case: find the driver node for this output signal
+                    // Output is driven by combinational logic
+                    // Find the driver node for this output signal
                     if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
                         if let Some(driver_node_id) = signal.driver_node {
                             // Find the driver node and connect its output to this signal
@@ -192,7 +183,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                             output.name, node_output.signal_id
                                         ));
                                         eprintln!(
-                                            "🔗 OUTPUT: {} = {}",
+                                            "🔗 OUTPUT (COMB): {} = signals->{}",
                                             output.name, node_output.signal_id
                                         );
                                         break;
@@ -202,7 +193,6 @@ impl<'a> MetalShaderGenerator<'a> {
                         }
                     }
                 }
-                // TODO: Make this more general by analyzing the actual signal connections
             }
         }
 
@@ -491,35 +481,11 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Update all register outputs with the data input value from signals
                 for output in &node.outputs {
                     if sir.state_elements.contains_key(&output.signal_id) {
-                        // Special handling for pipeline register dependencies
-                        if output.signal_id == "writeback_data" {
-                            // writeback_data should get the previous execute_result register value
-                            self.write_indented(&format!(
-                                "registers->{} = old_execute_result;\n",
-                                output.signal_id
-                            ));
-                        } else if output.signal_id == "decode_operand" {
-                            // decode_operand should get fetch_instruction[7:0] from beginning of cycle
-                            self.write_indented(&format!(
-                                "registers->{} = old_fetch_instruction & 0xFF;\n",
-                                output.signal_id
-                            ));
-                        } else if output.signal_id == "decode_opcode" {
-                            // decode_opcode should get fetch_instruction[15:12] from beginning of cycle
-                            self.write_indented(&format!(
-                                "registers->{} = (old_fetch_instruction >> 12) & 0xF;\n",
-                                output.signal_id
-                            ));
-                        } else if output.signal_id == "execute_result" {
-                            // execute_result should be decode_operand + data_in from beginning of cycle
-                            self.write_indented(&format!("registers->{} = (inputs->rst ? 0 : (old_decode_operand + inputs->data_in));\n",
-                                output.signal_id));
-                        } else {
-                            self.write_indented(&format!(
-                                "registers->{} = signals->{};\n",
-                                output.signal_id, data_signal
-                            ));
-                        }
+                        // General case: read the computed value from signals
+                        self.write_indented(&format!(
+                            "registers->{} = signals->{};\n",
+                            output.signal_id, data_signal
+                        ));
                     }
                 }
 

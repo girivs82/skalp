@@ -596,6 +596,7 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
                 String::new()
             }
         }
+        skalp_mir::DataType::Bool => String::new(), // Boolean is single bit
         // Parametric types use parameter expression
         skalp_mir::DataType::BitParam { param, default }
         | skalp_mir::DataType::LogicParam { param, default }
@@ -660,6 +661,7 @@ fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
         | skalp_mir::DataType::Logic(width)
         | skalp_mir::DataType::Int(width)
         | skalp_mir::DataType::Nat(width) => *width,
+        skalp_mir::DataType::Bool => 1, // Boolean is 1 bit
         // Parametric types use their default width for calculations
         skalp_mir::DataType::BitParam { default, .. }
         | skalp_mir::DataType::LogicParam { default, .. }

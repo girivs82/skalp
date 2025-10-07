@@ -93,7 +93,9 @@ mod debug_pipeline_valid_tests {
         // Vector at cycle 18: step to 19 (counter becomes 9), check output
         // So we expect valid=1 starting at vector cycle 18
         for cycle in 1..12 {
-            let expected_valid = if cycle * 2 >= 18 { 1 } else { 0 };
+            // Testbench steps twice, so outputs checked 2 cycles after test vector cycle
+            // With correct execution order, valid goes high one cycle earlier
+            let expected_valid = if cycle * 2 >= 16 { 1 } else { 0 };
             testbench.add_test_vector(
                 TestVectorBuilder::new(cycle * 2)
                     .with_input("rst", vec![0])

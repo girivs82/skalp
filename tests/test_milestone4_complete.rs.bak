@@ -14,7 +14,7 @@ mod milestone4_tests {
         }
 
         impl Buffer<const SIZE: nat[16]> {
-            signal buffer_mem: nat[8] = 0
+            signal buffer_mem: nat[8] = 0;
 
             on(clk.rise) {
                 data_out <= buffer_mem;
@@ -54,8 +54,8 @@ mod milestone4_tests {
         }
 
         impl DataProcessor {
-            signal temp1: nat[8] = 0
-            signal temp2: nat[8] = 0
+            signal temp1: nat[8] = 0;
+            signal temp2: nat[8] = 0;
 
             on(clk.rise) {
                 flow {
@@ -73,8 +73,8 @@ mod milestone4_tests {
         }
 
         impl StateMachine {
-            signal current_state: nat[2] = 0
-            signal next_state: nat[2] = 0
+            signal current_state: nat[2] = 0;
+            signal next_state: nat[2] = 0;
 
             on(clk.rise) {
                 if (rst) {

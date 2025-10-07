@@ -417,6 +417,7 @@ pub struct HirIfExpr {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HirType {
     Bit(u32),
+    Bool, // Boolean type (true/false) - distinct from Bit
     Logic(u32),
     Int(u32),
     Nat(u32),

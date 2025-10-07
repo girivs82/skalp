@@ -10,7 +10,6 @@ mod synthesis_optimization_tests {
     use skalp_mir::lower_to_mir;
 
     #[test]
-    #[ignore = "HIR building fails - undefined symbols 'true' and 'false'"]
     fn test_constant_folding_optimization() {
         let source = r#"
         entity ConstantTest {
@@ -54,7 +53,6 @@ mod synthesis_optimization_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - implementation parsing incomplete"]
     fn test_dead_code_elimination() {
         let source = r#"
         entity DeadCodeTest {
@@ -64,8 +62,8 @@ mod synthesis_optimization_tests {
         }
 
         impl DeadCodeTest {
-            signal unused: bool = false;  // This signal is not used
-            assign y = a && b;
+            signal unused: bool = false  // This signal is not used
+            assign y = a && b
             // unused should be eliminated
         }
         "#;
@@ -95,7 +93,6 @@ mod synthesis_optimization_tests {
     }
 
     #[test]
-    #[ignore = "HIR building fails - undefined symbol 'true'"]
     fn test_optimization_pipeline() {
         let source = r#"
         entity PipelineTest {
@@ -142,7 +139,6 @@ mod synthesis_optimization_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - implementation parsing incomplete"]
     fn test_timing_analysis() {
         let source = r#"
         entity TimingAnalysisTest {
@@ -153,15 +149,15 @@ mod synthesis_optimization_tests {
         }
 
         impl TimingAnalysisTest {
-            signal reg1: bool = false;
-            signal reg2: bool = false;
+            signal reg1: bool = false
+            signal reg2: bool = false
 
             on(clk.rise) {
-                reg1 <= a && b;
-                reg2 <= reg1 || a;
+                reg1 <= a && b
+                reg2 <= reg1 || a
             }
 
-            assign y = reg2;
+            assign y = reg2
         }
         "#;
 
@@ -245,36 +241,36 @@ mod synthesis_optimization_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - expected identifier (complex syntax not fully implemented)"]
+    #[ignore = "Parsing fails - unknown issue with test string vs file parsing"]
     fn test_full_synthesis_flow() {
         let source = r#"
-        entity FullFlowTest {
-            in clk: clock
-            in reset: bool
-            in enable: bool
-            in data_in: nat[4]
-            out data_out: nat[4]
-            out valid: bool
+entity FullFlowTest {
+    in clk: clock
+    in reset: bool
+    in enable: bool
+    in data_in: nat[4]
+    out data_out: nat[4]
+    out valid: bool
+}
+
+impl FullFlowTest {
+    signal counter: nat[4] = 0
+    signal valid_reg: bool = false
+
+    on(clk.rise) {
+        if (reset) {
+            counter <= 0
+            valid_reg <= false
+        } else if (enable) {
+            counter <= counter + 1
+            valid_reg <= true
         }
+    }
 
-        impl FullFlowTest {
-            signal counter: nat[4] = 0;
-            signal valid_reg: bool = false;
-
-            on(clk.rise) {
-                if reset {
-                    counter <= 0;
-                    valid_reg <= false;
-                } else if enable {
-                    counter <= counter + 1;
-                    valid_reg <= true;
-                }
-            }
-
-            assign data_out = counter;
-            assign valid = valid_reg && enable;
-        }
-        "#;
+    data_out = counter
+    valid = valid_reg
+}
+"#;
 
         println!("🚀 Starting full synthesis flow test...");
 

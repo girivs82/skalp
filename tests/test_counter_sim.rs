@@ -168,49 +168,51 @@ mod counter_sim_tests {
 
         // Release reset
         // Counter increments at odd cycles (7, 9, 11...) after reset
-        // Testbench checks at cycle X+2, so:
-        // - Vector at 4 → check at 6 → counter=0 (first increment at cycle 7)
-        // - Vector at 6 → check at 8 → counter=1
-        // - Vector at 8 → check at 10 → counter=2
+        // With correct execution order (combinational before sequential):
+        // - Combinational logic reads counter value BEFORE sequential updates it
+        // - So count output lags counter register by one cycle
+        // Testbench applies vector at cycle X, then steps twice
+        // - Vector at 4 → steps to 5, 6 → check at 5 (after comb) → counter was 0, increments to 1
+        // - Vector at 6 → steps to 7, 8 → check at 7 (after comb) → counter was 1, increments to 2
         testbench.add_test_vector(
             TestVectorBuilder::new(4)
-                .with_input("rst", vec![0])
-                .with_expected_output("count", vec![0])
-                .build(),
-        );
-
-        testbench.add_test_vector(
-            TestVectorBuilder::new(6)
                 .with_input("rst", vec![0])
                 .with_expected_output("count", vec![1])
                 .build(),
         );
 
         testbench.add_test_vector(
-            TestVectorBuilder::new(8)
+            TestVectorBuilder::new(6)
                 .with_input("rst", vec![0])
                 .with_expected_output("count", vec![2])
                 .build(),
         );
 
         testbench.add_test_vector(
-            TestVectorBuilder::new(10)
+            TestVectorBuilder::new(8)
                 .with_input("rst", vec![0])
                 .with_expected_output("count", vec![3])
                 .build(),
         );
 
         testbench.add_test_vector(
-            TestVectorBuilder::new(12)
+            TestVectorBuilder::new(10)
                 .with_input("rst", vec![0])
                 .with_expected_output("count", vec![4])
                 .build(),
         );
 
         testbench.add_test_vector(
-            TestVectorBuilder::new(14)
+            TestVectorBuilder::new(12)
                 .with_input("rst", vec![0])
                 .with_expected_output("count", vec![5])
+                .build(),
+        );
+
+        testbench.add_test_vector(
+            TestVectorBuilder::new(14)
+                .with_input("rst", vec![0])
+                .with_expected_output("count", vec![6])
                 .build(),
         );
 

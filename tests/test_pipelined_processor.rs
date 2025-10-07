@@ -18,7 +18,6 @@ mod pipelined_processor_tests {
 
     #[tokio::test]
     #[cfg(target_os = "macos")]
-    #[ignore = "GPU simulation test failing - testbench results don't pass"]
     async fn test_pipelined_processor_gpu() {
         let source = r#"
         entity PipelinedProcessor {

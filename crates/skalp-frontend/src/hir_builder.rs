@@ -1177,8 +1177,11 @@ impl HirBuilderContext {
                         SyntaxKind::BinLiteral => {
                             let text = token.text();
                             let value = parse_binary(text)?;
-                            // Convert to bit vector
-                            let bits = format!("{:b}", value).chars().map(|c| c == '1').collect();
+                            // Convert to bit vector, preserving the original bit width from source
+                            // Extract the binary digits after "0b" prefix, removing underscores
+                            let bin_digits = text[2..].replace('_', "");
+                            let bits: Vec<bool> =
+                                bin_digits.chars().rev().map(|c| c == '1').collect();
                             HirLiteral::BitVector(bits)
                         }
                         SyntaxKind::HexLiteral => {
@@ -1265,8 +1268,10 @@ impl HirBuilderContext {
                 SyntaxKind::BinLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = parse_binary(text)?;
-                    // Convert to bit vector
-                    let bits = format!("{:b}", value).chars().map(|c| c == '1').collect();
+                    // Convert to bit vector, preserving the original bit width from source
+                    // Extract the binary digits after "0b" prefix, removing underscores
+                    let bin_digits = text[2..].replace('_', "");
+                    let bits: Vec<bool> = bin_digits.chars().rev().map(|c| c == '1').collect();
                     Some(HirLiteral::BitVector(bits))
                 }
                 SyntaxKind::HexLiteral => {
@@ -1479,8 +1484,10 @@ impl HirBuilderContext {
                 SyntaxKind::BinLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     let value = parse_binary(text)?;
-                    // Convert to bit vector
-                    let bits = format!("{:b}", value).chars().map(|c| c == '1').collect();
+                    // Convert to bit vector, preserving the original bit width from source
+                    // Extract the binary digits after "0b" prefix, removing underscores
+                    let bin_digits = text[2..].replace('_', "");
+                    let bits: Vec<bool> = bin_digits.chars().rev().map(|c| c == '1').collect();
                     Some(HirExpression::Literal(HirLiteral::BitVector(bits)))
                 }
                 SyntaxKind::HexLiteral => {
@@ -1497,6 +1504,8 @@ impl HirBuilderContext {
                         .to_string();
                     Some(HirExpression::Literal(HirLiteral::String(s)))
                 }
+                SyntaxKind::TrueKw => Some(HirExpression::Literal(HirLiteral::Boolean(true))),
+                SyntaxKind::FalseKw => Some(HirExpression::Literal(HirLiteral::Boolean(false))),
                 _ => None,
             }
         } else {

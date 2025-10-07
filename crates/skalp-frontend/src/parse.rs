@@ -539,15 +539,29 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::IfStmt);
 
         self.expect(SyntaxKind::IfKw);
-        self.expect(SyntaxKind::LParen);
+
+        // Parentheses are optional in SKALP
+        let has_parens = self.at(SyntaxKind::LParen);
+        if has_parens {
+            self.bump();
+        }
+
         self.parse_expression();
-        self.expect(SyntaxKind::RParen);
+
+        if has_parens {
+            self.expect(SyntaxKind::RParen);
+        }
 
         self.parse_block_statement();
 
         if self.at(SyntaxKind::ElseKw) {
             self.bump();
-            self.parse_block_statement();
+            // Check for else-if chain
+            if self.at(SyntaxKind::IfKw) {
+                self.parse_if_statement();
+            } else {
+                self.parse_block_statement();
+            }
         }
 
         self.finish_node();
@@ -589,10 +603,10 @@ impl<'a> ParseState<'a> {
         self.parse_expression();
         self.expect(SyntaxKind::LBrace);
 
-        // Parse match arms
+        // Parse match arms (with statements)
         self.start_node(SyntaxKind::MatchArmList);
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
-            self.parse_match_arm();
+            self.parse_match_arm_statement();
         }
         self.finish_node();
 
@@ -609,10 +623,10 @@ impl<'a> ParseState<'a> {
         self.parse_expression();
         self.expect(SyntaxKind::LBrace);
 
-        // Parse match arms
+        // Parse match arms (with expressions)
         self.start_node(SyntaxKind::MatchArmList);
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
-            self.parse_match_arm();
+            self.parse_match_arm_expression();
         }
         self.finish_node();
 
@@ -621,8 +635,8 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
-    /// Parse a single match arm
-    fn parse_match_arm(&mut self) {
+    /// Parse a single match arm with statement body (for match statements)
+    fn parse_match_arm_statement(&mut self) {
         self.start_node(SyntaxKind::MatchArm);
 
         // Parse pattern
@@ -653,9 +667,12 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::Ident) => {
                     // Could be assignment or expression
                     // Look ahead to see if there's an assignment operator
-                    if self.peek_kind(1) == Some(SyntaxKind::Assign)
-                        || self.peek_kind(1) == Some(SyntaxKind::LBracket)
-                        || self.peek_kind(1) == Some(SyntaxKind::Dot)
+                    let next = self.peek_kind(1);
+                    if next == Some(SyntaxKind::Assign)
+                        || next == Some(SyntaxKind::NonBlockingAssign)
+                        || next == Some(SyntaxKind::BlockingAssign)
+                        || next == Some(SyntaxKind::LBracket)
+                        || next == Some(SyntaxKind::Dot)
                     {
                         // Parse as assignment statement
                         self.parse_assignment_stmt();
@@ -676,6 +693,39 @@ impl<'a> ParseState<'a> {
                 }
             }
         }
+
+        // Optional comma
+        if self.at(SyntaxKind::Comma) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a single match arm with expression body (for match expressions)
+    fn parse_match_arm_expression(&mut self) {
+        self.start_node(SyntaxKind::MatchArm);
+
+        // Parse pattern
+        self.parse_pattern();
+
+        // Parse optional guard (if expression)
+        if self.at(SyntaxKind::IfKw) {
+            self.start_node(SyntaxKind::MatchGuard);
+            self.bump(); // consume 'if'
+            self.parse_expression(); // guard condition
+            self.finish_node();
+        }
+
+        // Expect arrow (-> or =>)
+        if !self.at(SyntaxKind::Arrow) && !self.at(SyntaxKind::FatArrow) {
+            self.error("Expected '->' or '=>' after pattern");
+        } else {
+            self.bump(); // consume arrow
+        }
+
+        // Parse arm body - must be an expression
+        self.parse_expression();
 
         // Optional comma
         if self.at(SyntaxKind::Comma) {
@@ -2251,6 +2301,12 @@ impl<'a> ParseState<'a> {
                 self.parse_width_spec();
                 self.finish_node();
             }
+            Some(SyntaxKind::BoolKw) => {
+                self.start_node(SyntaxKind::BoolType);
+                self.bump();
+                // Bool type has no width specifier
+                self.finish_node();
+            }
             Some(SyntaxKind::NatKw) => {
                 self.start_node(SyntaxKind::NatType);
                 self.bump();
@@ -2619,7 +2675,9 @@ impl<'a> ParseState<'a> {
                 SyntaxKind::IntLiteral
                 | SyntaxKind::BinLiteral
                 | SyntaxKind::HexLiteral
-                | SyntaxKind::StringLiteral,
+                | SyntaxKind::StringLiteral
+                | SyntaxKind::TrueKw
+                | SyntaxKind::FalseKw,
             ) => {
                 self.start_node(SyntaxKind::LiteralExpr);
                 self.bump();

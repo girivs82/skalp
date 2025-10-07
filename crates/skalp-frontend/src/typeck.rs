@@ -952,6 +952,7 @@ impl TypeChecker {
                 let width = self.extract_width(node);
                 Type::Bit(width)
             }
+            SyntaxKind::BoolType => Type::Bool,
             SyntaxKind::LogicType => {
                 let width = self.extract_width(node);
                 Type::Logic(width)

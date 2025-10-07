@@ -25,6 +25,7 @@ pub enum SyntaxKind {
 
     // Type System (10) - Updated to include numeric types
     BitKw,
+    BoolKw,
     NatKw,
     IntKw,
     LogicKw,
@@ -35,6 +36,10 @@ pub enum SyntaxKind {
     StructKw,
     EnumKw,
     UnionKw,
+
+    // Boolean Literals (2)
+    TrueKw,
+    FalseKw,
 
     // Traits and Generics (5)
     TraitKw,
@@ -278,6 +283,7 @@ pub enum SyntaxKind {
     TypeExpr,
     TypeAnnotation,
     BitType,
+    BoolType,
     LogicType,
     IntType,
     NatType,
@@ -373,8 +379,10 @@ impl SyntaxKind {
             // Core Hardware Description (12)
             EntityKw | ImplKw | SignalKw | VarKw | ConstKw
                 | InKw | OutKw | InoutKw | OnKw | IfKw | ElseKw | AssignKw
-            // Type System (7)
-            | BitKw | ClockKw | ResetKw | TypeKw | StreamKw | StructKw | EnumKw | UnionKw
+            // Type System (11)
+            | BitKw | BoolKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | StructKw | EnumKw | UnionKw
+            // Boolean Literals (2)
+            | TrueKw | FalseKw
             // Traits and Generics (5)
             | TraitKw | ProtocolKw | WhereKw | SelfKw | SelfTypeKw
             // Event Control (2)
@@ -456,8 +464,12 @@ impl SyntaxKind {
             ElseKw => "'else'",
             AssignKw => "'assign'",
 
-            // Type System (7)
+            // Type System (11)
             BitKw => "'bit'",
+            BoolKw => "'bool'",
+            NatKw => "'nat'",
+            IntKw => "'int'",
+            LogicKw => "'logic'",
             ClockKw => "'clock'",
             ResetKw => "'reset'",
             TypeKw => "'type'",
@@ -465,6 +477,10 @@ impl SyntaxKind {
             StructKw => "'struct'",
             EnumKw => "'enum'",
             UnionKw => "'union'",
+
+            // Boolean Literals (2)
+            TrueKw => "'true'",
+            FalseKw => "'false'",
 
             // Traits and Generics (5)
             TraitKw => "'trait'",
@@ -638,8 +654,9 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Else => ElseKw,
             Token::AssignKw => AssignKw,
 
-            // Type System (10) - Updated to include numeric types
+            // Type System (11) - Updated to include numeric types and bool
             Token::Bit => BitKw,
+            Token::Bool => BoolKw,
             Token::Nat => NatKw,
             Token::Int => IntKw,
             Token::Logic => LogicKw,
@@ -650,6 +667,10 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Struct => StructKw,
             Token::Enum => EnumKw,
             Token::Union => UnionKw,
+
+            // Boolean Literals (2)
+            Token::True => TrueKw,
+            Token::False => FalseKw,
 
             // Traits and Generics (5)
             Token::Trait => TraitKw,
