@@ -121,30 +121,29 @@ mod technology_mapping_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - impl block with signal declarations and if/else incomplete"]
     fn test_asic_standard_cell_mapping() {
         println!("🔧 Testing ASIC standard cell technology mapping...");
 
         let source = r#"
         entity AsicTest {
             in clk: clock
-            in reset: bool
+            in rst: reset
             in data: bool
             out q: bool
         }
 
         impl AsicTest {
-            signal reg_q: bool = false;
+            signal reg_q: bool = false
 
             on(clk.rise) {
-                if reset {
-                    reg_q <= false;
+                if (rst) {
+                    reg_q <= false
                 } else {
-                    reg_q <= data;
+                    reg_q <= data
                 }
             }
 
-            assign q = reg_q;
+            q = reg_q
         }
         "#;
 
@@ -234,14 +233,14 @@ mod technology_mapping_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - impl block with signal declarations and if/else/else-if incomplete"]
+    #[ignore = "Technology mapper doesn't track flip-flops in LIR - needs register detection"]
     fn test_complex_design_mapping() {
         println!("🔧 Testing complex design technology mapping...");
 
         let source = r#"
         entity ComplexDesign {
             in clk: clock
-            in reset: bool
+            in rst: reset
             in enable: bool
             in data_in: nat[4]
             out data_out: nat[4]
@@ -249,23 +248,23 @@ mod technology_mapping_tests {
         }
 
         impl ComplexDesign {
-            signal counter: nat[4] = 0;
-            signal valid_reg: bool = false;
+            signal counter: nat[4] = 0
+            signal valid_reg: bool = false
 
             on(clk.rise) {
-                if reset {
-                    counter <= 0;
-                    valid_reg <= false;
-                } else if enable {
-                    counter <= counter + 1;
-                    valid_reg <= true;
+                if (rst) {
+                    counter <= 0
+                    valid_reg <= false
+                } else if (enable) {
+                    counter <= counter + 1
+                    valid_reg <= true
                 } else {
-                    valid_reg <= false;
+                    valid_reg <= false
                 }
             }
 
-            assign data_out = counter;
-            assign valid = valid_reg && enable;
+            data_out = counter
+            valid = valid_reg && enable
         }
         "#;
 

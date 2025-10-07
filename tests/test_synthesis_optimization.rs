@@ -241,36 +241,35 @@ mod synthesis_optimization_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - unknown issue with test string vs file parsing"]
     fn test_full_synthesis_flow() {
         let source = r#"
-entity FullFlowTest {
-    in clk: clock
-    in reset: bool
-    in enable: bool
-    in data_in: nat[4]
-    out data_out: nat[4]
-    out valid: bool
-}
-
-impl FullFlowTest {
-    signal counter: nat[4] = 0
-    signal valid_reg: bool = false
-
-    on(clk.rise) {
-        if (reset) {
-            counter <= 0
-            valid_reg <= false
-        } else if (enable) {
-            counter <= counter + 1
-            valid_reg <= true
+        entity FullFlowTest {
+            in clk: clock
+            in rst: reset
+            in enable: bool
+            in data_in: nat[4]
+            out data_out: nat[4]
+            out valid: bool
         }
-    }
 
-    data_out = counter
-    valid = valid_reg
-}
-"#;
+        impl FullFlowTest {
+            signal counter: nat[4] = 0
+            signal valid_reg: bool = false
+
+            on(clk.rise) {
+                if (rst) {
+                    counter <= 0
+                    valid_reg <= false
+                } else if (enable) {
+                    counter <= counter + 1
+                    valid_reg <= true
+                }
+            }
+
+            data_out = counter
+            valid = valid_reg
+        }
+        "#;
 
         println!("🚀 Starting full synthesis flow test...");
 

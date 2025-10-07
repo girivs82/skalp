@@ -5,9 +5,11 @@ use std::collections::HashMap;
 
 pub struct CpuRuntime {
     module: Option<SirModule>,
-    state: HashMap<String, Vec<u8>>,
-    next_state: HashMap<String, Vec<u8>>,
-    signals: HashMap<String, Vec<u8>>,
+    inputs: HashMap<String, Vec<u8>>, // Input port values (preserved across steps)
+    state: HashMap<String, Vec<u8>>,  // State elements (registers)
+    next_state: HashMap<String, Vec<u8>>, // Next state for double-buffering
+    outputs: HashMap<String, Vec<u8>>, // Output port values
+    signals: HashMap<String, Vec<u8>>, // Internal signal values
     current_cycle: u64,
 }
 
@@ -21,8 +23,10 @@ impl CpuRuntime {
     pub fn new() -> Self {
         CpuRuntime {
             module: None,
+            inputs: HashMap::new(),
             state: HashMap::new(),
             next_state: HashMap::new(),
+            outputs: HashMap::new(),
             signals: HashMap::new(),
             current_cycle: 0,
         }
@@ -58,15 +62,18 @@ impl CpuRuntime {
                     // Update flip-flop state on clock edge
                     for output in &node.outputs {
                         let signal_name = &output.signal_id;
-                        if let Some(current_val) = self.signals.get(signal_name) {
-                            self.next_state
-                                .insert(signal_name.clone(), current_val.clone());
+                        // Only update if this is a state element (register), not an input/output
+                        if module.state_elements.contains_key(signal_name) {
+                            if let Some(current_val) = self.signals.get(signal_name) {
+                                self.next_state
+                                    .insert(signal_name.clone(), current_val.clone());
+                            }
                         }
                     }
                 }
             }
 
-            // Swap state buffers
+            // Swap state buffers (only affects registers, not inputs)
             std::mem::swap(&mut self.state, &mut self.next_state);
             self.next_state.clear();
         }
@@ -82,19 +89,20 @@ impl CpuRuntime {
                 .insert(signal.name.clone(), vec![0u8; byte_size]);
         }
 
-        // Initialize input ports
+        // Initialize input ports (separate from state)
         for input in &module.inputs {
             let byte_size = input.width.div_ceil(8);
-            self.state.insert(input.name.clone(), vec![0u8; byte_size]);
+            self.inputs.insert(input.name.clone(), vec![0u8; byte_size]);
         }
 
-        // Initialize output ports
+        // Initialize output ports (separate from state)
         for output in &module.outputs {
             let byte_size = output.width.div_ceil(8);
-            self.state.insert(output.name.clone(), vec![0u8; byte_size]);
+            self.outputs
+                .insert(output.name.clone(), vec![0u8; byte_size]);
         }
 
-        // Initialize state elements
+        // Initialize state elements (registers only)
         for (name, element) in &module.state_elements {
             let byte_size = element.width.div_ceil(8);
             let initial_value = if let Some(reset_val) = element.reset_value {
@@ -129,11 +137,16 @@ impl SimulationRuntime for CpuRuntime {
 
         self.current_cycle += 1;
 
-        // Create simulation state snapshot
+        // Create simulation state snapshot combining inputs, outputs, and state elements
+        let mut combined_state = HashMap::new();
+        combined_state.extend(self.inputs.clone());
+        combined_state.extend(self.outputs.clone());
+        combined_state.extend(self.state.clone());
+
         Ok(SimulationState {
             cycle: self.current_cycle,
             signals: self.signals.clone(),
-            registers: self.state.clone(),
+            registers: combined_state,
         })
     }
 
@@ -182,8 +195,8 @@ impl SimulationRuntime for CpuRuntime {
     }
 
     async fn set_input(&mut self, name: &str, value: &[u8]) -> SimulationResult<()> {
-        if self.state.contains_key(name) {
-            self.state.insert(name.to_string(), value.to_vec());
+        if self.inputs.contains_key(name) {
+            self.inputs.insert(name.to_string(), value.to_vec());
             Ok(())
         } else {
             Err(SimulationError::InvalidInput(format!(
@@ -194,7 +207,7 @@ impl SimulationRuntime for CpuRuntime {
     }
 
     async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
-        self.state
+        self.outputs
             .get(name)
             .cloned()
             .ok_or_else(|| SimulationError::InvalidInput(format!("Output {} not found", name)))
