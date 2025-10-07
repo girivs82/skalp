@@ -3,7 +3,7 @@ mod milestone4_tests {
     use skalp_frontend::parse_and_build_hir;
 
     #[test]
-    #[ignore = "Test hangs - milestone 4 features (generics, traits, intents) not fully implemented"]
+    #[ignore = "Milestone 4 features (generics with const params, traits, intents, flow blocks) not fully implemented - parsing fails"]
     fn test_milestone4_comprehensive() {
         let source = r#"
         // Enhanced Generics with Const Parameters

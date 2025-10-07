@@ -7,7 +7,6 @@ mod phase8_final_success_tests {
     use skalp_mir::lower_to_mir;
 
     #[test]
-    #[ignore = "Phase 8 processor design uses unimplemented language features - parsing fails"]
     fn test_phase8_final_success_simple_processor() {
         println!("🎯 Phase 8 Final Success Test - Simple Processor");
         println!("Target: Demonstrate full synthesis pipeline on complex design");
@@ -15,7 +14,7 @@ mod phase8_final_success_tests {
         let source = r#"
         entity SimpleProcessor {
             in clk: clock
-            in reset: bool
+            in rst: reset
             in instruction: nat[8]
             in data_in: nat[8]
             out pc: nat[8]
@@ -24,45 +23,44 @@ mod phase8_final_success_tests {
         }
 
         impl SimpleProcessor {
-            signal program_counter: nat[8] = 0;
-            signal accumulator: nat[8] = 0;
-            signal status_reg: bool = false;
+            signal program_counter: nat[8] = 0
+            signal accumulator: nat[8] = 0
+            signal status_reg: bool = false
 
             on(clk.rise) {
-                if reset {
-                    program_counter <= 0;
-                    accumulator <= 0;
-                    status_reg <= false;
+                if (rst) {
+                    program_counter <= 0
+                    accumulator <= 0
+                    status_reg <= false
                 } else {
-                    // Simple instruction execution
                     match instruction {
-                        0 => { // NOP
-                            program_counter <= program_counter + 1;
+                        0 => {
+                            program_counter <= program_counter + 1
                         }
-                        1 => { // LOAD
-                            accumulator <= data_in;
-                            program_counter <= program_counter + 1;
-                            status_reg <= true;
+                        1 => {
+                            accumulator <= data_in
+                            program_counter <= program_counter + 1
+                            status_reg <= true
                         }
-                        2 => { // ADD
-                            accumulator <= accumulator + data_in;
-                            program_counter <= program_counter + 1;
-                            status_reg <= accumulator != 0;
+                        2 => {
+                            accumulator <= accumulator + data_in
+                            program_counter <= program_counter + 1
+                            status_reg <= accumulator != 0
                         }
-                        3 => { // JUMP
-                            program_counter <= data_in;
-                            status_reg <= false;
+                        3 => {
+                            program_counter <= data_in
+                            status_reg <= false
                         }
-                        _ => { // Default
-                            program_counter <= program_counter + 1;
+                        _ => {
+                            program_counter <= program_counter + 1
                         }
                     }
                 }
             }
 
-            assign pc = program_counter;
-            assign data_out = accumulator;
-            assign status = status_reg;
+            pc = program_counter
+            data_out = accumulator
+            status = status_reg
         }
         "#;
 
