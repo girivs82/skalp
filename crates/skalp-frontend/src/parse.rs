@@ -1840,7 +1840,8 @@ impl<'a> ParseState<'a> {
             match self.current_kind() {
                 Some(SyntaxKind::TypeKw) => self.parse_trait_type(),
                 Some(SyntaxKind::ConstKw) => self.parse_trait_const(),
-                Some(SyntaxKind::Ident) => self.parse_trait_method(),
+                Some(SyntaxKind::FnKw) => self.parse_trait_method(),
+                Some(SyntaxKind::SignalKw) => self.parse_trait_signal(),
                 Some(SyntaxKind::RBrace) => break,
                 _ => {
                     self.error_and_bump("expected trait item");
@@ -1897,6 +1898,9 @@ impl<'a> ParseState<'a> {
     fn parse_trait_method(&mut self) {
         self.start_node(SyntaxKind::TraitMethod);
 
+        // 'fn' keyword
+        self.expect(SyntaxKind::FnKw);
+
         // Method name
         self.expect(SyntaxKind::Ident);
 
@@ -1918,6 +1922,25 @@ impl<'a> ParseState<'a> {
             self.expect(SyntaxKind::Semicolon);
         }
 
+        self.finish_node();
+    }
+
+    /// Parse trait signal
+    fn parse_trait_signal(&mut self) {
+        self.start_node(SyntaxKind::TraitSignal);
+
+        self.expect(SyntaxKind::SignalKw);
+        self.expect(SyntaxKind::Ident);
+        self.expect(SyntaxKind::Colon);
+        self.parse_type();
+
+        // Optional default value
+        if self.at(SyntaxKind::Assign) {
+            self.bump();
+            self.parse_expression();
+        }
+
+        self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
 
@@ -1988,7 +2011,7 @@ impl<'a> ParseState<'a> {
             match self.current_kind() {
                 Some(SyntaxKind::TypeKw) => self.parse_trait_impl_type(),
                 Some(SyntaxKind::ConstKw) => self.parse_trait_impl_const(),
-                Some(SyntaxKind::Ident) => self.parse_trait_impl_method(),
+                Some(SyntaxKind::FnKw) => self.parse_trait_impl_method(),
                 Some(SyntaxKind::RBrace) => break,
                 _ => {
                     self.error_and_bump("expected trait implementation item");
@@ -2030,6 +2053,9 @@ impl<'a> ParseState<'a> {
     /// Parse trait implementation method
     fn parse_trait_impl_method(&mut self) {
         self.start_node(SyntaxKind::TraitMethod);
+
+        // 'fn' keyword
+        self.expect(SyntaxKind::FnKw);
 
         // Method name
         self.expect(SyntaxKind::Ident);
@@ -2811,6 +2837,20 @@ impl<'a> ParseState<'a> {
     /// Parse single parameter
     fn parse_parameter(&mut self) {
         self.start_node(SyntaxKind::Parameter);
+
+        // Handle &self or self
+        if self.at(SyntaxKind::Amp) {
+            self.bump(); // &
+            if self.at(SyntaxKind::SelfKw) {
+                self.bump(); // self
+                self.finish_node();
+                return;
+            }
+        } else if self.at(SyntaxKind::SelfKw) {
+            self.bump(); // self
+            self.finish_node();
+            return;
+        }
 
         // Parameter name
         self.expect(SyntaxKind::Ident);

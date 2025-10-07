@@ -21,7 +21,6 @@ mod simple_impl_tests {
     }
 
     #[test]
-    #[ignore = "Trait implementation syntax not fully implemented"]
     fn test_trait_impl_syntax() {
         let source = r#"
         trait Test {

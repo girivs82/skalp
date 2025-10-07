@@ -3,7 +3,6 @@ mod trait_tests {
     use skalp_frontend::parse_and_build_hir;
 
     #[test]
-    #[ignore = "Parsing fails - trait item parsing incomplete"]
     fn test_simple_trait_definition() {
         let source = r#"
         trait Clocked {
@@ -59,7 +58,6 @@ mod trait_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - trait item and implementation parsing incomplete"]
     fn test_trait_implementation() {
         let source = r#"
         trait Clocked {
