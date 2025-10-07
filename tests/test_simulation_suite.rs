@@ -54,6 +54,10 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "GPU simulation only available on macOS, CPU runtime not yet implemented"
+    )]
     async fn test_counter_increments() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
@@ -101,6 +105,10 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "GPU simulation only available on macOS, CPU runtime not yet implemented"
+    )]
     async fn test_alu_operations() {
         let alu_source = fs::read_to_string("examples/alu.sk").expect("Failed to read alu.sk");
 
@@ -156,7 +164,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "GPU simulation test - FIFO uses generics with bit<WIDTH> syntax not yet fully supported in parsing"]
+    #[ignore = "FIFO uses generics with bit<WIDTH> syntax not yet fully supported in parsing"]
     async fn test_fifo_operations() {
         let fifo_source = fs::read_to_string("examples/fifo.sk").expect("Failed to read fifo.sk");
 
@@ -277,6 +285,10 @@ mod simulation_suite {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "GPU simulation only available on macOS, CPU runtime not yet implemented"
+    )]
     async fn test_simulation_state_consistency() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
