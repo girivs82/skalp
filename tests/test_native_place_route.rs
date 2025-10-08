@@ -25,11 +25,11 @@ mod native_place_route_tests {
         println!("   I/O tiles: {}", hx8k.io_tiles.len());
         println!("   Memory blocks: {}", hx8k.memory_blocks.len());
 
-        let stats = hx8k.stats();
-        println!("   Total LUTs: {}", stats.total_luts);
-        println!("   Total FFs: {}", stats.total_ffs);
-        println!("   Total I/Os: {}", stats.total_ios);
-        println!("   Total BRAMs: {}", stats.total_brams);
+        let stats_hx8k = hx8k.stats();
+        println!("   Total LUTs: {}", stats_hx8k.total_luts);
+        println!("   Total FFs: {}", stats_hx8k.total_ffs);
+        println!("   Total I/Os: {}", stats_hx8k.total_ios);
+        println!("   Total BRAMs: {}", stats_hx8k.total_brams);
 
         // Test HX1K device
         let hx1k = Device::ice40_hx1k();
@@ -38,16 +38,16 @@ mod native_place_route_tests {
         println!("   Grid size: {:?}", hx1k.grid_size);
         println!("   Logic tiles: {}", hx1k.logic_tiles.len());
 
-        let stats = hx1k.stats();
-        println!("   Total LUTs: {}", stats.total_luts);
-        println!("   Total FFs: {}", stats.total_ffs);
+        let stats_hx1k = hx1k.stats();
+        println!("   Total LUTs: {}", stats_hx1k.total_luts);
+        println!("   Total FFs: {}", stats_hx1k.total_ffs);
 
         // Validate architecture
         assert_eq!(hx8k.family, DeviceFamily::Ice40);
         assert_eq!(hx8k.grid_size, (33, 33));
         assert!(!hx8k.logic_tiles.is_empty());
         assert!(!hx8k.io_tiles.is_empty());
-        assert!(stats.total_luts >= 7680 && stats.total_luts <= 7800); // HX8K: got 7688 LUTs (961 tiles × 8 LUTs/tile)
+        assert!(stats_hx8k.total_luts >= 7680 && stats_hx8k.total_luts <= 7800); // HX8K: got 7688 LUTs (961 tiles × 8 LUTs/tile)
 
         assert_eq!(hx1k.family, DeviceFamily::Ice40);
         assert_eq!(hx1k.grid_size, (17, 17));
