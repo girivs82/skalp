@@ -890,6 +890,103 @@ impl<'hir> HirToMir<'hir> {
                 param: param_name.clone(),
                 default: 32,
             },
+            // Expression-based types - need const evaluation
+            hir::HirType::BitExpr(expr) => {
+                // TODO: Evaluate const expression to get concrete width
+                // For now, try to extract literal or fallback to parameter
+                match self.try_eval_const_expr(expr) {
+                    Some(val) => DataType::Bit(val as usize),
+                    None => DataType::BitParam {
+                        param: "expr".to_string(),
+                        default: 8,
+                    },
+                }
+            }
+            hir::HirType::LogicExpr(expr) => match self.try_eval_const_expr(expr) {
+                Some(val) => DataType::Logic(val as usize),
+                None => DataType::LogicParam {
+                    param: "expr".to_string(),
+                    default: 8,
+                },
+            },
+            hir::HirType::IntExpr(expr) => match self.try_eval_const_expr(expr) {
+                Some(val) => DataType::Int(val as usize),
+                None => DataType::IntParam {
+                    param: "expr".to_string(),
+                    default: 32,
+                },
+            },
+            hir::HirType::NatExpr(expr) => match self.try_eval_const_expr(expr) {
+                Some(val) => DataType::Nat(val as usize),
+                None => DataType::NatParam {
+                    param: "expr".to_string(),
+                    default: 32,
+                },
+            },
+            hir::HirType::ArrayExpr(inner_type, size_expr) => {
+                // Evaluate size expression
+                match self.try_eval_const_expr(size_expr) {
+                    Some(val) => {
+                        DataType::Array(Box::new(self.convert_type(inner_type)), val as usize)
+                    }
+                    None => DataType::Array(Box::new(self.convert_type(inner_type)), 1), // Fallback
+                }
+            }
+        }
+    }
+
+    /// Try to evaluate a const expression at compile time
+    /// Returns Some(value) if the expression can be evaluated, None otherwise
+    #[allow(clippy::only_used_in_recursion)]
+    fn try_eval_const_expr(&self, expr: &hir::HirExpression) -> Option<u64> {
+        match expr {
+            hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) => Some(*val),
+            hir::HirExpression::Binary(bin_expr) => {
+                // Recursively evaluate binary expressions
+                let left = self.try_eval_const_expr(&bin_expr.left)?;
+                let right = self.try_eval_const_expr(&bin_expr.right)?;
+
+                match bin_expr.op {
+                    hir::HirBinaryOp::Add => Some(left + right),
+                    hir::HirBinaryOp::Sub => Some(left.saturating_sub(right)),
+                    hir::HirBinaryOp::Mul => Some(left * right),
+                    hir::HirBinaryOp::Div if right != 0 => Some(left / right),
+                    hir::HirBinaryOp::Mod if right != 0 => Some(left % right),
+                    _ => None, // Can't evaluate other operations
+                }
+            }
+            hir::HirExpression::Call(call_expr) => {
+                // Handle intrinsic functions
+                match call_expr.function.as_str() {
+                    "clog2" => {
+                        // Calculate ceiling log2
+                        if call_expr.args.len() == 1 {
+                            let arg = self.try_eval_const_expr(&call_expr.args[0])?;
+                            if arg == 0 {
+                                return Some(0);
+                            }
+                            Some((64 - (arg - 1).leading_zeros()) as u64)
+                        } else {
+                            None
+                        }
+                    }
+                    "pow2" => {
+                        // Calculate 2^n
+                        if call_expr.args.len() == 1 {
+                            let arg = self.try_eval_const_expr(&call_expr.args[0])?;
+                            if arg < 64 {
+                                Some(1u64 << arg)
+                            } else {
+                                None // Overflow
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None, // Unknown function
+                }
+            }
+            _ => None, // Can't evaluate variables, constants, etc. without context
         }
     }
 
@@ -1147,6 +1244,16 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::LogicParam(_) => 8, // Default logic width
             hir::HirType::IntParam(_) => 32,  // Default int width
             hir::HirType::NatParam(_) => 32,  // Default nat width
+            // Expression-based types - evaluate or use default
+            hir::HirType::BitExpr(expr) => self.try_eval_const_expr(expr).unwrap_or(8) as usize,
+            hir::HirType::LogicExpr(expr) => self.try_eval_const_expr(expr).unwrap_or(8) as usize,
+            hir::HirType::IntExpr(expr) => self.try_eval_const_expr(expr).unwrap_or(32) as usize,
+            hir::HirType::NatExpr(expr) => self.try_eval_const_expr(expr).unwrap_or(32) as usize,
+            hir::HirType::ArrayExpr(element_type, size_expr) => {
+                let element_width = self.get_hir_type_width(element_type);
+                let size = self.try_eval_const_expr(size_expr).unwrap_or(1) as usize;
+                element_width * size
+            }
         }
     }
 

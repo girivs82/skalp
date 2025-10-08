@@ -442,9 +442,14 @@ impl<'a> ParseState<'a> {
 
     /// Parse assignment or other statement starting with identifier
     fn parse_assignment_or_statement(&mut self) {
-        // For now, just parse as assignment
-        // In the future, we could look ahead to determine the statement type
-        self.parse_assignment_stmt();
+        // Check if this is a return statement
+        if self.at(SyntaxKind::ReturnKw) {
+            self.parse_return_statement();
+        } else {
+            // For now, just parse as assignment
+            // In the future, we could look ahead to determine the statement type
+            self.parse_assignment_stmt();
+        }
     }
 
     /// Parse continuous assignment (assign keyword)
@@ -514,6 +519,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::SequenceKw) => self.parse_sequence_statement(),
                 Some(SyntaxKind::AssumeKw) => self.parse_assume_statement(),
                 Some(SyntaxKind::ExpectKw) => self.parse_expect_statement(),
+                Some(SyntaxKind::ReturnKw) => self.parse_return_statement(),
                 Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
                 Some(SyntaxKind::LBrace) => self.parse_block_statement(),
                 Some(SyntaxKind::AssignKw) => {
@@ -975,6 +981,24 @@ impl<'a> ParseState<'a> {
 
         // Expect semicolon
         self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse return statement
+    fn parse_return_statement(&mut self) {
+        self.start_node(SyntaxKind::ReturnStmt);
+
+        // 'return' keyword
+        self.expect(SyntaxKind::ReturnKw);
+
+        // Optional return value expression
+        if !self.at(SyntaxKind::Semicolon) && !self.is_at_end() {
+            self.parse_expression();
+        }
+
+        // Optional semicolon
+        self.consume_semicolon();
 
         self.finish_node();
     }
@@ -2305,8 +2329,27 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::Arg);
 
         // Check if it's a literal (const argument)
+        // Use simple expression to avoid consuming > as comparison operator
         if self.current_kind().is_some_and(|k| k.is_literal()) {
-            self.parse_expression();
+            self.start_node(SyntaxKind::LiteralExpr);
+            self.bump();
+            self.finish_node();
+        }
+        // Check if it's an identifier that looks like a const arg (not followed by type syntax)
+        else if self.current_kind() == Some(SyntaxKind::Ident) {
+            // Look ahead to see if this identifier is followed by type-like syntax
+            // If followed by < or [, it's likely a type (e.g., Vec<T> or array[N])
+            // Otherwise it's a const expression (e.g., WIDTH or DEPTH)
+            let next = self.peek_kind(1);
+            if matches!(next, Some(SyntaxKind::Lt) | Some(SyntaxKind::LBracket)) {
+                // Looks like a generic type
+                self.parse_type();
+            } else {
+                // Simple identifier - treat as const argument
+                self.start_node(SyntaxKind::IdentExpr);
+                self.bump();
+                self.finish_node();
+            }
         }
         // Otherwise parse as type
         else {
@@ -2409,6 +2452,19 @@ impl<'a> ParseState<'a> {
 
                 self.finish_node();
             }
+            Some(SyntaxKind::SelfTypeKw) => {
+                // Self or Self::Type syntax
+                self.start_node(SyntaxKind::SelfType);
+                self.bump(); // consume Self
+
+                // Check for ::Type (associated type)
+                if self.at(SyntaxKind::ColonColon) {
+                    self.bump(); // consume ::
+                    self.expect(SyntaxKind::Ident); // consume associated type name
+                }
+
+                self.finish_node();
+            }
             _ => {
                 self.error("expected type");
             }
@@ -2455,7 +2511,7 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
-    /// Parse width specification [N] or [expr]
+    /// Parse width specification [N] or [expr] or <N> or <expr>
     fn parse_width_spec(&mut self) {
         if self.at(SyntaxKind::LBracket) {
             self.start_node(SyntaxKind::WidthSpec);
@@ -2466,6 +2522,93 @@ impl<'a> ParseState<'a> {
 
             self.expect(SyntaxKind::RBracket);
             self.finish_node();
+        } else if self.at(SyntaxKind::Lt) {
+            // Support angle bracket syntax: bit<WIDTH>
+            self.start_node(SyntaxKind::WidthSpec);
+            self.bump(); // consume <
+
+            // Parse primary expression only (literal or identifier) to avoid
+            // consuming the closing > as a comparison operator
+            self.parse_type_arg_expr();
+
+            self.expect_closing_angle(); // consume >
+            self.finish_node();
+        }
+    }
+
+    /// Parse a simple expression for type arguments (identifier, literal, function call, or binary op)
+    /// This avoids parsing comparison operators which would consume the closing >
+    fn parse_type_arg_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
+
+        // Start with primary expression
+        self.parse_type_arg_primary();
+
+        // Check for binary operators (+, -, *, /, %)
+        // But stop at > which closes the type argument list
+        if matches!(
+            self.current_kind(),
+            Some(SyntaxKind::Plus)
+                | Some(SyntaxKind::Minus)
+                | Some(SyntaxKind::Star)
+                | Some(SyntaxKind::Slash)
+                | Some(SyntaxKind::Percent)
+        ) {
+            // Wrap everything in a BinaryExpr node starting from the checkpoint
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
+            self.bump(); // operator
+            self.parse_type_arg_primary();
+            self.finish_node();
+        }
+    }
+
+    /// Parse a primary expression in type argument context
+    fn parse_type_arg_primary(&mut self) {
+        match self.current_kind() {
+            Some(SyntaxKind::Ident) => {
+                // Check if it's a function call (identifier followed by '(')
+                if self.peek_kind(1) == Some(SyntaxKind::LParen) {
+                    // Parse as function call (e.g., clog2(DEPTH))
+                    self.start_node(SyntaxKind::CallExpr);
+                    self.bump(); // function name
+                    self.bump(); // '('
+
+                    // Parse arguments (recursively handle const expressions)
+                    if !self.at(SyntaxKind::RParen) {
+                        self.parse_type_arg_expr();
+
+                        while self.at(SyntaxKind::Comma) {
+                            self.bump(); // ','
+                            self.parse_type_arg_expr();
+                        }
+                    }
+
+                    self.expect(SyntaxKind::RParen);
+                    self.finish_node();
+                } else {
+                    // Simple identifier
+                    self.start_node(SyntaxKind::IdentExpr);
+                    self.bump();
+                    self.finish_node();
+                }
+            }
+            Some(kind) if kind.is_literal() => {
+                self.start_node(SyntaxKind::LiteralExpr);
+                self.bump(); // literal value
+                self.finish_node();
+            }
+            Some(SyntaxKind::LParen) => {
+                // Parenthesized expression
+                self.start_node(SyntaxKind::ParenExpr);
+                self.bump(); // '('
+                self.parse_type_arg_expr();
+                self.expect(SyntaxKind::RParen);
+                self.finish_node();
+            }
+            _ => {
+                self.error("expected identifier, literal, function call, or parenthesized expression in type argument");
+            }
         }
     }
 
@@ -2506,6 +2649,12 @@ impl<'a> ParseState<'a> {
             self.expect(SyntaxKind::Ident); // parameter name
             self.expect(SyntaxKind::Colon);
             self.parse_type(); // parameter type
+
+            // Optional default value (= 8)
+            if self.at(SyntaxKind::Assign) {
+                self.bump(); // consume =
+                self.parse_type_arg_expr(); // default value (use type_arg_expr to avoid consuming >)
+            }
         }
         // Check if it's a type parameter with bounds (T: Trait) or type constraint (WIDTH: nat = 8)
         else if self.current_kind() == Some(SyntaxKind::Ident) {
@@ -2531,7 +2680,7 @@ impl<'a> ParseState<'a> {
                     // Optional default value (= 8)
                     if self.at(SyntaxKind::Assign) {
                         self.bump(); // consume =
-                        self.parse_expression(); // default value
+                        self.parse_type_arg_expr(); // default value (use type_arg_expr to avoid consuming >)
                     }
                 } else {
                     // Parse trait bounds (T: Trait)

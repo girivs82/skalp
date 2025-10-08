@@ -435,6 +435,12 @@ pub enum HirType {
     LogicParam(String), // logic[WIDTH] where WIDTH is a parameter
     IntParam(String),   // int[WIDTH] where WIDTH is a parameter
     NatParam(String),   // nat[WIDTH] where WIDTH is a parameter
+    // Types with const expressions (e.g., bit<SIZE + 1>, nat<clog2(DEPTH)>)
+    BitExpr(Box<HirExpression>),
+    LogicExpr(Box<HirExpression>),
+    IntExpr(Box<HirExpression>),
+    NatExpr(Box<HirExpression>),
+    ArrayExpr(Box<HirType>, Box<HirExpression>), // array<T, SIZE_EXPR>
 }
 
 /// Patterns in HIR

@@ -65,13 +65,14 @@ struct SymbolTable {
 }
 
 /// Generic symbol ID
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum SymbolId {
     Entity(EntityId),
     Port(PortId),
     Signal(SignalId),
     Variable(VariableId),
     Constant(ConstantId),
+    GenericParam(String), // Generic parameter name (e.g., WIDTH)
 }
 
 /// HIR building errors
@@ -214,7 +215,11 @@ impl HirBuilderContext {
             if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
                 let params = self.parse_generic_params(&generic_list);
 
-                for param in &params {}
+                // Register generic parameters in symbol table so ports can reference them
+                for param in &params {
+                    self.symbols
+                        .add_to_scope(&param.name, SymbolId::GenericParam(param.name.clone()));
+                }
 
                 // Register clock domain lifetimes in symbol table
                 for param in &params {
@@ -314,12 +319,22 @@ impl HirBuilderContext {
         // Enter new scope and add ports to symbol table
         self.symbols.enter_scope();
 
-        // Get the built entity and add its ports to the current scope
-        if let Some(built_entity) = self.built_entities.get(&entity_name) {
-            for port in &built_entity.ports {
-                self.symbols
-                    .add_to_scope(&port.name, SymbolId::Port(port.id));
-            }
+        // Get the built entity and add its ports and generic parameters to the current scope
+        let (ports, generics) = if let Some(built_entity) = self.built_entities.get(&entity_name) {
+            (built_entity.ports.clone(), built_entity.generics.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        for port in &ports {
+            self.symbols
+                .add_to_scope(&port.name, SymbolId::Port(port.id));
+        }
+
+        // Add generic parameters to scope so they can be referenced in the impl
+        for generic in &generics {
+            self.symbols
+                .add_to_scope(&generic.name, SymbolId::GenericParam(generic.name.clone()));
         }
 
         let mut signals = Vec::new();
@@ -1414,6 +1429,7 @@ impl HirBuilderContext {
             SyntaxKind::IdentExpr => self.build_ident_expr(node),
             SyntaxKind::BinaryExpr => self.build_binary_expr(node),
             SyntaxKind::UnaryExpr => self.build_unary_expr(node),
+            SyntaxKind::CallExpr => self.build_call_expr(node),
             SyntaxKind::FieldExpr => self.build_field_expr(node),
             SyntaxKind::IndexExpr => self.build_index_expr(node),
             SyntaxKind::PathExpr => self.build_path_expr(node),
@@ -1529,6 +1545,12 @@ impl HirBuilderContext {
                 SymbolId::Signal(id) => Some(HirExpression::Signal(*id)),
                 SymbolId::Variable(id) => Some(HirExpression::Variable(*id)),
                 SymbolId::Constant(id) => Some(HirExpression::Constant(*id)),
+                SymbolId::GenericParam(_param_name) => {
+                    // Generic parameters in expression context are not yet fully supported
+                    // For now, treat as undefined to allow compilation to proceed
+                    // They will be properly resolved during monomorphization in the future
+                    None
+                }
                 _ => None,
             }
         } else {
@@ -1538,6 +1560,26 @@ impl HirBuilderContext {
             });
             None
         }
+    }
+
+    /// Build function call expression
+    fn build_call_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Get function name from first identifier
+        let function = node
+            .first_token_of_kind(SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        // Parse arguments - all child nodes are arguments (tokens like LParen/RParen are not in children())
+        let mut args = Vec::new();
+
+        for child in node.children() {
+            // All children of CallExpr are expression arguments
+            if let Some(expr) = self.build_expression(&child) {
+                args.push(expr);
+            }
+        }
+
+        Some(HirExpression::Call(HirCallExpr { function, args }))
     }
 
     /// Build binary expression
@@ -2456,7 +2498,7 @@ impl HirBuilderContext {
     }
 
     /// Extract HIR type from node
-    fn extract_hir_type(&self, node: &SyntaxNode) -> HirType {
+    fn extract_hir_type(&mut self, node: &SyntaxNode) -> HirType {
         // Look for type nodes in children
         if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeExpr) {
             return self.build_hir_type(&type_node);
@@ -2515,7 +2557,7 @@ impl HirBuilderContext {
     }
 
     /// Build HIR type from type expression node
-    fn build_hir_type(&self, node: &SyntaxNode) -> HirType {
+    fn build_hir_type(&mut self, node: &SyntaxNode) -> HirType {
         // Recursively extract from type expression
         for child in node.children() {
             match child.kind() {
@@ -2538,135 +2580,112 @@ impl HirBuilderContext {
     }
 
     /// Build bit type with width
-    fn build_bit_type(&self, node: &SyntaxNode) -> HirType {
-        // Look for width specification [N] or [WIDTH]
+    fn build_bit_type(&mut self, node: &SyntaxNode) -> HirType {
+        // Look for width specification [N] or <N>
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
             // Look for expression inside width spec
             for child in width_node.children() {
-                if child.kind() == SyntaxKind::LiteralExpr {
-                    // Found a literal expression, look for the integer literal token
-                    if let Some(lit) = child.first_token_of_kind(SyntaxKind::IntLiteral) {
-                        if let Ok(width) = lit.text().parse::<u32>() {
-                            return HirType::Bit(width);
+                // Check if it's a simple identifier that might be a generic parameter
+                if child.kind() == SyntaxKind::IdentExpr {
+                    if let Some(ident_token) = child.first_token_of_kind(SyntaxKind::Ident) {
+                        let name = ident_token.text().to_string();
+                        // Check if this is a generic parameter
+                        if let Some(SymbolId::GenericParam(param_name)) = self.symbols.lookup(&name)
+                        {
+                            return HirType::BitParam(param_name.clone());
                         }
                     }
-                } else if child.kind() == SyntaxKind::IdentExpr {
-                    // Generic parameter case
-                    if let Some(ident) = child.first_token_of_kind(SyntaxKind::Ident) {
-                        let param_name = ident.text().to_string();
-                        return HirType::BitParam(param_name);
+                }
+
+                // Try to build as expression - handles literals, identifiers, binary ops, function calls, etc.
+                if let Some(expr) = self.build_expression(&child) {
+                    // Check if it's a simple case that can be evaluated immediately
+                    match &expr {
+                        HirExpression::Literal(HirLiteral::Integer(val)) => {
+                            // Concrete value
+                            return HirType::Bit(*val as u32);
+                        }
+                        HirExpression::Variable(_) | HirExpression::Constant(_) => {
+                            // Single parameter reference - treat as expression for now
+                            return HirType::BitExpr(Box::new(expr));
+                        }
+                        _ => {
+                            // Complex expression (binary op, function call, etc.)
+                            return HirType::BitExpr(Box::new(expr));
+                        }
                     }
                 }
-            }
-            // Fallback: try direct integer literal token
-            if let Some(lit) = width_node.first_token_of_kind(SyntaxKind::IntLiteral) {
-                if let Ok(width) = lit.text().parse::<u32>() {
-                    return HirType::Bit(width);
-                }
-            }
-            // Fallback: try direct identifier token
-            if let Some(ident) = width_node.first_token_of_kind(SyntaxKind::Ident) {
-                let param_name = ident.text().to_string();
-                return HirType::BitParam(param_name);
             }
         }
         HirType::Bit(1) // Default to single bit
     }
 
     /// Build nat type with width
-    fn build_nat_type(&self, node: &SyntaxNode) -> HirType {
-        // Look for width specification [N] or [WIDTH]
+    fn build_nat_type(&mut self, node: &SyntaxNode) -> HirType {
+        // Look for width specification [N] or <N>
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
             // Look for expression inside width spec
             for child in width_node.children() {
-                if child.kind() == SyntaxKind::LiteralExpr {
-                    // Found a literal expression, look for the integer literal token
-                    if let Some(lit) = child.first_token_of_kind(SyntaxKind::IntLiteral) {
-                        if let Ok(width) = lit.text().parse::<u32>() {
-                            return HirType::Nat(width);
+                // Try to build as expression
+                if let Some(expr) = self.build_expression(&child) {
+                    match &expr {
+                        HirExpression::Literal(HirLiteral::Integer(val)) => {
+                            return HirType::Nat(*val as u32);
+                        }
+                        HirExpression::Variable(_) | HirExpression::Constant(_) => {
+                            return HirType::NatExpr(Box::new(expr));
+                        }
+                        _ => {
+                            return HirType::NatExpr(Box::new(expr));
                         }
                     }
-                } else if child.kind() == SyntaxKind::IdentExpr {
-                    // Generic parameter case
-                    if let Some(ident) = child.first_token_of_kind(SyntaxKind::Ident) {
-                        let param_name = ident.text().to_string();
-                        return HirType::NatParam(param_name);
-                    }
                 }
-            }
-
-            // Fallback: try direct integer literal token
-            if let Some(lit) = width_node.first_token_of_kind(SyntaxKind::IntLiteral) {
-                if let Ok(width) = lit.text().parse::<u32>() {
-                    return HirType::Nat(width);
-                }
-            }
-            // Fallback: try direct identifier token
-            if let Some(ident) = width_node.first_token_of_kind(SyntaxKind::Ident) {
-                let param_name = ident.text().to_string();
-                return HirType::NatParam(param_name);
             }
         }
         HirType::Nat(32) // Default to 32-bit unsigned
     }
 
     /// Build int type with width
-    fn build_int_type(&self, node: &SyntaxNode) -> HirType {
-        // Look for width specification [N] or [WIDTH]
+    fn build_int_type(&mut self, node: &SyntaxNode) -> HirType {
+        // Look for width specification [N] or <N>
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
-            // Look for expression inside width spec
             for child in width_node.children() {
-                if child.kind() == SyntaxKind::LiteralExpr {
-                    // Found a literal expression, look for the integer literal token
-                    if let Some(lit) = child.first_token_of_kind(SyntaxKind::IntLiteral) {
-                        if let Ok(width) = lit.text().parse::<u32>() {
-                            return HirType::Int(width);
+                if let Some(expr) = self.build_expression(&child) {
+                    match &expr {
+                        HirExpression::Literal(HirLiteral::Integer(val)) => {
+                            return HirType::Int(*val as u32);
+                        }
+                        HirExpression::Variable(_) | HirExpression::Constant(_) => {
+                            return HirType::IntExpr(Box::new(expr));
+                        }
+                        _ => {
+                            return HirType::IntExpr(Box::new(expr));
                         }
                     }
-                } else if child.kind() == SyntaxKind::IdentExpr {
-                    // Generic parameter case
-                    if let Some(ident) = child.first_token_of_kind(SyntaxKind::Ident) {
-                        let param_name = ident.text().to_string();
-                        return HirType::IntParam(param_name);
-                    }
                 }
-            }
-            // Fallback: try direct integer literal token
-            if let Some(lit) = width_node.first_token_of_kind(SyntaxKind::IntLiteral) {
-                if let Ok(width) = lit.text().parse::<u32>() {
-                    return HirType::Int(width);
-                }
-            }
-            // Fallback: try direct identifier token
-            if let Some(ident) = width_node.first_token_of_kind(SyntaxKind::Ident) {
-                let param_name = ident.text().to_string();
-                return HirType::IntParam(param_name);
             }
         }
         HirType::Int(32) // Default to 32-bit signed
     }
 
     /// Build logic type with width
-    fn build_logic_type(&self, node: &SyntaxNode) -> HirType {
-        // Look for width specification [N] or [WIDTH]
+    fn build_logic_type(&mut self, node: &SyntaxNode) -> HirType {
+        // Look for width specification [N] or <N>
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
-            // Try integer literal first
-            if let Some(lit) = width_node.first_token_of_kind(SyntaxKind::IntLiteral) {
-                if let Ok(width) = lit.text().parse::<u32>() {
-                    return HirType::Logic(width);
+            for child in width_node.children() {
+                if let Some(expr) = self.build_expression(&child) {
+                    match &expr {
+                        HirExpression::Literal(HirLiteral::Integer(val)) => {
+                            return HirType::Logic(*val as u32);
+                        }
+                        HirExpression::Variable(_) | HirExpression::Constant(_) => {
+                            return HirType::LogicExpr(Box::new(expr));
+                        }
+                        _ => {
+                            return HirType::LogicExpr(Box::new(expr));
+                        }
+                    }
                 }
-            }
-            // Try identifier expression (generic parameter)
-            if let Some(ident_expr) = width_node.first_child_of_kind(SyntaxKind::IdentExpr) {
-                if let Some(ident) = ident_expr.first_token_of_kind(SyntaxKind::Ident) {
-                    let param_name = ident.text().to_string();
-                    return HirType::LogicParam(param_name);
-                }
-            }
-            // Fallback: try direct identifier token
-            if let Some(ident) = width_node.first_token_of_kind(SyntaxKind::Ident) {
-                let param_name = ident.text().to_string();
-                return HirType::LogicParam(param_name);
             }
         }
         HirType::Logic(1) // Default to single bit logic
@@ -2704,7 +2723,7 @@ impl HirBuilderContext {
     }
 
     /// Build array type
-    fn build_array_type(&self, node: &SyntaxNode) -> HirType {
+    fn build_array_type(&mut self, node: &SyntaxNode) -> HirType {
         let elem_type = if let Some(elem) = node.children().next() {
             Box::new(self.extract_hir_type(&elem))
         } else {
@@ -2817,7 +2836,7 @@ impl HirBuilderContext {
     }
 
     /// Build type from annotation (for struct/union fields)
-    fn build_type_from_annotation(&self, node: &SyntaxNode) -> Option<HirType> {
+    fn build_type_from_annotation(&mut self, node: &SyntaxNode) -> Option<HirType> {
         // Look for TypeAnnotation node
         if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
             Some(self.extract_hir_type(&type_node))

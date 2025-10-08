@@ -223,6 +223,7 @@ pub enum SyntaxKind {
 
     // Statements
     AssignmentStmt,
+    ReturnStmt,
     IfStmt,
     MatchStmt,
     BlockStmt,
@@ -296,6 +297,7 @@ pub enum SyntaxKind {
     ArraySize,
     TupleType,
     CustomType,
+    SelfType,
     StructType,
     EnumType,
 
