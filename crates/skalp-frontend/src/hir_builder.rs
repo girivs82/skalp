@@ -487,10 +487,20 @@ impl HirBuilderContext {
         // Get type - look for TypeAnnotation first
         let signal_type =
             if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+                eprintln!("DEBUG build_signal '{}': Using TypeAnnotation node", name);
                 self.extract_hir_type(&type_node)
             } else {
+                eprintln!(
+                    "DEBUG build_signal '{}': No TypeAnnotation, using node directly",
+                    name
+                );
                 self.extract_hir_type(node)
             };
+
+        eprintln!(
+            "DEBUG build_signal '{}': final type = {:?}",
+            name, signal_type
+        );
 
         // Build initial value
         let initial_value = self.find_initial_value_expr(node);
@@ -742,16 +752,42 @@ impl HirBuilderContext {
             return None;
         }
 
-        let lhs = self.build_lvalue(&exprs[0])?;
+        // Handle array indexing: memory[index] <= value
+        // Parser splits this into: IdentExpr("memory"), IndexExpr("[index]"), IdentExpr("value")
+        let lhs = if exprs.len() == 3 && exprs[1].kind() == SyntaxKind::IndexExpr {
+            // Combine base and index to form indexed lvalue
+            let base = self.build_lvalue(&exprs[0])?;
+
+            // Extract the index expression from the IndexExpr node
+            let index_expr = exprs[1]
+                .children()
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
+                    )
+                })
+                .and_then(|n| self.build_expression(&n))?;
+
+            HirLValue::Index(Box::new(base), index_expr)
+        } else {
+            self.build_lvalue(&exprs[0])?
+        };
 
         // Handle RHS - if there are multiple expressions, we need to combine them
         let rhs = if exprs.len() == 2 {
             // Simple case: LHS op RHS
             self.build_expression(&exprs[1])?
         } else if exprs.len() == 3 {
+            let second_expr = &exprs[1];
             let third_expr = &exprs[2];
 
-            if third_expr.kind() == SyntaxKind::FieldExpr {
+            // Check if this is an indexed assignment (base[index] <= value)
+            // In this case, exprs[1] is the IndexExpr which we already consumed in LHS
+            if second_expr.kind() == SyntaxKind::IndexExpr {
+                // The RHS is exprs[2]
+                self.build_expression(&exprs[2])?
+            } else if third_expr.kind() == SyntaxKind::FieldExpr {
                 // Case: LHS op BASE_EXPR FIELD_EXPR
                 // This happens with field access like "dst_addr <= header.dst"
                 // EXPR1 is the base (header), EXPR2 is the field access (.dst)
@@ -1545,11 +1581,17 @@ impl HirBuilderContext {
                 SymbolId::Signal(id) => Some(HirExpression::Signal(*id)),
                 SymbolId::Variable(id) => Some(HirExpression::Variable(*id)),
                 SymbolId::Constant(id) => Some(HirExpression::Constant(*id)),
-                SymbolId::GenericParam(_param_name) => {
-                    // Generic parameters in expression context are not yet fully supported
-                    // For now, treat as undefined to allow compilation to proceed
-                    // They will be properly resolved during monomorphization in the future
-                    None
+                SymbolId::GenericParam(param_name) => {
+                    // Generic parameters in expressions - create a Constant expression
+                    // They will be resolved during monomorphization
+                    // For now, look up the constant ID or create a placeholder
+                    if let Some(const_id) = self.symbols.constants.get(param_name) {
+                        Some(HirExpression::Constant(*const_id))
+                    } else {
+                        // Create a variable reference for the generic param
+                        // This will be resolved during type checking/monomorphization
+                        Some(HirExpression::GenericParam(param_name.clone()))
+                    }
                 }
                 _ => None,
             }
@@ -1572,13 +1614,24 @@ impl HirBuilderContext {
         // Parse arguments - all child nodes are arguments (tokens like LParen/RParen are not in children())
         let mut args = Vec::new();
 
+        eprintln!(
+            "DEBUG build_call_expr: function={}, children: {:?}",
+            function,
+            node.children().map(|c| c.kind()).collect::<Vec<_>>()
+        );
+
         for child in node.children() {
+            eprintln!("DEBUG build_call_expr: Processing child {:?}", child.kind());
             // All children of CallExpr are expression arguments
             if let Some(expr) = self.build_expression(&child) {
+                eprintln!("DEBUG build_call_expr: Added arg: {:?}", expr);
                 args.push(expr);
+            } else {
+                eprintln!("DEBUG build_call_expr: build_expression returned None");
             }
         }
 
+        eprintln!("DEBUG build_call_expr: Final args count: {}", args.len());
         Some(HirExpression::Call(HirCallExpr { function, args }))
     }
 
@@ -2501,6 +2554,7 @@ impl HirBuilderContext {
     fn extract_hir_type(&mut self, node: &SyntaxNode) -> HirType {
         // Look for type nodes in children
         if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeExpr) {
+            eprintln!("DEBUG extract_hir_type: Found TypeExpr, delegating to build_hir_type");
             return self.build_hir_type(&type_node);
         }
 
@@ -2536,6 +2590,7 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::ArrayType => {
+                    eprintln!("DEBUG extract_hir_type: Found ArrayType child");
                     return self.build_array_type(&child);
                 }
                 SyntaxKind::IdentType | SyntaxKind::CustomType => {
@@ -2624,10 +2679,19 @@ impl HirBuilderContext {
     fn build_nat_type(&mut self, node: &SyntaxNode) -> HirType {
         // Look for width specification [N] or <N>
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
+            eprintln!(
+                "DEBUG build_nat_type: Found WidthSpec, children: {:?}",
+                width_node.children().map(|c| c.kind()).collect::<Vec<_>>()
+            );
             // Look for expression inside width spec
             for child in width_node.children() {
+                eprintln!(
+                    "DEBUG build_nat_type: Processing child kind {:?}",
+                    child.kind()
+                );
                 // Try to build as expression
                 if let Some(expr) = self.build_expression(&child) {
+                    eprintln!("DEBUG build_nat_type: Built expression: {:?}", expr);
                     match &expr {
                         HirExpression::Literal(HirLiteral::Integer(val)) => {
                             return HirType::Nat(*val as u32);
@@ -2639,9 +2703,15 @@ impl HirBuilderContext {
                             return HirType::NatExpr(Box::new(expr));
                         }
                     }
+                } else {
+                    eprintln!(
+                        "DEBUG build_nat_type: build_expression returned None for child {:?}",
+                        child.kind()
+                    );
                 }
             }
         }
+        eprintln!("DEBUG build_nat_type: Defaulting to Nat(32)");
         HirType::Nat(32) // Default to 32-bit unsigned
     }
 
@@ -2724,24 +2794,33 @@ impl HirBuilderContext {
 
     /// Build array type
     fn build_array_type(&mut self, node: &SyntaxNode) -> HirType {
-        let elem_type = if let Some(elem) = node.children().next() {
+        // Array syntax: [Type; Size]
+        // Children: [0] TypeAnnotation/Type, [1] Size expression
+        let mut children = node.children();
+
+        // First child is the element type
+        let elem_type = if let Some(elem) = children.next() {
             Box::new(self.extract_hir_type(&elem))
         } else {
             Box::new(HirType::Bit(8))
         };
 
-        // Look for array size
-        let size = if let Some(size_node) = node.first_child_of_kind(SyntaxKind::ArraySize) {
+        // Second child is the size (could be literal or expression)
+        if let Some(size_node) = children.next() {
+            // Try to parse as literal first
             if let Some(lit) = size_node.first_token_of_kind(SyntaxKind::IntLiteral) {
-                lit.text().parse::<u32>().unwrap_or(1)
-            } else {
-                1
+                let size = lit.text().parse::<u32>().unwrap_or(1);
+                return HirType::Array(elem_type, size);
             }
-        } else {
-            1
-        };
 
-        HirType::Array(elem_type, size)
+            // Otherwise, it's an expression (IdentExpr, BinaryExpr, CallExpr, etc.)
+            if let Some(size_expr) = self.build_expression(&size_node) {
+                return HirType::ArrayExpr(elem_type, Box::new(size_expr));
+            }
+        }
+
+        // Fallback: array of size 1
+        HirType::Array(elem_type, 1)
     }
 
     /// Find initial value expression
@@ -3207,10 +3286,21 @@ impl HirBuilderContext {
 
             let param_type = self.extract_hir_type(node);
 
+            // Extract default value if present (e.g., const WIDTH: nat = 8)
+            // The parser structure is: GenericParam -> TypeAnnotation, LiteralExpr
+            // If there's a second child, it's the default value
+            let default_value = node.children().nth(1).and_then(|child| {
+                if child.kind() == SyntaxKind::LiteralExpr {
+                    self.build_expression(&child)
+                } else {
+                    None
+                }
+            });
+
             Some(HirGeneric {
                 name,
                 param_type: HirGenericType::Const(param_type),
-                default_value: None, // TODO: Extract default value
+                default_value,
             })
         } else {
             // Regular type parameter (e.g., WIDTH: nat = 8)

@@ -164,7 +164,7 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "FIFO uses generics with bit<WIDTH> syntax not yet fully supported in parsing"]
+    #[ignore = "FIFO count logic issue: doesn't handle simultaneous read/write correctly"]
     async fn test_fifo_operations() {
         let fifo_source = fs::read_to_string("examples/fifo.sk").expect("Failed to read fifo.sk");
 

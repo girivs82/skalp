@@ -10,6 +10,10 @@ pub fn generate_metal_shader(sir_module: &SirModule) -> String {
     generator.generate_combinational_kernels(sir_module);
     generator.generate_sequential_kernel(sir_module);
 
+    eprintln!(
+        "\n========== GENERATED METAL SHADER ==========\n{}\n========== END SHADER ==========\n",
+        shader
+    );
     shader
 }
 
@@ -48,8 +52,17 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "// Register buffer (flip-flop outputs only)").unwrap();
         writeln!(self.output, "struct Registers {{").unwrap();
         self.indent += 1;
-        for (i, (name, elem)) in sir.state_elements.iter().enumerate() {
-            eprintln!("🔧 REGISTER[{}]: {}", i, name);
+        // Sort state elements by name for consistent ordering
+        let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
+        sorted_states.sort_by_key(|(name, _)| *name);
+        for (i, (name, elem)) in sorted_states.iter().enumerate() {
+            eprintln!(
+                "🔧 REGISTER[{}]: {} (width={}, type={})",
+                i,
+                name,
+                elem.width,
+                self.get_metal_type_name(elem.width)
+            );
             self.write_indented(&format!(
                 "{} {};\n",
                 self.get_metal_type_name(elem.width),
@@ -219,15 +232,52 @@ impl<'a> MetalShaderGenerator<'a> {
         self.write_indented("// DEBUG: Sequential update kernel executing\n");
 
         // Save old register values for proper simultaneous update semantics
-        for state_name in sir.state_elements.keys() {
+        // Sort state elements by name for consistent ordering
+        let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
+        sorted_states.sort_by_key(|(name, _)| *name);
+        for (state_name, state_elem) in sorted_states {
+            let state_type = self.get_metal_type_name(state_elem.width);
             self.write_indented(&format!(
-                "uint old_{} = registers->{};\n",
-                state_name, state_name
+                "{} old_{} = registers->{};\n",
+                state_type, state_name, state_name
             ));
         }
 
         // Check clock edges and update registers
-        for node in &sir.sequential_nodes {
+        // Sort sequential nodes by their output register name for consistent ordering
+        let mut sorted_seq_nodes: Vec<_> = sir.sequential_nodes.iter().collect();
+        sorted_seq_nodes.sort_by(|a, b| {
+            // Get the output register names from these flip-flops
+            let a_name = a
+                .outputs
+                .first()
+                .map(|out| out.signal_id.as_str())
+                .unwrap_or("");
+            let b_name = b
+                .outputs
+                .first()
+                .map(|out| out.signal_id.as_str())
+                .unwrap_or("");
+            a_name.cmp(b_name)
+        });
+
+        eprintln!("DEBUG Metal gen: Sorted FF order:");
+        for (i, node) in sorted_seq_nodes.iter().enumerate() {
+            if let Some(output) = node.outputs.first() {
+                eprintln!(
+                    "  [{}] Node {}: output '{}', inputs: {:?}",
+                    i,
+                    node.id,
+                    output.signal_id,
+                    node.inputs
+                        .iter()
+                        .map(|inp| &inp.signal_id)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
+        for node in sorted_seq_nodes {
             if let SirNodeKind::FlipFlop { clock_edge } = &node.kind {
                 self.generate_flipflop_update_v2(sir, node, clock_edge);
             }
@@ -418,6 +468,138 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
+    fn generate_array_read(&mut self, sir: &SirModule, node: &SirNode) {
+        // ArrayRead: inputs=[array_signal, index], outputs=[value]
+        if node.inputs.len() >= 2 && !node.outputs.is_empty() {
+            let array_signal_name = &node.inputs[0].signal_id;
+            let index_signal = &node.inputs[1].signal_id;
+            let output = &node.outputs[0].signal_id;
+
+            // Get array width to determine element size
+            // For now, assume 8-bit elements (bit<8>)
+            let elem_width = 8;
+
+            // For arrays > 32 bits, we need special handling for Metal vector types
+            // Read the array value into a temporary with the correct type
+            let array_width = self.get_signal_width_from_sir(sir, array_signal_name);
+            let array_type = self.get_metal_type_name(array_width).to_string();
+
+            if array_width > 32 {
+                // Multi-word array - need to handle as vector type
+                // Create temporary to hold the packed array value
+                self.write_indented(&format!(
+                    "{} array_val_{} = signals->{};\n",
+                    array_type, output, array_signal_name
+                ));
+
+                // Extract using bit manipulation on the full vector
+                // For uint4, we treat it as 128 bits and extract the element
+                self.write_indented(&format!(
+                    "uint elem_idx_{} = signals->{};\n",
+                    output, index_signal
+                ));
+                self.write_indented(&format!(
+                    "uint word_idx_{} = elem_idx_{} / 4;\n", // Which uint in the uint4
+                    output, output
+                ));
+                self.write_indented(&format!(
+                    "uint byte_in_word_{} = elem_idx_{} % 4;\n", // Which byte in that uint
+                    output, output
+                ));
+                self.write_indented(&format!(
+                    "signals->{} = (array_val_{}[word_idx_{}] >> (byte_in_word_{} * 8)) & 0xFF;\n",
+                    output, output, output, output
+                ));
+            } else {
+                // Single-word array - simple bit shift
+                self.write_indented(&format!(
+                    "signals->{} = (signals->{} >> (signals->{} * {})) & 0xFF;\n",
+                    output, array_signal_name, index_signal, elem_width
+                ));
+            }
+        }
+    }
+
+    fn generate_array_write(&mut self, sir: &SirModule, node: &SirNode) {
+        // ArrayWrite: inputs=[old_array, index, value], outputs=[new_array]
+        if node.inputs.len() >= 3 && !node.outputs.is_empty() {
+            let old_array_name = &node.inputs[0].signal_id;
+            let index_signal = &node.inputs[1].signal_id;
+            let value_signal = &node.inputs[2].signal_id;
+            let output = &node.outputs[0].signal_id;
+
+            // Get array width to determine storage type
+            let elem_width = 8; // Assume 8-bit elements for now
+            let array_width = self.get_signal_width_from_sir(sir, old_array_name);
+            let array_type = self.get_metal_type_name(array_width).to_string();
+
+            self.write_indented(&format!(
+                "// Array write: {}[{}] = {}\n",
+                old_array_name, index_signal, value_signal
+            ));
+
+            if array_width > 32 {
+                // Multi-word array stored as vector
+                self.write_indented(&format!(
+                    "{} new_array_{} = signals->{};\n",
+                    array_type, output, old_array_name
+                ));
+                self.write_indented(&format!(
+                    "uint elem_idx_{} = signals->{};\n",
+                    output, index_signal
+                ));
+                self.write_indented(&format!(
+                    "uint word_idx_{} = elem_idx_{} / 4;\n",
+                    output, output
+                ));
+                self.write_indented(&format!(
+                    "uint byte_in_word_{} = elem_idx_{} % 4;\n",
+                    output, output
+                ));
+                self.write_indented(&format!(
+                    "uint shift_{} = byte_in_word_{} * 8;\n",
+                    output, output
+                ));
+                self.write_indented(&format!(
+                    "uint mask_{} = ~(0xFFu << shift_{});\n",
+                    output, output
+                ));
+                self.write_indented(&format!(
+                    "new_array_{}[word_idx_{}] = (new_array_{}[word_idx_{}] & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
+                    output, output, output, output, output, value_signal, output
+                ));
+                self.write_indented(&format!("signals->{} = new_array_{};\n", output, output));
+            } else {
+                // Single-word array
+                self.write_indented(&format!(
+                    "uint32_t shift_{} = signals->{} * {};\n",
+                    output, index_signal, elem_width
+                ));
+                self.write_indented(&format!(
+                    "uint32_t mask_{} = ~(0xFFu << shift_{});\n",
+                    output, output
+                ));
+                self.write_indented(&format!(
+                    "signals->{} = (signals->{} & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
+                    output, old_array_name, output, value_signal, output
+                ));
+            }
+        }
+    }
+
+    fn get_signal_width_from_sir(&self, sir: &SirModule, signal_name: &str) -> usize {
+        // Check signals
+        if let Some(sig) = sir.signals.iter().find(|s| s.name == signal_name) {
+            return sig.width;
+        }
+        // Check state elements
+        if let Some(state) = sir.state_elements.get(signal_name) {
+            return state.width;
+        }
+        // Default
+        32
+    }
+
     fn generate_signal_ref(&mut self, node: &SirNode, signal: &str) {
         if !node.outputs.is_empty() && !node.inputs.is_empty() {
             let output = &node.outputs[0].signal_id;
@@ -451,6 +633,8 @@ impl<'a> MetalShaderGenerator<'a> {
                     }
                 }
             }
+            SirNodeKind::ArrayRead => self.generate_array_read(sir, node),
+            SirNodeKind::ArrayWrite => self.generate_array_write(sir, node),
             _ => {}
         }
     }
@@ -459,6 +643,17 @@ impl<'a> MetalShaderGenerator<'a> {
         if node.inputs.len() >= 2 && !node.outputs.is_empty() {
             let clock_signal = &node.inputs[0].signal_id;
             let data_signal = &node.inputs[1].signal_id;
+
+            eprintln!(
+                "DEBUG Metal gen: FF node {} reads from signal '{}' for clock '{}', outputs: {:?}",
+                node.id,
+                data_signal,
+                clock_signal,
+                node.outputs
+                    .iter()
+                    .map(|o| &o.signal_id)
+                    .collect::<Vec<_>>()
+            );
 
             // Find which clock input this is
             if let Some(clock_input) = sir.inputs.iter().find(|i| i.name == *clock_signal) {
@@ -482,10 +677,13 @@ impl<'a> MetalShaderGenerator<'a> {
                 for output in &node.outputs {
                     if sir.state_elements.contains_key(&output.signal_id) {
                         // General case: read the computed value from signals
-                        self.write_indented(&format!(
+                        let assignment = format!(
                             "registers->{} = signals->{};\n",
                             output.signal_id, data_signal
-                        ));
+                        );
+                        eprintln!("DEBUG Metal gen: About to write: {}", assignment.trim());
+                        self.write_indented(&assignment);
+                        eprintln!("DEBUG Metal gen: Wrote to output buffer");
                     }
                 }
 

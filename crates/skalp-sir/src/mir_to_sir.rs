@@ -22,6 +22,40 @@ pub fn convert_mir_to_sir(mir_module: &Module) -> SirModule {
     converter.extract_clock_domains();
 
     println!("🌟 MIR TO SIR: Conversion complete");
+    println!(
+        "📥 INPUTS: {:?}",
+        sir.inputs.iter().map(|i| &i.name).collect::<Vec<_>>()
+    );
+    println!(
+        "📤 OUTPUTS: {:?}",
+        sir.outputs.iter().map(|o| &o.name).collect::<Vec<_>>()
+    );
+    println!("🔧 COMBINATIONAL NODES: {}", sir.combinational_nodes.len());
+    for node in &sir.combinational_nodes {
+        println!(
+            "   Node {}: {:?}, inputs={:?}, outputs={:?}",
+            node.id,
+            node.kind,
+            node.inputs.iter().map(|i| &i.signal_id).collect::<Vec<_>>(),
+            node.outputs
+                .iter()
+                .map(|o| &o.signal_id)
+                .collect::<Vec<_>>()
+        );
+    }
+    println!("⚡ SEQUENTIAL NODES: {}", sir.sequential_nodes.len());
+    for node in &sir.sequential_nodes {
+        println!(
+            "   Node {}: {:?}, inputs={:?}, outputs={:?}",
+            node.id,
+            node.kind,
+            node.inputs.iter().map(|i| &i.signal_id).collect::<Vec<_>>(),
+            node.outputs
+                .iter()
+                .map(|o| &o.signal_id)
+                .collect::<Vec<_>>()
+        );
+    }
     sir
 }
 
@@ -99,6 +133,11 @@ impl<'a> MirToSirConverter<'a> {
     fn convert_signals(&mut self) {
         for signal in &self.mir.signals {
             let width = self.get_width(&signal.signal_type);
+
+            eprintln!(
+                "📏 Signal '{}': type={:?}, width={}",
+                signal.name, signal.signal_type, width
+            );
 
             // Determine if this is a register by checking if it's assigned in sequential blocks
             let is_register = self.is_signal_sequential(signal.id);
@@ -430,30 +469,115 @@ impl<'a> MirToSirConverter<'a> {
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
-                    let target = self.lvalue_to_string(&assign.lhs);
-                    println!("   📝 ASSIGNMENT: {} <= expression", target);
+                    // Check if this is an array write (BitSelect with non-constant index)
+                    eprintln!(
+                        "DEBUG: Assignment lhs type: {:?}",
+                        std::mem::discriminant(&assign.lhs)
+                    );
+                    if let LValue::BitSelect { base, index } = &assign.lhs {
+                        eprintln!("DEBUG: BitSelect found, checking if index is constant...");
+                        let is_const = self.evaluate_constant_expression(index);
+                        eprintln!("DEBUG: Index constant check: {:?}", is_const);
+                        if is_const.is_none() {
+                            // Dynamic array write: array[index] <= value
+                            let array_name = self.lvalue_to_string(base);
+                            println!(
+                                "   📝 ARRAY ASSIGNMENT: {}[index] <= expression",
+                                array_name
+                            );
 
-                    // CRITICAL: For sequential blocks (non-blocking assignments), all RHS
-                    // values are sampled at the beginning of the clock cycle.
-                    // We should NOT use a local context that tracks intermediate values.
-                    let value = self.create_expression_node(&assign.rhs);
+                            // Create nodes for the array write
+                            // For arrays that are state elements, we need to read from the register
+                            let old_array = self.create_lvalue_ref_node(base);
+                            let index_node = self.create_expression_node(index);
+                            let value_node = self.create_expression_node(&assign.rhs);
 
-                    // Create flip-flop
-                    let ff_node = self.create_flipflop_with_input(value, clock, edge.clone());
-                    self.connect_node_to_signal(ff_node, &target);
+                            // Create ArrayWrite node
+                            let array_write =
+                                self.create_array_write_node(old_array, index_node, value_node);
+
+                            // Create flip-flop to register the new array state
+                            let ff_node =
+                                self.create_flipflop_with_input(array_write, clock, edge.clone());
+                            self.connect_node_to_signal(ff_node, &array_name);
+                        } else {
+                            // Static bit select - treat as normal assignment
+                            let target = self.lvalue_to_string(&assign.lhs);
+                            println!("   📝 ASSIGNMENT: {} <= expression", target);
+                            let value = self.create_expression_node(&assign.rhs);
+                            let ff_node =
+                                self.create_flipflop_with_input(value, clock, edge.clone());
+                            self.connect_node_to_signal(ff_node, &target);
+                        }
+                    } else {
+                        // Normal assignment (not BitSelect)
+                        let target = self.lvalue_to_string(&assign.lhs);
+                        println!("   📝 ASSIGNMENT: {} <= expression", target);
+
+                        // CRITICAL: For sequential blocks (non-blocking assignments), all RHS
+                        // values are sampled at the beginning of the clock cycle.
+                        // We should NOT use a local context that tracks intermediate values.
+                        let value = self.create_expression_node(&assign.rhs);
+
+                        // Create flip-flop
+                        let ff_node = self.create_flipflop_with_input(value, clock, edge.clone());
+                        self.connect_node_to_signal(ff_node, &target);
+                    }
                 }
                 Statement::ResolvedConditional(resolved) => {
-                    let target = self.lvalue_to_string(&resolved.target);
-                    println!("   🔄 RESOLVED CONDITIONAL: {} <= priority mux", target);
+                    // Check if this is an array write (BitSelect with non-constant index)
+                    eprintln!(
+                        "DEBUG: ResolvedConditional target type: {:?}",
+                        std::mem::discriminant(&resolved.target)
+                    );
+                    if let LValue::BitSelect { base, index } = &resolved.target {
+                        if self.evaluate_constant_expression(index).is_none() {
+                            // Dynamic array write with conditional: array[index] <= mux(conds, values)
+                            let array_name = self.lvalue_to_string(base);
+                            println!(
+                                "   🔄 RESOLVED CONDITIONAL ARRAY: {}[index] <= priority mux",
+                                array_name
+                            );
 
-                    // CRITICAL: For sequential blocks, we should NOT use local_context
-                    // because in sequential logic (non-blocking assignments), all RHS
-                    // values are sampled at the beginning of the clock cycle.
-                    let mux_value = self.create_priority_mux_node(&resolved.resolved);
+                            // For array writes, we need to create ArrayWrite for each branch
+                            // Then mux between them based on conditions
+                            // For now, use a simplified approach: evaluate the mux value, then write to array
+                            let old_array = self.create_lvalue_ref_node(base);
+                            let index_node = self.create_expression_node(index);
+                            let mux_value = self.create_priority_mux_node(&resolved.resolved);
 
-                    // Create flip-flop
-                    let ff_node = self.create_flipflop_with_input(mux_value, clock, edge.clone());
-                    self.connect_node_to_signal(ff_node, &target);
+                            // Create ArrayWrite node
+                            let array_write =
+                                self.create_array_write_node(old_array, index_node, mux_value);
+
+                            // Create flip-flop to register the new array state
+                            let ff_node =
+                                self.create_flipflop_with_input(array_write, clock, edge.clone());
+                            self.connect_node_to_signal(ff_node, &array_name);
+                        } else {
+                            // Static bit select
+                            let target = self.lvalue_to_string(&resolved.target);
+                            println!("   🔄 RESOLVED CONDITIONAL: {} <= priority mux", target);
+                            let mux_value = self.create_priority_mux_node(&resolved.resolved);
+                            let ff_node =
+                                self.create_flipflop_with_input(mux_value, clock, edge.clone());
+                            self.connect_node_to_signal(ff_node, &target);
+                        }
+                    } else {
+                        // Normal resolved conditional (not array write)
+                        let target = self.lvalue_to_string(&resolved.target);
+                        println!("   🔄 RESOLVED CONDITIONAL: {} <= priority mux", target);
+
+                        // CRITICAL: For sequential blocks, we should NOT use local_context
+                        // because in sequential logic (non-blocking assignments), all RHS
+                        // values are sampled at the beginning of the clock cycle.
+                        let mux_value = self.create_priority_mux_node(&resolved.resolved);
+
+                        // Create flip-flop
+                        let ff_node =
+                            self.create_flipflop_with_input(mux_value, clock, edge.clone());
+                        self.connect_node_to_signal(ff_node, &target);
+                    }
                 }
                 Statement::Block(block) => {
                     println!("   📦 BLOCK: Recursing into nested block");
@@ -989,7 +1113,7 @@ impl<'a> MirToSirConverter<'a> {
             let value = if cases.is_empty() {
                 self.create_signal_ref(signal)
             } else {
-                self.build_priority_mux(&cases)
+                self.build_priority_mux(&cases, signal)
             };
             result.insert(signal.clone(), value);
         }
@@ -998,9 +1122,26 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_if_in_sequential(&mut self, if_stmt: &IfStatement, clock: &str, edge: ClockEdge) {
+        // First, handle array writes separately since they need special processing
+        self.handle_array_writes_in_if(if_stmt, clock, edge.clone());
+
         // Synthesis-like approach: collect all conditions and values, then build priority mux
         let mut targets = std::collections::HashSet::new();
         self.collect_assignment_targets(if_stmt, &mut targets);
+
+        println!("   📋 COLLECTED TARGETS: {:?}", targets);
+        println!(
+            "   📋 AVAILABLE MIR SIGNALS: {:?}",
+            self.mir
+                .signals
+                .iter()
+                .map(|s| format!("{}(id={})", s.name, s.id.0))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "   📋 STATE ELEMENTS: {:?}",
+            self.sir.state_elements.keys().collect::<Vec<_>>()
+        );
 
         // For each target signal, synthesize a priority-encoded mux
         for target in targets {
@@ -1008,6 +1149,235 @@ impl<'a> MirToSirConverter<'a> {
             let ff_node = self.create_flipflop_with_input(final_value, clock, edge.clone());
             self.connect_node_to_signal(ff_node, &target);
         }
+    }
+
+    fn handle_array_writes_in_if(&mut self, if_stmt: &IfStatement, clock: &str, edge: ClockEdge) {
+        // Collect all array write assignments from the if statement
+        let mut array_writes = Vec::new();
+        println!("   🔍 SCANNING FOR ARRAY WRITES IN IF");
+        self.collect_array_writes(if_stmt, &mut array_writes);
+        println!("   📊 FOUND {} ARRAY WRITES", array_writes.len());
+
+        // Process each unique array write
+        for (array_base, array_name) in array_writes {
+            println!(
+                "   🔄 IF ARRAY WRITE: {}[index] with conditional assignment",
+                array_name
+            );
+
+            // Synthesize the conditional array write:
+            // 1. Get the old array value
+            // 2. Build a mux tree for the write conditions
+            // 3. Create ArrayWrite node
+            // 4. Create flip-flop
+            let old_array = self.create_lvalue_ref_node(&array_base);
+            let (index_node, value_node) = self.synthesize_array_write_in_if(if_stmt, &array_base);
+
+            if index_node != 0 && value_node != 0 {
+                let array_write = self.create_array_write_node(old_array, index_node, value_node);
+                let ff_node = self.create_flipflop_with_input(array_write, clock, edge.clone());
+                self.connect_node_to_signal(ff_node, &array_name);
+            }
+        }
+    }
+
+    fn collect_array_writes(
+        &self,
+        if_stmt: &IfStatement,
+        array_writes: &mut Vec<(LValue, String)>,
+    ) {
+        // Check then branch
+        println!(
+            "      🔎 SCANNING THEN BRANCH: {} statements",
+            if_stmt.then_block.statements.len()
+        );
+        self.scan_block_for_array_writes(&if_stmt.then_block.statements, array_writes);
+
+        // Check else branch
+        if let Some(else_block) = &if_stmt.else_block {
+            println!(
+                "      🔎 SCANNING ELSE BRANCH: {} statements",
+                else_block.statements.len()
+            );
+            self.scan_block_for_array_writes(&else_block.statements, array_writes);
+        }
+    }
+
+    fn scan_block_for_array_writes(
+        &self,
+        statements: &[Statement],
+        array_writes: &mut Vec<(LValue, String)>,
+    ) {
+        for (i, stmt) in statements.iter().enumerate() {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let lval_name = self.lvalue_to_string(&assign.lhs);
+                    println!(
+                        "         Statement[{}]: Assignment to {:?} (name={}), RHS: {:?}",
+                        i,
+                        std::mem::discriminant(&assign.lhs),
+                        lval_name,
+                        std::mem::discriminant(&assign.rhs)
+                    );
+
+                    // Check if RHS contains array writes even if LHS is just a Signal
+                    if lval_name == "memory" {
+                        println!("            📝 MEMORY ASSIGNMENT FOUND - checking if this is an array write");
+                    }
+
+                    if let LValue::BitSelect { base, index } = &assign.lhs {
+                        let is_const = self.evaluate_constant_expression(index);
+                        let base_name = self.lvalue_to_string(base);
+                        println!(
+                            "            BitSelect[{}] - is_const: {:?}",
+                            base_name, is_const
+                        );
+                        if is_const.is_none() {
+                            // Dynamic array write
+                            println!("            ✅ FOUND DYNAMIC ARRAY WRITE: {}", base_name);
+                            // Only add if not already present
+                            if !array_writes.iter().any(|(_, name)| name == &base_name) {
+                                array_writes.push(((**base).clone(), base_name));
+                            }
+                        }
+                    }
+                }
+                Statement::If(nested_if) => {
+                    println!("         Statement[{}]: Nested If, recursing...", i);
+                    self.collect_array_writes(nested_if, array_writes);
+                }
+                Statement::Block(block) => {
+                    println!(
+                        "         Statement[{}]: Block with {} statements, recursing...",
+                        i,
+                        block.statements.len()
+                    );
+                    self.scan_block_for_array_writes(&block.statements, array_writes);
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    println!(
+                        "         Statement[{}]: ResolvedConditional to {:?}",
+                        i,
+                        std::mem::discriminant(&resolved.target)
+                    );
+                    if let LValue::BitSelect { base, index } = &resolved.target {
+                        let is_const = self.evaluate_constant_expression(index);
+                        let base_name = self.lvalue_to_string(base);
+                        println!(
+                            "            BitSelect[{}] - is_const: {:?}",
+                            base_name, is_const
+                        );
+                        if is_const.is_none() {
+                            println!(
+                                "            ✅ FOUND DYNAMIC ARRAY WRITE (resolved): {}",
+                                base_name
+                            );
+                            if !array_writes.iter().any(|(_, name)| name == &base_name) {
+                                array_writes.push(((**base).clone(), base_name));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    println!(
+                        "         Statement[{}]: Other type: {:?}",
+                        i,
+                        std::mem::discriminant(stmt)
+                    );
+                }
+            }
+        }
+    }
+
+    fn synthesize_array_write_in_if(
+        &mut self,
+        if_stmt: &IfStatement,
+        array_base: &LValue,
+    ) -> (usize, usize) {
+        // Find array write in then branch (recursively search nested ifs)
+        let mut then_index = 0;
+        let mut then_value = 0;
+        for stmt in &if_stmt.then_block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if let LValue::BitSelect { base, index } = &assign.lhs {
+                        if self.lvalues_match(base, array_base) {
+                            then_index = self.create_expression_node(index);
+                            then_value = self.create_expression_node(&assign.rhs);
+                            break;
+                        }
+                    }
+                }
+                Statement::If(nested_if) => {
+                    // Recursively search nested if statements
+                    let (nested_index, nested_value) =
+                        self.synthesize_array_write_in_if(nested_if, array_base);
+                    if nested_index != 0 && nested_value != 0 {
+                        then_index = nested_index;
+                        then_value = nested_value;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Find array write in else branch (if any, recursively search nested ifs)
+        let mut else_index = 0;
+        let mut else_value = 0;
+        if let Some(else_block) = &if_stmt.else_block {
+            for stmt in &else_block.statements {
+                match stmt {
+                    Statement::Assignment(assign) => {
+                        if let LValue::BitSelect { base, index } = &assign.lhs {
+                            if self.lvalues_match(base, array_base) {
+                                else_index = self.create_expression_node(index);
+                                else_value = self.create_expression_node(&assign.rhs);
+                                break;
+                            }
+                        }
+                    }
+                    Statement::If(nested_if) => {
+                        // Recursively search nested if statements
+                        let (nested_index, nested_value) =
+                            self.synthesize_array_write_in_if(nested_if, array_base);
+                        if nested_index != 0 && nested_value != 0 {
+                            else_index = nested_index;
+                            else_value = nested_value;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Build conditional mux for both index and value
+        let condition = self.create_expression_node(&if_stmt.condition);
+
+        // If only then branch has array write, use then values when condition is true
+        // For now, we'll assume writes happen in both branches or we need to preserve old value
+        // TODO: Handle case where write only happens in one branch (need to preserve array)
+        if then_index != 0 && else_index == 0 {
+            // Only then branch writes - for now just use then values
+            // Proper implementation would require "no-write" muxing
+            (then_index, then_value)
+        } else if then_index == 0 && else_index != 0 {
+            // Only else branch writes
+            (else_index, else_value)
+        } else if then_index != 0 && else_index != 0 {
+            // Both branches write - mux the index and value
+            let final_index = self.create_mux_node(condition, then_index, else_index);
+            let final_value = self.create_mux_node(condition, then_value, else_value);
+            (final_index, final_value)
+        } else {
+            // No writes found
+            (0, 0)
+        }
+    }
+
+    fn lvalues_match(&self, lv1: &LValue, lv2: &LValue) -> bool {
+        self.lvalue_to_string(lv1) == self.lvalue_to_string(lv2)
     }
 
     #[allow(dead_code)]
@@ -1076,6 +1446,13 @@ impl<'a> MirToSirConverter<'a> {
         // Collect targets from then branch
         for stmt in &if_stmt.then_block.statements {
             if let Statement::Assignment(assign) = stmt {
+                // Skip array writes (handled separately)
+                if let LValue::BitSelect { index, .. } = &assign.lhs {
+                    if self.evaluate_constant_expression(index).is_none() {
+                        continue; // Dynamic array write, skip
+                    }
+                }
+
                 let target = self.lvalue_to_string(&assign.lhs);
                 // Skip output ports that should only have continuous assignments
                 if !self.is_output_port(&target) {
@@ -1089,6 +1466,13 @@ impl<'a> MirToSirConverter<'a> {
             for stmt in &else_block.statements {
                 match stmt {
                     Statement::Assignment(assign) => {
+                        // Skip array writes (handled separately)
+                        if let LValue::BitSelect { index, .. } = &assign.lhs {
+                            if self.evaluate_constant_expression(index).is_none() {
+                                continue; // Dynamic array write, skip
+                            }
+                        }
+
                         let target = self.lvalue_to_string(&assign.lhs);
                         // Skip output ports that should only have continuous assignments
                         if !self.is_output_port(&target) {
@@ -1113,32 +1497,76 @@ impl<'a> MirToSirConverter<'a> {
 
     fn synthesize_conditional_assignment(&mut self, if_stmt: &IfStatement, target: &str) -> usize {
         // Use dependency-aware processing for conditional assignments
+        println!(
+            "      🔨 SYNTHESIZE_CONDITIONAL_ASSIGNMENT: target={}",
+            target
+        );
         let mut cases = Vec::new();
 
         // Process then branch with local context
-        if let Some(then_value) =
-            self.process_branch_with_dependencies(&if_stmt.then_block.statements, target)
-        {
-            let condition = self.create_expression_node(&if_stmt.condition);
-            cases.push((condition, then_value));
-        }
+        let then_value =
+            self.process_branch_with_dependencies(&if_stmt.then_block.statements, target);
+        println!("         DEBUG: then_value = {:?}", then_value);
+        let else_value = if let Some(else_block) = &if_stmt.else_block {
+            let result = self.process_branch_with_dependencies(&else_block.statements, target);
+            println!("         DEBUG: else_value = {:?}", result);
+            result
+        } else {
+            println!("         DEBUG: no else block");
+            None
+        };
 
-        // Process else branch with local context
-        if let Some(else_block) = &if_stmt.else_block {
-            if let Some(else_value) =
-                self.process_branch_with_dependencies(&else_block.statements, target)
-            {
-                cases.push((0, else_value)); // condition=0 means "default case"
+        // Build cases based on what we found
+        match (then_value, else_value) {
+            (Some(then_val), Some(else_val)) => {
+                // Both branches assign: create proper mux
+                let condition = self.create_expression_node(&if_stmt.condition);
+                println!(
+                    "         ✅ THEN: node_{}, ELSE: node_{}, cond: node_{}",
+                    then_val, else_val, condition
+                );
+                cases.push((condition, then_val));
+                cases.push((0, else_val));
+            }
+            (Some(then_val), None) => {
+                // Only then assigns: mux(cond, then_val, keep_current)
+                let condition = self.create_expression_node(&if_stmt.condition);
+                println!(
+                    "         ✅ THEN: node_{}, ELSE: keep_{}, cond: node_{}",
+                    then_val, target, condition
+                );
+                let keep_val = self.create_signal_ref(target);
+                cases.push((condition, then_val));
+                cases.push((0, keep_val));
+            }
+            (None, Some(else_val)) => {
+                // Only else assigns: mux(cond, keep_current, else_val)
+                let condition = self.create_expression_node(&if_stmt.condition);
+                println!(
+                    "         ✅ THEN: keep_{}, ELSE: node_{}, cond: node_{}",
+                    target, else_val, condition
+                );
+                let keep_val = self.create_signal_ref(target);
+                cases.push((condition, keep_val));
+                cases.push((0, else_val));
+            }
+            (None, None) => {
+                // Neither assigns: keep current value
+                println!("         ❌ No assignment to {} in either branch", target);
             }
         }
 
         // Build priority-encoded mux tree
-        if cases.is_empty() {
+        println!("         📊 Total cases: {}", cases.len());
+        let result = if cases.is_empty() {
             // No assignments to this target, use current value
+            println!("         ⚠️ No cases - using signal ref");
             self.create_signal_ref(target)
         } else {
-            self.build_priority_mux(&cases)
-        }
+            self.build_priority_mux(&cases, target)
+        };
+        println!("         ➡️ RESULT: node_{}", result);
+        result
     }
 
     fn process_branch_with_dependencies(
@@ -1149,23 +1577,64 @@ impl<'a> MirToSirConverter<'a> {
         // CRITICAL: In sequential blocks (non-blocking assignments), all RHS values
         // are sampled at the beginning of the clock cycle. We should NOT track
         // intermediate computed values in a local context.
-        let mut target_value = None;
+
+        // Process ALL statements and collect results from nested ifs.
+        // For multiple independent ifs, we need to combine them properly:
+        // - Each nested if may or may not assign to our target
+        // - We need to merge all nested ifs that DO assign to target into a priority chain
+        // - Later statements override earlier ones (sequential semantics)
+
+        let mut nested_if_results = Vec::new();
 
         for stmt in statements {
-            if let Statement::Assignment(assign) = stmt {
-                let assign_target = self.lvalue_to_string(&assign.lhs);
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let assign_target = self.lvalue_to_string(&assign.lhs);
 
-                // Create expression WITHOUT local context - read from registers
-                let value = self.create_expression_node(&assign.rhs);
-
-                // If this is our target, save it
-                if assign_target == target {
-                    target_value = Some(value);
+                    // If this is a direct assignment to our target, it overrides everything
+                    if assign_target == target {
+                        let value = self.create_expression_node(&assign.rhs);
+                        // Clear previous nested ifs and return this direct assignment
+                        return Some(value);
+                    }
                 }
+                Statement::If(nested_if) => {
+                    // Handle nested if/else-if chains
+                    println!(
+                        "         🔁 NESTED IF found in branch for target={}",
+                        target
+                    );
+                    let nested_result = self.synthesize_conditional_assignment(nested_if, target);
+                    nested_if_results.push(nested_result);
+                }
+                _ => {}
             }
         }
 
-        target_value
+        // Now we have all nested if results. We need to combine them.
+        // Each nested_if_result is already a full mux tree for that if statement.
+        // However, if a nested if doesn't assign to our target, it returns a SignalRef
+        // that just keeps the current value. We need to skip those and find the one
+        // that actually assigns.
+        //
+        // Filter out "keep value" signal refs by checking if the node is a SignalRef to target.
+        // Then use the last remaining result (sequential override semantics).
+        let meaningful_results: Vec<usize> = nested_if_results.into_iter()
+            .filter(|&node_id| {
+                // Check if this node is just a SignalRef to our target
+                let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
+                    n.id == node_id && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
+                });
+                !is_keep_value
+            })
+            .collect();
+
+        if meaningful_results.is_empty() {
+            None
+        } else {
+            // Use the last meaningful result (latest if statement that assigns)
+            Some(*meaningful_results.last().unwrap())
+        }
     }
 
     fn create_expression_with_local_context(
@@ -1423,7 +1892,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn build_priority_mux(&mut self, cases: &[(usize, usize)]) -> usize {
+    fn build_priority_mux(&mut self, cases: &[(usize, usize)], target: &str) -> usize {
         if cases.len() == 1 {
             let (cond, val) = cases[0];
             if cond == 0 {
@@ -1431,8 +1900,10 @@ impl<'a> MirToSirConverter<'a> {
                 return val;
             } else {
                 // Single conditional case - need to create mux with signal's current value as default
-                // This shouldn't normally happen but handle it gracefully
-                return val; // For now, just return the value
+                // When no else case exists, the signal retains its value
+                println!("         🔧 BUILD_PRIORITY_MUX: Single case, creating mux(cond={}, then={}, else=keep_{})", cond, val, target);
+                let keep_value = self.create_signal_ref(target);
+                return self.create_mux_node(cond, val, keep_value);
             }
         }
 
@@ -1444,7 +1915,7 @@ impl<'a> MirToSirConverter<'a> {
             // No more cases - this shouldn't happen with proper case collection
             self.create_constant_node(0, 8) // Default fallback
         } else {
-            self.build_priority_mux(rest_cases)
+            self.build_priority_mux(rest_cases, target)
         };
 
         if first_cond == 0 {
@@ -1658,13 +2129,17 @@ impl<'a> MirToSirConverter<'a> {
                 self.get_or_create_signal_driver(&var_name)
             }
             LValue::BitSelect { base, index } => {
-                let base_node = self.create_lvalue_ref_node(base);
-
-                // Evaluate index expression to get constant value
-                let index_val = self.evaluate_constant_expression(index).unwrap_or(0) as usize;
-
-                // Create a bit select node as a slice with width 1
-                self.create_slice_node(base_node, index_val, index_val)
+                // Try to evaluate index as constant first
+                if let Some(index_val) = self.evaluate_constant_expression(index) {
+                    // Static bit select - create a slice node
+                    let base_node = self.create_lvalue_ref_node(base);
+                    self.create_slice_node(base_node, index_val as usize, index_val as usize)
+                } else {
+                    // Dynamic array indexing - create ArrayRead node
+                    let base_node = self.create_lvalue_ref_node(base);
+                    let index_node = self.create_expression_node(index);
+                    self.create_array_read_node(base_node, index_node)
+                }
             }
             LValue::RangeSelect { base, high, low } => {
                 let base_node = self.create_lvalue_ref_node(base);
@@ -1881,6 +2356,93 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         eprintln!("   🔗 Adding slice node {} to combinational_nodes", node_id);
+        self.sir.combinational_nodes.push(node);
+        node_id
+    }
+
+    fn create_array_read_node(&mut self, array: usize, index: usize) -> usize {
+        eprintln!(
+            "📚 ARRAY READ: Creating array read node from array={}, index={}",
+            array, index
+        );
+        let node_id = self.next_node_id();
+
+        let array_signal = self.node_to_signal_ref(array);
+        let index_signal = self.node_to_signal_ref(index);
+
+        // Get the array signal to determine element width
+        // For now, assume 8-bit elements (we'll need to track this properly later)
+        let element_width = 8; // TODO: Get from array type info
+
+        let output_signal_name = format!("node_{}_out", node_id);
+        let output_signal = SignalRef {
+            signal_id: output_signal_name.clone(),
+            bit_range: None,
+        };
+        self.sir.signals.push(SirSignal {
+            name: output_signal_name,
+            width: element_width,
+            is_state: false,
+            driver_node: Some(node_id),
+            fanout_nodes: Vec::new(),
+        });
+
+        let node = SirNode {
+            id: node_id,
+            kind: SirNodeKind::ArrayRead,
+            inputs: vec![array_signal, index_signal],
+            outputs: vec![output_signal],
+            clock_domain: None,
+        };
+
+        eprintln!(
+            "   🔗 Adding array read node {} to combinational_nodes",
+            node_id
+        );
+        self.sir.combinational_nodes.push(node);
+        node_id
+    }
+
+    fn create_array_write_node(&mut self, old_array: usize, index: usize, value: usize) -> usize {
+        eprintln!(
+            "✍️ ARRAY WRITE: Creating array write node from old_array={}, index={}, value={}",
+            old_array, index, value
+        );
+        let node_id = self.next_node_id();
+
+        let old_array_signal = self.node_to_signal_ref(old_array);
+        let index_signal = self.node_to_signal_ref(index);
+        let value_signal = self.node_to_signal_ref(value);
+
+        // Get the array signal to determine total width
+        // For now, assume same width as old array
+        let array_width = self.get_signal_width(&old_array_signal.signal_id);
+
+        let output_signal_name = format!("node_{}_out", node_id);
+        let output_signal = SignalRef {
+            signal_id: output_signal_name.clone(),
+            bit_range: None,
+        };
+        self.sir.signals.push(SirSignal {
+            name: output_signal_name,
+            width: array_width,
+            is_state: false,
+            driver_node: Some(node_id),
+            fanout_nodes: Vec::new(),
+        });
+
+        let node = SirNode {
+            id: node_id,
+            kind: SirNodeKind::ArrayWrite,
+            inputs: vec![old_array_signal, index_signal, value_signal],
+            outputs: vec![output_signal],
+            clock_domain: None,
+        };
+
+        eprintln!(
+            "   🔗 Adding array write node {} to combinational_nodes",
+            node_id
+        );
         self.sir.combinational_nodes.push(node);
         node_id
     }

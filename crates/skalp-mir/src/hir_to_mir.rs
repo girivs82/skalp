@@ -33,6 +33,8 @@ pub struct HirToMir<'hir> {
     clock_domain_map: HashMap<hir::ClockDomainId, ClockDomainId>,
     /// Reference to HIR for type resolution
     hir: Option<&'hir Hir>,
+    /// Current entity being converted (for generic parameter resolution)
+    current_entity_id: Option<hir::EntityId>,
 }
 
 impl<'hir> HirToMir<'hir> {
@@ -51,6 +53,7 @@ impl<'hir> HirToMir<'hir> {
             variable_map: HashMap::new(),
             clock_domain_map: HashMap::new(),
             hir: None,
+            current_entity_id: None,
         }
     }
 
@@ -99,6 +102,9 @@ impl<'hir> HirToMir<'hir> {
         // Second pass: add implementations
         for impl_block in &hir.implementations {
             if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
+                // Set current entity for generic parameter resolution
+                self.current_entity_id = Some(impl_block.entity);
+
                 // Find the module
                 if let Some(module) = mir.modules.iter_mut().find(|m| m.id == module_id) {
                     // Add signals
@@ -628,6 +634,41 @@ impl<'hir> HirToMir<'hir> {
                 // Fallback if constant not found
                 Some(Expression::Literal(Value::Integer(0)))
             }
+            hir::HirExpression::GenericParam(param_name) => {
+                // Look up the generic parameter value in the current context
+                // Generic parameters are treated as constants after monomorphization
+                if let Some(hir) = self.hir {
+                    // First, try to find it in the current entity's generic parameters
+                    if let Some(entity_id) = self.current_entity_id {
+                        for entity in &hir.entities {
+                            if entity.id == entity_id {
+                                for generic in &entity.generics {
+                                    if generic.name == *param_name {
+                                        // Found the generic parameter, use its default value
+                                        if let Some(default_expr) = &generic.default_value {
+                                            // Recursively convert the default value expression
+                                            return self.convert_expression(default_expr);
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // If not found as generic param, try constants in implementation
+                    for implementation in &hir.implementations {
+                        for constant in &implementation.constants {
+                            if constant.name == *param_name {
+                                return self.convert_expression(&constant.value);
+                            }
+                        }
+                    }
+                }
+                // If not found, return a literal 0 as fallback
+                // This will be properly resolved during monomorphization/type checking
+                Some(Expression::Literal(Value::Integer(0)))
+            }
             hir::HirExpression::Binary(binary) => {
                 let left = Box::new(self.convert_expression(&binary.left)?);
                 let right = Box::new(self.convert_expression(&binary.right)?);
@@ -985,6 +1026,26 @@ impl<'hir> HirToMir<'hir> {
                     }
                     _ => None, // Unknown function
                 }
+            }
+            hir::HirExpression::GenericParam(param_name) => {
+                // Look up generic parameter value from current entity
+                if let Some(hir) = self.hir {
+                    if let Some(entity_id) = self.current_entity_id {
+                        for entity in &hir.entities {
+                            if entity.id == entity_id {
+                                for generic in &entity.generics {
+                                    if generic.name == *param_name {
+                                        if let Some(default_expr) = &generic.default_value {
+                                            return self.try_eval_const_expr(default_expr);
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                None
             }
             _ => None, // Can't evaluate variables, constants, etc. without context
         }
