@@ -2497,7 +2497,8 @@ impl HirBuilderContext {
             }
         };
 
-        // Parse constraint expression
+        // Parse constraint expression without symbol resolution
+        // Intent constraints are optimization hints, not actual hardware signals
         let expr = node
             .children()
             .find(|child| {
@@ -2509,7 +2510,7 @@ impl HirBuilderContext {
                         | SyntaxKind::IdentExpr
                 )
             })
-            .and_then(|expr_node| self.build_expression(&expr_node))
+            .and_then(|expr_node| Self::build_constraint_expression(&expr_node))
             .unwrap_or({
                 // Default expression if parsing fails
                 HirExpression::Literal(HirLiteral::Integer(0))
@@ -2519,6 +2520,39 @@ impl HirBuilderContext {
             constraint_type,
             expr,
         })
+    }
+
+    /// Build constraint expression without symbol resolution
+    /// Intent constraints contain keywords like "maximize", "minimize" which are not symbols
+    fn build_constraint_expression(node: &SyntaxNode) -> Option<HirExpression> {
+        match node.kind() {
+            SyntaxKind::LiteralExpr => {
+                // Parse numeric literals
+                let token = node.first_token()?;
+                let text = token.text();
+                if let Ok(val) = text.parse::<u64>() {
+                    Some(HirExpression::Literal(HirLiteral::Integer(val)))
+                } else {
+                    None
+                }
+            }
+            SyntaxKind::IdentExpr => {
+                // For constraint expressions, treat identifiers as string literals
+                // This handles keywords like "maximize", "minimize", "MHz", "W", etc.
+                let token = node.first_token()?;
+                let text = token.text().to_string();
+                Some(HirExpression::Literal(HirLiteral::String(text)))
+            }
+            SyntaxKind::BinaryExpr => {
+                // Parse binary expressions like "< 1000"
+                // For now, just recursively parse the left side
+                let left = node
+                    .first_child()
+                    .and_then(|expr_node| Self::build_constraint_expression(&expr_node))?;
+                Some(left)
+            }
+            _ => None,
+        }
     }
 
     /// Build requirement (stub)

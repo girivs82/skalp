@@ -123,7 +123,8 @@
       "Bash(SKALP_DUMP_MIR=1 cargo test --test test_simulation_suite test_fifo_operations --all-features -- --ignored --nocapture)",
       "Bash(env SKALP_DUMP_MIR=1 cargo test --test test_simulation_suite test_fifo_operations --all-features -- --ignored --nocapture)",
       "Bash(/tmp/debug_fifo_count:*)",
-      "Bash(./dump_signal_order)"
+      "Bash(./dump_signal_order)",
+      "Bash(RUST_BACKTRACE=1 cargo test test_milestone4_comprehensive --all-features -- --ignored --nocapture)"
     ],
     "deny": [],
     "ask": []

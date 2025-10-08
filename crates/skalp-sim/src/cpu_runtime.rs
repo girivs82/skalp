@@ -130,7 +130,10 @@ impl CpuRuntime {
                     .or_else(|| self.state.get(signal))
                     .cloned()
                     .unwrap_or_else(|| {
-                        eprintln!("WARNING: SignalRef couldn't find signal '{}', defaulting to 0", signal);
+                        eprintln!(
+                            "WARNING: SignalRef couldn't find signal '{}', defaulting to 0",
+                            signal
+                        );
                         vec![0u8]
                     })
             }
@@ -421,19 +424,25 @@ impl CpuRuntime {
                     .unwrap_or(0);
 
                 // Get previous clock value
-                let prev_clock = self.prev_clock_values.get(clock_signal).copied().unwrap_or(0);
+                let prev_clock = self
+                    .prev_clock_values
+                    .get(clock_signal)
+                    .copied()
+                    .unwrap_or(0);
 
                 // Check for the specified edge
                 let edge_detected = match clock_edge {
                     ClockEdge::Rising => prev_clock == 0 && current_clock != 0,
                     ClockEdge::Falling => prev_clock != 0 && current_clock == 0,
                     ClockEdge::Both => {
-                        (prev_clock == 0 && current_clock != 0) || (prev_clock != 0 && current_clock == 0)
+                        (prev_clock == 0 && current_clock != 0)
+                            || (prev_clock != 0 && current_clock == 0)
                     }
                 };
 
                 // Update previous clock value
-                self.prev_clock_values.insert(clock_signal.clone(), current_clock);
+                self.prev_clock_values
+                    .insert(clock_signal.clone(), current_clock);
 
                 if edge_detected {
                     // Get the D input value
@@ -448,11 +457,12 @@ impl CpuRuntime {
                     // Write to the output (which is the register)
                     // Truncate to the correct width
                     if let Some(output) = node.outputs.first() {
-                        let truncated = if let Some(&width) = self.signal_widths.get(&output.signal_id) {
-                            Self::truncate_to_width(&d_value, width)
-                        } else {
-                            d_value.clone()
-                        };
+                        let truncated =
+                            if let Some(&width) = self.signal_widths.get(&output.signal_id) {
+                                Self::truncate_to_width(&d_value, width)
+                            } else {
+                                d_value.clone()
+                            };
                         self.next_state.insert(output.signal_id.clone(), truncated);
                     }
                 }
@@ -502,7 +512,7 @@ impl CpuRuntime {
 
             // Add state elements to registers (matching GPU behavior)
             // Only state elements go in registers, not inputs or outputs
-            for (name, _) in &module.state_elements {
+            for name in module.state_elements.keys() {
                 if let Some(value) = self.state.get(name) {
                     registers.insert(name.clone(), value.clone());
                 }
@@ -518,7 +528,8 @@ impl CpuRuntime {
 
     fn initialize_signals(&mut self, module: &SirModule) {
         // Build set of input names for quick lookup
-        let input_names: std::collections::HashSet<_> = module.inputs.iter().map(|i| &i.name).collect();
+        let input_names: std::collections::HashSet<_> =
+            module.inputs.iter().map(|i| &i.name).collect();
 
         // Initialize non-input signals to zero and record their widths
         // Inputs are handled separately and should not be in the signals map

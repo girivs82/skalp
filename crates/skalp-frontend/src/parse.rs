@@ -108,20 +108,38 @@ impl<'a> ParseState<'a> {
         // 'impl' keyword
         self.expect(SyntaxKind::ImplKw);
 
+        // Optional generic parameters for the impl itself
+        // Pattern: impl<T, const N: nat> EntityName<T, N> { }
+        let has_impl_generics = self.at(SyntaxKind::Lt);
+
         // Look ahead to determine if this is a trait impl
-        // After consuming 'impl', position 0 is the next token
-        // Check if we have: <trait> for <type>
+        // After consuming 'impl' and optional generics, check for: <trait> for <type>
         let is_trait_impl = {
             let mut found_for = false;
-            let mut lookahead = 1;
+            let mut lookahead = 0;
 
-            // Look for 'for' keyword within the next few tokens
-            // Pattern: IDENT [<generics>] FOR IDENT
-            if self.peek_kind(0) == Some(SyntaxKind::Ident) {
-                // Skip generic parameters if present
+            // Skip past impl generic parameters if present
+            if has_impl_generics {
+                lookahead = 1; // Start after '<'
+                let mut depth = 1;
+                while depth > 0 && lookahead < 50 && self.peek_kind(lookahead).is_some() {
+                    match self.peek_kind(lookahead) {
+                        Some(SyntaxKind::Lt) => depth += 1,
+                        Some(SyntaxKind::Gt) => depth -= 1,
+                        Some(SyntaxKind::Shr) => depth -= 2, // >> counts as two >
+                        _ => {}
+                    }
+                    lookahead += 1;
+                }
+            }
+
+            // Now check if we have: IDENT [<generics>] FOR IDENT
+            if self.peek_kind(lookahead) == Some(SyntaxKind::Ident) {
+                lookahead += 1;
+                // Skip generic parameters after entity/trait name if present
                 if self.peek_kind(lookahead) == Some(SyntaxKind::Lt) {
-                    // Simple skip - just look for 'for' keyword
-                    while lookahead < 10 && self.peek_kind(lookahead).is_some() {
+                    // Look for 'for' keyword
+                    while lookahead < 50 && self.peek_kind(lookahead).is_some() {
                         if self.peek_kind(lookahead) == Some(SyntaxKind::ForKw) {
                             found_for = true;
                             break;
@@ -149,12 +167,29 @@ impl<'a> ParseState<'a> {
     fn parse_entity_impl_after_keyword(&mut self) {
         self.start_node(SyntaxKind::ImplBlock);
 
+        // Optional generic parameters for the impl itself
+        // Pattern: impl<T, const N: nat> EntityName<T, N>
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
         // Entity name
         self.expect(SyntaxKind::Ident);
 
-        // Optional generic parameters
+        // Optional generic arguments being applied to the entity
+        // Pattern: EntityName<T, N>
         if self.at(SyntaxKind::Lt) {
             self.parse_generic_params();
+        }
+
+        // Optional 'with' clause for intents
+        if self.at(SyntaxKind::WithKw) {
+            self.bump(); // consume 'with'
+            self.expect(SyntaxKind::Ident); // intent name
+                                            // Optional generic parameters for intent
+            if self.at(SyntaxKind::Lt) {
+                self.parse_generic_params();
+            }
         }
 
         // Implementation body
@@ -169,10 +204,16 @@ impl<'a> ParseState<'a> {
     fn parse_trait_impl_after_keyword(&mut self) {
         self.start_node(SyntaxKind::TraitImpl);
 
+        // Optional generic parameters for the impl itself
+        // Pattern: impl<T, const N: nat> TraitName<T> for EntityName<T>
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
         // Trait name
         self.expect(SyntaxKind::Ident);
 
-        // Optional generic parameters for trait
+        // Optional generic arguments for trait
         if self.at(SyntaxKind::Lt) {
             self.parse_generic_params();
         }
@@ -183,7 +224,7 @@ impl<'a> ParseState<'a> {
         // Target type
         self.expect(SyntaxKind::Ident);
 
-        // Optional generic parameters for target
+        // Optional generic arguments for target
         if self.at(SyntaxKind::Lt) {
             self.parse_generic_params();
         }
@@ -1751,10 +1792,36 @@ impl<'a> ParseState<'a> {
         // Could be: "< 100MHz", "minimize", "< 1000 LUTs", etc.
         self.parse_expression();
 
-        // Optional units or additional info
-        while self.current_kind() == Some(SyntaxKind::Ident) {
+        // Optional units or additional info on the same line
+        // Stop at newlines to avoid consuming the next constraint's keyword
+        while self.current_kind() == Some(SyntaxKind::Ident) && !self.at_newline() {
             self.bump();
         }
+    }
+
+    /// Check if we're at a newline by looking ahead in trivia
+    fn at_newline(&self) -> bool {
+        if self.current >= self.tokens.len() {
+            return false;
+        }
+        // Check the trivia before current position for newlines
+        let current_pos = self.current;
+        if current_pos == 0 {
+            return false;
+        }
+        // Look at the trivia between last token and current position
+        let last_token_end = if current_pos > 0 {
+            self.tokens[current_pos - 1].span.end
+        } else {
+            0
+        };
+        let current_token_start = if current_pos < self.tokens.len() {
+            self.tokens[current_pos].span.start
+        } else {
+            self.source.len()
+        };
+        let trivia = &self.source[last_token_end..current_token_start];
+        trivia.contains('\n')
     }
 
     /// Parse requirement declaration

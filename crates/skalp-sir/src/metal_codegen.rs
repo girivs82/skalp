@@ -688,8 +688,12 @@ impl<'a> MetalShaderGenerator<'a> {
                             "registers->{} = signals->{} & {};\n",
                             output.signal_id, data_signal, mask
                         );
-                        eprintln!("DEBUG Metal gen: About to write: {} (width={}, mask={})",
-                            assignment.trim(), width, mask);
+                        eprintln!(
+                            "DEBUG Metal gen: About to write: {} (width={}, mask={})",
+                            assignment.trim(),
+                            width,
+                            mask
+                        );
                         self.write_indented(&assignment);
                         eprintln!("DEBUG Metal gen: Wrote to output buffer");
                     }
