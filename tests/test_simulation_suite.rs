@@ -230,7 +230,10 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "CPU runtime not fully implemented - evaluate_combinational is a stub"]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "GPU simulation only available on macOS"
+    )]
     async fn test_cpu_vs_gpu_performance() {
         let counter_source =
             fs::read_to_string("examples/counter.sk").expect("Failed to read counter.sk");
