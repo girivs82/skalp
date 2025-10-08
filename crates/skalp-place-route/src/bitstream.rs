@@ -87,8 +87,9 @@ impl BitstreamGenerator {
         match self.config.format {
             BitstreamFormat::IceStormAscii => self.generate_ice40_ascii(placement, routing),
             BitstreamFormat::IceStormBinary => self.generate_ice40_binary(placement, routing),
+            BitstreamFormat::VtrBitstream => self.generate_vtr_bitstream(placement, routing), // VTR supports all devices
             _ => Err(BitstreamError::UnsupportedFormat(
-                "iCE40 only supports IceStorm formats".to_string(),
+                "iCE40 supports IceStorm and VTR formats".to_string(),
             )),
         }
     }
@@ -238,7 +239,7 @@ impl BitstreamGenerator {
         let mut bitstream_data = Vec::new();
 
         // Trellis binary format header
-        bitstream_data.extend_from_slice(b"TRELLIS"); // Magic header
+        bitstream_data.extend_from_slice(b"TRELLIS_ECP5"); // Magic header
         bitstream_data.extend_from_slice(&[0x01, 0x00]); // Version 1.0
 
         // Device information
@@ -825,7 +826,7 @@ impl Bitstream {
                 }
 
                 // Check Trellis magic header
-                if &self.data[0..7] != b"TRELLIS" {
+                if &self.data[0..12] != b"TRELLIS_ECP5" {
                     return Err(BitstreamError::CorruptedBitstream(
                         "Invalid Trellis header".to_string(),
                     ));
