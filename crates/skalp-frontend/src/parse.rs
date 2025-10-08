@@ -3352,7 +3352,10 @@ mod tests {
         eprintln!("Errors: {:?}", errors);
         eprintln!("Tree: {}", tree);
 
-        assert!(errors.is_empty(), "Should parse const generic with usize type");
+        assert!(
+            errors.is_empty(),
+            "Should parse const generic with usize type"
+        );
 
         // Now test HIR building
         let hir_result = crate::parse_and_build_hir(source);
@@ -3374,14 +3377,20 @@ mod tests {
             eprintln!("Parse error: {:?}", error);
         }
 
-        assert!(errors.is_empty(), "Should parse const generic with nat type");
+        assert!(
+            errors.is_empty(),
+            "Should parse const generic with nat type"
+        );
 
         // Now test HIR building
         let hir_result = crate::parse_and_build_hir(source);
         if let Err(e) = &hir_result {
             eprintln!("HIR Error: {:?}", e);
         }
-        assert!(hir_result.is_ok(), "Should build HIR from const generic with nat");
+        assert!(
+            hir_result.is_ok(),
+            "Should build HIR from const generic with nat"
+        );
     }
 
     #[test]
@@ -3411,7 +3420,10 @@ mod tests {
             eprintln!("Parse error: {:?}", error);
         }
 
-        assert!(errors.is_empty(), "Should parse const generic with default value");
+        assert!(
+            errors.is_empty(),
+            "Should parse const generic with default value"
+        );
     }
 
     #[test]

@@ -1329,3 +1329,58 @@ impl Test {
 
     assert_eq!(implementation.assignments.len(), 1);
 }
+
+#[test]
+fn test_fifo_four_signals() {
+    let source = r#"
+entity FIFO<const WIDTH: nat = 8, const DEPTH: nat = 16> {
+    in clk: clock
+    out empty: bit
+}
+
+impl FIFO {
+    signal memory: [bit<WIDTH>; DEPTH]
+    signal wr_ptr: nat<clog2(DEPTH)>
+    signal rd_ptr: nat<clog2(DEPTH)>
+    signal count: nat<clog2(DEPTH+1)>
+
+    empty = (count == 0)
+}
+"#;
+    let hir = assert_builds(source);
+    let implementation = get_first_impl(&hir);
+
+    println!("=== Debugging FIFO Signals ===");
+    println!("Number of signals: {}", implementation.signals.len());
+    for signal in &implementation.signals {
+        println!(
+            "  - Signal: {} (id={:?}, type={:?})",
+            signal.name, signal.id, signal.signal_type
+        );
+    }
+
+    assert_eq!(
+        implementation.signals.len(),
+        4,
+        "Should have 4 signals: memory, wr_ptr, rd_ptr, count"
+    );
+
+    let signal_names: Vec<&str> = implementation
+        .signals
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(
+        signal_names.contains(&"memory"),
+        "Should have memory signal"
+    );
+    assert!(
+        signal_names.contains(&"wr_ptr"),
+        "Should have wr_ptr signal"
+    );
+    assert!(
+        signal_names.contains(&"rd_ptr"),
+        "Should have rd_ptr signal"
+    );
+    assert!(signal_names.contains(&"count"), "Should have count signal");
+}

@@ -125,7 +125,10 @@ impl GpuRuntime {
 
     fn calculate_register_size(&self, module: &SirModule) -> u64 {
         let mut size = 0u64;
-        for state in module.state_elements.values() {
+        // Sort state elements by name for consistent ordering with Metal shader
+        let mut sorted_states: Vec<_> = module.state_elements.values().collect();
+        sorted_states.sort_by_key(|state| &state.name);
+        for state in sorted_states {
             size += self.get_metal_type_size(state.width) as u64;
         }
         size
@@ -231,8 +234,17 @@ impl GpuRuntime {
                             .map(|c| c.previous_value)
                             .unwrap_or(false);
 
+                        eprintln!(
+                            "DEBUG execute_sequential: clock={}, current={}, prev={}",
+                            input.name, current_value, prev_value
+                        );
+
                         if current_value && !prev_value {
                             // Rising edge detected
+                            eprintln!(
+                                "DEBUG execute_sequential: RISING EDGE DETECTED on {}",
+                                input.name
+                            );
                             has_edge = true;
                         }
                     }
@@ -241,8 +253,11 @@ impl GpuRuntime {
         }
 
         if !has_edge {
+            eprintln!("DEBUG execute_sequential: NO EDGE, skipping sequential update");
             return Ok(());
         }
+
+        eprintln!("DEBUG execute_sequential: EXECUTING SEQUENTIAL KERNEL");
 
         if let Some(pipeline) = self.pipelines.get("sequential") {
             let command_buffer = self.device.command_queue.new_command_buffer();
@@ -295,6 +310,10 @@ impl GpuRuntime {
                 let signal_ptr = signal_buffer.contents() as *const u8;
                 let mut offset = 0usize;
 
+                // Build set of output names to avoid reading them twice
+                let output_names: std::collections::HashSet<_> =
+                    module.outputs.iter().map(|o| &o.name).collect();
+
                 // Read outputs first
                 for output in &module.outputs {
                     let metal_size = self.get_metal_type_size(output.width);
@@ -311,9 +330,9 @@ impl GpuRuntime {
                     offset += metal_size;
                 }
 
-                // Read intermediate signals
+                // Read intermediate signals (skipping outputs and state elements)
                 for signal in &module.signals {
-                    if !signal.is_state {
+                    if !signal.is_state && !output_names.contains(&signal.name) {
                         let metal_size = self.get_metal_type_size(signal.width);
                         let bytes_needed = signal.width.div_ceil(8);
                         let mut value = vec![0u8; bytes_needed];
@@ -335,7 +354,11 @@ impl GpuRuntime {
                 let register_ptr = register_buffer.contents() as *const u8;
                 let mut offset = 0usize;
 
-                for (name, state_elem) in &module.state_elements {
+                // Sort state elements by name for consistent ordering with Metal shader
+                let mut sorted_states: Vec<_> = module.state_elements.iter().collect();
+                sorted_states.sort_by_key(|(name, _)| *name);
+
+                for (name, state_elem) in sorted_states {
                     let metal_size = self.get_metal_type_size(state_elem.width);
                     let bytes_needed = state_elem.width.div_ceil(8);
                     let mut value = vec![0u8; bytes_needed];

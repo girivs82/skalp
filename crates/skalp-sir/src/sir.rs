@@ -60,6 +60,10 @@ pub enum SirNodeKind {
     Latch { enable: SignalRef },
     Memory { depth: usize, width: usize },
 
+    // Array operations
+    ArrayRead,  // Read array[index]: inputs=[array_signal, index], outputs=[value]
+    ArrayWrite, // Write array[index] = value: inputs=[old_array, index, value], outputs=[new_array]
+
     // Special nodes
     ClockGate,
     Reset,

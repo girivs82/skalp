@@ -105,7 +105,6 @@ mod trait_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - generic trait parsing incomplete"]
     fn test_complex_trait_with_generics() {
         let source = r#"
         trait Serializable<T> {
@@ -131,7 +130,6 @@ mod trait_tests {
     }
 
     #[test]
-    #[ignore = "Parsing fails - trait with signal requirements parsing incomplete"]
     fn test_trait_with_signal_requirements() {
         let source = r#"
         trait BusInterface {

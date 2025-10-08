@@ -675,13 +675,21 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 // Update all register outputs with the data input value from signals
                 for output in &node.outputs {
-                    if sir.state_elements.contains_key(&output.signal_id) {
-                        // General case: read the computed value from signals
+                    if let Some(state_elem) = sir.state_elements.get(&output.signal_id) {
+                        // Truncate to the register's declared width with a bit mask
+                        let width = state_elem.width;
+                        let mask = if width < 32 {
+                            format!("0x{:X}", (1u64 << width) - 1)
+                        } else {
+                            "0xFFFFFFFF".to_string()
+                        };
+
                         let assignment = format!(
-                            "registers->{} = signals->{};\n",
-                            output.signal_id, data_signal
+                            "registers->{} = signals->{} & {};\n",
+                            output.signal_id, data_signal, mask
                         );
-                        eprintln!("DEBUG Metal gen: About to write: {}", assignment.trim());
+                        eprintln!("DEBUG Metal gen: About to write: {} (width={}, mask={})",
+                            assignment.trim(), width, mask);
                         self.write_indented(&assignment);
                         eprintln!("DEBUG Metal gen: Wrote to output buffer");
                     }

@@ -296,6 +296,7 @@ pub enum HirExpression {
     Port(PortId),
     Variable(VariableId),
     Constant(ConstantId),
+    GenericParam(String), // Generic parameter reference (e.g., WIDTH, DEPTH)
     Binary(HirBinaryExpr),
     Unary(HirUnaryExpr),
     Call(HirCallExpr),

@@ -7,6 +7,6 @@ pub mod sir;
 pub use metal_codegen::generate_metal_shader;
 pub use mir_to_sir::convert_mir_to_sir;
 pub use sir::{
-    ClockDomain, ClockEdge, CombinationalCone, SignalRef, SirModule, SirNode, SirNodeKind, SirPort,
-    SirSignal, StateElement,
+    BinaryOperation, ClockDomain, ClockEdge, CombinationalCone, SignalRef, SirModule, SirNode,
+    SirNodeKind, SirPort, SirSignal, StateElement, UnaryOperation,
 };
