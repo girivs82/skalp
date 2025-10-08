@@ -11,6 +11,9 @@ use std::collections::HashMap;
 /// Maximum recursion depth to prevent stack overflow
 const MAX_RECURSION_DEPTH: usize = 100;
 
+/// List of builtin/intrinsic functions that don't require symbol resolution
+const BUILTIN_FUNCTIONS: &[&str] = &["clog2", "pow2", "min", "max", "abs"];
+
 /// HIR builder context
 pub struct HirBuilderContext {
     /// Next IDs for various HIR elements
@@ -1591,6 +1594,14 @@ impl HirBuilderContext {
         let name = node
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
+
+        // Check if this is a builtin function - don't resolve as symbol
+        if BUILTIN_FUNCTIONS.contains(&name.as_str()) {
+            // Builtin functions should only appear in call expressions
+            // If we see them as plain identifiers, something is wrong with the parse tree
+            // Return None to indicate this should be handled differently
+            return None;
+        }
 
         // Look up symbol
         if let Some(symbol) = self.symbols.lookup(&name) {
