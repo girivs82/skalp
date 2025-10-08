@@ -1144,7 +1144,10 @@ impl<'a> MirToSirConverter<'a> {
         );
 
         // For each target signal, synthesize a priority-encoded mux
-        for target in targets {
+        // Sort targets for deterministic ordering
+        let mut sorted_targets: Vec<_> = targets.into_iter().collect();
+        sorted_targets.sort();
+        for target in sorted_targets {
             let final_value = self.synthesize_conditional_assignment(if_stmt, &target);
             let ff_node = self.create_flipflop_with_input(final_value, clock, edge.clone());
             self.connect_node_to_signal(ff_node, &target);

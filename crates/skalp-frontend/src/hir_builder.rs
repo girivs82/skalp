@@ -879,10 +879,31 @@ impl HirBuilderContext {
             Vec::new()
         };
 
+        // For else block, check if it's a regular block or an else-if (nested IfStmt)
         let else_statements = if blocks.len() > 1 {
+            // Regular else with block: `else { ... }`
             Some(self.build_statements(&blocks[1]))
         } else {
-            None
+            // Check for else-if pattern: `else if ...`
+            // The parser creates: IfStmt -> Condition -> BlockStmt -> [IfStmt | BlockStmt]
+            // So we look for an IfStmt child that appears after the first BlockStmt
+            let mut found_then_block = false;
+            let nested_if = node.children().find_map(|child| {
+                if child.kind() == SyntaxKind::BlockStmt {
+                    found_then_block = true;
+                    None
+                } else if found_then_block && child.kind() == SyntaxKind::IfStmt {
+                    Some(child)
+                } else {
+                    None
+                }
+            });
+
+            nested_if.and_then(|nested_if_node| {
+                // Found a nested if statement - this is an else-if
+                self.build_if_statement(&nested_if_node)
+                    .map(|if_stmt| vec![HirStatement::If(if_stmt)])
+            })
         };
 
         Some(HirIfStatement {

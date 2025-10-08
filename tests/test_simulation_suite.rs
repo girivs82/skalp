@@ -164,7 +164,10 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "FIFO count logic issue: doesn't handle simultaneous read/write correctly"]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "GPU simulation only available on macOS, CPU runtime not yet implemented"
+    )]
     async fn test_fifo_operations() {
         let fifo_source = fs::read_to_string("examples/fifo.sk").expect("Failed to read fifo.sk");
 
