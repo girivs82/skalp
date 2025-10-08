@@ -3345,6 +3345,76 @@ mod tests {
     use crate::syntax::SyntaxNodeExt;
 
     #[test]
+    fn test_const_generic_with_usize() {
+        let source = "entity Test<const W: usize> { in a: bit }";
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        eprintln!("Tree: {}", tree);
+
+        assert!(errors.is_empty(), "Should parse const generic with usize type");
+
+        // Now test HIR building
+        let hir_result = crate::parse_and_build_hir(source);
+        if let Err(e) = &hir_result {
+            eprintln!("HIR Error: {:?}", e);
+        }
+        assert!(hir_result.is_ok(), "Should build HIR from const generic");
+    }
+
+    #[test]
+    fn test_const_generic_with_nat() {
+        let source = "entity Test<const W: nat> { in a: bit }";
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        eprintln!("Tree: {}", tree);
+
+        for error in &errors {
+            eprintln!("Parse error: {:?}", error);
+        }
+
+        assert!(errors.is_empty(), "Should parse const generic with nat type");
+
+        // Now test HIR building
+        let hir_result = crate::parse_and_build_hir(source);
+        if let Err(e) = &hir_result {
+            eprintln!("HIR Error: {:?}", e);
+        }
+        assert!(hir_result.is_ok(), "Should build HIR from const generic with nat");
+    }
+
+    #[test]
+    fn test_two_const_generics() {
+        let source = "entity Test<const W: nat, const D: nat> { in a: bit }";
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors for two generics: {:?}", errors);
+        eprintln!("Tree: {}", tree);
+
+        for error in &errors {
+            eprintln!("Parse error: {:?}", error);
+        }
+
+        assert!(errors.is_empty(), "Should parse two const generics");
+    }
+
+    #[test]
+    fn test_const_generic_with_default() {
+        let source = "entity Test<const W: nat = 8> { in a: bit }";
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors for default: {:?}", errors);
+        eprintln!("Tree: {}", tree);
+
+        for error in &errors {
+            eprintln!("Parse error: {:?}", error);
+        }
+
+        assert!(errors.is_empty(), "Should parse const generic with default value");
+    }
+
+    #[test]
     fn test_parse_empty() {
         let source = "";
         let tree = parse(source);

@@ -1,45 +1,45 @@
 // FIFO example
 entity FIFO<const WIDTH: nat = 8, const DEPTH: nat = 16> {
-    in clk: clock;
-    in rst: reset(active_high);
-    in wr_en: bit;
-    in wr_data: bit<WIDTH>;
-    out full: bit;
-    in rd_en: bit;
-    out rd_data: bit<WIDTH>;
-    out empty: bit;
+    in clk: clock
+    in rst: reset(active_high)
+    in wr_en: bit
+    in wr_data: bit<WIDTH>
+    out full: bit
+    in rd_en: bit
+    out rd_data: bit<WIDTH>
+    out empty: bit
 }
 
-impl FIFO<const WIDTH: nat, const DEPTH: nat> {
-    signal memory: array<bit<WIDTH>, DEPTH>;
-    signal wr_ptr: nat<$clog2(DEPTH)>;
-    signal rd_ptr: nat<$clog2(DEPTH)>;
-    signal count: nat<$clog2(DEPTH+1)>;
+impl FIFO {
+    signal memory: [bit<WIDTH>; DEPTH]
+    signal wr_ptr: nat<clog2(DEPTH)>
+    signal rd_ptr: nat<clog2(DEPTH)>
+    signal count: nat<clog2(DEPTH+1)>
 
-    empty = (count == 0);
-    full = (count == DEPTH);
-    rd_data = memory[rd_ptr];
-
-    on(rst.active) {
-        wr_ptr <= 0;
-        rd_ptr <= 0;
-        count <= 0;
-    }
+    empty = (count == 0)
+    full = (count == DEPTH)
+    rd_data = memory[rd_ptr]
 
     on(clk.rise) {
-        if wr_en && !full {
-            memory[wr_ptr] <= wr_data;
-            wr_ptr <= (wr_ptr + 1) % DEPTH;
-        }
+        if rst {
+            wr_ptr <= 0
+            rd_ptr <= 0
+            count <= 0
+        } else {
+            if wr_en && !full {
+                memory[wr_ptr] <= wr_data
+                wr_ptr <= (wr_ptr + 1) % DEPTH
+            }
 
-        if rd_en && !empty {
-            rd_ptr <= (rd_ptr + 1) % DEPTH;
-        }
+            if rd_en && !empty {
+                rd_ptr <= (rd_ptr + 1) % DEPTH
+            }
 
-        if wr_en && !rd_en && !full {
-            count <= count + 1;
-        } else if !wr_en && rd_en && !empty {
-            count <= count - 1;
+            if wr_en && !rd_en && !full {
+                count <= count + 1
+            } else if !wr_en && rd_en && !empty {
+                count <= count - 1
+            }
         }
     }
 }
