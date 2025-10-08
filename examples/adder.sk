@@ -1,7 +1,7 @@
 // Parameterized adder example
 // Demonstrates generic parameters and combinational logic
 
-entity Adder<WIDTH: nat = 8> {
+entity Adder<const WIDTH: nat = 8> {
     in a: bit[WIDTH]
     in b: bit[WIDTH]
     in carry_in: bit

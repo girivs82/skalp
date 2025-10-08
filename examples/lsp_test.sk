@@ -2,31 +2,31 @@
 // This file tests language server functionality
 
 entity Counter {
-    input clock clk;
-    input reset rst;
-    input bit enable;
-    output bit[8] count;
+    in clk: clock
+    in rst: reset
+    in enable: bit
+    out count: nat[8]
 }
 
 impl Counter {
-    signal bit[8] count_reg = 0;
+    signal count_reg: nat[8] = 0
 
-    event clk {
-        when rst {
-            count_reg <= 0;
+    on(clk.rise) {
+        if (rst) {
+            count_reg <= 0
         } else {
-            when enable {
-                count_reg <= count_reg + 1;
+            if (enable) {
+                count_reg <= count_reg + 1
             }
         }
     }
 
     // Continuous assignment
-    count = count_reg;
+    count = count_reg
 }
 
 // Test function with error to check diagnostics
-fn test_function() -> bit[32] {
-    let invalid_var = unknown_variable; // This should trigger an error
-    return 42;
+fn test_function() -> nat[32] {
+    let invalid_var = unknown_variable  // This should trigger an error
+    return 42
 }

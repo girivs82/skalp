@@ -3,18 +3,18 @@ entity FIFO<const WIDTH: nat = 8, const DEPTH: nat = 16> {
     in clk: clock
     in rst: reset(active_high)
     in wr_en: bit
-    in wr_data: bit<WIDTH>
+    in wr_data: bit[WIDTH]
     out full: bit
     in rd_en: bit
-    out rd_data: bit<WIDTH>
+    out rd_data: bit[WIDTH]
     out empty: bit
 }
 
 impl FIFO {
-    signal memory: [bit<WIDTH>; DEPTH]
-    signal wr_ptr: nat<clog2(DEPTH)>
-    signal rd_ptr: nat<clog2(DEPTH)>
-    signal count: nat<clog2(DEPTH+1)>
+    signal memory: [bit[WIDTH]; DEPTH]
+    signal wr_ptr: nat[clog2(DEPTH)]
+    signal rd_ptr: nat[clog2(DEPTH)]
+    signal count: nat[clog2(DEPTH+1)]
 
     empty = (count == 0)
     full = (count == DEPTH)
