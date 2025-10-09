@@ -125,7 +125,18 @@
       "Bash(/tmp/debug_fifo_count:*)",
       "Bash(./dump_signal_order)",
       "Bash(RUST_BACKTRACE=1 cargo test test_milestone4_comprehensive --all-features -- --ignored --nocapture)",
-      "Bash(RUST_BACKTRACE=1 cargo test --test test_milestone4_complete test_milestone4_comprehensive)"
+      "Bash(RUST_BACKTRACE=1 cargo test --test test_milestone4_complete test_milestone4_comprehensive)",
+      "Bash(RUST_LOG=debug ./target/debug/skalp build:*)",
+      "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test test_comparison_in_if_golden)",
+      "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test --test golden_file_tests test_comparison_in_if_golden)",
+      "Bash(do echo \"Testing: $test\" timeout 5 cargo test --test test_language_features $test -- --nocapture)",
+      "Bash(env RUST_BACKTRACE=1 /Users/girivs/src/hw/hls/target/debug/skalp build:*)",
+      "Bash(do echo \"Testing: $example\")",
+      "Bash(while read f)",
+      "Bash(do echo \"Testing: $f\")",
+      "Bash(./debug_slice_match)",
+      "Bash(./test_simple_index)",
+      "Bash(RUST_BACKTRACE=1 ./test_simple_index)"
     ],
     "deny": [],
     "ask": []

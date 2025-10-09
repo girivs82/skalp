@@ -293,7 +293,10 @@ impl<T> Register<T> {
     q = reg
 }
 "#;
-    assert!(compiles(source), "generic entity with type parameter should compile");
+    assert!(
+        compiles(source),
+        "generic entity with type parameter should compile"
+    );
 }
 
 #[test]
@@ -314,7 +317,10 @@ impl<const WIDTH: nat> Counter<WIDTH> {
     count = counter
 }
 "#;
-    assert!(compiles(source), "generic entity with const parameter should compile");
+    assert!(
+        compiles(source),
+        "generic entity with const parameter should compile"
+    );
 }
 
 #[test]

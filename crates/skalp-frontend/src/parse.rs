@@ -2574,7 +2574,10 @@ impl<'a> ParseState<'a> {
         // Each `[N]` wraps the previous type in an ArrayType node
         while self.at(SyntaxKind::LBracket) {
             // Wrap everything parsed so far in an ArrayType using the saved checkpoint
-            self.builder.start_node_at(type_checkpoint, rowan::SyntaxKind(SyntaxKind::ArrayType as u16));
+            self.builder.start_node_at(
+                type_checkpoint,
+                rowan::SyntaxKind(SyntaxKind::ArrayType as u16),
+            );
 
             self.bump(); // consume [
             self.parse_expression(); // array size
