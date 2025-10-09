@@ -275,7 +275,6 @@ impl TestMatch {
 // ============================================================================
 
 #[test]
-#[ignore] // Generics not fully implemented yet
 fn test_generic_entity_type() {
     let source = r#"
 entity Register<T> {
@@ -298,7 +297,6 @@ impl<T> Register<T> {
 }
 
 #[test]
-#[ignore] // Generics not fully implemented yet
 fn test_generic_entity_const() {
     let source = r#"
 entity Counter<const WIDTH: nat> {
