@@ -157,28 +157,47 @@ These language features haven't been needed yet:
 
 **Note:** These will likely be used in examples 4-10.
 
-### ❌ Missing Features Discovered
+### ❌ Features in Spec but Not Yet Implemented
 
-1. **Array types** - Had to use separate signals (`mem0`, `mem1`, `mem2`, `mem3`) instead of `signal mem: nat[8][4]`
-   - **Workaround:** Manual expansion
-   - **Impact:** Code bloat, not scalable
+**Important**: These features ARE defined in LANGUAGE_SPECIFICATION.md but NOT implemented in parser/compiler yet:
 
-2. **Const expressions in types** - `nat[clog2(DEPTH)]` doesn't work
+1. **Array types** - Spec defines `T[N]` syntax (e.g., `nat[8][4]` for 4 elements of nat[8])
+   - **Spec Reference:** Lines 1181-1191 (Array of Instances section)
+   - **Status:** Parser fails with "expected implementation item"
+   - **Workaround:** Manual signal expansion (`mem0`, `mem1`, `mem2`, `mem3`)
+   - **Impact:** Code bloat, not scalable, tedious to write
+
+2. **Generic entities** - Spec defines `entity Foo<T>` and `entity Bar<const N: nat>` syntax
+   - **Spec Reference:** Lines 2108-2142 (Generic Entities and Trait Bounds)
+   - **Status:** Not tested yet (parser may support partial implementation)
+   - **Workaround:** Fixed-size modules
+   - **Impact:** No code reusability, must duplicate logic for different widths
+
+3. **Const generic expressions** - Spec allows `clog2(N)` in type expressions
+   - **Spec Reference:** Intrinsic functions (clog2, pow2 exist in MIR at hir_to_mir.rs:1003)
+   - **Status:** MIR supports evaluation, but parser may not allow in type positions
    - **Workaround:** Hardcode bit widths
    - **Impact:** Not parameterizable
 
-3. **Generic parameters** - `entity Fifo<const WIDTH: nat[16], const DEPTH: nat[16]>` doesn't instantiate properly
-   - **Workaround:** Fixed-size modules
-   - **Impact:** No reusability
-
-4. **Bool type for control signals** - Had to use `bit` instead
-   - **Workaround:** Use bit for booleans
-   - **Impact:** Minor, confusing semantics
-
-5. **Bidirectional ports (inout)** - No support for `inout` keyword for tristate/bidirectional signals
+4. **Bidirectional ports (inout)** - Spec defines `inout` keyword for tristate signals
+   - **Spec Reference:** Line 74 (keyword list), used in protocol definitions
+   - **Status:** Keyword exists but parser rejects `inout` in entity ports
    - **Workaround:** Use separate `in`/`out`/`oe` (output enable) signals
-   - **Impact:** Cannot express true tristate I/O, less realistic hardware models
-   - **Example:** I2C SDA line needs tristate but must use sda_in/sda_out/sda_oe workaround
+   - **Impact:** Cannot express true tristate I/O, less realistic models
+   - **Example:** I2C SDA line needs tristate but must use sda_in/sda_out/sda_oe
+
+### ✅ Features That DO Work
+
+**Tested and confirmed working:**
+
+1. **Bool type** - `in enable: bool` compiles successfully ✓
+   - Distinct from `bit` as per spec
+   - Can be used in ports and signals
+
+2. **Struct types** - Defined in spec, need to test implementation
+3. **Enum types** - Defined in spec, need to test implementation
+4. **Match expressions** - Parser supports them (unused in examples so far)
+5. **Traits** - Defined in spec, need to test implementation
 
 ---
 
