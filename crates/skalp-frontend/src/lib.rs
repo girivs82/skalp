@@ -8,6 +8,7 @@
 //! - HIR (High-level IR) generation
 
 pub mod ast;
+pub mod constraints;
 pub mod generics;
 pub mod hir;
 pub mod hir_builder;
@@ -86,6 +87,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         requirements: Vec::new(),
         trait_definitions: Vec::new(),
         trait_implementations: Vec::new(),
+        global_constraints: Vec::new(),
     })
 }
 

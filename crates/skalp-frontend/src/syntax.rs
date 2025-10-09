@@ -118,6 +118,39 @@ pub enum SyntaxKind {
     IsolationKw,
     DiagnosticCoverageKw,
 
+    // Physical Constraints (28)
+    ConstraintKw,
+    PhysicalKw,
+    PinKw,
+    PinsKw,
+    PinPKw,
+    PinNKw,
+    IoStandardKw,
+    DriveKw,
+    SlewKw,
+    PullKw,
+    DiffTermKw,
+    SchmittKw,
+    BankKw,
+    FloorplanKw,
+    RegionKw,
+    AreaKw,
+    InstancesKw,
+    BoundaryKw,
+    KeepTogetherKw,
+    PreferredRegionKw,
+    IoDefaultsKw,
+    VoltageKw,
+    DeviceKw,
+    GroupKw,
+    FastKw,
+    SlowKw,
+    MediumKw,
+    UpKw,
+    DownKw,
+    NoneKw,
+    KeeperKw,
+
     // Literals
     Ident,
     IntLiteral,
@@ -261,6 +294,23 @@ pub enum SyntaxKind {
     InstanceDecl,
     ConnectionList,
     Connection,
+
+    // Physical Constraints
+    GlobalConstraintBlock,
+    PhysicalConstraintBlock,
+    ConstraintPair,
+    PinLocation,
+    PinArray,
+    DriveStrength,
+    SlewRate,
+    Termination,
+    BankBlock,
+    FloorplanBlock,
+    RegionBlock,
+    AreaSpec,
+    IoDefaultsBlock,
+    DeviceSpec,
+    GroupBlock,
 
     // Flow pipeline
     FlowPipeline,
@@ -409,6 +459,13 @@ impl SyntaxKind {
             | AsilKw | SafetyReqKw | SafetyGoalKw | FmeaKw | FmedaKw
             | PsmKw | LsmKw | SpfmKw | LfmKw | PmhfKw
             | PowerDomainKw | IsolationKw | DiagnosticCoverageKw
+            // Physical Constraints (28)
+            | ConstraintKw | PhysicalKw | PinKw | PinsKw | PinPKw | PinNKw
+            | IoStandardKw | DriveKw | SlewKw | PullKw | DiffTermKw | SchmittKw
+            | BankKw | FloorplanKw | RegionKw | AreaKw | InstancesKw | BoundaryKw
+            | KeepTogetherKw | PreferredRegionKw | IoDefaultsKw | VoltageKw
+            | DeviceKw | GroupKw | FastKw | SlowKw | MediumKw
+            | UpKw | DownKw | NoneKw | KeeperKw
         )
     }
 
@@ -561,6 +618,39 @@ impl SyntaxKind {
             PowerDomainKw => "'power_domain'",
             IsolationKw => "'isolation'",
             DiagnosticCoverageKw => "'diagnostic_coverage'",
+
+            // Physical Constraints (28)
+            ConstraintKw => "'constraint'",
+            PhysicalKw => "'physical'",
+            PinKw => "'pin'",
+            PinsKw => "'pins'",
+            PinPKw => "'pin_p'",
+            PinNKw => "'pin_n'",
+            IoStandardKw => "'io_standard'",
+            DriveKw => "'drive'",
+            SlewKw => "'slew'",
+            PullKw => "'pull'",
+            DiffTermKw => "'diff_term'",
+            SchmittKw => "'schmitt'",
+            BankKw => "'bank'",
+            FloorplanKw => "'floorplan'",
+            RegionKw => "'region'",
+            AreaKw => "'area'",
+            InstancesKw => "'instances'",
+            BoundaryKw => "'boundary'",
+            KeepTogetherKw => "'keep_together'",
+            PreferredRegionKw => "'preferred_region'",
+            IoDefaultsKw => "'io_defaults'",
+            VoltageKw => "'voltage'",
+            DeviceKw => "'device'",
+            GroupKw => "'group'",
+            FastKw => "'fast'",
+            SlowKw => "'slow'",
+            MediumKw => "'medium'",
+            UpKw => "'up'",
+            DownKw => "'down'",
+            NoneKw => "'none'",
+            KeeperKw => "'keeper'",
 
             Ident => "identifier",
             IntLiteral => "integer literal",
@@ -811,6 +901,39 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::PowerDomain => PowerDomainKw,
             Token::Isolation => IsolationKw,
             Token::DiagnosticCoverage => DiagnosticCoverageKw,
+
+            // Physical Constraints (28)
+            Token::Constraint => ConstraintKw,
+            Token::Physical => PhysicalKw,
+            Token::Pin => PinKw,
+            Token::Pins => PinsKw,
+            Token::PinP => PinPKw,
+            Token::PinN => PinNKw,
+            Token::IoStandard => IoStandardKw,
+            Token::Drive => DriveKw,
+            Token::Slew => SlewKw,
+            Token::Pull => PullKw,
+            Token::DiffTerm => DiffTermKw,
+            Token::Schmitt => SchmittKw,
+            Token::Bank => BankKw,
+            Token::Floorplan => FloorplanKw,
+            Token::Region => RegionKw,
+            Token::Area => AreaKw,
+            Token::Instances => InstancesKw,
+            Token::Boundary => BoundaryKw,
+            Token::KeepTogether => KeepTogetherKw,
+            Token::PreferredRegion => PreferredRegionKw,
+            Token::IoDefaults => IoDefaultsKw,
+            Token::Voltage => VoltageKw,
+            Token::Device => DeviceKw,
+            Token::Group => GroupKw,
+            Token::Fast => FastKw,
+            Token::Slow => SlowKw,
+            Token::Medium => MediumKw,
+            Token::Up => UpKw,
+            Token::Down => DownKw,
+            Token::None => NoneKw,
+            Token::Keeper => KeeperKw,
 
             Token::Error => Error,
         }

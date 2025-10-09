@@ -35,6 +35,9 @@ pub struct Port {
     pub direction: PortDirection,
     /// Port width
     pub width: usize,
+    /// Physical constraints (from HIR/MIR)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
 }
 
 /// Port direction

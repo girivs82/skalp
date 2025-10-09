@@ -298,6 +298,11 @@ impl HirBuilderContext {
                 self.extract_hir_type(node)
             };
 
+        // Extract physical constraints if present
+        let physical_constraints = node
+            .first_child_of_kind(SyntaxKind::PhysicalConstraintBlock)
+            .and_then(|constraint_node| self.extract_physical_constraints(&constraint_node));
+
         // Register in symbol table
         self.symbols.ports.insert(name.clone(), id);
         // Also add to general scope for lookup
@@ -308,6 +313,7 @@ impl HirBuilderContext {
             name,
             direction,
             port_type,
+            physical_constraints,
         })
     }
 
@@ -490,7 +496,6 @@ impl HirBuilderContext {
         // Get type - look for TypeAnnotation first
         let signal_type =
             if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
-                eprintln!("DEBUG build_signal '{}': Using TypeAnnotation node", name);
                 self.extract_hir_type(&type_node)
             } else {
                 eprintln!(
@@ -1653,17 +1658,12 @@ impl HirBuilderContext {
         );
 
         for child in node.children() {
-            eprintln!("DEBUG build_call_expr: Processing child {:?}", child.kind());
             // All children of CallExpr are expression arguments
             if let Some(expr) = self.build_expression(&child) {
-                eprintln!("DEBUG build_call_expr: Added arg: {:?}", expr);
                 args.push(expr);
-            } else {
-                eprintln!("DEBUG build_call_expr: build_expression returned None");
             }
         }
 
-        eprintln!("DEBUG build_call_expr: Final args count: {}", args.len());
         Some(HirExpression::Call(HirCallExpr { function, args }))
     }
 
@@ -2616,11 +2616,293 @@ impl HirBuilderContext {
         }
     }
 
+    /// Extract physical constraints from constraint block
+    fn extract_physical_constraints(&self, node: &SyntaxNode) -> Option<PhysicalConstraints> {
+        let mut constraints = PhysicalConstraints {
+            pin_location: None,
+            io_standard: None,
+            drive_strength: None,
+            slew_rate: None,
+            termination: None,
+            schmitt_trigger: None,
+            bank: None,
+            diff_term: None,
+        };
+
+        for pair in node
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::ConstraintPair)
+        {
+            // Get key - it's the first token (keyword or ident)
+            let key_token = pair
+                .children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .next();
+
+            if key_token.is_none() {
+                continue;
+            }
+
+            let key_text = key_token.unwrap().text().to_string();
+
+            // Find the value (third token) - may be string literal or keyword
+            let value_token = pair
+                .children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .nth(2); // Skip key and colon, get value
+
+            // Extract value text and kind if available
+            let (value_text, value_kind) = if let Some(token) = value_token {
+                (token.text().to_string(), Some(token.kind()))
+            } else {
+                (String::new(), None)
+            };
+
+            match key_text.as_str() {
+                "pin" => {
+                    // Remove quotes from string literal
+                    constraints.pin_location = Some(PinLocation::Single(
+                        value_text.trim_matches('"').to_string(),
+                    ));
+                }
+                "pins" => {
+                    // Handle pin array - need to look for PinArray child node
+                    for child in pair.children() {
+                        if child.kind() == SyntaxKind::PinArray {
+                            if let Some(pins) = self.extract_pin_array(&child) {
+                                constraints.pin_location = Some(PinLocation::Multiple(pins));
+                            }
+                        }
+                    }
+                }
+                "pin_p" | "pin_n" => {
+                    // Handle differential pairs
+                    let pin = value_text.trim_matches('"').to_string();
+                    if key_text == "pin_p" {
+                        if let Some(negative) = self.find_differential_pair(node, "pin_n") {
+                            constraints.pin_location = Some(PinLocation::Differential {
+                                positive: pin,
+                                negative,
+                            });
+                        }
+                    }
+                }
+                "io_standard" => {
+                    constraints.io_standard = Some(value_text.trim_matches('"').to_string());
+                }
+                "slew" => {
+                    // Debug: see what children we have
+                    for child in pair.children() {
+                        eprintln!("  child kind: {:?}", child.kind());
+                    }
+                    eprintln!("  value_kind: {:?}", value_kind);
+
+                    // Look for SlewRate child node or direct keyword
+                    if let Some(slew_node) = pair.first_child_of_kind(SyntaxKind::SlewRate) {
+                        eprintln!("  Found SlewRate node");
+                        if slew_node.first_token_of_kind(SyntaxKind::FastKw).is_some() {
+                            constraints.slew_rate = Some(SlewRate::Fast);
+                        } else if slew_node.first_token_of_kind(SyntaxKind::SlowKw).is_some() {
+                            constraints.slew_rate = Some(SlewRate::Slow);
+                        } else if slew_node
+                            .first_token_of_kind(SyntaxKind::MediumKw)
+                            .is_some()
+                        {
+                            constraints.slew_rate = Some(SlewRate::Medium);
+                        }
+                    } else {
+                        eprintln!("  No SlewRate node, trying direct keyword");
+                        // Try direct keyword
+                        match value_kind {
+                            Some(SyntaxKind::FastKw) => {
+                                eprintln!("  Found FastKw!");
+                                constraints.slew_rate = Some(SlewRate::Fast);
+                            }
+                            Some(SyntaxKind::SlowKw) => {
+                                constraints.slew_rate = Some(SlewRate::Slow)
+                            }
+                            Some(SyntaxKind::MediumKw) => {
+                                constraints.slew_rate = Some(SlewRate::Medium)
+                            }
+                            _ => {
+                                eprintln!("  No matching keyword");
+                            }
+                        }
+                    }
+                }
+                "pull" => {
+                    // Look for Termination child node or direct keyword
+                    if let Some(term_node) = pair.first_child_of_kind(SyntaxKind::Termination) {
+                        if term_node.first_token_of_kind(SyntaxKind::UpKw).is_some() {
+                            constraints.termination = Some(Termination::PullUp);
+                        } else if term_node.first_token_of_kind(SyntaxKind::DownKw).is_some() {
+                            constraints.termination = Some(Termination::PullDown);
+                        } else if term_node.first_token_of_kind(SyntaxKind::NoneKw).is_some() {
+                            constraints.termination = Some(Termination::None);
+                        } else if term_node
+                            .first_token_of_kind(SyntaxKind::KeeperKw)
+                            .is_some()
+                        {
+                            constraints.termination = Some(Termination::Keeper);
+                        }
+                    } else {
+                        // Try direct keyword
+                        match value_kind {
+                            Some(SyntaxKind::UpKw) => {
+                                constraints.termination = Some(Termination::PullUp)
+                            }
+                            Some(SyntaxKind::DownKw) => {
+                                constraints.termination = Some(Termination::PullDown)
+                            }
+                            Some(SyntaxKind::NoneKw) => {
+                                constraints.termination = Some(Termination::None)
+                            }
+                            Some(SyntaxKind::KeeperKw) => {
+                                constraints.termination = Some(Termination::Keeper)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "schmitt" => match value_kind {
+                    Some(SyntaxKind::TrueKw) => constraints.schmitt_trigger = Some(true),
+                    Some(SyntaxKind::FalseKw) => constraints.schmitt_trigger = Some(false),
+                    _ => {}
+                },
+                "bank" => {
+                    if let Ok(bank_num) = value_text.parse::<u32>() {
+                        constraints.bank = Some(bank_num);
+                    }
+                }
+                "diff_term" => match value_kind {
+                    Some(SyntaxKind::TrueKw) => constraints.diff_term = Some(true),
+                    Some(SyntaxKind::FalseKw) => constraints.diff_term = Some(false),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
+        Some(constraints)
+    }
+
+    /// Extract string literal from node
+    fn extract_string_literal(&self, node: &SyntaxNode) -> Option<String> {
+        node.children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::StringLiteral)
+            .map(|t| {
+                // Remove quotes
+                let text = t.text();
+                text.trim_matches('"').to_string()
+            })
+    }
+
+    /// Extract pin array from node
+    fn extract_pin_array(&self, array_node: &SyntaxNode) -> Option<Vec<String>> {
+        let mut pins = Vec::new();
+        for token in array_node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+        {
+            if token.kind() == SyntaxKind::StringLiteral {
+                let pin = token.text().trim_matches('"').to_string();
+                pins.push(pin);
+            }
+        }
+
+        if pins.is_empty() {
+            None
+        } else {
+            Some(pins)
+        }
+    }
+
+    /// Find differential pair partner in constraint block
+    fn find_differential_pair(
+        &self,
+        constraint_block: &SyntaxNode,
+        key_name: &str,
+    ) -> Option<String> {
+        for pair in constraint_block
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::ConstraintPair)
+        {
+            let key = pair
+                .children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .find(|t| t.kind() == SyntaxKind::Ident)
+                .map(|t| t.text().to_string())?;
+
+            if key == key_name {
+                let value_node = pair.children().nth(1)?;
+                return self.extract_string_literal(&value_node);
+            }
+        }
+        None
+    }
+
+    /// Extract slew rate from node
+    fn extract_slew_rate(&self, node: &SyntaxNode) -> Option<SlewRate> {
+        let slew_node = node.first_child_of_kind(SyntaxKind::SlewRate)?;
+
+        if slew_node.first_token_of_kind(SyntaxKind::FastKw).is_some() {
+            Some(SlewRate::Fast)
+        } else if slew_node.first_token_of_kind(SyntaxKind::SlowKw).is_some() {
+            Some(SlewRate::Slow)
+        } else if slew_node
+            .first_token_of_kind(SyntaxKind::MediumKw)
+            .is_some()
+        {
+            Some(SlewRate::Medium)
+        } else {
+            None
+        }
+    }
+
+    /// Extract termination from node
+    fn extract_termination(&self, node: &SyntaxNode) -> Option<Termination> {
+        let term_node = node.first_child_of_kind(SyntaxKind::Termination)?;
+
+        if term_node.first_token_of_kind(SyntaxKind::UpKw).is_some() {
+            Some(Termination::PullUp)
+        } else if term_node.first_token_of_kind(SyntaxKind::DownKw).is_some() {
+            Some(Termination::PullDown)
+        } else if term_node.first_token_of_kind(SyntaxKind::NoneKw).is_some() {
+            Some(Termination::None)
+        } else if term_node
+            .first_token_of_kind(SyntaxKind::KeeperKw)
+            .is_some()
+        {
+            Some(Termination::Keeper)
+        } else {
+            None
+        }
+    }
+
+    /// Extract boolean from node
+    fn extract_boolean(&self, node: &SyntaxNode) -> Option<bool> {
+        if node.first_token_of_kind(SyntaxKind::TrueKw).is_some() {
+            Some(true)
+        } else if node.first_token_of_kind(SyntaxKind::FalseKw).is_some() {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Extract integer from node
+    fn extract_integer(&self, node: &SyntaxNode) -> Option<i64> {
+        node.children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::IntLiteral)
+            .and_then(|t| t.text().parse().ok())
+    }
+
     /// Extract HIR type from node
     fn extract_hir_type(&mut self, node: &SyntaxNode) -> HirType {
         // Look for type nodes in children
         if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeExpr) {
-            eprintln!("DEBUG extract_hir_type: Found TypeExpr, delegating to build_hir_type");
             return self.build_hir_type(&type_node);
         }
 
@@ -2656,7 +2938,6 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::ArrayType => {
-                    eprintln!("DEBUG extract_hir_type: Found ArrayType child");
                     return self.build_array_type(&child);
                 }
                 SyntaxKind::IdentType | SyntaxKind::CustomType => {
@@ -2757,7 +3038,6 @@ impl HirBuilderContext {
                 );
                 // Try to build as expression
                 if let Some(expr) = self.build_expression(&child) {
-                    eprintln!("DEBUG build_nat_type: Built expression: {:?}", expr);
                     match &expr {
                         HirExpression::Literal(HirLiteral::Integer(val)) => {
                             return HirType::Nat(*val as u32);
@@ -2777,7 +3057,6 @@ impl HirBuilderContext {
                 }
             }
         }
-        eprintln!("DEBUG build_nat_type: Defaulting to Nat(32)");
         HirType::Nat(32) // Default to 32-bit unsigned
     }
 

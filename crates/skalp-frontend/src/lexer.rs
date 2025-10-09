@@ -204,6 +204,74 @@ pub enum Token {
     #[token("diagnostic_coverage")]
     DiagnosticCoverage,
 
+    // Physical Constraints (21)
+    #[token("constraint")]
+    Constraint,
+    #[token("physical")]
+    Physical,
+    #[token("pin")]
+    Pin,
+    #[token("pins")]
+    Pins,
+    #[token("pin_p")]
+    PinP,
+    #[token("pin_n")]
+    PinN,
+    #[token("io_standard")]
+    IoStandard,
+    #[token("drive")]
+    Drive,
+    #[token("slew")]
+    Slew,
+    #[token("pull")]
+    Pull,
+    #[token("diff_term")]
+    DiffTerm,
+    #[token("schmitt")]
+    Schmitt,
+    #[token("bank")]
+    Bank,
+    #[token("floorplan")]
+    Floorplan,
+    #[token("region")]
+    Region,
+    #[token("area")]
+    Area,
+    #[token("instances")]
+    Instances,
+    #[token("boundary")]
+    Boundary,
+    #[token("keep_together")]
+    KeepTogether,
+    #[token("preferred_region")]
+    PreferredRegion,
+    #[token("io_defaults")]
+    IoDefaults,
+    #[token("voltage")]
+    Voltage,
+    #[token("device")]
+    Device,
+    #[token("group")]
+    Group,
+
+    // Slew Rate Values (3)
+    #[token("fast")]
+    Fast,
+    #[token("slow")]
+    Slow,
+    #[token("medium")]
+    Medium,
+
+    // Termination Values (4)
+    #[token("up")]
+    Up,
+    #[token("down")]
+    Down,
+    #[token("none")]
+    None,
+    #[token("keeper")]
+    Keeper,
+
     // Identifiers and literals
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_owned())]
     Identifier(String),
@@ -697,7 +765,8 @@ entity Counter {
         assert!(tokens.contains(&Token::Intent));
         assert!(tokens.contains(&Token::Identifier("target_freq".to_string())));
         assert!(tokens.contains(&Token::Identifier("optimization".to_string())));
-        assert!(tokens.contains(&Token::Identifier("area".to_string())));
+        // 'area' is now a keyword for physical constraints, not an identifier
+        assert!(tokens.contains(&Token::Area));
     }
 
     #[test]

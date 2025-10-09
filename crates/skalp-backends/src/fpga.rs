@@ -135,13 +135,20 @@ impl FpgaBackend {
         &self,
         verilog: &str,
         temp_dir: &Path,
+        _lir: &skalp_lir::LirDesign,
     ) -> BackendResult<SynthesisResults> {
+        // TODO: Convert LirDesign to Netlist for constraint generation
+        // For now, pass None until full integration is complete
+        let netlist = None;
+
         match &self.target {
             FpgaTarget::Ice40 { part, package } => {
-                ice40::synthesize_ice40(verilog, part, package, temp_dir, &self.config).await
+                ice40::synthesize_ice40(verilog, part, package, temp_dir, &self.config, netlist)
+                    .await
             }
             FpgaTarget::Xilinx7Series { part, package } => {
-                xilinx::synthesize_xilinx(verilog, part, package, temp_dir, &self.config).await
+                xilinx::synthesize_xilinx(verilog, part, package, temp_dir, &self.config, netlist)
+                    .await
             }
             FpgaTarget::CycloneV { part, package } => {
                 intel::synthesize_intel(verilog, part, package, temp_dir, &self.config).await
@@ -169,7 +176,7 @@ impl Backend for FpgaBackend {
         tokio::fs::write(&verilog_file, &verilog).await?;
 
         // Run synthesis
-        let mut results = self.run_synthesis(&verilog, temp_path).await?;
+        let mut results = self.run_synthesis(&verilog, temp_path, lir).await?;
 
         // Update results with target information
         results.target = TargetPlatform::Fpga(self.target.clone());

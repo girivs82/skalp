@@ -15,6 +15,7 @@ fn create_counter_with_reset_event() -> Hir {
         requirements: vec![],
         trait_definitions: vec![],
         trait_implementations: vec![],
+        global_constraints: vec![],
     };
 
     // Create counter entity
@@ -29,18 +30,21 @@ fn create_counter_with_reset_event() -> Hir {
                 name: "clk".to_string(),
                 direction: HirPortDirection::Input,
                 port_type: HirType::Clock(None),
+                physical_constraints: None,
             },
             HirPort {
                 id: PortId(2),
                 name: "reset".to_string(),
                 direction: HirPortDirection::Input,
                 port_type: HirType::Reset(None),
+                physical_constraints: None,
             },
             HirPort {
                 id: PortId(3),
                 name: "count".to_string(),
                 direction: HirPortDirection::Output,
                 port_type: HirType::Bit(8),
+                physical_constraints: None,
             },
         ],
     };
@@ -121,6 +125,7 @@ fn create_combined_clock_reset_event() -> Hir {
         requirements: vec![],
         trait_definitions: vec![],
         trait_implementations: vec![],
+        global_constraints: vec![],
     };
 
     // Create entity
@@ -135,18 +140,21 @@ fn create_combined_clock_reset_event() -> Hir {
                 name: "clk".to_string(),
                 direction: HirPortDirection::Input,
                 port_type: HirType::Clock(None),
+                physical_constraints: None,
             },
             HirPort {
                 id: PortId(2),
                 name: "reset".to_string(),
                 direction: HirPortDirection::Input,
                 port_type: HirType::Reset(None),
+                physical_constraints: None,
             },
             HirPort {
                 id: PortId(3),
                 name: "count".to_string(),
                 direction: HirPortDirection::Output,
                 port_type: HirType::Bit(8),
+                physical_constraints: None,
             },
         ],
     };

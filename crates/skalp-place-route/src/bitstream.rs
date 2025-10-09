@@ -155,11 +155,56 @@ impl BitstreamGenerator {
 
         // I/O configuration
         bitstream_text.push_str("\n.io_tiles\n");
-        for (i, io_tile) in self.device.io_tiles.iter().enumerate().take(8) {
-            // Limit for demo
-            let (x, y) = io_tile.position;
-            bitstream_text.push_str(&format!(".io {} {} input\n", x, y));
-            bitstream_text.push_str(".io_standard LVCMOS33\n");
+
+        // First, configure constrained I/Os from placement
+        for (signal_name, io_config) in &placement.io_configurations {
+            // Find the I/O tile for this pin location
+            if let Some(io_tile) = self
+                .device
+                .io_tiles
+                .iter()
+                .find(|tile| tile.pins.iter().any(|pin| pin == &io_config.location))
+            {
+                let (x, y) = io_tile.position;
+                bitstream_text.push_str(&format!(
+                    ".io {} {} {} # signal: {}\n",
+                    x, y, "input", signal_name
+                ));
+
+                if let Some(ref io_std) = io_config.io_standard {
+                    bitstream_text.push_str(&format!(".io_standard {}\n", io_std));
+                } else {
+                    bitstream_text.push_str(".io_standard LVCMOS33\n");
+                }
+
+                if let Some(drive) = io_config.drive_strength {
+                    bitstream_text.push_str(&format!(".drive_strength {}mA\n", drive));
+                }
+
+                if let Some(ref slew) = io_config.slew_rate {
+                    bitstream_text.push_str(&format!(".slew_rate {:?}\n", slew));
+                }
+
+                if let Some(ref term) = io_config.termination {
+                    bitstream_text.push_str(&format!(".termination {:?}\n", term));
+                }
+            }
+        }
+
+        // Then add any unconfigured I/O tiles (for demo purposes, limit to 8 total)
+        let configured_pins: std::collections::HashSet<_> = placement
+            .io_configurations
+            .values()
+            .map(|cfg| cfg.location.clone())
+            .collect();
+
+        for io_tile in self.device.io_tiles.iter().take(8) {
+            let has_configured_pin = io_tile.pins.iter().any(|pin| configured_pins.contains(pin));
+            if !has_configured_pin {
+                let (x, y) = io_tile.position;
+                bitstream_text.push_str(&format!(".io {} {} input\n", x, y));
+                bitstream_text.push_str(".io_standard LVCMOS33\n");
+            }
         }
 
         // Footer
@@ -304,22 +349,86 @@ impl BitstreamGenerator {
 
         // I/O configuration
         bitstream_data.extend_from_slice(b"IOCONF");
-        let io_count = self.device.io_tiles.len().min(256); // Limit for demo
+
+        // Count configured I/Os plus unconfigured ones (up to 256 total)
+        let configured_count = placement.io_configurations.len();
+        let unconfigured_count =
+            (self.device.io_tiles.len() - configured_count).min(256 - configured_count);
+        let io_count = configured_count + unconfigured_count;
         bitstream_data.extend_from_slice(&(io_count as u32).to_le_bytes());
 
-        for (i, io_tile) in self.device.io_tiles.iter().enumerate().take(io_count) {
-            let (x, y) = io_tile.position;
-            bitstream_data.extend_from_slice(&(x as u16).to_le_bytes());
-            bitstream_data.extend_from_slice(&(y as u16).to_le_bytes());
+        // First, write constrained I/O configurations
+        for (signal_name, io_config) in &placement.io_configurations {
+            if let Some(io_tile) = self
+                .device
+                .io_tiles
+                .iter()
+                .find(|tile| tile.pins.iter().any(|pin| pin == &io_config.location))
+            {
+                let (x, y) = io_tile.position;
+                bitstream_data.extend_from_slice(&(x as u16).to_le_bytes());
+                bitstream_data.extend_from_slice(&(y as u16).to_le_bytes());
 
-            // I/O standard (LVCMOS33 = 0x01)
-            bitstream_data.push(0x01);
-            // Drive strength (8mA = 0x03)
-            bitstream_data.push(0x03);
-            // Direction (input = 0x01)
-            bitstream_data.push(0x01);
-            // Reserved
-            bitstream_data.push(0x00);
+                // I/O standard encoding
+                let io_std_byte = match io_config.io_standard.as_deref() {
+                    Some("LVCMOS33") => 0x01,
+                    Some("LVCMOS25") => 0x02,
+                    Some("LVCMOS18") => 0x03,
+                    Some("LVDS") => 0x10,
+                    _ => 0x01, // Default to LVCMOS33
+                };
+                bitstream_data.push(io_std_byte);
+
+                // Drive strength (0-255, in mA)
+                bitstream_data.push(io_config.drive_strength.unwrap_or(4));
+
+                // Slew rate (0=slow, 1=medium, 2=fast)
+                let slew_byte = match io_config.slew_rate {
+                    Some(crate::placer::SlewRate::Slow) => 0,
+                    Some(crate::placer::SlewRate::Medium) => 1,
+                    Some(crate::placer::SlewRate::Fast) => 2,
+                    None => 1, // Default to medium
+                };
+                bitstream_data.push(slew_byte);
+
+                // Termination (0=none, 1=pullup, 2=pulldown, 3=keeper)
+                let term_byte = match io_config.termination {
+                    Some(crate::placer::Termination::None) => 0,
+                    Some(crate::placer::Termination::PullUp) => 1,
+                    Some(crate::placer::Termination::PullDown) => 2,
+                    Some(crate::placer::Termination::Keeper) => 3,
+                    None => 0,
+                };
+                bitstream_data.push(term_byte);
+            }
+        }
+
+        // Then add unconfigured I/O tiles
+        let configured_pins: std::collections::HashSet<_> = placement
+            .io_configurations
+            .values()
+            .map(|cfg| cfg.location.clone())
+            .collect();
+
+        for io_tile in self.device.io_tiles.iter() {
+            if unconfigured_count == 0 {
+                break;
+            }
+            let has_configured_pin = io_tile.pins.iter().any(|pin| configured_pins.contains(pin));
+            if !has_configured_pin {
+                let (x, y) = io_tile.position;
+                bitstream_data.extend_from_slice(&(x as u16).to_le_bytes());
+                bitstream_data.extend_from_slice(&(y as u16).to_le_bytes());
+
+                // Default I/O standard (LVCMOS33 = 0x01)
+                bitstream_data.push(0x01);
+                // Drive strength (8mA)
+                bitstream_data.push(8);
+                // Slew rate (medium = 1)
+                bitstream_data.push(1);
+                // Termination (none = 0)
+                bitstream_data.push(0);
+            }
         }
 
         // DSP configuration (if present)

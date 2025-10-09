@@ -24,6 +24,8 @@ pub struct Hir {
     pub trait_definitions: Vec<HirTraitDefinition>,
     /// Trait implementations
     pub trait_implementations: Vec<HirTraitImplementation>,
+    /// Global physical constraints
+    pub global_constraints: Vec<GlobalConstraint>,
 }
 
 /// Entity in HIR
@@ -97,6 +99,8 @@ pub struct HirPort {
     pub direction: HirPortDirection,
     /// Port type
     pub port_type: HirType,
+    /// Physical constraints (pin mapping, I/O characteristics)
+    pub physical_constraints: Option<PhysicalConstraints>,
 }
 
 /// Port direction in HIR
@@ -735,6 +739,7 @@ impl HirBuilder {
             requirements: Vec::new(),
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
+            global_constraints: Vec::new(),
         }
     }
 
@@ -813,6 +818,7 @@ impl Hir {
             requirements: Vec::new(),
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
+            global_constraints: Vec::new(),
         }
     }
 }
@@ -1290,3 +1296,147 @@ pub struct HirTraceStep {
 /// Unique identifiers for formal verification constructs
 pub type FormalPropertyId = u32;
 pub type FormalBlockId = u32;
+
+// ============================================================================
+// Physical Constraints
+// ============================================================================
+
+/// Physical constraints for FPGA pin mapping and I/O configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhysicalConstraints {
+    /// Pin location assignment
+    pub pin_location: Option<PinLocation>,
+    /// I/O electrical standard (e.g., "LVCMOS33", "LVDS_25")
+    pub io_standard: Option<String>,
+    /// Drive strength
+    pub drive_strength: Option<DriveStrength>,
+    /// Slew rate
+    pub slew_rate: Option<SlewRate>,
+    /// Termination/pull resistor
+    pub termination: Option<Termination>,
+    /// Schmitt trigger enable
+    pub schmitt_trigger: Option<bool>,
+    /// I/O bank assignment
+    pub bank: Option<u32>,
+    /// Differential termination (for LVDS, etc.)
+    pub diff_term: Option<bool>,
+}
+
+/// Pin location specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PinLocation {
+    /// Single pin (e.g., "A1")
+    Single(String),
+    /// Multiple pins for a bus (e.g., ["A1", "A2", "A3"])
+    Multiple(Vec<String>),
+    /// Differential pair
+    Differential {
+        /// Positive pin
+        positive: String,
+        /// Negative pin
+        negative: String,
+    },
+}
+
+/// Drive strength specification
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DriveStrength {
+    /// 4mA drive strength
+    Ma4,
+    /// 8mA drive strength
+    Ma8,
+    /// 12mA drive strength
+    Ma12,
+    /// 16mA drive strength
+    Ma16,
+}
+
+/// Slew rate specification
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SlewRate {
+    /// Fast slew rate
+    Fast,
+    /// Slow slew rate
+    Slow,
+    /// Medium slew rate
+    Medium,
+}
+
+/// Termination/pull resistor specification
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Termination {
+    /// No termination
+    None,
+    /// Pull-up resistor
+    PullUp,
+    /// Pull-down resistor
+    PullDown,
+    /// Keeper (weak latch)
+    Keeper,
+}
+
+/// Global constraint for device-wide settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GlobalConstraint {
+    /// Device selection constraint
+    Device(DeviceConstraint),
+    /// Bank voltage and I/O standard constraint
+    Bank(BankConstraint),
+    /// Floorplan constraint
+    Floorplan(FloorplanConstraint),
+    /// Global I/O defaults
+    IoDefaults(IoDefaults),
+}
+
+/// Device selection constraint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceConstraint {
+    /// Device name (e.g., "iCE40HX8K-CT256")
+    pub device_name: String,
+}
+
+/// Bank voltage and I/O standard constraint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankConstraint {
+    /// Bank identifier
+    pub bank_id: u32,
+    /// Bank voltage (e.g., "3.3V", "1.8V")
+    pub voltage: Option<String>,
+    /// Default I/O standard for the bank
+    pub io_standard: Option<String>,
+}
+
+/// Floorplan constraint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FloorplanConstraint {
+    /// Placement regions
+    pub regions: Vec<RegionConstraint>,
+}
+
+/// Placement region constraint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionConstraint {
+    /// Region name
+    pub name: String,
+    /// Physical area (x1, y1, x2, y2)
+    pub area: (u32, u32, u32, u32),
+    /// Instances to place in this region
+    pub instances: Vec<String>,
+    /// Whether this is a boundary region
+    pub boundary: bool,
+    /// Keep instances together
+    pub keep_together: bool,
+}
+
+/// Global I/O defaults
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoDefaults {
+    /// Default I/O standard
+    pub io_standard: Option<String>,
+    /// Default drive strength
+    pub drive_strength: Option<DriveStrength>,
+    /// Default slew rate
+    pub slew_rate: Option<SlewRate>,
+    /// Default termination
+    pub termination: Option<Termination>,
+}

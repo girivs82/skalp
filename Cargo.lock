@@ -2326,6 +2326,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "skalp-frontend",
  "skalp-lir",
  "tempfile",
  "thiserror 1.0.69",
@@ -2463,6 +2464,7 @@ dependencies = [
  "indexmap",
  "petgraph",
  "rayon",
+ "skalp-frontend",
  "skalp-lir",
  "thiserror 1.0.69",
 ]

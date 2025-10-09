@@ -71,15 +71,35 @@ pub async fn synthesize_ice40(
     package: &str,
     temp_dir: &Path,
     config: &FpgaConfig,
+    netlist: Option<&skalp_lir::Netlist>,
 ) -> BackendResult<SynthesisResults> {
     let device = Ice40Device::from_part(part, package);
     let mut log_messages = Vec::new();
+    let mut config = config.clone();
+
+    // Generate PCF file if netlist is provided
+    if let Some(netlist) = netlist {
+        let pcf_content = crate::constraint_gen::generate_pcf_from_lir(netlist);
+        if pcf_content.trim().lines().nth(2).is_some() {
+            // PCF has content beyond the header
+            let pcf_file = temp_dir.join("design.pcf");
+            tokio::fs::write(&pcf_file, pcf_content).await?;
+            config.pin_file = Some(pcf_file.to_string_lossy().to_string());
+
+            log_messages.push(LogMessage {
+                level: LogLevel::Info,
+                message: format!("Generated PCF constraint file: {}", pcf_file.display()),
+                source: "skalp-ice40".to_string(),
+                timestamp: chrono::Utc::now(),
+            });
+        }
+    }
 
     // Step 1: Run Yosys synthesis
-    let yosys_result = run_yosys_synthesis(verilog, temp_dir, config, &mut log_messages).await?;
+    let yosys_result = run_yosys_synthesis(verilog, temp_dir, &config, &mut log_messages).await?;
 
     // Step 2: Run nextpnr place and route
-    let pnr_result = run_nextpnr_pnr(&device, temp_dir, config, &mut log_messages).await?;
+    let pnr_result = run_nextpnr_pnr(&device, temp_dir, &config, &mut log_messages).await?;
 
     // Step 3: Generate bitstream with icepack
     let bitstream_result = run_icepack(temp_dir, &mut log_messages).await?;
@@ -121,6 +141,15 @@ pub async fn synthesize_ice40(
         path: temp_dir.join("timing.rpt").to_string_lossy().to_string(),
         description: "Timing analysis report".to_string(),
     });
+
+    // Add PCF file if it was generated
+    if config.pin_file.is_some() {
+        output_files.push(OutputFile {
+            file_type: OutputFileType::SynthesisLog, // Reuse this for constraint files
+            path: temp_dir.join("design.pcf").to_string_lossy().to_string(),
+            description: "Physical constraints file (PCF)".to_string(),
+        });
+    }
 
     Ok(SynthesisResults {
         success: bitstream_result,
@@ -551,8 +580,15 @@ mod tests {
         let config = FpgaConfig::default();
         let verilog = "module test(input a, output b); assign b = a; endmodule";
 
-        let result =
-            synthesize_ice40(verilog, "iCE40HX8K", "CT256", temp_dir.path(), &config).await;
+        let result = synthesize_ice40(
+            verilog,
+            "iCE40HX8K",
+            "CT256",
+            temp_dir.path(),
+            &config,
+            None,
+        )
+        .await;
         assert!(result.is_ok());
 
         let synthesis_result = result.unwrap();

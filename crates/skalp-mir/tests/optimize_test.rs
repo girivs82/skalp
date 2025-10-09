@@ -14,12 +14,14 @@ fn create_module_with_unused() -> Mir {
         name: "in".to_string(),
         direction: PortDirection::Input,
         port_type: DataType::Logic(8),
+        physical_constraints: None,
     });
     module.ports.push(Port {
         id: PortId(1),
         name: "out".to_string(),
         direction: PortDirection::Output,
         port_type: DataType::Logic(8),
+        physical_constraints: None,
     });
 
     // Add signals - some used, some unused
@@ -95,6 +97,7 @@ fn create_module_with_constants() -> Mir {
         name: "out".to_string(),
         direction: PortDirection::Output,
         port_type: DataType::Logic(8),
+        physical_constraints: None,
     });
 
     // Add signal

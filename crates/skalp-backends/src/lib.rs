@@ -66,6 +66,7 @@ pub mod mock_lir {
 }
 
 pub mod asic;
+pub mod constraint_gen;
 pub mod constraints;
 pub mod fpga;
 pub mod intel;

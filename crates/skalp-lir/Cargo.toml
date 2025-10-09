@@ -10,6 +10,7 @@ indexmap = "2.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 skalp-mir = { path = "../skalp-mir" }
+skalp-frontend = { path = "../skalp-frontend" }
 anyhow = "1.0.100"
 
 [dev-dependencies]

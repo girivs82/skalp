@@ -59,6 +59,9 @@ pub struct Port {
     pub direction: PortDirection,
     /// Port type
     pub port_type: DataType,
+    /// Physical constraints (from HIR)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
 }
 
 /// Port identifier

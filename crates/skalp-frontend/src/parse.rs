@@ -62,6 +62,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
                 Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
                 Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
+                Some(SyntaxKind::ConstraintKw) => self.parse_global_constraint_block(),
                 _ => {
                     // Unknown item - consume token as error and continue
                     self.error_and_bump("expected top-level item");
@@ -314,6 +315,11 @@ impl<'a> ParseState<'a> {
         // Colon and type
         self.expect(SyntaxKind::Colon);
         self.parse_type();
+
+        // Optional physical constraint block: @ { ... }
+        if self.at(SyntaxKind::At) {
+            self.parse_physical_constraint_block();
+        }
 
         self.finish_node();
     }
@@ -1760,7 +1766,8 @@ impl<'a> ParseState<'a> {
             }
 
             // Parse constraint keyword (timing, power, area, throughput, latency)
-            if self.current_kind() == Some(SyntaxKind::Ident) {
+            // Allow both identifiers and keywords (like 'area', 'performance') as constraint names
+            if self.current_kind() == Some(SyntaxKind::Ident) || self.at_keyword_as_ident() {
                 self.parse_intent_constraint();
             } else {
                 self.error_and_bump("expected intent constraint");
@@ -1775,7 +1782,15 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::IntentConstraint);
 
         // Constraint type (timing, power, area, etc.)
-        self.expect(SyntaxKind::Ident);
+        // Allow keywords to be used as constraint names
+        if self.current_kind() == Some(SyntaxKind::Ident) {
+            self.expect(SyntaxKind::Ident);
+        } else if self.at_keyword_as_ident() {
+            // Bump any keyword being used as a constraint name
+            self.bump();
+        } else {
+            self.error("expected constraint name");
+        }
 
         // Colon
         self.expect(SyntaxKind::Colon);
@@ -3155,6 +3170,12 @@ impl<'a> ParseState<'a> {
         )
     }
 
+    /// Check if at a keyword that can be used as an identifier in certain contexts
+    /// (e.g., 'area' as intent constraint name)
+    fn at_keyword_as_ident(&self) -> bool {
+        matches!(self.current_kind(), Some(SyntaxKind::AreaKw))
+    }
+
     /// Get current binary operator
     fn current_binary_op(&self) -> Option<SyntaxKind> {
         self.current_kind().filter(|k| k.is_operator())
@@ -3282,6 +3303,313 @@ impl<'a> ParseState<'a> {
         };
 
         self.errors.push(error);
+    }
+
+    // ===== Physical Constraint Parsing =====
+
+    /// Parse global constraint block: constraint physical { ... }
+    fn parse_global_constraint_block(&mut self) {
+        self.start_node(SyntaxKind::GlobalConstraintBlock);
+
+        // 'constraint' keyword
+        self.expect(SyntaxKind::ConstraintKw);
+
+        // Constraint type (physical, timing, etc.)
+        if self.at(SyntaxKind::PhysicalKw) {
+            self.bump();
+        } else {
+            self.error("expected constraint type (e.g., 'physical')");
+        }
+
+        // Constraint body
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            // Parse constraint statements
+            match self.current_kind() {
+                Some(SyntaxKind::DeviceKw) => self.parse_device_spec(),
+                Some(SyntaxKind::BankKw) => self.parse_bank_block(),
+                Some(SyntaxKind::FloorplanKw) => self.parse_floorplan_block(),
+                Some(SyntaxKind::IoDefaultsKw) => self.parse_io_defaults_block(),
+                _ => {
+                    self.error_and_bump("expected constraint statement");
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse inline physical constraint block: @ { pin: "A1", ... }
+    fn parse_physical_constraint_block(&mut self) {
+        self.start_node(SyntaxKind::PhysicalConstraintBlock);
+
+        // '@' symbol
+        self.expect(SyntaxKind::At);
+
+        // Constraint pairs
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            self.parse_constraint_pair();
+
+            // Optional comma
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse a constraint pair: key: value
+    fn parse_constraint_pair(&mut self) {
+        self.start_node(SyntaxKind::ConstraintPair);
+
+        // Key (identifier or keyword)
+        match self.current_kind() {
+            Some(SyntaxKind::PinKw)
+            | Some(SyntaxKind::PinsKw)
+            | Some(SyntaxKind::PinPKw)
+            | Some(SyntaxKind::PinNKw)
+            | Some(SyntaxKind::IoStandardKw)
+            | Some(SyntaxKind::DriveKw)
+            | Some(SyntaxKind::SlewKw)
+            | Some(SyntaxKind::PullKw)
+            | Some(SyntaxKind::DiffTermKw)
+            | Some(SyntaxKind::SchmittKw)
+            | Some(SyntaxKind::BankKw)
+            | Some(SyntaxKind::VoltageKw) => {
+                self.bump();
+            }
+            _ => {
+                self.error("expected constraint key");
+                self.finish_node();
+                return;
+            }
+        }
+
+        // Colon
+        self.expect(SyntaxKind::Colon);
+
+        // Value - depends on the key
+        self.parse_constraint_value();
+
+        self.finish_node();
+    }
+
+    /// Parse constraint value (can be string, number, identifier, or array)
+    fn parse_constraint_value(&mut self) {
+        match self.current_kind() {
+            Some(SyntaxKind::StringLiteral) => {
+                self.bump(); // String value like "A1" or "LVCMOS33"
+            }
+            Some(SyntaxKind::IntLiteral) => {
+                self.bump(); // Integer value
+            }
+            Some(SyntaxKind::TrueKw) | Some(SyntaxKind::FalseKw) => {
+                self.bump(); // Boolean value
+            }
+            Some(SyntaxKind::FastKw) | Some(SyntaxKind::SlowKw) | Some(SyntaxKind::MediumKw) => {
+                self.start_node(SyntaxKind::SlewRate);
+                self.bump();
+                self.finish_node();
+            }
+            Some(SyntaxKind::UpKw)
+            | Some(SyntaxKind::DownKw)
+            | Some(SyntaxKind::NoneKw)
+            | Some(SyntaxKind::KeeperKw) => {
+                self.start_node(SyntaxKind::Termination);
+                self.bump();
+                self.finish_node();
+            }
+            Some(SyntaxKind::LBracket) => {
+                // Array of pins: ["A1", "A2", "A3"]
+                self.start_node(SyntaxKind::PinArray);
+                self.bump(); // '['
+
+                while !self.at(SyntaxKind::RBracket) && !self.is_at_end() {
+                    self.skip_trivia();
+
+                    if self.at(SyntaxKind::RBracket) {
+                        break;
+                    }
+
+                    self.expect(SyntaxKind::StringLiteral);
+
+                    if self.at(SyntaxKind::Comma) {
+                        self.bump();
+                    }
+                }
+
+                self.expect(SyntaxKind::RBracket);
+                self.finish_node();
+            }
+            Some(SyntaxKind::Ident) => {
+                self.bump(); // Identifier value
+            }
+            _ => {
+                self.error("expected constraint value (string, number, boolean, or array)");
+            }
+        }
+    }
+
+    /// Parse device specification: device: "iCE40HX8K-CT256"
+    fn parse_device_spec(&mut self) {
+        self.start_node(SyntaxKind::DeviceSpec);
+
+        self.expect(SyntaxKind::DeviceKw);
+        self.expect(SyntaxKind::Colon);
+        self.expect(SyntaxKind::StringLiteral);
+
+        self.finish_node();
+    }
+
+    /// Parse bank block: bank 0 { voltage: 3.3, io_standard: "LVCMOS33" }
+    fn parse_bank_block(&mut self) {
+        self.start_node(SyntaxKind::BankBlock);
+
+        self.expect(SyntaxKind::BankKw);
+        self.expect(SyntaxKind::IntLiteral); // Bank number
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            self.parse_constraint_pair();
+
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse floorplan block: floorplan { region "name" { ... } }
+    fn parse_floorplan_block(&mut self) {
+        self.start_node(SyntaxKind::FloorplanBlock);
+
+        self.expect(SyntaxKind::FloorplanKw);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            if self.at(SyntaxKind::RegionKw) {
+                self.parse_region_block();
+            } else if self.at(SyntaxKind::GroupKw) {
+                self.parse_group_block();
+            } else {
+                self.error_and_bump("expected 'region' or 'group'");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse region block: region "name" { area: (10, 10, 30, 30), ... }
+    fn parse_region_block(&mut self) {
+        self.start_node(SyntaxKind::RegionBlock);
+
+        self.expect(SyntaxKind::RegionKw);
+        self.expect(SyntaxKind::StringLiteral); // Region name
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            self.parse_constraint_pair();
+
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse group block: group "name" { instances: [...], ... }
+    fn parse_group_block(&mut self) {
+        self.start_node(SyntaxKind::GroupBlock);
+
+        self.expect(SyntaxKind::GroupKw);
+        self.expect(SyntaxKind::StringLiteral); // Group name
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            self.parse_constraint_pair();
+
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse I/O defaults block: io_defaults { io_standard: "LVCMOS33", ... }
+    fn parse_io_defaults_block(&mut self) {
+        self.start_node(SyntaxKind::IoDefaultsBlock);
+
+        self.expect(SyntaxKind::IoDefaultsKw);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            self.parse_constraint_pair();
+
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
     }
 }
 
@@ -3528,5 +3856,62 @@ mod tests {
 
         let impl_block = tree.first_child().unwrap();
         assert_eq!(impl_block.kind(), SyntaxKind::ImplBlock);
+    }
+
+    #[test]
+    fn test_parse_inline_physical_constraints() {
+        let source = r#"
+            entity LedBlinker {
+                in clk: clock @ {
+                    pin: "A1",
+                    io_standard: "LVCMOS33"
+                }
+                out led: bit @ {
+                    pin: "B2",
+                    slew: fast
+                }
+            }
+        "#;
+        let tree = parse(source);
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+
+        let entity = tree.first_child().unwrap();
+        assert_eq!(entity.kind(), SyntaxKind::EntityDecl);
+    }
+
+    #[test]
+    fn test_parse_global_constraint_block() {
+        let source = r#"
+            constraint physical {
+                device: "iCE40HX8K-CT256"
+
+                io_defaults {
+                    io_standard: "LVCMOS33",
+                    slew: slow
+                }
+            }
+        "#;
+        let tree = parse(source);
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+
+        let constraint_block = tree.first_child().unwrap();
+        assert_eq!(constraint_block.kind(), SyntaxKind::GlobalConstraintBlock);
+    }
+
+    #[test]
+    fn test_parse_multi_pin_constraint() {
+        let source = r#"
+            entity Counter {
+                out count: nat[8] @ {
+                    pins: ["C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4"],
+                    io_standard: "LVCMOS33"
+                }
+            }
+        "#;
+        let tree = parse(source);
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+
+        let entity = tree.first_child().unwrap();
+        assert_eq!(entity.kind(), SyntaxKind::EntityDecl);
     }
 }

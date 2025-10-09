@@ -15,6 +15,7 @@ tokio = { version = "1.0", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 skalp-lir = { path = "../skalp-lir" }
+skalp-frontend = { path = "../skalp-frontend" }
 log = "0.4"
 
 [features]

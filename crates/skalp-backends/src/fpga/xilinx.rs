@@ -61,9 +61,27 @@ pub async fn synthesize_xilinx(
     package: &str,
     temp_dir: &Path,
     config: &FpgaConfig,
+    netlist: Option<&skalp_lir::Netlist>,
 ) -> BackendResult<SynthesisResults> {
     let device = XilinxDevice::from_part(part, package);
     let mut log_messages = Vec::new();
+
+    // Generate XDC file if netlist is provided
+    if let Some(netlist) = netlist {
+        let xdc_content = crate::constraint_gen::generate_xdc_from_lir(netlist);
+        if xdc_content.trim().lines().nth(1).is_some() {
+            // XDC has content beyond the header
+            let xdc_file = temp_dir.join("design.xdc");
+            tokio::fs::write(&xdc_file, xdc_content).await?;
+
+            log_messages.push(LogMessage {
+                level: LogLevel::Info,
+                message: format!("Generated XDC constraint file: {}", xdc_file.display()),
+                source: "skalp-xilinx".to_string(),
+                timestamp: chrono::Utc::now(),
+            });
+        }
+    }
 
     // Step 1: Create Vivado project and run synthesis
     let synth_result =
@@ -119,6 +137,15 @@ pub async fn synthesize_xilinx(
         path: temp_dir.join("power.rpt").to_string_lossy().to_string(),
         description: "Power analysis report".to_string(),
     });
+
+    // Add XDC file if it was generated
+    if temp_dir.join("design.xdc").exists() {
+        output_files.push(OutputFile {
+            file_type: OutputFileType::SynthesisLog, // Reuse for constraint files
+            path: temp_dir.join("design.xdc").to_string_lossy().to_string(),
+            description: "Xilinx Design Constraints (XDC)".to_string(),
+        });
+    }
 
     Ok(SynthesisResults {
         success: bitstream_result,
@@ -594,7 +621,7 @@ mod tests {
         let verilog = "module test(input clk, input a, output reg b); always @(posedge clk) b <= a; endmodule";
 
         let result =
-            synthesize_xilinx(verilog, "xc7a35t", "cpg236", temp_dir.path(), &config).await;
+            synthesize_xilinx(verilog, "xc7a35t", "cpg236", temp_dir.path(), &config, None).await;
         assert!(result.is_ok());
 
         let synthesis_result = result.unwrap();

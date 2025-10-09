@@ -13,8 +13,44 @@ pub struct Placer {
     device: Device,
     /// Current placement state
     placement: HashMap<String, (usize, usize)>,
+    /// Fixed placements for constrained signals (e.g., I/O pins)
+    fixed_placements: HashMap<String, (usize, usize)>,
+    /// I/O configurations for pins
+    io_configurations: HashMap<String, IoConfig>,
     /// Random number generator seed
     rng_seed: u64,
+}
+
+/// I/O configuration for a pin
+#[derive(Debug, Clone)]
+pub struct IoConfig {
+    /// Pin location (e.g., "A1", "B2")
+    pub location: String,
+    /// I/O standard (e.g., "LVCMOS33", "LVDS")
+    pub io_standard: Option<String>,
+    /// Drive strength in mA
+    pub drive_strength: Option<u8>,
+    /// Slew rate
+    pub slew_rate: Option<SlewRate>,
+    /// Termination type
+    pub termination: Option<Termination>,
+}
+
+/// Slew rate options
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlewRate {
+    Fast,
+    Slow,
+    Medium,
+}
+
+/// Termination options
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Termination {
+    None,
+    PullUp,
+    PullDown,
+    Keeper,
 }
 
 /// Placement configuration
@@ -70,8 +106,234 @@ impl Placer {
             config,
             device,
             placement: HashMap::new(),
+            fixed_placements: HashMap::new(),
+            io_configurations: HashMap::new(),
             rng_seed: 12345,
         }
+    }
+
+    /// Apply pin constraints from LIR netlist
+    /// This pre-assigns I/O locations before general placement
+    pub fn apply_pin_constraints(
+        &mut self,
+        netlist: &skalp_lir::Netlist,
+    ) -> Result<(), PlacementError> {
+        for module in &netlist.modules {
+            for port in &module.ports {
+                if let Some(ref constraints) = port.physical_constraints {
+                    if let Some(ref pin_loc) = constraints.pin_location {
+                        match pin_loc {
+                            skalp_frontend::hir::PinLocation::Single(pin) => {
+                                // Find I/O tile for this pin
+                                if let Some(position) = self.device.find_io_tile_position(pin) {
+                                    self.fixed_placements.insert(port.name.clone(), position);
+
+                                    // Store I/O configuration
+                                    self.io_configurations.insert(
+                                        port.name.clone(),
+                                        IoConfig {
+                                            location: pin.clone(),
+                                            io_standard: constraints.io_standard.clone(),
+                                            drive_strength: constraints.drive_strength.clone().map(
+                                                |ds| match ds {
+                                                    skalp_frontend::hir::DriveStrength::Ma4 => 4,
+                                                    skalp_frontend::hir::DriveStrength::Ma8 => 8,
+                                                    skalp_frontend::hir::DriveStrength::Ma12 => 12,
+                                                    skalp_frontend::hir::DriveStrength::Ma16 => 16,
+                                                },
+                                            ),
+                                            slew_rate: constraints.slew_rate.clone().map(|sr| {
+                                                match sr {
+                                                    skalp_frontend::hir::SlewRate::Fast => {
+                                                        SlewRate::Fast
+                                                    }
+                                                    skalp_frontend::hir::SlewRate::Slow => {
+                                                        SlewRate::Slow
+                                                    }
+                                                    skalp_frontend::hir::SlewRate::Medium => {
+                                                        SlewRate::Medium
+                                                    }
+                                                }
+                                            }),
+                                            termination: constraints.termination.clone().map(|t| {
+                                                match t {
+                                                    skalp_frontend::hir::Termination::None => {
+                                                        Termination::None
+                                                    }
+                                                    skalp_frontend::hir::Termination::PullUp => {
+                                                        Termination::PullUp
+                                                    }
+                                                    skalp_frontend::hir::Termination::PullDown => {
+                                                        Termination::PullDown
+                                                    }
+                                                    skalp_frontend::hir::Termination::Keeper => {
+                                                        Termination::Keeper
+                                                    }
+                                                }
+                                            }),
+                                        },
+                                    );
+                                } else {
+                                    return Err(PlacementError::InvalidPin(pin.clone()));
+                                }
+                            }
+                            skalp_frontend::hir::PinLocation::Multiple(pins) => {
+                                // Handle bus - assign each bit to corresponding pin
+                                for (bit_idx, pin) in pins.iter().enumerate() {
+                                    let bit_signal = format!("{}[{}]", port.name, bit_idx);
+                                    if let Some(position) = self.device.find_io_tile_position(pin) {
+                                        self.fixed_placements.insert(bit_signal.clone(), position);
+                                        self.io_configurations.insert(
+                                            bit_signal,
+                                            IoConfig {
+                                                location: pin.clone(),
+                                                io_standard: constraints.io_standard.clone(),
+                                                drive_strength: constraints.drive_strength.clone().map(|ds| match ds {
+                                                    skalp_frontend::hir::DriveStrength::Ma4 => 4,
+                                                    skalp_frontend::hir::DriveStrength::Ma8 => 8,
+                                                    skalp_frontend::hir::DriveStrength::Ma12 => 12,
+                                                    skalp_frontend::hir::DriveStrength::Ma16 => 16,
+                                                }),
+                                                slew_rate: constraints.slew_rate.clone().map(|sr| match sr {
+                                                    skalp_frontend::hir::SlewRate::Fast => SlewRate::Fast,
+                                                    skalp_frontend::hir::SlewRate::Slow => SlewRate::Slow,
+                                                    skalp_frontend::hir::SlewRate::Medium => SlewRate::Medium,
+                                                }),
+                                                termination: constraints.termination.clone().map(|t| match t {
+                                                    skalp_frontend::hir::Termination::None => Termination::None,
+                                                    skalp_frontend::hir::Termination::PullUp => Termination::PullUp,
+                                                    skalp_frontend::hir::Termination::PullDown => Termination::PullDown,
+                                                    skalp_frontend::hir::Termination::Keeper => Termination::Keeper,
+                                                }),
+                                            },
+                                        );
+                                    } else {
+                                        return Err(PlacementError::InvalidPin(pin.clone()));
+                                    }
+                                }
+                            }
+                            skalp_frontend::hir::PinLocation::Differential {
+                                positive,
+                                negative,
+                            } => {
+                                // Handle differential pair
+                                if let (Some(pos_position), Some(neg_position)) = (
+                                    self.device.find_io_tile_position(positive),
+                                    self.device.find_io_tile_position(negative),
+                                ) {
+                                    self.fixed_placements
+                                        .insert(format!("{}_p", port.name), pos_position);
+                                    self.fixed_placements
+                                        .insert(format!("{}_n", port.name), neg_position);
+
+                                    self.io_configurations.insert(
+                                        format!("{}_p", port.name),
+                                        IoConfig {
+                                            location: positive.clone(),
+                                            io_standard: constraints.io_standard.clone(),
+                                            drive_strength: constraints.drive_strength.clone().map(
+                                                |ds| match ds {
+                                                    skalp_frontend::hir::DriveStrength::Ma4 => 4,
+                                                    skalp_frontend::hir::DriveStrength::Ma8 => 8,
+                                                    skalp_frontend::hir::DriveStrength::Ma12 => 12,
+                                                    skalp_frontend::hir::DriveStrength::Ma16 => 16,
+                                                },
+                                            ),
+                                            slew_rate: constraints.slew_rate.clone().map(|sr| {
+                                                match sr {
+                                                    skalp_frontend::hir::SlewRate::Fast => {
+                                                        SlewRate::Fast
+                                                    }
+                                                    skalp_frontend::hir::SlewRate::Slow => {
+                                                        SlewRate::Slow
+                                                    }
+                                                    skalp_frontend::hir::SlewRate::Medium => {
+                                                        SlewRate::Medium
+                                                    }
+                                                }
+                                            }),
+                                            termination: constraints.termination.clone().map(|t| {
+                                                match t {
+                                                    skalp_frontend::hir::Termination::None => {
+                                                        Termination::None
+                                                    }
+                                                    skalp_frontend::hir::Termination::PullUp => {
+                                                        Termination::PullUp
+                                                    }
+                                                    skalp_frontend::hir::Termination::PullDown => {
+                                                        Termination::PullDown
+                                                    }
+                                                    skalp_frontend::hir::Termination::Keeper => {
+                                                        Termination::Keeper
+                                                    }
+                                                }
+                                            }),
+                                        },
+                                    );
+                                    self.io_configurations.insert(
+                                        format!("{}_n", port.name),
+                                        IoConfig {
+                                            location: negative.clone(),
+                                            io_standard: constraints.io_standard.clone(),
+                                            drive_strength: constraints.drive_strength.clone().map(
+                                                |ds| match ds {
+                                                    skalp_frontend::hir::DriveStrength::Ma4 => 4,
+                                                    skalp_frontend::hir::DriveStrength::Ma8 => 8,
+                                                    skalp_frontend::hir::DriveStrength::Ma12 => 12,
+                                                    skalp_frontend::hir::DriveStrength::Ma16 => 16,
+                                                },
+                                            ),
+                                            slew_rate: constraints.slew_rate.clone().map(|sr| {
+                                                match sr {
+                                                    skalp_frontend::hir::SlewRate::Fast => {
+                                                        SlewRate::Fast
+                                                    }
+                                                    skalp_frontend::hir::SlewRate::Slow => {
+                                                        SlewRate::Slow
+                                                    }
+                                                    skalp_frontend::hir::SlewRate::Medium => {
+                                                        SlewRate::Medium
+                                                    }
+                                                }
+                                            }),
+                                            termination: constraints.termination.clone().map(|t| {
+                                                match t {
+                                                    skalp_frontend::hir::Termination::None => {
+                                                        Termination::None
+                                                    }
+                                                    skalp_frontend::hir::Termination::PullUp => {
+                                                        Termination::PullUp
+                                                    }
+                                                    skalp_frontend::hir::Termination::PullDown => {
+                                                        Termination::PullDown
+                                                    }
+                                                    skalp_frontend::hir::Termination::Keeper => {
+                                                        Termination::Keeper
+                                                    }
+                                                }
+                                            }),
+                                        },
+                                    );
+                                } else {
+                                    return Err(PlacementError::InvalidDifferentialPair {
+                                        positive: positive.clone(),
+                                        negative: negative.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("   Applied {} pin constraints", self.fixed_placements.len());
+        Ok(())
+    }
+
+    /// Get I/O configurations for bitstream generation
+    pub fn io_configurations(&self) -> &HashMap<String, IoConfig> {
+        &self.io_configurations
     }
 
     /// Run placement algorithm
@@ -90,6 +352,7 @@ impl Placer {
         if all_gates.is_empty() {
             return Ok(PlacementResult {
                 placements: HashMap::new(),
+                io_configurations: HashMap::new(),
                 cost: 0.0,
                 wirelength: 0,
                 timing_score: 0.0,
@@ -367,6 +630,11 @@ impl Placer {
         random_value < probability
     }
 
+    /// Get reference to fixed placements (for testing)
+    pub fn fixed_placements(&self) -> &HashMap<String, (usize, usize)> {
+        &self.fixed_placements
+    }
+
     /// Create final placement result
     fn create_placement_result(&self, gates: &[&Gate]) -> PlacementResult {
         let wirelength = self.calculate_wirelength(gates);
@@ -377,6 +645,7 @@ impl Placer {
 
         PlacementResult {
             placements: self.placement.clone(),
+            io_configurations: self.io_configurations.clone(),
             cost: self.calculate_cost(gates),
             wirelength,
             timing_score,
@@ -390,6 +659,8 @@ impl Placer {
 pub struct PlacementResult {
     /// Cell placements (gate_id -> (x, y))
     pub placements: HashMap<String, (usize, usize)>,
+    /// I/O configurations for constrained pins
+    pub io_configurations: HashMap<String, IoConfig>,
     /// Total placement cost
     pub cost: f64,
     /// Total wirelength
@@ -409,4 +680,8 @@ pub enum PlacementError {
     InsufficientResources,
     #[error("Invalid device configuration")]
     InvalidDevice,
+    #[error("Invalid pin: {0}")]
+    InvalidPin(String),
+    #[error("Invalid differential pair: positive={positive}, negative={negative}")]
+    InvalidDifferentialPair { positive: String, negative: String },
 }

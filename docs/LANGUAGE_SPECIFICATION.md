@@ -560,6 +560,490 @@ entity DataPath {
 }
 ```
 
+### 4.11 Physical Constraints
+
+SKALP extends the philosophy of inline timing constraints (section 4.5) to physical constraints. Unlike traditional HDLs where physical constraints live in separate vendor-specific files (PCF, XDC, SDC), SKALP allows constraints to be specified inline with port declarations while maintaining compatibility with external constraint files.
+
+#### 4.11.1 Design Philosophy
+
+**Rationale:**
+- **Single Source of Truth**: Physical constraints are design intent and should travel with the code
+- **Type Safety**: Compiler validates pin names against device database, catching errors at compile time
+- **Version Control**: Constraints are versioned with the design, not separate files
+- **Tool Independence**: Same syntax generates PCF, XDC, or SDC as needed
+
+**Compatibility:**
+- Inline constraints are the primary mechanism (recommended)
+- External constraint files supported for legacy designs and board-level constraints
+- Inline constraints override external constraints when both are present
+
+#### 4.11.2 Inline Pin Constraints
+
+Physical constraints attach to entity ports using the `@` syntax with a constraint block:
+
+```rust
+entity LedBlinker {
+    // Single-pin constraint
+    in clk: clock @ {
+        pin: "A1",
+        io_standard: "LVCMOS33",
+        frequency: 100MHz
+    }
+
+    // Pin with electrical characteristics
+    in rst: reset @ {
+        pin: "B2",
+        io_standard: "LVCMOS33",
+        pull: up,
+        schmitt: true
+    }
+
+    // Multi-pin bus (pins auto-assigned in order)
+    out leds: bit[8] @ {
+        pins: ["C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4"],
+        io_standard: "LVCMOS33",
+        drive: 8mA,
+        slew: fast
+    }
+
+    // Differential pair
+    inout lvds_data: bit @ {
+        pin_p: "E1",    // Positive
+        pin_n: "E2",    // Negative
+        io_standard: "LVDS_25",
+        diff_term: 100  // 100Ω termination
+    }
+}
+```
+
+#### 4.11.3 Constraint Block Syntax
+
+**Grammar:**
+
+```ebnf
+physical_constraint_block ::= '{' constraint_pair { ',' constraint_pair } '}'
+
+constraint_pair ::=
+    | 'pin' ':' pin_location
+    | 'pins' ':' pin_array
+    | 'pin_p' ':' string_literal     // Differential positive
+    | 'pin_n' ':' string_literal     // Differential negative
+    | 'io_standard' ':' io_standard_name
+    | 'drive' ':' drive_strength
+    | 'slew' ':' slew_rate
+    | 'pull' ':' termination
+    | 'diff_term' ':' integer        // Differential termination (Ω)
+    | 'schmitt' ':' bool
+    | 'frequency' ':' frequency_value
+
+pin_location ::= string_literal          // e.g., "A1", "PIN_12"
+pin_array ::= '[' string_literal { ',' string_literal } ']'
+io_standard_name ::= identifier          // e.g., LVCMOS33, LVDS_25
+drive_strength ::= integer 'mA'          // e.g., 4mA, 8mA, 12mA, 16mA
+slew_rate ::= 'fast' | 'slow' | 'medium'
+termination ::= 'up' | 'down' | 'none' | 'keeper'
+```
+
+#### 4.11.4 Device-Specific I/O Standards
+
+**iCE40 (Lattice):**
+```rust
+// Common iCE40 I/O standards
+in signal: bit @ {
+    pin: "A1",
+    io_standard: "SB_LVCMOS"  // or SB_LVDS_INPUT, SB_LVCMOS33, etc.
+}
+```
+
+**Xilinx 7-Series:**
+```rust
+// Xilinx I/O standards
+in ddr_data: bit[32] @ {
+    pins: ["AA1", "AA2", /* ... */],
+    io_standard: "SSTL15",      // DDR3
+    slew: fast,
+    drive: 16mA
+}
+
+in lvds_clk: bit @ {
+    pin_p: "AB1",
+    pin_n: "AB2",
+    io_standard: "LVDS_25"
+}
+```
+
+**Intel Stratix/Cyclone:**
+```rust
+// Intel I/O standards
+inout dram_dq: bit[16] @ {
+    pins: ["PIN_A1", "PIN_A2", /* ... */],
+    io_standard: "SSTL-15 CLASS I",
+    drive: 16mA,
+    on_chip_termination: "RZQ/6"
+}
+```
+
+#### 4.11.5 Global Constraint Blocks
+
+For device selection, floorplanning, and design-wide constraints:
+
+```rust
+// Device and floorplan constraints
+constraint physical {
+    // Target device selection
+    device: "iCE40HX8K-CT256"
+
+    // Floorplan regions
+    floorplan {
+        // Define placement regions
+        region "fast_logic" {
+            area: (x1: 10, y1: 10, x2: 30, y2: 30),
+            instances: [adder, multiplier, alu]
+        }
+
+        region "io_ring" {
+            area: (x1: 0, y1: 0, x2: 50, y2: 50),
+            boundary: true,
+            instances: [uart_tx, uart_rx, spi_interface]
+        }
+
+        // Keep groups together
+        group "crypto_core" {
+            instances: [aes_encrypt, aes_decrypt, key_schedule],
+            keep_together: true,
+            preferred_region: "fast_logic"
+        }
+    }
+
+    // Global I/O defaults
+    io_defaults {
+        io_standard: "LVCMOS33",
+        drive: 8mA,
+        slew: slow  // Conservative default
+    }
+}
+```
+
+#### 4.11.6 Bank and Voltage Constraints
+
+For multi-bank FPGAs with different I/O voltages:
+
+```rust
+constraint physical {
+    // Define I/O banks and voltages
+    bank 0 {
+        voltage: 3.3,
+        io_standard: "LVCMOS33"
+    }
+
+    bank 1 {
+        voltage: 1.8,
+        io_standard: "LVCMOS18"
+    }
+
+    bank 2 {
+        voltage: 2.5,
+        io_standard: "LVDS_25"
+    }
+}
+
+entity MultiVoltageDesign {
+    // Pins assigned to specific banks
+    in low_voltage_input: bit @ {
+        pin: "A1",
+        bank: 1,  // Must match bank voltage
+        io_standard: "LVCMOS18"
+    }
+
+    in diff_input: bit @ {
+        pin_p: "C1",
+        pin_n: "C2",
+        bank: 2,
+        io_standard: "LVDS_25"
+    }
+}
+```
+
+#### 4.11.7 Validation Rules
+
+**Compile-Time Checks:**
+
+1. **Pin Existence**: Pin names validated against device database
+   ```rust
+   // Error: Pin "Z99" does not exist on iCE40HX8K-CT256
+   in clk: clock @ { pin: "Z99" }
+   ```
+
+2. **Pin Conflicts**: Multiple signals cannot use same pin
+   ```rust
+   // Error: Pin "A1" used by both clk and data
+   in clk: clock @ { pin: "A1" }
+   in data: bit @ { pin: "A1" }  // CONFLICT
+   ```
+
+3. **I/O Standard Compatibility**: Standard must match device capabilities
+   ```rust
+   // Error: LVDS_25 not supported on iCE40 HX series
+   in signal: bit @ {
+       pin: "A1",
+       io_standard: "LVDS_25"  // iCE40 uses SB_LVDS_INPUT
+   }
+   ```
+
+4. **Bank Voltage Compatibility**: I/O standard must match bank voltage
+   ```rust
+   constraint physical {
+       bank 0 { voltage: 3.3 }
+   }
+
+   entity Design {
+       // Error: LVCMOS18 requires 1.8V, but bank 0 is 3.3V
+       in signal: bit @ {
+           pin: "A1",  // Bank 0
+           io_standard: "LVCMOS18"
+       }
+   }
+   ```
+
+5. **Differential Pair Validity**: Differential pins must be adjacent/valid pairs
+   ```rust
+   // Error: A1 and Z99 are not a valid differential pair
+   in lvds: bit @ {
+       pin_p: "A1",
+       pin_n: "Z99"  // INVALID PAIR
+   }
+   ```
+
+6. **Bus Width Matching**: Number of pins must match signal width
+   ```rust
+   // Error: 8-bit signal requires 8 pins, only 4 provided
+   out data: bit[8] @ {
+       pins: ["A1", "A2", "A3", "A4"]  // Need 4 more pins
+   }
+   ```
+
+#### 4.11.8 External Constraint Files
+
+For compatibility and board-level constraints:
+
+**Loading External Constraints:**
+
+```bash
+# CLI support for external constraint files
+skalp build design.sk --constraints board.pcf --device iCE40HX8K
+
+# Multiple constraint files (merged in order)
+skalp build design.sk \
+    --constraints board.pcf \
+    --constraints timing.sdc \
+    --device iCE40HX8K
+```
+
+**Precedence Rules:**
+
+1. Inline constraints in source code (highest priority)
+2. Command-line constraint files (in order specified)
+3. Global defaults in `constraint physical` blocks
+4. Tool defaults (lowest priority)
+
+**Example PCF (iCE40):**
+```tcl
+# board.pcf - iCE40 Physical Constraints File
+set_io clk A1
+set_io rst B2
+set_io led[0] C1
+set_io led[1] C2
+```
+
+**Example XDC (Xilinx):**
+```tcl
+# board.xdc - Xilinx Design Constraints
+set_property PACKAGE_PIN A1 [get_ports clk]
+set_property IOSTANDARD LVCMOS33 [get_ports clk]
+set_property PACKAGE_PIN B2 [get_ports rst]
+set_property PULLUP true [get_ports rst]
+```
+
+**Constraint File Merging:**
+
+```rust
+// design.sk - has inline constraints
+entity Design {
+    in clk: clock @ { pin: "A1" }  // Inline
+    in rst: reset                   // No constraint
+    out led: bit[4]                // No constraint
+}
+
+// board.pcf - external constraints
+// set_io rst B2        # Applied (rst has no inline constraint)
+// set_io clk C1        # IGNORED (clk has inline constraint at A1)
+// set_io led[0] D1     # Applied
+// set_io led[1] D2     # Applied
+// set_io led[2] D3     # Applied
+// set_io led[3] D4     # Applied
+
+// Result: clk=A1 (inline), rst=B2 (external), led=D1-D4 (external)
+```
+
+#### 4.11.9 Advanced Features
+
+**Conditional Constraints by Build Target:**
+
+```rust
+entity PortableDesign {
+    // Constraints vary by target device
+    in clk: clock @ {
+        pin: if target == "iCE40HX8K" then "A1"
+             else if target == "Artix7" then "E3"
+             else "PIN_N14",  // Intel default
+        io_standard: if target.vendor == "Lattice" then "SB_LVCMOS"
+                     else "LVCMOS33"
+    }
+}
+```
+
+**Auto-Generated Constraint Documentation:**
+
+```rust
+// Compiler can generate constraint documentation
+// skalp build design.sk --emit-constraints-doc constraints.md
+
+entity Design {
+    in clk: clock @ {
+        pin: "A1",
+        io_standard: "LVCMOS33"
+        /* Generates documentation:
+         * Signal: clk
+         * Direction: Input
+         * Type: clock
+         * Pin: A1 (Bank 0, Position: Top-Left)
+         * I/O Standard: LVCMOS33 (3.3V CMOS)
+         * Board Connection: Crystal oscillator output
+         */
+    }
+}
+```
+
+#### 4.11.10 Integration with Synthesis Flow
+
+**Native Place & Route:**
+
+When using SKALP's native place and route tools:
+
+```rust
+// Physical constraints directly guide placer
+entity Design {
+    in clk: clock @ { pin: "A1" }  // Fixed I/O location
+}
+
+// Native placer:
+// 1. Reads inline constraints from HIR/MIR
+// 2. Pre-assigns fixed I/O locations before placement
+// 3. Uses electrical characteristics during routing
+// 4. Generates bitstream with correct I/O configuration
+```
+
+**External Tool Integration:**
+
+When using vendor tools (Vivado, Quartus, NextPNR):
+
+```rust
+// Compilation flow:
+// 1. Parse inline constraints from SKALP source
+// 2. Generate tool-specific constraint file (XDC/PCF/SDC)
+// 3. Invoke synthesis tool with generated constraints
+// 4. Validate results against original constraints
+
+// Example: iCE40 flow
+skalp build led.sk --device iCE40HX8K --native=false
+
+// Internally:
+// 1. Extracts pin constraints from led.sk
+// 2. Generates /tmp/build/led.pcf
+// 3. Calls: yosys led.v -o led.json
+// 4. Calls: nextpnr-ice40 --pcf /tmp/build/led.pcf ...
+// 5. Calls: icepack led.asc led.bin
+```
+
+#### 4.11.11 Complete Example
+
+```rust
+// Board constraint definition
+constraint physical {
+    device: "iCE40HX8K-CT256"
+
+    bank 0 { voltage: 3.3 }
+    bank 1 { voltage: 3.3 }
+    bank 2 { voltage: 1.8 }
+
+    io_defaults {
+        io_standard: "LVCMOS33",
+        slew: slow
+    }
+
+    floorplan {
+        region "cpu_core" {
+            area: (10, 10, 40, 40),
+            instances: [cpu, ram, rom]
+        }
+    }
+}
+
+// UART communication module
+entity UartTx {
+    // 100MHz system clock - high-speed pin
+    in clk: clock<100MHz> @ {
+        pin: "J3",
+        bank: 0,
+        io_standard: "LVCMOS33",
+        frequency: 100MHz
+    }
+
+    // Active-high reset with pull-up
+    in rst: reset(active_high) @ {
+        pin: "K3",
+        bank: 0,
+        io_standard: "LVCMOS33",
+        pull: up
+    }
+
+    // UART transmit pin - medium drive
+    out tx: bit @ {
+        pin: "A2",
+        bank: 1,
+        io_standard: "LVCMOS33",
+        drive: 8mA,
+        slew: medium
+    }
+
+    // Optional flow control
+    in cts: bit @ {
+        pin: "A3",
+        bank: 1,
+        io_standard: "LVCMOS33",
+        pull: up,
+        schmitt: true  // Noise immunity
+    }
+
+    // 8-bit data input (internal, no pins)
+    in data: bit[8]
+    in valid: bit
+    out ready: bit
+}
+
+impl UartTx {
+    // Implementation here...
+}
+```
+
+This example demonstrates:
+- Device selection
+- Bank voltage management
+- Per-pin I/O standards
+- Electrical characteristics (drive, slew, pull)
+- Mixed internal/external signals
+- Clean integration with clock domain specifications
+
 ## 5. Entities and Implementation
 
 ### 5.1 Entity Declaration

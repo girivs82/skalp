@@ -92,6 +92,7 @@ impl<'hir> HirToMir<'hir> {
                     name: hir_port.name.clone(),
                     direction: self.convert_port_direction(&hir_port.direction),
                     port_type: self.convert_type(&hir_port.port_type),
+                    physical_constraints: hir_port.physical_constraints.clone(),
                 };
                 module.ports.push(port);
             }

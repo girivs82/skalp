@@ -15,6 +15,7 @@ fn create_counter_mir() -> Mir {
         name: "clk".to_string(),
         direction: PortDirection::Input,
         port_type: DataType::Clock { domain: None },
+        physical_constraints: None,
     });
     module.ports.push(Port {
         id: PortId(1),
@@ -24,12 +25,14 @@ fn create_counter_mir() -> Mir {
             active_high: true,
             domain: None,
         },
+        physical_constraints: None,
     });
     module.ports.push(Port {
         id: PortId(2),
         name: "count".to_string(),
         direction: PortDirection::Output,
         port_type: DataType::Logic(8),
+        physical_constraints: None,
     });
 
     // Add signal for count register
@@ -127,18 +130,21 @@ fn test_combinational_logic() {
         name: "a".to_string(),
         direction: PortDirection::Input,
         port_type: DataType::Logic(8),
+        physical_constraints: None,
     });
     module.ports.push(Port {
         id: PortId(1),
         name: "b".to_string(),
         direction: PortDirection::Input,
         port_type: DataType::Logic(8),
+        physical_constraints: None,
     });
     module.ports.push(Port {
         id: PortId(2),
         name: "sum".to_string(),
         direction: PortDirection::Output,
         port_type: DataType::Logic(9),
+        physical_constraints: None,
     });
 
     // Continuous assignment for sum
@@ -177,12 +183,14 @@ fn test_case_statement() {
         name: "sel".to_string(),
         direction: PortDirection::Input,
         port_type: DataType::Logic(2),
+        physical_constraints: None,
     });
     module.ports.push(Port {
         id: PortId(1),
         name: "out".to_string(),
         direction: PortDirection::Output,
         port_type: DataType::Logic(4),
+        physical_constraints: None,
     });
 
     // Create combinational process with case

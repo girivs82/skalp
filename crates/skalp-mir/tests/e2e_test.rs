@@ -16,6 +16,7 @@ fn create_counter_hir() -> Hir {
         requirements: vec![],
         trait_definitions: vec![],
         trait_implementations: vec![],
+        global_constraints: vec![],
     };
 
     // Create counter entity
@@ -30,24 +31,28 @@ fn create_counter_hir() -> Hir {
                 name: "clk".to_string(),
                 direction: HirPortDirection::Input,
                 port_type: HirType::Clock(None),
+                physical_constraints: None,
             },
             HirPort {
                 id: PortId(2),
                 name: "rst".to_string(),
                 direction: HirPortDirection::Input,
                 port_type: HirType::Reset(None),
+                physical_constraints: None,
             },
             HirPort {
                 id: PortId(3),
                 name: "enable".to_string(),
                 direction: HirPortDirection::Input,
                 port_type: HirType::Bit(1),
+                physical_constraints: None,
             },
             HirPort {
                 id: PortId(4),
                 name: "count".to_string(),
                 direction: HirPortDirection::Output,
                 port_type: HirType::Bit(8),
+                physical_constraints: None,
             },
         ],
     };
