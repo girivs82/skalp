@@ -744,6 +744,10 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
+        // Convert the match value expression ONCE to avoid exponential blowup
+        // when we create N comparisons against it
+        let match_value_expr = self.convert_expression(match_value)?;
+
         // Build nested conditionals from right to left
         // Start with the last arm as the default (usually wildcard)
         let mut result = self.convert_expression(&arms.last()?.expr)?;
@@ -754,7 +758,8 @@ impl<'hir> HirToMir<'hir> {
             let condition = match &arm.pattern {
                 hir::HirPattern::Literal(lit) => {
                     // Compare match_value with literal
-                    let left = Box::new(self.convert_expression(match_value)?);
+                    // Clone the pre-converted match value instead of re-converting
+                    let left = Box::new(match_value_expr.clone());
                     let right = Box::new(Expression::Literal(self.convert_literal(lit)?));
                     Some(Expression::Binary {
                         op: BinaryOp::Equal,

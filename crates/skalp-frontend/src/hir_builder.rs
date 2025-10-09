@@ -1502,6 +1502,7 @@ impl HirBuilderContext {
             SyntaxKind::PathExpr => self.build_path_expr(node),
             SyntaxKind::IfExpr => self.build_if_expr(node),
             SyntaxKind::MatchExpr => self.build_match_expr(node),
+            SyntaxKind::CastExpr => self.build_cast_expr(node),
             SyntaxKind::ParenExpr => {
                 // Unwrap parentheses - but handle parser bug where complex expressions
                 // inside parens are represented as multiple sibling BinaryExpr nodes
@@ -2251,6 +2252,37 @@ impl HirBuilderContext {
             expr: Box::new(expr),
             arms,
         }))
+    }
+
+    /// Build cast expression (expr as Type)
+    fn build_cast_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // CastExpr structure from parser (manual tree building):
+        //   ParenExpr (or other expression)
+        //   TypeAnnotation
+        // Find the expression (first child)
+        let expr = node
+            .children()
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                )
+            })
+            .and_then(|n| self.build_expression(&n))?;
+
+        // For now, just return the expression unwrapped
+        // TODO: Add type information to HIR when needed
+        Some(expr)
     }
 
     /// Build match arm for match expressions

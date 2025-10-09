@@ -2983,6 +2983,14 @@ impl<'a> ParseState<'a> {
                 self.parse_expression();
                 self.expect(SyntaxKind::RParen);
                 self.finish_node();
+
+                // Check for cast after parenthesized expression
+                if self.at(SyntaxKind::AsKw) {
+                    self.start_node(SyntaxKind::CastExpr);
+                    self.bump(); // consume 'as'
+                    self.parse_type();
+                    self.finish_node();
+                }
             }
             Some(SyntaxKind::Bang | SyntaxKind::Tilde | SyntaxKind::Minus) => {
                 self.start_node(SyntaxKind::UnaryExpr);
@@ -3057,6 +3065,15 @@ impl<'a> ParseState<'a> {
                     self.bump(); // consume '('
                     self.parse_argument_list();
                     self.expect(SyntaxKind::RParen);
+                }
+                Some(SyntaxKind::AsKw) => {
+                    // Type cast
+                    self.finish_node(); // finish current expression
+                    self.start_node(SyntaxKind::CastExpr);
+                    self.bump(); // consume 'as'
+                    self.parse_type();
+                    // Note: parse_type calls finish_node internally for TypeAnnotation
+                    // but we still need to finish the CastExpr
                 }
                 _ => break,
             }

@@ -329,6 +329,7 @@ pub enum SyntaxKind {
     PathExpr,
     IfExpr,
     MatchExpr,
+    CastExpr,
 
     // Types
     TypeExpr,
