@@ -1,0 +1,91 @@
+// Example 1: Synchronous FIFO with Configurable Depth and Width
+//
+// Features Used:
+// - entity/impl syntax
+// - Generics (const WIDTH, const DEPTH)
+// - signal declarations
+// - on(clk.rise) sequential logic
+// - reset handling
+// - struct types (for count)
+// - match expressions (for state logic)
+// - bit slicing and indexing
+// - comparison operators
+// - arithmetic (wrap-around)
+
+entity Fifo<const WIDTH: nat[16], const DEPTH: nat[16]> {
+    in clk: clock
+    in rst: reset
+
+    // Write interface
+    in wr_en: bool
+    in wr_data: bit<WIDTH>
+    out wr_full: bool
+
+    // Read interface
+    in rd_en: bool
+    out rd_data: bit<WIDTH>
+    out rd_empty: bool
+
+    // Status
+    out count: nat[16]
+}
+
+impl<const WIDTH: nat[16], const DEPTH: nat[16]> Fifo<WIDTH, DEPTH> {
+    // Storage array
+    signal memory: bit<WIDTH>[DEPTH] = [0; DEPTH]
+
+    // Pointers (need extra bit for full/empty distinction)
+    signal wr_ptr: nat[17] = 0
+    signal rd_ptr: nat[17] = 0
+    signal data_count: nat[16] = 0
+
+    // Combinational outputs
+    wr_full = (data_count == DEPTH)
+    rd_empty = (data_count == 0)
+    count = data_count
+
+    // Read data (combinational from memory)
+    rd_data = memory[rd_ptr[15:0]]
+
+    on(clk.rise) {
+        if rst {
+            // Reset all pointers
+            wr_ptr <= 0
+            rd_ptr <= 0
+            data_count <= 0
+        } else {
+            // Handle simultaneous read and write
+            match (wr_en, rd_en) {
+                (true, true) => {
+                    // Both read and write
+                    if !wr_full {
+                        memory[wr_ptr[15:0]] <= wr_data
+                        wr_ptr <= (wr_ptr + 1) % (DEPTH + 1)
+                    }
+                    if !rd_empty {
+                        rd_ptr <= (rd_ptr + 1) % (DEPTH + 1)
+                    }
+                    // Count stays same if both succeed
+                }
+                (true, false) => {
+                    // Write only
+                    if !wr_full {
+                        memory[wr_ptr[15:0]] <= wr_data
+                        wr_ptr <= (wr_ptr + 1) % (DEPTH + 1)
+                        data_count <= data_count + 1
+                    }
+                }
+                (false, true) => {
+                    // Read only
+                    if !rd_empty {
+                        rd_ptr <= (rd_ptr + 1) % (DEPTH + 1)
+                        data_count <= data_count - 1
+                    }
+                }
+                _ => {
+                    // No operation
+                }
+            }
+        }
+    }
+}

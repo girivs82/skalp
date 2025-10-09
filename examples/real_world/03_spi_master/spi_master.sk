@@ -1,0 +1,98 @@
+// Example 3: SPI Master Controller (Mode 0: CPOL=0, CPHA=0)
+//
+// Features Used:
+// - Clock generation (SCLK)
+// - Bidirectional data (MOSI/MISO)
+// - Chip select control
+// - Shift register for serial data
+// - Edge-sensitive operations
+// - Bit counting
+//
+// Real-world use: Flash memory, ADC/DAC, SD cards, sensors
+
+entity SpiMaster {
+    in clk: clock       // System clock (50MHz)
+    in rst: reset
+
+    // Control interface
+    in start: bit       // Start SPI transaction
+    in tx_data: nat[8]  // Data to send
+    out rx_data: nat[8] // Data received
+    out busy: bit       // Transaction in progress
+
+    // SPI interface (Mode 0)
+    out sclk: bit       // SPI clock (idle low)
+    out mosi: bit       // Master Out Slave In
+    in miso: bit        // Master In Slave Out
+    out cs_n: bit       // Chip Select (active low)
+}
+
+impl SpiMaster {
+    // Clock divider: 50MHz / 8 = 6.25MHz SPI clock
+    signal clk_div: nat[3] = 0
+    signal spi_clk: bit = 0
+
+    // State machine
+    signal state: nat[2] = 0
+    // 0 = IDLE
+    // 1 = TRANSFER
+    // 2 = DONE
+
+    // Shift registers
+    signal tx_shift: nat[8] = 0
+    signal rx_shift: nat[8] = 0
+    signal bit_count: nat[4] = 0
+
+    // Outputs
+    busy = (state != 0)
+    cs_n = (state == 0)
+    sclk = spi_clk
+    mosi = tx_shift / 128  // MSB of shift register
+    rx_data = rx_shift
+
+    on(clk.rise) {
+        if (rst) {
+            state <= 0
+            clk_div <= 0
+            spi_clk <= 0
+            tx_shift <= 0
+            rx_shift <= 0
+            bit_count <= 0
+        } else {
+            // Clock divider
+            clk_div <= clk_div + 1
+
+            if (state == 0) {
+                // IDLE: Wait for start
+                spi_clk <= 0
+                if (start) {
+                    state <= 1
+                    tx_shift <= tx_data
+                    bit_count <= 0
+                    clk_div <= 0
+                }
+            } else if (state == 1) {
+                // TRANSFER: Exchange bits
+                if (clk_div == 3) {
+                    // Rising edge of SPI clock - sample MISO
+                    spi_clk <= 1
+                    rx_shift <= (rx_shift * 2) + miso
+                } else if (clk_div == 7) {
+                    // Falling edge of SPI clock - shift out next bit
+                    spi_clk <= 0
+                    tx_shift <= (tx_shift * 2) % 256
+                    bit_count <= bit_count + 1
+                    clk_div <= 0
+
+                    if (bit_count == 7) {
+                        state <= 2
+                    }
+                }
+            } else {
+                // DONE: One extra cycle before returning to IDLE
+                state <= 0
+                spi_clk <= 0
+            }
+        }
+    }
+}

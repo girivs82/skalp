@@ -1,0 +1,104 @@
+// Example 2: UART Transmitter (115200 baud @ 50MHz clock)
+//
+// Features Used:
+// - FSM with explicit state encoding
+// - State transitions with if/else
+// - Bit shifting and indexing
+// - Counter-based timing
+// - Start/stop bit generation
+// - Serial data transmission
+//
+// Real-world use: Debugging output, serial communication
+
+entity UartTx {
+    in clk: clock       // 50MHz system clock
+    in rst: reset
+
+    // Data interface
+    in tx_start: bit    // Pulse to start transmission
+    in tx_data: nat[8]  // 8-bit data to transmit
+    out tx_busy: bit    // High when transmitting
+
+    // UART interface
+    out tx: bit         // Serial output line
+}
+
+impl UartTx {
+    // Baud rate timing: 50MHz / 115200 = 434 clocks per bit
+    signal baud_counter: nat[9] = 0
+    signal bit_counter: nat[4] = 0
+
+    // State encoding
+    signal state: nat[2] = 0
+    // 0 = IDLE
+    // 1 = START_BIT
+    // 2 = DATA_BITS
+    // 3 = STOP_BIT
+
+    // Shift register for data
+    signal shift_reg: nat[8] = 0
+
+    // TX output defaults to idle (high)
+    signal tx_out: bit = 1
+    tx = tx_out
+
+    // Busy when not in IDLE state
+    tx_busy = (state != 0)
+
+    on(clk.rise) {
+        if (rst) {
+            state <= 0
+            baud_counter <= 0
+            bit_counter <= 0
+            shift_reg <= 0
+            tx_out <= 1
+        } else {
+            // Default: decrement baud counter if active
+            if (baud_counter > 0) {
+                baud_counter <= baud_counter - 1
+            }
+
+            // State machine
+            if (state == 0) {
+                // IDLE state
+                tx_out <= 1
+                if (tx_start) {
+                    // Start transmission
+                    state <= 1
+                    shift_reg <= tx_data
+                    baud_counter <= 434
+                    bit_counter <= 0
+                }
+            } else if (state == 1) {
+                // START_BIT state
+                tx_out <= 0
+                if (baud_counter == 0) {
+                    state <= 2
+                    baud_counter <= 434
+                }
+            } else if (state == 2) {
+                // DATA_BITS state
+                // Output LSB of shift register
+                tx_out <= shift_reg % 2
+
+                if (baud_counter == 0) {
+                    // Shift to next bit
+                    shift_reg <= shift_reg / 2
+                    bit_counter <= bit_counter + 1
+
+                    if (bit_counter == 7) {
+                        // All 8 bits sent
+                        state <= 3
+                    }
+                    baud_counter <= 434
+                }
+            } else {
+                // STOP_BIT state
+                tx_out <= 1
+                if (baud_counter == 0) {
+                    state <= 0
+                }
+            }
+        }
+    }
+}

@@ -864,17 +864,19 @@ impl HirBuilderContext {
 
     /// Build if statement
     fn build_if_statement(&mut self, node: &SyntaxNode) -> Option<HirIfStatement> {
-        // Get condition expression
+        // Get condition expression - prefer complex expressions (Binary, Unary, Paren) over simple ones (Ident, Literal)
+        // This avoids selecting the left operand of a binary expression instead of the full expression
         let condition = node
             .children()
             .find(|n| {
                 matches!(
                     n.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
+                    SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr | SyntaxKind::ParenExpr
                 )
+            })
+            .or_else(|| {
+                node.children()
+                    .find(|n| matches!(n.kind(), SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr))
             })
             .and_then(|n| self.build_expression(&n))?;
 

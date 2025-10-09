@@ -1,0 +1,93 @@
+// Example 1: Simple Synchronous FIFO (4 entries, 8-bit width)
+//
+// Features Used:
+// - entity/impl syntax
+// - signal declarations with initialization
+// - on(clk.rise) sequential logic
+// - reset handling
+// - if/else conditionals
+// - bit types and nat types
+// - arithmetic operations
+// - comparison operators
+// - array indexing
+//
+// Real-world use: Small data buffering between clock domains
+
+entity SimpleFifo {
+    in clk: clock
+    in rst: reset
+
+    // Write interface
+    in wr_en: bit
+    in wr_data: nat[8]
+    out wr_full: bit
+
+    // Read interface
+    in rd_en: bit
+    out rd_data: nat[8]
+    out rd_empty: bit
+
+    // Status
+    out count: nat[3]
+}
+
+impl SimpleFifo {
+    // Storage array (4 entries of 8 bits each)
+    signal mem0: nat[8] = 0
+    signal mem1: nat[8] = 0
+    signal mem2: nat[8] = 0
+    signal mem3: nat[8] = 0
+
+    // Pointers (2 bits for 4 entries)
+    signal wr_ptr: nat[2] = 0
+    signal rd_ptr: nat[2] = 0
+    signal data_count: nat[3] = 0
+
+    // Combinational outputs
+    wr_full = (data_count == 4)
+    rd_empty = (data_count == 0)
+    count = data_count
+
+    // Read data mux (combinational)
+    signal rd_mux: nat[8] = 0
+    rd_mux = if (rd_ptr == 0) { mem0 }
+             else if (rd_ptr == 1) { mem1 }
+             else if (rd_ptr == 2) { mem2 }
+             else { mem3 }
+    rd_data = rd_mux
+
+    on(clk.rise) {
+        if (rst) {
+            // Reset all pointers
+            wr_ptr <= 0
+            rd_ptr <= 0
+            data_count <= 0
+        } else {
+            // Write operation
+            if (wr_en && (data_count < 4)) {
+                if (wr_ptr == 0) {
+                    mem0 <= wr_data
+                } else if (wr_ptr == 1) {
+                    mem1 <= wr_data
+                } else if (wr_ptr == 2) {
+                    mem2 <= wr_data
+                } else {
+                    mem3 <= wr_data
+                }
+                wr_ptr <= (wr_ptr + 1) % 4
+            }
+
+            // Read operation
+            if (rd_en && (data_count > 0)) {
+                rd_ptr <= (rd_ptr + 1) % 4
+            }
+
+            // Update count
+            if (wr_en && !rd_en && (data_count < 4)) {
+                data_count <= data_count + 1
+            } else if (!wr_en && rd_en && (data_count > 0)) {
+                data_count <= data_count - 1
+            }
+        }
+    }
+}

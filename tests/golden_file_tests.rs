@@ -47,6 +47,50 @@ fn test_counter_codegen_golden() {
 }
 
 #[test]
+fn test_comparison_in_if_golden() {
+    // Regression test for comparison bug where `if (x == 0)` was compiled as `if (x)`
+    let source = r#"
+entity TestComparison {
+    in clk: clock
+    in rst: reset
+    in x: nat[2]
+    out y: bit
+}
+
+impl TestComparison {
+    signal result: bit = 0
+
+    on(clk.rise) {
+        if (rst) {
+            result <= 0
+        } else {
+            if (x == 0) {
+                result <= 1
+            } else {
+                result <= 0
+            }
+        }
+    }
+
+    y = result
+}
+"#;
+
+    let golden = GoldenTest::new("comparison_in_if");
+    let verilog = compile_to_verilog(source);
+
+    // Should contain "== 0" comparison, not just a bare signal reference
+    // The bug was that `if (x == 0)` compiled to `if (x)` instead of `if (x == 0)`
+    assert!(
+        verilog.contains("== 0"),
+        "Generated Verilog should contain comparison '== 0', got:\n{}",
+        verilog
+    );
+
+    golden.assert_eq("sv", &verilog);
+}
+
+#[test]
 fn test_simple_adder_golden() {
     let source = r#"
 entity Adder {
