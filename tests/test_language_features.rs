@@ -198,7 +198,6 @@ impl TestOutput {
 }
 
 #[test]
-#[ignore] // inout not implemented yet
 fn test_inout_port() {
     let source = r#"
 entity TestInout {
