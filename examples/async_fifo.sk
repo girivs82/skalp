@@ -1,0 +1,151 @@
+// Asynchronous FIFO with independent read and write clock domains
+// This demonstrates proper Clock Domain Crossing (CDC) using Gray code pointers
+
+entity AsyncFifo {
+    // Write domain ports
+    in wr_clk: clock
+    in wr_rst: reset(active_high)
+    in wr_en: bit
+    in wr_data: bit[8]
+    out wr_full: bit
+
+    // Read domain ports
+    in rd_clk: clock
+    in rd_rst: reset(active_high)
+    in rd_en: bit
+    out rd_data: bit[8]
+    out rd_empty: bit
+}
+
+impl AsyncFifo {
+    // Memory array (16 deep, 8 bits wide)
+    signal mem0: bit[8]
+    signal mem1: bit[8]
+    signal mem2: bit[8]
+    signal mem3: bit[8]
+    signal mem4: bit[8]
+    signal mem5: bit[8]
+    signal mem6: bit[8]
+    signal mem7: bit[8]
+    signal mem8: bit[8]
+    signal mem9: bit[8]
+    signal mem10: bit[8]
+    signal mem11: bit[8]
+    signal mem12: bit[8]
+    signal mem13: bit[8]
+    signal mem14: bit[8]
+    signal mem15: bit[8]
+
+    // Write domain pointers (5 bits: 4-bit addr + 1 for full/empty detection)
+    signal wr_ptr: bit[5]
+    signal wr_ptr_gray: bit[5]
+
+    // Read domain pointers
+    signal rd_ptr: bit[5]
+    signal rd_ptr_gray: bit[5]
+
+    // CDC synchronizers (2-stage for metastability)
+    signal rd_ptr_gray_sync1: bit[5]  // In write domain
+    signal rd_ptr_gray_sync2: bit[5]  // In write domain
+    signal wr_ptr_gray_sync1: bit[5]  // In read domain
+    signal wr_ptr_gray_sync2: bit[5]  // In read domain
+
+    // Write domain logic
+    on(wr_clk.rise) {
+        if wr_rst {
+            wr_ptr <= 0
+            wr_ptr_gray <= 0
+            rd_ptr_gray_sync1 <= 0
+            rd_ptr_gray_sync2 <= 0
+        } else {
+            // Synchronize read pointer from read domain (2-flop synchronizer)
+            rd_ptr_gray_sync1 <= rd_ptr_gray
+            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1
+
+            // Write operation
+            if wr_en && !wr_full {
+                let wr_addr = wr_ptr[3:0]
+
+                // Write to memory array (using match for synthesis)
+                match wr_addr {
+                    0x0 => mem0 <= wr_data
+                    0x1 => mem1 <= wr_data
+                    0x2 => mem2 <= wr_data
+                    0x3 => mem3 <= wr_data
+                    0x4 => mem4 <= wr_data
+                    0x5 => mem5 <= wr_data
+                    0x6 => mem6 <= wr_data
+                    0x7 => mem7 <= wr_data
+                    0x8 => mem8 <= wr_data
+                    0x9 => mem9 <= wr_data
+                    0xA => mem10 <= wr_data
+                    0xB => mem11 <= wr_data
+                    0xC => mem12 <= wr_data
+                    0xD => mem13 <= wr_data
+                    0xE => mem14 <= wr_data
+                    _ => mem15 <= wr_data
+                }
+
+                // Increment pointer and convert to Gray code
+                let next_wr_ptr = wr_ptr + 1
+                wr_ptr <= next_wr_ptr
+                // Binary to Gray: G = B XOR (B >> 1)
+                wr_ptr_gray <= next_wr_ptr ^ (next_wr_ptr >> 1)
+            }
+        }
+    }
+
+    // Read domain logic
+    on(rd_clk.rise) {
+        if rd_rst {
+            rd_ptr <= 0
+            rd_ptr_gray <= 0
+            wr_ptr_gray_sync1 <= 0
+            wr_ptr_gray_sync2 <= 0
+        } else {
+            // Synchronize write pointer from write domain (2-flop synchronizer)
+            wr_ptr_gray_sync1 <= wr_ptr_gray
+            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1
+
+            // Read operation
+            if rd_en && !rd_empty {
+                // Increment pointer and convert to Gray code
+                let next_rd_ptr = rd_ptr + 1
+                rd_ptr <= next_rd_ptr
+                // Binary to Gray: G = B XOR (B >> 1)
+                rd_ptr_gray <= next_rd_ptr ^ (next_rd_ptr >> 1)
+            }
+        }
+    }
+
+    // Combinational logic for status flags
+
+    // Full flag: write pointer + 1 would equal synced read pointer (in write domain)
+    let wr_ptr_next = wr_ptr + 1
+    let wr_ptr_next_gray = wr_ptr_next ^ (wr_ptr_next >> 1)
+    wr_full = (wr_ptr_next_gray == rd_ptr_gray_sync2)
+
+    // Empty flag: read pointer equals synced write pointer (in read domain)
+    rd_empty = (rd_ptr_gray == wr_ptr_gray_sync2)
+
+    // Read data output - combinational mux from memory
+    let rd_addr = rd_ptr[3:0]
+    rd_data = match rd_addr {
+        0x0 => mem0
+        0x1 => mem1
+        0x2 => mem2
+        0x3 => mem3
+        0x4 => mem4
+        0x5 => mem5
+        0x6 => mem6
+        0x7 => mem7
+        0x8 => mem8
+        0x9 => mem9
+        0xA => mem10
+        0xB => mem11
+        0xC => mem12
+        0xD => mem13
+        0xE => mem14
+        _ => mem15
+    }
+}

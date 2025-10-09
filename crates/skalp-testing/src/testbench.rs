@@ -88,8 +88,26 @@ impl Testbench {
         self
     }
 
-    /// Apply pending inputs and run for N clock cycles
+    /// Apply pending inputs and run for N clock cycles (uses default clock "clk")
+    ///
+    /// # Parameters
+    /// - `cycles`: Number of clock cycles to run (NOT a signal value)
     pub async fn clock(&mut self, cycles: usize) -> &mut Self {
+        self.clock_signal("clk", cycles).await
+    }
+
+    /// Apply pending inputs and run for N cycles on a specific clock signal
+    ///
+    /// # Parameters
+    /// - `clock_name`: Name of the clock signal (e.g., "clk", "wr_clk", "rd_clk")
+    /// - `cycles`: Number of clock cycles to run (NOT a signal value)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Run 3 cycles on the write clock
+    /// tb.clock_signal("wr_clk", 3).await;
+    /// ```
+    pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
         // Apply all pending inputs
         for (signal, value) in self.pending_inputs.drain() {
             self.sim.set_input(&signal, value).await.unwrap();
@@ -97,9 +115,56 @@ impl Testbench {
 
         // Run clock cycles
         for _ in 0..cycles {
-            self.sim.set_input("clk", vec![0]).await.unwrap();
+            self.sim.set_input(clock_name, vec![0]).await.unwrap();
             self.sim.step_simulation().await.unwrap();
-            self.sim.set_input("clk", vec![1]).await.unwrap();
+            self.sim.set_input(clock_name, vec![1]).await.unwrap();
+            self.sim.step_simulation().await.unwrap();
+            self.cycle_count += 1;
+        }
+
+        self
+    }
+
+    /// Toggle multiple clocks independently - useful for CDC testing
+    ///
+    /// # Parameters
+    /// - `clocks`: Array of (clock_name, num_cycles) tuples
+    ///   - Each tuple specifies a clock and how many cycles to run it
+    ///   - The numbers are cycle counts, NOT signal values
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Run 1 cycle on wr_clk AND 2 cycles on rd_clk simultaneously
+    /// // This simulates rd_clk being 2x faster than wr_clk
+    /// tb.clock_multi(&[("wr_clk", 1), ("rd_clk", 2)]).await;
+    /// //                           ^               ^
+    /// //                    1 = num cycles   2 = num cycles
+    /// ```
+    pub async fn clock_multi(&mut self, clocks: &[(&str, usize)]) -> &mut Self {
+        // Apply all pending inputs first
+        for (signal, value) in self.pending_inputs.drain() {
+            self.sim.set_input(&signal, value).await.unwrap();
+        }
+
+        // Find the maximum number of cycles across all clocks
+        let max_cycles = clocks.iter().map(|(_, c)| c).max().copied().unwrap_or(0);
+
+        for cycle in 0..max_cycles {
+            // For each clock, toggle if we're within its cycle count
+            for (clock_name, clock_cycles) in clocks {
+                if cycle < *clock_cycles {
+                    // Low phase
+                    self.sim.set_input(clock_name, vec![0]).await.unwrap();
+                }
+            }
+            self.sim.step_simulation().await.unwrap();
+
+            for (clock_name, clock_cycles) in clocks {
+                if cycle < *clock_cycles {
+                    // High phase
+                    self.sim.set_input(clock_name, vec![1]).await.unwrap();
+                }
+            }
             self.sim.step_simulation().await.unwrap();
             self.cycle_count += 1;
         }

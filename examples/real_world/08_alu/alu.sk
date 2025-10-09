@@ -1,0 +1,34 @@
+// Simple ALU with Match Expression
+//
+// Demonstrates match expressions for operation decoding
+// Features:
+// - 8 operations (add, sub, and, or, xor, shl, shr, eq)
+// - Match expression for clean operation selection
+// - Combinational logic
+
+entity ALU {
+    in a: nat[8]
+    in b: nat[8]
+    in op: nat[3]
+    out result: nat[8]
+    out zero: bit
+}
+
+impl ALU {
+    signal alu_out: nat[8]
+
+    // Match on operation code
+    alu_out = match op {
+        0 => a + b,           // ADD
+        1 => a - b,           // SUB
+        2 => a & b,           // AND  
+        3 => a | b,           // OR
+        4 => a ^ b,           // XOR
+        5 => a * 2,           // SHL (multiply by 2)
+        6 => a / 2,           // SHR (divide by 2)
+        7 => (a == b) as nat[8]  // EQ
+    }
+
+    result = alu_out
+    zero = (alu_out == 0) as bit
+}

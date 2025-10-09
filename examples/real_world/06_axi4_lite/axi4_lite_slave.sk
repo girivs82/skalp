@@ -1,0 +1,216 @@
+// AXI4-Lite Slave with 4 Registers
+//
+// Implements a simple AXI4-Lite slave interface with 4 32-bit registers
+// Demonstrates struct types for bus interfaces and state machines with enums
+//
+// Features:
+// - AXI4-Lite protocol compliance  
+// - Read/write to 4 registers
+// - Proper handshaking (VALID/READY)
+// - Address decoding
+// - Struct types for address/data channels
+// - Enum for FSM states
+
+// AXI4-Lite Write Address Channel
+struct AxiWriteAddr {
+    valid: bit,
+    ready: bit,
+    addr: nat[4]
+}
+
+// AXI4-Lite Write Data Channel  
+struct AxiWriteData {
+    valid: bit,
+    ready: bit,
+    data: nat[32],
+    strb: nat[4]
+}
+
+// AXI4-Lite Write Response Channel
+struct AxiWriteResp {
+    valid: bit,
+    ready: bit,
+    resp: nat[2]
+}
+
+// AXI4-Lite Read Address Channel
+struct AxiReadAddr {
+    valid: bit,
+    ready: bit,
+    addr: nat[4]
+}
+
+// AXI4-Lite Read Data Channel
+struct AxiReadData {
+    valid: bit,
+    ready: bit,
+    data: nat[32],
+    resp: nat[2]
+}
+
+// AXI State Machine
+enum AxiState {
+    IDLE = 0,
+    WRITE_ADDR = 1,
+    WRITE_DATA = 2,
+    WRITE_RESP = 3,
+    READ_ADDR = 4,
+    READ_DATA = 5
+}
+
+entity Axi4LiteSlave {
+    in clk: clock
+    in rst: reset
+
+    // Write Address Channel
+    in awvalid: bit
+    out awready: bit
+    in awaddr: nat[4]
+
+    // Write Data Channel
+    in wvalid: bit
+    out wready: bit
+    in wdata: nat[32]
+    in wstrb: nat[4]
+
+    // Write Response Channel
+    out bvalid: bit
+    in bready: bit
+    out bresp: nat[2]
+
+    // Read Address Channel
+    in arvalid: bit
+    out arready: bit
+    in araddr: nat[4]
+
+    // Read Data Channel
+    out rvalid: bit
+    in rready: bit
+    out rdata: nat[32]
+    out rresp: nat[2]
+}
+
+impl Axi4LiteSlave {
+    // Internal registers (4 x 32-bit)
+    signal reg0: nat[32] = 0
+    signal reg1: nat[32] = 0
+    signal reg2: nat[32] = 0
+    signal reg3: nat[32] = 0
+
+    // FSM state
+    signal state: AxiState = AxiState::IDLE
+
+    // Latched address for write/read
+    signal addr_latch: nat[4] = 0
+
+    // Response signals
+    signal resp_valid: bit = 0
+    signal read_valid: bit = 0
+    signal read_data_reg: nat[32] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            state <= AxiState::IDLE
+            resp_valid <= 0
+            read_valid <= 0
+            addr_latch <= 0
+            reg0 <= 0
+            reg1 <= 0
+            reg2 <= 0
+            reg3 <= 0
+        } else {
+            // FSM transitions
+            if (state == AxiState::IDLE) {
+                // Check for write or read request
+                if (awvalid == 1) {
+                    state <= AxiState::WRITE_ADDR
+                    addr_latch <= awaddr
+                } else {
+                    if (arvalid == 1) {
+                        state <= AxiState::READ_ADDR
+                        addr_latch <= araddr
+                    }
+                }
+            } else {
+                if (state == AxiState::WRITE_ADDR) {
+                    // Wait for write data
+                    if (wvalid == 1) {
+                        state <= AxiState::WRITE_DATA
+                        // Perform write based on address
+                        if (addr_latch == 0) {
+                            reg0 <= wdata
+                        } else {
+                            if (addr_latch == 4) {
+                                reg1 <= wdata
+                            } else {
+                                if (addr_latch == 8) {
+                                    reg2 <= wdata
+                                } else {
+                                    if (addr_latch == 12) {
+                                        reg3 <= wdata
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (state == AxiState::WRITE_DATA) {
+                        // Send write response
+                        state <= AxiState::WRITE_RESP
+                        resp_valid <= 1
+                    } else {
+                        if (state == AxiState::WRITE_RESP) {
+                            // Wait for response handshake
+                            if (bready == 1) {
+                                state <= AxiState::IDLE
+                                resp_valid <= 0
+                            }
+                        } else {
+                            if (state == AxiState::READ_ADDR) {
+                                // Perform read based on address
+                                state <= AxiState::READ_DATA
+                                read_valid <= 1
+                                if (addr_latch == 0) {
+                                    read_data_reg <= reg0
+                                } else {
+                                    if (addr_latch == 4) {
+                                        read_data_reg <= reg1
+                                    } else {
+                                        if (addr_latch == 8) {
+                                            read_data_reg <= reg2
+                                        } else {
+                                            if (addr_latch == 12) {
+                                                read_data_reg <= reg3
+                                            } else {
+                                                read_data_reg <= 0
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                if (state == AxiState::READ_DATA) {
+                                    // Wait for read data handshake
+                                    if (rready == 1) {
+                                        state <= AxiState::IDLE
+                                        read_valid <= 0
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Output assignments
+    awready = (state == AxiState::IDLE) as bit
+    wready = (state == AxiState::WRITE_ADDR) as bit
+    bvalid = resp_valid
+    bresp = 0  // OKAY response
+
+    arready = (state == AxiState::IDLE) as bit
+    rvalid = read_valid
+    rdata = read_data_reg
+    rresp = 0  // OKAY response
+}

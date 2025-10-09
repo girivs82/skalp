@@ -1,0 +1,46 @@
+// 8-Register File with Dual-Port Read
+//
+// Demonstrates arrays and address decoding
+// Features:
+// - 8 registers of 32 bits each
+// - 1 write port
+// - 2 read ports
+// - Synchronous write, combinational read
+
+entity RegisterFile {
+    in clk: clock
+    in rst: reset
+
+    // Write port
+    in we: bit
+    in waddr: nat[3]
+    in wdata: nat[32]
+
+    // Read port A
+    in raddr_a: nat[3]
+    out rdata_a: nat[32]
+
+    // Read port B
+    in raddr_b: nat[3]
+    out rdata_b: nat[32]
+}
+
+impl RegisterFile {
+    // 8 registers
+    signal regs: nat[32][8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            regs <= 0
+        } else {
+            if (we == 1) {
+                // Write to register
+                regs[waddr] <= wdata
+            }
+        }
+    }
+
+    // Combinational reads
+    rdata_a = regs[raddr_a]
+    rdata_b = regs[raddr_b]
+}
