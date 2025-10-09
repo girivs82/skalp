@@ -132,7 +132,6 @@ impl TestEnum {
 }
 
 #[test]
-#[ignore] // Arrays not implemented yet
 fn test_array_type_signal() {
     let source = r#"
 entity TestArray {
@@ -150,7 +149,6 @@ impl TestArray {
 }
 
 #[test]
-#[ignore] // Arrays not implemented yet
 fn test_array_type_port() {
     let source = r#"
 entity TestArrayPort {

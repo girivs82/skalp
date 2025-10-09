@@ -2236,7 +2236,11 @@ impl<'a> ParseState<'a> {
                 break;
             }
             self.parse_struct_field();
-            self.consume_semicolon();
+
+            // Consume optional separator (semicolon or comma)
+            if self.at(SyntaxKind::Semicolon) || self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
         }
 
         self.finish_node();
@@ -2311,8 +2315,13 @@ impl<'a> ParseState<'a> {
         // Variant name
         self.expect(SyntaxKind::Ident);
 
+        // Optional discriminant value: NAME = expr
+        if self.at(SyntaxKind::Assign) {
+            self.bump(); // consume =
+            self.parse_expression(); // parse discriminant value
+        }
         // Optional variant data
-        if self.at(SyntaxKind::LParen) {
+        else if self.at(SyntaxKind::LParen) {
             // Tuple variant
             self.bump(); // (
 
@@ -2384,7 +2393,11 @@ impl<'a> ParseState<'a> {
                 break;
             }
             self.parse_union_field();
-            self.consume_semicolon();
+
+            // Consume optional separator (semicolon or comma)
+            if self.at(SyntaxKind::Semicolon) || self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
         }
 
         self.finish_node();
