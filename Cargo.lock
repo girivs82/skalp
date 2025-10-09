@@ -2528,6 +2528,7 @@ version = "0.1.0"
 name = "skalp-testing"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arbitrary",
  "log",
  "proptest",
@@ -2537,7 +2538,9 @@ dependencies = [
  "serde",
  "skalp-frontend",
  "skalp-lir",
+ "skalp-mir",
  "skalp-sim",
+ "skalp-sir",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",

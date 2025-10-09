@@ -13,6 +13,7 @@ pub mod generators;
 pub mod golden;
 pub mod harness;
 pub mod strategies;
+pub mod testbench;
 
 use skalp_lir::LirDesign;
 use std::collections::HashMap;
