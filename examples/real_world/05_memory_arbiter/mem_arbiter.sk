@@ -1,0 +1,191 @@
+// 4-Port Memory Arbiter with Round-Robin and Priority
+//
+// Arbitrates access to a shared memory resource among 4 requesters
+// Supports both priority-based and round-robin arbitration modes
+//
+// Features:
+// - 4 independent request channels
+// - Configurable priority levels
+// - Fair round-robin arbitration
+// - Single-cycle grant latency
+// - No starvation in round-robin mode
+
+entity MemArbiter {
+    in clk: clock
+    in rst: reset
+
+    // Arbiter configuration
+    in priority_mode: bit  // 0=round-robin, 1=fixed priority
+
+    // Request channels (4 ports)
+    in req0: bit
+    in req1: bit
+    in req2: bit
+    in req3: bit
+
+    // Priority levels (only used in priority mode)
+    // Higher value = higher priority
+    in prio0: nat[2]
+    in prio1: nat[2]
+    in prio2: nat[2]
+    in prio3: nat[2]
+
+    // Grant signals (one-hot encoded)
+    out gnt0: bit
+    out gnt1: bit
+    out gnt2: bit
+    out gnt3: bit
+
+    // Status
+    out active: bit        // At least one request granted
+    out granted_id: nat[2] // ID of currently granted port
+}
+
+impl MemArbiter {
+    // Round-robin state: tracks last granted port
+    signal last_grant: nat[2] = 0
+
+    // Grant calculation signals
+    signal grant_vec: nat[4] = 0  // One-hot grant vector
+    signal any_granted: bit = 0
+
+    // Priority mode signals - need to be declared here
+    signal winner: nat[2] = 0
+    signal max_prio: nat[2] = 0
+
+    // Output assignments
+    gnt0 = (grant_vec / 1) % 2
+    gnt1 = (grant_vec / 2) % 2
+    gnt2 = (grant_vec / 4) % 2
+    gnt3 = (grant_vec / 8) % 2
+    active = any_granted
+    granted_id = (gnt0 * 0) + (gnt1 * 1) + (gnt2 * 2) + (gnt3 * 3)
+
+    on(clk.rise) {
+        if (rst) {
+            last_grant <= 0
+            grant_vec <= 0
+            any_granted <= 0
+        } else {
+            if (priority_mode == 1) {
+                // Priority-based arbitration
+                // Find highest priority requester
+
+                // Check if any requests active
+                if (req0 == 0 && req1 == 0 && req2 == 0 && req3 == 0) {
+                    grant_vec <= 0
+                    any_granted <= 0
+                } else {
+                    // Find max priority among active requesters
+                    // Start with port 0
+                    if (req0 == 1) {
+                        winner <= 0
+                        max_prio <= prio0
+                    } else {
+                        winner <= 0
+                        max_prio <= 0
+                    }
+
+                    if (req1 == 1 && prio1 > max_prio) {
+                        winner <= 1
+                        max_prio <= prio1
+                    }
+
+                    if (req2 == 1 && prio2 > max_prio) {
+                        winner <= 2
+                        max_prio <= prio2
+                    }
+
+                    if (req3 == 1 && prio3 > max_prio) {
+                        winner <= 3
+                        max_prio <= prio3
+                    }
+
+                    // Set grant vector based on winner
+                    if (winner == 0) {
+                        grant_vec <= 1
+                    } else if (winner == 1) {
+                        grant_vec <= 2
+                    } else if (winner == 2) {
+                        grant_vec <= 4
+                    } else {
+                        grant_vec <= 8
+                    }
+                    any_granted <= 1
+                }
+            } else {
+                // Round-robin arbitration
+                // Start searching from next port after last grant
+
+                if (req0 == 0 && req1 == 0 && req2 == 0 && req3 == 0) {
+                    grant_vec <= 0
+                    any_granted <= 0
+                } else {
+                    // Search in round-robin order
+                    if (last_grant == 0) {
+                        // Check 1, 2, 3, 0
+                        if (req1 == 1) {
+                            grant_vec <= 2
+                            last_grant <= 1
+                        } else if (req2 == 1) {
+                            grant_vec <= 4
+                            last_grant <= 2
+                        } else if (req3 == 1) {
+                            grant_vec <= 8
+                            last_grant <= 3
+                        } else if (req0 == 1) {
+                            grant_vec <= 1
+                            last_grant <= 0
+                        }
+                    } else if (last_grant == 1) {
+                        // Check 2, 3, 0, 1
+                        if (req2 == 1) {
+                            grant_vec <= 4
+                            last_grant <= 2
+                        } else if (req3 == 1) {
+                            grant_vec <= 8
+                            last_grant <= 3
+                        } else if (req0 == 1) {
+                            grant_vec <= 1
+                            last_grant <= 0
+                        } else if (req1 == 1) {
+                            grant_vec <= 2
+                            last_grant <= 1
+                        }
+                    } else if (last_grant == 2) {
+                        // Check 3, 0, 1, 2
+                        if (req3 == 1) {
+                            grant_vec <= 8
+                            last_grant <= 3
+                        } else if (req0 == 1) {
+                            grant_vec <= 1
+                            last_grant <= 0
+                        } else if (req1 == 1) {
+                            grant_vec <= 2
+                            last_grant <= 1
+                        } else if (req2 == 1) {
+                            grant_vec <= 4
+                            last_grant <= 2
+                        }
+                    } else {
+                        // last_grant == 3: Check 0, 1, 2, 3
+                        if (req0 == 1) {
+                            grant_vec <= 1
+                            last_grant <= 0
+                        } else if (req1 == 1) {
+                            grant_vec <= 2
+                            last_grant <= 1
+                        } else if (req2 == 1) {
+                            grant_vec <= 4
+                            last_grant <= 2
+                        } else if (req3 == 1) {
+                            grant_vec <= 8
+                            last_grant <= 3
+                        }
+                    }
+                    any_granted <= 1
+                }
+            }
+        }
+    }
+}

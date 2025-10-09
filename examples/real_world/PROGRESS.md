@@ -9,7 +9,7 @@ Validate SKALP language design by creating 10 progressively complex hardware exa
 
 ---
 
-## Completed Examples (3/10)
+## Completed Examples (4/10)
 
 ### ✅ Example 1: Simple FIFO (4 entries × 8 bits)
 **Status:** Compiles ✓ | Simulated ⏳
@@ -56,13 +56,24 @@ Validate SKALP language design by creating 10 progressively complex hardware exa
 **LOC:** 92 lines
 **Real Use:** Flash, ADC/DAC, SD cards
 
+### ✅ Example 4: I2C Master Controller (100kHz)
+**Status:** Compiles ✓ | Simulated ⏳
+
+**Features Used:**
+- Complex 8-state FSM
+- Clock divider with phase tracking
+- Shift registers for serial communication
+- Bidirectional signaling (via in/out/oe workaround)
+- START/STOP condition generation
+- ACK/NACK detection
+
+**Complexity:** ⭐⭐⭐ Advanced
+**LOC:** 290 lines
+**Real Use:** Sensor communication, EEPROM, RTC, displays
+
 ---
 
-## Examples In Progress (7/10)
-
-### 🔨 Example 4: I2C Controller
-**Status:** Not started
-**Features:** Bidirectional signals, tristate, multi-state FSM, ACK/NACK
+## Examples In Progress (6/10)
 
 ### 📋 Example 5: Memory Arbiter
 **Status:** Not started
@@ -163,6 +174,11 @@ These language features haven't been needed yet:
 4. **Bool type for control signals** - Had to use `bit` instead
    - **Workaround:** Use bit for booleans
    - **Impact:** Minor, confusing semantics
+
+5. **Bidirectional ports (inout)** - No support for `inout` keyword for tristate/bidirectional signals
+   - **Workaround:** Use separate `in`/`out`/`oe` (output enable) signals
+   - **Impact:** Cannot express true tristate I/O, less realistic hardware models
+   - **Example:** I2C SDA line needs tristate but must use sda_in/sda_out/sda_oe workaround
 
 ---
 
