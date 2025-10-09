@@ -2443,6 +2443,8 @@ impl<'a> ParseState<'a> {
 
     /// Parse type annotation
     fn parse_type(&mut self) {
+        // Save a checkpoint BEFORE starting TypeAnnotation so we can wrap it later
+        let type_checkpoint = self.builder.checkpoint();
         self.start_node(SyntaxKind::TypeAnnotation);
 
         match self.current_kind() {
@@ -2552,7 +2554,26 @@ impl<'a> ParseState<'a> {
             }
         }
 
-        self.finish_node();
+        self.finish_node(); // finish TypeAnnotation
+
+        // After parsing the base type, check for postfix array dimensions: T[N][M]
+        // This allows syntax like nat[8][4] meaning "array of 4 elements of nat[8]"
+        // Each `[N]` wraps the previous type in an ArrayType node
+        while self.at(SyntaxKind::LBracket) {
+            // Wrap everything parsed so far in an ArrayType using the saved checkpoint
+            self.builder.start_node_at(type_checkpoint, rowan::SyntaxKind(SyntaxKind::ArrayType as u16));
+
+            self.bump(); // consume [
+            self.parse_expression(); // array size
+            self.expect(SyntaxKind::RBracket);
+
+            self.finish_node(); // finish ArrayType
+
+            // Note: We reuse the same checkpoint, which means each ArrayType wraps
+            // all previous content. For nat[8][4], this creates:
+            // ArrayType { TypeAnnotation { NatType[8] }, 4 }
+            // This is correct: "array of 4 elements of nat[8]"
+        }
     }
 
     /// Parse array type [T; N]

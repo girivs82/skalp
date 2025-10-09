@@ -3141,19 +3141,33 @@ impl HirBuilderContext {
 
     /// Build array type
     fn build_array_type(&mut self, node: &SyntaxNode) -> HirType {
-        // Array syntax: [Type; Size]
-        // Children: [0] TypeAnnotation/Type, [1] Size expression
-        let mut children = node.children();
+        // Array syntax can be either:
+        // 1. Rust-style: [Type; Size] - used by parse_array_type()
+        // 2. Postfix style: Type[Size] - created by parse_type() with start_node_at()
 
-        // First child is the element type
-        let elem_type = if let Some(elem) = children.next() {
-            Box::new(self.extract_hir_type(&elem))
+        // Collect all children that are types or expressions
+        let children: Vec<_> = node.children().collect();
+
+        // For postfix style Type[Size], the structure is:
+        // ArrayType
+        //   ├─ TypeAnnotation (contains the element type like NatType[8])
+        //   └─ LiteralExpr/Expression (the array size)
+
+        // For Rust style [Type; Size], the structure is:
+        // ArrayType
+        //   ├─ TypeAnnotation/Type (element type)
+        //   └─ Expression (array size)
+
+        // Try to find element type and size
+        let elem_type = if let Some(first) = children.first() {
+            // The first child should be the element type or TypeAnnotation containing it
+            Box::new(self.extract_hir_type(first))
         } else {
             Box::new(HirType::Bit(8))
         };
 
-        // Second child is the size (could be literal or expression)
-        if let Some(size_node) = children.next() {
+        // Second child (if exists) is the size
+        if let Some(size_node) = children.get(1) {
             // Try to parse as literal first
             if let Some(lit) = size_node.first_token_of_kind(SyntaxKind::IntLiteral) {
                 let size = lit.text().parse::<u32>().unwrap_or(1);
@@ -3161,7 +3175,7 @@ impl HirBuilderContext {
             }
 
             // Otherwise, it's an expression (IdentExpr, BinaryExpr, CallExpr, etc.)
-            if let Some(size_expr) = self.build_expression(&size_node) {
+            if let Some(size_expr) = self.build_expression(size_node) {
                 return HirType::ArrayExpr(elem_type, Box::new(size_expr));
             }
         }
