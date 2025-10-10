@@ -212,7 +212,8 @@ impl CpuRuntime {
 
                     // Get the output width to determine element size
                     let elem_size = if let Some(output) = node.outputs.first() {
-                        self.signal_widths.get(&output.signal_id)
+                        self.signal_widths
+                            .get(&output.signal_id)
                             .map(|&w| w.div_ceil(8))
                             .unwrap_or(1)
                     } else {
@@ -221,17 +222,11 @@ impl CpuRuntime {
 
                     let offset = index * elem_size;
 
-                    eprintln!("DEBUG ArrayRead: index={}, elem_size={}, offset={}, array_len={}, array={:?}",
-                        index, elem_size, offset, array_bytes.len(), array_bytes);
-
                     // Extract element from array
                     if offset + elem_size <= array_bytes.len() {
-                        let result = array_bytes[offset..offset + elem_size].to_vec();
-                        eprintln!("DEBUG ArrayRead result: {:?}", result);
-                        result
+                        array_bytes[offset..offset + elem_size].to_vec()
                     } else {
                         // Out of bounds - return zero
-                        eprintln!("DEBUG ArrayRead: OUT OF BOUNDS");
                         vec![0u8; elem_size]
                     }
                 } else {
@@ -253,15 +248,9 @@ impl CpuRuntime {
                     let elem_size = value.len();
                     let offset = index * elem_size;
 
-                    eprintln!("DEBUG ArrayWrite: index={}, value={:?}, elem_size={}, offset={}, old_array={:?}",
-                        index, value, elem_size, offset, old_array);
-
                     // Update element if within bounds
                     if offset + elem_size <= new_array.len() {
                         new_array[offset..offset + elem_size].copy_from_slice(value);
-                        eprintln!("DEBUG ArrayWrite: new_array={:?}", new_array);
-                    } else {
-                        eprintln!("DEBUG ArrayWrite: OUT OF BOUNDS");
                     }
 
                     new_array

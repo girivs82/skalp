@@ -663,10 +663,6 @@ impl SimpleRegFile {
             sim.step_simulation().await.unwrap();
 
             let rdata = sim.get_output("rdata").await.unwrap();
-            eprintln!(
-                "CPU RegFile: addr={}, expected=0x{:02x}, got=0x{:02x}",
-                addr, expected, rdata[0]
-            );
             assert_eq!(
                 rdata[0], expected,
                 "Register {} should contain 0x{:02x}, got 0x{:02x}",

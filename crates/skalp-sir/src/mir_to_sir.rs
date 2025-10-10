@@ -2,26 +2,44 @@ use crate::sir::*;
 use skalp_mir::mir::PortDirection as MirPortDirection;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::{
-    Block, DataType, EdgeType, Expression, IfStatement, LValue, Module, ProcessKind,
+    Block, DataType, EdgeType, Expression, IfStatement, LValue, Mir, Module, ProcessKind,
     SensitivityList, Statement, Value,
 };
 use std::collections::HashMap;
 
+/// Convert MIR to SIR with full hierarchical elaboration
+/// This function takes the entire Mir (all modules) and elaborates the first module
+/// by recursively flattening all instantiated submodules
 pub fn convert_mir_to_sir(mir_module: &Module) -> SirModule {
+    // For backward compatibility, create a minimal Mir with just this module
+    let mir = Mir {
+        name: "design".to_string(),
+        modules: vec![mir_module.clone()],
+    };
+    convert_mir_to_sir_with_hierarchy(&mir, mir_module)
+}
+
+/// Convert MIR to SIR with hierarchical elaboration
+/// Takes the full Mir design (all modules) to resolve instances
+pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirModule {
     println!(
-        "🌟 MIR TO SIR: Starting conversion for module '{}'",
-        mir_module.name
+        "🌟 MIR TO SIR: Starting hierarchical conversion for module '{}'",
+        top_module.name
     );
 
-    let mut sir = SirModule::new(mir_module.name.clone());
-    let mut converter = MirToSirConverter::new(&mut sir, mir_module);
+    let mut sir = SirModule::new(top_module.name.clone());
+    let mut converter = MirToSirConverter::new(&mut sir, top_module, mir);
 
     converter.convert_ports();
     converter.convert_signals();
     converter.convert_logic();
+
+    // CRITICAL: Flatten hierarchical instances
+    converter.flatten_instances("");
+
     converter.extract_clock_domains();
 
-    println!("🌟 MIR TO SIR: Conversion complete");
+    println!("🌟 MIR TO SIR: Hierarchical conversion complete");
     println!(
         "📥 INPUTS: {:?}",
         sir.inputs.iter().map(|i| &i.name).collect::<Vec<_>>()
@@ -61,7 +79,8 @@ pub fn convert_mir_to_sir(mir_module: &Module) -> SirModule {
 
 struct MirToSirConverter<'a> {
     sir: &'a mut SirModule,
-    mir: &'a Module,
+    mir: &'a Module,     // Current module being converted
+    mir_design: &'a Mir, // Full design with all modules for instance resolution
     node_counter: usize,
     #[allow(dead_code)]
     signal_map: HashMap<String, String>,
@@ -70,10 +89,11 @@ struct MirToSirConverter<'a> {
 }
 
 impl<'a> MirToSirConverter<'a> {
-    fn new(sir: &'a mut SirModule, mir: &'a Module) -> Self {
+    fn new(sir: &'a mut SirModule, mir: &'a Module, mir_design: &'a Mir) -> Self {
         MirToSirConverter {
             sir,
             mir,
+            mir_design,
             node_counter: 0,
             signal_map: HashMap::new(),
             conditional_contexts: HashMap::new(),
@@ -1122,14 +1142,33 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_if_in_sequential(&mut self, if_stmt: &IfStatement, clock: &str, edge: ClockEdge) {
-        // First, handle array writes separately since they need special processing
-        self.handle_array_writes_in_if(if_stmt, clock, edge.clone());
+        // First, collect array writes to exclude them from general processing
+        let mut array_writes = Vec::new();
+        println!("   🔍 SCANNING FOR ARRAY WRITES IN IF");
+        self.collect_array_writes(if_stmt, &mut array_writes);
+
+        // Create a set of array names that have been processed
+        let array_names: std::collections::HashSet<String> =
+            array_writes.iter().map(|(_, name)| name.clone()).collect();
+        println!(
+            "   📊 FOUND {} ARRAY WRITES: {:?}",
+            array_writes.len(),
+            array_names
+        );
+
+        // Handle array writes separately since they need special processing
+        self.handle_array_writes_in_if_with_list(if_stmt, clock, edge.clone(), array_writes);
 
         // Synthesis-like approach: collect all conditions and values, then build priority mux
         let mut targets = std::collections::HashSet::new();
         self.collect_assignment_targets(if_stmt, &mut targets);
 
-        println!("   📋 COLLECTED TARGETS: {:?}", targets);
+        println!("   📋 COLLECTED TARGETS (before filtering): {:?}", targets);
+
+        // CRITICAL FIX: Exclude array write targets since they're already handled
+        targets.retain(|target| !array_names.contains(target));
+
+        println!("   📋 COLLECTED TARGETS (after filtering): {:?}", targets);
         println!(
             "   📋 AVAILABLE MIR SIGNALS: {:?}",
             self.mir
@@ -1154,13 +1193,13 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn handle_array_writes_in_if(&mut self, if_stmt: &IfStatement, clock: &str, edge: ClockEdge) {
-        // Collect all array write assignments from the if statement
-        let mut array_writes = Vec::new();
-        println!("   🔍 SCANNING FOR ARRAY WRITES IN IF");
-        self.collect_array_writes(if_stmt, &mut array_writes);
-        println!("   📊 FOUND {} ARRAY WRITES", array_writes.len());
-
+    fn handle_array_writes_in_if_with_list(
+        &mut self,
+        if_stmt: &IfStatement,
+        clock: &str,
+        edge: ClockEdge,
+        array_writes: Vec<(LValue, String)>,
+    ) {
         // Process each unique array write
         for (array_base, array_name) in array_writes {
             println!(
@@ -1940,7 +1979,10 @@ impl<'a> MirToSirConverter<'a> {
             kind: SirNodeKind::SignalRef {
                 signal: signal_name.to_string(),
             },
-            inputs: vec![],
+            inputs: vec![SignalRef {
+                signal_id: signal_name.to_string(),
+                bit_range: None,
+            }],
             outputs: vec![SignalRef {
                 signal_id: signal_id.clone(),
                 bit_range: None,
@@ -2840,6 +2882,1020 @@ impl<'a> MirToSirConverter<'a> {
 
         // Default to 8 bits for the counter example
         8
+    }
+
+    /// Flatten hierarchical module instances into the SIR
+    /// This recursively elaborates all instances, creating unique signals/states for each
+    ///
+    /// # Arguments
+    /// * `instance_prefix` - Hierarchical path prefix (e.g., "stage1." for nested instances)
+    fn flatten_instances(&mut self, instance_prefix: &str) {
+        println!(
+            "🔧 Flattening instances in module '{}' with prefix '{}'",
+            self.mir.name, instance_prefix
+        );
+
+        // Clone the instances list to avoid borrow checker issues
+        let instances = self.mir.instances.clone();
+
+        for instance in &instances {
+            println!(
+                "   📦 Processing instance '{}' of module {:?}",
+                instance.name, instance.module
+            );
+
+            // Find the module being instantiated
+            let child_module = self
+                .mir_design
+                .modules
+                .iter()
+                .find(|m| m.id == instance.module)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Module {:?} not found for instance {}",
+                        instance.module, instance.name
+                    )
+                });
+
+            println!("      ├─ Child module: {}", child_module.name);
+            println!("      ├─ Ports: {}", child_module.ports.len());
+            println!("      ├─ Signals: {}", child_module.signals.len());
+            println!("      ├─ Processes: {}", child_module.processes.len());
+            println!("      └─ Instances: {}", child_module.instances.len());
+
+            // Create hierarchical prefix for this instance
+            let inst_prefix = format!("{}{}", instance_prefix, instance.name);
+
+            // Elaborate child module into parent's SIR
+            self.elaborate_instance(instance, child_module, &inst_prefix);
+        }
+    }
+
+    /// Elaborate a single instance by copying its logic into the parent SIR
+    /// All signals/states are prefixed with the instance path to maintain uniqueness
+    fn elaborate_instance(
+        &mut self,
+        instance: &skalp_mir::ModuleInstance,
+        child_module: &Module,
+        inst_prefix: &str,
+    ) {
+        println!("      🔨 Elaborating instance '{}'", inst_prefix);
+
+        // Step 1: Create signals for child module's internal signals
+        // These get prefixed with instance name (e.g., "stage1.reg")
+        for signal in &child_module.signals {
+            let prefixed_name = format!("{}.{}", inst_prefix, signal.name);
+            let width = self.get_width(&signal.signal_type);
+
+            // Check if this signal is a register in the child module
+            let is_register = self.is_signal_sequential_in_module(signal.id, child_module);
+
+            println!(
+                "         ├─ Signal: {} (width={}, is_reg={})",
+                prefixed_name, width, is_register
+            );
+
+            self.sir.signals.push(SirSignal {
+                name: prefixed_name.clone(),
+                width,
+                driver_node: None,
+                fanout_nodes: Vec::new(),
+                is_state: is_register,
+            });
+
+            if is_register {
+                self.sir.state_elements.insert(
+                    prefixed_name.clone(),
+                    StateElement {
+                        name: prefixed_name,
+                        width,
+                        reset_value: None,
+                        clock: String::new(),
+                        reset: None,
+                    },
+                );
+            }
+        }
+
+        // Step 2: Convert child module's logic with instance prefix
+        // This includes both combinational assignments and sequential processes
+        self.elaborate_child_logic(child_module, inst_prefix, instance);
+
+        // Step 3: Recursively elaborate any instances within the child
+        if !child_module.instances.is_empty() {
+            println!(
+                "         └─ Recursively elaborating {} nested instances",
+                child_module.instances.len()
+            );
+            let nested_prefix = format!("{}.", inst_prefix);
+            self.flatten_instances_for_module(child_module, &nested_prefix);
+        }
+    }
+
+    /// Elaborate child module's logic (assignments and processes) with instance prefix
+    fn elaborate_child_logic(
+        &mut self,
+        child_module: &Module,
+        inst_prefix: &str,
+        instance: &skalp_mir::ModuleInstance,
+    ) {
+        // Create a mapping from child port names to parent expressions
+        // This connects the instance ports to the parent's signals
+        let mut port_mapping: HashMap<String, Expression> = HashMap::new();
+        for (port_name, parent_expr) in &instance.connections {
+            port_mapping.insert(port_name.clone(), parent_expr.clone());
+        }
+
+        // Convert combinational assignments from child module
+        for assign in &child_module.assignments {
+            self.convert_child_assignment(assign, inst_prefix, &port_mapping, child_module);
+        }
+
+        // Convert sequential processes from child module
+        for process in &child_module.processes {
+            self.convert_child_process(process, inst_prefix, &port_mapping, child_module);
+        }
+    }
+
+    /// Convert child module assignment with instance prefix and port mapping
+    fn convert_child_assignment(
+        &mut self,
+        assign: &skalp_mir::ContinuousAssign,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+    ) {
+        // Translate LHS: if it's a port (output), map to parent signal
+        // Otherwise prefix with instance name
+        eprintln!(
+            "🔍 convert_child_assignment: LHS = {:?} in instance {}",
+            assign.lhs, inst_prefix
+        );
+        let lhs_signal = match &assign.lhs {
+            LValue::Signal(sig_id) => {
+                if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                    eprintln!("   → Internal signal: {}.{}", inst_prefix, signal.name);
+                    format!("{}.{}", inst_prefix, signal.name)
+                } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
+                    eprintln!("   → Port: {} (direction={:?})", port.name, port.direction);
+                    // Output port - this connects to parent signal
+                    if let Some(parent_expr) = port_mapping.get(&port.name) {
+                        let parent_sig = self.get_signal_name_from_expression(parent_expr);
+                        eprintln!("   → Mapped to parent signal: {}", parent_sig);
+                        parent_sig
+                    } else {
+                        eprintln!("   ⚠️ Port {} not in connections!", port.name);
+                        format!("{}.{}", inst_prefix, port.name)
+                    }
+                } else {
+                    eprintln!("   ⚠️ Signal {:?} not found", sig_id);
+                    format!("{}.unknown", inst_prefix)
+                }
+            }
+            LValue::Port(port_id) => {
+                eprintln!("   → Direct LValue::Port({:?})", port_id);
+                if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
+                    eprintln!("   → Port: {} (direction={:?})", port.name, port.direction);
+                    if let Some(parent_expr) = port_mapping.get(&port.name) {
+                        let parent_sig = self.get_signal_name_from_expression(parent_expr);
+                        eprintln!("   → Mapped to parent signal: {}", parent_sig);
+                        parent_sig
+                    } else {
+                        eprintln!("   ⚠️ Port {} not in connections!", port.name);
+                        format!("{}.{}", inst_prefix, port.name)
+                    }
+                } else {
+                    eprintln!("   ⚠️ Port {:?} not found", port_id);
+                    format!("{}.unknown_port", inst_prefix)
+                }
+            }
+            _ => {
+                eprintln!("   → Complex LHS: {:?}", assign.lhs);
+                format!("{}.complex_lhs", inst_prefix)
+            }
+        };
+
+        println!("            ├─ Assignment: {} = <expr>", lhs_signal);
+
+        // Translate RHS expression with port mapping
+        let node_id = self.node_counter;
+        self.node_counter += 1;
+
+        // Convert the RHS expression, substituting port references with parent signals
+        self.convert_expression_for_instance(
+            &assign.rhs,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            &lhs_signal,
+            node_id,
+        );
+    }
+
+    /// Convert child process (always block) with instance prefix
+    fn convert_child_process(
+        &mut self,
+        process: &skalp_mir::Process,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+    ) {
+        println!("            ├─ Process: {:?}", process.kind);
+
+        // For sequential processes, we need to:
+        // 1. Extract clock edge from sensitivity list
+        // 2. Map the clock/reset signals through port connections
+        // 3. Create FlipFlop nodes for sequential assignments
+
+        if process.kind == ProcessKind::Sequential {
+            // Extract clock edge info
+            if let SensitivityList::Edge(edges) = &process.sensitivity {
+                if let Some(edge_sens) = edges.first() {
+                    let clock_edge = match edge_sens.edge {
+                        skalp_mir::EdgeType::Rising => ClockEdge::Rising,
+                        skalp_mir::EdgeType::Falling => ClockEdge::Falling,
+                        _ => ClockEdge::Rising, // Default for Both/Active/Inactive
+                    };
+
+                    // Get clock signal name, mapping through ports if needed
+                    let clock_lvalue = &edge_sens.signal;
+                    let clock_signal = if let Some(sig_name) = self.get_signal_from_lvalue(
+                        clock_lvalue,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                    ) {
+                        sig_name
+                    } else {
+                        "clk".to_string()
+                    };
+
+                    // Process sequential block: collect targets, build MUX trees, create FlipFlops
+                    // This mirrors how the regular (non-hierarchical) conversion works
+
+                    // Collect all targets assigned in this sequential block
+                    let mut targets = std::collections::HashSet::new();
+                    for statement in &process.body.statements {
+                        self.collect_assignment_targets_for_instance(
+                            statement,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            &mut targets,
+                        );
+                    }
+
+                    // For each target, synthesize conditional logic and create FlipFlop
+                    for target in targets {
+                        // Build combinational logic (including MUXes for conditionals)
+                        let data_node = self.synthesize_sequential_logic_for_instance(
+                            &process.body.statements,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            &target,
+                        );
+
+                        let node_id = self.node_counter;
+                        self.node_counter += 1;
+
+                        // Create FlipFlop node with clock and synthesized data
+                        let ff_node = SirNode {
+                            id: node_id,
+                            kind: SirNodeKind::FlipFlop {
+                                clock_edge: clock_edge.clone(),
+                            },
+                            inputs: vec![
+                                SignalRef {
+                                    signal_id: clock_signal.clone(),
+                                    bit_range: None,
+                                },
+                                SignalRef {
+                                    signal_id: format!("node_{}_out", data_node),
+                                    bit_range: None,
+                                },
+                            ],
+                            outputs: vec![SignalRef {
+                                signal_id: target.clone(),
+                                bit_range: None,
+                            }],
+                            clock_domain: Some(clock_signal.clone()),
+                        };
+
+                        self.sir.sequential_nodes.push(ff_node);
+
+                        // Mark the signal as having this driver
+                        if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == target) {
+                            sig.driver_node = Some(node_id);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Combinational process
+            for statement in &process.body.statements {
+                self.convert_statement_for_instance(
+                    statement,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    false,
+                );
+            }
+        }
+    }
+
+    /// Collect assignment targets in a sequential block for an instance
+    #[allow(clippy::only_used_in_recursion)]
+    fn collect_assignment_targets_for_instance(
+        &self,
+        statement: &Statement,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        targets: &mut std::collections::HashSet<String>,
+    ) {
+        match statement {
+            Statement::Assignment(assign) => {
+                // Get LHS signal name with prefix
+                let lhs_signal = match &assign.lhs {
+                    LValue::Signal(sig_id) => {
+                        if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id)
+                        {
+                            format!("{}.{}", inst_prefix, signal.name)
+                        } else {
+                            return; // Skip if not found
+                        }
+                    }
+                    _ => return,
+                };
+                targets.insert(lhs_signal);
+            }
+            Statement::If(if_stmt) => {
+                // Recursively collect from both branches
+                for stmt in &if_stmt.then_block.statements {
+                    self.collect_assignment_targets_for_instance(
+                        stmt,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        targets,
+                    );
+                }
+                if let Some(else_block) = &if_stmt.else_block {
+                    for stmt in &else_block.statements {
+                        self.collect_assignment_targets_for_instance(
+                            stmt,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            targets,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Synthesize sequential logic for a target signal in instance
+    /// This builds MUX trees for conditional assignments
+    fn synthesize_sequential_logic_for_instance(
+        &mut self,
+        statements: &[Statement],
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        target: &str,
+    ) -> usize {
+        // Process all statements to find assignments to target
+        for statement in statements {
+            match statement {
+                Statement::Assignment(assign) => {
+                    // Check if this assigns to our target
+                    let lhs = match &assign.lhs {
+                        LValue::Signal(sig_id) => {
+                            if let Some(signal) =
+                                child_module.signals.iter().find(|s| s.id == *sig_id)
+                            {
+                                format!("{}.{}", inst_prefix, signal.name)
+                            } else {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    };
+
+                    if lhs == target {
+                        // Direct assignment to target - create node for RHS
+                        return self.create_expression_node_for_instance(
+                            &assign.rhs,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                        );
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    // Build conditional MUX
+                    return self.synthesize_conditional_for_instance(
+                        if_stmt,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // No assignment found - use signal ref (keep current value)
+        self.create_signal_ref(target)
+    }
+
+    /// Synthesize conditional assignment for instance (creates MUX nodes)
+    fn synthesize_conditional_for_instance(
+        &mut self,
+        if_stmt: &IfStatement,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        target: &str,
+    ) -> usize {
+        // Get values from then and else branches
+        let then_value = self.find_assignment_in_branch_for_instance(
+            &if_stmt.then_block.statements,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            target,
+        );
+
+        let else_value = if let Some(else_block) = &if_stmt.else_block {
+            self.find_assignment_in_branch_for_instance(
+                &else_block.statements,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                target,
+            )
+        } else {
+            None
+        };
+
+        // Build MUX based on what was found
+        match (then_value, else_value) {
+            (Some(then_val), Some(else_val)) => {
+                // Both branches assign: mux(cond, then, else)
+                let condition = self.create_expression_node_for_instance(
+                    &if_stmt.condition,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
+                self.create_mux_node(condition, then_val, else_val)
+            }
+            (Some(then_val), None) => {
+                // Only then assigns: mux(cond, then, keep)
+                let condition = self.create_expression_node_for_instance(
+                    &if_stmt.condition,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
+                let keep_val = self.create_signal_ref(target);
+                self.create_mux_node(condition, then_val, keep_val)
+            }
+            (None, Some(else_val)) => {
+                // Only else assigns: mux(cond, keep, else)
+                let condition = self.create_expression_node_for_instance(
+                    &if_stmt.condition,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
+                let keep_val = self.create_signal_ref(target);
+                self.create_mux_node(condition, keep_val, else_val)
+            }
+            (None, None) => {
+                // Neither assigns: keep current value
+                self.create_signal_ref(target)
+            }
+        }
+    }
+
+    /// Find assignment to target in a branch
+    fn find_assignment_in_branch_for_instance(
+        &mut self,
+        statements: &[Statement],
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        target: &str,
+    ) -> Option<usize> {
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let lhs = match &assign.lhs {
+                        LValue::Signal(sig_id) => {
+                            if let Some(signal) =
+                                child_module.signals.iter().find(|s| s.id == *sig_id)
+                            {
+                                format!("{}.{}", inst_prefix, signal.name)
+                            } else {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    };
+
+                    if lhs == target {
+                        return Some(self.create_expression_node_for_instance(
+                            &assign.rhs,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                        ));
+                    }
+                }
+                Statement::If(nested_if) => {
+                    // Recursively handle nested if
+                    return Some(self.synthesize_conditional_for_instance(
+                        nested_if,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Create expression node for instance context
+    fn create_expression_node_for_instance(
+        &mut self,
+        expr: &Expression,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+    ) -> usize {
+        match expr {
+            Expression::Ref(lvalue) => {
+                // Map signal reference through ports
+                eprintln!(
+                    "🔍 Expression::Ref processing lvalue: {:?} in instance {}",
+                    lvalue, inst_prefix
+                );
+                if let Some(sig_name) =
+                    self.get_signal_from_lvalue(lvalue, inst_prefix, port_mapping, child_module)
+                {
+                    eprintln!("   ✓ get_signal_from_lvalue returned: {}", sig_name);
+                    self.create_signal_ref(&sig_name)
+                } else {
+                    eprintln!("   ✗ get_signal_from_lvalue returned None, trying fallback");
+                    // Try to resolve as a simple signal name for debugging
+                    let fallback_name = match lvalue {
+                        LValue::Signal(sig_id) => {
+                            // Try to find the signal in child module
+                            if let Some(signal) =
+                                child_module.signals.iter().find(|s| s.id == *sig_id)
+                            {
+                                format!("{}.{}", inst_prefix, signal.name)
+                            } else if let Some(port) =
+                                child_module.ports.iter().find(|p| p.id.0 == sig_id.0)
+                            {
+                                // Port reference - map through port_mapping
+                                if let Some(parent_expr) = port_mapping.get(&port.name) {
+                                    self.get_signal_name_from_expression(parent_expr)
+                                } else {
+                                    eprintln!(
+                                        "⚠️ Port {} not in port_mapping for instance {}",
+                                        port.name, inst_prefix
+                                    );
+                                    port.name.clone()
+                                }
+                            } else {
+                                eprintln!(
+                                    "⚠️ Unresolved signal {:?} in instance {}",
+                                    sig_id, inst_prefix
+                                );
+                                "unknown".to_string()
+                            }
+                        }
+                        LValue::Port(port_id) => {
+                            // Direct port reference
+                            eprintln!(
+                                "🔍 LValue::Port matched for port_id={:?} in instance {}",
+                                port_id, inst_prefix
+                            );
+                            if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id)
+                            {
+                                eprintln!("   Found port: {}", port.name);
+                                // Map through port_mapping
+                                if let Some(parent_expr) = port_mapping.get(&port.name) {
+                                    let resolved =
+                                        self.get_signal_name_from_expression(parent_expr);
+                                    eprintln!(
+                                        "   Port {} mapped to expression → signal: {}",
+                                        port.name, resolved
+                                    );
+                                    resolved
+                                } else {
+                                    eprintln!(
+                                        "⚠️ Port {} not in port_mapping for instance {}",
+                                        port.name, inst_prefix
+                                    );
+                                    port.name.clone()
+                                }
+                            } else {
+                                eprintln!(
+                                    "⚠️ Unresolved port {:?} in instance {}",
+                                    port_id, inst_prefix
+                                );
+                                "unknown".to_string()
+                            }
+                        }
+                        _ => {
+                            eprintln!("⚠️ Complex lvalue {:?} in instance {}", lvalue, inst_prefix);
+                            "complex_lvalue".to_string()
+                        }
+                    };
+                    self.create_signal_ref(&fallback_name)
+                }
+            }
+            Expression::Literal(value) => {
+                // Create constant node
+                let (val, width) = match value {
+                    skalp_mir::Value::Integer(i) => {
+                        let w = if *i <= 0xFF {
+                            8
+                        } else if *i <= 0xFFFF {
+                            16
+                        } else {
+                            32
+                        };
+                        (*i as u64, w)
+                    }
+                    skalp_mir::Value::BitVector { width, value } => (*value, *width),
+                    _ => (0, 8),
+                };
+                self.create_constant_node(val, width)
+            }
+            Expression::Binary { op, left, right } => {
+                let left_node = self.create_expression_node_for_instance(
+                    left,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
+                let right_node = self.create_expression_node_for_instance(
+                    right,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
+
+                // Use the existing create_binary_op_node which handles BinaryOp correctly
+                self.create_binary_op_node(op, left_node, right_node)
+            }
+            _ => {
+                // For complex expressions, create a placeholder
+                let node_id = self.node_counter;
+                self.node_counter += 1;
+                node_id
+            }
+        }
+    }
+
+    /// Convert a statement from child module with instance prefix
+    fn convert_statement_for_instance(
+        &mut self,
+        statement: &Statement,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        is_sequential: bool,
+    ) {
+        match statement {
+            Statement::Assignment(assign) => {
+                // Get LHS signal name with prefix
+                let lhs_signal = match &assign.lhs {
+                    LValue::Signal(sig_id) => {
+                        if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id)
+                        {
+                            format!("{}.{}", inst_prefix, signal.name)
+                        } else if let Some(port) =
+                            child_module.ports.iter().find(|p| p.id.0 == sig_id.0)
+                        {
+                            // Output port
+                            if let Some(parent_expr) = port_mapping.get(&port.name) {
+                                self.get_signal_name_from_expression(parent_expr)
+                            } else {
+                                format!("{}.{}", inst_prefix, port.name)
+                            }
+                        } else {
+                            format!("{}.unknown", inst_prefix)
+                        }
+                    }
+                    _ => format!("{}.complex", inst_prefix),
+                };
+
+                let node_id = self.node_counter;
+                self.node_counter += 1;
+
+                if is_sequential {
+                    // Sequential assignment - create sequential node
+                    self.convert_expression_for_instance(
+                        &assign.rhs,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        &lhs_signal,
+                        node_id,
+                    );
+
+                    // Mark the signal as having sequential driver
+                    if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == lhs_signal) {
+                        sig.driver_node = Some(node_id);
+                    }
+                } else {
+                    // Combinational assignment
+                    self.convert_expression_for_instance(
+                        &assign.rhs,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        &lhs_signal,
+                        node_id,
+                    );
+                }
+            }
+            Statement::If(if_stmt) => {
+                // Recursively handle if statements
+                for stmt in &if_stmt.then_block.statements {
+                    self.convert_statement_for_instance(
+                        stmt,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        is_sequential,
+                    );
+                }
+                if let Some(else_block) = &if_stmt.else_block {
+                    for stmt in &else_block.statements {
+                        self.convert_statement_for_instance(
+                            stmt,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            is_sequential,
+                        );
+                    }
+                }
+            }
+            _ => {
+                // Handle other statement types as needed
+            }
+        }
+    }
+
+    /// Convert expression from child module, mapping ports to parent signals
+    fn convert_expression_for_instance(
+        &mut self,
+        expr: &Expression,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        output_signal: &str,
+        node_id: usize,
+    ) {
+        // For simple signal references, create a SignalRef node
+        // For complex expressions, we'd need to build the full expression tree
+
+        match expr {
+            Expression::Ref(lvalue) => {
+                // Simple signal reference: output = input
+                if let Some(input_sig) =
+                    self.get_signal_from_lvalue(lvalue, inst_prefix, port_mapping, child_module)
+                {
+                    let node = SirNode {
+                        id: node_id,
+                        kind: SirNodeKind::SignalRef {
+                            signal: input_sig.clone(), // Signal being READ FROM
+                        },
+                        inputs: vec![SignalRef {
+                            signal_id: input_sig,
+                            bit_range: None,
+                        }],
+                        outputs: vec![SignalRef {
+                            signal_id: output_signal.to_string(),
+                            bit_range: None,
+                        }],
+                        clock_domain: None,
+                    };
+                    self.sir.combinational_nodes.push(node);
+                    // Register this node as the driver of the output signal
+                    self.connect_node_to_signal(node_id, output_signal);
+                } else {
+                    eprintln!(
+                        "⚠️ Failed to resolve signal reference for assignment to {}",
+                        output_signal
+                    );
+                }
+            }
+            _ => {
+                // Complex expression - collect inputs and create a generic node
+                let inputs =
+                    self.collect_expression_inputs(expr, inst_prefix, port_mapping, child_module);
+
+                let node = SirNode {
+                    id: node_id,
+                    kind: SirNodeKind::SignalRef {
+                        signal: output_signal.to_string(),
+                    },
+                    inputs,
+                    outputs: vec![SignalRef {
+                        signal_id: output_signal.to_string(),
+                        bit_range: None,
+                    }],
+                    clock_domain: None,
+                };
+
+                self.sir.combinational_nodes.push(node);
+                // Register this node as the driver of the output signal
+                self.connect_node_to_signal(node_id, output_signal);
+            }
+        }
+    }
+
+    /// Collect input signal references from expression
+    fn collect_expression_inputs(
+        &self,
+        expr: &Expression,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+    ) -> Vec<SignalRef> {
+        let mut inputs = Vec::new();
+
+        match expr {
+            Expression::Ref(lvalue) => {
+                // Extract signal from LValue
+                if let Some(sig_name) =
+                    self.get_signal_from_lvalue(lvalue, inst_prefix, port_mapping, child_module)
+                {
+                    inputs.push(SignalRef {
+                        signal_id: sig_name,
+                        bit_range: None,
+                    });
+                }
+            }
+            Expression::Binary { op: _, left, right } => {
+                inputs.extend(self.collect_expression_inputs(
+                    left,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                ));
+                inputs.extend(self.collect_expression_inputs(
+                    right,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                ));
+            }
+            Expression::Unary { op: _, operand } => {
+                inputs.extend(self.collect_expression_inputs(
+                    operand,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                ));
+            }
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                inputs.extend(self.collect_expression_inputs(
+                    cond,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                ));
+                inputs.extend(self.collect_expression_inputs(
+                    then_expr,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                ));
+                inputs.extend(self.collect_expression_inputs(
+                    else_expr,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                ));
+            }
+            _ => {}
+        }
+
+        inputs
+    }
+
+    /// Get signal name from LValue, handling instance prefixing and port mapping
+    fn get_signal_from_lvalue(
+        &self,
+        lvalue: &LValue,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+    ) -> Option<String> {
+        match lvalue {
+            LValue::Signal(sig_id) => {
+                if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                    Some(format!("{}.{}", inst_prefix, signal.name))
+                } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
+                    // Input port - map to parent signal
+                    if let Some(parent_expr) = port_mapping.get(&port.name) {
+                        Some(self.get_signal_name_from_expression(parent_expr))
+                    } else {
+                        Some(format!("{}.{}", inst_prefix, port.name))
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract signal name from expression (for port mapping)
+    fn get_signal_name_from_expression(&self, expr: &Expression) -> String {
+        match expr {
+            Expression::Ref(lvalue) => {
+                match lvalue {
+                    LValue::Signal(sig_id) => {
+                        // Find signal by ID in current module
+                        if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
+                            signal.name.clone()
+                        } else if let Some(port) =
+                            self.mir.ports.iter().find(|p| p.id.0 == sig_id.0)
+                        {
+                            port.name.clone()
+                        } else {
+                            format!("unknown_signal_{}", sig_id.0)
+                        }
+                    }
+                    LValue::Port(port_id) => {
+                        // Find port by ID in current module (top-level)
+                        if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
+                            port.name.clone()
+                        } else {
+                            format!("unknown_port_{:?}", port_id)
+                        }
+                    }
+                    _ => "complex_lvalue".to_string(),
+                }
+            }
+            _ => "complex_expr".to_string(),
+        }
+    }
+
+    /// Check if signal is sequential in a given module
+    fn is_signal_sequential_in_module(
+        &self,
+        signal_id: skalp_mir::SignalId,
+        module: &Module,
+    ) -> bool {
+        for process in &module.processes {
+            if process.kind == ProcessKind::Sequential
+                && self.is_signal_assigned_in_block(&process.body, signal_id)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Flatten instances for a specific module (used for recursion)
+    fn flatten_instances_for_module(&mut self, module: &Module, instance_prefix: &str) {
+        let instances = module.instances.clone();
+
+        for instance in &instances {
+            let child_module = self
+                .mir_design
+                .modules
+                .iter()
+                .find(|m| m.id == instance.module)
+                .unwrap_or_else(|| panic!("Module {:?} not found", instance.module));
+
+            let inst_prefix = format!("{}{}", instance_prefix, instance.name);
+            self.elaborate_instance(instance, child_module, &inst_prefix);
+        }
     }
 
     fn extract_clock_domains(&mut self) {
