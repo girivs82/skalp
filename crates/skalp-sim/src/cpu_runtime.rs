@@ -380,19 +380,18 @@ impl CpuRuntime {
             }
             BinaryOperation::Shl => left_val << (right_val & 0x3F), // Limit shift amount
             BinaryOperation::Shr => left_val >> (right_val & 0x3F),
-            // Floating-point operations - for now, treat as bit patterns
-            // TODO: Implement proper FP arithmetic
-            BinaryOperation::FAdd => left_val.wrapping_add(right_val),
-            BinaryOperation::FSub => left_val.wrapping_sub(right_val),
-            BinaryOperation::FMul => left_val.wrapping_mul(right_val),
-            BinaryOperation::FDiv => if right_val == 0 { 0 } else { left_val / right_val },
-            BinaryOperation::FMod => if right_val == 0 { 0 } else { left_val % right_val },
-            BinaryOperation::FEq => if left_val == right_val { 1 } else { 0 },
-            BinaryOperation::FNeq => if left_val != right_val { 1 } else { 0 },
-            BinaryOperation::FLt => if left_val < right_val { 1 } else { 0 },
-            BinaryOperation::FLte => if left_val <= right_val { 1 } else { 0 },
-            BinaryOperation::FGt => if left_val > right_val { 1 } else { 0 },
-            BinaryOperation::FGte => if left_val >= right_val { 1 } else { 0 },
+            // Floating-point operations - perform proper IEEE 754 arithmetic
+            BinaryOperation::FAdd => Self::eval_fp_binary(left, right, |a, b| a + b),
+            BinaryOperation::FSub => Self::eval_fp_binary(left, right, |a, b| a - b),
+            BinaryOperation::FMul => Self::eval_fp_binary(left, right, |a, b| a * b),
+            BinaryOperation::FDiv => Self::eval_fp_binary(left, right, |a, b| a / b),
+            BinaryOperation::FMod => Self::eval_fp_binary(left, right, |a, b| a % b),
+            BinaryOperation::FEq => Self::eval_fp_compare(left, right, |a, b| a == b),
+            BinaryOperation::FNeq => Self::eval_fp_compare(left, right, |a, b| a != b),
+            BinaryOperation::FLt => Self::eval_fp_compare(left, right, |a, b| a < b),
+            BinaryOperation::FLte => Self::eval_fp_compare(left, right, |a, b| a <= b),
+            BinaryOperation::FGt => Self::eval_fp_compare(left, right, |a, b| a > b),
+            BinaryOperation::FGte => Self::eval_fp_compare(left, right, |a, b| a >= b),
         };
 
         // Determine output size (max of input sizes)
@@ -410,7 +409,14 @@ impl CpuRuntime {
 
         let result_val = match op {
             UnaryOperation::Not => !operand_val,
-            UnaryOperation::Neg => operand_val.wrapping_neg(),
+            UnaryOperation::Neg => {
+                // Check if this is likely an FP type based on size (2, 4, or 8 bytes)
+                // For FP types, perform proper IEEE 754 negation
+                match operand.len() {
+                    2 | 4 | 8 => Self::eval_fp_unary(operand, |a| -a),
+                    _ => operand_val.wrapping_neg(), // Integer negation for other sizes
+                }
+            }
             UnaryOperation::RedAnd => {
                 // Reduction AND: result is 1 if all bits are 1
                 let mask = (1u64 << (operand.len() * 8)) - 1;
@@ -438,11 +444,10 @@ impl CpuRuntime {
                 }
                 result
             }
-            // Floating-point operations - for now, treat as bit patterns
-            // TODO: Implement proper FP arithmetic
-            UnaryOperation::FNeg => operand_val.wrapping_neg(),
-            UnaryOperation::FAbs => operand_val, // TODO: Implement proper FP abs
-            UnaryOperation::FSqrt => operand_val, // TODO: Implement proper FP sqrt
+            // Floating-point operations - perform proper IEEE 754 arithmetic
+            UnaryOperation::FNeg => Self::eval_fp_unary(operand, |a| -a),
+            UnaryOperation::FAbs => Self::eval_fp_unary(operand, |a| a.abs()),
+            UnaryOperation::FSqrt => Self::eval_fp_unary(operand, |a| a.sqrt()),
         };
 
         Ok(Self::u64_to_bytes(result_val, operand.len()))
@@ -482,6 +487,194 @@ impl CpuRuntime {
             *byte = ((value >> (i * 8)) & 0xFF) as u8;
         }
         bytes
+    }
+
+    /// Evaluate floating-point binary operation
+    fn eval_fp_binary<F>(left: &[u8], right: &[u8], op: F) -> u64
+    where
+        F: Fn(f64, f64) -> f64,
+    {
+        // Determine FP type based on byte length
+        match left.len() {
+            2 => {
+                // fp16 - convert via f32 (Rust doesn't have native f16)
+                let left_f32 = f32::from_bits(u32::from_le_bytes([
+                    left[0],
+                    left.get(1).copied().unwrap_or(0),
+                    0,
+                    0,
+                ]));
+                let right_f32 = f32::from_bits(u32::from_le_bytes([
+                    right[0],
+                    right.get(1).copied().unwrap_or(0),
+                    0,
+                    0,
+                ]));
+                let result = op(left_f32 as f64, right_f32 as f64) as f32;
+                let result_bits = result.to_bits();
+                (result_bits & 0xFFFF) as u64
+            }
+            4 => {
+                // fp32
+                let left_f32 = f32::from_le_bytes([
+                    left[0],
+                    left.get(1).copied().unwrap_or(0),
+                    left.get(2).copied().unwrap_or(0),
+                    left.get(3).copied().unwrap_or(0),
+                ]);
+                let right_f32 = f32::from_le_bytes([
+                    right[0],
+                    right.get(1).copied().unwrap_or(0),
+                    right.get(2).copied().unwrap_or(0),
+                    right.get(3).copied().unwrap_or(0),
+                ]);
+                let result = op(left_f32 as f64, right_f32 as f64) as f32;
+                result.to_bits() as u64
+            }
+            8 => {
+                // fp64
+                let left_f64 = f64::from_le_bytes([
+                    left[0],
+                    left.get(1).copied().unwrap_or(0),
+                    left.get(2).copied().unwrap_or(0),
+                    left.get(3).copied().unwrap_or(0),
+                    left.get(4).copied().unwrap_or(0),
+                    left.get(5).copied().unwrap_or(0),
+                    left.get(6).copied().unwrap_or(0),
+                    left.get(7).copied().unwrap_or(0),
+                ]);
+                let right_f64 = f64::from_le_bytes([
+                    right[0],
+                    right.get(1).copied().unwrap_or(0),
+                    right.get(2).copied().unwrap_or(0),
+                    right.get(3).copied().unwrap_or(0),
+                    right.get(4).copied().unwrap_or(0),
+                    right.get(5).copied().unwrap_or(0),
+                    right.get(6).copied().unwrap_or(0),
+                    right.get(7).copied().unwrap_or(0),
+                ]);
+                let result = op(left_f64, right_f64);
+                result.to_bits()
+            }
+            _ => 0, // Unsupported FP size
+        }
+    }
+
+    /// Evaluate floating-point comparison operation
+    fn eval_fp_compare<F>(left: &[u8], right: &[u8], op: F) -> u64
+    where
+        F: Fn(f64, f64) -> bool,
+    {
+        // Determine FP type based on byte length
+        let result = match left.len() {
+            2 => {
+                // fp16
+                let left_f32 = f32::from_bits(u32::from_le_bytes([
+                    left[0],
+                    left.get(1).copied().unwrap_or(0),
+                    0,
+                    0,
+                ]));
+                let right_f32 = f32::from_bits(u32::from_le_bytes([
+                    right[0],
+                    right.get(1).copied().unwrap_or(0),
+                    0,
+                    0,
+                ]));
+                op(left_f32 as f64, right_f32 as f64)
+            }
+            4 => {
+                // fp32
+                let left_f32 = f32::from_le_bytes([
+                    left[0],
+                    left.get(1).copied().unwrap_or(0),
+                    left.get(2).copied().unwrap_or(0),
+                    left.get(3).copied().unwrap_or(0),
+                ]);
+                let right_f32 = f32::from_le_bytes([
+                    right[0],
+                    right.get(1).copied().unwrap_or(0),
+                    right.get(2).copied().unwrap_or(0),
+                    right.get(3).copied().unwrap_or(0),
+                ]);
+                op(left_f32 as f64, right_f32 as f64)
+            }
+            8 => {
+                // fp64
+                let left_f64 = f64::from_le_bytes([
+                    left[0],
+                    left.get(1).copied().unwrap_or(0),
+                    left.get(2).copied().unwrap_or(0),
+                    left.get(3).copied().unwrap_or(0),
+                    left.get(4).copied().unwrap_or(0),
+                    left.get(5).copied().unwrap_or(0),
+                    left.get(6).copied().unwrap_or(0),
+                    left.get(7).copied().unwrap_or(0),
+                ]);
+                let right_f64 = f64::from_le_bytes([
+                    right[0],
+                    right.get(1).copied().unwrap_or(0),
+                    right.get(2).copied().unwrap_or(0),
+                    right.get(3).copied().unwrap_or(0),
+                    right.get(4).copied().unwrap_or(0),
+                    right.get(5).copied().unwrap_or(0),
+                    right.get(6).copied().unwrap_or(0),
+                    right.get(7).copied().unwrap_or(0),
+                ]);
+                op(left_f64, right_f64)
+            }
+            _ => false, // Unsupported FP size
+        };
+        if result { 1 } else { 0 }
+    }
+
+    /// Evaluate floating-point unary operation
+    fn eval_fp_unary<F>(operand: &[u8], op: F) -> u64
+    where
+        F: Fn(f64) -> f64,
+    {
+        // Determine FP type based on byte length
+        match operand.len() {
+            2 => {
+                // fp16
+                let operand_f32 = f32::from_bits(u32::from_le_bytes([
+                    operand[0],
+                    operand.get(1).copied().unwrap_or(0),
+                    0,
+                    0,
+                ]));
+                let result = op(operand_f32 as f64) as f32;
+                let result_bits = result.to_bits();
+                (result_bits & 0xFFFF) as u64
+            }
+            4 => {
+                // fp32
+                let operand_f32 = f32::from_le_bytes([
+                    operand[0],
+                    operand.get(1).copied().unwrap_or(0),
+                    operand.get(2).copied().unwrap_or(0),
+                    operand.get(3).copied().unwrap_or(0),
+                ]);
+                let result = op(operand_f32 as f64) as f32;
+                result.to_bits() as u64
+            }
+            8 => {
+                // fp64
+                let operand_f64 = f64::from_le_bytes([
+                    operand[0],
+                    operand.get(1).copied().unwrap_or(0),
+                    operand.get(2).copied().unwrap_or(0),
+                    operand.get(3).copied().unwrap_or(0),
+                    operand.get(4).copied().unwrap_or(0),
+                    operand.get(5).copied().unwrap_or(0),
+                    operand.get(6).copied().unwrap_or(0),
+                    operand.get(7).copied().unwrap_or(0),
+                ]);
+                let result = op(operand_f64);
+                result.to_bits()
+            }
+            _ => 0, // Unsupported FP size
+        }
     }
 
     fn evaluate_sequential(&mut self) -> Result<(), SimulationError> {
