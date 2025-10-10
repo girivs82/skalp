@@ -454,20 +454,47 @@ impl CpuRuntime {
     }
 
     fn extract_slice(value: &[u8], start: usize, end: usize) -> Vec<u8> {
-        let width = end - start + 1;
+        // For HDL range [high:low], start=high, end=low
+        // Width = high - low + 1, shift = low
+        let (high, low) = if start >= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let width = high - low + 1;
         let byte_size = width.div_ceil(8);
         let mut result = vec![0u8; byte_size];
 
-        let value_as_u64 = Self::bytes_to_u64(value);
-        let mask = if width >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << width) - 1
-        };
-        let sliced = (value_as_u64 >> start) & mask;
+        // For values > 64 bits, work with byte arrays directly
+        if low < 64 && value.len() <= 8 {
+            // Fast path for u64 values
+            let value_as_u64 = Self::bytes_to_u64(value);
+            let mask = if width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
+            let sliced = (value_as_u64 >> low) & mask;
 
-        for (i, byte) in result.iter_mut().enumerate() {
-            *byte = ((sliced >> (i * 8)) & 0xFF) as u8;
+            for (i, byte) in result.iter_mut().enumerate() {
+                *byte = ((sliced >> (i * 8)) & 0xFF) as u8;
+            }
+        } else {
+            // Slow path for values > 64 bits or high bit positions
+            // Extract bit-by-bit
+            for bit_idx in 0..width {
+                let src_bit = low + bit_idx;
+                let src_byte = src_bit / 8;
+                let src_bit_in_byte = src_bit % 8;
+
+                let dst_byte = bit_idx / 8;
+                let dst_bit_in_byte = bit_idx % 8;
+
+                if src_byte < value.len() {
+                    let bit_val = (value[src_byte] >> src_bit_in_byte) & 1;
+                    result[dst_byte] |= bit_val << dst_bit_in_byte;
+                }
+            }
         }
 
         result
@@ -625,7 +652,11 @@ impl CpuRuntime {
             }
             _ => false, // Unsupported FP size
         };
-        if result { 1 } else { 0 }
+        if result {
+            1
+        } else {
+            0
+        }
     }
 
     /// Evaluate floating-point unary operation

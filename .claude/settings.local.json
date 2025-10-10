@@ -138,7 +138,12 @@
       "Bash(./test_simple_index)",
       "Bash(RUST_BACKTRACE=1 ./test_simple_index)",
       "WebFetch(domain:doc.veryl-lang.org)",
-      "Bash(RUST_LOG=debug /Users/girivs/src/hw/hls/target/debug/skalp build:*)"
+      "Bash(RUST_LOG=debug /Users/girivs/src/hw/hls/target/debug/skalp build:*)",
+      "Bash(/tmp/debug_vec2_mir:*)",
+      "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test --test test_stdlib_vec)",
+      "Bash(git log:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test --test test_vec_arithmetic test_vec2_component_addition_cpu --all-features -- --nocapture)",
+      "Bash(env RUST_BACKTRACE=1 cargo test --test test_vec_arithmetic test_vec2_component_addition_cpu --all-features -- --nocapture)"
     ],
     "deny": [],
     "ask": []

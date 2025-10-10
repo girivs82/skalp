@@ -61,12 +61,8 @@ mod cpu_fp_simulation_tests {
         let b: f32 = 3.5;
         let expected: f32 = 6.0;
 
-        sim.set_input("a", a.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec())
-            .await
-            .unwrap();
+        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         let result_bytes = sim.get_output("result").await.unwrap();
@@ -77,7 +73,10 @@ mod cpu_fp_simulation_tests {
             result_bytes[3],
         ]);
 
-        assert_eq!(result, expected, "FP32 addition: 2.5 + 3.5 should equal 6.0");
+        assert_eq!(
+            result, expected,
+            "FP32 addition: 2.5 + 3.5 should equal 6.0"
+        );
     }
 
     #[tokio::test]
@@ -101,12 +100,8 @@ mod cpu_fp_simulation_tests {
         let b: f32 = 4.0;
         let expected: f32 = 12.0;
 
-        sim.set_input("a", a.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec())
-            .await
-            .unwrap();
+        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         let result_bytes = sim.get_output("result").await.unwrap();
@@ -117,7 +112,10 @@ mod cpu_fp_simulation_tests {
             result_bytes[3],
         ]);
 
-        assert_eq!(result, expected, "FP32 multiplication: 3.0 * 4.0 should equal 12.0");
+        assert_eq!(
+            result, expected,
+            "FP32 multiplication: 3.0 * 4.0 should equal 12.0"
+        );
     }
 
     #[tokio::test]
@@ -144,12 +142,8 @@ mod cpu_fp_simulation_tests {
         let a: f32 = 2.5;
         let b: f32 = 3.5;
 
-        sim.set_input("a", a.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec())
-            .await
-            .unwrap();
+        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         let lt_bytes = sim.get_output("lt").await.unwrap();
@@ -179,9 +173,7 @@ mod cpu_fp_simulation_tests {
         // Test with x = -9.0
         let x: f32 = -9.0;
 
-        sim.set_input("x", x.to_le_bytes().to_vec())
-            .await
-            .unwrap();
+        sim.set_input("x", x.to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         // Negation: -(-9.0) = 9.0

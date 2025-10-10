@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod stdlib_synthesis_tests {
     use skalp_frontend::parse_and_build_hir;
-    use skalp_lir::{lower_to_lir, transform_mir_to_lir};
+    use skalp_lir::transform_mir_to_lir;
     use skalp_mir::lower_to_mir;
 
     #[test]

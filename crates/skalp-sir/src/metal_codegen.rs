@@ -45,10 +45,12 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "struct Inputs {{").unwrap();
         self.indent += 1;
         for input in &sir.inputs {
+            let (base_type, array_suffix) = self.get_metal_type_parts(&input.sir_type);
             self.write_indented(&format!(
-                "{} {};\n",
-                self.get_metal_type_name(input.width),
-                self.sanitize_name(&input.name)
+                "{} {}{};\n",
+                base_type,
+                self.sanitize_name(&input.name),
+                array_suffix
             ));
         }
         self.indent -= 1;
@@ -61,18 +63,25 @@ impl<'a> MetalShaderGenerator<'a> {
         // Sort state elements by name for consistent ordering
         let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
-        for (i, (name, elem)) in sorted_states.iter().enumerate() {
+        for (i, (name, _elem)) in sorted_states.iter().enumerate() {
+            // Look up the signal to get its type
+            let default_type = SirType::Bits(_elem.width);
+            let sir_type = sir
+                .signals
+                .iter()
+                .find(|s| &s.name == *name)
+                .map(|s| &s.sir_type)
+                .unwrap_or(&default_type);
+            let (base_type, array_suffix) = self.get_metal_type_parts(sir_type);
             eprintln!(
-                "🔧 REGISTER[{}]: {} (width={}, type={})",
-                i,
-                name,
-                elem.width,
-                self.get_metal_type_name(elem.width)
+                "🔧 REGISTER[{}]: {} (type={} {})",
+                i, name, base_type, array_suffix
             );
             self.write_indented(&format!(
-                "{} {};\n",
-                self.get_metal_type_name(elem.width),
-                self.sanitize_name(name)
+                "{} {}{};\n",
+                base_type,
+                self.sanitize_name(name),
+                array_suffix
             ));
         }
         self.indent -= 1;
@@ -90,10 +99,10 @@ impl<'a> MetalShaderGenerator<'a> {
         for output in &sir.outputs {
             let sanitized_name = self.sanitize_name(&output.name);
             if added_names.insert(sanitized_name.clone()) {
+                let (base_type, array_suffix) = self.get_metal_type_parts(&output.sir_type);
                 self.write_indented(&format!(
-                    "{} {};\n",
-                    self.get_metal_type_name(output.width),
-                    sanitized_name
+                    "{} {}{};\n",
+                    base_type, sanitized_name, array_suffix
                 ));
             }
         }
@@ -102,10 +111,10 @@ impl<'a> MetalShaderGenerator<'a> {
         for signal in &sir.signals {
             let sanitized_name = self.sanitize_name(&signal.name);
             if !signal.is_state && added_names.insert(sanitized_name.clone()) {
+                let (base_type, array_suffix) = self.get_metal_type_parts(&signal.sir_type);
                 self.write_indented(&format!(
-                    "{} {};\n",
-                    self.get_metal_type_name(signal.width),
-                    sanitized_name
+                    "{} {}{};\n",
+                    base_type, sanitized_name, array_suffix
                 ));
             }
         }
@@ -532,8 +541,10 @@ impl<'a> MetalShaderGenerator<'a> {
                         _ => "x", // fallback
                     };
 
-                    eprintln!("   🎯 VECTOR SLICE: {} -> .{} (elem_width={}, low={}, component={})",
-                              input, component, elem_width, low, component_index);
+                    eprintln!(
+                        "   🎯 VECTOR SLICE: {} -> .{} (elem_width={}, low={}, component={})",
+                        input, component, elem_width, low, component_index
+                    );
 
                     self.write_indented(&format!(
                         "signals->{} = {}.{};\n",
@@ -911,18 +922,31 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
-    fn get_metal_type_from_sir_type(&self, sir_type: &SirType) -> String {
+    /// Returns (base_type, array_suffix) for Metal type declarations
+    /// For example: Array(Bits(32), 16) returns ("uint", "[16]")
+    /// Non-arrays return ("type", "")
+    fn get_metal_type_parts(&self, sir_type: &SirType) -> (String, String) {
         match sir_type {
-            SirType::Bits(w) => self.get_metal_type_name(*w).to_string(),
-            SirType::Float16 => "half".to_string(),
-            SirType::Float32 => "float".to_string(),
-            SirType::Float64 => "double".to_string(),
-            SirType::Vec2(elem) => format!("{}2", self.get_metal_type_from_sir_type(elem)),
-            SirType::Vec3(elem) => format!("{}3", self.get_metal_type_from_sir_type(elem)),
-            SirType::Vec4(elem) => format!("{}4", self.get_metal_type_from_sir_type(elem)),
+            SirType::Bits(w) => (self.get_metal_type_name(*w).to_string(), String::new()),
+            SirType::Float16 => ("half".to_string(), String::new()),
+            SirType::Float32 => ("float".to_string(), String::new()),
+            SirType::Float64 => ("double".to_string(), String::new()),
+            SirType::Vec2(elem) => {
+                let (base, _) = self.get_metal_type_parts(elem);
+                (format!("{}2", base), String::new())
+            }
+            SirType::Vec3(elem) => {
+                let (base, _) = self.get_metal_type_parts(elem);
+                (format!("{}3", base), String::new())
+            }
+            SirType::Vec4(elem) => {
+                let (base, _) = self.get_metal_type_parts(elem);
+                (format!("{}4", base), String::new())
+            }
             SirType::Array(elem, size) => {
-                // Metal doesn't have dynamic arrays, use fixed-size array
-                format!("{}[{}]", self.get_metal_type_from_sir_type(elem), size)
+                let (base, suffix) = self.get_metal_type_parts(elem);
+                // Metal array syntax: type name[size], not type[size] name
+                (base, format!("{}[{}]", suffix, size))
             }
         }
     }

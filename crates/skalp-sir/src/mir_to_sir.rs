@@ -2231,11 +2231,26 @@ impl<'a> MirToSirConverter<'a> {
 
         let sir_type = if bin_op.is_float_op() {
             // FP operations preserve input type (use left if both are same width)
-            if left_type.is_float() { left_type.clone() } else { right_type.clone() }
-        } else if matches!(bin_op, BinaryOperation::Eq | BinaryOperation::Neq | BinaryOperation::Lt |
-                          BinaryOperation::Lte | BinaryOperation::Gt | BinaryOperation::Gte |
-                          BinaryOperation::FEq | BinaryOperation::FNeq | BinaryOperation::FLt |
-                          BinaryOperation::FLte | BinaryOperation::FGt | BinaryOperation::FGte) {
+            if left_type.is_float() {
+                left_type.clone()
+            } else {
+                right_type.clone()
+            }
+        } else if matches!(
+            bin_op,
+            BinaryOperation::Eq
+                | BinaryOperation::Neq
+                | BinaryOperation::Lt
+                | BinaryOperation::Lte
+                | BinaryOperation::Gt
+                | BinaryOperation::Gte
+                | BinaryOperation::FEq
+                | BinaryOperation::FNeq
+                | BinaryOperation::FLt
+                | BinaryOperation::FLte
+                | BinaryOperation::FGt
+                | BinaryOperation::FGte
+        ) {
             // Comparison operations return 1-bit boolean
             SirType::Bits(1)
         } else {
@@ -2937,10 +2952,6 @@ impl<'a> MirToSirConverter<'a> {
                 SirType::Bits(1)
             }
         }
-    }
-
-    fn get_width(&self, data_type: &DataType) -> usize {
-        self.convert_type(data_type).width()
     }
 
     fn get_signal_width(&self, signal_name: &str) -> usize {

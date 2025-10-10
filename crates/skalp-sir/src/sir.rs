@@ -160,18 +160,18 @@ pub enum BinaryOperation {
     Shl,
     Shr,
     // Floating-point arithmetic (IEEE 754)
-    FAdd,  // FP addition
-    FSub,  // FP subtraction
-    FMul,  // FP multiplication
-    FDiv,  // FP division
-    FMod,  // FP modulo
+    FAdd, // FP addition
+    FSub, // FP subtraction
+    FMul, // FP multiplication
+    FDiv, // FP division
+    FMod, // FP modulo
     // Floating-point comparison
-    FEq,   // FP equality
-    FNeq,  // FP inequality
-    FLt,   // FP less than
-    FLte,  // FP less than or equal
-    FGt,   // FP greater than
-    FGte,  // FP greater than or equal
+    FEq,  // FP equality
+    FNeq, // FP inequality
+    FLt,  // FP less than
+    FLte, // FP less than or equal
+    FGt,  // FP greater than
+    FGte, // FP greater than or equal
 }
 
 impl BinaryOperation {

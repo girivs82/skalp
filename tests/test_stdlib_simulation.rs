@@ -119,12 +119,8 @@ mod stdlib_simulation_tests {
         let a: u64 = 0x40000000_3F800000; // [1.0, 2.0]
         let b: u64 = 0x40800000_40400000; // [3.0, 4.0]
 
-        sim.set_input("a", a.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec())
-            .await
-            .unwrap();
+        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         // Note: This test verifies that the SystemVerilog code is generated correctly.
