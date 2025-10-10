@@ -27,6 +27,12 @@ impl<'a> MetalShaderGenerator<'a> {
         MetalShaderGenerator { output, indent: 0 }
     }
 
+    /// Sanitize signal names for Metal by replacing dots with underscores
+    /// This handles hierarchical signal names like "stage1.reg" -> "stage1_reg"
+    fn sanitize_name(&self, name: &str) -> String {
+        name.replace('.', "_")
+    }
+
     fn generate_header(&mut self) {
         writeln!(self.output, "#include <metal_stdlib>").unwrap();
         writeln!(self.output, "#include <metal_compute>").unwrap();
@@ -42,7 +48,7 @@ impl<'a> MetalShaderGenerator<'a> {
             self.write_indented(&format!(
                 "{} {};\n",
                 self.get_metal_type_name(input.width),
-                input.name
+                self.sanitize_name(&input.name)
             ));
         }
         self.indent -= 1;
@@ -66,7 +72,7 @@ impl<'a> MetalShaderGenerator<'a> {
             self.write_indented(&format!(
                 "{} {};\n",
                 self.get_metal_type_name(elem.width),
-                name
+                self.sanitize_name(name)
             ));
         }
         self.indent -= 1;
@@ -82,22 +88,24 @@ impl<'a> MetalShaderGenerator<'a> {
 
         // Outputs are computed signals too
         for output in &sir.outputs {
-            if added_names.insert(output.name.clone()) {
+            let sanitized_name = self.sanitize_name(&output.name);
+            if added_names.insert(sanitized_name.clone()) {
                 self.write_indented(&format!(
                     "{} {};\n",
                     self.get_metal_type_name(output.width),
-                    output.name
+                    sanitized_name
                 ));
             }
         }
 
         // All intermediate signals (avoiding duplicates)
         for signal in &sir.signals {
-            if !signal.is_state && added_names.insert(signal.name.clone()) {
+            let sanitized_name = self.sanitize_name(&signal.name);
+            if !signal.is_state && added_names.insert(sanitized_name.clone()) {
                 self.write_indented(&format!(
                     "{} {};\n",
                     self.get_metal_type_name(signal.width),
-                    signal.name
+                    sanitized_name
                 ));
             }
         }
@@ -176,7 +184,8 @@ impl<'a> MetalShaderGenerator<'a> {
                     // Output is driven by a register - read from register buffer
                     self.write_indented(&format!(
                         "signals->{} = registers->{};\n",
-                        output.name, output.name
+                        self.sanitize_name(&output.name),
+                        self.sanitize_name(&output.name)
                     ));
                     eprintln!(
                         "🔗 OUTPUT (STATE): {} = registers->{}",
@@ -193,7 +202,8 @@ impl<'a> MetalShaderGenerator<'a> {
                                     if let Some(node_output) = comb_node.outputs.first() {
                                         self.write_indented(&format!(
                                             "signals->{} = signals->{};\n",
-                                            output.name, node_output.signal_id
+                                            self.sanitize_name(&output.name),
+                                            self.sanitize_name(&node_output.signal_id)
                                         ));
                                         eprintln!(
                                             "🔗 OUTPUT (COMB): {} = signals->{}",
@@ -237,9 +247,10 @@ impl<'a> MetalShaderGenerator<'a> {
         sorted_states.sort_by_key(|(name, _)| *name);
         for (state_name, state_elem) in sorted_states {
             let state_type = self.get_metal_type_name(state_elem.width);
+            let sanitized = self.sanitize_name(state_name);
             self.write_indented(&format!(
                 "{} old_{} = registers->{};\n",
-                state_type, state_name, state_name
+                state_type, sanitized, sanitized
             ));
         }
 
@@ -316,7 +327,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 let mask = (1u64 << (high - low + 1)) - 1;
                 self.write_indented(&format!(
                     "signals->{} = (signals->{} >> {}) & 0x{:X};\n",
-                    output, input, shift, mask
+                    self.sanitize_name(output),
+                    self.sanitize_name(input),
+                    shift,
+                    mask
                 ));
             }
             SirNodeKind::SignalRef { signal } => {
@@ -353,7 +367,10 @@ impl<'a> MetalShaderGenerator<'a> {
 
             self.write_indented(&format!(
                 "signals->{} = signals->{} {} signals->{};\n",
-                output, left, op_str, right
+                self.sanitize_name(output),
+                self.sanitize_name(left),
+                op_str,
+                self.sanitize_name(right)
             ));
         }
     }
@@ -373,7 +390,9 @@ impl<'a> MetalShaderGenerator<'a> {
 
             self.write_indented(&format!(
                 "signals->{} = {}signals->{};\n",
-                output, op_str, input
+                self.sanitize_name(output),
+                op_str,
+                self.sanitize_name(input)
             ));
         }
     }
@@ -384,7 +403,9 @@ impl<'a> MetalShaderGenerator<'a> {
             let metal_type = self.get_metal_type_name(width);
             self.write_indented(&format!(
                 "signals->{} = {}({});\n",
-                output, metal_type, value
+                self.sanitize_name(output),
+                metal_type,
+                value
             ));
         }
     }
@@ -398,7 +419,10 @@ impl<'a> MetalShaderGenerator<'a> {
 
             self.write_indented(&format!(
                 "signals->{} = signals->{} ? signals->{} : signals->{};\n",
-                output, sel, true_val, false_val
+                self.sanitize_name(output),
+                self.sanitize_name(sel),
+                self.sanitize_name(true_val),
+                self.sanitize_name(false_val)
             ));
         }
     }
@@ -428,7 +452,7 @@ impl<'a> MetalShaderGenerator<'a> {
             // Map signal names to register names for flip-flop outputs
             let input_ref = if sir.state_elements.contains_key(input) {
                 // Direct register reference
-                format!("registers->{}", input)
+                format!("registers->{}", self.sanitize_name(input))
             } else if input.starts_with("node_") && input.ends_with("_out") {
                 // This might be a flip-flop output signal, check if it corresponds to a register
                 let mut mapped_register = None;
@@ -453,17 +477,20 @@ impl<'a> MetalShaderGenerator<'a> {
                 }
 
                 if let Some(reg_name) = mapped_register {
-                    format!("registers->{}", reg_name)
+                    format!("registers->{}", self.sanitize_name(&reg_name))
                 } else {
-                    format!("signals->{}", input)
+                    format!("signals->{}", self.sanitize_name(input))
                 }
             } else {
-                format!("signals->{}", input)
+                format!("signals->{}", self.sanitize_name(input))
             };
 
             self.write_indented(&format!(
                 "signals->{} = ({} >> {}) & 0x{:X};\n",
-                output, input_ref, shift, mask
+                self.sanitize_name(output),
+                input_ref,
+                shift,
+                mask
             ));
         }
     }
@@ -489,32 +516,39 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Create temporary to hold the packed array value
                 self.write_indented(&format!(
                     "{} array_val_{} = signals->{};\n",
-                    array_type, output, array_signal_name
+                    array_type,
+                    self.sanitize_name(output),
+                    self.sanitize_name(array_signal_name)
                 ));
 
                 // Extract using bit manipulation on the full vector
                 // For uint4, we treat it as 128 bits and extract the element
+                let san_output = self.sanitize_name(output);
+                let san_index = self.sanitize_name(index_signal);
                 self.write_indented(&format!(
                     "uint elem_idx_{} = signals->{};\n",
-                    output, index_signal
+                    san_output, san_index
                 ));
                 self.write_indented(&format!(
                     "uint word_idx_{} = elem_idx_{} / 4;\n", // Which uint in the uint4
-                    output, output
+                    san_output, san_output
                 ));
                 self.write_indented(&format!(
                     "uint byte_in_word_{} = elem_idx_{} % 4;\n", // Which byte in that uint
-                    output, output
+                    san_output, san_output
                 ));
                 self.write_indented(&format!(
                     "signals->{} = (array_val_{}[word_idx_{}] >> (byte_in_word_{} * 8)) & 0xFF;\n",
-                    output, output, output, output
+                    san_output, san_output, san_output, san_output
                 ));
             } else {
                 // Single-word array - simple bit shift
                 self.write_indented(&format!(
                     "signals->{} = (signals->{} >> (signals->{} * {})) & 0xFF;\n",
-                    output, array_signal_name, index_signal, elem_width
+                    self.sanitize_name(output),
+                    self.sanitize_name(array_signal_name),
+                    self.sanitize_name(index_signal),
+                    elem_width
                 ));
             }
         }
@@ -540,48 +574,59 @@ impl<'a> MetalShaderGenerator<'a> {
 
             if array_width > 32 {
                 // Multi-word array stored as vector
+                let san_output = self.sanitize_name(output);
+                let san_old_array = self.sanitize_name(old_array_name);
+                let san_index = self.sanitize_name(index_signal);
+                let san_value = self.sanitize_name(value_signal);
                 self.write_indented(&format!(
                     "{} new_array_{} = signals->{};\n",
-                    array_type, output, old_array_name
+                    array_type, san_output, san_old_array
                 ));
                 self.write_indented(&format!(
                     "uint elem_idx_{} = signals->{};\n",
-                    output, index_signal
+                    san_output, san_index
                 ));
                 self.write_indented(&format!(
                     "uint word_idx_{} = elem_idx_{} / 4;\n",
-                    output, output
+                    san_output, san_output
                 ));
                 self.write_indented(&format!(
                     "uint byte_in_word_{} = elem_idx_{} % 4;\n",
-                    output, output
+                    san_output, san_output
                 ));
                 self.write_indented(&format!(
                     "uint shift_{} = byte_in_word_{} * 8;\n",
-                    output, output
+                    san_output, san_output
                 ));
                 self.write_indented(&format!(
                     "uint mask_{} = ~(0xFFu << shift_{});\n",
-                    output, output
+                    san_output, san_output
                 ));
                 self.write_indented(&format!(
                     "new_array_{}[word_idx_{}] = (new_array_{}[word_idx_{}] & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
-                    output, output, output, output, output, value_signal, output
+                    san_output, san_output, san_output, san_output, san_output, san_value, san_output
                 ));
-                self.write_indented(&format!("signals->{} = new_array_{};\n", output, output));
+                self.write_indented(&format!(
+                    "signals->{} = new_array_{};\n",
+                    san_output, san_output
+                ));
             } else {
                 // Single-word array
+                let san_output = self.sanitize_name(output);
+                let san_index = self.sanitize_name(index_signal);
+                let san_old_array = self.sanitize_name(old_array_name);
+                let san_value = self.sanitize_name(value_signal);
                 self.write_indented(&format!(
                     "uint32_t shift_{} = signals->{} * {};\n",
-                    output, index_signal, elem_width
+                    san_output, san_index, elem_width
                 ));
                 self.write_indented(&format!(
                     "uint32_t mask_{} = ~(0xFFu << shift_{});\n",
-                    output, output
+                    san_output, san_output
                 ));
                 self.write_indented(&format!(
                     "signals->{} = (signals->{} & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
-                    output, old_array_name, output, value_signal, output
+                    san_output, san_old_array, san_output, san_value, san_output
                 ));
             }
         }
@@ -605,7 +650,11 @@ impl<'a> MetalShaderGenerator<'a> {
             let output = &node.outputs[0].signal_id;
 
             // Copy from state to signals
-            self.write_indented(&format!("signals->{} = state->{};\n", output, signal));
+            self.write_indented(&format!(
+                "signals->{} = state->{};\n",
+                self.sanitize_name(output),
+                self.sanitize_name(signal)
+            ));
         }
     }
 
@@ -620,15 +669,29 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Check if it's reading from inputs or registers
                 if !node.outputs.is_empty() {
                     let output = &node.outputs[0].signal_id;
+
+                    // Skip if output is a state element (it's in Registers, not Signals)
+                    if sir.state_elements.contains_key(output) {
+                        return;
+                    }
+
                     if sir.inputs.iter().any(|i| i.name == *signal) {
                         self.write_indented(&format!(
                             "signals->{} = inputs->{};\n",
-                            output, signal
+                            self.sanitize_name(output),
+                            self.sanitize_name(signal)
                         ));
                     } else if sir.state_elements.contains_key(signal) {
                         self.write_indented(&format!(
                             "signals->{} = registers->{};\n",
-                            output, signal
+                            self.sanitize_name(output),
+                            self.sanitize_name(signal)
+                        ));
+                    } else if sir.signals.iter().any(|s| s.name == *signal) {
+                        self.write_indented(&format!(
+                            "signals->{} = signals->{};\n",
+                            self.sanitize_name(output),
+                            self.sanitize_name(signal)
                         ));
                     }
                 }
@@ -660,10 +723,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 let _edge_condition = match edge {
                     ClockEdge::Rising => {
                         // Check for rising edge: was 0, now 1
-                        format!("inputs->{} == 1", clock_input.name)
+                        format!("inputs->{} == 1", self.sanitize_name(&clock_input.name))
                     }
                     ClockEdge::Falling => {
-                        format!("inputs->{} == 0", clock_input.name)
+                        format!("inputs->{} == 0", self.sanitize_name(&clock_input.name))
                     }
                     ClockEdge::Both => "true".to_string(),
                 };
@@ -686,7 +749,9 @@ impl<'a> MetalShaderGenerator<'a> {
 
                         let assignment = format!(
                             "registers->{} = signals->{} & {};\n",
-                            output.signal_id, data_signal, mask
+                            self.sanitize_name(&output.signal_id),
+                            self.sanitize_name(data_signal),
+                            mask
                         );
                         eprintln!(
                             "DEBUG Metal gen: About to write: {} (width={}, mask={})",
