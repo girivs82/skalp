@@ -436,6 +436,10 @@ impl SystemVerilogGenerator {
             DataType::NatParam { param, default } => {
                 format!("logic [{}-1:0]", param)
             }
+            // Floating-point types
+            DataType::Float16 => "fp16_t".to_string(), // Will be defined in FP library
+            DataType::Float32 => "fp32_t".to_string(),
+            DataType::Float64 => "fp64_t".to_string(),
         }
     }
 
@@ -585,6 +589,7 @@ impl SystemVerilogGenerator {
     fn format_value(&self, val: &Value) -> String {
         match val {
             Value::Integer(n) => n.to_string(),
+            Value::Float(f) => f.to_string(),
             Value::BitVector { width, value } => {
                 format!("{}'h{:x}", width, value)
             }
@@ -602,6 +607,10 @@ impl SystemVerilogGenerator {
             BinaryOp::Mul => "*",
             BinaryOp::Div => "/",
             BinaryOp::Mod => "%",
+            BinaryOp::FAdd => "+",
+            BinaryOp::FSub => "-",
+            BinaryOp::FMul => "*",
+            BinaryOp::FDiv => "/",
             BinaryOp::And => "&", // Logical AND in context
             BinaryOp::Or => "|",  // Logical OR in context
             BinaryOp::Xor => "^", // Logical XOR in context
@@ -616,6 +625,12 @@ impl SystemVerilogGenerator {
             BinaryOp::LessEqual => "<=",
             BinaryOp::Greater => ">",
             BinaryOp::GreaterEqual => ">=",
+            BinaryOp::FEqual => "==",
+            BinaryOp::FNotEqual => "!=",
+            BinaryOp::FLess => "<",
+            BinaryOp::FLessEqual => "<=",
+            BinaryOp::FGreater => ">",
+            BinaryOp::FGreaterEqual => ">=",
             BinaryOp::LeftShift => "<<",
             BinaryOp::RightShift => ">>",
         }

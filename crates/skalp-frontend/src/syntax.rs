@@ -23,7 +23,7 @@ pub enum SyntaxKind {
     ElseKw,
     AssignKw,
 
-    // Type System (10) - Updated to include numeric types
+    // Type System (13) - Updated to include numeric and floating-point types
     BitKw,
     BoolKw,
     NatKw,
@@ -33,6 +33,9 @@ pub enum SyntaxKind {
     ResetKw,
     TypeKw,
     StreamKw,
+    Fp16Kw,
+    Fp32Kw,
+    Fp64Kw,
     StructKw,
     EnumKw,
     UnionKw,
@@ -156,6 +159,7 @@ pub enum SyntaxKind {
     IntLiteral,
     BinLiteral,
     HexLiteral,
+    FloatLiteral,
     StringLiteral,
     Lifetime,
 
@@ -343,6 +347,9 @@ pub enum SyntaxKind {
     ResetType,
     EventType,
     StreamType,
+    Fp16Type,
+    Fp32Type,
+    Fp64Type,
     IdentType,
     ArrayType,
     ArraySize,
@@ -434,7 +441,7 @@ impl SyntaxKind {
             EntityKw | ImplKw | SignalKw | VarKw | ConstKw
                 | InKw | OutKw | InoutKw | OnKw | IfKw | ElseKw | AssignKw
             // Type System (11)
-            | BitKw | BoolKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | StructKw | EnumKw | UnionKw
+            | BitKw | BoolKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | StructKw | EnumKw | UnionKw
             // Boolean Literals (2)
             | TrueKw | FalseKw
             // Traits and Generics (5)
@@ -505,7 +512,7 @@ impl SyntaxKind {
 
     /// Check if this is a literal
     pub fn is_literal(self) -> bool {
-        matches!(self, IntLiteral | BinLiteral | HexLiteral | StringLiteral)
+        matches!(self, IntLiteral | BinLiteral | HexLiteral | FloatLiteral | StringLiteral)
     }
 
     /// Get a human-readable description of this syntax kind
@@ -525,7 +532,7 @@ impl SyntaxKind {
             ElseKw => "'else'",
             AssignKw => "'assign'",
 
-            // Type System (11)
+            // Type System (14)
             BitKw => "'bit'",
             BoolKw => "'bool'",
             NatKw => "'nat'",
@@ -535,6 +542,9 @@ impl SyntaxKind {
             ResetKw => "'reset'",
             TypeKw => "'type'",
             StreamKw => "'stream'",
+            Fp16Kw => "'fp16'",
+            Fp32Kw => "'fp32'",
+            Fp64Kw => "'fp64'",
             StructKw => "'struct'",
             EnumKw => "'enum'",
             UnionKw => "'union'",
@@ -657,6 +667,7 @@ impl SyntaxKind {
             IntLiteral => "integer literal",
             BinLiteral => "binary literal",
             HexLiteral => "hexadecimal literal",
+            FloatLiteral => "floating-point literal",
             StringLiteral => "string literal",
             Lifetime => "lifetime",
 
@@ -748,7 +759,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Else => ElseKw,
             Token::AssignKw => AssignKw,
 
-            // Type System (11) - Updated to include numeric types and bool
+            // Type System (14) - Updated to include numeric types, bool, and floating-point
             Token::Bit => BitKw,
             Token::Bool => BoolKw,
             Token::Nat => NatKw,
@@ -758,6 +769,9 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Reset => ResetKw,
             Token::Type => TypeKw,
             Token::Stream => StreamKw,
+            Token::Fp16 => Fp16Kw,
+            Token::Fp32 => Fp32Kw,
+            Token::Fp64 => Fp64Kw,
             Token::Struct => StructKw,
             Token::Enum => EnumKw,
             Token::Union => UnionKw,
@@ -832,6 +846,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::DecimalLiteral(_) => IntLiteral,
             Token::BinaryLiteral(_) => BinLiteral,
             Token::HexLiteral(_) => HexLiteral,
+            Token::FloatLiteral(_) => FloatLiteral,
             Token::StringLiteral(_) => StringLiteral,
             Token::Lifetime(_) => Lifetime,
 

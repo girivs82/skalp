@@ -343,6 +343,7 @@ pub struct HirMatchArmExpr {
 pub enum HirLiteral {
     Integer(u64),
     Boolean(bool),
+    Float(f64),
     String(String),
     BitVector(Vec<bool>),
 }
@@ -446,6 +447,10 @@ pub enum HirType {
     IntExpr(Box<HirExpression>),
     NatExpr(Box<HirExpression>),
     ArrayExpr(Box<HirType>, Box<HirExpression>), // array<T, SIZE_EXPR>
+    // IEEE 754 floating-point types
+    Float16, // IEEE 754 half precision (16-bit)
+    Float32, // IEEE 754 single precision (32-bit)
+    Float64, // IEEE 754 double precision (64-bit)
 }
 
 /// Patterns in HIR

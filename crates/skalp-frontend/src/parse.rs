@@ -2530,6 +2530,24 @@ impl<'a> ParseState<'a> {
                 }
                 self.finish_node();
             }
+            Some(SyntaxKind::Fp16Kw) => {
+                self.start_node(SyntaxKind::Fp16Type);
+                self.bump();
+                // FP16 has fixed width (16-bit), no width specifier
+                self.finish_node();
+            }
+            Some(SyntaxKind::Fp32Kw) => {
+                self.start_node(SyntaxKind::Fp32Type);
+                self.bump();
+                // FP32 has fixed width (32-bit), no width specifier
+                self.finish_node();
+            }
+            Some(SyntaxKind::Fp64Kw) => {
+                self.start_node(SyntaxKind::Fp64Type);
+                self.bump();
+                // FP64 has fixed width (64-bit), no width specifier
+                self.finish_node();
+            }
             Some(SyntaxKind::LBracket) => {
                 // Array type [element_type; size]
                 self.parse_array_type();
@@ -2969,6 +2987,7 @@ impl<'a> ParseState<'a> {
                 SyntaxKind::IntLiteral
                 | SyntaxKind::BinLiteral
                 | SyntaxKind::HexLiteral
+                | SyntaxKind::FloatLiteral
                 | SyntaxKind::StringLiteral
                 | SyntaxKind::TrueKw
                 | SyntaxKind::FalseKw,

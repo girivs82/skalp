@@ -150,6 +150,12 @@ pub enum DataType {
     IntParam { param: String, default: usize },
     /// Unsigned natural with parametric width
     NatParam { param: String, default: usize },
+    /// IEEE 754 half precision (16-bit)
+    Float16,
+    /// IEEE 754 single precision (32-bit)
+    Float32,
+    /// IEEE 754 double precision (64-bit)
+    Float64,
 }
 
 /// Clock domain identifier in MIR
@@ -331,10 +337,12 @@ pub enum Expression {
 }
 
 /// Literal value
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     /// Integer literal
     Integer(i64),
+    /// Floating-point literal
+    Float(f64),
     /// Bit vector literal
     BitVector { width: usize, value: u64 },
     /// String literal
@@ -345,26 +353,49 @@ pub enum Value {
     Unknown,
 }
 
+// Custom Eq implementation for Value
+// We use bitwise comparison for floats to maintain Eq semantics
+impl Eq for Value {}
+
+impl Value {
+    /// Compare floats using bitwise equality (required for Eq)
+    pub fn eq_float(a: f64, b: f64) -> bool {
+        a.to_bits() == b.to_bits()
+    }
+}
+
 /// Binary operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
-    // Arithmetic
+    // Integer Arithmetic
     Add,
     Sub,
     Mul,
     Div,
     Mod,
+    // Floating-Point Arithmetic
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
     // Logical
     And,
     Or,
     Xor,
-    // Comparison
+    // Integer Comparison
     Equal,
     NotEqual,
     Less,
     LessEqual,
     Greater,
     GreaterEqual,
+    // Floating-Point Comparison
+    FEqual,
+    FNotEqual,
+    FLess,
+    FLessEqual,
+    FGreater,
+    FGreaterEqual,
     // Bitwise
     BitwiseAnd,
     BitwiseOr,

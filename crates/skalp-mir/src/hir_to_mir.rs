@@ -514,6 +514,9 @@ impl<'hir> HirToMir<'hir> {
                     hir::HirLiteral::Integer(val) => {
                         Some(Expression::Literal(Value::Integer(*val as i64)))
                     }
+                    hir::HirLiteral::Float(f) => {
+                        Some(Expression::Literal(Value::Float(*f)))
+                    }
                     hir::HirLiteral::String(s) => {
                         Some(Expression::Literal(Value::String(s.clone())))
                     }
@@ -673,7 +676,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Binary(binary) => {
                 let left = Box::new(self.convert_expression(&binary.left)?);
                 let right = Box::new(self.convert_expression(&binary.right)?);
-                let op = self.convert_binary_op(&binary.op);
+                let op = self.convert_binary_op(&binary.op, &binary.left);
                 Some(Expression::Binary { op, left, right })
             }
             hir::HirExpression::Unary(unary) => {
@@ -823,6 +826,7 @@ impl<'hir> HirToMir<'hir> {
         match lit {
             hir::HirLiteral::Integer(val) => Some(Value::Integer(*val as i64)),
             hir::HirLiteral::Boolean(b) => Some(Value::Integer(if *b { 1 } else { 0 })),
+            hir::HirLiteral::Float(f) => Some(Value::Float(*f)),
             hir::HirLiteral::String(s) => Some(Value::String(s.clone())),
             hir::HirLiteral::BitVector(bits) => {
                 // Convert vector of bools to integer value
@@ -853,22 +857,91 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR binary op to MIR
-    fn convert_binary_op(&self, op: &hir::HirBinaryOp) -> BinaryOp {
+    /// Infer HIR expression type
+    fn infer_hir_type(&self, expr: &hir::HirExpression) -> Option<hir::HirType> {
+        let hir = self.hir?;
+        match expr {
+            hir::HirExpression::Literal(lit) => match lit {
+                hir::HirLiteral::Integer(_) => Some(hir::HirType::Bit(32)), // Default integer width
+                hir::HirLiteral::Boolean(_) => Some(hir::HirType::Bool),
+                hir::HirLiteral::Float(_) => Some(hir::HirType::Float32), // Default float type
+                hir::HirLiteral::String(_) => None,
+                hir::HirLiteral::BitVector(bits) => Some(hir::HirType::Bit(bits.len() as u32)),
+            },
+            hir::HirExpression::Signal(signal_id) => {
+                // Look up signal in current entity's implementation
+                let entity_id = self.current_entity_id?;
+                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
+                let signal = impl_block.signals.iter().find(|s| s.id == *signal_id)?;
+                Some(signal.signal_type.clone())
+            },
+            hir::HirExpression::Port(port_id) => {
+                // Look up port in current entity
+                let entity_id = self.current_entity_id?;
+                let entity = hir.entities.iter().find(|e| e.id == entity_id)?;
+                let port = entity.ports.iter().find(|p| p.id == *port_id)?;
+                Some(port.port_type.clone())
+            },
+            hir::HirExpression::Variable(var_id) => {
+                // Look up variable in current entity's implementation
+                let entity_id = self.current_entity_id?;
+                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
+                let var = impl_block.variables.iter().find(|v| v.id == *var_id)?;
+                Some(var.var_type.clone())
+            },
+            hir::HirExpression::Binary(binary) => {
+                // For binary expressions, infer from operands
+                self.infer_hir_type(&binary.left)
+            },
+            hir::HirExpression::FieldAccess { base, .. } => {
+                // Infer from base expression and field
+                let base_type = self.infer_hir_type(base)?;
+                // TODO: Look up field type in struct definition
+                Some(base_type)
+            },
+            hir::HirExpression::Index(base, _) => {
+                // For array indexing, infer element type
+                let base_type = self.infer_hir_type(base)?;
+                match base_type {
+                    hir::HirType::Array(elem_type, _) => Some(*elem_type),
+                    _ => Some(hir::HirType::Bit(1)), // Bit select
+                }
+            },
+            _ => None,
+        }
+    }
+
+    /// Check if HIR type is a floating-point type
+    fn is_float_type(&self, hir_type: &hir::HirType) -> bool {
+        matches!(
+            hir_type,
+            hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
+        )
+    }
+
+    fn convert_binary_op(&self, op: &hir::HirBinaryOp, left_expr: &hir::HirExpression) -> BinaryOp {
+        // Infer type from left operand to determine if we need FP operators
+        let is_fp = if let Some(ty) = self.infer_hir_type(left_expr) {
+            self.is_float_type(&ty)
+        } else {
+            false
+        };
+
         match op {
-            hir::HirBinaryOp::Add => BinaryOp::Add,
-            hir::HirBinaryOp::Sub => BinaryOp::Sub,
-            hir::HirBinaryOp::Mul => BinaryOp::Mul,
-            hir::HirBinaryOp::Div => BinaryOp::Div,
-            hir::HirBinaryOp::Mod => BinaryOp::Mod,
+            hir::HirBinaryOp::Add => if is_fp { BinaryOp::FAdd } else { BinaryOp::Add },
+            hir::HirBinaryOp::Sub => if is_fp { BinaryOp::FSub } else { BinaryOp::Sub },
+            hir::HirBinaryOp::Mul => if is_fp { BinaryOp::FMul } else { BinaryOp::Mul },
+            hir::HirBinaryOp::Div => if is_fp { BinaryOp::FDiv } else { BinaryOp::Div },
+            hir::HirBinaryOp::Mod => BinaryOp::Mod, // No FP modulo
             hir::HirBinaryOp::And => BinaryOp::BitwiseAnd,
             hir::HirBinaryOp::Or => BinaryOp::BitwiseOr,
             hir::HirBinaryOp::Xor => BinaryOp::BitwiseXor,
-            hir::HirBinaryOp::Equal => BinaryOp::Equal,
-            hir::HirBinaryOp::NotEqual => BinaryOp::NotEqual,
-            hir::HirBinaryOp::Less => BinaryOp::Less,
-            hir::HirBinaryOp::LessEqual => BinaryOp::LessEqual,
-            hir::HirBinaryOp::Greater => BinaryOp::Greater,
-            hir::HirBinaryOp::GreaterEqual => BinaryOp::GreaterEqual,
+            hir::HirBinaryOp::Equal => if is_fp { BinaryOp::FEqual } else { BinaryOp::Equal },
+            hir::HirBinaryOp::NotEqual => if is_fp { BinaryOp::FNotEqual } else { BinaryOp::NotEqual },
+            hir::HirBinaryOp::Less => if is_fp { BinaryOp::FLess } else { BinaryOp::Less },
+            hir::HirBinaryOp::LessEqual => if is_fp { BinaryOp::FLessEqual } else { BinaryOp::LessEqual },
+            hir::HirBinaryOp::Greater => if is_fp { BinaryOp::FGreater } else { BinaryOp::Greater },
+            hir::HirBinaryOp::GreaterEqual => if is_fp { BinaryOp::FGreaterEqual } else { BinaryOp::GreaterEqual },
             hir::HirBinaryOp::LogicalAnd => BinaryOp::LogicalAnd,
             hir::HirBinaryOp::LogicalOr => BinaryOp::LogicalOr,
             hir::HirBinaryOp::LeftShift => BinaryOp::LeftShift,
@@ -920,6 +993,10 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Union(union_type) => {
                 DataType::Union(Box::new(self.convert_union_type(union_type)))
             }
+            // Floating-point types
+            hir::HirType::Float16 => DataType::Float16,
+            hir::HirType::Float32 => DataType::Float32,
+            hir::HirType::Float64 => DataType::Float64,
             // Parametric types - preserve parameter name and default
             hir::HirType::BitParam(param_name) => DataType::BitParam {
                 param: param_name.clone(),
@@ -1321,6 +1398,10 @@ impl<'hir> HirToMir<'hir> {
                 let size = self.try_eval_const_expr(size_expr).unwrap_or(1) as usize;
                 element_width * size
             }
+            // Floating-point types have fixed widths
+            hir::HirType::Float16 => 16,
+            hir::HirType::Float32 => 32,
+            hir::HirType::Float64 => 64,
         }
     }
 
@@ -1386,6 +1467,7 @@ impl<'hir> HirToMir<'hir> {
         match lit {
             hir::HirLiteral::Integer(val) => Some(Value::Integer(*val as i64)),
             hir::HirLiteral::Boolean(b) => Some(Value::Integer(if *b { 1 } else { 0 })),
+            hir::HirLiteral::Float(f) => Some(Value::Float(*f)),
             hir::HirLiteral::String(s) => Some(Value::String(s.clone())),
             hir::HirLiteral::BitVector(bits) => {
                 // Convert bit vector to integer

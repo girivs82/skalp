@@ -3,7 +3,7 @@
 //! Transforms the syntax tree into HIR (High-level Intermediate Representation)
 
 use crate::hir::*;
-use crate::lexer::{parse_binary, parse_hex};
+use crate::lexer::{parse_binary, parse_float, parse_hex};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
 use std::collections::HashMap;
@@ -1608,6 +1608,11 @@ impl HirBuilderContext {
                     let value = parse_hex(text)?;
                     Some(HirExpression::Literal(HirLiteral::Integer(value)))
                 }
+                SyntaxKind::FloatLiteral => {
+                    let text = token.as_token().map(|t| t.text())?;
+                    let value = parse_float(text)?;
+                    Some(HirExpression::Literal(HirLiteral::Float(value)))
+                }
                 SyntaxKind::StringLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
                     // Remove quotes
@@ -2999,6 +3004,15 @@ impl HirBuilderContext {
                         // Default to Stream<bit[8]> if no inner type specified
                         return HirType::Stream(Box::new(HirType::Bit(8)));
                     }
+                }
+                SyntaxKind::Fp16Type => {
+                    return HirType::Float16;
+                }
+                SyntaxKind::Fp32Type => {
+                    return HirType::Float32;
+                }
+                SyntaxKind::Fp64Type => {
+                    return HirType::Float64;
                 }
                 SyntaxKind::ArrayType => {
                     return self.build_array_type(&child);

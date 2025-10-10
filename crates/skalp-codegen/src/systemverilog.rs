@@ -598,6 +598,7 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
 fn format_value(value: &skalp_mir::Value) -> String {
     match value {
         skalp_mir::Value::Integer(n) => n.to_string(),
+        skalp_mir::Value::Float(f) => f.to_string(),
         skalp_mir::Value::BitVector { width, value } => {
             format!("{}'b{:0width$b}", width, value, width = *width)
         }
@@ -615,6 +616,10 @@ fn format_binary_op(op: &skalp_mir::BinaryOp) -> &'static str {
         skalp_mir::BinaryOp::Mul => "*",
         skalp_mir::BinaryOp::Div => "/",
         skalp_mir::BinaryOp::Mod => "%",
+        skalp_mir::BinaryOp::FAdd => "+",
+        skalp_mir::BinaryOp::FSub => "-",
+        skalp_mir::BinaryOp::FMul => "*",
+        skalp_mir::BinaryOp::FDiv => "/",
         skalp_mir::BinaryOp::And => "&", // Logical operations (same as bitwise in Verilog context)
         skalp_mir::BinaryOp::Or => "|",
         skalp_mir::BinaryOp::Xor => "^",
@@ -629,6 +634,12 @@ fn format_binary_op(op: &skalp_mir::BinaryOp) -> &'static str {
         skalp_mir::BinaryOp::LessEqual => "<=",
         skalp_mir::BinaryOp::Greater => ">",
         skalp_mir::BinaryOp::GreaterEqual => ">=",
+        skalp_mir::BinaryOp::FEqual => "==",
+        skalp_mir::BinaryOp::FNotEqual => "!=",
+        skalp_mir::BinaryOp::FLess => "<",
+        skalp_mir::BinaryOp::FLessEqual => "<=",
+        skalp_mir::BinaryOp::FGreater => ">",
+        skalp_mir::BinaryOp::FGreaterEqual => ">=",
         skalp_mir::BinaryOp::LeftShift => "<<",
         skalp_mir::BinaryOp::RightShift => ">>",
     }
@@ -719,6 +730,10 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
                 String::new()
             }
         }
+        // Floating-point types have fixed widths
+        skalp_mir::DataType::Float16 => "[15:0] ".to_string(),
+        skalp_mir::DataType::Float32 => "[31:0] ".to_string(),
+        skalp_mir::DataType::Float64 => "[63:0] ".to_string(),
     }
 }
 
@@ -780,6 +795,10 @@ fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
             }
             max_width
         }
+        // Floating-point types have fixed widths
+        skalp_mir::DataType::Float16 => 16,
+        skalp_mir::DataType::Float32 => 32,
+        skalp_mir::DataType::Float64 => 64,
     }
 }
 

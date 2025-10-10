@@ -36,7 +36,7 @@ pub enum Token {
     #[token("assign")]
     AssignKw,
 
-    // Type System (11) - Updated to include numeric types
+    // Type System (14) - Updated to include numeric and floating-point types
     #[token("bit")]
     Bit,
     #[token("bool")]
@@ -55,6 +55,12 @@ pub enum Token {
     Type,
     #[token("stream")]
     Stream,
+    #[token("fp16")]
+    Fp16,
+    #[token("fp32")]
+    Fp32,
+    #[token("fp64")]
+    Fp64,
     #[token("struct")]
     Struct,
     #[token("enum")]
@@ -286,6 +292,11 @@ pub enum Token {
     #[regex(r"[0-9][0-9_]*", |lex| parse_decimal(lex.slice()))]
     DecimalLiteral(u64),
 
+    // Floating-point literals
+    // Matches: 1.0, 3.14, 1.5e10, 1.5e-10, 1.0f, 1.0f32, 1.0f64
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?(f|f16|f32|f64)?", |lex| parse_float(lex.slice()))]
+    FloatLiteral(f64),
+
     // String literals
     #[regex(r#""([^"\\]|\\["\\nt])*""#, |lex| parse_string(lex.slice()))]
     StringLiteral(String),
@@ -467,6 +478,7 @@ impl fmt::Display for Token {
             Token::DecimalLiteral(n) => write!(f, "{}", n),
             Token::BinaryLiteral(n) => write!(f, "0b{:b}", n),
             Token::HexLiteral(n) => write!(f, "0x{:x}", n),
+            Token::FloatLiteral(fl) => write!(f, "{}", fl),
             Token::StringLiteral(s) => write!(f, "\"{}\"", s),
             Token::Lifetime(name) => write!(f, "'{}", name),
             Token::LeftParen => write!(f, "("),
@@ -494,6 +506,24 @@ pub fn parse_hex(input: &str) -> Option<u64> {
 pub fn parse_decimal(input: &str) -> Option<u64> {
     let without_underscores = input.replace('_', "");
     without_underscores.parse::<u64>().ok()
+}
+
+/// Parse floating-point literal
+/// Supports: 1.0, 3.14, 1.5e10, 1.5e-10, 1.0f, 1.0f32, 1.0f64
+pub fn parse_float(input: &str) -> Option<f64> {
+    // Remove underscores and optional type suffix (f, f16, f32, f64)
+    let mut cleaned = input.replace('_', "");
+
+    // Remove type suffix if present
+    if cleaned.ends_with("f64") {
+        cleaned = cleaned[..cleaned.len() - 3].to_string();
+    } else if cleaned.ends_with("f32") || cleaned.ends_with("f16") {
+        cleaned = cleaned[..cleaned.len() - 3].to_string();
+    } else if cleaned.ends_with('f') {
+        cleaned = cleaned[..cleaned.len() - 1].to_string();
+    }
+
+    cleaned.parse::<f64>().ok()
 }
 
 /// Parse string literal (remove quotes and handle escapes)
