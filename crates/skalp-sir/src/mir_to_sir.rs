@@ -102,7 +102,8 @@ impl<'a> MirToSirConverter<'a> {
 
     fn convert_ports(&mut self) {
         for port in &self.mir.ports {
-            let width = self.get_width(&port.port_type);
+            let sir_type = self.convert_type(&port.port_type);
+            let width = sir_type.width();
             let direction = match port.direction {
                 skalp_mir::PortDirection::Input => PortDirection::Input,
                 skalp_mir::PortDirection::Output => PortDirection::Output,
@@ -112,6 +113,7 @@ impl<'a> MirToSirConverter<'a> {
             let sir_port = SirPort {
                 name: port.name.clone(),
                 width,
+                sir_type: sir_type.clone(),
                 direction: direction.clone(),
                 clock_domain: None,
             };
@@ -129,6 +131,7 @@ impl<'a> MirToSirConverter<'a> {
             self.sir.signals.push(SirSignal {
                 name: port.name.clone(),
                 width,
+                sir_type: sir_type.clone(),
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: is_sequential_port,
@@ -152,7 +155,8 @@ impl<'a> MirToSirConverter<'a> {
 
     fn convert_signals(&mut self) {
         for signal in &self.mir.signals {
-            let width = self.get_width(&signal.signal_type);
+            let sir_type = self.convert_type(&signal.signal_type);
+            let width = sir_type.width();
 
             eprintln!(
                 "📏 Signal '{}': type={:?}, width={}",
@@ -165,6 +169,7 @@ impl<'a> MirToSirConverter<'a> {
             self.sir.signals.push(SirSignal {
                 name: signal.name.clone(),
                 width,
+                sir_type: sir_type.clone(),
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: is_register,
@@ -1991,9 +1996,11 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         self.sir.combinational_nodes.push(sir_node);
+        let sir_type = self.get_signal_type(signal_name);
         self.sir.signals.push(SirSignal {
             name: format!("node_{}_out", node_id),
-            width: self.get_signal_width(signal_name),
+            width: sir_type.width(),
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: vec![],
@@ -2118,6 +2125,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width,
+            sir_type: SirType::Bits(width),
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2217,10 +2225,26 @@ impl<'a> MirToSirConverter<'a> {
         let left_signal = self.node_to_signal_ref(left);
         let right_signal = self.node_to_signal_ref(right);
 
-        // Determine width from input signals
-        let width = self
-            .get_signal_width(&left_signal.signal_id)
-            .max(self.get_signal_width(&right_signal.signal_id));
+        // Determine type from operation and inputs
+        let left_type = self.get_signal_type(&left_signal.signal_id);
+        let right_type = self.get_signal_type(&right_signal.signal_id);
+
+        let sir_type = if bin_op.is_float_op() {
+            // FP operations preserve input type (use left if both are same width)
+            if left_type.is_float() { left_type.clone() } else { right_type.clone() }
+        } else if matches!(bin_op, BinaryOperation::Eq | BinaryOperation::Neq | BinaryOperation::Lt |
+                          BinaryOperation::Lte | BinaryOperation::Gt | BinaryOperation::Gte |
+                          BinaryOperation::FEq | BinaryOperation::FNeq | BinaryOperation::FLt |
+                          BinaryOperation::FLte | BinaryOperation::FGt | BinaryOperation::FGte) {
+            // Comparison operations return 1-bit boolean
+            SirType::Bits(1)
+        } else {
+            // Arithmetic/logic operations use max width
+            let width = left_type.width().max(right_type.width());
+            SirType::Bits(width)
+        };
+
+        let width = sir_type.width();
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -2233,6 +2257,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width,
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2256,8 +2281,9 @@ impl<'a> MirToSirConverter<'a> {
 
         let operand_signal = self.node_to_signal_ref(operand);
 
-        // Get width from operand
-        let width = self.get_signal_width(&operand_signal.signal_id);
+        // Get type from operand - unary ops preserve type
+        let sir_type = self.get_signal_type(&operand_signal.signal_id);
+        let width = sir_type.width();
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -2269,6 +2295,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width,
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2293,10 +2320,15 @@ impl<'a> MirToSirConverter<'a> {
         let true_signal = self.node_to_signal_ref(true_val);
         let false_signal = self.node_to_signal_ref(false_val);
 
-        // Get width from true/false branches
-        let width = self
-            .get_signal_width(&true_signal.signal_id)
-            .max(self.get_signal_width(&false_signal.signal_id));
+        // Get type from true/false branches - use the wider type
+        let true_type = self.get_signal_type(&true_signal.signal_id);
+        let false_type = self.get_signal_type(&false_signal.signal_id);
+        let sir_type = if true_type.width() >= false_type.width() {
+            true_type
+        } else {
+            false_type
+        };
+        let width = sir_type.width();
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -2308,6 +2340,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width,
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2337,7 +2370,7 @@ impl<'a> MirToSirConverter<'a> {
             .map(|s| self.get_signal_width(&s.signal_id))
             .sum();
 
-        // Create output signal for this node
+        // Create output signal for this node - concatenation always produces bits
         let output_signal_name = format!("node_{}_out", node_id);
         let output_signal = SignalRef {
             signal_id: output_signal_name.clone(),
@@ -2346,6 +2379,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width,
+            sir_type: SirType::Bits(width),
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2387,6 +2421,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width: output_width,
+            sir_type: SirType::Bits(output_width),
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2427,6 +2462,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width: element_width,
+            sir_type: SirType::Bits(element_width),
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2468,9 +2504,12 @@ impl<'a> MirToSirConverter<'a> {
             signal_id: output_signal_name.clone(),
             bit_range: None,
         };
+        // Array write preserves the array type
+        let sir_type = self.get_signal_type(&old_array_signal.signal_id);
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width: array_width,
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2501,8 +2540,9 @@ impl<'a> MirToSirConverter<'a> {
             bit_range: None,
         };
 
-        // Get width from input signal
-        let width = self.get_signal_width(&input_signal.signal_id);
+        // Get type from input signal - flip-flop preserves type
+        let sir_type = self.get_signal_type(&input_signal.signal_id);
+        let width = sir_type.width();
 
         // Create output signal for this flip-flop
         let output_signal_name = format!("node_{}_out", node_id);
@@ -2513,6 +2553,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width,
+            sir_type,
             is_state: false, // This is just a temporary signal, not a state element
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2539,6 +2580,7 @@ impl<'a> MirToSirConverter<'a> {
             self.sir.signals.push(SirSignal {
                 name: signal_name.clone(),
                 width: 8, // Default to 8 bits for counter example
+                sir_type: SirType::Bits(8),
                 driver_node: Some(node_id),
                 fanout_nodes: Vec::new(),
                 is_state: false,
@@ -2709,19 +2751,21 @@ impl<'a> MirToSirConverter<'a> {
             bit_range: None,
         };
 
-        // Get port width from MIR
-        let port_width = self
+        // Get port type from MIR
+        let sir_type = self
             .mir
             .ports
             .iter()
             .find(|p| p.name == port_name)
-            .map(|p| self.get_width(&p.port_type))
-            .unwrap_or(8);
+            .map(|p| self.convert_type(&p.port_type))
+            .unwrap_or(SirType::Bits(8));
+        let port_width = sir_type.width();
 
         // Add the output signal to SIR
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width: port_width,
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2782,18 +2826,18 @@ impl<'a> MirToSirConverter<'a> {
             bit_range: None,
         };
 
-        // Check if this is a state element or signal to get width
-        let width = if let Some(state) = self.sir.state_elements.get(name) {
-            state.width
-        } else if let Some(signal) = self.sir.signals.iter().find(|s| s.name == name) {
-            signal.width
+        // Check if this is a state element or signal to get type
+        let sir_type = if let Some(signal) = self.sir.signals.iter().find(|s| s.name == name) {
+            signal.sir_type.clone()
         } else {
-            8 // Default to 8 bits
+            SirType::Bits(8) // Default to 8 bits
         };
+        let width = sir_type.width();
 
         self.sir.signals.push(SirSignal {
             name: output_signal_name.clone(),
             width,
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2825,10 +2869,10 @@ impl<'a> MirToSirConverter<'a> {
             Mul => BinaryOperation::Mul,
             Div => BinaryOperation::Div,
             Mod => BinaryOperation::Mod,
-            FAdd => BinaryOperation::Add,
-            FSub => BinaryOperation::Sub,
-            FMul => BinaryOperation::Mul,
-            FDiv => BinaryOperation::Div,
+            FAdd => BinaryOperation::FAdd,
+            FSub => BinaryOperation::FSub,
+            FMul => BinaryOperation::FMul,
+            FDiv => BinaryOperation::FDiv,
             BitwiseAnd => BinaryOperation::And,
             BitwiseOr => BinaryOperation::Or,
             BitwiseXor => BinaryOperation::Xor,
@@ -2841,12 +2885,12 @@ impl<'a> MirToSirConverter<'a> {
             LessEqual => BinaryOperation::Lte,
             Greater => BinaryOperation::Gt,
             GreaterEqual => BinaryOperation::Gte,
-            FEqual => BinaryOperation::Eq,
-            FNotEqual => BinaryOperation::Neq,
-            FLess => BinaryOperation::Lt,
-            FLessEqual => BinaryOperation::Lte,
-            FGreater => BinaryOperation::Gt,
-            FGreaterEqual => BinaryOperation::Gte,
+            FEqual => BinaryOperation::FEq,
+            FNotEqual => BinaryOperation::FNeq,
+            FLess => BinaryOperation::FLt,
+            FLessEqual => BinaryOperation::FLte,
+            FGreater => BinaryOperation::FGt,
+            FGreaterEqual => BinaryOperation::FGte,
             LeftShift => BinaryOperation::Shl,
             RightShift => BinaryOperation::Shr,
             LogicalAnd => BinaryOperation::And, // Boolean AND
@@ -2865,18 +2909,38 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    fn get_width(&self, data_type: &DataType) -> usize {
+    /// Convert MIR DataType to SIR SirType
+    fn convert_type(&self, data_type: &DataType) -> SirType {
         match data_type {
-            DataType::Bit(w) | DataType::Logic(w) => *w,
-            DataType::Int(w) | DataType::Nat(w) => *w,
-            DataType::Clock { .. } | DataType::Reset { .. } => 1,
-            DataType::Array(dt, size) => self.get_width(dt) * size,
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => {
+                SirType::Bits(*w)
+            }
+            DataType::Bool => SirType::Bits(1),
+            DataType::Clock { .. } | DataType::Reset { .. } | DataType::Event => SirType::Bits(1),
+            DataType::Float16 => SirType::Float16,
+            DataType::Float32 => SirType::Float32,
+            DataType::Float64 => SirType::Float64,
+            DataType::Vec2(elem) => SirType::Vec2(Box::new(self.convert_type(elem))),
+            DataType::Vec3(elem) => SirType::Vec3(Box::new(self.convert_type(elem))),
+            DataType::Vec4(elem) => SirType::Vec4(Box::new(self.convert_type(elem))),
+            DataType::Array(elem, size) => SirType::Array(Box::new(self.convert_type(elem)), *size),
             DataType::BitParam { default, .. }
             | DataType::LogicParam { default, .. }
             | DataType::IntParam { default, .. }
-            | DataType::NatParam { default, .. } => *default,
-            _ => 1,
+            | DataType::NatParam { default, .. } => SirType::Bits(*default),
+            // Struct, Enum, Union are not yet supported for simulation
+            // They should be decomposed at a higher level
+            DataType::Struct(_) | DataType::Enum(_) | DataType::Union(_) => {
+                eprintln!(
+                    "Warning: Struct/Enum/Union types not yet supported in SIR, treating as 1-bit"
+                );
+                SirType::Bits(1)
+            }
         }
+    }
+
+    fn get_width(&self, data_type: &DataType) -> usize {
+        self.convert_type(data_type).width()
     }
 
     fn get_signal_width(&self, signal_name: &str) -> usize {
@@ -2892,6 +2956,16 @@ impl<'a> MirToSirConverter<'a> {
 
         // Default to 8 bits for the counter example
         8
+    }
+
+    fn get_signal_type(&self, signal_name: &str) -> SirType {
+        // Check if it's a signal
+        if let Some(signal) = self.sir.signals.iter().find(|s| s.name == signal_name) {
+            return signal.sir_type.clone();
+        }
+
+        // Default to Bits based on width
+        SirType::Bits(self.get_signal_width(signal_name))
     }
 
     /// Flatten hierarchical module instances into the SIR
@@ -2955,7 +3029,8 @@ impl<'a> MirToSirConverter<'a> {
         // These get prefixed with instance name (e.g., "stage1.reg")
         for signal in &child_module.signals {
             let prefixed_name = format!("{}.{}", inst_prefix, signal.name);
-            let width = self.get_width(&signal.signal_type);
+            let sir_type = self.convert_type(&signal.signal_type);
+            let width = sir_type.width();
 
             // Check if this signal is a register in the child module
             let is_register = self.is_signal_sequential_in_module(signal.id, child_module);
@@ -2968,6 +3043,7 @@ impl<'a> MirToSirConverter<'a> {
             self.sir.signals.push(SirSignal {
                 name: prefixed_name.clone(),
                 width,
+                sir_type: sir_type.clone(),
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: is_register,

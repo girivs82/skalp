@@ -344,7 +344,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
     let sir = if design_file.extension() == Some(std::ffi::OsStr::new("lir")) {
         // For LIR files, create a minimal SIR for simulation
         use skalp_lir::LirDesign;
-        use skalp_sir::{SirModule, SirSignal};
+        use skalp_sir::{SirModule, SirSignal, SirType};
         use std::collections::HashMap;
 
         let lir: LirDesign = serde_json::from_str(&design_str)?;
@@ -361,6 +361,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
             signals.push(SirSignal {
                 name: signal.name.clone(),
                 width: 32, // Default width
+                sir_type: SirType::Bits(32),
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: signal.is_register,

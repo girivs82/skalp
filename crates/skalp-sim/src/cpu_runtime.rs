@@ -380,6 +380,19 @@ impl CpuRuntime {
             }
             BinaryOperation::Shl => left_val << (right_val & 0x3F), // Limit shift amount
             BinaryOperation::Shr => left_val >> (right_val & 0x3F),
+            // Floating-point operations - for now, treat as bit patterns
+            // TODO: Implement proper FP arithmetic
+            BinaryOperation::FAdd => left_val.wrapping_add(right_val),
+            BinaryOperation::FSub => left_val.wrapping_sub(right_val),
+            BinaryOperation::FMul => left_val.wrapping_mul(right_val),
+            BinaryOperation::FDiv => if right_val == 0 { 0 } else { left_val / right_val },
+            BinaryOperation::FMod => if right_val == 0 { 0 } else { left_val % right_val },
+            BinaryOperation::FEq => if left_val == right_val { 1 } else { 0 },
+            BinaryOperation::FNeq => if left_val != right_val { 1 } else { 0 },
+            BinaryOperation::FLt => if left_val < right_val { 1 } else { 0 },
+            BinaryOperation::FLte => if left_val <= right_val { 1 } else { 0 },
+            BinaryOperation::FGt => if left_val > right_val { 1 } else { 0 },
+            BinaryOperation::FGte => if left_val >= right_val { 1 } else { 0 },
         };
 
         // Determine output size (max of input sizes)
@@ -425,6 +438,11 @@ impl CpuRuntime {
                 }
                 result
             }
+            // Floating-point operations - for now, treat as bit patterns
+            // TODO: Implement proper FP arithmetic
+            UnaryOperation::FNeg => operand_val.wrapping_neg(),
+            UnaryOperation::FAbs => operand_val, // TODO: Implement proper FP abs
+            UnaryOperation::FSqrt => operand_val, // TODO: Implement proper FP sqrt
         };
 
         Ok(Self::u64_to_bytes(result_val, operand.len()))

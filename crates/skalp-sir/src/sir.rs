@@ -12,10 +12,77 @@ pub struct SirModule {
     pub clock_domains: HashMap<String, ClockDomain>,
 }
 
+/// Type information for SIR signals and ports
+#[derive(Debug, Clone, PartialEq)]
+pub enum SirType {
+    /// Bit vector with fixed width
+    Bits(usize),
+    /// IEEE 754 half precision (16-bit)
+    Float16,
+    /// IEEE 754 single precision (32-bit)
+    Float32,
+    /// IEEE 754 double precision (64-bit)
+    Float64,
+    /// 2-component vector
+    Vec2(Box<SirType>),
+    /// 3-component vector
+    Vec3(Box<SirType>),
+    /// 4-component vector
+    Vec4(Box<SirType>),
+    /// Array of elements
+    Array(Box<SirType>, usize),
+}
+
+impl SirType {
+    /// Get the bit width of this type
+    pub fn width(&self) -> usize {
+        match self {
+            SirType::Bits(w) => *w,
+            SirType::Float16 => 16,
+            SirType::Float32 => 32,
+            SirType::Float64 => 64,
+            SirType::Vec2(elem) => elem.width() * 2,
+            SirType::Vec3(elem) => elem.width() * 3,
+            SirType::Vec4(elem) => elem.width() * 4,
+            SirType::Array(elem, size) => elem.width() * size,
+        }
+    }
+
+    /// Check if this is a floating-point type
+    pub fn is_float(&self) -> bool {
+        matches!(self, SirType::Float16 | SirType::Float32 | SirType::Float64)
+    }
+
+    /// Check if this is a vector type
+    pub fn is_vector(&self) -> bool {
+        matches!(self, SirType::Vec2(_) | SirType::Vec3(_) | SirType::Vec4(_))
+    }
+
+    /// Get the element type for vectors
+    pub fn elem_type(&self) -> Option<&SirType> {
+        match self {
+            SirType::Vec2(e) | SirType::Vec3(e) | SirType::Vec4(e) => Some(e),
+            SirType::Array(e, _) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Get the number of components for vectors
+    pub fn component_count(&self) -> usize {
+        match self {
+            SirType::Vec2(_) => 2,
+            SirType::Vec3(_) => 3,
+            SirType::Vec4(_) => 4,
+            _ => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SirPort {
     pub name: String,
     pub width: usize,
+    pub sir_type: SirType,
     pub direction: PortDirection,
     pub clock_domain: Option<String>,
 }
@@ -30,6 +97,7 @@ pub enum PortDirection {
 pub struct SirSignal {
     pub name: String,
     pub width: usize,
+    pub sir_type: SirType,
     pub driver_node: Option<usize>,
     pub fanout_nodes: Vec<usize>,
     pub is_state: bool,
@@ -71,31 +139,83 @@ pub enum SirNodeKind {
 
 #[derive(Debug, Clone)]
 pub enum BinaryOperation {
+    // Integer arithmetic
     Add,
     Sub,
     Mul,
     Div,
     Mod,
+    // Bitwise operations
     And,
     Or,
     Xor,
+    // Comparison operations
     Eq,
     Neq,
     Lt,
     Lte,
     Gt,
     Gte,
+    // Shift operations
     Shl,
     Shr,
+    // Floating-point arithmetic (IEEE 754)
+    FAdd,  // FP addition
+    FSub,  // FP subtraction
+    FMul,  // FP multiplication
+    FDiv,  // FP division
+    FMod,  // FP modulo
+    // Floating-point comparison
+    FEq,   // FP equality
+    FNeq,  // FP inequality
+    FLt,   // FP less than
+    FLte,  // FP less than or equal
+    FGt,   // FP greater than
+    FGte,  // FP greater than or equal
+}
+
+impl BinaryOperation {
+    /// Check if this is a floating-point operation
+    pub fn is_float_op(&self) -> bool {
+        matches!(
+            self,
+            BinaryOperation::FAdd
+                | BinaryOperation::FSub
+                | BinaryOperation::FMul
+                | BinaryOperation::FDiv
+                | BinaryOperation::FMod
+                | BinaryOperation::FEq
+                | BinaryOperation::FNeq
+                | BinaryOperation::FLt
+                | BinaryOperation::FLte
+                | BinaryOperation::FGt
+                | BinaryOperation::FGte
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum UnaryOperation {
+    // Bitwise operations
     Not,
     Neg,
     RedAnd,
     RedOr,
     RedXor,
+    // Floating-point operations
+    FNeg,  // FP negation
+    FAbs,  // FP absolute value
+    FSqrt, // FP square root
+}
+
+impl UnaryOperation {
+    /// Check if this is a floating-point operation
+    pub fn is_float_op(&self) -> bool {
+        matches!(
+            self,
+            UnaryOperation::FNeg | UnaryOperation::FAbs | UnaryOperation::FSqrt
+        )
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -363,6 +363,18 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Gte => ">=",
                 BinaryOperation::Shl => "<<",
                 BinaryOperation::Shr => ">>",
+                // Floating-point operations
+                BinaryOperation::FAdd => "+",
+                BinaryOperation::FSub => "-",
+                BinaryOperation::FMul => "*",
+                BinaryOperation::FDiv => "/",
+                BinaryOperation::FMod => "%",
+                BinaryOperation::FEq => "==",
+                BinaryOperation::FNeq => "!=",
+                BinaryOperation::FLt => "<",
+                BinaryOperation::FLte => "<=",
+                BinaryOperation::FGt => ">",
+                BinaryOperation::FGte => ">=",
             };
 
             self.write_indented(&format!(
@@ -386,7 +398,24 @@ impl<'a> MetalShaderGenerator<'a> {
                 UnaryOperation::RedAnd => "&",
                 UnaryOperation::RedOr => "|",
                 UnaryOperation::RedXor => "^",
+                // Floating-point operations use Metal math functions
+                UnaryOperation::FNeg => "-",
+                UnaryOperation::FAbs => "abs",
+                UnaryOperation::FSqrt => "sqrt",
             };
+
+            // Check if this is a function call (abs, sqrt) or a prefix operator (-, ~)
+            let is_function = matches!(op, UnaryOperation::FAbs | UnaryOperation::FSqrt);
+
+            if is_function {
+                self.write_indented(&format!(
+                    "signals->{} = {}(signals->{});\n",
+                    self.sanitize_name(output),
+                    op_str,
+                    self.sanitize_name(input)
+                ));
+                return;
+            }
 
             self.write_indented(&format!(
                 "signals->{} = {}signals->{};\n",
@@ -447,7 +476,10 @@ impl<'a> MetalShaderGenerator<'a> {
             };
             let width = high - low + 1;
             let shift = low;
-            let mask = (1u64 << width) - 1;
+
+            // Get the input signal's type to determine if it's a vector
+            let input_signal = sir.signals.iter().find(|s| s.name == *input);
+            let input_type = input_signal.map(|s| &s.sir_type);
 
             // Map signal names to register names for flip-flop outputs
             let input_ref = if sir.state_elements.contains_key(input) {
@@ -485,6 +517,36 @@ impl<'a> MetalShaderGenerator<'a> {
                 format!("signals->{}", self.sanitize_name(input))
             };
 
+            // Check if this is a vector component access
+            if let Some(input_type) = input_type {
+                if input_type.is_vector() {
+                    // For vectors, use component accessors (.x, .y, .z, .w)
+                    // Determine which component based on the slice range
+                    let elem_width = input_type.elem_type().map(|t| t.width()).unwrap_or(32);
+                    let component_index = low / elem_width;
+                    let component = match component_index {
+                        0 => "x",
+                        1 => "y",
+                        2 => "z",
+                        3 => "w",
+                        _ => "x", // fallback
+                    };
+
+                    eprintln!("   🎯 VECTOR SLICE: {} -> .{} (elem_width={}, low={}, component={})",
+                              input, component, elem_width, low, component_index);
+
+                    self.write_indented(&format!(
+                        "signals->{} = {}.{};\n",
+                        self.sanitize_name(output),
+                        input_ref,
+                        component
+                    ));
+                    return;
+                }
+            }
+
+            // For non-vector types, use bit shifts and masks
+            let mask = (1u64 << width) - 1;
             self.write_indented(&format!(
                 "signals->{} = ({} >> {}) & 0x{:X};\n",
                 self.sanitize_name(output),
@@ -846,6 +908,22 @@ impl<'a> MetalShaderGenerator<'a> {
             1..=32 => "uint",
             33..=64 => "uint2",
             _ => "uint4",
+        }
+    }
+
+    fn get_metal_type_from_sir_type(&self, sir_type: &SirType) -> String {
+        match sir_type {
+            SirType::Bits(w) => self.get_metal_type_name(*w).to_string(),
+            SirType::Float16 => "half".to_string(),
+            SirType::Float32 => "float".to_string(),
+            SirType::Float64 => "double".to_string(),
+            SirType::Vec2(elem) => format!("{}2", self.get_metal_type_from_sir_type(elem)),
+            SirType::Vec3(elem) => format!("{}3", self.get_metal_type_from_sir_type(elem)),
+            SirType::Vec4(elem) => format!("{}4", self.get_metal_type_from_sir_type(elem)),
+            SirType::Array(elem, size) => {
+                // Metal doesn't have dynamic arrays, use fixed-size array
+                format!("{}[{}]", self.get_metal_type_from_sir_type(elem), size)
+            }
         }
     }
 
