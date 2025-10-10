@@ -8,4 +8,7 @@ module Vec2Ops (
     output [31:0] y_sum
 );
 
+    assign x_sum = (a[31:0] + b[31:0]);
+    assign y_sum = (a[63:32] + b[63:32]);
+
 endmodule

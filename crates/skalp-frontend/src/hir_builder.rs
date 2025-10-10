@@ -853,8 +853,9 @@ impl HirBuilderContext {
                 self.build_expression(exprs.last().unwrap())?
             }
         } else {
-            // Fallback to last expression
-            self.build_expression(exprs.last().unwrap())?
+            // For 4+ expressions, we have a chain like: LHS = BASE FIELD BINARY or LHS = BASE INDEX FIELD BINARY
+            // Build the RHS by chaining the expressions left-to-right
+            self.build_chained_rhs_expression(&exprs[1..])?
         };
 
         Some(HirAssignment {
@@ -872,13 +873,38 @@ impl HirBuilderContext {
         binary_node: &SyntaxNode,
     ) -> Option<HirExpression> {
         // Get the operator and right operand from the binary node
-        let binary_children: Vec<_> = binary_node.children().collect();
+        let binary_children: Vec<_> = binary_node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::ArrayLiteral
+                )
+            })
+            .collect();
+
         if binary_children.is_empty() {
             return None;
         }
 
-        // The binary node should contain the right operand
-        let right_expr = self.build_expression(&binary_children[0])?;
+        // The binary node may contain multiple expression children if the right operand has postfix operations
+        // For example: "a.x + b.x" parses as BinaryExpr containing [b (IdentExpr), .x (FieldExpr)]
+        // We need to chain these into a single right operand: b.x
+        let right_expr = if binary_children.len() == 1 {
+            self.build_expression(&binary_children[0])?
+        } else {
+            // Chain the expressions
+            self.build_chained_rhs_expression(&binary_children)?
+        };
 
         // Get the operator token from the binary node
         let op_token = binary_node
@@ -893,6 +919,108 @@ impl HirBuilderContext {
             op,
             right: Box::new(right_expr),
         }))
+    }
+
+    /// Build chained RHS expression from multiple sibling nodes
+    /// Parser creates flat structure: BASE FIELD BINARY etc
+    /// We need to chain them: (BASE.FIELD) + ...
+    fn build_chained_rhs_expression(&mut self, rhs_exprs: &[SyntaxNode]) -> Option<HirExpression> {
+        if rhs_exprs.is_empty() {
+            return None;
+        }
+
+        // Start with the first expression
+        let mut result = self.build_expression(&rhs_exprs[0])?;
+
+        // Chain the remaining expressions
+        for current_node in rhs_exprs.iter().skip(1) {
+            match current_node.kind() {
+                SyntaxKind::FieldExpr => {
+                    // Combine result with field access
+                    let field_name = current_node
+                        .children_with_tokens()
+                        .filter_map(|elem| elem.into_token())
+                        .find(|t| t.kind() == SyntaxKind::Ident)
+                        .map(|t| t.text().to_string())?;
+
+                    result = HirExpression::FieldAccess {
+                        base: Box::new(result),
+                        field: field_name,
+                    };
+                }
+                SyntaxKind::IndexExpr => {
+                    // Combine result with index access
+                    result = self.build_index_with_base(result, current_node)?;
+                }
+                SyntaxKind::BinaryExpr => {
+                    // Combine result with binary operation
+                    result = self.combine_expressions_with_binary(result, current_node)?;
+                }
+                SyntaxKind::CallExpr => {
+                    // Function call - just build it normally
+                    // The parser should have created proper structure
+                    result = self.build_expression(current_node)?;
+                }
+                _ => {
+                    // Unknown expression type - skip it
+                    continue;
+                }
+            }
+        }
+
+        Some(result)
+    }
+
+    /// Build index expression with a given base expression
+    fn build_index_with_base(
+        &mut self,
+        base: HirExpression,
+        index_node: &SyntaxNode,
+    ) -> Option<HirExpression> {
+        // Check if it's a range (has colon token) or single index
+        let has_colon = index_node.children_with_tokens().any(|element| {
+            element
+                .as_token()
+                .is_some_and(|t| t.kind() == SyntaxKind::Colon)
+        });
+
+        if has_colon {
+            // Range indexing: base[high:low]
+            let index_exprs: Vec<_> = index_node
+                .children()
+                .filter(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
+                    )
+                })
+                .collect();
+
+            if index_exprs.len() >= 2 {
+                let high_expr = self.build_expression(&index_exprs[0])?;
+                let low_expr = self.build_expression(&index_exprs[1])?;
+                Some(HirExpression::Range(
+                    Box::new(base),
+                    Box::new(high_expr),
+                    Box::new(low_expr),
+                ))
+            } else {
+                None
+            }
+        } else {
+            // Single index: base[index]
+            let index_expr = index_node
+                .children()
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
+                    )
+                })
+                .and_then(|n| self.build_expression(&n))?;
+
+            Some(HirExpression::Index(Box::new(base), Box::new(index_expr)))
+        }
     }
 
     /// Build if statement
