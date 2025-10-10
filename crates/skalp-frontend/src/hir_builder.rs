@@ -386,10 +386,7 @@ impl HirBuilderContext {
             }
         }
 
-        // Exit scope
-        self.symbols.exit_scope();
-
-        // Build instances
+        // Build instances BEFORE exiting scope so signals are still accessible
         let mut instances = Vec::new();
         for child in node.children() {
             if child.kind() == SyntaxKind::InstanceDecl {
@@ -398,6 +395,9 @@ impl HirBuilderContext {
                 }
             }
         }
+
+        // Exit scope
+        self.symbols.exit_scope();
 
         let mut implementation = HirImplementation {
             entity,
