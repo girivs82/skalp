@@ -760,24 +760,53 @@ impl HirBuilderContext {
             return None;
         }
 
-        // Handle array indexing: memory[index] <= value
+        // Handle array indexing/slicing: memory[index] <= value or state[3:1] <= value
         // Parser splits this into: IdentExpr("memory"), IndexExpr("[index]"), IdentExpr("value")
         let lhs = if exprs.len() == 3 && exprs[1].kind() == SyntaxKind::IndexExpr {
-            // Combine base and index to form indexed lvalue
+            // Combine base and index/range to form indexed lvalue
             let base = self.build_lvalue(&exprs[0])?;
+            let index_node = &exprs[1];
 
-            // Extract the index expression from the IndexExpr node
-            let index_expr = exprs[1]
-                .children()
-                .find(|n| {
-                    matches!(
-                        n.kind(),
-                        SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
-                    )
-                })
-                .and_then(|n| self.build_expression(&n))?;
+            // Check if it's a range (has colon token) or single index
+            let has_colon = index_node.children_with_tokens().any(|element| {
+                element
+                    .as_token()
+                    .is_some_and(|t| t.kind() == SyntaxKind::Colon)
+            });
 
-            HirLValue::Index(Box::new(base), index_expr)
+            if has_colon {
+                // Range indexing: signal[high:low]
+                let index_exprs: Vec<_> = index_node
+                    .children()
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .collect();
+
+                if index_exprs.len() >= 2 {
+                    let high_expr = self.build_expression(&index_exprs[0])?;
+                    let low_expr = self.build_expression(&index_exprs[1])?;
+                    HirLValue::Range(Box::new(base), high_expr, low_expr)
+                } else {
+                    return None;
+                }
+            } else {
+                // Single index: signal[index]
+                let index_expr = index_node
+                    .children()
+                    .find(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .and_then(|n| self.build_expression(&n))?;
+
+                HirLValue::Index(Box::new(base), index_expr)
+            }
         } else {
             self.build_lvalue(&exprs[0])?
         };

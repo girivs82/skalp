@@ -136,7 +136,9 @@
       "Bash(do echo \"Testing: $f\")",
       "Bash(./debug_slice_match)",
       "Bash(./test_simple_index)",
-      "Bash(RUST_BACKTRACE=1 ./test_simple_index)"
+      "Bash(RUST_BACKTRACE=1 ./test_simple_index)",
+      "WebFetch(domain:doc.veryl-lang.org)",
+      "Bash(RUST_LOG=debug /Users/girivs/src/hw/hls/target/debug/skalp build:*)"
     ],
     "deny": [],
     "ask": []

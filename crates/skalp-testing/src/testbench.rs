@@ -27,7 +27,7 @@ use anyhow::Result;
 use skalp_frontend::parse_and_build_hir;
 use skalp_mir::{MirCompiler, OptimizationLevel};
 use skalp_sim::{SimulationConfig, Simulator};
-use skalp_sir::convert_mir_to_sir;
+use skalp_sir::convert_mir_to_sir_with_hierarchy;
 use std::collections::HashMap;
 use std::fs;
 
@@ -64,11 +64,12 @@ impl Testbench {
             .compile_to_mir(&hir)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // Convert to SIR
+        // Convert to SIR with hierarchical elaboration
         if mir.modules.is_empty() {
             anyhow::bail!("No modules found in design");
         }
-        let sir = convert_mir_to_sir(&mir.modules[0]);
+        let top_module = &mir.modules[mir.modules.len() - 1]; // Last module is typically top
+        let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
         // Create simulator and load design
         let mut sim = Simulator::new(config).await?;

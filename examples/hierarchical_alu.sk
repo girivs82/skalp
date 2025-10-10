@@ -1,0 +1,138 @@
+// Hierarchical ALU Example - Demonstrating Module Instantiation
+// This example shows how to build a complex ALU from simpler components
+
+// ============================================================================
+// Component 1: Adder
+// ============================================================================
+entity Adder<const WIDTH: nat = 32> {
+    in a: bit[WIDTH]
+    in b: bit[WIDTH]
+    out sum: bit[WIDTH]
+    out carry: bit
+}
+
+impl Adder {
+    signal result: bit[WIDTH+1]
+    result = a + b
+    sum = result[WIDTH-1:0]
+    carry = result[WIDTH]
+}
+
+// ============================================================================
+// Component 2: Comparator
+// ============================================================================
+entity Comparator<const WIDTH: nat = 32> {
+    in a: bit[WIDTH]
+    in b: bit[WIDTH]
+    out lt: bit  // less than
+    out eq: bit  // equal
+    out gt: bit  // greater than
+}
+
+impl Comparator {
+    lt = if a < b { 1 } else { 0 }
+    eq = if a == b { 1 } else { 0 }
+    gt = if a > b { 1 } else { 0 }
+}
+
+// ============================================================================
+// Component 3: Shifter
+// ============================================================================
+entity Shifter<const WIDTH: nat = 32> {
+    in data: bit[WIDTH]
+    in shift_amt: bit[5]
+    in shift_left: bit  // 1 = left, 0 = right
+    out result: bit[WIDTH]
+}
+
+impl Shifter {
+    result = if shift_left {
+        data << shift_amt
+    } else {
+        data >> shift_amt
+    }
+}
+
+// ============================================================================
+// Top-level: Hierarchical ALU
+// ============================================================================
+entity HierarchicalALU<const WIDTH: nat = 32> {
+    in clk: clock
+    in a: bit[WIDTH]
+    in b: bit[WIDTH]
+    in op: bit[3]  // Operation select
+    // Operations:
+    // 000 = ADD
+    // 001 = SUB
+    // 010 = AND
+    // 011 = OR
+    // 100 = XOR
+    // 101 = SHIFT
+    // 110 = SLT (set if less than)
+    // 111 = SEQ (set if equal)
+    out result: bit[WIDTH]
+    out zero: bit
+    out negative: bit
+}
+
+impl HierarchicalALU {
+    // Signals connected to component outputs
+    signal add_sum: bit[WIDTH]
+    signal add_carry: bit
+    signal cmp_lt: bit
+    signal cmp_eq: bit
+    signal cmp_gt: bit
+    signal shift_result: bit[WIDTH]
+
+    // Internal computation
+    signal sub_result: bit[WIDTH]
+    signal result_comb: bit[WIDTH]
+
+    // Instantiate Adder component
+    let adder = Adder<WIDTH> {
+        a: a,
+        b: b,
+        sum: add_sum,
+        carry: add_carry
+    }
+
+    // Instantiate Comparator component
+    let comparator = Comparator<WIDTH> {
+        a: a,
+        b: b,
+        lt: cmp_lt,
+        eq: cmp_eq,
+        gt: cmp_gt
+    }
+
+    // Instantiate Shifter component
+    let shifter = Shifter<WIDTH> {
+        data: a,
+        shift_amt: b[4:0],
+        shift_left: op[0],
+        result: shift_result
+    }
+
+    // SUB is computed inline (could also be a component)
+    sub_result = a - b
+
+    // Result multiplexing based on operation
+    result_comb = match op {
+        0b000 => add_sum,           // ADD (from adder component)
+        0b001 => sub_result,        // SUB (inline)
+        0b010 => a & b,             // AND (inline)
+        0b011 => a | b,             // OR (inline)
+        0b100 => a ^ b,             // XOR (inline)
+        0b101 => shift_result,      // SHIFT (from shifter component)
+        0b110 => if cmp_lt { 1 } else { 0 },  // SLT (from comparator)
+        0b111 => if cmp_eq { 1 } else { 0 },  // SEQ (from comparator)
+        _ => 0
+    }
+
+    // Register the output
+    on(clk.rise) {
+        result <= result_comb
+        zero <= if result_comb == 0 { 1 } else { 0 }
+        negative <= result_comb[WIDTH-1]
+    }
+}

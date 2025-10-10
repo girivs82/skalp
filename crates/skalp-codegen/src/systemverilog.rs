@@ -801,10 +801,9 @@ fn is_signal_assigned_in_block(signal_id: &skalp_mir::SignalId, block: &skalp_mi
     for stmt in &block.statements {
         match stmt {
             Statement::Assignment(assign) => {
-                if let skalp_mir::LValue::Signal(id) = &assign.lhs {
-                    if id == signal_id {
-                        return true;
-                    }
+                // Check if this assignment targets the signal (directly or through indexing/slicing)
+                if lvalue_contains_signal(&assign.lhs, signal_id) {
+                    return true;
                 }
             }
             Statement::If(if_stmt) => {
@@ -826,6 +825,19 @@ fn is_signal_assigned_in_block(signal_id: &skalp_mir::SignalId, block: &skalp_mi
         }
     }
     false
+}
+
+/// Check if an LValue references a specific signal (directly or through indexing/slicing)
+fn lvalue_contains_signal(lvalue: &skalp_mir::LValue, signal_id: &skalp_mir::SignalId) -> bool {
+    match lvalue {
+        skalp_mir::LValue::Signal(id) => id == signal_id,
+        skalp_mir::LValue::BitSelect { base, .. } => lvalue_contains_signal(base, signal_id),
+        skalp_mir::LValue::RangeSelect { base, .. } => lvalue_contains_signal(base, signal_id),
+        skalp_mir::LValue::Concat(items) => {
+            items.iter().any(|item| lvalue_contains_signal(item, signal_id))
+        }
+        _ => false,
+    }
 }
 
 /// Collect all struct and enum types used in a module
