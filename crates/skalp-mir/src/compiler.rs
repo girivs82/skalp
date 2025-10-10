@@ -3,10 +3,10 @@
 //! This module provides the main compilation pipeline from HIR to SystemVerilog
 
 use crate::cdc_analysis::{CdcAnalyzer, CdcSeverity, CdcViolation};
-use crate::codegen::SystemVerilogGenerator;
 use crate::hir_to_mir::HirToMir;
 use crate::mir::Mir;
 use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
+use anyhow::Result;
 use skalp_frontend::hir::Hir;
 
 /// Optimization level
@@ -94,19 +94,9 @@ impl MirCompiler {
         Ok(mir)
     }
 
-    /// Compile HIR to SystemVerilog
-    pub fn compile(&self, hir: &Hir) -> Result<String, String> {
-        // Compile to MIR with CDC analysis
-        let mir = self.compile_to_mir(hir)?;
-
-        // Step 4: Generate SystemVerilog
-        if self.verbose {
-            println!("Phase 4: SystemVerilog code generation");
-        }
-        let mut generator = SystemVerilogGenerator::new();
-        let verilog = generator.generate(&mir);
-
-        Ok(verilog)
+    /// Compile HIR to MIR (without codegen - that's handled by skalp-codegen crate)
+    pub fn compile(&self, hir: &Hir) -> Result<Mir, String> {
+        self.compile_to_mir(hir)
     }
 
     /// Apply optimization passes based on optimization level
@@ -197,14 +187,4 @@ impl Default for MirCompiler {
     }
 }
 
-/// Compile HIR to SystemVerilog with default settings
-pub fn compile_hir_to_verilog(hir: &Hir) -> Result<String, String> {
-    let compiler = MirCompiler::new();
-    compiler.compile(hir)
-}
-
-/// Compile HIR to SystemVerilog with full optimizations
-pub fn compile_hir_to_verilog_optimized(hir: &Hir) -> Result<String, String> {
-    let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Full);
-    compiler.compile(hir)
-}
+// Old convenience functions removed - use skalp_codegen directly for code generation

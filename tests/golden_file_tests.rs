@@ -20,8 +20,15 @@ fn compile_to_verilog(source: &str) -> String {
     // Build HIR
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    // Compile to Verilog using the e2e function
-    skalp_mir::compile_hir_to_verilog(&hir).expect("Verilog generation should succeed")
+    // Lower to MIR
+    let mir = skalp_mir::lower_to_mir(&hir).expect("MIR lowering should succeed");
+
+    // Lower to LIR
+    let lir = skalp_lir::lower_to_lir(&mir).expect("LIR lowering should succeed");
+
+    // Generate SystemVerilog using correct generator
+    skalp_codegen::generate_systemverilog_from_mir(&mir, &lir)
+        .expect("Verilog generation should succeed")
 }
 
 #[test]

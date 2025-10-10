@@ -8,7 +8,6 @@
 //! - Preparation for code generation
 
 pub mod cdc_analysis;
-pub mod codegen;
 pub mod compiler;
 pub mod hir_to_mir;
 pub mod mir;
@@ -18,10 +17,7 @@ pub mod transform;
 
 // Re-export main types
 pub use cdc_analysis::{CdcAnalyzer, CdcSeverity, CdcViolation, CdcViolationType};
-pub use codegen::SystemVerilogGenerator;
-pub use compiler::{
-    compile_hir_to_verilog, compile_hir_to_verilog_optimized, MirCompiler, OptimizationLevel,
-};
+pub use compiler::{MirCompiler, OptimizationLevel};
 pub use hir_to_mir::HirToMir;
 pub use mir::{
     Assignment, AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType,
