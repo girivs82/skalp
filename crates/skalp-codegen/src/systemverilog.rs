@@ -23,14 +23,18 @@ pub fn generate_systemverilog_from_mir(mir: &Mir, lir: &LirDesign) -> Result<Str
 
     // Generate each module
     for (mir_module, lir_module) in mir.modules.iter().zip(lir.modules.iter()) {
-        sv.push_str(&generate_module(mir_module, lir_module)?);
+        sv.push_str(&generate_module(mir_module, lir_module, mir)?);
     }
 
     Ok(sv)
 }
 
 /// Generate a single SystemVerilog module
-fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Result<String> {
+fn generate_module(
+    mir_module: &Module,
+    lir_module: &skalp_lir::LirModule,
+    mir: &Mir,
+) -> Result<String> {
     let mut sv = String::new();
 
     // Collect all unique struct and enum types from ports and signals
@@ -97,9 +101,9 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
             skalp_mir::PortDirection::InOut => "inout",
         };
 
-        // Determine width from port type
-        let width = get_width_spec(&port.port_type);
-        ports.push(format!("    {} {}{}", direction, width, port.name));
+        // Split type into element width and array dimensions
+        let (element_width, array_dim) = get_type_dimensions(&port.port_type);
+        ports.push(format!("    {} {}{}{}", direction, element_width, port.name, array_dim));
     }
 
     if !ports.is_empty() {
@@ -111,7 +115,7 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
 
     // Generate internal signal declarations
     for signal in &mir_module.signals {
-        let width = get_width_spec(&signal.signal_type);
+        let (element_width, array_dim) = get_type_dimensions(&signal.signal_type);
 
         // Determine if it's a reg or wire based on usage
         let signal_type = if is_register(signal, mir_module) {
@@ -120,7 +124,8 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
             "wire"
         };
 
-        sv.push_str(&format!("    {} {}{}", signal_type, width, signal.name));
+        // Format: wire [element_width] name [array_dim];
+        sv.push_str(&format!("    {} {}{}{}", signal_type, element_width, signal.name, array_dim));
 
         // Add initial value if present
         if let Some(init) = &signal.initial {
@@ -147,6 +152,12 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
         sv.push('\n');
     }
 
+    // Generate module instances
+    for instance in &mir_module.instances {
+        sv.push_str(&generate_instance(instance, mir_module, mir)?);
+        sv.push('\n');
+    }
+
     // Generate processes (always blocks)
     for process in &mir_module.processes {
         sv.push_str(&generate_process(process, mir_module)?);
@@ -154,6 +165,63 @@ fn generate_module(mir_module: &Module, lir_module: &skalp_lir::LirModule) -> Re
     }
 
     sv.push_str("endmodule\n");
+    Ok(sv)
+}
+
+/// Generate a module instance
+fn generate_instance(
+    instance: &skalp_mir::ModuleInstance,
+    parent_module: &Module,
+    mir: &Mir,
+) -> Result<String> {
+    let mut sv = String::new();
+
+    // Look up the module being instantiated to get its name and ports
+    let instantiated_module = mir
+        .modules
+        .iter()
+        .find(|m| m.id == instance.module)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Module ID {:?} not found for instance {}",
+                instance.module,
+                instance.name
+            )
+        })?;
+
+    // Start with module name
+    sv.push_str(&format!("    {} ", instantiated_module.name));
+
+    // Add parameter overrides if any
+    if !instance.parameters.is_empty() {
+        sv.push_str("#(\n");
+        let params: Vec<String> = instance
+            .parameters
+            .iter()
+            .map(|(name, value)| format!("        .{}({})", name, format_value(value)))
+            .collect();
+        sv.push_str(&params.join(",\n"));
+        sv.push_str("\n    ) ");
+    }
+
+    // Instance name
+    sv.push_str(&format!("{} (\n", instance.name));
+
+    // Port connections
+    let connections: Vec<String> = instance
+        .connections
+        .iter()
+        .map(|(port_name, expr)| {
+            format!(
+                "        .{}({})",
+                port_name,
+                format_expression_with_context(expr, parent_module)
+            )
+        })
+        .collect();
+    sv.push_str(&connections.join(",\n"));
+    sv.push_str("\n    );\n");
+
     Ok(sv)
 }
 
@@ -650,6 +718,29 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
             } else {
                 String::new()
             }
+        }
+    }
+}
+
+/// Get type dimensions split into element width and array dimensions
+/// Returns (element_width, array_dimensions)
+/// For non-arrays: returns (width_spec, "")
+/// For arrays: returns (element_width_spec, " [0:size-1]")
+fn get_type_dimensions(data_type: &skalp_mir::DataType) -> (String, String) {
+    match data_type {
+        skalp_mir::DataType::Array(element_type, size) => {
+            // Recursively handle nested arrays
+            let (inner_element, inner_array) = get_type_dimensions(element_type);
+            let array_dim = if *size > 1 {
+                format!("{} [0:{}]", inner_array, size - 1)
+            } else {
+                inner_array
+            };
+            (inner_element, array_dim)
+        }
+        _ => {
+            // Non-array types: return width spec with no array dimension
+            (get_width_spec(data_type), String::new())
         }
     }
 }
