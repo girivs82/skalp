@@ -672,4 +672,91 @@ impl SimpleRegFile {
 
         println!("✅ CPU register file simulation test passed!");
     }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn test_register_file_gpu() {
+        // Test register file with array operations on GPU (Metal backend)
+        let regfile_source = r#"
+entity SimpleRegFile {
+    in clk: clock
+    in rst: reset
+    in we: bit
+    in waddr: nat[2]
+    in wdata: nat[8]
+    in raddr: nat[2]
+    out rdata: nat[8]
+}
+
+impl SimpleRegFile {
+    signal regs: nat[8][4] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            regs <= 0
+        } else {
+            if (we == 1) {
+                regs[waddr] <= wdata
+            }
+        }
+    }
+
+    rdata = regs[raddr]
+}
+"#;
+
+        let mut sim = setup_simulator(regfile_source, true).await; // GPU
+
+        // Reset
+        sim.set_input("rst", vec![1]).await.unwrap();
+        sim.set_input("we", vec![0]).await.unwrap();
+        sim.set_input("waddr", vec![0]).await.unwrap(); // nat[2] = 1 byte
+        sim.set_input("wdata", vec![0]).await.unwrap();
+        sim.set_input("raddr", vec![0]).await.unwrap(); // nat[2] = 1 byte
+        sim.set_input("clk", vec![0]).await.unwrap();
+
+        // Reset for 2 cycles
+        for i in 0..4 {
+            sim.set_input("clk", vec![(i % 2) as u8]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+        }
+
+        // Release reset
+        sim.set_input("rst", vec![0]).await.unwrap();
+
+        // Write test values to registers
+        let test_values = [0x42u8, 0x55u8, 0xAAu8, 0xFFu8];
+        for (addr, &value) in test_values.iter().enumerate() {
+            sim.set_input("we", vec![1]).await.unwrap();
+            sim.set_input("waddr", vec![addr as u8]).await.unwrap(); // nat[2] = 1 byte
+            sim.set_input("wdata", vec![value]).await.unwrap();
+
+            // Clock cycle
+            sim.set_input("clk", vec![0]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+            sim.set_input("clk", vec![1]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+        }
+
+        // Disable write
+        sim.set_input("we", vec![0]).await.unwrap();
+
+        // Read back and verify
+        for (addr, &expected) in test_values.iter().enumerate() {
+            sim.set_input("raddr", vec![addr as u8]).await.unwrap(); // nat[2] = 1 byte
+
+            // Clock cycle (for registered output timing)
+            sim.set_input("clk", vec![0]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+
+            let rdata = sim.get_output("rdata").await.unwrap();
+            assert_eq!(
+                rdata[0], expected,
+                "GPU Register {} should contain 0x{:02x}, got 0x{:02x}",
+                addr, expected, rdata[0]
+            );
+        }
+
+        println!("✅ GPU register file simulation test passed!");
+    }
 }
