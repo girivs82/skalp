@@ -204,12 +204,94 @@ impl CpuRuntime {
 
             SirNodeKind::ArrayRead => {
                 // ArrayRead: inputs = [array_signal, index]
+                // Array is stored as contiguous bytes: [elem0, elem1, elem2, ...]
+                // We need to extract element at given index
                 if input_values.len() >= 2 {
-                    // For now, just return zero (array operations need more complex handling)
-                    vec![0u8]
+                    let array_bytes = &input_values[0];
+                    let index = Self::bytes_to_u64(&input_values[1]) as usize;
+
+                    // Get the output width to determine element size
+                    let elem_size = if let Some(output) = node.outputs.first() {
+                        self.signal_widths.get(&output.signal_id)
+                            .map(|&w| w.div_ceil(8))
+                            .unwrap_or(1)
+                    } else {
+                        1
+                    };
+
+                    let offset = index * elem_size;
+
+                    eprintln!("DEBUG ArrayRead: index={}, elem_size={}, offset={}, array_len={}, array={:?}",
+                        index, elem_size, offset, array_bytes.len(), array_bytes);
+
+                    // Extract element from array
+                    if offset + elem_size <= array_bytes.len() {
+                        let result = array_bytes[offset..offset + elem_size].to_vec();
+                        eprintln!("DEBUG ArrayRead result: {:?}", result);
+                        result
+                    } else {
+                        // Out of bounds - return zero
+                        eprintln!("DEBUG ArrayRead: OUT OF BOUNDS");
+                        vec![0u8; elem_size]
+                    }
                 } else {
                     vec![0u8]
                 }
+            }
+
+            SirNodeKind::ArrayWrite => {
+                // ArrayWrite: inputs = [old_array, index, value]
+                // Creates new array with updated element
+                if input_values.len() >= 3 {
+                    let old_array = &input_values[0];
+                    let index = Self::bytes_to_u64(&input_values[1]) as usize;
+                    let value = &input_values[2];
+
+                    // Create a copy of the old array
+                    let mut new_array = old_array.clone();
+
+                    let elem_size = value.len();
+                    let offset = index * elem_size;
+
+                    eprintln!("DEBUG ArrayWrite: index={}, value={:?}, elem_size={}, offset={}, old_array={:?}",
+                        index, value, elem_size, offset, old_array);
+
+                    // Update element if within bounds
+                    if offset + elem_size <= new_array.len() {
+                        new_array[offset..offset + elem_size].copy_from_slice(value);
+                        eprintln!("DEBUG ArrayWrite: new_array={:?}", new_array);
+                    } else {
+                        eprintln!("DEBUG ArrayWrite: OUT OF BOUNDS");
+                    }
+
+                    new_array
+                } else {
+                    vec![0u8]
+                }
+            }
+
+            SirNodeKind::Latch { .. } => {
+                // TODO: Implement latch support (level-sensitive storage)
+                // Latches are transparent when enable is high, hold value when low
+                vec![0u8]
+            }
+
+            SirNodeKind::Memory { .. } => {
+                // TODO: Implement memory block support (for block RAMs)
+                // Memory blocks have read/write ports with address decoding
+                vec![0u8]
+            }
+
+            SirNodeKind::ClockGate => {
+                // TODO: Implement clock gating support
+                // Clock gating conditionally stops the clock for power savings
+                vec![0u8]
+            }
+
+            SirNodeKind::Reset => {
+                // TODO: Implement reset node support
+                // Currently reset is handled via signal values
+                vec![0u8]
             }
 
             _ => {
