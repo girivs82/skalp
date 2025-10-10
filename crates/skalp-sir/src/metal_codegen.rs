@@ -255,12 +255,19 @@ impl<'a> MetalShaderGenerator<'a> {
         let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
         for (state_name, state_elem) in sorted_states {
-            let state_type = self.get_metal_type_name(state_elem.width);
             let sanitized = self.sanitize_name(state_name);
-            self.write_indented(&format!(
-                "{} old_{} = registers->{};\n",
-                state_type, sanitized, sanitized
-            ));
+
+            // Check if this is an array - arrays don't need old value capture
+            let state_sir_type = self.get_signal_sir_type(sir, state_name);
+            let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+
+            if !is_array {
+                let state_type = self.get_metal_type_name(state_elem.width);
+                self.write_indented(&format!(
+                    "{} old_{} = registers->{};\n",
+                    state_type, sanitized, sanitized
+                ));
+            }
         }
 
         // Check clock edges and update registers
@@ -575,54 +582,66 @@ impl<'a> MetalShaderGenerator<'a> {
             let index_signal = &node.inputs[1].signal_id;
             let output = &node.outputs[0].signal_id;
 
-            // Get array width to determine element size
-            // For now, assume 8-bit elements (bit<8>)
-            let elem_width = 8;
+            // Check if this is a proper array type
+            let array_type = self.get_signal_sir_type(sir, array_signal_name);
 
-            // For arrays > 32 bits, we need special handling for Metal vector types
-            // Read the array value into a temporary with the correct type
-            let array_width = self.get_signal_width_from_sir(sir, array_signal_name);
-            let array_type = self.get_metal_type_name(array_width).to_string();
+            if matches!(array_type, Some(SirType::Array(_, _))) {
+                // Proper array - use direct indexing
+                let array_location = if sir.state_elements.contains_key(array_signal_name) {
+                    format!("registers->{}", self.sanitize_name(array_signal_name))
+                } else {
+                    format!("signals->{}", self.sanitize_name(array_signal_name))
+                };
 
-            if array_width > 32 {
-                // Multi-word array - need to handle as vector type
-                // Create temporary to hold the packed array value
                 self.write_indented(&format!(
-                    "{} array_val_{} = signals->{};\n",
-                    array_type,
+                    "signals->{} = {}[signals->{}];\n",
                     self.sanitize_name(output),
-                    self.sanitize_name(array_signal_name)
-                ));
-
-                // Extract using bit manipulation on the full vector
-                // For uint4, we treat it as 128 bits and extract the element
-                let san_output = self.sanitize_name(output);
-                let san_index = self.sanitize_name(index_signal);
-                self.write_indented(&format!(
-                    "uint elem_idx_{} = signals->{};\n",
-                    san_output, san_index
-                ));
-                self.write_indented(&format!(
-                    "uint word_idx_{} = elem_idx_{} / 4;\n", // Which uint in the uint4
-                    san_output, san_output
-                ));
-                self.write_indented(&format!(
-                    "uint byte_in_word_{} = elem_idx_{} % 4;\n", // Which byte in that uint
-                    san_output, san_output
-                ));
-                self.write_indented(&format!(
-                    "signals->{} = (array_val_{}[word_idx_{}] >> (byte_in_word_{} * 8)) & 0xFF;\n",
-                    san_output, san_output, san_output, san_output
+                    array_location,
+                    self.sanitize_name(index_signal)
                 ));
             } else {
-                // Single-word array - simple bit shift
-                self.write_indented(&format!(
-                    "signals->{} = (signals->{} >> (signals->{} * {})) & 0xFF;\n",
-                    self.sanitize_name(output),
-                    self.sanitize_name(array_signal_name),
-                    self.sanitize_name(index_signal),
-                    elem_width
-                ));
+                // Fallback for packed bit vectors (legacy)
+                let elem_width = 8;
+                let array_width = self.get_signal_width_from_sir(sir, array_signal_name);
+
+                if array_width > 32 {
+                    // Multi-word packed array
+                    let array_type = self.get_metal_type_name(array_width).to_string();
+                    self.write_indented(&format!(
+                        "{} array_val_{} = signals->{};\n",
+                        array_type,
+                        self.sanitize_name(output),
+                        self.sanitize_name(array_signal_name)
+                    ));
+
+                    let san_output = self.sanitize_name(output);
+                    let san_index = self.sanitize_name(index_signal);
+                    self.write_indented(&format!(
+                        "uint elem_idx_{} = signals->{};\n",
+                        san_output, san_index
+                    ));
+                    self.write_indented(&format!(
+                        "uint word_idx_{} = elem_idx_{} / 4;\n",
+                        san_output, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "uint byte_in_word_{} = elem_idx_{} % 4;\n",
+                        san_output, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "signals->{} = (array_val_{}[word_idx_{}] >> (byte_in_word_{} * 8)) & 0xFF;\n",
+                        san_output, san_output, san_output, san_output
+                    ));
+                } else {
+                    // Single-word packed array
+                    self.write_indented(&format!(
+                        "signals->{} = (signals->{} >> (signals->{} * {})) & 0xFF;\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(array_signal_name),
+                        self.sanitize_name(index_signal),
+                        elem_width
+                    ));
+                }
             }
         }
     }
@@ -635,72 +654,94 @@ impl<'a> MetalShaderGenerator<'a> {
             let value_signal = &node.inputs[2].signal_id;
             let output = &node.outputs[0].signal_id;
 
-            // Get array width to determine storage type
-            let elem_width = 8; // Assume 8-bit elements for now
-            let array_width = self.get_signal_width_from_sir(sir, old_array_name);
-            let array_type = self.get_metal_type_name(array_width).to_string();
-
             self.write_indented(&format!(
                 "// Array write: {}[{}] = {}\n",
                 old_array_name, index_signal, value_signal
             ));
 
-            if array_width > 32 {
-                // Multi-word array stored as vector
-                let san_output = self.sanitize_name(output);
-                let san_old_array = self.sanitize_name(old_array_name);
-                let san_index = self.sanitize_name(index_signal);
-                let san_value = self.sanitize_name(value_signal);
+            // Check if this is a proper array type
+            let array_type = self.get_signal_sir_type(sir, old_array_name);
+
+            if let Some(SirType::Array(_, size)) = array_type {
+                // Proper array - copy old array to output, then update one element
+                self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", size));
+                self.indent += 1;
                 self.write_indented(&format!(
-                    "{} new_array_{} = signals->{};\n",
-                    array_type, san_output, san_old_array
+                    "signals->{}[i] = signals->{}[i];\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(old_array_name)
                 ));
+                self.indent -= 1;
+                self.write_indented("}\n");
                 self.write_indented(&format!(
-                    "uint elem_idx_{} = signals->{};\n",
-                    san_output, san_index
-                ));
-                self.write_indented(&format!(
-                    "uint word_idx_{} = elem_idx_{} / 4;\n",
-                    san_output, san_output
-                ));
-                self.write_indented(&format!(
-                    "uint byte_in_word_{} = elem_idx_{} % 4;\n",
-                    san_output, san_output
-                ));
-                self.write_indented(&format!(
-                    "uint shift_{} = byte_in_word_{} * 8;\n",
-                    san_output, san_output
-                ));
-                self.write_indented(&format!(
-                    "uint mask_{} = ~(0xFFu << shift_{});\n",
-                    san_output, san_output
-                ));
-                self.write_indented(&format!(
-                    "new_array_{}[word_idx_{}] = (new_array_{}[word_idx_{}] & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
-                    san_output, san_output, san_output, san_output, san_output, san_value, san_output
-                ));
-                self.write_indented(&format!(
-                    "signals->{} = new_array_{};\n",
-                    san_output, san_output
+                    "signals->{}[signals->{}] = signals->{};\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(index_signal),
+                    self.sanitize_name(value_signal)
                 ));
             } else {
-                // Single-word array
-                let san_output = self.sanitize_name(output);
-                let san_index = self.sanitize_name(index_signal);
-                let san_old_array = self.sanitize_name(old_array_name);
-                let san_value = self.sanitize_name(value_signal);
-                self.write_indented(&format!(
-                    "uint32_t shift_{} = signals->{} * {};\n",
-                    san_output, san_index, elem_width
-                ));
-                self.write_indented(&format!(
-                    "uint32_t mask_{} = ~(0xFFu << shift_{});\n",
-                    san_output, san_output
-                ));
-                self.write_indented(&format!(
-                    "signals->{} = (signals->{} & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
-                    san_output, san_old_array, san_output, san_value, san_output
-                ));
+                // Fallback for packed bit vectors (legacy)
+                let elem_width = 8;
+                let array_width = self.get_signal_width_from_sir(sir, old_array_name);
+                let array_type_name = self.get_metal_type_name(array_width).to_string();
+
+                if array_width > 32 {
+                    // Multi-word packed array
+                    let san_output = self.sanitize_name(output);
+                    let san_old_array = self.sanitize_name(old_array_name);
+                    let san_index = self.sanitize_name(index_signal);
+                    let san_value = self.sanitize_name(value_signal);
+                    self.write_indented(&format!(
+                        "{} new_array_{} = signals->{};\n",
+                        array_type_name, san_output, san_old_array
+                    ));
+                    self.write_indented(&format!(
+                        "uint elem_idx_{} = signals->{};\n",
+                        san_output, san_index
+                    ));
+                    self.write_indented(&format!(
+                        "uint word_idx_{} = elem_idx_{} / 4;\n",
+                        san_output, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "uint byte_in_word_{} = elem_idx_{} % 4;\n",
+                        san_output, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "uint shift_{} = byte_in_word_{} * 8;\n",
+                        san_output, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "uint mask_{} = ~(0xFFu << shift_{});\n",
+                        san_output, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "new_array_{}[word_idx_{}] = (new_array_{}[word_idx_{}] & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
+                        san_output, san_output, san_output, san_output, san_output, san_value, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "signals->{} = new_array_{};\n",
+                        san_output, san_output
+                    ));
+                } else {
+                    // Single-word packed array
+                    let san_output = self.sanitize_name(output);
+                    let san_index = self.sanitize_name(index_signal);
+                    let san_old_array = self.sanitize_name(old_array_name);
+                    let san_value = self.sanitize_name(value_signal);
+                    self.write_indented(&format!(
+                        "uint32_t shift_{} = signals->{} * {};\n",
+                        san_output, san_index, elem_width
+                    ));
+                    self.write_indented(&format!(
+                        "uint32_t mask_{} = ~(0xFFu << shift_{});\n",
+                        san_output, san_output
+                    ));
+                    self.write_indented(&format!(
+                        "signals->{} = (signals->{} & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
+                        san_output, san_old_array, san_output, san_value, san_output
+                    ));
+                }
             }
         }
     }
@@ -748,24 +789,55 @@ impl<'a> MetalShaderGenerator<'a> {
                         return;
                     }
 
-                    if sir.inputs.iter().any(|i| i.name == *signal) {
-                        self.write_indented(&format!(
-                            "signals->{} = inputs->{};\n",
-                            self.sanitize_name(output),
-                            self.sanitize_name(signal)
-                        ));
-                    } else if sir.state_elements.contains_key(signal) {
-                        self.write_indented(&format!(
-                            "signals->{} = registers->{};\n",
-                            self.sanitize_name(output),
-                            self.sanitize_name(signal)
-                        ));
-                    } else if sir.signals.iter().any(|s| s.name == *signal) {
-                        self.write_indented(&format!(
-                            "signals->{} = signals->{};\n",
-                            self.sanitize_name(output),
-                            self.sanitize_name(signal)
-                        ));
+                    // Check if source is an array type - if so, need element-wise copy
+                    let source_type = self.get_signal_sir_type(sir, signal);
+                    let is_array = matches!(source_type, Some(SirType::Array(_, _)));
+
+                    if is_array {
+                        // Get array size for loop
+                        if let Some(SirType::Array(_, size)) = source_type {
+                            let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
+                                format!("inputs->{}", self.sanitize_name(signal))
+                            } else if sir.state_elements.contains_key(signal) {
+                                format!("registers->{}", self.sanitize_name(signal))
+                            } else {
+                                format!("signals->{}", self.sanitize_name(signal))
+                            };
+
+                            self.write_indented(&format!(
+                                "for (uint i = 0; i < {}; i++) {{\n",
+                                size
+                            ));
+                            self.indent += 1;
+                            self.write_indented(&format!(
+                                "signals->{}[i] = {}[i];\n",
+                                self.sanitize_name(output),
+                                source_location
+                            ));
+                            self.indent -= 1;
+                            self.write_indented("}\n");
+                        }
+                    } else {
+                        // Non-array types use direct assignment
+                        if sir.inputs.iter().any(|i| i.name == *signal) {
+                            self.write_indented(&format!(
+                                "signals->{} = inputs->{};\n",
+                                self.sanitize_name(output),
+                                self.sanitize_name(signal)
+                            ));
+                        } else if sir.state_elements.contains_key(signal) {
+                            self.write_indented(&format!(
+                                "signals->{} = registers->{};\n",
+                                self.sanitize_name(output),
+                                self.sanitize_name(signal)
+                            ));
+                        } else if sir.signals.iter().any(|s| s.name == *signal) {
+                            self.write_indented(&format!(
+                                "signals->{} = signals->{};\n",
+                                self.sanitize_name(output),
+                                self.sanitize_name(signal)
+                            ));
+                        }
                     }
                 }
             }
@@ -812,28 +884,50 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Update all register outputs with the data input value from signals
                 for output in &node.outputs {
                     if let Some(state_elem) = sir.state_elements.get(&output.signal_id) {
-                        // Truncate to the register's declared width with a bit mask
-                        let width = state_elem.width;
-                        let mask = if width < 32 {
-                            format!("0x{:X}", (1u64 << width) - 1)
-                        } else {
-                            "0xFFFFFFFF".to_string()
-                        };
+                        // Check if this is an array type
+                        let output_type = self.get_signal_sir_type(sir, &output.signal_id);
+                        let is_array = matches!(output_type, Some(SirType::Array(_, _)));
 
-                        let assignment = format!(
-                            "registers->{} = signals->{} & {};\n",
-                            self.sanitize_name(&output.signal_id),
-                            self.sanitize_name(data_signal),
-                            mask
-                        );
-                        eprintln!(
-                            "DEBUG Metal gen: About to write: {} (width={}, mask={})",
-                            assignment.trim(),
-                            width,
-                            mask
-                        );
-                        self.write_indented(&assignment);
-                        eprintln!("DEBUG Metal gen: Wrote to output buffer");
+                        if is_array {
+                            // Element-wise copy for arrays
+                            if let Some(SirType::Array(_, size)) = output_type {
+                                self.write_indented(&format!(
+                                    "for (uint i = 0; i < {}; i++) {{\n",
+                                    size
+                                ));
+                                self.indent += 1;
+                                self.write_indented(&format!(
+                                    "registers->{}[i] = signals->{}[i];\n",
+                                    self.sanitize_name(&output.signal_id),
+                                    self.sanitize_name(data_signal)
+                                ));
+                                self.indent -= 1;
+                                self.write_indented("}\n");
+                            }
+                        } else {
+                            // Truncate to the register's declared width with a bit mask
+                            let width = state_elem.width;
+                            let mask = if width < 32 {
+                                format!("0x{:X}", (1u64 << width) - 1)
+                            } else {
+                                "0xFFFFFFFF".to_string()
+                            };
+
+                            let assignment = format!(
+                                "registers->{} = signals->{} & {};\n",
+                                self.sanitize_name(&output.signal_id),
+                                self.sanitize_name(data_signal),
+                                mask
+                            );
+                            eprintln!(
+                                "DEBUG Metal gen: About to write: {} (width={}, mask={})",
+                                assignment.trim(),
+                                width,
+                                mask
+                            );
+                            self.write_indented(&assignment);
+                            eprintln!("DEBUG Metal gen: Wrote to output buffer");
+                        }
                     }
                 }
 
@@ -949,6 +1043,22 @@ impl<'a> MetalShaderGenerator<'a> {
                 (base, format!("{}[{}]", suffix, size))
             }
         }
+    }
+
+    fn get_signal_sir_type(&self, sir: &SirModule, signal_name: &str) -> Option<SirType> {
+        // Check signals
+        if let Some(signal) = sir.signals.iter().find(|s| s.name == signal_name) {
+            return Some(signal.sir_type.clone());
+        }
+        // Check inputs
+        if let Some(input) = sir.inputs.iter().find(|i| i.name == signal_name) {
+            return Some(input.sir_type.clone());
+        }
+        // Check outputs
+        if let Some(output) = sir.outputs.iter().find(|o| o.name == signal_name) {
+            return Some(output.sir_type.clone());
+        }
+        None
     }
 
     fn write_indented(&mut self, text: &str) {
