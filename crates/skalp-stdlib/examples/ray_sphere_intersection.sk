@@ -1,0 +1,328 @@
+// Ray-Sphere Intersection Calculator
+//
+// This example demonstrates SKALP's advanced features by implementing
+// a complete geometric algorithm using FP and vector operations.
+//
+// Problem: Given a ray (origin + direction) and a sphere (center + radius),
+//          determine if/where the ray intersects the sphere.
+//
+// Mathematical Background:
+// - Ray equation: P(t) = ray_origin + t * ray_direction
+// - Sphere equation: |P - sphere_center|² = radius²
+// - Intersection when: |ray_origin + t*ray_dir - sphere_center|² = radius²
+//
+// Solution using quadratic formula:
+//   Let oc = ray_origin - sphere_center
+//   a = dot(ray_dir, ray_dir)  [usually = 1 if normalized]
+//   b = 2 * dot(oc, ray_dir)
+//   c = dot(oc, oc) - radius²
+//   discriminant = b² - 4ac
+//
+//   If discriminant < 0: no intersection
+//   If discriminant = 0: one intersection (tangent)
+//   If discriminant > 0: two intersections (entry and exit)
+//
+// Features Showcased:
+// - vec3<fp32> parametric types
+// - Vector component access (.x, .y, .z)
+// - Floating-point arithmetic
+// - Module composition (instantiating vector ops)
+// - Complex conditional logic
+// - Hardware-synthesizable geometric algorithms
+
+entity RaySphereIntersection {
+    // Ray definition
+    in ray_origin: vec3<fp32>
+    in ray_direction: vec3<fp32>  // Should be normalized
+
+    // Sphere definition
+    in sphere_center: vec3<fp32>
+    in sphere_radius: fp32
+
+    // Outputs
+    out hit: bit                  // True if ray intersects sphere
+    out t_near: fp32             // Distance to first intersection
+    out t_far: fp32              // Distance to second intersection
+    out hit_point: vec3<fp32>    // Nearest hit point
+    out hit_normal: vec3<fp32>   // Surface normal at hit point
+}
+
+impl RaySphereIntersection {
+    //=========================================================================
+    // Step 1: Compute oc = ray_origin - sphere_center
+    //=========================================================================
+    inst compute_oc: Vec3Sub<fp32> {
+        a = ray_origin,
+        b = sphere_center
+    }
+
+    signal oc: vec3<fp32> = compute_oc.result
+
+    //=========================================================================
+    // Step 2: Compute quadratic coefficients
+    //=========================================================================
+
+    // a = dot(ray_direction, ray_direction)
+    // For normalized direction, this should be 1.0, but we compute it anyway
+    inst compute_a: Vec3Dot<fp32> {
+        a = ray_direction,
+        b = ray_direction
+    }
+
+    signal a: fp32 = compute_a.result
+
+    // b = 2 * dot(oc, ray_direction)
+    inst compute_half_b: Vec3Dot<fp32> {
+        a = oc,
+        b = ray_direction
+    }
+
+    // We use half_b to simplify: half_b = b/2 = dot(oc, ray_dir)
+    // This makes discriminant = half_b² - a*c (simpler than b² - 4ac)
+    signal half_b: fp32 = compute_half_b.result
+
+    // c = dot(oc, oc) - radius²
+    inst compute_oc_length_sq: Vec3Dot<fp32> {
+        a = oc,
+        b = oc
+    }
+
+    signal oc_length_sq: fp32 = compute_oc_length_sq.result
+
+    inst radius_sq_mul: FP32Mul {
+        a = sphere_radius,
+        b = sphere_radius
+    }
+
+    signal radius_sq: fp32 = radius_sq_mul.result
+
+    inst compute_c: FP32Sub {
+        a = oc_length_sq,
+        b = radius_sq
+    }
+
+    signal c: fp32 = compute_c.result
+
+    //=========================================================================
+    // Step 3: Compute discriminant = half_b² - a*c
+    //=========================================================================
+
+    inst half_b_sq: FP32Mul {
+        a = half_b,
+        b = half_b
+    }
+
+    inst a_times_c: FP32Mul {
+        a = a,
+        b = c
+    }
+
+    inst discriminant_calc: FP32Sub {
+        a = half_b_sq.result,
+        b = a_times_c.result
+    }
+
+    signal discriminant: fp32 = discriminant_calc.result
+
+    //=========================================================================
+    // Step 4: Check for intersection
+    //=========================================================================
+
+    // Create zero constant for comparison
+    signal zero_fp: fp32 = 32'h00000000  // +0.0
+
+    inst disc_compare: FP32Compare {
+        a = discriminant,
+        b = zero_fp
+    }
+
+    // Hit if discriminant >= 0
+    hit = !disc_compare.less_than
+
+    //=========================================================================
+    // Step 5: Compute intersection distances (if hit)
+    //=========================================================================
+
+    // sqrt(discriminant) - not implemented in FP library yet, so we use
+    // a placeholder approximation for now (in real design, instantiate FP32Sqrt)
+    // For demonstration, we'll assume discriminant is small and use linear approx
+    signal sqrt_disc: fp32 = discriminant  // PLACEHOLDER - should be FP32Sqrt
+
+    // t = (-half_b ± sqrt(discriminant)) / a
+    signal neg_half_b: fp32 = zero_fp - half_b  // PLACEHOLDER - should use FP32Sub
+
+    inst t_near_calc: FP32Sub {
+        a = neg_half_b,
+        b = sqrt_disc
+    }
+
+    inst t_far_calc: FP32Add {
+        a = neg_half_b,
+        b = sqrt_disc
+    }
+
+    signal t_near_raw: fp32 = t_near_calc.result
+    signal t_far_raw: fp32 = t_far_calc.result
+
+    // Divide by a to get final t values
+    // PLACEHOLDER - should instantiate FP32Div entities
+    t_near = t_near_raw  // Should be: t_near_raw / a
+    t_far = t_far_raw    // Should be: t_far_raw / a
+
+    //=========================================================================
+    // Step 6: Compute hit point = ray_origin + t_near * ray_direction
+    //=========================================================================
+
+    inst scaled_dir: Vec3Scale<fp32> {
+        v = ray_direction,
+        s = t_near
+    }
+
+    inst compute_hit_point: Vec3Add<fp32> {
+        a = ray_origin,
+        b = scaled_dir.result
+    }
+
+    hit_point = if hit {
+        compute_hit_point.result
+    } else {
+        vec3::<fp32> { x: zero_fp, y: zero_fp, z: zero_fp }
+    }
+
+    //=========================================================================
+    // Step 7: Compute surface normal = (hit_point - sphere_center) / radius
+    //=========================================================================
+
+    inst normal_unnorm: Vec3Sub<fp32> {
+        a = hit_point,
+        b = sphere_center
+    }
+
+    // Normalize by dividing by radius
+    // PLACEHOLDER - should use FP division for each component
+    hit_normal = if hit {
+        normal_unnorm.result  // Should divide by radius
+    } else {
+        vec3::<fp32> { x: zero_fp, y: zero_fp, z: zero_fp }
+    }
+}
+
+//=============================================================================
+// Simplified Version: Just Test for Hit (No Intersection Details)
+//=============================================================================
+
+entity RaySphereHitTest {
+    in ray_origin: vec3<fp32>
+    in ray_direction: vec3<fp32>
+    in sphere_center: vec3<fp32>
+    in sphere_radius: fp32
+
+    out hit: bit
+}
+
+impl RaySphereHitTest {
+    // Vector from ray origin to sphere center
+    inst oc: Vec3Sub<fp32> {
+        a = ray_origin,
+        b = sphere_center
+    }
+
+    // Project oc onto ray direction
+    inst projection: Vec3Dot<fp32> {
+        a = oc.result,
+        b = ray_direction
+    }
+
+    signal t_closest: fp32 = projection.result
+
+    // Closest point on ray to sphere center
+    inst closest_point_offset: Vec3Scale<fp32> {
+        v = ray_direction,
+        s = t_closest
+    }
+
+    inst closest_point: Vec3Add<fp32> {
+        a = ray_origin,
+        b = closest_point_offset.result
+    }
+
+    // Distance from sphere center to closest point
+    inst distance_vec: Vec3Sub<fp32> {
+        a = sphere_center,
+        b = closest_point.result
+    }
+
+    inst distance_sq: Vec3LengthSq {
+        v = distance_vec.result
+    }
+
+    // Radius squared
+    inst radius_sq: FP32Mul {
+        a = sphere_radius,
+        b = sphere_radius
+    }
+
+    // Hit if distance <= radius
+    inst compare: FP32Compare {
+        a = distance_sq.result,
+        b = radius_sq.result
+    }
+
+    hit = compare.less_equal
+}
+
+//=============================================================================
+// Multi-Sphere Hit Test: Test ray against 4 spheres
+//=============================================================================
+
+entity RayMultiSphereHitTest {
+    in ray_origin: vec3<fp32>
+    in ray_direction: vec3<fp32>
+
+    in sphere0_center: vec3<fp32>
+    in sphere0_radius: fp32
+
+    in sphere1_center: vec3<fp32>
+    in sphere1_radius: fp32
+
+    in sphere2_center: vec3<fp32>
+    in sphere2_radius: fp32
+
+    in sphere3_center: vec3<fp32>
+    in sphere3_radius: fp32
+
+    out hit_mask: bit<4>  // Bit N set if sphere N was hit
+}
+
+impl RayMultiSphereHitTest {
+    inst test0: RaySphereHitTest {
+        ray_origin = ray_origin,
+        ray_direction = ray_direction,
+        sphere_center = sphere0_center,
+        sphere_radius = sphere0_radius
+    }
+
+    inst test1: RaySphereHitTest {
+        ray_origin = ray_origin,
+        ray_direction = ray_direction,
+        sphere_center = sphere1_center,
+        sphere_radius = sphere1_radius
+    }
+
+    inst test2: RaySphereHitTest {
+        ray_origin = ray_origin,
+        ray_direction = ray_direction,
+        sphere_center = sphere2_center,
+        sphere_radius = sphere2_radius
+    }
+
+    inst test3: RaySphereHitTest {
+        ray_origin = ray_origin,
+        ray_direction = ray_direction,
+        sphere_center = sphere3_center,
+        sphere_radius = sphere3_radius
+    }
+
+    // Pack results into bit vector
+    hit_mask = {test3.hit, test2.hit, test1.hit, test0.hit}
+}

@@ -1,0 +1,134 @@
+// IEEE 754 Single-Precision Floating-Point Comparator
+//
+// This entity demonstrates FP comparison logic with proper NaN handling.
+// Implements all standard FP comparison operations.
+//
+// Outputs:
+// - less_than, less_equal, greater_than, greater_equal, equal, not_equal
+// - unordered (true if either operand is NaN)
+//
+// IEEE 754 comparison rules:
+// - Any comparison with NaN returns false (except != which returns true)
+// - -0.0 == +0.0
+// - Denormalized numbers compare by magnitude
+
+entity FP32Compare {
+    in a: fp32
+    in b: fp32
+
+    // Comparison results
+    out less_than: bit
+    out less_equal: bit
+    out greater_than: bit
+    out greater_equal: bit
+    out equal: bit
+    out not_equal: bit
+    out unordered: bit  // True if either operand is NaN
+}
+
+impl FP32Compare {
+    // Unpack operands
+    signal a_sign: bit = a[31]
+    signal a_exp: bit<8> = a[30:23]
+    signal a_mant: bit<23> = a[22:0]
+
+    signal b_sign: bit = b[31]
+    signal b_exp: bit<8> = b[30:23]
+    signal b_mant: bit<23> = b[22:0]
+
+    // Special value detection
+    signal a_is_nan: bit = (a_exp == 8'b11111111) && (a_mant != 23'b0)
+    signal b_is_nan: bit = (b_exp == 8'b11111111) && (b_mant != 23'b0)
+
+    signal a_is_zero: bit = (a_exp == 8'b00000000) && (a_mant == 23'b0)
+    signal b_is_zero: bit = (b_exp == 8'b00000000) && (b_mant == 23'b0)
+
+    signal a_is_inf: bit = (a_exp == 8'b11111111) && (a_mant == 23'b0)
+    signal b_is_inf: bit = (b_exp == 8'b11111111) && (b_mant == 23'b0)
+
+    // Check for NaN (makes comparison unordered)
+    unordered = a_is_nan || b_is_nan
+
+    // Bit-exact equality check
+    signal bits_equal: bit = (a == b)
+
+    // Handle zero equality: -0.0 == +0.0
+    signal both_zero: bit = a_is_zero && b_is_zero
+
+    // Magnitude comparison (ignoring sign)
+    // Compare as unsigned: [exponent][mantissa]
+    signal a_mag: bit<31> = {a_exp, a_mant}
+    signal b_mag: bit<31> = {b_exp, b_mant}
+    signal mag_less: bit = a_mag < b_mag
+    signal mag_greater: bit = a_mag > b_mag
+
+    // Sign-aware comparison
+    // If signs differ:
+    //   - positive > negative (unless both zero)
+    //   - negative < positive (unless both zero)
+    // If signs same:
+    //   - both positive: compare magnitudes normally
+    //   - both negative: compare magnitudes inverted
+
+    signal a_positive: bit = !a_sign
+    signal b_positive: bit = !b_sign
+    signal signs_differ: bit = a_sign != b_sign
+
+    signal raw_less: bit = if both_zero {
+        1'b0  // -0.0 not less than +0.0
+    } else if signs_differ {
+        a_sign  // negative < positive, so true if a is negative
+    } else if a_positive {
+        mag_less  // Both positive: normal magnitude comparison
+    } else {
+        mag_greater  // Both negative: inverted magnitude comparison
+    }
+
+    signal raw_greater: bit = if both_zero {
+        1'b0  // +0.0 not greater than -0.0
+    } else if signs_differ {
+        b_sign  // positive > negative, so true if b is negative
+    } else if a_positive {
+        mag_greater  // Both positive: normal magnitude comparison
+    } else {
+        mag_less  // Both negative: inverted magnitude comparison
+    }
+
+    signal raw_equal: bit = bits_equal || both_zero
+
+    // Apply NaN handling: all comparisons return false if unordered
+    // (except not_equal which returns true)
+    less_than = raw_less && !unordered
+    greater_than = raw_greater && !unordered
+    equal = raw_equal && !unordered
+    less_equal = (raw_less || raw_equal) && !unordered
+    greater_equal = (raw_greater || raw_equal) && !unordered
+    not_equal = !raw_equal || unordered  // True if unequal OR unordered
+}
+
+// Utility entity: returns 2-bit comparison code
+// 00 = less, 01 = equal, 10 = greater, 11 = unordered
+entity FP32CompareCode {
+    in a: fp32
+    in b: fp32
+    out code: bit<2>
+}
+
+impl FP32CompareCode {
+    // Instantiate full comparator
+    inst cmp: FP32Compare {
+        a = a,
+        b = b
+    }
+
+    // Encode result
+    code = if cmp.unordered {
+        2'b11
+    } else if cmp.less_than {
+        2'b00
+    } else if cmp.equal {
+        2'b01
+    } else {
+        2'b10  // greater_than
+    }
+}

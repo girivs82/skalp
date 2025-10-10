@@ -1,0 +1,368 @@
+// Vector Arithmetic Operations
+//
+// This file demonstrates generic vector operations using SKALP's
+// parametric types. These operations work with any element type
+// that supports the required arithmetic.
+//
+// Design Philosophy:
+// - Generic over element type (vec2<T>, vec3<T>, vec4<T>)
+// - Component-wise operations parallelize naturally in hardware
+// - Specialized variants for FP vs integer types
+//
+// These entities showcase:
+// - Parametric struct types
+// - Component access (.x, .y, .z, .w)
+// - Type-generic arithmetic
+// - Multiple related operations in one file
+
+//=============================================================================
+// Vec2 Operations
+//=============================================================================
+
+/// Component-wise addition of two 2D vectors
+entity Vec2Add<T> where T: Synthesizable {
+    in a: vec2<T>
+    in b: vec2<T>
+    out result: vec2<T>
+}
+
+impl<T> Vec2Add<T> {
+    result = vec2::<T> {
+        x: a.x + b.x,
+        y: a.y + b.y
+    }
+}
+
+/// Component-wise subtraction of two 2D vectors
+entity Vec2Sub<T> where T: Synthesizable {
+    in a: vec2<T>
+    in b: vec2<T>
+    out result: vec2<T>
+}
+
+impl<T> Vec2Sub<T> {
+    result = vec2::<T> {
+        x: a.x - b.x,
+        y: a.y - b.y
+    }
+}
+
+/// Hadamard product (component-wise multiplication)
+entity Vec2Mul<T> where T: Synthesizable {
+    in a: vec2<T>
+    in b: vec2<T>
+    out result: vec2<T>
+}
+
+impl<T> Vec2Mul<T> {
+    result = vec2::<T> {
+        x: a.x * b.x,
+        y: a.y * b.y
+    }
+}
+
+/// Scalar multiplication
+entity Vec2Scale<T> where T: Synthesizable {
+    in v: vec2<T>
+    in s: T
+    out result: vec2<T>
+}
+
+impl<T> Vec2Scale<T> {
+    result = vec2::<T> {
+        x: v.x * s,
+        y: v.y * s
+    }
+}
+
+/// Dot product (returns scalar)
+entity Vec2Dot<T> where T: Synthesizable {
+    in a: vec2<T>
+    in b: vec2<T>
+    out result: T
+}
+
+impl<T> Vec2Dot<T> {
+    result = (a.x * b.x) + (a.y * b.y)
+}
+
+/// 2D cross product (returns scalar: x1*y2 - y1*x2)
+entity Vec2Cross<T> where T: Synthesizable {
+    in a: vec2<T>
+    in b: vec2<T>
+    out result: T
+}
+
+impl<T> Vec2Cross<T> {
+    result = (a.x * b.y) - (a.y * b.x)
+}
+
+/// Perpendicular vector (rotate 90° counter-clockwise)
+entity Vec2Perp<T> where T: Synthesizable {
+    in v: vec2<T>
+    out result: vec2<T>
+}
+
+impl<T> Vec2Perp<T> {
+    // Negate using subtraction from zero
+    signal zero: T = 0 as T
+    signal neg_x: T = zero - v.x
+
+    result = vec2::<T> {
+        x: neg_x,
+        y: v.y
+    }
+}
+
+//=============================================================================
+// Vec3 Operations
+//=============================================================================
+
+/// Component-wise addition of two 3D vectors
+entity Vec3Add<T> where T: Synthesizable {
+    in a: vec3<T>
+    in b: vec3<T>
+    out result: vec3<T>
+}
+
+impl<T> Vec3Add<T> {
+    result = vec3::<T> {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z
+    }
+}
+
+/// Component-wise subtraction of two 3D vectors
+entity Vec3Sub<T> where T: Synthesizable {
+    in a: vec3<T>
+    in b: vec3<T>
+    out result: vec3<T>
+}
+
+impl<T> Vec3Sub<T> {
+    result = vec3::<T> {
+        x: a.x - b.x,
+        y: a.y - b.y,
+        z: a.z - b.z
+    }
+}
+
+/// Scalar multiplication
+entity Vec3Scale<T> where T: Synthesizable {
+    in v: vec3<T>
+    in s: T
+    out result: vec3<T>
+}
+
+impl<T> Vec3Scale<T> {
+    result = vec3::<T> {
+        x: v.x * s,
+        y: v.y * s,
+        z: v.z * s
+    }
+}
+
+/// Dot product (returns scalar)
+entity Vec3Dot<T> where T: Synthesizable {
+    in a: vec3<T>
+    in b: vec3<T>
+    out result: T
+}
+
+impl<T> Vec3Dot<T> {
+    result = (a.x * b.x) + (a.y * b.y) + (a.z * b.z)
+}
+
+/// 3D cross product (returns vector)
+/// Formula: a × b = (a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
+entity Vec3Cross<T> where T: Synthesizable {
+    in a: vec3<T>
+    in b: vec3<T>
+    out result: vec3<T>
+}
+
+impl<T> Vec3Cross<T> {
+    result = vec3::<T> {
+        x: (a.y * b.z) - (a.z * b.y),
+        y: (a.z * b.x) - (a.x * b.z),
+        z: (a.x * b.y) - (a.y * b.x)
+    }
+}
+
+//=============================================================================
+// Vec4 Operations
+//=============================================================================
+
+/// Component-wise addition of two 4D vectors
+entity Vec4Add<T> where T: Synthesizable {
+    in a: vec4<T>
+    in b: vec4<T>
+    out result: vec4<T>
+}
+
+impl<T> Vec4Add<T> {
+    result = vec4::<T> {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z,
+        w: a.w + b.w
+    }
+}
+
+/// Component-wise subtraction of two 4D vectors
+entity Vec4Sub<T> where T: Synthesizable {
+    in a: vec4<T>
+    in b: vec4<T>
+    out result: vec4<T>
+}
+
+impl<T> Vec4Sub<T> {
+    result = vec4::<T> {
+        x: a.x - b.x,
+        y: a.y - b.y,
+        z: a.z - b.z,
+        w: a.w - b.w
+    }
+}
+
+/// Scalar multiplication
+entity Vec4Scale<T> where T: Synthesizable {
+    in v: vec4<T>
+    in s: T
+    out result: vec4<T>
+}
+
+impl<T> Vec4Scale<T> {
+    result = vec4::<T> {
+        x: v.x * s,
+        y: v.y * s,
+        z: v.z * s,
+        w: v.w * s
+    }
+}
+
+/// Dot product (returns scalar)
+entity Vec4Dot<T> where T: Synthesizable {
+    in a: vec4<T>
+    in b: vec4<T>
+    out result: T
+}
+
+impl<T> Vec4Dot<T> {
+    result = (a.x * b.x) + (a.y * b.y) + (a.z * b.z) + (a.w * b.w)
+}
+
+//=============================================================================
+// Floating-Point Specific Operations
+//=============================================================================
+
+/// Length squared (dot product with self) - avoids sqrt for efficiency
+entity Vec3LengthSq {
+    in v: vec3<fp32>
+    out result: fp32
+}
+
+impl Vec3LengthSq {
+    inst dot: Vec3Dot<fp32> {
+        a = v,
+        b = v,
+        result => result
+    }
+}
+
+/// Distance squared between two points
+entity Vec3DistanceSq {
+    in a: vec3<fp32>
+    in b: vec3<fp32>
+    out result: fp32
+}
+
+impl Vec3DistanceSq {
+    inst diff: Vec3Sub<fp32> {
+        a = a,
+        b = b
+    }
+
+    inst len_sq: Vec3LengthSq {
+        v = diff.result,
+        result => result
+    }
+}
+
+/// Linear interpolation: result = a + (b - a) * t
+entity Vec3Lerp {
+    in a: vec3<fp32>
+    in b: vec3<fp32>
+    in t: fp32
+    out result: vec3<fp32>
+}
+
+impl Vec3Lerp {
+    inst diff: Vec3Sub<fp32> {
+        a = b,
+        b = a
+    }
+
+    inst scaled: Vec3Scale<fp32> {
+        v = diff.result,
+        s = t
+    }
+
+    inst final_add: Vec3Add<fp32> {
+        a = a,
+        b = scaled.result,
+        result => result
+    }
+}
+
+/// Component-wise minimum
+entity Vec3Min {
+    in a: vec3<fp32>
+    in b: vec3<fp32>
+    out result: vec3<fp32>
+}
+
+impl Vec3Min {
+    result = vec3::<fp32> {
+        x: if a.x < b.x { a.x } else { b.x },
+        y: if a.y < b.y { a.y } else { b.y },
+        z: if a.z < b.z { a.z } else { b.z }
+    }
+}
+
+/// Component-wise maximum
+entity Vec3Max {
+    in a: vec3<fp32>
+    in b: vec3<fp32>
+    out result: vec3<fp32>
+}
+
+impl Vec3Max {
+    result = vec3::<fp32> {
+        x: if a.x > b.x { a.x } else { b.x },
+        y: if a.y > b.y { a.y } else { b.y },
+        z: if a.z > b.z { a.z } else { b.z }
+    }
+}
+
+/// Component-wise clamp to range [min_val, max_val]
+entity Vec3Clamp {
+    in v: vec3<fp32>
+    in min_val: vec3<fp32>
+    in max_val: vec3<fp32>
+    out result: vec3<fp32>
+}
+
+impl Vec3Clamp {
+    inst clamped_min: Vec3Max {
+        a = v,
+        b = min_val
+    }
+
+    inst clamped: Vec3Min {
+        a = clamped_min.result,
+        b = max_val,
+        result => result
+    }
+}

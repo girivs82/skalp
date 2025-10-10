@@ -1,0 +1,159 @@
+// IEEE 754 Single-Precision Floating-Point Adder
+//
+// This entity implements fp32 addition following IEEE 754-2008 standard.
+// It demonstrates SKALP's ability to express complex combinational logic
+// for hardware arithmetic units.
+//
+// Format: fp32 = [31] sign | [30:23] exponent | [22:0] mantissa
+//         Exponent bias = 127
+//         Implicit leading 1 for normalized numbers
+//
+// Algorithm:
+// 1. Unpack operands (sign, exp, mantissa)
+// 2. Handle special cases (NaN, Inf, zero)
+// 3. Align exponents (shift smaller mantissa right)
+// 4. Add/subtract aligned mantissas
+// 5. Normalize result
+// 6. Round result
+// 7. Pack result
+
+entity FP32Add {
+    in a: fp32
+    in b: fp32
+    out result: fp32
+    out flags: bit<5>  // [4]=invalid [3]=div_by_zero [2]=overflow [1]=underflow [0]=inexact
+}
+
+impl FP32Add {
+    // Unpack operands into components
+    signal a_sign: bit = a[31]
+    signal a_exp: bit<8> = a[30:23]
+    signal a_mant: bit<23> = a[22:0]
+
+    signal b_sign: bit = b[31]
+    signal b_exp: bit<8> = b[30:23]
+    signal b_mant: bit<23> = b[22:0]
+
+    // Special case detection
+    signal a_is_zero: bit = (a_exp == 8'b00000000) && (a_mant == 23'b0)
+    signal b_is_zero: bit = (b_exp == 8'b00000000) && (b_mant == 23'b0)
+
+    signal a_is_inf: bit = (a_exp == 8'b11111111) && (a_mant == 23'b0)
+    signal b_is_inf: bit = (b_exp == 8'b11111111) && (b_mant == 23'b0)
+
+    signal a_is_nan: bit = (a_exp == 8'b11111111) && (a_mant != 23'b0)
+    signal b_is_nan: bit = (b_exp == 8'b11111111) && (b_mant != 23'b0)
+
+    signal a_is_denorm: bit = (a_exp == 8'b00000000) && (a_mant != 23'b0)
+    signal b_is_denorm: bit = (b_exp == 8'b00000000) && (b_mant != 23'b0)
+
+    // Add implicit leading 1 for normalized numbers (create 24-bit mantissa)
+    signal a_mant_full: bit<24> = if a_is_denorm {
+        {1'b0, a_mant}
+    } else {
+        {1'b1, a_mant}
+    }
+
+    signal b_mant_full: bit<24> = if b_is_denorm {
+        {1'b0, b_mant}
+    } else {
+        {1'b1, b_mant}
+    }
+
+    // Exponent difference for alignment
+    signal exp_diff: bit<8> = if a_exp > b_exp {
+        a_exp - b_exp
+    } else {
+        b_exp - a_exp
+    }
+
+    // Determine which operand has larger exponent
+    signal a_larger: bit = a_exp >= b_exp
+
+    signal larger_exp: bit<8> = if a_larger { a_exp } else { b_exp }
+    signal larger_mant: bit<24> = if a_larger { a_mant_full } else { b_mant_full }
+    signal larger_sign: bit = if a_larger { a_sign } else { b_sign }
+
+    signal smaller_mant: bit<24> = if a_larger { b_mant_full } else { a_mant_full }
+    signal smaller_sign: bit = if a_larger { b_sign } else { a_sign }
+
+    // Align mantissas (shift smaller right by exp_diff)
+    // Guard, Round, Sticky bits for accurate rounding
+    signal aligned_mant: bit<27> = {smaller_mant, 3'b000} >> exp_diff
+    signal guard_bit: bit = aligned_mant[2]
+    signal round_bit: bit = aligned_mant[1]
+    signal sticky_bit: bit = aligned_mant[0]
+
+    // Extended mantissa for addition (with guard bits)
+    signal larger_mant_ext: bit<27> = {larger_mant, 3'b000}
+
+    // Perform addition or subtraction based on sign agreement
+    signal signs_match: bit = larger_sign == smaller_sign
+
+    signal sum_mant: bit<27> = if signs_match {
+        larger_mant_ext + aligned_mant
+    } else {
+        larger_mant_ext - aligned_mant
+    }
+
+    signal sum_sign: bit = larger_sign
+
+    // Normalization: find leading one position
+    signal needs_shift_left: bit = sum_mant[26] == 1'b0
+    signal needs_shift_right: bit = sum_mant[26] == 1'b1  // Overflow into bit 26
+
+    // Normalized mantissa and adjusted exponent
+    signal norm_mant: bit<24> = if needs_shift_right {
+        sum_mant[26:3]  // Shift right 1, keep guard bits
+    } else if needs_shift_left {
+        sum_mant[25:2]  // Shift left 1
+    } else {
+        sum_mant[25:2]
+    }
+
+    signal norm_exp: bit<8> = if needs_shift_right {
+        larger_exp + 8'd1
+    } else if needs_shift_left {
+        larger_exp - 8'd1
+    } else {
+        larger_exp
+    }
+
+    // Rounding (round to nearest, ties to even)
+    signal round_up: bit = guard_bit && (round_bit || sticky_bit || norm_mant[0])
+
+    signal final_mant: bit<23> = if round_up {
+        norm_mant[23:1] + 23'd1
+    } else {
+        norm_mant[23:1]
+    }
+
+    signal final_exp: bit<8> = norm_exp
+
+    // Handle special cases for result
+    signal result_is_nan: bit = a_is_nan || b_is_nan ||
+                                (a_is_inf && b_is_inf && (a_sign != b_sign))
+
+    signal result_is_inf: bit = (a_is_inf || b_is_inf) && !result_is_nan
+
+    signal result_is_zero: bit = (a_is_zero && b_is_zero) || (sum_mant == 27'b0)
+
+    // Pack result
+    result = if result_is_nan {
+        32'hFFC00000  // Canonical quiet NaN
+    } else if result_is_inf {
+        {sum_sign, 8'b11111111, 23'b0}
+    } else if result_is_zero {
+        {sum_sign, 8'b00000000, 23'b0}
+    } else {
+        {sum_sign, final_exp, final_mant}
+    }
+
+    // Exception flags
+    signal flag_invalid: bit = result_is_nan && (a_is_inf && b_is_inf)
+    signal flag_overflow: bit = (final_exp == 8'b11111111) && !result_is_inf
+    signal flag_underflow: bit = (final_exp == 8'b00000000) && !result_is_zero
+    signal flag_inexact: bit = guard_bit || round_bit || sticky_bit
+
+    flags = {flag_invalid, 1'b0, flag_overflow, flag_underflow, flag_inexact}
+}

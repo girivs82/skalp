@@ -1,0 +1,206 @@
+// Floating-Point Type Traits for SKALP
+//
+// This file demonstrates SKALP's advanced features:
+// - Trait definitions with associated types and constants
+// - Generic programming for hardware
+// - Type-safe numeric operations
+// - Default implementations
+
+/// Core trait for floating-point arithmetic types
+trait FloatingPoint {
+    /// Bit width of this floating-point format
+    const WIDTH: nat
+
+    /// Exponent width
+    const EXP_WIDTH: nat
+
+    /// Mantissa width (fractional bits, excluding implicit leading 1)
+    const MANT_WIDTH: nat
+
+    /// Exponent bias (2^(EXP_WIDTH-1) - 1)
+    const BIAS: nat
+
+    /// Maximum representable value
+    const MAX_VALUE: Self
+
+    /// Minimum positive normalized value
+    const MIN_NORMAL: Self
+
+    /// Machine epsilon (smallest x where 1.0 + x != 1.0)
+    const EPSILON: Self
+
+    /// Infinity value
+    const INFINITY: Self
+
+    /// Not-a-Number value
+    const NAN: Self
+
+    // Basic arithmetic operations
+    fn add(self, other: Self) -> Self
+    fn sub(self, other: Self) -> Self
+    fn mul(self, other: Self) -> Self
+    fn div(self, other: Self) -> Self
+
+    // Comparison operations
+    fn less_than(self, other: Self) -> bit
+    fn less_equal(self, other: Self) -> bit
+    fn greater_than(self, other: Self) -> bit
+    fn greater_equal(self, other: Self) -> bit
+    fn equal(self, other: Self) -> bit
+    fn not_equal(self, other: Self) -> bit
+
+    // Classification
+    fn is_nan(self) -> bit
+    fn is_infinite(self) -> bit
+    fn is_finite(self) -> bit
+    fn is_zero(self) -> bit
+    fn is_negative(self) -> bit
+
+    // Default implementations using other trait methods
+    fn abs(self) -> Self {
+        if self.is_negative() {
+            Self::zero().sub(self)
+        } else {
+            self
+        }
+    }
+
+    fn negate(self) -> Self {
+        Self::zero().sub(self)
+    }
+
+    fn max(self, other: Self) -> Self {
+        if self.greater_than(other) { self } else { other }
+    }
+
+    fn min(self, other: Self) -> Self {
+        if self.less_than(other) { self } else { other }
+    }
+
+    fn clamp(self, min_val: Self, max_val: Self) -> Self {
+        self.max(min_val).min(max_val)
+    }
+
+    // Factory methods
+    fn zero() -> Self
+    fn one() -> Self
+}
+
+/// Trait for advanced floating-point operations
+trait FloatMath: FloatingPoint {
+    /// Square root
+    fn sqrt(self) -> Self
+
+    /// Reciprocal square root (1/√x) - often more efficient than sqrt then divide
+    fn rsqrt(self) -> Self
+
+    /// Fused multiply-add: (a * b) + c with single rounding
+    fn fma(self, b: Self, c: Self) -> Self {
+        // Default implementation: two operations (less accurate)
+        self.mul(b).add(c)
+    }
+
+    /// Fused multiply-subtract: (a * b) - c
+    fn fms(self, b: Self, c: Self) -> Self {
+        self.mul(b).sub(c)
+    }
+
+    /// Natural exponential (e^x)
+    fn exp(self) -> Self
+
+    /// Natural logarithm (ln(x))
+    fn ln(self) -> Self
+
+    /// Base-2 logarithm
+    fn log2(self) -> Self
+
+    /// Power function (self^exponent)
+    fn pow(self, exponent: Self) -> Self {
+        // Default: exp(exponent * ln(self))
+        exponent.mul(self.ln()).exp()
+    }
+
+    /// Sine
+    fn sin(self) -> Self
+
+    /// Cosine
+    fn cos(self) -> Self
+
+    /// Tangent
+    fn tan(self) -> Self {
+        // Default implementation
+        self.sin().div(self.cos())
+    }
+
+    /// Arctangent
+    fn atan(self) -> Self
+
+    /// Two-argument arctangent (atan2(y, x))
+    fn atan2(self, x: Self) -> Self
+}
+
+/// Trait for type conversions between floating-point formats
+trait FloatConvert<From> {
+    /// Convert from another floating-point type
+    fn from_float(value: From) -> Self
+
+    /// Convert to another floating-point type
+    fn to_float(self) -> From
+}
+
+/// Trait for conversions between floating-point and integer types
+trait FloatIntConvert<IntType> {
+    /// Convert from integer
+    fn from_int(value: IntType) -> Self
+
+    /// Convert to integer (truncate towards zero)
+    fn to_int(self) -> IntType
+
+    /// Round to nearest integer and convert
+    fn round_to_int(self) -> IntType
+
+    /// Floor to integer
+    fn floor_to_int(self) -> IntType
+
+    /// Ceiling to integer
+    fn ceil_to_int(self) -> IntType
+}
+
+/// Trait for synthesizable numeric types (constrains what can be in hardware)
+trait Synthesizable {
+    /// Returns true if this type can be synthesized to hardware
+    const IS_SYNTH: bit = 1
+}
+
+/// Trait for types that can be compared
+trait Comparable {
+    fn compare(self, other: Self) -> bit<2>  // 00=less, 01=equal, 10=greater, 11=unordered(NaN)
+}
+
+// Implement Synthesizable for floating-point types
+impl Synthesizable for fp16 {
+    const IS_SYNTH: bit = 1
+}
+
+impl Synthesizable for fp32 {
+    const IS_SYNTH: bit = 1
+}
+
+impl Synthesizable for fp64 {
+    const IS_SYNTH: bit = 1
+}
+
+// Implement Comparable for FP types
+impl Comparable for fp32 {
+    fn compare(self, other: Self) -> bit<2> {
+        if self.is_nan() || other.is_nan() {
+            0b11  // Unordered
+        } else if self < other {
+            0b00  // Less than
+        } else if self == other {
+            0b01  // Equal
+        } else {
+            0b10  // Greater than
+        }
+    }
+}
