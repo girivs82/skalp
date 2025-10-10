@@ -893,11 +893,28 @@ impl<'hir> HirToMir<'hir> {
                 // For binary expressions, infer from operands
                 self.infer_hir_type(&binary.left)
             },
-            hir::HirExpression::FieldAccess { base, .. } => {
+            hir::HirExpression::FieldAccess { base, field } => {
                 // Infer from base expression and field
                 let base_type = self.infer_hir_type(base)?;
-                // TODO: Look up field type in struct definition
-                Some(base_type)
+                // For vector types, return element type
+                match base_type {
+                    hir::HirType::Vec2(element_type)
+                    | hir::HirType::Vec3(element_type)
+                    | hir::HirType::Vec4(element_type) => {
+                        // Vector component access returns element type
+                        Some(*element_type)
+                    }
+                    hir::HirType::Struct(ref struct_type) => {
+                        // Look up field type in struct definition
+                        for struct_field in &struct_type.fields {
+                            if struct_field.name == *field {
+                                return Some(struct_field.field_type.clone());
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
             },
             hir::HirExpression::Index(base, _) => {
                 // For array indexing, infer element type
@@ -997,6 +1014,16 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Float16 => DataType::Float16,
             hir::HirType::Float32 => DataType::Float32,
             hir::HirType::Float64 => DataType::Float64,
+            // Vector types
+            hir::HirType::Vec2(element_type) => {
+                DataType::Vec2(Box::new(self.convert_type(element_type)))
+            }
+            hir::HirType::Vec3(element_type) => {
+                DataType::Vec3(Box::new(self.convert_type(element_type)))
+            }
+            hir::HirType::Vec4(element_type) => {
+                DataType::Vec4(Box::new(self.convert_type(element_type)))
+            }
             // Parametric types - preserve parameter name and default
             hir::HirType::BitParam(param_name) => DataType::BitParam {
                 param: param_name.clone(),
@@ -1225,7 +1252,7 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
-    /// Convert struct field access to bit slice
+    /// Convert struct/vector field access to bit slice
     fn convert_field_access(
         &mut self,
         base: &hir::HirExpression,
@@ -1248,6 +1275,10 @@ impl<'hir> HirToMir<'hir> {
                         return None;
                     }
                 }
+            }
+            hir::HirExpression::Port(id) => {
+                let port_id = *self.port_map.get(id)?;
+                LValue::Port(port_id)
             }
             hir::HirExpression::Variable(id) => {
                 let var_id = *self.variable_map.get(id)?;
@@ -1272,12 +1303,48 @@ impl<'hir> HirToMir<'hir> {
         }))
     }
 
-    /// Get the bit range for a struct field
+    /// Get the bit range for a struct field or vector component
     fn get_field_bit_range(
         &self,
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<(usize, usize)> {
+        // First, check if this is a vector type
+        if let Some(base_type) = self.infer_hir_type(base) {
+            match base_type {
+                hir::HirType::Vec2(ref element_type) => {
+                    let elem_width = self.get_hir_type_width(element_type);
+                    match field_name {
+                        "x" => return Some((elem_width - 1, 0)),
+                        "y" => return Some((2 * elem_width - 1, elem_width)),
+                        _ => return None, // Invalid component for vec2
+                    }
+                }
+                hir::HirType::Vec3(ref element_type) => {
+                    let elem_width = self.get_hir_type_width(element_type);
+                    match field_name {
+                        "x" => return Some((elem_width - 1, 0)),
+                        "y" => return Some((2 * elem_width - 1, elem_width)),
+                        "z" => return Some((3 * elem_width - 1, 2 * elem_width)),
+                        _ => return None, // Invalid component for vec3
+                    }
+                }
+                hir::HirType::Vec4(ref element_type) => {
+                    let elem_width = self.get_hir_type_width(element_type);
+                    match field_name {
+                        "x" => return Some((elem_width - 1, 0)),
+                        "y" => return Some((2 * elem_width - 1, elem_width)),
+                        "z" => return Some((3 * elem_width - 1, 2 * elem_width)),
+                        "w" => return Some((4 * elem_width - 1, 3 * elem_width)),
+                        _ => return None, // Invalid component for vec4
+                    }
+                }
+                _ => {
+                    // Not a vector type, fall through to struct handling
+                }
+            }
+        }
+
         // Get the struct type from the base expression
         let struct_type = self.get_expression_struct_type(base)?;
 
@@ -1402,6 +1469,10 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Float16 => 16,
             hir::HirType::Float32 => 32,
             hir::HirType::Float64 => 64,
+            // Vector types - width is element_width * component_count
+            hir::HirType::Vec2(element_type) => self.get_hir_type_width(element_type) * 2,
+            hir::HirType::Vec3(element_type) => self.get_hir_type_width(element_type) * 3,
+            hir::HirType::Vec4(element_type) => self.get_hir_type_width(element_type) * 4,
         }
     }
 

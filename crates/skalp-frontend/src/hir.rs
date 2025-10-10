@@ -451,6 +451,10 @@ pub enum HirType {
     Float16, // IEEE 754 half precision (16-bit)
     Float32, // IEEE 754 single precision (32-bit)
     Float64, // IEEE 754 double precision (64-bit)
+    // Vector types (SIMD-style packed vectors)
+    Vec2(Box<HirType>), // 2-component vector (x, y)
+    Vec3(Box<HirType>), // 3-component vector (x, y, z)
+    Vec4(Box<HirType>), // 4-component vector (x, y, z, w)
 }
 
 /// Patterns in HIR

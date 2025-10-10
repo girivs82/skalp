@@ -734,6 +734,34 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
         skalp_mir::DataType::Float16 => "[15:0] ".to_string(),
         skalp_mir::DataType::Float32 => "[31:0] ".to_string(),
         skalp_mir::DataType::Float64 => "[63:0] ".to_string(),
+        // Vector types - width is element_width * component_count
+        skalp_mir::DataType::Vec2(element_type) => {
+            let elem_width = get_type_width(element_type);
+            let total_width = elem_width * 2;
+            if total_width > 1 {
+                format!("[{}:0] ", total_width - 1)
+            } else {
+                String::new()
+            }
+        }
+        skalp_mir::DataType::Vec3(element_type) => {
+            let elem_width = get_type_width(element_type);
+            let total_width = elem_width * 3;
+            if total_width > 1 {
+                format!("[{}:0] ", total_width - 1)
+            } else {
+                String::new()
+            }
+        }
+        skalp_mir::DataType::Vec4(element_type) => {
+            let elem_width = get_type_width(element_type);
+            let total_width = elem_width * 4;
+            if total_width > 1 {
+                format!("[{}:0] ", total_width - 1)
+            } else {
+                String::new()
+            }
+        }
     }
 }
 
@@ -799,6 +827,10 @@ fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
         skalp_mir::DataType::Float16 => 16,
         skalp_mir::DataType::Float32 => 32,
         skalp_mir::DataType::Float64 => 64,
+        // Vector types - width is element_width * component_count
+        skalp_mir::DataType::Vec2(element_type) => get_type_width(element_type) * 2,
+        skalp_mir::DataType::Vec3(element_type) => get_type_width(element_type) * 3,
+        skalp_mir::DataType::Vec4(element_type) => get_type_width(element_type) * 4,
     }
 }
 

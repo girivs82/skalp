@@ -61,6 +61,12 @@ pub enum Token {
     Fp32,
     #[token("fp64")]
     Fp64,
+    #[token("vec2")]
+    Vec2,
+    #[token("vec3")]
+    Vec3,
+    #[token("vec4")]
+    Vec4,
     #[token("struct")]
     Struct,
     #[token("enum")]

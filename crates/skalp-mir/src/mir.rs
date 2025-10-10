@@ -156,6 +156,12 @@ pub enum DataType {
     Float32,
     /// IEEE 754 double precision (64-bit)
     Float64,
+    /// 2-component vector type (packed struct with x, y fields)
+    Vec2(Box<DataType>),
+    /// 3-component vector type (packed struct with x, y, z fields)
+    Vec3(Box<DataType>),
+    /// 4-component vector type (packed struct with x, y, z, w fields)
+    Vec4(Box<DataType>),
 }
 
 /// Clock domain identifier in MIR

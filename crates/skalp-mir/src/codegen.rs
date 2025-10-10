@@ -440,6 +440,29 @@ impl SystemVerilogGenerator {
             DataType::Float16 => "fp16_t".to_string(), // Will be defined in FP library
             DataType::Float32 => "fp32_t".to_string(),
             DataType::Float64 => "fp64_t".to_string(),
+            // Vector types - represented as packed structs
+            DataType::Vec2(element_type) => {
+                format!("vec2_{}_t", self.type_suffix(element_type))
+            }
+            DataType::Vec3(element_type) => {
+                format!("vec3_{}_t", self.type_suffix(element_type))
+            }
+            DataType::Vec4(element_type) => {
+                format!("vec4_{}_t", self.type_suffix(element_type))
+            }
+        }
+    }
+
+    /// Get a short suffix for a type (for naming vector types)
+    fn type_suffix(&self, dtype: &DataType) -> String {
+        match dtype {
+            DataType::Float16 => "fp16".to_string(),
+            DataType::Float32 => "fp32".to_string(),
+            DataType::Float64 => "fp64".to_string(),
+            DataType::Bit(w) => format!("b{}", w),
+            DataType::Int(w) => format!("i{}", w),
+            DataType::Nat(w) => format!("u{}", w),
+            _ => "t".to_string(),
         }
     }
 
