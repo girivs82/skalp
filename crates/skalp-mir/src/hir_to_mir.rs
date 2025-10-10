@@ -514,9 +514,7 @@ impl<'hir> HirToMir<'hir> {
                     hir::HirLiteral::Integer(val) => {
                         Some(Expression::Literal(Value::Integer(*val as i64)))
                     }
-                    hir::HirLiteral::Float(f) => {
-                        Some(Expression::Literal(Value::Float(*f)))
-                    }
+                    hir::HirLiteral::Float(f) => Some(Expression::Literal(Value::Float(*f))),
                     hir::HirLiteral::String(s) => {
                         Some(Expression::Literal(Value::String(s.clone())))
                     }
@@ -874,25 +872,25 @@ impl<'hir> HirToMir<'hir> {
                 let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
                 let signal = impl_block.signals.iter().find(|s| s.id == *signal_id)?;
                 Some(signal.signal_type.clone())
-            },
+            }
             hir::HirExpression::Port(port_id) => {
                 // Look up port in current entity
                 let entity_id = self.current_entity_id?;
                 let entity = hir.entities.iter().find(|e| e.id == entity_id)?;
                 let port = entity.ports.iter().find(|p| p.id == *port_id)?;
                 Some(port.port_type.clone())
-            },
+            }
             hir::HirExpression::Variable(var_id) => {
                 // Look up variable in current entity's implementation
                 let entity_id = self.current_entity_id?;
                 let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
                 let var = impl_block.variables.iter().find(|v| v.id == *var_id)?;
                 Some(var.var_type.clone())
-            },
+            }
             hir::HirExpression::Binary(binary) => {
                 // For binary expressions, infer from operands
                 self.infer_hir_type(&binary.left)
-            },
+            }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Infer from base expression and field
                 let base_type = self.infer_hir_type(base)?;
@@ -915,7 +913,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                     _ => None,
                 }
-            },
+            }
             hir::HirExpression::Index(base, _) => {
                 // For array indexing, infer element type
                 let base_type = self.infer_hir_type(base)?;
@@ -923,7 +921,7 @@ impl<'hir> HirToMir<'hir> {
                     hir::HirType::Array(elem_type, _) => Some(*elem_type),
                     _ => Some(hir::HirType::Bit(1)), // Bit select
                 }
-            },
+            }
             _ => None,
         }
     }
@@ -945,20 +943,80 @@ impl<'hir> HirToMir<'hir> {
         };
 
         match op {
-            hir::HirBinaryOp::Add => if is_fp { BinaryOp::FAdd } else { BinaryOp::Add },
-            hir::HirBinaryOp::Sub => if is_fp { BinaryOp::FSub } else { BinaryOp::Sub },
-            hir::HirBinaryOp::Mul => if is_fp { BinaryOp::FMul } else { BinaryOp::Mul },
-            hir::HirBinaryOp::Div => if is_fp { BinaryOp::FDiv } else { BinaryOp::Div },
+            hir::HirBinaryOp::Add => {
+                if is_fp {
+                    BinaryOp::FAdd
+                } else {
+                    BinaryOp::Add
+                }
+            }
+            hir::HirBinaryOp::Sub => {
+                if is_fp {
+                    BinaryOp::FSub
+                } else {
+                    BinaryOp::Sub
+                }
+            }
+            hir::HirBinaryOp::Mul => {
+                if is_fp {
+                    BinaryOp::FMul
+                } else {
+                    BinaryOp::Mul
+                }
+            }
+            hir::HirBinaryOp::Div => {
+                if is_fp {
+                    BinaryOp::FDiv
+                } else {
+                    BinaryOp::Div
+                }
+            }
             hir::HirBinaryOp::Mod => BinaryOp::Mod, // No FP modulo
             hir::HirBinaryOp::And => BinaryOp::BitwiseAnd,
             hir::HirBinaryOp::Or => BinaryOp::BitwiseOr,
             hir::HirBinaryOp::Xor => BinaryOp::BitwiseXor,
-            hir::HirBinaryOp::Equal => if is_fp { BinaryOp::FEqual } else { BinaryOp::Equal },
-            hir::HirBinaryOp::NotEqual => if is_fp { BinaryOp::FNotEqual } else { BinaryOp::NotEqual },
-            hir::HirBinaryOp::Less => if is_fp { BinaryOp::FLess } else { BinaryOp::Less },
-            hir::HirBinaryOp::LessEqual => if is_fp { BinaryOp::FLessEqual } else { BinaryOp::LessEqual },
-            hir::HirBinaryOp::Greater => if is_fp { BinaryOp::FGreater } else { BinaryOp::Greater },
-            hir::HirBinaryOp::GreaterEqual => if is_fp { BinaryOp::FGreaterEqual } else { BinaryOp::GreaterEqual },
+            hir::HirBinaryOp::Equal => {
+                if is_fp {
+                    BinaryOp::FEqual
+                } else {
+                    BinaryOp::Equal
+                }
+            }
+            hir::HirBinaryOp::NotEqual => {
+                if is_fp {
+                    BinaryOp::FNotEqual
+                } else {
+                    BinaryOp::NotEqual
+                }
+            }
+            hir::HirBinaryOp::Less => {
+                if is_fp {
+                    BinaryOp::FLess
+                } else {
+                    BinaryOp::Less
+                }
+            }
+            hir::HirBinaryOp::LessEqual => {
+                if is_fp {
+                    BinaryOp::FLessEqual
+                } else {
+                    BinaryOp::LessEqual
+                }
+            }
+            hir::HirBinaryOp::Greater => {
+                if is_fp {
+                    BinaryOp::FGreater
+                } else {
+                    BinaryOp::Greater
+                }
+            }
+            hir::HirBinaryOp::GreaterEqual => {
+                if is_fp {
+                    BinaryOp::FGreaterEqual
+                } else {
+                    BinaryOp::GreaterEqual
+                }
+            }
             hir::HirBinaryOp::LogicalAnd => BinaryOp::LogicalAnd,
             hir::HirBinaryOp::LogicalOr => BinaryOp::LogicalOr,
             hir::HirBinaryOp::LeftShift => BinaryOp::LeftShift,

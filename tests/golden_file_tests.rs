@@ -326,7 +326,11 @@ impl FP32Test {
     let verilog = compile_to_verilog(source);
 
     // Verify fp32 is 32-bit
-    assert!(verilog.contains("[31:0]"), "FP32 should be 32-bit: {}", verilog);
+    assert!(
+        verilog.contains("[31:0]"),
+        "FP32 should be 32-bit: {}",
+        verilog
+    );
 
     golden.assert_eq("sv", &verilog);
 }
@@ -380,10 +384,22 @@ impl Vec2Test {
     let verilog = compile_to_verilog(source);
 
     // Verify vec2<fp32> is 64-bit (2 * 32)
-    assert!(verilog.contains("[63:0]"), "vec2<fp32> should be 64-bit:\n{}", verilog);
+    assert!(
+        verilog.contains("[63:0]"),
+        "vec2<fp32> should be 64-bit:\n{}",
+        verilog
+    );
     // Verify component access (port_0 is the input v)
-    assert!(verilog.contains("[31:0]"), "Should have x component (bits [31:0]):\n{}", verilog);
-    assert!(verilog.contains("[63:32]"), "Should have y component (bits [63:32]):\n{}", verilog);
+    assert!(
+        verilog.contains("[31:0]"),
+        "Should have x component (bits [31:0]):\n{}",
+        verilog
+    );
+    assert!(
+        verilog.contains("[63:32]"),
+        "Should have y component (bits [63:32]):\n{}",
+        verilog
+    );
 
     golden.assert_eq("sv", &verilog);
 }
@@ -411,9 +427,18 @@ impl Vec3Test {
     // Verify vec3<bit<16>> is 48-bit (3 * 16)
     assert!(verilog.contains("[47:0]"), "vec3<bit<16>> should be 48-bit");
     // Verify component access
-    assert!(verilog.contains("[15:0]"), "Should have x component (bits [15:0])");
-    assert!(verilog.contains("[31:16]"), "Should have y component (bits [31:16])");
-    assert!(verilog.contains("[47:32]"), "Should have z component (bits [47:32])");
+    assert!(
+        verilog.contains("[15:0]"),
+        "Should have x component (bits [15:0])"
+    );
+    assert!(
+        verilog.contains("[31:16]"),
+        "Should have y component (bits [31:16])"
+    );
+    assert!(
+        verilog.contains("[47:32]"),
+        "Should have z component (bits [47:32])"
+    );
 
     golden.assert_eq("sv", &verilog);
 }
@@ -443,10 +468,22 @@ impl Vec4Test {
     // Verify vec4<bit<8>> is 32-bit (4 * 8)
     assert!(verilog.contains("[31:0]"), "vec4<bit<8>> should be 32-bit");
     // Verify component access
-    assert!(verilog.contains("[7:0]"), "Should have x component (bits [7:0])");
-    assert!(verilog.contains("[15:8]"), "Should have y component (bits [15:8])");
-    assert!(verilog.contains("[23:16]"), "Should have z component (bits [23:16])");
-    assert!(verilog.contains("[31:24]"), "Should have w component (bits [31:24])");
+    assert!(
+        verilog.contains("[7:0]"),
+        "Should have x component (bits [7:0])"
+    );
+    assert!(
+        verilog.contains("[15:8]"),
+        "Should have y component (bits [15:8])"
+    );
+    assert!(
+        verilog.contains("[23:16]"),
+        "Should have z component (bits [23:16])"
+    );
+    assert!(
+        verilog.contains("[31:24]"),
+        "Should have w component (bits [31:24])"
+    );
 
     golden.assert_eq("sv", &verilog);
 }

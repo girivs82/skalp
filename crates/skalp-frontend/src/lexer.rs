@@ -521,9 +521,7 @@ pub fn parse_float(input: &str) -> Option<f64> {
     let mut cleaned = input.replace('_', "");
 
     // Remove type suffix if present
-    if cleaned.ends_with("f64") {
-        cleaned = cleaned[..cleaned.len() - 3].to_string();
-    } else if cleaned.ends_with("f32") || cleaned.ends_with("f16") {
+    if cleaned.ends_with("f64") || cleaned.ends_with("f32") || cleaned.ends_with("f16") {
         cleaned = cleaned[..cleaned.len() - 3].to_string();
     } else if cleaned.ends_with('f') {
         cleaned = cleaned[..cleaned.len() - 1].to_string();

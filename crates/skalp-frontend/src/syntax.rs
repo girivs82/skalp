@@ -518,7 +518,10 @@ impl SyntaxKind {
 
     /// Check if this is a literal
     pub fn is_literal(self) -> bool {
-        matches!(self, IntLiteral | BinLiteral | HexLiteral | FloatLiteral | StringLiteral)
+        matches!(
+            self,
+            IntLiteral | BinLiteral | HexLiteral | FloatLiteral | StringLiteral
+        )
     }
 
     /// Get a human-readable description of this syntax kind

@@ -781,7 +781,9 @@ impl HirBuilderContext {
                     .filter(|n| {
                         matches!(
                             n.kind(),
-                            SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
                         )
                     })
                     .collect();
@@ -800,7 +802,9 @@ impl HirBuilderContext {
                     .find(|n| {
                         matches!(
                             n.kind(),
-                            SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
                         )
                     })
                     .and_then(|n| self.build_expression(&n))?;

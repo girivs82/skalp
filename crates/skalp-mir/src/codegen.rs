@@ -442,17 +442,17 @@ impl SystemVerilogGenerator {
             DataType::Float64 => "logic [63:0]".to_string(),
             // Vector types - represented as packed bit vectors
             DataType::Vec2(element_type) => {
-                let elem_width = self.get_type_width(element_type);
+                let elem_width = Self::get_type_width(element_type);
                 let total_width = elem_width * 2;
                 format!("logic [{}:0]", total_width - 1)
             }
             DataType::Vec3(element_type) => {
-                let elem_width = self.get_type_width(element_type);
+                let elem_width = Self::get_type_width(element_type);
                 let total_width = elem_width * 3;
                 format!("logic [{}:0]", total_width - 1)
             }
             DataType::Vec4(element_type) => {
-                let elem_width = self.get_type_width(element_type);
+                let elem_width = Self::get_type_width(element_type);
                 let total_width = elem_width * 4;
                 format!("logic [{}:0]", total_width - 1)
             }
@@ -473,7 +473,7 @@ impl SystemVerilogGenerator {
     }
 
     /// Get the width in bits of a data type
-    fn get_type_width(&self, dtype: &DataType) -> usize {
+    fn get_type_width(dtype: &DataType) -> usize {
         match dtype {
             DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => *w,
             DataType::Bool => 1,
@@ -484,9 +484,9 @@ impl SystemVerilogGenerator {
             DataType::Float16 => 16,
             DataType::Float32 => 32,
             DataType::Float64 => 64,
-            DataType::Vec2(element_type) => self.get_type_width(element_type) * 2,
-            DataType::Vec3(element_type) => self.get_type_width(element_type) * 3,
-            DataType::Vec4(element_type) => self.get_type_width(element_type) * 4,
+            DataType::Vec2(element_type) => Self::get_type_width(element_type) * 2,
+            DataType::Vec3(element_type) => Self::get_type_width(element_type) * 3,
+            DataType::Vec4(element_type) => Self::get_type_width(element_type) * 4,
             _ => 32, // Default for unsupported types
         }
     }

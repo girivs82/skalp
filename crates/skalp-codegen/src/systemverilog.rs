@@ -103,7 +103,10 @@ fn generate_module(
 
         // Split type into element width and array dimensions
         let (element_width, array_dim) = get_type_dimensions(&port.port_type);
-        ports.push(format!("    {} {}{}{}", direction, element_width, port.name, array_dim));
+        ports.push(format!(
+            "    {} {}{}{}",
+            direction, element_width, port.name, array_dim
+        ));
     }
 
     if !ports.is_empty() {
@@ -125,7 +128,10 @@ fn generate_module(
         };
 
         // Format: wire [element_width] name [array_dim];
-        sv.push_str(&format!("    {} {}{}{}", signal_type, element_width, signal.name, array_dim));
+        sv.push_str(&format!(
+            "    {} {}{}{}",
+            signal_type, element_width, signal.name, array_dim
+        ));
 
         // Add initial value if present
         if let Some(init) = &signal.initial {
@@ -884,9 +890,9 @@ fn lvalue_contains_signal(lvalue: &skalp_mir::LValue, signal_id: &skalp_mir::Sig
         skalp_mir::LValue::Signal(id) => id == signal_id,
         skalp_mir::LValue::BitSelect { base, .. } => lvalue_contains_signal(base, signal_id),
         skalp_mir::LValue::RangeSelect { base, .. } => lvalue_contains_signal(base, signal_id),
-        skalp_mir::LValue::Concat(items) => {
-            items.iter().any(|item| lvalue_contains_signal(item, signal_id))
-        }
+        skalp_mir::LValue::Concat(items) => items
+            .iter()
+            .any(|item| lvalue_contains_signal(item, signal_id)),
         _ => false,
     }
 }
