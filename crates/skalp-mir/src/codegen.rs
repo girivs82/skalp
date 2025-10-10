@@ -436,19 +436,25 @@ impl SystemVerilogGenerator {
             DataType::NatParam { param, default } => {
                 format!("logic [{}-1:0]", param)
             }
-            // Floating-point types
-            DataType::Float16 => "fp16_t".to_string(), // Will be defined in FP library
-            DataType::Float32 => "fp32_t".to_string(),
-            DataType::Float64 => "fp64_t".to_string(),
-            // Vector types - represented as packed structs
+            // Floating-point types - represented as bit vectors
+            DataType::Float16 => "logic [15:0]".to_string(),
+            DataType::Float32 => "logic [31:0]".to_string(),
+            DataType::Float64 => "logic [63:0]".to_string(),
+            // Vector types - represented as packed bit vectors
             DataType::Vec2(element_type) => {
-                format!("vec2_{}_t", self.type_suffix(element_type))
+                let elem_width = self.get_type_width(element_type);
+                let total_width = elem_width * 2;
+                format!("logic [{}:0]", total_width - 1)
             }
             DataType::Vec3(element_type) => {
-                format!("vec3_{}_t", self.type_suffix(element_type))
+                let elem_width = self.get_type_width(element_type);
+                let total_width = elem_width * 3;
+                format!("logic [{}:0]", total_width - 1)
             }
             DataType::Vec4(element_type) => {
-                format!("vec4_{}_t", self.type_suffix(element_type))
+                let elem_width = self.get_type_width(element_type);
+                let total_width = elem_width * 4;
+                format!("logic [{}:0]", total_width - 1)
             }
         }
     }
@@ -463,6 +469,25 @@ impl SystemVerilogGenerator {
             DataType::Int(w) => format!("i{}", w),
             DataType::Nat(w) => format!("u{}", w),
             _ => "t".to_string(),
+        }
+    }
+
+    /// Get the width in bits of a data type
+    fn get_type_width(&self, dtype: &DataType) -> usize {
+        match dtype {
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => *w,
+            DataType::Bool => 1,
+            DataType::BitParam { default, .. }
+            | DataType::LogicParam { default, .. }
+            | DataType::IntParam { default, .. }
+            | DataType::NatParam { default, .. } => *default,
+            DataType::Float16 => 16,
+            DataType::Float32 => 32,
+            DataType::Float64 => 64,
+            DataType::Vec2(element_type) => self.get_type_width(element_type) * 2,
+            DataType::Vec3(element_type) => self.get_type_width(element_type) * 3,
+            DataType::Vec4(element_type) => self.get_type_width(element_type) * 4,
+            _ => 32, // Default for unsupported types
         }
     }
 

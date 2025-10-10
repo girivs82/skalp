@@ -307,3 +307,172 @@ impl ComplexExpr {
 
     golden.assert_eq("sv", &verilog);
 }
+
+#[test]
+fn test_fp32_types_golden() {
+    let source = r#"
+entity FP32Test {
+    in a: fp32
+    in b: fp32
+    out result: fp32
+}
+
+impl FP32Test {
+    result = a
+}
+"#;
+
+    let golden = GoldenTest::new("fp32_types");
+    let verilog = compile_to_verilog(source);
+
+    // Verify fp32 is 32-bit
+    assert!(verilog.contains("[31:0]"), "FP32 should be 32-bit: {}", verilog);
+
+    golden.assert_eq("sv", &verilog);
+}
+
+#[test]
+fn test_fp16_fp64_types_golden() {
+    let source = r#"
+entity FPVariants {
+    in a16: fp16
+    in a32: fp32
+    in a64: fp64
+    out o16: fp16
+    out o32: fp32
+    out o64: fp64
+}
+
+impl FPVariants {
+    o16 = a16
+    o32 = a32
+    o64 = a64
+}
+"#;
+
+    let golden = GoldenTest::new("fp_variants");
+    let verilog = compile_to_verilog(source);
+
+    // Verify widths
+    assert!(verilog.contains("[15:0] a16"), "FP16 should be 16-bit");
+    assert!(verilog.contains("[31:0] a32"), "FP32 should be 32-bit");
+    assert!(verilog.contains("[63:0] a64"), "FP64 should be 64-bit");
+
+    golden.assert_eq("sv", &verilog);
+}
+
+#[test]
+fn test_vec2_types_golden() {
+    let source = r#"
+entity Vec2Test {
+    in v: vec2<fp32>
+    out x: fp32
+    out y: fp32
+}
+
+impl Vec2Test {
+    x = v.x
+    y = v.y
+}
+"#;
+
+    let golden = GoldenTest::new("vec2_types");
+    let verilog = compile_to_verilog(source);
+
+    // Verify vec2<fp32> is 64-bit (2 * 32)
+    assert!(verilog.contains("[63:0]"), "vec2<fp32> should be 64-bit:\n{}", verilog);
+    // Verify component access (port_0 is the input v)
+    assert!(verilog.contains("[31:0]"), "Should have x component (bits [31:0]):\n{}", verilog);
+    assert!(verilog.contains("[63:32]"), "Should have y component (bits [63:32]):\n{}", verilog);
+
+    golden.assert_eq("sv", &verilog);
+}
+
+#[test]
+fn test_vec3_types_golden() {
+    let source = r#"
+entity Vec3Test {
+    in v: vec3<bit<16>>
+    out x: bit<16>
+    out y: bit<16>
+    out z: bit<16>
+}
+
+impl Vec3Test {
+    x = v.x
+    y = v.y
+    z = v.z
+}
+"#;
+
+    let golden = GoldenTest::new("vec3_types");
+    let verilog = compile_to_verilog(source);
+
+    // Verify vec3<bit<16>> is 48-bit (3 * 16)
+    assert!(verilog.contains("[47:0]"), "vec3<bit<16>> should be 48-bit");
+    // Verify component access
+    assert!(verilog.contains("[15:0]"), "Should have x component (bits [15:0])");
+    assert!(verilog.contains("[31:16]"), "Should have y component (bits [31:16])");
+    assert!(verilog.contains("[47:32]"), "Should have z component (bits [47:32])");
+
+    golden.assert_eq("sv", &verilog);
+}
+
+#[test]
+fn test_vec4_types_golden() {
+    let source = r#"
+entity Vec4Test {
+    in v: vec4<bit<8>>
+    out x: bit<8>
+    out y: bit<8>
+    out z: bit<8>
+    out w: bit<8>
+}
+
+impl Vec4Test {
+    x = v.x
+    y = v.y
+    z = v.z
+    w = v.w
+}
+"#;
+
+    let golden = GoldenTest::new("vec4_types");
+    let verilog = compile_to_verilog(source);
+
+    // Verify vec4<bit<8>> is 32-bit (4 * 8)
+    assert!(verilog.contains("[31:0]"), "vec4<bit<8>> should be 32-bit");
+    // Verify component access
+    assert!(verilog.contains("[7:0]"), "Should have x component (bits [7:0])");
+    assert!(verilog.contains("[15:8]"), "Should have y component (bits [15:8])");
+    assert!(verilog.contains("[23:16]"), "Should have z component (bits [23:16])");
+    assert!(verilog.contains("[31:24]"), "Should have w component (bits [31:24])");
+
+    golden.assert_eq("sv", &verilog);
+}
+
+#[test]
+fn test_vec_fp_mixed_golden() {
+    let source = r#"
+entity VecFPMixed {
+    in v2: vec2<fp32>
+    in v3: vec3<fp16>
+    out sum2: fp32
+    out sum3: fp16
+}
+
+impl VecFPMixed {
+    sum2 = v2.x + v2.y
+    sum3 = v3.x + v3.y + v3.z
+}
+"#;
+
+    let golden = GoldenTest::new("vec_fp_mixed");
+    let verilog = compile_to_verilog(source);
+
+    // Verify mixed vector and FP types
+    assert!(verilog.contains("[63:0]"), "vec2<fp32> should be 64-bit");
+    assert!(verilog.contains("[47:0]"), "vec3<fp16> should be 48-bit");
+
+    golden.assert_eq("sv", &verilog);
+}
