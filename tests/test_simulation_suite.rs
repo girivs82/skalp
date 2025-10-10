@@ -3,7 +3,6 @@ mod simulation_suite {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
     use skalp_sim::{SimulationConfig, Simulator};
-    use skalp_sir::convert_mir_to_sir;
     use std::fs;
     use std::time::Instant;
 
@@ -17,17 +16,19 @@ mod simulation_suite {
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
 
-        // Convert to SIR
+        // Convert to SIR with hierarchical elaboration
         assert!(!mir.modules.is_empty());
+        let top_module = &mir.modules[mir.modules.len() - 1]; // Last module is typically top
         eprintln!(
-            "DEBUG setup_simulator: module={}, ports={}, signals={}, processes={}, assignments={}",
-            mir.modules[0].name,
-            mir.modules[0].ports.len(),
-            mir.modules[0].signals.len(),
-            mir.modules[0].processes.len(),
-            mir.modules[0].assignments.len()
+            "DEBUG setup_simulator: module={}, ports={}, signals={}, processes={}, assignments={}, instances={}",
+            top_module.name,
+            top_module.ports.len(),
+            top_module.signals.len(),
+            top_module.processes.len(),
+            top_module.assignments.len(),
+            top_module.instances.len()
         );
-        let sir = convert_mir_to_sir(&mir.modules[0]);
+        let sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
         eprintln!("DEBUG setup_simulator: SIR inputs={}, outputs={}, comb_nodes={}, seq_nodes={}, states={}",
             sir.inputs.len(), sir.outputs.len(), sir.combinational_nodes.len(),
             sir.sequential_nodes.len(), sir.state_elements.len());
@@ -128,6 +129,10 @@ mod simulation_suite {
         sim.set_input("clk", vec![1]).await.unwrap();
         sim.step_simulation().await.unwrap();
 
+        // One more cycle to see registered output
+        sim.set_input("clk", vec![0]).await.unwrap();
+        sim.step_simulation().await.unwrap();
+
         let result = sim.get_output("result").await.unwrap();
         let result_val = u32::from_le_bytes([result[0], result[1], result[2], result[3]]);
         assert_eq!(result_val, 8, "5 + 3 should equal 8");
@@ -137,6 +142,10 @@ mod simulation_suite {
         sim.set_input("clk", vec![0]).await.unwrap();
         sim.step_simulation().await.unwrap();
         sim.set_input("clk", vec![1]).await.unwrap();
+        sim.step_simulation().await.unwrap();
+
+        // One more cycle to see registered output
+        sim.set_input("clk", vec![0]).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         let result = sim.get_output("result").await.unwrap();
@@ -154,6 +163,10 @@ mod simulation_suite {
         sim.set_input("clk", vec![0]).await.unwrap();
         sim.step_simulation().await.unwrap();
         sim.set_input("clk", vec![1]).await.unwrap();
+        sim.step_simulation().await.unwrap();
+
+        // One more cycle to see registered output
+        sim.set_input("clk", vec![0]).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         let result = sim.get_output("result").await.unwrap();
@@ -213,16 +226,23 @@ mod simulation_suite {
         // Read data back
         for i in 0..8u8 {
             sim.set_input("rd_en", vec![1]).await.unwrap();
-            let data = sim.get_output("rd_data").await.unwrap();
-            assert_eq!(data[0], i * 10, "Read data should match written data");
 
+            // Clock to propagate the read
             sim.set_input("clk", vec![0]).await.unwrap();
             sim.step_simulation().await.unwrap();
             sim.set_input("clk", vec![1]).await.unwrap();
             sim.step_simulation().await.unwrap();
+
+            // Now read the data
+            let data = sim.get_output("rd_data").await.unwrap();
+            assert_eq!(data[0], i * 10, "Read data should match written data");
         }
 
         sim.set_input("rd_en", vec![0]).await.unwrap();
+
+        // Clock once more to see empty flag update
+        sim.set_input("clk", vec![0]).await.unwrap();
+        sim.step_simulation().await.unwrap();
 
         // Verify empty again
         let empty = sim.get_output("empty").await.unwrap();
@@ -326,5 +346,244 @@ mod simulation_suite {
             states1[..],
             "Early states should remain unchanged"
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "GPU simulation only available on macOS"
+    )]
+    async fn test_hierarchical_pipeline() {
+        // Test hierarchical module instantiation in simulation
+        // This tests the full hierarchical elaboration pipeline:
+        // - Parser creates instance declarations
+        // - HIR builder resolves signal connections
+        // - MIR converter creates ModuleInstance structs
+        // - SIR converter flattens hierarchy with prefixed signals
+        // - Simulator runs flattened design
+        let hierarchy_source = r#"
+entity Register {
+    in clk: clock
+    in rst: reset
+    in data_in: bit[8]
+    out data_out: bit[8]
+}
+
+impl Register {
+    signal reg: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            reg <= 0
+        } else {
+            reg <= data_in
+        }
+    }
+
+    data_out = reg
+}
+
+entity Pipeline2 {
+    in clk: clock
+    in rst: reset
+    in data_in: bit[8]
+    out data_out: bit[8]
+}
+
+impl Pipeline2 {
+    signal stage1_out: bit[8] = 0
+    signal stage2_out: bit[8] = 0
+
+    data_out = stage2_out
+
+    let stage1 = Register {
+        clk: clk,
+        rst: rst,
+        data_in: data_in,
+        data_out: stage1_out
+    }
+
+    let stage2 = Register {
+        clk: clk,
+        rst: rst,
+        data_in: stage1_out,
+        data_out: stage2_out
+    }
+}
+"#;
+
+        let mut sim = setup_simulator(hierarchy_source, true).await;
+
+        // Reset pipeline
+        sim.set_input("rst", vec![1]).await.unwrap();
+        sim.set_input("clk", vec![0]).await.unwrap();
+        sim.set_input("data_in", vec![0]).await.unwrap();
+
+        // Reset for 2 cycles
+        for i in 0..4 {
+            sim.set_input("clk", vec![(i % 2) as u8]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+        }
+
+        // Release reset
+        sim.set_input("rst", vec![0]).await.unwrap();
+
+        // Feed data through the 2-stage pipeline
+        // The pipeline has 2 clock latency
+        let test_sequence = [0x42u8, 0x55u8, 0xAAu8, 0xFFu8];
+
+        for (cycle, &input_val) in test_sequence.iter().enumerate() {
+            // Set input
+            sim.set_input("data_in", vec![input_val]).await.unwrap();
+
+            // Clock low
+            sim.set_input("clk", vec![0]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+
+            // Clock high (rising edge)
+            sim.set_input("clk", vec![1]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+
+            // Read output
+            let output_bytes = sim.get_output("data_out").await.unwrap();
+            let output = output_bytes[0];
+
+            eprintln!(
+                "Cycle {}: input=0x{:02x}, output=0x{:02x}",
+                cycle, input_val, output
+            );
+
+            // Verify 2-clock latency:
+            // Cycle 0: input=0x42, output=0x00 (still in reset)
+            // Cycle 1: input=0x55, output=0x00 (0x42 in stage1)
+            // Cycle 2: input=0xAA, output=0x42 (0x42 reaches output)
+            // Cycle 3: input=0xFF, output=0x55 (0x55 reaches output)
+            if cycle >= 2 {
+                let expected = test_sequence[cycle - 2];
+                assert_eq!(
+                    output, expected,
+                    "Cycle {}: expected 0x{:02x}, got 0x{:02x} (2-cycle pipeline latency)",
+                    cycle, expected, output
+                );
+            }
+        }
+
+        println!("✅ Hierarchical pipeline simulation test passed!");
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_pipeline_cpu() {
+        // Test hierarchical module instantiation with CPU runtime
+        // This verifies the CPU simulator correctly handles flattened hierarchical designs
+        let hierarchy_source = r#"
+entity Register {
+    in clk: clock
+    in rst: reset
+    in data_in: bit[8]
+    out data_out: bit[8]
+}
+
+impl Register {
+    signal reg: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            reg <= 0
+        } else {
+            reg <= data_in
+        }
+    }
+
+    data_out = reg
+}
+
+entity Pipeline2 {
+    in clk: clock
+    in rst: reset
+    in data_in: bit[8]
+    out data_out: bit[8]
+}
+
+impl Pipeline2 {
+    signal stage1_out: bit[8] = 0
+    signal stage2_out: bit[8] = 0
+
+    data_out = stage2_out
+
+    let stage1 = Register {
+        clk: clk,
+        rst: rst,
+        data_in: data_in,
+        data_out: stage1_out
+    }
+
+    let stage2 = Register {
+        clk: clk,
+        rst: rst,
+        data_in: stage1_out,
+        data_out: stage2_out
+    }
+}
+"#;
+
+        let mut sim = setup_simulator(hierarchy_source, false).await; // false = CPU
+
+        // Reset pipeline
+        sim.set_input("rst", vec![1]).await.unwrap();
+        sim.set_input("clk", vec![0]).await.unwrap();
+        sim.set_input("data_in", vec![0]).await.unwrap();
+
+        // Reset for 2 cycles
+        for i in 0..4 {
+            sim.set_input("clk", vec![(i % 2) as u8]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+        }
+
+        // Release reset
+        sim.set_input("rst", vec![0]).await.unwrap();
+
+        // Feed data through the 2-stage pipeline
+        let test_sequence = [0x42u8, 0x55u8, 0xAAu8, 0xFFu8];
+
+        for (cycle, &input_val) in test_sequence.iter().enumerate() {
+            // Set input
+            sim.set_input("data_in", vec![input_val]).await.unwrap();
+
+            // Clock low
+            sim.set_input("clk", vec![0]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+
+            // Clock high (rising edge)
+            sim.set_input("clk", vec![1]).await.unwrap();
+            sim.step_simulation().await.unwrap();
+
+            // Read output
+            let output_bytes = sim.get_output("data_out").await.unwrap();
+            let output = output_bytes[0];
+
+            eprintln!(
+                "CPU: Cycle {}: input=0x{:02x}, output=0x{:02x}",
+                cycle, input_val, output
+            );
+
+            // 2-stage pipeline: output = input from 2 cycles ago
+            if cycle >= 2 {
+                let expected = test_sequence[cycle - 2];
+                assert_eq!(
+                    output, expected,
+                    "CPU: Cycle {}: expected 0x{:02x}, got 0x{:02x}",
+                    cycle, expected, output
+                );
+            } else {
+                // First 2 cycles should output 0 (initial state)
+                assert_eq!(
+                    output, 0,
+                    "CPU: Cycle {}: expected 0x00 (initial), got 0x{:02x}",
+                    cycle, output
+                );
+            }
+        }
+
+        println!("✅ CPU hierarchical pipeline simulation test passed!");
     }
 }

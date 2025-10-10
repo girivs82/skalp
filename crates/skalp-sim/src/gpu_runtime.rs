@@ -31,6 +31,7 @@ pub struct GpuRuntime {
     input_buffer: Option<Buffer>,
     register_buffer: Option<Buffer>,
     signal_buffer: Option<Buffer>,
+    output_buffer: Option<Buffer>, // Stores outputs from BEFORE sequential update
     current_cycle: u64,
     clock_manager: ClockManager,
 }
@@ -46,6 +47,7 @@ impl GpuRuntime {
             input_buffer: None,
             register_buffer: None,
             signal_buffer: None,
+            output_buffer: None,
             current_cycle: 0,
             clock_manager: ClockManager::new(),
         })
@@ -104,6 +106,14 @@ impl GpuRuntime {
                 .new_buffer(signal_size.max(1024), MTLResourceOptions::StorageModeShared),
         );
 
+        // Allocate output buffer (for storing outputs before sequential update)
+        let output_size = self.calculate_output_size(module);
+        self.output_buffer = Some(
+            self.device
+                .device
+                .new_buffer(output_size.max(16), MTLResourceOptions::StorageModeShared),
+        );
+
         // Initialize registers to zero
         if let Some(reg_buffer) = &self.register_buffer {
             let ptr = reg_buffer.contents();
@@ -152,12 +162,48 @@ impl GpuRuntime {
         size
     }
 
+    fn calculate_output_size(&self, module: &SirModule) -> u64 {
+        let mut size = 0u64;
+        for output in &module.outputs {
+            size += self.get_metal_type_size(output.width) as u64;
+        }
+        size
+    }
+
     fn get_metal_type_size(&self, width: usize) -> usize {
         match width {
             1..=32 => 4,  // uint (32-bit)
             33..=64 => 8, // uint2 (64-bit)
             _ => 16,      // uint4 (128-bit)
         }
+    }
+
+    fn capture_outputs(&mut self) -> Result<(), SimulationError> {
+        // Copy output values from signal buffer to output buffer
+        // This preserves the output values from BEFORE the sequential update
+        if let (Some(signal_buffer), Some(output_buffer), Some(module)) =
+            (&self.signal_buffer, &self.output_buffer, &self.module)
+        {
+            let signal_ptr = signal_buffer.contents() as *const u8;
+            let output_ptr = output_buffer.contents() as *mut u8;
+            let mut signal_offset = 0usize;
+            let mut output_offset = 0usize;
+
+            // Outputs are at the beginning of the signal buffer
+            for output in &module.outputs {
+                let metal_size = self.get_metal_type_size(output.width);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        signal_ptr.add(signal_offset),
+                        output_ptr.add(output_offset),
+                        metal_size,
+                    );
+                }
+                signal_offset += metal_size;
+                output_offset += metal_size;
+            }
+        }
+        Ok(())
     }
 
     async fn execute_combinational(&mut self) -> Result<(), SimulationError> {
@@ -305,23 +351,22 @@ impl GpuRuntime {
 
         // Read data from GPU buffers
         if let Some(module) = &self.module {
-            // Read outputs from signal buffer
-            if let Some(signal_buffer) = &self.signal_buffer {
-                let signal_ptr = signal_buffer.contents() as *const u8;
+            // Build set of output names to avoid reading them twice
+            let output_names: std::collections::HashSet<_> =
+                module.outputs.iter().map(|o| &o.name).collect();
+
+            // Read outputs from output_buffer (buffered values from BEFORE sequential update)
+            if let Some(output_buffer) = &self.output_buffer {
+                let output_ptr = output_buffer.contents() as *const u8;
                 let mut offset = 0usize;
 
-                // Build set of output names to avoid reading them twice
-                let output_names: std::collections::HashSet<_> =
-                    module.outputs.iter().map(|o| &o.name).collect();
-
-                // Read outputs first
                 for output in &module.outputs {
                     let metal_size = self.get_metal_type_size(output.width);
                     let bytes_needed = output.width.div_ceil(8);
                     let mut value = vec![0u8; bytes_needed];
                     unsafe {
                         std::ptr::copy_nonoverlapping(
-                            signal_ptr.add(offset),
+                            output_ptr.add(offset),
                             value.as_mut_ptr(),
                             bytes_needed.min(metal_size),
                         );
@@ -329,6 +374,17 @@ impl GpuRuntime {
                     signals.insert(output.name.clone(), value);
                     offset += metal_size;
                 }
+            }
+
+            // Read intermediate signals from signal buffer (skipping outputs)
+            if let Some(signal_buffer) = &self.signal_buffer {
+                let signal_ptr = signal_buffer.contents() as *const u8;
+                // Skip past outputs in signal buffer to get to intermediate signals
+                let mut offset = module
+                    .outputs
+                    .iter()
+                    .map(|o| self.get_metal_type_size(o.width))
+                    .sum::<usize>();
 
                 // Read intermediate signals (skipping outputs and state elements)
                 for signal in &module.signals {
@@ -443,13 +499,15 @@ impl SimulationRuntime for GpuRuntime {
         // we get the OLD values (before the clock edge updates them)
         self.execute_combinational().await?;
 
+        // Capture outputs BEFORE sequential update (for correct pipeline timing)
+        self.capture_outputs()?;
+
         // Phase 2: Sequential logic updates registers on clock edge
         // Flip-flops sample their data inputs (computed in phase 1) and update register values
         self.execute_sequential().await?;
 
-        // Phase 3: Re-execute combinational logic to update outputs based on new register state
-        // This ensures that outputs (which are often just wires from registers) reflect
-        // the CURRENT register state, not the old state
+        // Phase 3: Re-execute combinational logic to update internal signals based on new register state
+        // This ensures internal signals are ready for the next cycle, but outputs remain from Phase 1
         self.execute_combinational().await?;
 
         self.current_cycle += 1;
@@ -562,11 +620,12 @@ impl SimulationRuntime for GpuRuntime {
 
     async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
         if let Some(module) = &self.module {
-            if let Some(signal_buffer) = &self.signal_buffer {
-                let signal_ptr = signal_buffer.contents() as *const u8;
+            // Read from output_buffer which contains outputs from BEFORE sequential update
+            if let Some(output_buffer) = &self.output_buffer {
+                let output_ptr = output_buffer.contents() as *const u8;
                 let mut offset = 0usize;
 
-                // Find the output in the signals buffer
+                // Find the output in the output buffer
                 for output in &module.outputs {
                     let metal_size = self.get_metal_type_size(output.width);
                     let bytes_needed = output.width.div_ceil(8);
@@ -574,7 +633,7 @@ impl SimulationRuntime for GpuRuntime {
                         let mut value = vec![0u8; bytes_needed];
                         unsafe {
                             std::ptr::copy_nonoverlapping(
-                                signal_ptr.add(offset),
+                                output_ptr.add(offset),
                                 value.as_mut_ptr(),
                                 bytes_needed.min(metal_size),
                             );

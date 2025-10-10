@@ -8,7 +8,8 @@ pub struct CpuRuntime {
     inputs: HashMap<String, Vec<u8>>, // Input port values (preserved across steps)
     state: HashMap<String, Vec<u8>>,  // State elements (registers)
     next_state: HashMap<String, Vec<u8>>, // Next state for double-buffering
-    outputs: HashMap<String, Vec<u8>>, // Output port values
+    outputs: HashMap<String, Vec<u8>>, // Output port values (from BEFORE sequential update)
+    current_outputs: HashMap<String, Vec<u8>>, // Temporary outputs during evaluation
     signals: HashMap<String, Vec<u8>>, // Internal signal values
     signal_widths: HashMap<String, usize>, // Width in bits for each signal
     prev_clock_values: HashMap<String, u8>, // Previous clock values for edge detection
@@ -29,6 +30,7 @@ impl CpuRuntime {
             state: HashMap::new(),
             next_state: HashMap::new(),
             outputs: HashMap::new(),
+            current_outputs: HashMap::new(),
             signals: HashMap::new(),
             signal_widths: HashMap::new(),
             prev_clock_values: HashMap::new(),
@@ -76,7 +78,7 @@ impl CpuRuntime {
             self.evaluate_node(node)?;
         }
 
-        // Update outputs based on their drivers, truncating to correct width
+        // Update current_outputs based on their drivers, truncating to correct width
         for output in &outputs {
             if let Some(value) = self.signals.get(&output.name) {
                 // Truncate to the output's declared width
@@ -86,7 +88,7 @@ impl CpuRuntime {
                 } else {
                     value.clone()
                 };
-                self.outputs.insert(output.name.clone(), truncated);
+                self.current_outputs.insert(output.name.clone(), truncated);
             }
         }
 
@@ -403,6 +405,9 @@ impl CpuRuntime {
             return Ok(());
         };
 
+        // Track clock values to update after processing all flip-flops
+        let mut clock_updates = HashMap::new();
+
         // Evaluate flip-flops: check for clock edges and update on edge
         for node in &seq_nodes {
             if let skalp_sir::SirNodeKind::FlipFlop { clock_edge } = &node.kind {
@@ -440,9 +445,8 @@ impl CpuRuntime {
                     }
                 };
 
-                // Update previous clock value
-                self.prev_clock_values
-                    .insert(clock_signal.clone(), current_clock);
+                // Track this clock for later update (don't update yet!)
+                clock_updates.insert(clock_signal.clone(), current_clock);
 
                 if edge_detected {
                     // Get the D input value
@@ -467,6 +471,11 @@ impl CpuRuntime {
                     }
                 }
             }
+        }
+
+        // Now update all clock values (after processing all flip-flops)
+        for (clock_signal, clock_value) in clock_updates {
+            self.prev_clock_values.insert(clock_signal, clock_value);
         }
 
         // Swap state buffers
@@ -554,6 +563,8 @@ impl CpuRuntime {
             let byte_size = output.width.div_ceil(8);
             self.outputs
                 .insert(output.name.clone(), vec![0u8; byte_size]);
+            self.current_outputs
+                .insert(output.name.clone(), vec![0u8; byte_size]);
             self.signal_widths.insert(output.name.clone(), output.width);
         }
 
@@ -595,12 +606,18 @@ impl SimulationRuntime for CpuRuntime {
         }
         self.evaluate_combinational()?;
 
+        // Capture outputs BEFORE sequential update (for correct pipeline timing)
+        // This ensures outputs reflect the state from BEFORE the clock edge
+        for (name, value) in &self.current_outputs {
+            self.outputs.insert(name.clone(), value.clone());
+        }
+
         // Phase 2: Sequential logic updates registers on clock edges
         // This samples the D inputs computed in phase 1 and updates state
         self.evaluate_sequential()?;
 
         // Phase 3: Re-execute combinational logic with NEW register state
-        // This ensures outputs reflect current (not old) register values
+        // This updates internal signals but outputs remain captured from phase 1
         for (name, value) in &self.state {
             self.signals.insert(name.clone(), value.clone());
         }
