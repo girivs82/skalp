@@ -30,6 +30,14 @@ pub struct Manifest {
     /// Workspace configuration (for multi-package projects)
     #[serde(default)]
     pub workspace: Option<WorkspaceConfig>,
+
+    /// Patch dependencies (override dependencies from a source)
+    #[serde(default)]
+    pub patch: HashMap<String, HashMap<String, DependencySpec>>,
+
+    /// Replace dependencies (replace a dependency with another)
+    #[serde(default)]
+    pub replace: HashMap<String, DependencySpec>,
 }
 
 /// Package metadata
@@ -125,6 +133,9 @@ impl Manifest {
         // Validate dependencies
         self.validate_dependencies()?;
 
+        // Validate overrides
+        self.validate_overrides()?;
+
         Ok(())
     }
 
@@ -211,6 +222,29 @@ impl Manifest {
         Ok(())
     }
 
+    /// Validate override specifications
+    fn validate_overrides(&self) -> Result<()> {
+        // Validate patch dependencies
+        for (source, patches) in &self.patch {
+            if source.is_empty() {
+                return Err(ManifestError::Validation(
+                    "Patch source cannot be empty".to_string(),
+                ));
+            }
+
+            for (name, spec) in patches {
+                spec.validate(name)?;
+            }
+        }
+
+        // Validate replace dependencies
+        for (name, spec) in &self.replace {
+            spec.validate(name)?;
+        }
+
+        Ok(())
+    }
+
     /// Get all dependencies including those enabled by features
     pub fn get_dependencies_with_features(
         &self,
@@ -244,6 +278,53 @@ impl Manifest {
         }
 
         deps
+    }
+
+    /// Apply overrides to a dependency specification
+    ///
+    /// This resolves [patch] and [replace] sections to determine the actual
+    /// dependency source that should be used.
+    pub fn apply_overrides(&self, dep_name: &str, spec: &DependencySpec) -> DependencySpec {
+        // First check if there's a direct replacement
+        if let Some(replacement) = self.replace.get(dep_name) {
+            return replacement.clone();
+        }
+
+        // Check if this dependency should be patched based on its source
+        if let Some(git_url) = self.get_git_source(spec) {
+            // Check if there's a patch for this git source
+            if let Some(patches) = self.patch.get(git_url) {
+                if let Some(patched) = patches.get(dep_name) {
+                    return patched.clone();
+                }
+            }
+        }
+
+        // No override applies, return original spec
+        spec.clone()
+    }
+
+    /// Get the git source URL from a dependency spec, if it's a git dependency
+    fn get_git_source<'a>(&self, spec: &'a DependencySpec) -> Option<&'a str> {
+        match spec {
+            DependencySpec::Detailed(dep) => dep.git.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get all dependencies with features and overrides applied
+    pub fn get_resolved_dependencies(
+        &self,
+        enabled_features: &[String],
+    ) -> HashMap<String, DependencySpec> {
+        let deps = self.get_dependencies_with_features(enabled_features);
+
+        deps.into_iter()
+            .map(|(name, spec)| {
+                let resolved = self.apply_overrides(&name, spec);
+                (name, resolved)
+            })
+            .collect()
     }
 }
 
@@ -307,6 +388,8 @@ mod tests {
             lib: None,
             features: HashMap::new(),
             workspace: None,
+            patch: HashMap::new(),
+            replace: HashMap::new(),
         }
     }
 }

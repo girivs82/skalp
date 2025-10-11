@@ -61,3 +61,18 @@ full = ["fft", "basic-filters", "advanced-filters"]
 
 # GPU acceleration
 gpu = ["skalp-stdlib/metal", "skalp-numeric/simd"]
+
+# Dependency overrides (for local development and testing)
+# Replace a specific dependency with a local version
+[replace]
+# skalp-numeric = { path = "../numeric" }
+
+# Patch dependencies from a specific source
+# Useful for testing fixes or working on dependencies in a monorepo
+[patch."https://github.com/skalp/experimental"]
+# skalp-experimental = { path = "../local-experimental" }
+
+# You can patch multiple packages from the same source
+# [patch."https://github.com/skalp/monorepo"]
+# lib1 = { path = "../local-lib1" }
+# lib2 = { path = "../local-lib2" }
