@@ -767,6 +767,16 @@ impl<'hir> HirToMir<'hir> {
                 // match x { 1 => a, 2 => b, _ => c } becomes: (x == 1) ? a : ((x == 2) ? b : c)
                 self.convert_match_to_conditionals(&match_expr.expr, &match_expr.arms)
             }
+            hir::HirExpression::Cast(cast_expr) => {
+                // Convert type cast expression
+                // For now, just convert the inner expression
+                // Type checking and proper conversion will be handled during codegen
+                // TODO: Add explicit type conversion operations in MIR when needed for:
+                //   - Integer width changes (truncation/extension)
+                //   - Signed/unsigned conversions
+                //   - Fixed-point/floating-point conversions
+                self.convert_expression(&cast_expr.expr)
+            }
             hir::HirExpression::StructLiteral(struct_lit) => {
                 // Convert struct literal to packed bit vector
                 // Each field value is evaluated and packed into the correct bit positions

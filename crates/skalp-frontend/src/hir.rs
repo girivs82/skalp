@@ -367,6 +367,16 @@ pub enum HirExpression {
     StructLiteral(HirStructLiteral),
     If(HirIfExpr),
     Match(HirMatchExpr),
+    Cast(HirCastExpr),
+}
+
+/// Type cast expression in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirCastExpr {
+    /// Expression to cast
+    pub expr: Box<HirExpression>,
+    /// Target type
+    pub target_type: HirType,
 }
 
 /// Match expression in HIR

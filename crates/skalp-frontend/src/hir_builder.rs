@@ -2921,9 +2921,16 @@ impl HirBuilderContext {
             })
             .and_then(|n| self.build_expression(&n))?;
 
-        // For now, just return the expression unwrapped
-        // TODO: Add type information to HIR when needed
-        Some(expr)
+        // Find the target type from TypeAnnotation
+        let target_type = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
+            .map(|type_node| self.build_hir_type(&type_node))?;
+
+        Some(HirExpression::Cast(HirCastExpr {
+            expr: Box::new(expr),
+            target_type,
+        }))
     }
 
     /// Build match arm for match expressions
