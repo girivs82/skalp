@@ -356,17 +356,15 @@ skalpc synth src/main.sk --device ice40-hx8k
 /// Build SKALP design
 fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<()> {
     use skalp_codegen::{generate_systemverilog_from_mir, generate_verilog, generate_vhdl};
-    use skalp_frontend::parse_and_build_hir;
+    use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::lower_to_lir;
 
     info!("Building design from {:?} to {}", source, target);
 
-    // Read source file
-    let source_code = fs::read_to_string(source).context("Failed to read source file")?;
-
-    // Parse, build HIR, and type check in one step
-    info!("Parsing SKALP source and building HIR...");
-    let hir = parse_and_build_hir(&source_code).context("Failed to parse and build HIR")?;
+    // Parse, build HIR with module resolution
+    info!("Parsing SKALP source and building HIR with module resolution...");
+    let hir = parse_and_build_hir_from_file(source)
+        .context("Failed to parse and build HIR")?;
 
     // Lower to MIR with CDC analysis
     info!("Lowering to MIR with CDC analysis...");

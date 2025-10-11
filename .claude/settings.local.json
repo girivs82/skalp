@@ -144,7 +144,8 @@
       "Bash(git log:*)",
       "Bash(RUST_BACKTRACE=1 cargo test --test test_vec_arithmetic test_vec2_component_addition_cpu --all-features -- --nocapture)",
       "Bash(env RUST_BACKTRACE=1 cargo test --test test_vec_arithmetic test_vec2_component_addition_cpu --all-features -- --nocapture)",
-      "Bash(RUST_LOG=error /Users/girivs/src/hw/hls/target/release/skalp build:*)"
+      "Bash(RUST_LOG=error /Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Bash(RUST_LOG=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)"
     ],
     "deny": [],
     "ask": []
