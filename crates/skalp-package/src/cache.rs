@@ -6,6 +6,19 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Information about a cached package
+#[derive(Debug, Clone)]
+pub struct CachedPackageInfo {
+    /// Package name
+    pub name: String,
+    /// Package version
+    pub version: String,
+    /// Path to cached package
+    pub path: PathBuf,
+    /// Size in bytes
+    pub size: u64,
+}
+
 /// Package cache manager
 pub struct Cache {
     /// Root cache directory
@@ -95,6 +108,76 @@ impl Cache {
             }
         }
 
+        Ok(total)
+    }
+
+    /// List all cached packages
+    pub fn list(&self) -> Result<Vec<CachedPackageInfo>> {
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut packages = Vec::new();
+
+        // Walk the cache directory looking for skalp.toml files
+        for entry in walkdir::WalkDir::new(&self.root)
+            .max_depth(3) // Hash is 2 levels deep, then package dir
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.file_name() == Some(std::ffi::OsStr::new("skalp.toml")) {
+                // Found a manifest, extract package info
+                if let Ok(content) = fs::read_to_string(path) {
+                    if let Ok(manifest) = toml::from_str::<serde_json::Value>(&content) {
+                        if let Some(package) = manifest.get("package") {
+                            let name = package
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+
+                            let version = package
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+
+                            if let Some(pkg_dir) = path.parent() {
+                                let size = Self::dir_size(pkg_dir)?;
+                                packages.push(CachedPackageInfo {
+                                    name,
+                                    version,
+                                    path: pkg_dir.to_path_buf(),
+                                    size,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by name, then version
+        packages.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+
+        Ok(packages)
+    }
+
+    /// Get size of a directory
+    fn dir_size(dir: &Path) -> Result<u64> {
+        let mut total = 0u64;
+        for entry in walkdir::WalkDir::new(dir) {
+            let entry = entry
+                .map_err(|e| PackageError::Cache(format!("Failed to walk directory: {}", e)))?;
+
+            if entry.file_type().is_file() {
+                total += entry
+                    .metadata()
+                    .map_err(|e| PackageError::Cache(format!("Failed to get metadata: {}", e)))?
+                    .len();
+            }
+        }
         Ok(total)
     }
 

@@ -969,9 +969,34 @@ fn list_cache() -> Result<()> {
     let config = RegistryConfig::default();
     let cache = Cache::new(config.cache_dir.clone());
 
-    println!("📦 Cached packages in: {:?}", config.cache_dir);
-    println!("\n⚠️  Cache listing not yet fully implemented");
-    println!("Cache directory exists: {}", config.cache_dir.exists());
+    println!("📦 Cached packages in: {:?}\n", config.cache_dir);
+
+    let packages = cache.list()?;
+
+    if packages.is_empty() {
+        println!("No packages in cache");
+        return Ok(());
+    }
+
+    println!(
+        "Found {} cached package{}:\n",
+        packages.len(),
+        if packages.len() == 1 { "" } else { "s" }
+    );
+
+    for (i, pkg) in packages.iter().enumerate() {
+        let size_kb = pkg.size as f64 / 1024.0;
+        let size_str = if size_kb < 1024.0 {
+            format!("{:.2} KB", size_kb)
+        } else {
+            format!("{:.2} MB", size_kb / 1024.0)
+        };
+
+        println!("{}. {} v{}", i + 1, pkg.name, pkg.version);
+        println!("   Size: {}", size_str);
+        println!("   Path: {}", pkg.path.display());
+        println!();
+    }
 
     Ok(())
 }

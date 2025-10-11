@@ -10,6 +10,7 @@ pub mod registry;
 pub mod resolver;
 pub mod source;
 
+pub use cache::CachedPackageInfo;
 pub use error::{PackageError, Result};
 pub use lockfile::Lockfile;
 pub use registry::{PackageMetadata, RegistryClient, VersionInfo};
