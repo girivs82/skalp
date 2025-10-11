@@ -15,12 +15,15 @@ fn create_simple_entity() -> Hir {
         trait_definitions: vec![],
         trait_implementations: vec![],
         global_constraints: vec![],
+        modules: vec![],
+        imports: vec![],
     };
 
     // Create entity
     let entity = HirEntity {
         id: EntityId(1),
         name: "counter".to_string(),
+        visibility: HirVisibility::Private,
         generics: vec![],
         clock_domains: vec![],
         ports: vec![

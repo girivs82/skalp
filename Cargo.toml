@@ -114,5 +114,5 @@ members = [
     "crates/skalp-formal",
     "crates/skalp-testing",
     "crates/skalp-parallel",
-    "crates/skalp-incremental", "crates/skalp-asic",
+    "crates/skalp-incremental", "crates/skalp-asic", "crates/skalp-resolve",
 ]

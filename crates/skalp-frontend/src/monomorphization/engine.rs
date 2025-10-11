@@ -65,6 +65,8 @@ impl MonomorphizationEngine {
             trait_definitions: hir.trait_definitions.clone(),
             trait_implementations: hir.trait_implementations.clone(),
             global_constraints: hir.global_constraints.clone(),
+            modules: hir.modules.clone(),
+            imports: hir.imports.clone(),
         }
     }
 
@@ -93,6 +95,7 @@ impl MonomorphizationEngine {
         HirEntity {
             id: entity.id, // Will be assigned new ID in final pass
             name: instantiation.mangled_name(),
+            visibility: entity.visibility,
             ports: specialized_ports,
             generics: vec![], // No generics in specialized version
             clock_domains: entity.clock_domains.clone(),

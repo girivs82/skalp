@@ -28,11 +28,17 @@ pub enum Item {
     Trait(TraitDef),
     /// Trait implementation
     TraitImpl(TraitImpl),
+    /// Use statement (import)
+    Use(UseDecl),
+    /// Module declaration
+    Module(ModuleDecl),
 }
 
 /// Entity declaration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityDecl {
+    /// Visibility
+    pub visibility: Visibility,
     /// Entity name
     pub name: String,
     /// Generic parameters
@@ -538,6 +544,8 @@ pub enum VerificationMethod {
 /// Trait definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraitDef {
+    /// Visibility
+    pub visibility: Visibility,
     /// Trait name
     pub name: String,
     /// Generic parameters
@@ -687,4 +695,57 @@ pub struct WherePredicate {
     pub bounds: Vec<String>,
     /// Span in source code
     pub span: std::ops::Range<usize>,
+}
+
+/// Use declaration (import statement)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UseDecl {
+    /// Visibility (pub, pub(crate), etc.)
+    pub visibility: Visibility,
+    /// Path being imported
+    pub path: UsePath,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Path in a use statement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UsePath {
+    /// Simple path: use foo::bar::Baz;
+    Simple { path: Vec<String> },
+    /// Renamed import: use foo::bar::Baz as Qux;
+    Renamed { path: Vec<String>, alias: String },
+    /// Glob import: use foo::bar::*;
+    Glob { path: Vec<String> },
+    /// Nested imports: use foo::bar::{Baz, Qux};
+    Nested {
+        prefix: Vec<String>,
+        paths: Vec<UsePath>,
+    },
+}
+
+/// Module declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDecl {
+    /// Visibility
+    pub visibility: Visibility,
+    /// Module name
+    pub name: String,
+    /// Module items (if inline)
+    pub items: Option<Vec<Item>>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Visibility modifier
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Visibility {
+    /// Public (pub)
+    Public,
+    /// Crate-local (pub(crate))
+    Crate,
+    /// Super-local (pub(super))
+    Super,
+    /// Private (default)
+    Private,
 }

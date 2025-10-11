@@ -94,6 +94,8 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         trait_definitions: Vec::new(),
         trait_implementations: Vec::new(),
         global_constraints: Vec::new(),
+        modules: Vec::new(),
+        imports: Vec::new(),
     })
 }
 

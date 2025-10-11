@@ -1,0 +1,12 @@
+[package]
+name = "skalp-resolve"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Internal dependencies
+skalp-frontend = { path = "../skalp-frontend" }
+
+# External dependencies
+indexmap = "2.0"
+petgraph = "0.6"

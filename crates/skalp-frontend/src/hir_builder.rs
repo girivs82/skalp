@@ -271,6 +271,7 @@ impl HirBuilderContext {
         Some(HirEntity {
             id,
             name,
+            visibility: crate::hir::HirVisibility::Private,
             ports,
             generics,
             clock_domains,

@@ -2470,6 +2470,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skalp-resolve"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "petgraph",
+ "skalp-frontend",
+]
+
+[[package]]
 name = "skalp-safety"
 version = "0.1.0"
 dependencies = [

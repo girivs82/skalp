@@ -26,6 +26,10 @@ pub struct Hir {
     pub trait_implementations: Vec<HirTraitImplementation>,
     /// Global physical constraints
     pub global_constraints: Vec<GlobalConstraint>,
+    /// Module declarations
+    pub modules: Vec<HirModule>,
+    /// Use statements (imports)
+    pub imports: Vec<HirImport>,
 }
 
 /// Entity in HIR
@@ -35,6 +39,8 @@ pub struct HirEntity {
     pub id: EntityId,
     /// Entity name
     pub name: String,
+    /// Visibility
+    pub visibility: HirVisibility,
     /// Ports
     pub ports: Vec<HirPort>,
     /// Generic parameters
@@ -744,6 +750,10 @@ pub struct HirBuilder {
     next_property_id: u32,
     /// Next cover ID
     next_cover_id: u32,
+    /// Next module ID
+    next_module_id: u32,
+    /// Next import ID
+    next_import_id: u32,
 }
 
 impl HirBuilder {
@@ -765,6 +775,8 @@ impl HirBuilder {
             next_assertion_id: 0,
             next_property_id: 0,
             next_cover_id: 0,
+            next_module_id: 0,
+            next_import_id: 0,
         }
     }
 
@@ -781,6 +793,8 @@ impl HirBuilder {
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
             global_constraints: Vec::new(),
+            modules: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -860,6 +874,8 @@ impl Hir {
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
             global_constraints: Vec::new(),
+            modules: Vec::new(),
+            imports: Vec::new(),
         }
     }
 }
@@ -1481,3 +1497,76 @@ pub struct IoDefaults {
     /// Default termination
     pub termination: Option<Termination>,
 }
+
+/// Module declaration in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirModule {
+    /// Module identifier
+    pub id: ModuleId,
+    /// Module name
+    pub name: String,
+    /// Visibility
+    pub visibility: HirVisibility,
+    /// Items in the module (if inline)
+    pub items: Option<Vec<HirModuleItem>>,
+}
+
+/// Items that can appear in a module
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirModuleItem {
+    Entity(HirEntity),
+    Module(HirModule),
+    Import(HirImport),
+    TraitDef(HirTraitDefinition),
+}
+
+/// Use statement (import) in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirImport {
+    /// Import identifier
+    pub id: ImportId,
+    /// Visibility (pub use re-exports)
+    pub visibility: HirVisibility,
+    /// Path being imported
+    pub path: HirImportPath,
+}
+
+/// Path in an import statement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirImportPath {
+    /// Simple path: use foo::bar::Baz;
+    Simple { segments: Vec<String> },
+    /// Renamed import: use foo::bar::Baz as Qux;
+    Renamed {
+        segments: Vec<String>,
+        alias: String,
+    },
+    /// Glob import: use foo::bar::*;
+    Glob { segments: Vec<String> },
+    /// Nested imports: use foo::bar::{Baz, Qux};
+    Nested {
+        prefix: Vec<String>,
+        paths: Vec<HirImportPath>,
+    },
+}
+
+/// Visibility in HIR
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HirVisibility {
+    /// Public - visible everywhere
+    Public,
+    /// Crate-local - visible within the crate
+    Crate,
+    /// Super-local - visible to parent module
+    Super,
+    /// Private - only visible in the same module (default)
+    Private,
+}
+
+/// Module identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModuleId(pub u32);
+
+/// Import identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ImportId(pub u32);

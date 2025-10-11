@@ -53,6 +53,10 @@ impl<'a> ParseState<'a> {
 
             // Parse top-level items
             match self.current_kind() {
+                Some(SyntaxKind::UseKw) => self.parse_use_decl(),
+                Some(SyntaxKind::PubKw) | Some(SyntaxKind::ModKw) => {
+                    self.parse_item_with_visibility()
+                }
                 Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
                 Some(SyntaxKind::ImplKw) => self.parse_impl_block(),
                 Some(SyntaxKind::ProtocolKw) => self.parse_protocol_decl(),
@@ -3764,6 +3768,168 @@ pub fn parse_with_errors(source: &str) -> (SyntaxNode, Vec<ParseError>) {
     let parser = ParseState::new(source);
     let result = parser.parse_source_file();
     (SyntaxNode::new_root(result.green_node), result.errors)
+}
+
+impl ParseState<'_> {
+    /// Parse a use declaration
+    fn parse_use_decl(&mut self) {
+        self.start_node(SyntaxKind::UseDecl);
+
+        // 'use' keyword
+        self.expect(SyntaxKind::UseKw);
+
+        // Parse the use path
+        self.parse_use_path();
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse a use path (can be simple, renamed, glob, or nested)
+    fn parse_use_path(&mut self) {
+        self.start_node(SyntaxKind::UsePath);
+
+        // Parse path segments separated by ::
+        self.expect(SyntaxKind::Ident);
+
+        while self.at(SyntaxKind::ColonColon) {
+            self.bump(); // ::
+
+            if self.at(SyntaxKind::Star) {
+                // Glob import: use foo::bar::*;
+                self.bump(); // *
+                break;
+            } else if self.at(SyntaxKind::LBrace) {
+                // Nested imports: use foo::bar::{Baz, Qux};
+                self.parse_use_tree();
+                break;
+            } else {
+                // Continue path
+                self.expect(SyntaxKind::Ident);
+
+                // Check for rename: as alias
+                if self.at(SyntaxKind::AsKw) {
+                    self.bump(); // as
+                    self.expect(SyntaxKind::Ident); // alias
+                    break;
+                }
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse nested use tree: { Item1, Item2, ... }
+    fn parse_use_tree(&mut self) {
+        self.start_node(SyntaxKind::UseTree);
+
+        self.expect(SyntaxKind::LBrace);
+
+        // Parse first item
+        if !self.at(SyntaxKind::RBrace) {
+            self.parse_use_path();
+
+            // Parse remaining items
+            while self.at(SyntaxKind::Comma) {
+                self.bump(); // ,
+                if self.at(SyntaxKind::RBrace) {
+                    break; // Trailing comma
+                }
+                self.parse_use_path();
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse item with optional visibility modifier
+    fn parse_item_with_visibility(&mut self) {
+        // Parse visibility if present
+        if self.at(SyntaxKind::PubKw) {
+            self.parse_visibility();
+        }
+
+        // Parse the actual item
+        match self.current_kind() {
+            Some(SyntaxKind::ModKw) => self.parse_module_decl(),
+            Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
+            Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
+            _ => {
+                self.error_and_bump("expected item after visibility modifier");
+            }
+        }
+    }
+
+    /// Parse visibility modifier: pub, pub(crate), pub(super)
+    fn parse_visibility(&mut self) {
+        self.start_node(SyntaxKind::Visibility);
+
+        self.expect(SyntaxKind::PubKw);
+
+        // Check for restricted visibility: pub(crate) or pub(super)
+        if self.at(SyntaxKind::LParen) {
+            self.bump(); // (
+
+            // Expect 'crate' or 'super' or a path
+            if self.at(SyntaxKind::Ident) {
+                self.bump(); // crate/super
+            }
+
+            self.expect(SyntaxKind::RParen);
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse module declaration
+    fn parse_module_decl(&mut self) {
+        self.start_node(SyntaxKind::ModuleDecl);
+
+        // 'mod' keyword
+        self.expect(SyntaxKind::ModKw);
+
+        // Module name
+        self.expect(SyntaxKind::Ident);
+
+        // Either inline module { ... } or external module ;
+        if self.at(SyntaxKind::LBrace) {
+            // Inline module
+            self.bump(); // {
+
+            // Parse module items (recursively parse as mini source file)
+            while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                self.skip_trivia();
+
+                if self.at(SyntaxKind::RBrace) {
+                    break;
+                }
+
+                // Parse items within the module
+                match self.current_kind() {
+                    Some(SyntaxKind::UseKw) => self.parse_use_decl(),
+                    Some(SyntaxKind::PubKw) | Some(SyntaxKind::ModKw) => {
+                        self.parse_item_with_visibility()
+                    }
+                    Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
+                    Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
+                    _ => {
+                        self.error_and_bump("expected module item");
+                    }
+                }
+            }
+
+            self.expect(SyntaxKind::RBrace);
+        } else {
+            // External module (file)
+            self.expect(SyntaxKind::Semicolon);
+        }
+
+        self.finish_node();
+    }
 }
 
 #[cfg(test)]
