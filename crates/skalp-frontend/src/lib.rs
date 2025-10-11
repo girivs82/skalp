@@ -32,8 +32,8 @@ pub use lexer::Lexer;
 pub use parser::Parser;
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
 use module_resolver::ModuleResolver;
+use std::path::{Path, PathBuf};
 
 /// Parse and build HIR from a file with full module resolution
 pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
@@ -41,7 +41,8 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
     use std::fs;
 
     // Get the root directory (parent of the file)
-    let root_dir = file_path.parent()
+    let root_dir = file_path
+        .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
@@ -80,7 +81,8 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
     })?;
 
     // Resolve and load all dependencies
-    let dependencies = resolver.resolve_dependencies(&hir)
+    let dependencies = resolver
+        .resolve_dependencies(&hir)
         .context("Failed to resolve module dependencies")?;
 
     // Merge symbols from dependencies into HIR
@@ -96,11 +98,7 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
 }
 
 /// Merge imported symbols from dependencies into HIR
-fn merge_imports(
-    hir: &Hir,
-    dependencies: &[PathBuf],
-    resolver: &ModuleResolver,
-) -> Result<Hir> {
+fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver) -> Result<Hir> {
     use hir::HirImportPath;
 
     let mut merged_hir = hir.clone();
@@ -142,7 +140,12 @@ fn merge_imports(
                         }
                         HirImportPath::Renamed { segments, alias } => {
                             if let Some(symbol_name) = segments.last() {
-                                merge_symbol_with_rename(&mut merged_hir, loaded_module, symbol_name, alias)?;
+                                merge_symbol_with_rename(
+                                    &mut merged_hir,
+                                    loaded_module,
+                                    symbol_name,
+                                    alias,
+                                )?;
                             }
                         }
                         _ => {}
@@ -164,7 +167,11 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
     }
 
     // Try to find the symbol in trait definitions
-    if let Some(trait_def) = source.trait_definitions.iter().find(|t| t.name == symbol_name) {
+    if let Some(trait_def) = source
+        .trait_definitions
+        .iter()
+        .find(|t| t.name == symbol_name)
+    {
         target.trait_definitions.push(trait_def.clone());
         return Ok(());
     }
@@ -181,7 +188,12 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
 }
 
 /// Merge a specific symbol with a renamed alias
-fn merge_symbol_with_rename(target: &mut Hir, source: &Hir, symbol_name: &str, alias: &str) -> Result<()> {
+fn merge_symbol_with_rename(
+    target: &mut Hir,
+    source: &Hir,
+    symbol_name: &str,
+    alias: &str,
+) -> Result<()> {
     // Try to find the symbol in entities
     if let Some(entity) = source.entities.iter().find(|e| e.name == symbol_name) {
         let mut renamed_entity = entity.clone();
@@ -191,7 +203,11 @@ fn merge_symbol_with_rename(target: &mut Hir, source: &Hir, symbol_name: &str, a
     }
 
     // Try to find the symbol in trait definitions
-    if let Some(trait_def) = source.trait_definitions.iter().find(|t| t.name == symbol_name) {
+    if let Some(trait_def) = source
+        .trait_definitions
+        .iter()
+        .find(|t| t.name == symbol_name)
+    {
         let mut renamed_trait = trait_def.clone();
         renamed_trait.name = alias.to_string();
         target.trait_definitions.push(renamed_trait);

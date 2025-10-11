@@ -3,13 +3,13 @@
 //! Handles finding and loading SKALP modules based on import paths.
 //! Resolves `use` statements to actual file paths and loads dependencies.
 
+use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result, bail};
 
 use crate::hir::{Hir, HirImport, HirImportPath};
-use crate::parse;
 use crate::hir_builder::HirBuilderContext;
+use crate::parse;
 
 /// Module resolver handles finding and loading modules
 pub struct ModuleResolver {
@@ -42,7 +42,8 @@ impl ModuleResolver {
             }
 
             // Try crates/skalp-stdlib for development
-            let dev_stdlib = root_dir.parent()
+            let dev_stdlib = root_dir
+                .parent()
                 .and_then(|p| p.parent())
                 .map(|p| p.join("crates/skalp-stdlib"));
             if let Some(dev_path) = dev_stdlib {
@@ -123,10 +124,7 @@ impl ModuleResolver {
             }
         }
 
-        bail!(
-            "Could not find module for import: {}",
-            segments.join("::")
-        )
+        bail!("Could not find module for import: {}", segments.join("::"))
     }
 
     /// Load a module from a file path
@@ -165,15 +163,15 @@ impl ModuleResolver {
 
         // Build HIR
         let mut builder = HirBuilderContext::new();
-        let hir = builder.build(&syntax_tree)
-            .map_err(|errors| {
-                anyhow::anyhow!(
-                    "Failed to build HIR: {}",
-                    errors.first()
-                        .map(|e| e.message.clone())
-                        .unwrap_or_else(|| "unknown error".to_string())
-                )
-            })?;
+        let hir = builder.build(&syntax_tree).map_err(|errors| {
+            anyhow::anyhow!(
+                "Failed to build HIR: {}",
+                errors
+                    .first()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "unknown error".to_string())
+            )
+        })?;
 
         // Recursively load dependencies
         for import in &hir.imports {
@@ -231,8 +229,9 @@ mod tests {
         fs::create_dir(&module_dir).unwrap();
         fs::write(
             module_dir.join("lib.sk"),
-            "entity TestEntity { in clk: clock }"
-        ).unwrap();
+            "entity TestEntity { in clk: clock }",
+        )
+        .unwrap();
 
         let resolver = ModuleResolver::new(root);
         assert_eq!(resolver.search_paths.len(), 1);

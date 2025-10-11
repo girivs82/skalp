@@ -363,8 +363,7 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
 
     // Parse, build HIR with module resolution
     info!("Parsing SKALP source and building HIR with module resolution...");
-    let hir = parse_and_build_hir_from_file(source)
-        .context("Failed to parse and build HIR")?;
+    let hir = parse_and_build_hir_from_file(source).context("Failed to parse and build HIR")?;
 
     // Lower to MIR with CDC analysis
     info!("Lowering to MIR with CDC analysis...");

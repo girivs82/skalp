@@ -4055,11 +4055,43 @@ impl HirBuilderContext {
     fn build_enum_variant(&mut self, node: &SyntaxNode) -> Option<HirEnumVariant> {
         let name = self.extract_name(node)?;
 
-        // TODO: Parse explicit values for enum variants
-        // For now, values will be auto-assigned
-        let value = None;
+        // Check for explicit discriminant value (e.g., Idle = 0)
+        let value = node
+            .children()
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::UnaryExpr
+                )
+            })
+            .and_then(|n| self.build_expression(&n));
 
-        Some(HirEnumVariant { name, value })
+        // Check for associated data types (tuple variant syntax)
+        // Look for TypeAnnotation nodes between LParen and RParen
+        let associated_data = if node.children().any(|n| n.kind() == SyntaxKind::LParen) {
+            let types: Vec<HirType> = node
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::TypeAnnotation)
+                .map(|type_node| self.build_hir_type(&type_node))
+                .collect();
+
+            if types.is_empty() {
+                None
+            } else {
+                Some(types)
+            }
+        } else {
+            None
+        };
+
+        Some(HirEnumVariant {
+            name,
+            value,
+            associated_data,
+        })
     }
 
     /// Build union type from syntax node

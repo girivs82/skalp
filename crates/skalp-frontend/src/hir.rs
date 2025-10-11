@@ -641,8 +641,10 @@ pub struct HirEnumType {
 pub struct HirEnumVariant {
     /// Variant name
     pub name: String,
-    /// Variant value (optional)
+    /// Variant value (optional, for explicit discriminants)
     pub value: Option<HirExpression>,
+    /// Associated data types for tuple variants (e.g., Transfer(bit[3], bit[8]))
+    pub associated_data: Option<Vec<HirType>>,
 }
 
 /// Union type in HIR
