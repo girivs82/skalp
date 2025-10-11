@@ -2048,6 +2048,7 @@ impl HirBuilderContext {
             SyntaxKind::UnaryExpr => self.build_unary_expr(node),
             SyntaxKind::CallExpr => self.build_call_expr(node),
             SyntaxKind::StructLiteral => self.build_struct_literal(node),
+            SyntaxKind::ArrayLiteral => self.build_array_literal(node),
             SyntaxKind::FieldExpr => self.build_field_expr(node),
             SyntaxKind::IndexExpr => self.build_index_expr(node),
             SyntaxKind::PathExpr => self.build_path_expr(node),
@@ -2283,6 +2284,47 @@ impl HirBuilderContext {
             type_name,
             fields,
         }))
+    }
+
+    /// Build array literal: [1, 2, 3] or [value; count]
+    fn build_array_literal(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Check if this is a repeat array [value; count] by looking for semicolon token
+        let has_semicolon = node
+            .children_with_tokens()
+            .any(|elem| elem.as_token().map_or(false, |t| t.kind() == SyntaxKind::Semicolon));
+
+        if has_semicolon {
+            // Repeat syntax: [value; count]
+            let mut expressions: Vec<_> = node
+                .children()
+                .filter(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::ParenExpr
+                    )
+                })
+                .collect();
+
+            if expressions.len() == 2 {
+                let value = Box::new(self.build_expression(&expressions[0])?);
+                let count = Box::new(self.build_expression(&expressions[1])?);
+                return Some(HirExpression::ArrayRepeat { value, count });
+            }
+        } else {
+            // Regular array literal: [elem1, elem2, ...]
+            // TODO: Implement array literal lists
+            // For now, return None as this isn't fully implemented
+        }
+
+        None
     }
 
     /// Build struct field initialization

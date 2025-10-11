@@ -3348,10 +3348,17 @@ impl<'a> ParseState<'a> {
         if !self.at(SyntaxKind::RBracket) {
             self.parse_expression();
 
-            while self.at(SyntaxKind::Comma) {
-                self.bump();
-                if !self.at(SyntaxKind::RBracket) {
-                    self.parse_expression();
+            // Check for repeat syntax: [value; count]
+            if self.at(SyntaxKind::Semicolon) {
+                self.bump(); // consume semicolon
+                self.parse_expression(); // parse count
+            } else {
+                // Regular array literal: [elem1, elem2, ...]
+                while self.at(SyntaxKind::Comma) {
+                    self.bump();
+                    if !self.at(SyntaxKind::RBracket) {
+                        self.parse_expression();
+                    }
                 }
             }
         }

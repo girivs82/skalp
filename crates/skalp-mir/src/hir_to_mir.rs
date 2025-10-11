@@ -777,6 +777,37 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
             }
+            hir::HirExpression::ArrayRepeat { value, count } => {
+                // Array repeat expression: [value; count]
+                // This creates an array with `count` copies of `value`
+                // For MIR, we could:
+                // 1. Expand the array at compile-time if count is a constant
+                // 2. Generate initialization code at runtime
+                //
+                // For now, we'll try to evaluate count as a const expression
+                // If it's constant and reasonably small, expand it
+                // Otherwise, return a placeholder (proper array support in MIR needed)
+
+                // Try to evaluate count
+                if let Ok(count_val) = self.const_evaluator.eval(count) {
+                    if let Some(count_nat) = count_val.as_nat() {
+                        // For very large arrays, don't expand (could cause memory issues)
+                        // Just return a zero value as placeholder
+                        // TODO: Add proper array initialization support in MIR/codegen
+                        if count_nat > 1024 {
+                            // Return zero for large arrays
+                            return Some(Expression::Literal(Value::Integer(0)));
+                        }
+
+                        // For small arrays, we could expand, but for now just return
+                        // the value (proper array support needed)
+                        return self.convert_expression(value);
+                    }
+                }
+
+                // If count couldn't be evaluated, return placeholder
+                Some(Expression::Literal(Value::Integer(0)))
+            }
             hir::HirExpression::If(if_expr) => {
                 // Convert if-expression to a conditional (ternary) expression in MIR
                 // MIR represents this as: condition ? then_expr : else_expr

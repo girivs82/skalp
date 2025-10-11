@@ -375,6 +375,10 @@ pub enum HirExpression {
         type_name: String,
         constant_name: String,
     },
+    ArrayRepeat {
+        value: Box<HirExpression>,
+        count: Box<HirExpression>,
+    },
     StructLiteral(HirStructLiteral),
     If(HirIfExpr),
     Match(HirMatchExpr),
