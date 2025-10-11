@@ -261,6 +261,7 @@ pub enum SyntaxKind {
     VariableDecl,
     ConstantDecl,
     EventBlock,
+    FunctionDecl,
 
     // Event parts
     EventTriggerList,
@@ -270,9 +271,11 @@ pub enum SyntaxKind {
     // Statements
     AssignmentStmt,
     ReturnStmt,
+    ExprStmt,
     IfStmt,
     MatchStmt,
     BlockStmt,
+    LetStmt,
     FlowStmt,
     AssertStmt,
     PropertyStmt,
@@ -339,6 +342,8 @@ pub enum SyntaxKind {
     IndexExpr,
     ParenExpr,
     ArrayLiteral,
+    StructLiteral,
+    StructFieldInit,
     PathExpr,
     IfExpr,
     MatchExpr,

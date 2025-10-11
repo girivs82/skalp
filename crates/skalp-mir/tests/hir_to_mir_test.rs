@@ -17,6 +17,7 @@ fn create_simple_entity() -> Hir {
         global_constraints: vec![],
         modules: vec![],
         imports: vec![],
+        functions: vec![],
     };
 
     // Create entity
@@ -65,6 +66,7 @@ fn create_simple_entity() -> Hir {
         }],
         variables: vec![],
         constants: vec![],
+        functions: vec![],
         event_blocks: vec![HirEventBlock {
             id: BlockId(1),
             triggers: vec![HirEventTrigger {

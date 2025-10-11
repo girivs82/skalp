@@ -1,0 +1,119 @@
+// Generic Asynchronous FIFO with Clock Domain Crossing
+//
+// Demonstrates: Parametric types, Multiple clocks, Gray code CDC
+// This is production-quality CDC using Gray code pointers
+
+/// Asynchronous FIFO for safe clock domain crossing
+///
+/// Type Parameters:
+/// - T: Data type (any struct or bit vector)
+/// - DEPTH: FIFO depth (must be power of 2, max 256)
+///
+/// Features:
+/// - Gray code pointers for metastability protection
+/// - Two-flip-flop synchronizers
+/// - Zero-cycle read latency
+/// - Full/empty flags in respective domains
+entity AsyncFifo<T, const DEPTH: nat> {
+    // Write clock domain
+    in wr_clk: clock
+    in wr_rst: reset(active_high)
+    in wr_en: bit
+    in wr_data: T
+    out wr_full: bit
+
+    // Read clock domain
+    in rd_clk: clock
+    in rd_rst: reset(active_high)
+    in rd_en: bit
+    out rd_data: T
+    out rd_empty: bit
+}
+
+impl AsyncFifo<T, const DEPTH: nat> {
+    // Memory storage - generic over type T
+    signal mem: [T; DEPTH]
+
+    // Write domain pointers (in write clock domain)
+    signal wr_ptr: nat[9]
+    signal wr_ptr_gray: nat[9]
+    signal rd_ptr_gray_sync1: nat[9]
+    signal rd_ptr_gray_sync2: nat[9]
+
+    // Read domain pointers (in read clock domain)
+    signal rd_ptr: nat[9]
+    signal rd_ptr_gray: nat[9]
+    signal wr_ptr_gray_sync1: nat[9]
+    signal wr_ptr_gray_sync2: nat[9]
+
+    // Intermediate signals for full/empty computation
+    signal wr_ptr_next: nat[9]
+    signal wr_ptr_next_gray: nat[9]
+    signal rd_addr: nat[9]
+
+    // ========================================================================
+    // Write Domain Logic (wr_clk)
+    // ========================================================================
+
+    on(wr_clk.rise) {
+        if wr_rst {
+            wr_ptr <= 0
+            wr_ptr_gray <= 0
+            rd_ptr_gray_sync1 <= 0
+            rd_ptr_gray_sync2 <= 0
+        } else {
+            // Two-flop synchronizer for metastability protection
+            rd_ptr_gray_sync1 <= rd_ptr_gray
+            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1
+
+            // Write operation
+            if wr_en && !wr_full {
+                let wr_addr = wr_ptr % DEPTH
+                mem[wr_addr] <= wr_data
+
+                let next_wr_ptr = wr_ptr + 1
+                wr_ptr <= next_wr_ptr
+                // Convert to Gray code: G = B XOR (B >> 1)
+                wr_ptr_gray <= next_wr_ptr ^ (next_wr_ptr >> 1)
+            }
+        }
+    }
+
+    // Compute next write pointer and its Gray code
+    wr_ptr_next = wr_ptr + 1
+    wr_ptr_next_gray = wr_ptr_next ^ (wr_ptr_next >> 1)
+
+    // Write domain full flag (combinational logic)
+    wr_full = if wr_ptr_next_gray == rd_ptr_gray_sync2 { 1 } else { 0 }
+
+    // ========================================================================
+    // Read Domain Logic (rd_clk)
+    // ========================================================================
+
+    on(rd_clk.rise) {
+        if rd_rst {
+            rd_ptr <= 0
+            rd_ptr_gray <= 0
+            wr_ptr_gray_sync1 <= 0
+            wr_ptr_gray_sync2 <= 0
+        } else {
+            // Two-flop synchronizer for metastability protection
+            wr_ptr_gray_sync1 <= wr_ptr_gray
+            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1
+
+            // Read operation
+            if rd_en && !rd_empty {
+                let next_rd_ptr = rd_ptr + 1
+                rd_ptr <= next_rd_ptr
+                rd_ptr_gray <= next_rd_ptr ^ (next_rd_ptr >> 1)
+            }
+        }
+    }
+
+    // Read domain empty flag (combinational logic)
+    rd_empty = if rd_ptr_gray == wr_ptr_gray_sync2 { 1 } else { 0 }
+
+    // Read data output (combinational - zero cycle latency)
+    rd_addr = rd_ptr % DEPTH
+    rd_data = mem[rd_addr]
+}

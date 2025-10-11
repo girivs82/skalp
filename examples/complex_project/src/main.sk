@@ -1,0 +1,334 @@
+// Graphics Pipeline Accelerator - Top Level
+//
+// This is the main entry point demonstrating a complete multi-module hierarchical design.
+// Features: Multiple clock domains, hierarchical instantiation, complex data flow
+
+mod types;
+mod async_fifo;
+mod geometry_processor;
+
+use types::{Vertex, TransformedVertex, ScreenVertex, Command, CommandOpcode};
+use types::{Matrix4x4, Vec3, Color, identity_matrix};
+use async_fifo::{AsyncFifo, clog2};
+use geometry_processor::{GeometryProcessor4};
+
+/// Top-level Graphics Pipeline Accelerator
+///
+/// Integrates multiple clock domains and processing stages:
+/// - System clock: AXI interface and control
+/// - Geometry clock: High-speed vertex processing (2x system clock)
+/// - Pixel clock: Display output timing
+entity GraphicsPipelineTop {
+    // System clock domain (100 MHz)
+    in sys_clk: clock
+    in sys_rst: reset(active_high)
+
+    // Geometry processing clock domain (200 MHz)
+    in geom_clk: clock
+    in geom_rst: reset(active_high)
+
+    // Pixel clock domain (25 MHz for 640x480@60Hz)
+    in pixel_clk: clock
+    in pixel_rst: reset(active_high)
+
+    // AXI4-Lite slave interface (system clock domain)
+    in axi_awaddr: bit[32]
+    in axi_awvalid: bit
+    out axi_awready: bit
+    in axi_wdata: bit[32]
+    in axi_wstrb: bit[4]
+    in axi_wvalid: bit
+    out axi_wready: bit
+    out axi_bresp: bit[2]
+    out axi_bvalid: bit
+    in axi_bready: bit
+    in axi_araddr: bit[32]
+    in axi_arvalid: bit
+    out axi_arready: bit
+    out axi_rdata: bit[32]
+    out axi_rresp: bit[2]
+    out axi_rvalid: bit
+    in axi_rready: bit
+
+    // Video output (pixel clock domain)
+    out video_hsync: bit
+    out video_vsync: bit
+    out video_de: bit
+    out video_r: bit[8]
+    out video_g: bit[8]
+    out video_b: bit[8]
+
+    // Status
+    out busy: bit
+    out frame_count: bit[32]
+}
+
+impl GraphicsPipelineTop {
+    // ========================================================================
+    // Configuration Registers (System Clock Domain)
+    // ========================================================================
+
+    signal model_matrix: Matrix4x4
+    signal view_matrix: Matrix4x4
+    signal proj_matrix: Matrix4x4
+    signal light_direction: Vec3
+    signal light_color: Vec3
+    signal ambient_color: Vec3
+    signal viewport_width: bit[16]
+    signal viewport_height: bit[16]
+
+    // Command processing
+    signal cmd_valid: bit
+    signal cmd_ready: bit
+    signal current_command: Command
+
+    // Statistics
+    signal vertices_processed: bit[32]
+    signal triangles_drawn: bit[32]
+    signal frames_rendered: bit[32]
+
+    // ========================================================================
+    // System Clock Domain - AXI Interface & Control
+    // ========================================================================
+
+    on(sys_clk.rise) {
+        if sys_rst {
+            model_matrix <= identity_matrix()
+            view_matrix <= identity_matrix()
+            proj_matrix <= identity_matrix()
+            light_direction <= Vec3 { x: 0, y: 0, z: 0x3F800000 }  // [0,0,1]
+            light_color <= Vec3 { x: 0x3F800000, y: 0x3F800000, z: 0x3F800000 }  // white
+            ambient_color <= Vec3 { x: 0x3E800000, y: 0x3E800000, z: 0x3E800000 }  // 0.25
+            viewport_width <= 640
+            viewport_height <= 480
+            cmd_valid <= 0
+            vertices_processed <= 0
+            triangles_drawn <= 0
+            frames_rendered <= 0
+        } else {
+            // AXI write transaction handling
+            if axi_awvalid && axi_wvalid && axi_awready {
+                let addr = axi_awaddr[15:0]
+
+                // Register map (simplified - would decode properly in real design)
+                match addr {
+                    0x0000 => { /* Command register */
+                        current_command.opcode <= axi_wdata[3:0]
+                        current_command.vertex_addr <= axi_wdata[31:4]
+                        cmd_valid <= 1
+                    }
+                    0x0100 => model_matrix.col0.x <= axi_wdata
+                    0x0104 => model_matrix.col0.y <= axi_wdata
+                    0x0108 => model_matrix.col0.z <= axi_wdata
+                    0x010C => model_matrix.col0.w <= axi_wdata
+                    // ... more matrix registers ...
+                    0x0200 => light_direction.x <= axi_wdata
+                    0x0204 => light_direction.y <= axi_wdata
+                    0x0208 => light_direction.z <= axi_wdata
+                    0x0300 => viewport_width <= axi_wdata[15:0]
+                    0x0304 => viewport_height <= axi_wdata[15:0]
+                    _ => { /* Ignore unknown addresses */ }
+                }
+            }
+
+            // Clear command valid after consumed
+            if cmd_valid && cmd_ready {
+                cmd_valid <= 0
+            }
+        }
+    }
+
+    // AXI read transaction (status registers)
+    signal axi_read_data: bit[32]
+
+    on(sys_clk.rise) {
+        if axi_arvalid && axi_arready {
+            let addr = axi_araddr[15:0]
+            match addr {
+                0x1000 => axi_read_data <= vertices_processed
+                0x1004 => axi_read_data <= triangles_drawn
+                0x1008 => axi_read_data <= frames_rendered
+                0x100C => axi_read_data <= {31'b0, busy}
+                _ => axi_read_data <= 0
+            }
+        }
+    }
+
+    axi_rdata = axi_read_data
+    axi_awready = 1  // Always ready (simplified)
+    axi_wready = 1
+    axi_arready = 1
+    axi_rvalid = 1
+    axi_bvalid = 1
+    axi_bresp = 0  // OKAY
+    axi_rresp = 0
+
+    // ========================================================================
+    // Geometry Clock Domain - Vertex Processing
+    // ========================================================================
+
+    // Vertex input to geometry processor (from command decoder)
+    signal geom_vertex_valid: bit
+    signal geom_vertex: Vertex
+    signal geom_vertex_ready: bit
+
+    // Geometry processor output
+    signal geom_output_valid: bit
+    signal geom_output: TransformedVertex
+    signal geom_output_ready: bit
+    signal geom_busy: bit
+    signal geom_vertices_count: bit[32]
+
+    // Instantiate geometry processor (4-stage pipeline in geometry clock domain)
+    let geometry = GeometryProcessor4 {
+        clk: geom_clk,
+        rst: geom_rst,
+        vertex_valid: geom_vertex_valid,
+        vertex: geom_vertex,
+        vertex_ready: geom_vertex_ready,
+        model_matrix: model_matrix,  // CDC handled implicitly (quasi-static)
+        view_matrix: view_matrix,
+        proj_matrix: proj_matrix,
+        light_dir: light_direction,
+        light_color: light_color,
+        ambient: ambient_color,
+        output_valid: geom_output_valid,
+        output: geom_output,
+        output_ready: geom_output_ready,
+        busy: geom_busy,
+        vertices_processed: geom_vertices_count
+    }
+
+    // ========================================================================
+    // Clock Domain Crossing: System -> Geometry
+    // ========================================================================
+
+    // FIFO for vertex data crossing from sys_clk to geom_clk
+    signal vertex_fifo_wr_en: bit
+    signal vertex_fifo_wr_data: Vertex
+    signal vertex_fifo_wr_full: bit
+    signal vertex_fifo_rd_en: bit
+    signal vertex_fifo_rd_data: Vertex
+    signal vertex_fifo_rd_empty: bit
+
+    let vertex_fifo = AsyncFifo<Vertex, 16> {
+        wr_clk: sys_clk,
+        wr_rst: sys_rst,
+        wr_en: vertex_fifo_wr_en,
+        wr_data: vertex_fifo_wr_data,
+        wr_full: vertex_fifo_wr_full,
+        wr_count: _,  // Unused
+        rd_clk: geom_clk,
+        rd_rst: geom_rst,
+        rd_en: vertex_fifo_rd_en,
+        rd_data: vertex_fifo_rd_data,
+        rd_empty: vertex_fifo_rd_empty,
+        rd_count: _   // Unused
+    }
+
+    // Connect FIFO to geometry processor
+    geom_vertex_valid = !vertex_fifo_rd_empty
+    geom_vertex = vertex_fifo_rd_data
+    vertex_fifo_rd_en = geom_vertex_ready && !vertex_fifo_rd_empty
+
+    // ========================================================================
+    // Clock Domain Crossing: Geometry -> Pixel
+    // ========================================================================
+
+    // FIFO for transformed vertices crossing from geom_clk to pixel_clk
+    signal xform_fifo_wr_en: bit
+    signal xform_fifo_wr_data: TransformedVertex
+    signal xform_fifo_wr_full: bit
+    signal xform_fifo_rd_en: bit
+    signal xform_fifo_rd_data: TransformedVertex
+    signal xform_fifo_rd_empty: bit
+
+    let transform_fifo = AsyncFifo<TransformedVertex, 64> {
+        wr_clk: geom_clk,
+        wr_rst: geom_rst,
+        wr_en: xform_fifo_wr_en,
+        wr_data: xform_fifo_wr_data,
+        wr_full: xform_fifo_wr_full,
+        wr_count: _,
+        rd_clk: pixel_clk,
+        rd_rst: pixel_rst,
+        rd_en: xform_fifo_rd_en,
+        rd_data: xform_fifo_rd_data,
+        rd_empty: xform_fifo_rd_empty,
+        rd_count: _
+    }
+
+    // Connect geometry processor output to transform FIFO
+    xform_fifo_wr_en = geom_output_valid && !xform_fifo_wr_full
+    xform_fifo_wr_data = geom_output
+    geom_output_ready = !xform_fifo_wr_full
+
+    // ========================================================================
+    // Pixel Clock Domain - Rasterization and Display
+    // ========================================================================
+
+    signal pixel_x: bit[16]
+    signal pixel_y: bit[16]
+    signal pixel_valid: bit
+
+    // Simplified rasterizer (in real design, this would be much more complex)
+    on(pixel_clk.rise) {
+        if pixel_rst {
+            pixel_x <= 0
+            pixel_y <= 0
+            pixel_valid <= 0
+        } else {
+            // Read transformed vertices from FIFO
+            if !xform_fifo_rd_empty {
+                let vertex = xform_fifo_rd_data
+                xform_fifo_rd_en <= 1
+
+                // Simplified: just output vertex color
+                // Real rasterizer would:
+                // 1. Convert to screen space
+                // 2. Compute triangle edges
+                // 3. Scan convert
+                // 4. Generate fragments
+
+                pixel_valid <= 1
+            } else {
+                xform_fifo_rd_en <= 0
+                pixel_valid <= 0
+            }
+
+            // Scanline counter for video timing
+            if pixel_x < viewport_width - 1 {
+                pixel_x <= pixel_x + 1
+            } else {
+                pixel_x <= 0
+                if pixel_y < viewport_height - 1 {
+                    pixel_y <= pixel_y + 1
+                } else {
+                    pixel_y <= 0
+                    frames_rendered <= frames_rendered + 1
+                }
+            }
+        }
+    }
+
+    // Video timing generation (simplified)
+    video_hsync = (pixel_x >= 656 && pixel_x < 752)
+    video_vsync = (pixel_y >= 490 && pixel_y < 492)
+    video_de = (pixel_x < 640 && pixel_y < 480)
+
+    // Video output (placeholder - would come from framebuffer)
+    video_r = pixel_valid ? 0xFF : 0
+    video_g = pixel_valid ? 0xFF : 0
+    video_b = pixel_valid ? 0xFF : 0
+
+    // ========================================================================
+    // Status Outputs
+    // ========================================================================
+
+    busy = geom_busy || !vertex_fifo_rd_empty || !xform_fifo_rd_empty
+    frame_count = frames_rendered
+    vertices_processed = geom_vertices_count
+
+    // Command ready when vertex FIFO has space
+    cmd_ready = !vertex_fifo_wr_full
+}

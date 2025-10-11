@@ -30,6 +30,8 @@ pub struct Hir {
     pub modules: Vec<HirModule>,
     /// Use statements (imports)
     pub imports: Vec<HirImport>,
+    /// Top-level functions (including const functions)
+    pub functions: Vec<HirFunction>,
 }
 
 /// Entity in HIR
@@ -60,6 +62,8 @@ pub struct HirImplementation {
     pub variables: Vec<HirVariable>,
     /// Constants
     pub constants: Vec<HirConstant>,
+    /// Functions
+    pub functions: Vec<HirFunction>,
     /// Event blocks
     pub event_blocks: Vec<HirEventBlock>,
     /// Assignments
@@ -161,6 +165,28 @@ pub struct HirConstant {
     pub value: HirExpression,
 }
 
+/// Function declaration inside impl block
+///
+/// Represents combinational logic functions that can be called from
+/// sequential blocks, combinational assignments, or other functions.
+///
+/// Const functions can be evaluated at compile time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirFunction {
+    /// Function identifier
+    pub id: FunctionId,
+    /// Whether this is a const function
+    pub is_const: bool,
+    /// Function name
+    pub name: String,
+    /// Function parameters
+    pub params: Vec<HirParameter>,
+    /// Return type (None for void functions)
+    pub return_type: Option<HirType>,
+    /// Function body
+    pub body: Vec<HirStatement>,
+}
+
 /// Event block in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirEventBlock {
@@ -242,6 +268,9 @@ pub enum HirStatement {
     Assert(HirAssertStatement),
     Property(HirPropertyStatement),
     Cover(HirCoverStatement),
+    Let(HirLetStatement),
+    Return(Option<HirExpression>),
+    Expression(HirExpression),
 }
 
 /// If statement in HIR
@@ -253,6 +282,19 @@ pub struct HirIfStatement {
     pub then_statements: Vec<HirStatement>,
     /// Else statements
     pub else_statements: Option<Vec<HirStatement>>,
+}
+
+/// Let statement in HIR - local variable binding
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirLetStatement {
+    /// Variable identifier
+    pub id: VariableId,
+    /// Variable name
+    pub name: String,
+    /// Variable type
+    pub var_type: HirType,
+    /// Initializer expression
+    pub value: HirExpression,
 }
 
 /// Match statement in HIR
@@ -322,6 +364,7 @@ pub enum HirExpression {
         enum_type: String,
         variant: String,
     },
+    StructLiteral(HirStructLiteral),
     If(HirIfExpr),
     Match(HirMatchExpr),
 }
@@ -414,6 +457,24 @@ pub struct HirCallExpr {
     pub function: String,
     /// Arguments
     pub args: Vec<HirExpression>,
+}
+
+/// Struct literal in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirStructLiteral {
+    /// Struct type name
+    pub type_name: String,
+    /// Field initializations
+    pub fields: Vec<HirStructFieldInit>,
+}
+
+/// Struct field initialization in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirStructFieldInit {
+    /// Field name
+    pub name: String,
+    /// Field value
+    pub value: HirExpression,
 }
 
 /// If expression in HIR
@@ -684,6 +745,9 @@ pub struct VariableId(pub u32);
 pub struct ConstantId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FunctionId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -730,6 +794,8 @@ pub struct HirBuilder {
     next_variable_id: u32,
     /// Next constant ID
     next_constant_id: u32,
+    /// Next function ID
+    next_function_id: u32,
     /// Next block ID
     next_block_id: u32,
     /// Next assignment ID
@@ -765,6 +831,7 @@ impl HirBuilder {
             next_signal_id: 0,
             next_variable_id: 0,
             next_constant_id: 0,
+            next_function_id: 0,
             next_block_id: 0,
             next_assignment_id: 0,
             next_protocol_id: 0,
@@ -795,6 +862,7 @@ impl HirBuilder {
             global_constraints: Vec::new(),
             modules: Vec::new(),
             imports: Vec::new(),
+            functions: Vec::new(),
         }
     }
 
@@ -816,6 +884,13 @@ impl HirBuilder {
     fn next_signal_id(&mut self) -> SignalId {
         let id = SignalId(self.next_signal_id);
         self.next_signal_id += 1;
+        id
+    }
+
+    /// Generate next function ID
+    fn next_function_id(&mut self) -> FunctionId {
+        let id = FunctionId(self.next_function_id);
+        self.next_function_id += 1;
         id
     }
 
@@ -876,6 +951,7 @@ impl Hir {
             global_constraints: Vec::new(),
             modules: Vec::new(),
             imports: Vec::new(),
+            functions: Vec::new(),
         }
     }
 }

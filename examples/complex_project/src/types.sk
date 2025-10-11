@@ -1,0 +1,113 @@
+// Common Type Definitions for Graphics Pipeline
+//
+// This module defines all shared data structures used across the pipeline
+// Demonstrates: Structs, Enums, Type aliases
+
+// ============================================================================
+// Vector Types (Generic)
+// ============================================================================
+
+/// 2D vector (for texture coordinates)
+struct Vec2 {
+    x: bit[32],
+    y: bit[32]
+}
+
+/// 3D vector (for positions and normals)
+struct Vec3 {
+    x: bit[32],
+    y: bit[32],
+    z: bit[32]
+}
+
+/// 4D vector (for homogeneous coordinates)
+struct Vec4 {
+    x: bit[32],
+    y: bit[32],
+    z: bit[32],
+    w: bit[32]
+}
+
+// ============================================================================
+// Color and Material
+// ============================================================================
+
+/// RGBA color (8-bit per channel)
+struct Color {
+    r: bit[8],
+    g: bit[8],
+    b: bit[8],
+    a: bit[8]
+}
+
+// ============================================================================
+// Vertex Data Structures
+// ============================================================================
+
+/// Input vertex attributes
+struct Vertex {
+    position: Vec3,
+    normal: Vec3,
+    color: Color
+}
+
+/// Transformed vertex (after geometry processing)
+struct TransformedVertex {
+    position: Vec4,
+    normal: Vec3,
+    color: Color
+}
+
+// ============================================================================
+// Matrix Types
+// ============================================================================
+
+/// 4x4 transformation matrix (column-major)
+struct Matrix4x4 {
+    col0: Vec4,
+    col1: Vec4,
+    col2: Vec4,
+    col3: Vec4
+}
+
+// ============================================================================
+// Command Types (for control interface)
+// ============================================================================
+
+/// Command opcodes
+enum CommandOpcode {
+    DrawTriangle,
+    SetTransform,
+    SetViewport,
+    ClearBuffer,
+    Nop
+}
+
+/// Graphics command
+struct Command {
+    opcode: CommandOpcode,
+    data0: bit[32],
+    data1: bit[32]
+}
+
+// ============================================================================
+// State Machine States
+// ============================================================================
+
+/// Geometry processor state
+enum GeometryState {
+    Idle,
+    LoadVertex,
+    Transform,
+    Lighting,
+    WriteOutput
+}
+
+/// Rasterizer state
+enum RasterizerState {
+    Idle,
+    LoadTriangle,
+    ComputeEdges,
+    ScanLine,
+    WritePixels
+}

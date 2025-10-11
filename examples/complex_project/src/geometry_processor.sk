@@ -1,0 +1,158 @@
+// Geometry Processor - Vertex Transformation Pipeline
+//
+// Demonstrates:
+// - Pipelined architecture with multiple stages
+// - Pattern matching for state machines
+// - Complex data flow
+// - Parametric pipeline depth
+
+use crate::types::{Vertex, TransformedVertex, Vec3, Vec4, Matrix4x4, GeometryState, Color, Vec2};
+
+/// Geometry processor with configurable pipeline depth
+///
+/// Performs vertex transformation through multiple stages:
+/// 1. Model transformation (object -> world space)
+/// 2. View transformation (world -> camera space)
+/// 3. Projection transformation (camera -> clip space)
+/// 4. Lighting calculation
+///
+/// # Parameters
+/// - STAGES: Number of pipeline stages (higher = more throughput, more latency)
+entity GeometryProcessor<const STAGES: nat> {
+    in clk: clock
+    in rst: reset(active_high)
+
+    // Input vertex stream
+    in vertex_valid: bit
+    in vertex: Vertex
+    out vertex_ready: bit
+
+    // Transformation matrices
+    in model_matrix: Matrix4x4
+    in view_matrix: Matrix4x4
+    in proj_matrix: Matrix4x4
+
+    // Lighting parameters
+    in light_dir: Vec3
+    in light_color: Vec3
+    in ambient: Vec3
+
+    // Output transformed vertex stream
+    out output_valid: bit
+    out output: TransformedVertex
+    in output_ready: bit
+
+    // Status
+    out busy: bit
+    out vertices_processed: bit[32]
+}
+
+impl GeometryProcessor<const STAGES: nat> {
+    // State machine
+    signal state: GeometryState
+    signal vertex_count: bit[32]
+
+    // Pipeline registers
+    signal pipeline_valid: [bit; STAGES]
+    signal pipeline_stage: [bit[8]; STAGES]
+
+    // Intermediate vertex data at each stage
+    signal stage_position: [Vec4; STAGES]
+    signal stage_normal: [Vec3; STAGES]
+    signal stage_texcoord: [Vec2; STAGES]
+    signal stage_color: [Color; STAGES]
+
+    // Transformed data
+    signal world_pos: Vec4
+    signal view_pos: Vec4
+    signal clip_pos: Vec4
+    signal world_normal: Vec3
+    signal lit_color: Vec3
+
+    // Intermediate computation signals
+    signal n_dot_l: bit[32]
+    signal diffuse: bit[32]
+
+    // ========================================================================
+    // Control State Machine
+    // ========================================================================
+
+    on(clk.rise) {
+        if rst {
+            state <= GeometryState::Idle
+            vertex_count <= 0
+            pipeline_valid[0] <= 0
+        } else {
+            match state {
+                GeometryState::Idle => {
+                    if vertex_valid {
+                        state <= GeometryState::LoadVertex
+                    }
+                }
+
+                GeometryState::LoadVertex => {
+                    // Start transformation pipeline
+                    pipeline_valid[0] <= 1
+                    state <= GeometryState::Transform
+                    vertex_count <= vertex_count + 1
+                }
+
+                GeometryState::Transform => {
+                    // Pipeline processes automatically
+                    // Wait for output stage to complete
+                    if pipeline_valid[STAGES-1] {
+                        state <= GeometryState::WriteOutput
+                    }
+                }
+
+                GeometryState::WriteOutput => {
+                    // Output consumed
+                    if output_ready {
+                        pipeline_valid[STAGES-1] <= 0
+                        state <= GeometryState::Idle
+                    }
+                }
+
+                _ => {
+                    state <= GeometryState::Idle
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Pipeline Stage Processing - Simplified
+    // ========================================================================
+
+    on(clk.rise) {
+        if !rst {
+            // Stage 0: Load vertex data
+            if pipeline_valid[0] {
+                stage_position[0] <= Vec4 {
+                    x: vertex.position.x,
+                    y: vertex.position.y,
+                    z: vertex.position.z,
+                    w: 0
+                }
+                stage_normal[0] <= vertex.normal
+                stage_color[0] <= vertex.color
+            }
+        }
+    }
+
+    // ========================================================================
+    // Output Assignment
+    // ========================================================================
+
+    output_valid = if state == GeometryState::WriteOutput { 1 } else { 0 }
+    vertex_ready = if state == GeometryState::Idle { 1 } else { 0 }
+    busy = if state != GeometryState::Idle { 1 } else { 0 }
+    vertices_processed = vertex_count
+
+    // Output transformed vertex
+    output = TransformedVertex {
+        position: clip_pos,
+        normal: world_normal,
+        color: stage_color[0]
+    }
+}

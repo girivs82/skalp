@@ -67,6 +67,7 @@ impl MonomorphizationEngine {
             global_constraints: hir.global_constraints.clone(),
             modules: hir.modules.clone(),
             imports: hir.imports.clone(),
+            functions: hir.functions.clone(),
         }
     }
 

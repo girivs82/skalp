@@ -1,0 +1,43 @@
+[package]
+name = "graphics-pipeline-accelerator"
+version = "1.0.0"
+edition = "2024"
+authors = ["SKALP Examples"]
+description = "Complex multi-module hierarchical graphics pipeline demonstrating advanced SKALP features"
+license = "MIT"
+repository = "https://github.com/skalp-lang/skalp"
+keywords = ["graphics", "pipeline", "3d", "gpu", "accelerator"]
+categories = ["hardware", "graphics", "embedded"]
+
+[lib]
+path = "src/main.sk"
+
+[dependencies]
+# Would use stdlib for vector math in real project
+# skalp-stdlib = "1.0"
+
+[features]
+default = ["fixed-point"]
+fixed-point = []      # Use fixed-point math (default)
+floating-point = []   # Use floating-point math (requires FP units)
+texture-sampling = [] # Enable texture sampling unit
+z-buffer = []         # Enable depth testing
+
+[dev-dependencies]
+# Would have test dependencies here
+
+[[example]]
+name = "simple_triangle"
+path = "examples/simple_triangle.sk"
+
+[[example]]
+name = "textured_cube"
+path = "examples/textured_cube.sk"
+
+[profile.release]
+optimization = "aggressive"
+clock-frequency = 200_000_000  # 200 MHz target
+
+[profile.debug]
+optimization = "none"
+debug-info = true

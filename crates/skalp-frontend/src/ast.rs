@@ -75,6 +75,8 @@ pub enum ImplItem {
     EventBlock(EventBlock),
     /// Assignment statement
     Assignment(Assignment),
+    /// Function definition
+    Function(FunctionDecl),
 }
 
 /// Port declaration
@@ -133,6 +135,41 @@ pub struct ConstantDecl {
     pub const_type: Type,
     /// Constant value
     pub value: Expression,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Function declaration inside impl block
+///
+/// Represents helper functions defined within entity implementations.
+/// These are combinational logic functions that can be called from
+/// sequential blocks, combinational assignments, or other functions.
+///
+/// Const functions (const fn) can be evaluated at compile time and used
+/// in type expressions and generic parameters.
+///
+/// Example:
+/// ```skalp
+/// fn vec3_to_vec4(v: Vec3, w: fp32) -> Vec4 {
+///     Vec4 { x: v.x, y: v.y, z: v.z, w: w }
+/// }
+///
+/// const fn clog2(n: nat) -> nat {
+///     if n <= 1 { 0 } else { 1 + clog2(n / 2) }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionDecl {
+    /// Whether this is a const function (const fn)
+    pub is_const: bool,
+    /// Function name
+    pub name: String,
+    /// Parameters as (name, type) pairs
+    pub params: Vec<(String, Type)>,
+    /// Return type (optional for void functions)
+    pub return_type: Option<Type>,
+    /// Function body (statements)
+    pub body: Vec<Statement>,
     /// Span in source code
     pub span: std::ops::Range<usize>,
 }
@@ -204,6 +241,12 @@ pub enum Statement {
     Flow(FlowStatement),
     /// Block statement
     Block(BlockStatement),
+    /// Let statement (local variable binding)
+    Let(LetStatement),
+    /// Return statement (for functions)
+    Return(Option<Expression>),
+    /// Expression statement (for implicit returns)
+    Expression(Expression),
 }
 
 /// If statement
@@ -279,6 +322,28 @@ pub struct BlockStatement {
     pub span: std::ops::Range<usize>,
 }
 
+/// Let statement for local variable bindings
+///
+/// Allows defining local variables inside sequential and combinational blocks.
+/// Syntax: `let name [: type] = value`
+///
+/// Example:
+/// ```skalp
+/// let next_ptr = ptr + 1
+/// let gray = next_ptr ^ (next_ptr >> 1)
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LetStatement {
+    /// Variable name
+    pub name: String,
+    /// Optional type annotation
+    pub var_type: Option<Type>,
+    /// Initializer expression (required)
+    pub value: Expression,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
 /// Expressions in SKALP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expression {
@@ -296,6 +361,8 @@ pub enum Expression {
     Field(FieldExpr),
     /// Index access
     Index(IndexExpr),
+    /// Struct literal
+    StructLiteral(StructLiteralExpr),
 }
 
 /// Literal values
@@ -389,6 +456,24 @@ pub struct IndexExpr {
     pub base: Box<Expression>,
     /// Index expression
     pub index: Box<Expression>,
+}
+
+/// Struct literal expression
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructLiteralExpr {
+    /// Struct type name
+    pub type_name: String,
+    /// Field initializations
+    pub fields: Vec<StructFieldInit>,
+}
+
+/// Struct field initialization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructFieldInit {
+    /// Field name
+    pub name: String,
+    /// Field value
+    pub value: Expression,
 }
 
 /// Types in SKALP

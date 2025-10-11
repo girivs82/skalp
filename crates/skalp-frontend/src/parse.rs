@@ -67,6 +67,18 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
                 Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
                 Some(SyntaxKind::ConstraintKw) => self.parse_global_constraint_block(),
+                Some(SyntaxKind::ConstKw) => {
+                    // Check if this is 'const fn' or just 'const'
+                    if self.peek_kind(1) == Some(SyntaxKind::FnKw) {
+                        self.parse_impl_function() // Reuse impl function parser
+                    } else {
+                        self.parse_constant_decl()
+                    }
+                }
+                Some(SyntaxKind::FnKw) => {
+                    // Top-level function
+                    self.parse_impl_function()
+                }
                 _ => {
                     // Unknown item - consume token as error and continue
                     self.error_and_bump("expected top-level item");
@@ -255,8 +267,66 @@ impl<'a> ParseState<'a> {
             match self.current_kind() {
                 Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
                 Some(SyntaxKind::VarKw) => self.parse_variable_decl(),
-                Some(SyntaxKind::ConstKw) => self.parse_constant_decl(),
-                Some(SyntaxKind::LetKw) => self.parse_instance_decl(),
+                Some(SyntaxKind::ConstKw) => {
+                    // Check if this is 'const fn' or just 'const'
+                    if self.peek_kind(1) == Some(SyntaxKind::FnKw) {
+                        self.parse_impl_function()
+                    } else {
+                        self.parse_constant_decl()
+                    }
+                }
+                Some(SyntaxKind::FnKw) => self.parse_impl_function(),
+                Some(SyntaxKind::LetKw) => {
+                    // Disambiguate between instance declaration and let binding
+                    // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
+                    // Let binding: let name = expression
+                    // Look ahead to see if we have: let ident = ident { or let ident = ident < ...
+                    let mut is_instance = false;
+                    if self.peek_kind(1) == Some(SyntaxKind::Ident)
+                        && self.peek_kind(2) == Some(SyntaxKind::Assign)
+                        && self.peek_kind(3) == Some(SyntaxKind::Ident)
+                    {
+                        // Check if followed by { or <
+                        if self.peek_kind(4) == Some(SyntaxKind::LBrace) {
+                            is_instance = true;
+                        } else if self.peek_kind(4) == Some(SyntaxKind::Lt) {
+                            // Generic instantiation - scan forward to find the closing >
+                            // then check if there's a { after it
+                            let mut depth = 0;
+                            let mut offset = 4;
+                            loop {
+                                match self.peek_kind(offset) {
+                                    Some(SyntaxKind::Lt) => depth += 1,
+                                    Some(SyntaxKind::Gt) => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            // Found closing >, check next token
+                                            if self.peek_kind(offset + 1)
+                                                == Some(SyntaxKind::LBrace)
+                                            {
+                                                is_instance = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                    _ => {}
+                                }
+                                offset += 1;
+                                if offset > 20 {
+                                    // Safety limit
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if is_instance {
+                        self.parse_instance_decl()
+                    } else {
+                        self.parse_let_statement()
+                    }
+                }
                 Some(SyntaxKind::OnKw) => self.parse_event_block(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
@@ -374,6 +444,39 @@ impl<'a> ParseState<'a> {
         self.parse_type();
         self.expect(SyntaxKind::Assign);
         self.parse_expression();
+
+        self.finish_node();
+    }
+
+    /// Parse function declaration in impl block
+    /// Syntax: [const] fn name(params) -> return_type { body }
+    fn parse_impl_function(&mut self) {
+        self.start_node(SyntaxKind::FunctionDecl);
+
+        // Optional 'const' keyword
+        if self.at(SyntaxKind::ConstKw) {
+            self.bump();
+        }
+
+        // 'fn' keyword
+        self.expect(SyntaxKind::FnKw);
+
+        // Function name
+        self.expect(SyntaxKind::Ident);
+
+        // Parameters
+        self.expect(SyntaxKind::LParen);
+        self.parse_parameter_list();
+        self.expect(SyntaxKind::RParen);
+
+        // Optional return type
+        if self.at(SyntaxKind::Arrow) {
+            self.bump();
+            self.parse_type();
+        }
+
+        // Function body
+        self.parse_block_statement();
 
         self.finish_node();
     }
@@ -497,9 +600,8 @@ impl<'a> ParseState<'a> {
         if self.at(SyntaxKind::ReturnKw) {
             self.parse_return_statement();
         } else {
-            // For now, just parse as assignment
-            // In the future, we could look ahead to determine the statement type
-            self.parse_assignment_stmt();
+            // Parse expression first, then determine if it's assignment or expression statement
+            self.parse_assignment_or_expr_stmt();
         }
     }
 
@@ -523,6 +625,48 @@ impl<'a> ParseState<'a> {
         self.consume_semicolon();
 
         self.finish_node();
+    }
+
+    /// Parse assignment or expression statement
+    /// This disambiguates between assignments and standalone expressions
+    fn parse_assignment_or_expr_stmt(&mut self) {
+        // Save checkpoint before parsing
+        let checkpoint = self.builder.checkpoint();
+
+        // Parse left-hand side expression
+        self.parse_expression();
+
+        // Check if there's an assignment operator
+        if self.at(SyntaxKind::NonBlockingAssign)
+            || self.at(SyntaxKind::BlockingAssign)
+            || self.at(SyntaxKind::Assign)
+        {
+            // It's an assignment statement - wrap in AssignmentStmt
+            self.builder.start_node_at(
+                checkpoint,
+                rowan::SyntaxKind(SyntaxKind::AssignmentStmt as u16),
+            );
+
+            // Consume assignment operator
+            self.bump();
+
+            // Parse right-hand side
+            self.parse_expression();
+
+            // Optional semicolon
+            self.consume_semicolon();
+
+            self.finish_node();
+        } else {
+            // It's an expression statement - wrap in ExprStmt
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::ExprStmt as u16));
+
+            // Optional semicolon
+            self.consume_semicolon();
+
+            self.finish_node();
+        }
     }
 
     /// Parse assignment statement
@@ -564,6 +708,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
+                Some(SyntaxKind::LetKw) => self.parse_let_statement(),
                 Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
                 Some(SyntaxKind::PropertyKw) => self.parse_property_statement(),
                 Some(SyntaxKind::CoverKw) => self.parse_cover_statement(),
@@ -620,6 +765,35 @@ impl<'a> ParseState<'a> {
                 self.parse_block_statement();
             }
         }
+
+        self.finish_node();
+    }
+
+    /// Parse let statement
+    /// Syntax: let name [: type] = value [;]
+    fn parse_let_statement(&mut self) {
+        self.start_node(SyntaxKind::LetStmt);
+
+        // 'let' keyword
+        self.expect(SyntaxKind::LetKw);
+
+        // Variable name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional type annotation: : type
+        if self.at(SyntaxKind::Colon) {
+            self.bump(); // consume ':'
+            self.parse_type();
+        }
+
+        // Assignment operator '='
+        self.expect(SyntaxKind::Assign);
+
+        // Initializer expression
+        self.parse_expression();
+
+        // Optional semicolon (SKALP allows both with and without)
+        self.consume_semicolon();
 
         self.finish_node();
     }
@@ -3042,7 +3216,19 @@ impl<'a> ParseState<'a> {
                 self.finish_node();
             }
             Some(SyntaxKind::Ident) => {
-                self.parse_identifier_expression();
+                // Check if this is a struct literal: Type { field: value, ... }
+                // Look ahead for: Ident { Ident : or Ident { }
+                let is_struct_literal = (self.peek_kind(1) == Some(SyntaxKind::LBrace)
+                    && self.peek_kind(2) == Some(SyntaxKind::Ident)
+                    && self.peek_kind(3) == Some(SyntaxKind::Colon))
+                    || (self.peek_kind(1) == Some(SyntaxKind::LBrace)
+                        && self.peek_kind(2) == Some(SyntaxKind::RBrace));
+
+                if is_struct_literal {
+                    self.parse_struct_literal();
+                } else {
+                    self.parse_identifier_expression();
+                }
             }
             Some(SyntaxKind::LParen) => {
                 self.start_node(SyntaxKind::ParenExpr);
@@ -3133,6 +3319,11 @@ impl<'a> ParseState<'a> {
                     self.parse_argument_list();
                     self.expect(SyntaxKind::RParen);
                 }
+                Some(SyntaxKind::LBrace) => {
+                    // A { after an identifier means we've hit the start of a block
+                    // This is not a postfix operation, so break from the loop
+                    break;
+                }
                 Some(SyntaxKind::AsKw) => {
                     // Type cast
                     self.finish_node(); // finish current expression
@@ -3169,8 +3360,47 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse struct literal: TypeName { field: value, ... }
+    fn parse_struct_literal(&mut self) {
+        self.start_node(SyntaxKind::StructLiteral);
+
+        // Type name (identifier)
+        self.expect(SyntaxKind::Ident);
+
+        // Opening brace
+        self.expect(SyntaxKind::LBrace);
+
+        // Parse field initializations
+        if !self.at(SyntaxKind::RBrace) {
+            self.parse_struct_field_init();
+
+            while self.at(SyntaxKind::Comma) {
+                self.bump(); // consume ','
+                if !self.at(SyntaxKind::RBrace) {
+                    self.parse_struct_field_init();
+                }
+            }
+        }
+
+        // Closing brace
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse struct field initialization: field_name: value
+    fn parse_struct_field_init(&mut self) {
+        self.start_node(SyntaxKind::StructFieldInit);
+        self.expect(SyntaxKind::Ident); // field name
+        self.expect(SyntaxKind::Colon); // :
+        self.parse_expression(); // field value
+        self.finish_node();
+    }
+
     /// Parse parameter list
     fn parse_parameter_list(&mut self) {
+        self.start_node(SyntaxKind::ParameterList);
+
         if !self.at(SyntaxKind::RParen) {
             self.parse_parameter();
 
@@ -3181,6 +3411,8 @@ impl<'a> ParseState<'a> {
                 }
             }
         }
+
+        self.finish_node();
     }
 
     /// Parse single parameter

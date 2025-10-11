@@ -22,6 +22,7 @@ pub struct HirBuilderContext {
     next_signal_id: u32,
     next_variable_id: u32,
     next_constant_id: u32,
+    next_function_id: u32,
     next_block_id: u32,
     next_assignment_id: u32,
     next_protocol_id: u32,
@@ -75,6 +76,7 @@ enum SymbolId {
     Signal(SignalId),
     Variable(VariableId),
     Constant(ConstantId),
+    Function(FunctionId),
     GenericParam(String), // Generic parameter name (e.g., WIDTH)
 }
 
@@ -94,6 +96,7 @@ impl HirBuilderContext {
             next_signal_id: 0,
             next_variable_id: 0,
             next_constant_id: 0,
+            next_function_id: 0,
             next_block_id: 0,
             next_assignment_id: 0,
             next_protocol_id: 0,
@@ -192,6 +195,12 @@ impl HirBuilderContext {
                         self.symbols
                             .user_types
                             .insert(union_type.name.clone(), HirType::Union(union_type));
+                    }
+                }
+                SyntaxKind::FunctionDecl => {
+                    if let Some(function) = self.build_function(&child) {
+                        // Store function in HIR for later use
+                        hir.functions.push(function);
                     }
                 }
                 _ => {}
@@ -350,6 +359,7 @@ impl HirBuilderContext {
         let mut signals = Vec::new();
         let mut variables = Vec::new();
         let mut constants = Vec::new();
+        let mut functions = Vec::new();
         let mut event_blocks = Vec::new();
         let mut assignments = Vec::new();
 
@@ -371,6 +381,11 @@ impl HirBuilderContext {
                         constants.push(constant);
                     }
                 }
+                SyntaxKind::FunctionDecl => {
+                    if let Some(function) = self.build_function(&child) {
+                        functions.push(function);
+                    }
+                }
                 SyntaxKind::EventBlock => {
                     if let Some(block) = self.build_event_block(&child) {
                         event_blocks.push(block);
@@ -380,6 +395,28 @@ impl HirBuilderContext {
                     if let Some(assignment) =
                         self.build_assignment(&child, HirAssignmentType::Combinational)
                     {
+                        assignments.push(assignment);
+                    }
+                }
+                SyntaxKind::LetStmt => {
+                    // Let bindings in impl blocks are treated as variables with combinational assignments
+                    if let Some(let_stmt) = self.build_let_statement(&child) {
+                        // Create a variable for the let binding
+                        let variable = HirVariable {
+                            id: let_stmt.id,
+                            name: let_stmt.name.clone(),
+                            var_type: let_stmt.var_type.clone(),
+                            initial_value: None,
+                        };
+                        variables.push(variable);
+
+                        // Create a combinational assignment for the initialization
+                        let assignment = HirAssignment {
+                            id: self.next_assignment_id(),
+                            lhs: HirLValue::Variable(let_stmt.id),
+                            assignment_type: HirAssignmentType::Combinational,
+                            rhs: let_stmt.value,
+                        };
                         assignments.push(assignment);
                     }
                 }
@@ -405,6 +442,7 @@ impl HirBuilderContext {
             signals,
             variables,
             constants,
+            functions,
             event_blocks,
             assignments,
             covergroups: Vec::new(),   // TODO: Implement covergroup building
@@ -511,17 +549,8 @@ impl HirBuilderContext {
             if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
                 self.extract_hir_type(&type_node)
             } else {
-                eprintln!(
-                    "DEBUG build_signal '{}': No TypeAnnotation, using node directly",
-                    name
-                );
                 self.extract_hir_type(node)
             };
-
-        eprintln!(
-            "DEBUG build_signal '{}': final type = {:?}",
-            name, signal_type
-        );
 
         // Build initial value
         let initial_value = self.find_initial_value_expr(node);
@@ -578,6 +607,72 @@ impl HirBuilderContext {
             name,
             const_type,
             value,
+        })
+    }
+
+    /// Build function declaration
+    fn build_function(&mut self, node: &SyntaxNode) -> Option<HirFunction> {
+        let id = self.next_function_id();
+
+        // Check if this is a const function (has ConstKw token before FnKw)
+        let is_const = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .any(|t| t.kind() == SyntaxKind::ConstKw);
+
+        // Extract function name
+        let name = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        // Build parameters
+        let mut params = Vec::new();
+        if let Some(param_list) = node.first_child_of_kind(SyntaxKind::ParameterList) {
+            for param_node in param_list.children_of_kind(SyntaxKind::Parameter) {
+                if let Some(param) = self.build_parameter(&param_node) {
+                    params.push(param);
+                }
+            }
+        }
+
+        // Extract optional return type
+        let return_type = node
+            .children()
+            .skip_while(|n| !matches!(n.kind(), SyntaxKind::Arrow))
+            .skip(1) // Skip the Arrow itself
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::TypeAnnotation
+                        | SyntaxKind::BitType
+                        | SyntaxKind::LogicType
+                        | SyntaxKind::IntType
+                        | SyntaxKind::NatType
+                        | SyntaxKind::CustomType
+                        | SyntaxKind::ArrayType
+                )
+            })
+            .map(|n| self.extract_hir_type(&n));
+
+        // Build function body (statements from block)
+        let body = if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
+            self.build_statements(&block)
+        } else {
+            Vec::new()
+        };
+
+        // Register function in symbol table
+        self.symbols.add_to_scope(&name, SymbolId::Function(id));
+
+        Some(HirFunction {
+            id,
+            is_const,
+            name,
+            params,
+            return_type,
+            body,
         })
     }
 
@@ -688,9 +783,26 @@ impl HirBuilderContext {
                         statements.push(HirStatement::Cover(cover_stmt));
                     }
                 }
+                SyntaxKind::LetStmt => {
+                    if let Some(let_stmt) = self.build_let_statement(&child) {
+                        statements.push(HirStatement::Let(let_stmt));
+                    }
+                }
                 SyntaxKind::BlockStmt => {
                     let block_stmts = self.build_statements(&child);
                     statements.push(HirStatement::Block(block_stmts));
+                }
+                SyntaxKind::ExprStmt => {
+                    // Expression statement (for implicit returns in functions)
+                    if let Some(stmt) = self.build_statement(&child) {
+                        statements.push(stmt);
+                    }
+                }
+                SyntaxKind::ReturnStmt => {
+                    // Return statement
+                    if let Some(stmt) = self.build_statement(&child) {
+                        statements.push(stmt);
+                    }
                 }
                 _ => {}
             }
@@ -729,6 +841,141 @@ impl HirBuilderContext {
                 .build_property_statement(node)
                 .map(HirStatement::Property),
             SyntaxKind::CoverStmt => self.build_cover_statement(node).map(HirStatement::Cover),
+            SyntaxKind::LetStmt => self.build_let_statement(node).map(HirStatement::Let),
+            SyntaxKind::ReturnStmt => {
+                // Return statement: return [expr]
+                let expr = node
+                    .children()
+                    .find(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::LiteralExpr
+                                | SyntaxKind::IdentExpr
+                                | SyntaxKind::BinaryExpr
+                                | SyntaxKind::UnaryExpr
+                                | SyntaxKind::FieldExpr
+                                | SyntaxKind::IndexExpr
+                                | SyntaxKind::PathExpr
+                                | SyntaxKind::ParenExpr
+                                | SyntaxKind::IfExpr
+                                | SyntaxKind::MatchExpr
+                                | SyntaxKind::CallExpr
+                                | SyntaxKind::ArrayLiteral
+                        )
+                    })
+                    .and_then(|n| self.build_expression(&n));
+                Some(HirStatement::Return(expr))
+            }
+            SyntaxKind::ExprStmt => {
+                // Expression statement (implicit return at end of function)
+                // Check for function call pattern: IdentExpr followed by CallExpr
+                let children: Vec<_> = node.children().collect();
+
+                // Look for IdentExpr + CallExpr pattern (postfix function call)
+                for i in 0..children.len().saturating_sub(1) {
+                    if children[i].kind() == SyntaxKind::IdentExpr
+                        && children[i + 1].kind() == SyntaxKind::CallExpr
+                    {
+                        // This is a function call - get function name from IdentExpr
+                        if let Some(func_name) = children[i]
+                            .first_token_of_kind(SyntaxKind::Ident)
+                            .map(|t| t.text().to_string())
+                        {
+                            // Parse arguments from CallExpr
+                            // Note: Parser may create intermediate nodes (e.g., IdentExpr) that are
+                            // part of larger expressions (e.g., BinaryExpr). We need to identify
+                            // the top-level argument expressions.
+                            let call_children: Vec<_> = children[i + 1].children().collect();
+
+                            let mut args = Vec::new();
+                            let mut skip_next = false;
+
+                            for (idx, arg_child) in call_children.iter().enumerate() {
+                                if skip_next {
+                                    skip_next = false;
+                                    continue;
+                                }
+
+                                // Check for nested function call: IdentExpr followed by CallExpr
+                                if arg_child.kind() == SyntaxKind::IdentExpr
+                                    && idx + 1 < call_children.len()
+                                {
+                                    let next_kind = call_children[idx + 1].kind();
+
+                                    if next_kind == SyntaxKind::CallExpr {
+                                        // This is a nested function call
+                                        if let Some(nested_func_name) = arg_child
+                                            .first_token_of_kind(SyntaxKind::Ident)
+                                            .map(|t| t.text().to_string())
+                                        {
+                                            // Parse arguments from the nested CallExpr
+                                            let mut nested_args = Vec::new();
+                                            for nested_arg_child in
+                                                call_children[idx + 1].children()
+                                            {
+                                                if let Some(nested_arg_expr) =
+                                                    self.build_expression(&nested_arg_child)
+                                                {
+                                                    nested_args.push(nested_arg_expr);
+                                                }
+                                            }
+
+                                            let nested_call = HirExpression::Call(HirCallExpr {
+                                                function: nested_func_name,
+                                                args: nested_args,
+                                            });
+                                            args.push(nested_call);
+                                            skip_next = true; // Skip the CallExpr in next iteration
+                                            continue;
+                                        }
+                                    } else if matches!(
+                                        next_kind,
+                                        SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr
+                                    ) {
+                                        // IdentExpr is part of a binary/unary expression
+                                        continue;
+                                    }
+                                }
+
+                                if let Some(arg_expr) = self.build_expression(arg_child) {
+                                    args.push(arg_expr);
+                                }
+                            }
+                            let call_expr = HirExpression::Call(HirCallExpr {
+                                function: func_name,
+                                args,
+                            });
+                            return Some(HirStatement::Expression(call_expr));
+                        }
+                    }
+                }
+
+                // Fall back to original logic if no function call pattern found
+                // Search children in reverse to prioritize complex expressions like BinaryExpr
+                // over simple ones like IdentExpr (which may not be in scope yet)
+                let expr = children
+                    .into_iter()
+                    .rev()
+                    .find(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::BinaryExpr
+                                | SyntaxKind::UnaryExpr
+                                | SyntaxKind::CallExpr
+                                | SyntaxKind::IfExpr
+                                | SyntaxKind::MatchExpr
+                                | SyntaxKind::FieldExpr
+                                | SyntaxKind::IndexExpr
+                                | SyntaxKind::ParenExpr
+                                | SyntaxKind::ArrayLiteral
+                                | SyntaxKind::PathExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::IdentExpr
+                        )
+                    })
+                    .and_then(|n| self.build_expression(&n))?;
+                Some(HirStatement::Expression(expr))
+            }
             SyntaxKind::BlockStmt => {
                 let block_stmts = self.build_statements(node);
                 Some(HirStatement::Block(block_stmts))
@@ -1094,6 +1341,72 @@ impl HirBuilderContext {
             condition,
             then_statements,
             else_statements,
+        })
+    }
+
+    /// Build let statement
+    fn build_let_statement(&mut self, node: &SyntaxNode) -> Option<HirLetStatement> {
+        // Extract variable name using children_with_tokens to access tokens
+        let name = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        // Extract optional type annotation
+        let explicit_type = node
+            .children()
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::TypeAnnotation
+                        | SyntaxKind::BitType
+                        | SyntaxKind::LogicType
+                        | SyntaxKind::IntType
+                        | SyntaxKind::NatType
+                        | SyntaxKind::CustomType
+                        | SyntaxKind::ArrayType
+                )
+            })
+            .map(|n| self.extract_hir_type(&n));
+
+        // Extract initializer expression
+        let value = node
+            .children()
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::ParenExpr
+                )
+            })
+            .and_then(|n| self.build_expression(&n))?;
+
+        // Allocate a variable ID for this let binding
+        let id = self.next_variable_id();
+
+        // Use explicit type if provided, otherwise we'll need type inference
+        // For now, use a placeholder type that will be inferred later
+        let var_type = explicit_type.unwrap_or({
+            // Default to Nat(32) as a placeholder - type inference will refine this
+            HirType::Nat(32)
+        });
+
+        // Register in symbol table so the variable can be resolved
+        self.symbols.variables.insert(name.clone(), id);
+        self.symbols.add_to_scope(&name, SymbolId::Variable(id));
+
+        Some(HirLetStatement {
+            id,
+            name,
+            var_type,
+            value,
         })
     }
 
@@ -1671,6 +1984,7 @@ impl HirBuilderContext {
             SyntaxKind::BinaryExpr => self.build_binary_expr(node),
             SyntaxKind::UnaryExpr => self.build_unary_expr(node),
             SyntaxKind::CallExpr => self.build_call_expr(node),
+            SyntaxKind::StructLiteral => self.build_struct_literal(node),
             SyntaxKind::FieldExpr => self.build_field_expr(node),
             SyntaxKind::IndexExpr => self.build_index_expr(node),
             SyntaxKind::PathExpr => self.build_path_expr(node),
@@ -1815,38 +2129,130 @@ impl HirBuilderContext {
                 _ => None,
             }
         } else {
-            self.errors.push(HirError {
-                message: format!("Undefined symbol: {}", name),
-                location: None,
-            });
-            None
+            // Treat unresolved identifiers as generic parameters or function parameters
+            // This allows const function parameters to be referenced in function bodies
+            // They will be bound during const evaluation
+            Some(HirExpression::GenericParam(name))
         }
     }
 
     /// Build function call expression
     fn build_call_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Get function name from first identifier
-        let function = node
-            .first_token_of_kind(SyntaxKind::Ident)
-            .map(|t| t.text().to_string())?;
+        // Get function name - try direct Ident token first, then IdentExpr child,
+        // then check for preceding sibling IdentExpr (postfix call syntax)
+        let function = if let Some(ident_token) = node.first_token_of_kind(SyntaxKind::Ident) {
+            ident_token.text().to_string()
+        } else if let Some(ident_expr) = node.first_child_of_kind(SyntaxKind::IdentExpr) {
+            let name = ident_expr
+                .first_token_of_kind(SyntaxKind::Ident)
+                .map(|t| t.text().to_string())?;
+            name
+        } else if let Some(parent) = node.parent() {
+            // Postfix call: IdentExpr and CallExpr are siblings
+            // Look for preceding IdentExpr sibling
+            let siblings: Vec<_> = parent.children().collect();
+            let call_pos = siblings.iter().position(|n| n == node)?;
 
-        // Parse arguments - all child nodes are arguments (tokens like LParen/RParen are not in children())
+            if call_pos > 0 {
+                if let Some(prev_sibling) = siblings.get(call_pos - 1) {
+                    if prev_sibling.kind() == SyntaxKind::IdentExpr {
+                        let name = prev_sibling
+                            .first_token_of_kind(SyntaxKind::Ident)
+                            .map(|t| t.text().to_string())?;
+                        name
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
+        // Parse arguments - skip the first child if it's the function name (IdentExpr)
         let mut args = Vec::new();
-
-        eprintln!(
-            "DEBUG build_call_expr: function={}, children: {:?}",
-            function,
-            node.children().map(|c| c.kind()).collect::<Vec<_>>()
-        );
+        let mut skip_first = node
+            .first_child()
+            .is_some_and(|c| c.kind() == SyntaxKind::IdentExpr);
 
         for child in node.children() {
-            // All children of CallExpr are expression arguments
+            if skip_first {
+                skip_first = false;
+                continue; // Skip the IdentExpr that contains the function name
+            }
+            // All remaining children are expression arguments
             if let Some(expr) = self.build_expression(&child) {
                 args.push(expr);
             }
         }
 
         Some(HirExpression::Call(HirCallExpr { function, args }))
+    }
+
+    /// Build struct literal expression
+    fn build_struct_literal(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // The StructLiteral node should have:
+        // - A type name token (first Ident)
+        // - Multiple StructFieldInit children
+
+        // Get the type name - it's the first identifier token in the StructLiteral node
+        let type_name = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        // Parse field initializations
+        let mut fields = Vec::new();
+        for child in node.children() {
+            if child.kind() == SyntaxKind::StructFieldInit {
+                if let Some(field_init) = self.build_struct_field_init(&child) {
+                    fields.push(field_init);
+                }
+            }
+        }
+
+        Some(HirExpression::StructLiteral(HirStructLiteral {
+            type_name,
+            fields,
+        }))
+    }
+
+    /// Build struct field initialization
+    fn build_struct_field_init(&mut self, node: &SyntaxNode) -> Option<HirStructFieldInit> {
+        // StructFieldInit has: field_name : expression
+        let name = node
+            .first_token_of_kind(SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        // Find the expression child
+        let value = node
+            .children()
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::StructLiteral
+                        | SyntaxKind::ArrayLiteral
+                )
+            })
+            .and_then(|n| self.build_expression(&n))?;
+
+        Some(HirStructFieldInit { name, value })
     }
 
     /// Build binary expression
@@ -3273,16 +3679,40 @@ impl HirBuilderContext {
     fn build_nat_type(&mut self, node: &SyntaxNode) -> HirType {
         // Look for width specification [N] or <N>
         if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
-            eprintln!(
-                "DEBUG build_nat_type: Found WidthSpec, children: {:?}",
-                width_node.children().map(|c| c.kind()).collect::<Vec<_>>()
-            );
-            // Look for expression inside width spec
+            // Special case: function call is represented as IdentExpr + CallExpr siblings
+            let has_ident = width_node
+                .first_child_of_kind(SyntaxKind::IdentExpr)
+                .is_some();
+            let has_call = width_node
+                .first_child_of_kind(SyntaxKind::CallExpr)
+                .is_some();
+
+            if has_ident && has_call {
+                // This is a function call - combine IdentExpr and CallExpr
+                if let Some(func_name) = width_node
+                    .first_child_of_kind(SyntaxKind::IdentExpr)
+                    .and_then(|n| n.first_token_of_kind(SyntaxKind::Ident))
+                    .map(|t| t.text().to_string())
+                {
+                    if let Some(call_node) = width_node.first_child_of_kind(SyntaxKind::CallExpr) {
+                        let mut args = Vec::new();
+                        for arg_child in call_node.children() {
+                            if let Some(arg_expr) = self.build_expression(&arg_child) {
+                                args.push(arg_expr);
+                            }
+                        }
+
+                        let call_expr = HirExpression::Call(HirCallExpr {
+                            function: func_name,
+                            args,
+                        });
+                        return HirType::NatExpr(Box::new(call_expr));
+                    }
+                }
+            }
+
+            // Normal case: try to build each child as an expression
             for child in width_node.children() {
-                eprintln!(
-                    "DEBUG build_nat_type: Processing child kind {:?}",
-                    child.kind()
-                );
                 // Try to build as expression
                 if let Some(expr) = self.build_expression(&child) {
                     match &expr {
@@ -3296,11 +3726,6 @@ impl HirBuilderContext {
                             return HirType::NatExpr(Box::new(expr));
                         }
                     }
-                } else {
-                    eprintln!(
-                        "DEBUG build_nat_type: build_expression returned None for child {:?}",
-                        child.kind()
-                    );
                 }
             }
         }
@@ -3624,6 +4049,12 @@ impl HirBuilderContext {
     fn next_constant_id(&mut self) -> ConstantId {
         let id = ConstantId(self.next_constant_id);
         self.next_constant_id += 1;
+        id
+    }
+
+    fn next_function_id(&mut self) -> FunctionId {
+        let id = FunctionId(self.next_function_id);
+        self.next_function_id += 1;
         id
     }
 

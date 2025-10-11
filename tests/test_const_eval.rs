@@ -5,7 +5,7 @@ use skalp_frontend::hir::{HirBinaryExpr, HirBinaryOp, HirExpression, HirLiteral}
 
 #[test]
 fn test_basic_arithmetic() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 5 + 3
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -20,7 +20,7 @@ fn test_basic_arithmetic() {
 
 #[test]
 fn test_multiplication() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 4 * 7
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -35,7 +35,7 @@ fn test_multiplication() {
 
 #[test]
 fn test_subtraction() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 10 - 3
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -50,7 +50,7 @@ fn test_subtraction() {
 
 #[test]
 fn test_division() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 20 / 4
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -65,7 +65,7 @@ fn test_division() {
 
 #[test]
 fn test_nested_arithmetic() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // (5 + 3) * 2
     let add_expr = HirExpression::Binary(HirBinaryExpr {
@@ -86,7 +86,7 @@ fn test_nested_arithmetic() {
 
 #[test]
 fn test_comparison_operators() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 5 < 10
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -111,7 +111,7 @@ fn test_comparison_operators() {
 
 #[test]
 fn test_equality() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 5 == 5
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -126,7 +126,7 @@ fn test_equality() {
 
 #[test]
 fn test_logical_and() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // true && false
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -141,7 +141,7 @@ fn test_logical_and() {
 
 #[test]
 fn test_logical_or() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // true || false
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -156,7 +156,7 @@ fn test_logical_or() {
 
 #[test]
 fn test_bitwise_operations() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 5 | 3 (0b101 | 0b011 = 0b111 = 7)
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -171,7 +171,7 @@ fn test_bitwise_operations() {
 
 #[test]
 fn test_shift_left() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 1 << 3
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -186,7 +186,7 @@ fn test_shift_left() {
 
 #[test]
 fn test_shift_right() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 16 >> 2
     let expr = HirExpression::Binary(HirBinaryExpr {
@@ -243,7 +243,7 @@ fn test_complex_expression_with_params() {
 
 #[test]
 fn test_boolean_literals() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     let expr_true = HirExpression::Literal(HirLiteral::Boolean(true));
     let result = eval.eval(&expr_true).unwrap();
@@ -256,7 +256,7 @@ fn test_boolean_literals() {
 
 #[test]
 fn test_modulo_operation() {
-    let eval = ConstEvaluator::new();
+    let mut eval = ConstEvaluator::new();
 
     // 17 % 5
     let expr = HirExpression::Binary(HirBinaryExpr {

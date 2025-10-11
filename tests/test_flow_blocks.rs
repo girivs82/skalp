@@ -123,6 +123,15 @@ mod flow_block_tests {
                     skalp_frontend::hir::HirStatement::Cover(_) => {
                         println!("    Statement {}: Cover", j);
                     }
+                    skalp_frontend::hir::HirStatement::Let(_) => {
+                        println!("    Statement {}: Let", j);
+                    }
+                    skalp_frontend::hir::HirStatement::Return(_) => {
+                        println!("    Statement {}: Return", j);
+                    }
+                    skalp_frontend::hir::HirStatement::Expression(_) => {
+                        println!("    Statement {}: Expression", j);
+                    }
                 }
             }
         }

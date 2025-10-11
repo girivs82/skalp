@@ -2,7 +2,7 @@
 //!
 //! Evaluates compile-time constant expressions for monomorphization
 
-use crate::hir::{HirBinaryOp, HirExpression, HirLiteral, HirUnaryOp};
+use crate::hir::{HirBinaryOp, HirExpression, HirFunction, HirLiteral, HirStatement, HirUnaryOp};
 use std::collections::HashMap;
 
 /// Const expression evaluation result
@@ -111,6 +111,10 @@ pub struct ConstEvaluator {
     const_bindings: HashMap<String, ConstValue>,
     /// Built-in const functions
     builtin_fns: HashMap<String, BuiltinConstFn>,
+    /// User-defined const functions
+    user_fns: HashMap<String, HirFunction>,
+    /// Recursion depth (for preventing infinite recursion)
+    recursion_depth: usize,
 }
 
 /// Evaluation error
@@ -130,6 +134,10 @@ pub enum EvalError {
     InvalidArgCount { expected: usize, got: usize },
     /// Field not found
     FieldNotFound(String),
+    /// Recursion limit exceeded
+    RecursionLimitExceeded,
+    /// Non-const function cannot be evaluated at compile time
+    NonConstFunction(String),
 }
 
 impl ConstEvaluator {
@@ -150,6 +158,8 @@ impl ConstEvaluator {
         Self {
             const_bindings: HashMap::new(),
             builtin_fns,
+            user_fns: HashMap::new(),
+            recursion_depth: 0,
         }
     }
 
@@ -163,8 +173,27 @@ impl ConstEvaluator {
         self.const_bindings.extend(bindings);
     }
 
+    /// Register a user-defined const function
+    pub fn register_function(&mut self, func: HirFunction) {
+        if func.is_const {
+            self.user_fns.insert(func.name.clone(), func);
+        }
+    }
+
+    /// Register multiple user-defined const functions
+    pub fn register_functions(&mut self, funcs: &[HirFunction]) {
+        for func in funcs {
+            self.register_function(func.clone());
+        }
+    }
+
     /// Evaluate a const expression
-    pub fn eval(&self, expr: &HirExpression) -> Result<ConstValue, EvalError> {
+    pub fn eval(&mut self, expr: &HirExpression) -> Result<ConstValue, EvalError> {
+        // Check recursion depth
+        const MAX_RECURSION_DEPTH: usize = 100;
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            return Err(EvalError::RecursionLimitExceeded);
+        }
         match expr {
             // Literals are trivially constant
             HirExpression::Literal(lit) => self.eval_literal(lit),
@@ -185,12 +214,30 @@ impl ConstEvaluator {
             // Function calls
             HirExpression::Call(call) => {
                 let fn_name = &call.function;
-                if let Some(builtin) = self.builtin_fns.get(fn_name) {
+
+                // Check built-in functions first
+                if let Some(&builtin) = self.builtin_fns.get(fn_name) {
                     // Evaluate arguments
                     let args: Result<Vec<_>, _> =
                         call.args.iter().map(|arg| self.eval(arg)).collect();
                     let args = args?;
                     builtin(&args)
+                } else if let Some(user_fn) = self.user_fns.get(fn_name).cloned() {
+                    // User-defined const function
+                    if !user_fn.is_const {
+                        return Err(EvalError::NonConstFunction(fn_name.clone()));
+                    }
+
+                    // Check argument count
+                    if call.args.len() != user_fn.params.len() {
+                        return Err(EvalError::InvalidArgCount {
+                            expected: user_fn.params.len(),
+                            got: call.args.len(),
+                        });
+                    }
+
+                    // Evaluate user-defined function
+                    self.eval_user_function(&user_fn, &call.args)
                 } else {
                     Err(EvalError::FunctionNotFound(fn_name.clone()))
                 }
@@ -239,6 +286,89 @@ impl ConstEvaluator {
         }
     }
 
+    /// Evaluate a user-defined const function
+    fn eval_user_function(
+        &mut self,
+        func: &HirFunction,
+        args: &[HirExpression],
+    ) -> Result<ConstValue, EvalError> {
+        // Increment recursion depth
+        self.recursion_depth += 1;
+
+        // Save current bindings (for restoring later)
+        let saved_bindings = self.const_bindings.clone();
+
+        // Bind parameters to argument values
+        for (param, arg_expr) in func.params.iter().zip(args.iter()) {
+            let arg_val = self.eval(arg_expr)?;
+            self.const_bindings.insert(param.name.clone(), arg_val);
+        }
+
+        // Evaluate function body
+        let result = self.eval_function_body(&func.body);
+
+        // Restore bindings and decrement recursion depth
+        self.const_bindings = saved_bindings;
+        self.recursion_depth -= 1;
+
+        result
+    }
+
+    /// Evaluate function body and extract return value
+    fn eval_function_body(&mut self, body: &[HirStatement]) -> Result<ConstValue, EvalError> {
+        // Look for a return statement or expression statement
+        for stmt in body {
+            match stmt {
+                HirStatement::Return(Some(expr)) => {
+                    return self.eval(expr);
+                }
+                HirStatement::Return(None) => {
+                    return Err(EvalError::TypeMismatch(
+                        "Const function must return a value".to_string(),
+                    ));
+                }
+                HirStatement::Expression(expr) => {
+                    // Last expression is the return value (Rust-style)
+                    return self.eval(expr);
+                }
+                HirStatement::If(if_stmt) => {
+                    // Evaluate if condition
+                    let cond = self.eval(&if_stmt.condition)?;
+                    match cond {
+                        ConstValue::Bool(true) => {
+                            return self.eval_function_body(&if_stmt.then_statements);
+                        }
+                        ConstValue::Bool(false) => {
+                            if let Some(ref else_stmts) = if_stmt.else_statements {
+                                return self.eval_function_body(else_stmts);
+                            }
+                        }
+                        _ => {
+                            return Err(EvalError::TypeMismatch(
+                                "If condition must be boolean".to_string(),
+                            ));
+                        }
+                    }
+                }
+                HirStatement::Let(let_stmt) => {
+                    // Evaluate let binding
+                    let val = self.eval(&let_stmt.value)?;
+                    self.const_bindings.insert(let_stmt.name.clone(), val);
+                }
+                _ => {
+                    // Other statements cannot appear in const functions
+                    return Err(EvalError::NotConstant(
+                        "Statement not allowed in const function".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Err(EvalError::TypeMismatch(
+            "Const function must have a return value".to_string(),
+        ))
+    }
+
     /// Evaluate a literal
     fn eval_literal(&self, lit: &HirLiteral) -> Result<ConstValue, EvalError> {
         match lit {
@@ -251,7 +381,7 @@ impl ConstEvaluator {
     }
 
     /// Evaluate binary operation
-    fn eval_binary(&self, bin: &crate::hir::HirBinaryExpr) -> Result<ConstValue, EvalError> {
+    fn eval_binary(&mut self, bin: &crate::hir::HirBinaryExpr) -> Result<ConstValue, EvalError> {
         let left = self.eval(&bin.left)?;
         let right = self.eval(&bin.right)?;
 
@@ -401,7 +531,7 @@ impl ConstEvaluator {
     }
 
     /// Evaluate unary operation
-    fn eval_unary(&self, un: &crate::hir::HirUnaryExpr) -> Result<ConstValue, EvalError> {
+    fn eval_unary(&mut self, un: &crate::hir::HirUnaryExpr) -> Result<ConstValue, EvalError> {
         let operand = self.eval(&un.operand)?;
 
         match un.op {
@@ -545,7 +675,7 @@ mod tests {
 
     #[test]
     fn test_eval_literal() {
-        let eval = ConstEvaluator::new();
+        let mut eval = ConstEvaluator::new();
 
         let expr = HirExpression::Literal(HirLiteral::Integer(42));
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(42));
@@ -556,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_eval_arithmetic() {
-        let eval = ConstEvaluator::new();
+        let mut eval = ConstEvaluator::new();
 
         // 2 + 3
         let expr = HirExpression::Binary(HirBinaryExpr {
@@ -577,7 +707,7 @@ mod tests {
 
     #[test]
     fn test_clog2() {
-        let eval = ConstEvaluator::new();
+        let mut eval = ConstEvaluator::new();
 
         // clog2(1024) = 10
         let expr = HirExpression::Call(crate::hir::HirCallExpr {

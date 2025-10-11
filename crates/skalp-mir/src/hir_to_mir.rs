@@ -4,6 +4,7 @@
 //! to the mid-level MIR suitable for code generation
 
 use crate::mir::*;
+use skalp_frontend::const_eval::ConstEvaluator;
 use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
 
@@ -35,6 +36,8 @@ pub struct HirToMir<'hir> {
     hir: Option<&'hir Hir>,
     /// Current entity being converted (for generic parameter resolution)
     current_entity_id: Option<hir::EntityId>,
+    /// Const evaluator for evaluating const expressions (including user-defined const functions)
+    const_evaluator: ConstEvaluator,
 }
 
 impl<'hir> HirToMir<'hir> {
@@ -54,12 +57,17 @@ impl<'hir> HirToMir<'hir> {
             clock_domain_map: HashMap::new(),
             hir: None,
             current_entity_id: None,
+            const_evaluator: ConstEvaluator::new(),
         }
     }
 
     /// Transform HIR to MIR
     pub fn transform(&mut self, hir: &'hir Hir) -> Mir {
         self.hir = Some(hir);
+
+        // Register all user-defined const functions in the evaluator
+        self.const_evaluator.register_functions(&hir.functions);
+
         let mut mir = Mir::new(hir.name.clone());
 
         // First pass: create modules for entities
@@ -311,6 +319,33 @@ impl<'hir> HirToMir<'hir> {
                 // Cover statements are handled by the verification backend
                 // Skip in MIR generation for now
                 // TODO: Implement cover conversion for coverage collection
+                None
+            }
+            hir::HirStatement::Let(let_stmt) => {
+                // Convert let statement to assignment
+                // Let bindings are local variables that need to be treated as blocking assignments
+                let lhs = self
+                    .variable_map
+                    .get(&let_stmt.id)
+                    .map(|&id| LValue::Variable(id))?;
+                let rhs = self.convert_expression(&let_stmt.value)?;
+                Some(Statement::Assignment(Assignment {
+                    lhs,
+                    rhs,
+                    kind: AssignmentKind::Blocking,
+                }))
+            }
+            hir::HirStatement::Return(_return_expr) => {
+                // Return statements are function constructs
+                // For now, skip them in MIR as functions aren't yet lowered to hardware
+                // TODO: Implement function support in MIR
+                None
+            }
+            hir::HirStatement::Expression(_expr) => {
+                // Expression statements (standalone expressions without assignment)
+                // These represent implicit return values in functions
+                // For now, skip them in MIR as they don't map to hardware
+                // TODO: Handle when implementing function support in MIR
                 None
             }
         }
@@ -732,6 +767,73 @@ impl<'hir> HirToMir<'hir> {
                 // match x { 1 => a, 2 => b, _ => c } becomes: (x == 1) ? a : ((x == 2) ? b : c)
                 self.convert_match_to_conditionals(&match_expr.expr, &match_expr.arms)
             }
+            hir::HirExpression::StructLiteral(struct_lit) => {
+                // Convert struct literal to packed bit vector
+                // Each field value is evaluated and packed into the correct bit positions
+                self.convert_struct_literal(&struct_lit.type_name, &struct_lit.fields)
+            }
+        }
+    }
+
+    /// Convert struct literal to packed bit vector expression
+    fn convert_struct_literal(
+        &mut self,
+        type_name: &str,
+        fields: &[hir::HirStructFieldInit],
+    ) -> Option<Expression> {
+        // Find the struct type definition to get field layout
+        let hir = self.hir?;
+        let mut struct_type: Option<&hir::HirStructType> = None;
+
+        // Search for struct type in entities and implementations
+        for entity in &hir.entities {
+            for port in &entity.ports {
+                if let hir::HirType::Struct(ref st) = &port.port_type {
+                    if st.name == type_name {
+                        struct_type = Some(st);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if struct_type.is_none() {
+            for impl_block in &hir.implementations {
+                for signal in &impl_block.signals {
+                    if let hir::HirType::Struct(ref st) = &signal.signal_type {
+                        if st.name == type_name {
+                            struct_type = Some(st);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let struct_def = struct_type?;
+
+        // Convert field values and pack them into a bit vector
+        // For now, create a binary expression that concatenates the field values
+        // In a real implementation, we'd pack these properly based on bit offsets
+
+        // Collect field expressions in order
+        let mut field_exprs = Vec::new();
+        for struct_field in &struct_def.fields {
+            // Find the corresponding field init
+            let field_init = fields.iter().find(|f| f.name == struct_field.name)?;
+            let field_expr = self.convert_expression(&field_init.value)?;
+            field_exprs.push(field_expr);
+        }
+
+        // For simplicity, if there's only one field, return that expression
+        // For multiple fields, we'd need proper concatenation support in MIR
+        // TODO: Implement proper struct packing in MIR
+        if field_exprs.len() == 1 {
+            Some(field_exprs.into_iter().next().unwrap())
+        } else {
+            // For now, return the first field as a placeholder
+            // This is a limitation that will need proper struct support in MIR
+            field_exprs.into_iter().next()
         }
     }
 
@@ -1197,7 +1299,13 @@ impl<'hir> HirToMir<'hir> {
     /// Try to evaluate a const expression at compile time
     /// Returns Some(value) if the expression can be evaluated, None otherwise
     #[allow(clippy::only_used_in_recursion)]
-    fn try_eval_const_expr(&self, expr: &hir::HirExpression) -> Option<u64> {
+    fn try_eval_const_expr(&mut self, expr: &hir::HirExpression) -> Option<u64> {
+        // Try using the const evaluator first (handles both built-in and user-defined functions)
+        if let Ok(const_val) = self.const_evaluator.eval(expr) {
+            return const_val.as_nat().map(|n| n as u64);
+        }
+
+        // Fallback to manual evaluation for expressions the evaluator can't handle
         match expr {
             hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) => Some(*val),
             hir::HirExpression::Binary(bin_expr) => {
@@ -1215,7 +1323,7 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::Call(call_expr) => {
-                // Handle intrinsic functions
+                // Handle intrinsic functions (for backward compatibility)
                 match call_expr.function.as_str() {
                     "clog2" => {
                         // Calculate ceiling log2
@@ -1242,7 +1350,7 @@ impl<'hir> HirToMir<'hir> {
                             None
                         }
                     }
-                    _ => None, // Unknown function
+                    _ => None, // Unknown function - const evaluator already tried
                 }
             }
             hir::HirExpression::GenericParam(param_name) => {
@@ -1414,7 +1522,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Get the bit range for a struct field or vector component
     fn get_field_bit_range(
-        &self,
+        &mut self,
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<(usize, usize)> {
@@ -1457,11 +1565,18 @@ impl<'hir> HirToMir<'hir> {
         // Get the struct type from the base expression
         let struct_type = self.get_expression_struct_type(base)?;
 
+        // Clone the fields to avoid borrow checker issues
+        let fields: Vec<_> = struct_type
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.field_type.clone()))
+            .collect();
+
         // Calculate field offset
         let mut current_offset = 0;
-        for field in &struct_type.fields {
-            let field_width = self.get_hir_type_width(&field.field_type);
-            if field.name == field_name {
+        for (field_name_in_struct, field_type) in fields {
+            let field_width = self.get_hir_type_width(&field_type);
+            if field_name_in_struct == field_name {
                 // Found the field - return its bit range
                 let high_bit = current_offset + field_width - 1;
                 let low_bit = current_offset;
@@ -1521,7 +1636,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Get the width in bits of a HIR type
     #[allow(clippy::only_used_in_recursion)]
-    fn get_hir_type_width(&self, hir_type: &hir::HirType) -> usize {
+    fn get_hir_type_width(&mut self, hir_type: &hir::HirType) -> usize {
         match hir_type {
             hir::HirType::Bit(width) => *width as usize,
             hir::HirType::Bool => 1, // Boolean is represented as 1 bit in hardware
