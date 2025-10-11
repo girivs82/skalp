@@ -1,0 +1,37 @@
+[package]
+name = "skalp-package"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Internal dependencies
+skalp-manifest = { path = "../skalp-manifest" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# Version handling
+semver = "1.0"
+
+# File system and paths
+walkdir = "2.4"
+
+# HTTP client for downloading packages
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+# Hashing for integrity checks
+sha2 = "0.10"
+
+# Error handling
+thiserror = "1.0"
+
+# Async runtime (for future async support)
+tokio = { version = "1.35", features = ["full"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[features]
+default = []
+async = ["tokio", "reqwest/stream"]
