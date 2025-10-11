@@ -6,11 +6,13 @@
 pub mod cache;
 pub mod error;
 pub mod lockfile;
+pub mod registry;
 pub mod resolver;
 pub mod source;
 
 pub use error::{PackageError, Result};
 pub use lockfile::Lockfile;
+pub use registry::{PackageMetadata, RegistryClient, VersionInfo};
 pub use resolver::Resolver;
 pub use source::{PackageSource, SourceKind};
 

@@ -3,7 +3,8 @@
 use crate::cache::Cache;
 use crate::error::{PackageError, Result};
 use crate::lockfile::{LockedPackage, Lockfile};
-use crate::source::{GitReference, PackageSource};
+use crate::registry::RegistryClient;
+use crate::source::{GitReference, PackageSource, SourceKind};
 use crate::RegistryConfig;
 use skalp_manifest::{DependencySpec, Manifest};
 use std::collections::HashSet;
@@ -15,6 +16,8 @@ pub struct Resolver {
     registry: RegistryConfig,
     /// Package cache
     cache: Cache,
+    /// Registry client
+    registry_client: Option<RegistryClient>,
     /// Root manifest being resolved
     root_manifest: Option<Manifest>,
 }
@@ -23,9 +26,11 @@ impl Resolver {
     /// Create a new resolver with the given configuration
     pub fn new(registry: RegistryConfig) -> Self {
         let cache = Cache::new(registry.cache_dir.clone());
+        let registry_client = RegistryClient::new(registry.url.clone()).ok();
         Self {
             registry,
             cache,
+            registry_client,
             root_manifest: None,
         }
     }
@@ -148,6 +153,59 @@ impl Resolver {
     /// Get the cache directory
     pub fn cache_dir(&self) -> &PathBuf {
         &self.registry.cache_dir
+    }
+
+    /// Download and cache a package if needed
+    pub fn ensure_package(&self, source: &PackageSource) -> Result<PathBuf> {
+        // Check if already cached
+        if self.cache.is_cached(source) {
+            return Ok(self.cache.package_dir(source));
+        }
+
+        // Download based on source type
+        match &source.kind {
+            SourceKind::Registry { version } => self.download_from_registry(&source.name, version),
+            SourceKind::Git { .. } => {
+                // Git clone would go here
+                Err(PackageError::DownloadFailed(
+                    "Git dependencies not yet implemented".to_string(),
+                ))
+            }
+            SourceKind::Path { path } => {
+                // Just use the local path
+                Ok(path.clone())
+            }
+        }
+    }
+
+    /// Download a package from the registry
+    fn download_from_registry(&self, name: &str, version: &str) -> Result<PathBuf> {
+        let client = self.registry_client.as_ref().ok_or_else(|| {
+            PackageError::DownloadFailed("Registry client not initialized".to_string())
+        })?;
+
+        // Parse version requirement
+        let version_req = semver::VersionReq::parse(version).map_err(|e| {
+            PackageError::InvalidSource(format!("Invalid version requirement: {}", e))
+        })?;
+
+        // Resolve to specific version
+        let version_info = client.resolve_version(name, &version_req)?;
+
+        // Download to temporary directory first
+        let temp_dir = tempfile::tempdir().map_err(|e| {
+            PackageError::DownloadFailed(format!("Failed to create temp directory: {}", e))
+        })?;
+
+        let result = client.download_package(&version_info, temp_dir.path())?;
+
+        // Create package source for caching
+        let source = PackageSource::registry(name, &version_info.version);
+
+        // Store in cache
+        self.cache.store(&source, &result.path)?;
+
+        Ok(self.cache.package_dir(&source))
     }
 }
 
