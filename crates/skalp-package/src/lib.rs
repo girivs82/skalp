@@ -40,12 +40,3 @@ impl Default for RegistryConfig {
         }
     }
 }
-
-// Helper to get cache directory (stub for now, will use dirs crate later)
-mod dirs {
-    use std::path::PathBuf;
-
-    pub fn cache_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
-    }
-}

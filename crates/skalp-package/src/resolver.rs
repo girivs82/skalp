@@ -6,6 +6,7 @@ use crate::lockfile::{LockedPackage, Lockfile};
 use crate::registry::RegistryClient;
 use crate::source::{GitReference, PackageSource, SourceKind};
 use crate::RegistryConfig;
+use chrono::Utc;
 use skalp_manifest::{DependencySpec, Manifest};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -68,7 +69,7 @@ impl Resolver {
 
         // Add metadata
         lockfile.metadata = Some(crate::lockfile::LockfileMetadata {
-            generated: chrono::Utc::now().to_rfc3339(),
+            generated: Utc::now().to_rfc3339(),
             root: manifest.package.name.clone(),
         });
 
@@ -206,21 +207,6 @@ impl Resolver {
         self.cache.store(&source, &result.path)?;
 
         Ok(self.cache.package_dir(&source))
-    }
-}
-
-// Stub for chrono - we'll add proper timestamp support later
-mod chrono {
-    pub struct Utc;
-
-    impl Utc {
-        pub fn now() -> Self {
-            Self
-        }
-
-        pub fn to_rfc3339(&self) -> String {
-            "2024-01-01T00:00:00Z".to_string()
-        }
     }
 }
 

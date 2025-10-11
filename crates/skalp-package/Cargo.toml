@@ -34,6 +34,12 @@ thiserror = "1.0"
 # Temporary directories for downloads
 tempfile = "3.8"
 
+# Time and date handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Platform-specific directories
+dirs = "5.0"
+
 # Async runtime (for future async support)
 tokio = { version = "1.35", features = ["full"], optional = true }
 
