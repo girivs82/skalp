@@ -226,6 +226,13 @@ pub enum HirEdgeType {
     Inactive, // For reset.inactive (inactive level)
 }
 
+/// Reset polarity in HIR
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HirResetPolarity {
+    ActiveHigh,
+    ActiveLow,
+}
+
 /// Assignment in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirAssignment {
@@ -507,7 +514,10 @@ pub enum HirType {
     Int(u32),
     Nat(u32),
     Clock(Option<ClockDomainId>), // Clock with optional domain
-    Reset(Option<ClockDomainId>), // Reset with optional domain
+    Reset {
+        polarity: HirResetPolarity,
+        clock_domain: Option<ClockDomainId>,
+    }, // Reset with polarity and optional domain
     Event,
     Stream(Box<HirType>), // Stream<T> for streaming data with handshaking
     Array(Box<HirType>, u32),

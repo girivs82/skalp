@@ -128,7 +128,7 @@ fn mangle_type(ty: &HirType) -> String {
         HirType::Bit(width) => format!("bit{}", width),
         HirType::Array(elem, size) => format!("arr{}_{}", mangle_type(elem), size),
         HirType::Clock(_) => "clock".to_string(),
-        HirType::Reset(_) => "reset".to_string(),
+        HirType::Reset { .. } => "reset".to_string(),
         HirType::Float32 => "fp32".to_string(),
         HirType::Float64 => "fp64".to_string(),
         HirType::Float16 => "fp16".to_string(),

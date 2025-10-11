@@ -1156,10 +1156,17 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Clock(domain) => DataType::Clock {
                 domain: domain.map(|id| ClockDomainId(id.0)),
             },
-            hir::HirType::Reset(domain) => DataType::Reset {
-                active_high: true,
-                domain: domain.map(|id| ClockDomainId(id.0)),
-            },
+            hir::HirType::Reset {
+                polarity,
+                clock_domain,
+            } => {
+                // Convert HIR polarity to MIR active_high boolean
+                let active_high = matches!(polarity, hir::HirResetPolarity::ActiveHigh);
+                DataType::Reset {
+                    active_high,
+                    domain: clock_domain.map(|id| ClockDomainId(id.0)),
+                }
+            }
             hir::HirType::Event => DataType::Event,
             hir::HirType::Stream(inner_type) => {
                 // Stream types include implicit handshaking signals
@@ -1654,7 +1661,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Int(width) => *width as usize,
             hir::HirType::Nat(width) => *width as usize,
             hir::HirType::Clock(_) => 1,
-            hir::HirType::Reset(_) => 1,
+            hir::HirType::Reset { .. } => 1,
             hir::HirType::Event => 0,
             hir::HirType::Struct(struct_type) => {
                 let mut total_width = 0;

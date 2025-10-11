@@ -272,12 +272,19 @@ impl HirBuilderContext {
         // In the future, this should parse explicit clock domain parameters
         let mut seen_domains = std::collections::HashSet::new();
         for port in &ports {
-            if let HirType::Clock(Some(domain_id)) | HirType::Reset(Some(domain_id)) =
-                &port.port_type
-            {
-                if seen_domains.insert(*domain_id) {
+            let domain_id = match &port.port_type {
+                HirType::Clock(Some(domain_id)) => Some(*domain_id),
+                HirType::Reset {
+                    clock_domain: Some(domain_id),
+                    ..
+                } => Some(*domain_id),
+                _ => None,
+            };
+
+            if let Some(domain_id) = domain_id {
+                if seen_domains.insert(domain_id) {
                     clock_domains.push(HirClockDomain {
-                        id: *domain_id,
+                        id: domain_id,
                         name: format!("clk_{}", domain_id.0),
                     });
                 }
@@ -3607,7 +3614,7 @@ impl HirBuilderContext {
                     return self.build_clock_type(&child);
                 }
                 SyntaxKind::ResetType => {
-                    return HirType::Reset(None); // TODO: Add domain support
+                    return self.build_reset_type(&child);
                 }
                 SyntaxKind::StreamType => {
                     // Stream<T> type - extract inner type
@@ -3681,7 +3688,7 @@ impl HirBuilderContext {
             match child.kind() {
                 SyntaxKind::BitType => return self.build_bit_type(&child),
                 SyntaxKind::ClockType => return self.build_clock_type(&child),
-                SyntaxKind::ResetType => return HirType::Reset(None),
+                SyntaxKind::ResetType => return self.build_reset_type(&child),
                 SyntaxKind::StreamType => {
                     // Stream<T> type
                     if let Some(inner_type_node) = child.children().next() {
@@ -3870,6 +3877,42 @@ impl HirBuilderContext {
 
         // No domain specified, return untyped clock
         HirType::Clock(None)
+    }
+
+    /// Build reset type from syntax node
+    /// Supports: reset, reset(active_high), reset(active_low)
+    fn build_reset_type(&self, node: &SyntaxNode) -> HirType {
+        // Default polarity is active high
+        let mut polarity = HirResetPolarity::ActiveHigh;
+        let mut clock_domain = None;
+
+        // Look for polarity specifier in parentheses
+        // Syntax: reset(active_high) or reset(active_low)
+        if let Some(ident_token) = node.first_token_of_kind(SyntaxKind::Ident) {
+            let polarity_str = ident_token.text();
+            polarity = match polarity_str {
+                "active_low" => HirResetPolarity::ActiveLow,
+                "active_high" => HirResetPolarity::ActiveHigh,
+                _ => {
+                    // Could be a domain name or other parameter
+                    // For now, default to active high
+                    HirResetPolarity::ActiveHigh
+                }
+            };
+        }
+
+        // Could also look for lifetime for clock domain
+        if let Some(lifetime_token) = node.first_token_of_kind(SyntaxKind::Lifetime) {
+            let lifetime_name = lifetime_token.text().trim_start_matches('\'');
+            if let Some(domain_id) = self.symbols.clock_domains.get(lifetime_name) {
+                clock_domain = Some(*domain_id);
+            }
+        }
+
+        HirType::Reset {
+            polarity,
+            clock_domain,
+        }
     }
 
     /// Build array type
