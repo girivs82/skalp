@@ -33,6 +33,7 @@ pub struct HirBuilderContext {
     next_assertion_id: u32,
     next_property_id: u32,
     next_cover_id: u32,
+    next_import_id: u32,
 
     /// Symbol table for name resolution
     symbols: SymbolTable,
@@ -107,6 +108,7 @@ impl HirBuilderContext {
             next_assertion_id: 0,
             next_property_id: 0,
             next_cover_id: 0,
+            next_import_id: 0,
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
@@ -201,6 +203,11 @@ impl HirBuilderContext {
                     if let Some(function) = self.build_function(&child) {
                         // Store function in HIR for later use
                         hir.functions.push(function);
+                    }
+                }
+                SyntaxKind::UseDecl => {
+                    if let Some(import) = self.build_import(&child) {
+                        hir.imports.push(import);
                     }
                 }
                 _ => {}
@@ -725,6 +732,55 @@ impl HirBuilderContext {
         };
 
         Some(HirEventTrigger { signal, edge })
+    }
+
+    /// Build import (use statement) from syntax node
+    fn build_import(&mut self, node: &SyntaxNode) -> Option<HirImport> {
+        let id = self.next_import_id();
+
+        // For now, visibility is always private (pub use not yet implemented)
+        let visibility = HirVisibility::Private;
+
+        // Build the import path
+        let path = self.build_import_path(node)?;
+
+        Some(HirImport {
+            id,
+            visibility,
+            path,
+        })
+    }
+
+    /// Build import path from use declaration
+    fn build_import_path(&mut self, node: &SyntaxNode) -> Option<HirImportPath> {
+        // Find the UsePath child
+        let use_path = node.first_child_of_kind(SyntaxKind::UsePath)?;
+
+        // Collect path segments
+        let mut segments = Vec::new();
+        for child in use_path.children() {
+            if child.kind() == SyntaxKind::Ident {
+                if let Some(token) = child.first_token() {
+                    segments.push(token.text().to_string());
+                }
+            }
+        }
+
+        if segments.is_empty() {
+            return None;
+        }
+
+        // Check for rename (as keyword)
+        // TODO: Implement renamed imports
+
+        // Check for glob (*)
+        // TODO: Implement glob imports
+
+        // Check for nested imports ({...})
+        // TODO: Implement nested imports
+
+        // For now, just support simple paths
+        Some(HirImportPath::Simple { segments })
     }
 
     /// Build statements from block
@@ -4103,6 +4159,12 @@ impl HirBuilderContext {
     fn next_cover_id(&mut self) -> CoverId {
         let id = CoverId(self.next_cover_id);
         self.next_cover_id += 1;
+        id
+    }
+
+    fn next_import_id(&mut self) -> ImportId {
+        let id = ImportId(self.next_import_id);
+        self.next_import_id += 1;
         id
     }
 }
