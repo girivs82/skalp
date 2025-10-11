@@ -95,6 +95,85 @@ enum Commands {
         /// Test filter
         filter: Option<String>,
     },
+
+    /// Add a dependency to the project
+    Add {
+        /// Package name
+        package: String,
+
+        /// Version requirement (default: latest)
+        #[arg(short, long)]
+        version: Option<String>,
+
+        /// Add as dev dependency
+        #[arg(short, long)]
+        dev: bool,
+
+        /// Optional dependency (only included with feature)
+        #[arg(long)]
+        optional: bool,
+
+        /// Features to enable
+        #[arg(short, long)]
+        features: Vec<String>,
+    },
+
+    /// Remove a dependency from the project
+    Remove {
+        /// Package name
+        package: String,
+
+        /// Remove from dev dependencies
+        #[arg(short, long)]
+        dev: bool,
+    },
+
+    /// Update dependencies
+    Update {
+        /// Update specific package (if not specified, updates all)
+        package: Option<String>,
+
+        /// Force update even if already at latest
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Search for packages in the registry
+    Search {
+        /// Search query
+        query: String,
+
+        /// Number of results to show
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+
+    /// Manage package cache
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// List cached packages
+    List,
+
+    /// Show cache size
+    Size,
+
+    /// Clear the cache
+    Clear,
+
+    /// Remove specific package from cache
+    Remove {
+        /// Package name
+        package: String,
+
+        /// Package version
+        version: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -151,6 +230,35 @@ fn main() -> Result<()> {
         Commands::Test { filter } => {
             run_tests(filter.as_deref())?;
         }
+
+        Commands::Add {
+            package,
+            version,
+            dev,
+            optional,
+            features,
+        } => {
+            add_dependency(&package, version.as_deref(), dev, optional, &features)?;
+        }
+
+        Commands::Remove { package, dev } => {
+            remove_dependency(&package, dev)?;
+        }
+
+        Commands::Update { package, force } => {
+            update_dependencies(package.as_deref(), force)?;
+        }
+
+        Commands::Search { query, limit } => {
+            search_packages(&query, limit)?;
+        }
+
+        Commands::Cache { command } => match command {
+            CacheCommands::List => list_cache()?,
+            CacheCommands::Size => show_cache_size()?,
+            CacheCommands::Clear => clear_cache()?,
+            CacheCommands::Remove { package, version } => remove_from_cache(&package, &version)?,
+        },
     }
 
     Ok(())
@@ -616,5 +724,318 @@ fn run_tests(filter: Option<&str>) -> Result<()> {
 
     println!("\n✅ All tests passed!");
 
+    Ok(())
+}
+
+/// Add a dependency to skalp.toml
+fn add_dependency(
+    package: &str,
+    version: Option<&str>,
+    dev: bool,
+    optional: bool,
+    features: &[String],
+) -> Result<()> {
+    use skalp_manifest::{Dependency, DependencySpec};
+    use skalp_package::{RegistryClient, RegistryConfig};
+
+    println!("Adding dependency: {}", package);
+
+    // Load existing manifest
+    let manifest_path = PathBuf::from("skalp.toml");
+    let mut manifest = if manifest_path.exists() {
+        skalp_manifest::from_path(&manifest_path)?
+    } else {
+        anyhow::bail!("No skalp.toml found. Run 'skalp new' to create a project.");
+    };
+
+    // Resolve version from registry if not specified
+    let version_str = if let Some(v) = version {
+        v.to_string()
+    } else {
+        println!("Fetching latest version from registry...");
+        let config = RegistryConfig::default();
+        let client = RegistryClient::new(config.url)?;
+        let metadata = client.fetch_metadata(package)?;
+
+        if metadata.versions.is_empty() {
+            anyhow::bail!("No versions found for package: {}", package);
+        }
+
+        // Get latest version
+        let latest = &metadata.versions[0].version;
+        println!("Using version: {}", latest);
+        latest.clone()
+    };
+
+    // Create dependency spec
+    let dep_spec = if features.is_empty() && !optional {
+        DependencySpec::Simple(version_str.clone())
+    } else {
+        DependencySpec::Detailed(Dependency {
+            version: Some(version_str.clone()),
+            git: None,
+            branch: None,
+            tag: None,
+            revision: None,
+            path: None,
+            registry: None,
+            features: features.to_vec(),
+            default_features: true,
+            optional,
+            package: None,
+        })
+    };
+
+    // Add to appropriate section
+    if dev {
+        manifest
+            .dev_dependencies
+            .insert(package.to_string(), dep_spec);
+        println!("✅ Added {} {} as dev dependency", package, version_str);
+    } else {
+        manifest.dependencies.insert(package.to_string(), dep_spec);
+        println!("✅ Added {} {}", package, version_str);
+    }
+
+    // Save manifest
+    save_manifest(&manifest, &manifest_path)?;
+
+    println!("💾 Updated skalp.toml");
+    println!("\n💡 Run 'skalp build' to fetch and build with new dependency");
+
+    Ok(())
+}
+
+/// Remove a dependency from skalp.toml
+fn remove_dependency(package: &str, dev: bool) -> Result<()> {
+    println!("Removing dependency: {}", package);
+
+    // Load existing manifest
+    let manifest_path = PathBuf::from("skalp.toml");
+    let mut manifest = if manifest_path.exists() {
+        skalp_manifest::from_path(&manifest_path)?
+    } else {
+        anyhow::bail!("No skalp.toml found.");
+    };
+
+    // Remove from appropriate section
+    let removed = if dev {
+        manifest.dev_dependencies.remove(package).is_some()
+    } else {
+        manifest.dependencies.remove(package).is_some()
+    };
+
+    if !removed {
+        anyhow::bail!(
+            "Dependency '{}' not found in {}",
+            package,
+            if dev {
+                "dev-dependencies"
+            } else {
+                "dependencies"
+            }
+        );
+    }
+
+    // Save manifest
+    save_manifest(&manifest, &manifest_path)?;
+
+    println!(
+        "✅ Removed {} from {}",
+        package,
+        if dev {
+            "dev dependencies"
+        } else {
+            "dependencies"
+        }
+    );
+    println!("💾 Updated skalp.toml");
+
+    Ok(())
+}
+
+/// Update dependencies to latest versions
+fn update_dependencies(package: Option<&str>, force: bool) -> Result<()> {
+    use skalp_package::{RegistryClient, RegistryConfig};
+
+    println!("🔄 Updating dependencies...");
+
+    // Load existing manifest
+    let manifest_path = PathBuf::from("skalp.toml");
+    let mut manifest = if manifest_path.exists() {
+        skalp_manifest::from_path(&manifest_path)?
+    } else {
+        anyhow::bail!("No skalp.toml found.");
+    };
+
+    let config = RegistryConfig::default();
+    let client = RegistryClient::new(config.url)?;
+
+    // Determine which packages to update
+    let packages_to_update: Vec<String> = if let Some(pkg) = package {
+        vec![pkg.to_string()]
+    } else {
+        manifest.dependencies.keys().cloned().collect()
+    };
+
+    let mut updated = false;
+
+    for pkg_name in &packages_to_update {
+        // Only update registry dependencies
+        if let Some(skalp_manifest::DependencySpec::Simple(_)) = manifest.dependencies.get(pkg_name)
+        {
+            println!("Checking {} ...", pkg_name);
+
+            match client.fetch_metadata(pkg_name) {
+                Ok(metadata) => {
+                    if !metadata.versions.is_empty() {
+                        let latest = &metadata.versions[0].version;
+                        println!("  Latest version: {}", latest);
+
+                        // Update to latest
+                        manifest.dependencies.insert(
+                            pkg_name.clone(),
+                            skalp_manifest::DependencySpec::Simple(latest.clone()),
+                        );
+                        updated = true;
+                        println!("  ✅ Updated to {}", latest);
+                    }
+                }
+                Err(e) => {
+                    println!("  ⚠️  Could not fetch metadata: {}", e);
+                }
+            }
+        }
+    }
+
+    if updated {
+        save_manifest(&manifest, &manifest_path)?;
+        println!("\n💾 Updated skalp.toml");
+        println!("💡 Run 'skalp build' to fetch updated dependencies");
+    } else {
+        println!("✅ All dependencies already up to date");
+    }
+
+    Ok(())
+}
+
+/// Search for packages in the registry
+fn search_packages(query: &str, limit: usize) -> Result<()> {
+    use skalp_package::{RegistryClient, RegistryConfig};
+
+    println!("🔍 Searching for: {}", query);
+
+    let config = RegistryConfig::default();
+    let client = RegistryClient::new(config.url)?;
+
+    let results = client.search(query)?;
+
+    if results.is_empty() {
+        println!("No packages found matching '{}'", query);
+        return Ok(());
+    }
+
+    println!("\nFound {} packages:\n", results.len().min(limit));
+
+    for (i, pkg) in results.iter().take(limit).enumerate() {
+        println!(
+            "{}. {} ({})",
+            i + 1,
+            pkg.name,
+            pkg.versions
+                .first()
+                .map(|v| v.version.as_str())
+                .unwrap_or("unknown")
+        );
+
+        if let Some(desc) = &pkg.description {
+            println!("   {}", desc);
+        }
+
+        if let Some(repo) = &pkg.repository {
+            println!("   🔗 {}", repo);
+        }
+
+        println!();
+    }
+
+    Ok(())
+}
+
+/// List cached packages
+fn list_cache() -> Result<()> {
+    use skalp_package::{cache::Cache, RegistryConfig};
+
+    let config = RegistryConfig::default();
+    let cache = Cache::new(config.cache_dir.clone());
+
+    println!("📦 Cached packages in: {:?}", config.cache_dir);
+    println!("\n⚠️  Cache listing not yet fully implemented");
+    println!("Cache directory exists: {}", config.cache_dir.exists());
+
+    Ok(())
+}
+
+/// Show cache size
+fn show_cache_size() -> Result<()> {
+    use skalp_package::{cache::Cache, RegistryConfig};
+
+    let config = RegistryConfig::default();
+    let cache = Cache::new(config.cache_dir);
+
+    let size_bytes = cache.size()?;
+    let size_mb = size_bytes as f64 / 1024.0 / 1024.0;
+
+    println!("📊 Cache size: {:.2} MB ({} bytes)", size_mb, size_bytes);
+
+    Ok(())
+}
+
+/// Clear the cache
+fn clear_cache() -> Result<()> {
+    use skalp_package::{cache::Cache, RegistryConfig};
+
+    print!("⚠️  This will delete all cached packages. Continue? [y/N] ");
+    use std::io::{self, Write};
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    if input.trim().to_lowercase() != "y" {
+        println!("Cancelled");
+        return Ok(());
+    }
+
+    let config = RegistryConfig::default();
+    let cache = Cache::new(config.cache_dir);
+
+    cache.clear()?;
+    println!("✅ Cache cleared");
+
+    Ok(())
+}
+
+/// Remove a specific package from cache
+fn remove_from_cache(package: &str, version: &str) -> Result<()> {
+    use skalp_package::{cache::Cache, PackageSource, RegistryConfig};
+
+    println!("Removing {} {} from cache...", package, version);
+
+    let config = RegistryConfig::default();
+    let cache = Cache::new(config.cache_dir);
+
+    let source = PackageSource::registry(package, version);
+    cache.remove(&source)?;
+
+    println!("✅ Removed from cache");
+
+    Ok(())
+}
+
+/// Helper to save manifest to file
+fn save_manifest(manifest: &skalp_manifest::Manifest, path: &PathBuf) -> Result<()> {
+    let toml_str = toml::to_string_pretty(manifest)?;
+    fs::write(path, toml_str)?;
     Ok(())
 }

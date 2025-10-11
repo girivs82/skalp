@@ -61,6 +61,11 @@ skalp-testing = { path = "crates/skalp-testing" }
 skalp-safety = { path = "crates/skalp-safety" }
 skalp-place-route = { path = "crates/skalp-place-route" }
 
+# Library system
+skalp-resolve = { path = "crates/skalp-resolve" }
+skalp-manifest = { path = "crates/skalp-manifest" }
+skalp-package = { path = "crates/skalp-package" }
+
 [dev-dependencies]
 pretty_assertions = "1.4"
 insta = "1.34"  # Snapshot testing
