@@ -198,7 +198,7 @@ impl Counter {
     assert_eq!(entity.ports.len(), 3);
 
     // Check reset port type
-    assert!(matches!(entity.ports[1].port_type, HirType::Reset(_)));
+    assert!(matches!(entity.ports[1].port_type, HirType::Reset { .. }));
 }
 
 // ============================================================================
@@ -1007,7 +1007,7 @@ impl Test {
     let hir = assert_builds(source);
     let entity = get_first_entity(&hir);
 
-    assert!(matches!(entity.ports[0].port_type, HirType::Reset(_)));
+    assert!(matches!(entity.ports[0].port_type, HirType::Reset { .. }));
 }
 
 // ============================================================================

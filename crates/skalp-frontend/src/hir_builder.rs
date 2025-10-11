@@ -2289,13 +2289,14 @@ impl HirBuilderContext {
     /// Build array literal: [1, 2, 3] or [value; count]
     fn build_array_literal(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // Check if this is a repeat array [value; count] by looking for semicolon token
-        let has_semicolon = node
-            .children_with_tokens()
-            .any(|elem| elem.as_token().map_or(false, |t| t.kind() == SyntaxKind::Semicolon));
+        let has_semicolon = node.children_with_tokens().any(|elem| {
+            elem.as_token()
+                .is_some_and(|t| t.kind() == SyntaxKind::Semicolon)
+        });
 
         if has_semicolon {
             // Repeat syntax: [value; count]
-            let mut expressions: Vec<_> = node
+            let expressions: Vec<_> = node
                 .children()
                 .filter(|n| {
                     matches!(

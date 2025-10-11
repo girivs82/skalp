@@ -147,7 +147,8 @@
       "Bash(RUST_LOG=error /Users/girivs/src/hw/hls/target/release/skalp build:*)",
       "Bash(RUST_LOG=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)",
       "Bash(do echo \"=== Testing: $example ===\" /Users/girivs/src/hw/hls/target/debug/skalp build -s \"$example\" -o /tmp/test_out)",
-      "Bash(git reset:*)"
+      "Bash(git reset:*)",
+      "Bash(git restore:*)"
     ],
     "deny": [],
     "ask": []

@@ -39,7 +39,10 @@ fn create_simple_entity() -> Hir {
                 id: PortId(2),
                 name: "rst".to_string(),
                 direction: HirPortDirection::Input,
-                port_type: HirType::Reset(None),
+                port_type: HirType::Reset {
+                    polarity: HirResetPolarity::ActiveHigh,
+                    clock_domain: None,
+                },
                 physical_constraints: None,
             },
             HirPort {
