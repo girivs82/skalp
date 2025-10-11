@@ -83,6 +83,11 @@ fn generate_module(
                     // Clock domain parameters are not emitted as Verilog parameters
                     continue;
                 }
+                skalp_mir::GenericParameterType::Intent => {
+                    // Intent parameters are not emitted as Verilog parameters
+                    // They are used for HLS optimization and synthesis directives
+                    continue;
+                }
             };
             params.push(param_str);
         }

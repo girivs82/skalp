@@ -75,6 +75,8 @@ pub struct HirInstance {
     pub name: String,
     /// Entity to instantiate
     pub entity: EntityId,
+    /// Generic arguments (for monomorphization)
+    pub generic_args: Vec<HirExpression>,
     /// Port connections
     pub connections: Vec<HirConnection>,
 }
@@ -455,6 +457,35 @@ pub enum HirType {
     Vec2(Box<HirType>), // 2-component vector (x, y)
     Vec3(Box<HirType>), // 3-component vector (x, y, z)
     Vec4(Box<HirType>), // 4-component vector (x, y, z, w)
+
+    // Parametric numeric types (from unified type system)
+    /// Parametric floating-point type: fp<const F: FloatFormat>
+    /// Example: fp<IEEE754_32>, fp<BFLOAT16>
+    FpParametric {
+        format: Box<HirExpression>, // Const expression evaluating to FloatFormat
+    },
+
+    /// Parametric fixed-point type: fixed<const WIDTH: nat, const FRAC: nat, const SIGNED: bool>
+    /// Example: fixed<32, 16, true> for Q16.16 fixed-point
+    FixedParametric {
+        width: Box<HirExpression>,
+        frac: Box<HirExpression>,
+        signed: Box<HirExpression>,
+    },
+
+    /// Parametric integer type: int<const WIDTH: nat, const SIGNED: bool>
+    /// Example: int<32, true> for i32, int<64, false> for u64
+    IntParametric {
+        width: Box<HirExpression>,
+        signed: Box<HirExpression>,
+    },
+
+    /// Parametric vector type: vec<T, const N: nat>
+    /// Example: vec<fp32, 3> for vec3<fp32>
+    VecParametric {
+        element_type: Box<HirType>,
+        dimension: Box<HirExpression>,
+    },
 }
 
 /// Patterns in HIR
@@ -485,6 +516,7 @@ pub enum HirGenericType {
     Const(HirType),
     Width,
     ClockDomain, // Clock domain lifetime parameter
+    Intent,      // Intent parameter for HLS optimization
 }
 
 /// Clock domain in HIR

@@ -1,0 +1,59 @@
+// SKALP Standard Library
+//
+// Clean, modern stdlib using parametric types throughout.
+// No legacy cruft, no backward compatibility - just clean generic implementations.
+
+// ============================================================================
+// Core Numeric Types
+// ============================================================================
+
+pub mod numeric {
+    pub mod formats;      // FloatFormat definitions
+    pub mod fp;           // Floating-point types and operations
+    pub mod fixed;        // Fixed-point types and operations
+    pub mod int;          // Integer types and operations
+    pub mod vec;          // Vector types and operations
+    pub mod traits;       // Numeric trait and type classes
+}
+
+// ============================================================================
+// High-Level Synthesis
+// ============================================================================
+
+pub mod hls {
+    pub mod intents;      // Intent system for optimization
+    pub mod pipelines;    // Pipeline components
+    pub mod memories;     // Memory components
+}
+
+// ============================================================================
+// Standard Components
+// ============================================================================
+
+pub mod components {
+    pub mod counters;
+    pub mod shifters;
+    pub mod fifos;
+    pub mod multiplexers;
+}
+
+// ============================================================================
+// Interfaces & Protocols
+// ============================================================================
+
+pub mod interfaces {
+    pub mod axi4;
+    pub mod axi4_lite;
+    pub mod avalon;
+    pub mod wishbone;
+}
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+pub mod util {
+    pub mod math;         // Mathematical functions
+    pub mod bitmanip;     // Bit manipulation utilities
+    pub mod conversion;   // Type conversion utilities
+}

@@ -442,6 +442,17 @@ impl HirBuilderContext {
         // Look up entity ID
         let entity = *self.symbols.entities.get(&entity_name)?;
 
+        // Extract generic arguments if present
+        let mut generic_args = Vec::new();
+        if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
+            for arg_node in arg_list.children() {
+                // Each generic argument is an expression (could be a literal, const, or type)
+                if let Some(expr) = self.build_expression(&arg_node) {
+                    generic_args.push(expr);
+                }
+            }
+        }
+
         // Build connections
         let mut connections = Vec::new();
         if let Some(conn_list) = node.first_child_of_kind(SyntaxKind::ConnectionList) {
@@ -456,6 +467,7 @@ impl HirBuilderContext {
             id,
             name,
             entity,
+            generic_args,
             connections,
         })
     }
@@ -3866,6 +3878,30 @@ impl HirBuilderContext {
                 name,
                 param_type: HirGenericType::ClockDomain,
                 default_value: None,
+            })
+        }
+        // Check if it's an intent parameter (intent I: Intent)
+        else if node.first_token_of_kind(SyntaxKind::IntentKw).is_some() {
+            // intent I: Intent style parameter
+            let name = node
+                .children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .find(|t| t.kind() == SyntaxKind::Ident)
+                .map(|t| t.text().to_string())?;
+
+            // Extract default value if present (e.g., intent I: Intent = Intent::default())
+            let default_value = node.children().nth(1).and_then(|child| {
+                if child.kind() == SyntaxKind::LiteralExpr {
+                    self.build_expression(&child)
+                } else {
+                    None
+                }
+            });
+
+            Some(HirGeneric {
+                name,
+                param_type: HirGenericType::Intent,
+                default_value,
             })
         }
         // Check if it's a const parameter

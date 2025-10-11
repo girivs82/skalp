@@ -1,0 +1,615 @@
+// Integer Operations
+//
+// Generic integer arithmetic with parameterized width and signedness.
+
+use crate::numeric::traits::Numeric;
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+/// Generic integer type
+///
+/// # Parameters
+/// - W: Word width in bits
+/// - S: Signed (true) or unsigned (false)
+pub type int<const W: nat, const S: bool> = bit[W];
+
+// Common signed integer aliases
+pub type i8 = int<8, true>;
+pub type i16 = int<16, true>;
+pub type i32 = int<32, true>;
+pub type i64 = int<64, true>;
+pub type i128 = int<128, true>;
+
+// Common unsigned integer aliases
+pub type u8 = int<8, false>;
+pub type u16 = int<16, false>;
+pub type u32 = int<32, false>;
+pub type u64 = int<64, false>;
+pub type u128 = int<128, false>;
+
+// ============================================================================
+// Arithmetic Operations
+// ============================================================================
+
+/// Integer addition with overflow detection
+pub entity IntAdd<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out result: int<W, S>
+    out overflow: bit
+}
+
+impl IntAdd<const W: nat, const S: bool> {
+    signal sum: bit[W+1] = {1'b0, a} + {1'b0, b}
+    result = sum[W-1:0]
+
+    overflow = if S {
+        // Signed: overflow if signs same but result sign different
+        signal a_sign: bit = a[W-1]
+        signal b_sign: bit = b[W-1]
+        signal r_sign: bit = sum[W-1]
+        (a_sign == b_sign) && (a_sign != r_sign)
+    } else {
+        // Unsigned: overflow if carry out
+        sum[W]
+    }
+}
+
+/// Integer subtraction with overflow/underflow detection
+pub entity IntSub<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out result: int<W, S>
+    out overflow: bit
+}
+
+impl IntSub<const W: nat, const S: bool> {
+    signal diff: bit[W+1] = {1'b0, a} - {1'b0, b}
+    result = diff[W-1:0]
+
+    overflow = if S {
+        // Signed: overflow if signs different and result sign != a's sign
+        signal a_sign: bit = a[W-1]
+        signal b_sign: bit = b[W-1]
+        signal r_sign: bit = diff[W-1]
+        (a_sign != b_sign) && (a_sign != r_sign)
+    } else {
+        // Unsigned: underflow if borrow
+        diff[W]
+    }
+}
+
+/// Integer multiplication with overflow detection
+pub entity IntMul<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out result: int<W, S>
+    out overflow: bit
+}
+
+impl IntMul<const W: nat, const S: bool> {
+    const PROD_BITS: nat = W * 2
+
+    signal product: bit[PROD_BITS] = if S {
+        // Sign-extended signed multiplication
+        ({{W{a[W-1]}}, a} as bit[PROD_BITS]) *
+        ({{W{b[W-1]}}, b} as bit[PROD_BITS])
+    } else {
+        // Zero-extended unsigned multiplication
+        ({1'b0, a} as bit[PROD_BITS]) * ({1'b0, b} as bit[PROD_BITS])
+    }
+
+    result = product[W-1:0]
+
+    // Check if high bits indicate overflow
+    signal high_bits: bit[W] = product[PROD_BITS-1:W]
+    overflow = if S {
+        // For signed, high bits should be sign extension
+        signal result_sign: bit = result[W-1]
+        high_bits != {{W{result_sign}}}
+    } else {
+        // For unsigned, high bits should be zero
+        |high_bits
+    }
+}
+
+/// Integer division
+pub entity IntDiv<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out quotient: int<W, S>
+    out remainder: int<W, S>
+    out div_by_zero: bit
+    out overflow: bit
+}
+
+impl IntDiv<const W: nat, const S: bool> {
+    div_by_zero = (b == 0)
+
+    // Special case for signed: MIN / -1 overflows
+    overflow = if S {
+        signal min_value: bit[W] = {1'b1, {(W-1){1'b0}}}
+        signal neg_one: bit[W] = {W{1'b1}}
+        (a == min_value) && (b == neg_one)
+    } else {
+        1'b0
+    }
+
+    // Perform division
+    quotient = if div_by_zero || overflow {
+        0
+    } else {
+        if S {
+            (a as signed bit[W]) / (b as signed bit[W])
+        } else {
+            a / b
+        }
+    }
+
+    remainder = if div_by_zero || overflow {
+        0
+    } else {
+        if S {
+            (a as signed bit[W]) % (b as signed bit[W])
+        } else {
+            a % b
+        }
+    }
+}
+
+// ============================================================================
+// Saturating Arithmetic
+// ============================================================================
+
+/// Saturating addition (clamps to min/max on overflow)
+pub entity IntAddSat<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out result: int<W, S>
+}
+
+impl IntAddSat<const W: nat, const S: bool> {
+    signal sum: int<W, S>
+    signal overflow: bit
+
+    let adder = IntAdd<W, S> {
+        a: a,
+        b: b,
+        result: sum,
+        overflow: overflow
+    }
+
+    result = if overflow {
+        if S {
+            // Saturate to MAX or MIN based on signs
+            signal positive_overflow: bit = !a[W-1] && !b[W-1]
+            positive_overflow ? {1'b0, {(W-1){1'b1}}} : {1'b1, {(W-1){1'b0}}}
+        } else {
+            // Saturate to MAX
+            {W{1'b1}}
+        }
+    } else {
+        sum
+    }
+}
+
+/// Saturating subtraction
+pub entity IntSubSat<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out result: int<W, S>
+}
+
+impl IntSubSat<const W: nat, const S: bool> {
+    signal diff: int<W, S>
+    signal overflow: bit
+
+    let subber = IntSub<W, S> {
+        a: a,
+        b: b,
+        result: diff,
+        overflow: overflow
+    }
+
+    result = if overflow {
+        if S {
+            // Saturate based on signs
+            signal positive_overflow: bit = !a[W-1] && b[W-1]
+            positive_overflow ? {1'b0, {(W-1){1'b1}}} : {1'b1, {(W-1){1'b0}}}
+        } else {
+            // Saturate to 0 (underflow)
+            0
+        }
+    } else {
+        diff
+    }
+}
+
+// ============================================================================
+// Bitwise Operations
+// ============================================================================
+
+/// Bitwise AND
+pub entity IntAnd<const W: nat> {
+    in a: bit[W]
+    in b: bit[W]
+    out result: bit[W]
+}
+
+impl IntAnd<const W: nat> {
+    result = a & b
+}
+
+/// Bitwise OR
+pub entity IntOr<const W: nat> {
+    in a: bit[W]
+    in b: bit[W]
+    out result: bit[W]
+}
+
+impl IntOr<const W: nat> {
+    result = a | b
+}
+
+/// Bitwise XOR
+pub entity IntXor<const W: nat> {
+    in a: bit[W]
+    in b: bit[W]
+    out result: bit[W]
+}
+
+impl IntXor<const W: nat> {
+    result = a ^ b
+}
+
+/// Bitwise NOT
+pub entity IntNot<const W: nat> {
+    in a: bit[W]
+    out result: bit[W]
+}
+
+impl IntNot<const W: nat> {
+    result = ~a
+}
+
+// ============================================================================
+// Shift Operations
+// ============================================================================
+
+/// Logical left shift
+pub entity IntShl<const W: nat> {
+    in a: bit[W]
+    in shift: nat
+    out result: bit[W]
+}
+
+impl IntShl<const W: nat> {
+    result = a << shift
+}
+
+/// Logical right shift (zero-fill)
+pub entity IntShr<const W: nat> {
+    in a: bit[W]
+    in shift: nat
+    out result: bit[W]
+}
+
+impl IntShr<const W: nat> {
+    result = a >> shift
+}
+
+/// Arithmetic right shift (sign-extend for signed)
+pub entity IntSar<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in shift: nat
+    out result: int<W, S>
+}
+
+impl IntSar<const W: nat, const S: bool> {
+    result = if S {
+        // Sign-extend
+        signal sign: bit = a[W-1]
+        signal fill: bit[W] = {W{sign}}
+        (a >> shift) | (fill << (W - shift))
+    } else {
+        // Zero-fill
+        a >> shift
+    }
+}
+
+/// Rotate left
+pub entity IntRotl<const W: nat> {
+    in a: bit[W]
+    in shift: nat
+    out result: bit[W]
+}
+
+impl IntRotl<const W: nat> {
+    signal shift_mod: nat = shift % W
+    result = (a << shift_mod) | (a >> (W - shift_mod))
+}
+
+/// Rotate right
+pub entity IntRotr<const W: nat> {
+    in a: bit[W]
+    in shift: nat
+    out result: bit[W]
+}
+
+impl IntRotr<const W: nat> {
+    signal shift_mod: nat = shift % W
+    result = (a >> shift_mod) | (a << (W - shift_mod))
+}
+
+// ============================================================================
+// Comparison
+// ============================================================================
+
+/// Integer comparison
+pub entity IntCompare<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out lt: bit
+    out eq: bit
+    out gt: bit
+}
+
+impl IntCompare<const W: nat, const S: bool> {
+    eq = (a == b)
+
+    lt = if S {
+        // Signed comparison
+        signal a_sign: bit = a[W-1]
+        signal b_sign: bit = b[W-1]
+        (a_sign && !b_sign) || ((a_sign == b_sign) && (a < b))
+    } else {
+        // Unsigned comparison
+        a < b
+    }
+
+    gt = !lt && !eq
+}
+
+// ============================================================================
+// Mathematical Functions
+// ============================================================================
+
+/// Absolute value (signed only)
+pub entity IntAbs<const W: nat> {
+    in x: int<W, true>
+    out result: int<W, true>
+    out overflow: bit  // True if x = MIN_VALUE
+}
+
+impl IntAbs<const W: nat> {
+    signal is_negative: bit = x[W-1]
+    signal negated: bit[W] = -x
+
+    // MIN_VALUE abs overflows
+    signal min_value: bit[W] = {1'b1, {(W-1){1'b0}}}
+    overflow = (x == min_value)
+
+    result = is_negative ? negated : x
+}
+
+/// Negate
+pub entity IntNeg<const W: nat, const S: bool> {
+    in x: int<W, S>
+    out result: int<W, S>
+    out overflow: bit
+}
+
+impl IntNeg<const W: nat, const S: bool> {
+    result = -x
+
+    overflow = if S {
+        signal min_value: bit[W] = {1'b1, {(W-1){1'b0}}}
+        x == min_value
+    } else {
+        x != 0  // Negating non-zero unsigned always overflows
+    }
+}
+
+/// Minimum of two values
+pub entity IntMin<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out result: int<W, S>
+}
+
+impl IntMin<const W: nat, const S: bool> {
+    signal lt: bit
+
+    let cmp = IntCompare<W, S> {
+        a: a,
+        b: b,
+        lt: lt,
+        eq: _,
+        gt: _
+    }
+
+    result = lt ? a : b
+}
+
+/// Maximum of two values
+pub entity IntMax<const W: nat, const S: bool> {
+    in a: int<W, S>
+    in b: int<W, S>
+    out result: int<W, S>
+}
+
+impl IntMax<const W: nat, const S: bool> {
+    signal gt: bit
+
+    let cmp = IntCompare<W, S> {
+        a: a,
+        b: b,
+        lt: _,
+        eq: _,
+        gt: gt
+    }
+
+    result = gt ? a : b
+}
+
+/// Clamp value to range [min, max]
+pub entity IntClamp<const W: nat, const S: bool> {
+    in x: int<W, S>
+    in min_val: int<W, S>
+    in max_val: int<W, S>
+    out result: int<W, S>
+}
+
+impl IntClamp<const W: nat, const S: bool> {
+    signal clamped_min: int<W, S>
+
+    let min_op = IntMax<W, S> {
+        a: x,
+        b: min_val,
+        result: clamped_min
+    }
+
+    let max_op = IntMin<W, S> {
+        a: clamped_min,
+        b: max_val,
+        result: result
+    }
+}
+
+// ============================================================================
+// Bit Manipulation
+// ============================================================================
+
+/// Count leading zeros
+pub entity IntClz<const W: nat> {
+    in x: bit[W]
+    out count: nat
+}
+
+impl IntClz<const W: nat> {
+    count = clz(x)
+}
+
+/// Count trailing zeros
+pub entity IntCtz<const W: nat> {
+    in x: bit[W]
+    out count: nat
+}
+
+impl IntCtz<const W: nat> {
+    count = ctz(x)
+}
+
+/// Count set bits (population count)
+pub entity IntPopcount<const W: nat> {
+    in x: bit[W]
+    out count: nat
+}
+
+impl IntPopcount<const W: nat> {
+    signal accumulator: nat = 0
+    for i in 0..W {
+        accumulator = accumulator + (x[i] as nat)
+    }
+    count = accumulator
+}
+
+/// Parity (XOR of all bits)
+pub entity IntParity<const W: nat> {
+    in x: bit[W]
+    out parity: bit
+}
+
+impl IntParity<const W: nat> {
+    parity = ^x  // XOR reduction
+}
+
+/// Reverse bits
+pub entity IntReverse<const W: nat> {
+    in x: bit[W]
+    out result: bit[W]
+}
+
+impl IntReverse<const W: nat> {
+    for i in 0..W {
+        result[i] = x[W-1-i]
+    }
+}
+
+/// Byte swap (reverse byte order)
+pub entity IntByteSwap<const W: nat>
+where W % 8 == 0 {
+    in x: bit[W]
+    out result: bit[W]
+}
+
+impl IntByteSwap<const W: nat> {
+    const NUM_BYTES: nat = W / 8
+
+    for i in 0..NUM_BYTES {
+        signal byte_in: bit[8] = x[(i*8)+7:i*8]
+        signal byte_out_pos: nat = (NUM_BYTES - 1 - i) * 8
+        result[byte_out_pos+7:byte_out_pos] = byte_in
+    }
+}
+
+// ============================================================================
+// Width Conversion
+// ============================================================================
+
+/// Zero-extend to wider width
+pub entity IntZeroExtend<const W_IN: nat, const W_OUT: nat>
+where W_OUT >= W_IN {
+    in x: bit[W_IN]
+    out result: bit[W_OUT]
+}
+
+impl IntZeroExtend<const W_IN: nat, const W_OUT: nat> {
+    const PAD_BITS: nat = W_OUT - W_IN
+    result = {{PAD_BITS{1'b0}}, x}
+}
+
+/// Sign-extend to wider width
+pub entity IntSignExtend<const W_IN: nat, const W_OUT: nat>
+where W_OUT >= W_IN {
+    in x: int<W_IN, true>
+    out result: int<W_OUT, true>
+}
+
+impl IntSignExtend<const W_IN: nat, const W_OUT: nat> {
+    const PAD_BITS: nat = W_OUT - W_IN
+    signal sign: bit = x[W_IN-1]
+    result = {{PAD_BITS{sign}}, x}
+}
+
+/// Truncate to narrower width
+pub entity IntTruncate<const W_IN: nat, const W_OUT: nat>
+where W_OUT <= W_IN {
+    in x: bit[W_IN]
+    out result: bit[W_OUT]
+    out overflow: bit  // True if discarded bits were non-zero
+}
+
+impl IntTruncate<const W_IN: nat, const W_OUT: nat> {
+    const DISCARDED_BITS: nat = W_IN - W_OUT
+    signal high_bits: bit[DISCARDED_BITS] = x[W_IN-1:W_OUT]
+
+    result = x[W_OUT-1:0]
+    overflow = |high_bits
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Count leading zeros (hardware intrinsic)
+fn clz<const W: nat>(x: bit[W]) -> nat {
+    intrinsic_clz(x)
+}
+
+/// Count trailing zeros (hardware intrinsic)
+fn ctz<const W: nat>(x: bit[W]) -> nat {
+    intrinsic_ctz(x)
+}

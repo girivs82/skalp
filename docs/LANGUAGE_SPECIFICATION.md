@@ -180,7 +180,7 @@ bit[N]      // N-bit vector
 // Note: No 4-state logic. X is modeled as randomized 0/1,
 //       Z (tristate) is modeled as what receivers would see
 
-// Integer types
+// Integer types (legacy syntax - see 3.1.1 for parametric types)
 int[N]      // N-bit signed integer
 nat[N]      // N-bit unsigned integer
 
@@ -194,6 +194,214 @@ stream<T>   // Stream with implicit handshaking
 // Type Conversions
 // bool -> bit: Requires explicit cast (true as bit -> 1'b1, false as bit -> 1'b0)
 // bit -> bool: Requires explicit cast (1'b0 -> false, 1'b1 -> true)
+```
+
+### 3.1.1 Parametric Numeric Types
+
+SKALP provides a unified, parametric numeric type system that eliminates code duplication and enables compile-time specialization.
+
+#### Floating-Point Types
+
+```rust
+// Parametric floating-point type
+type fp<const F: FloatFormat> = bit[F.total_bits]
+
+// Float format descriptor
+struct FloatFormat {
+    total_bits: nat,
+    exponent_bits: nat,
+    mantissa_bits: nat,
+    bias: int,
+    name: &str,
+}
+
+// Standard IEEE 754 formats
+const IEEE754_16: FloatFormat = FloatFormat {
+    total_bits: 16, exponent_bits: 5, mantissa_bits: 10,
+    bias: 15, name: "IEEE754-half"
+}
+
+const IEEE754_32: FloatFormat = FloatFormat {
+    total_bits: 32, exponent_bits: 8, mantissa_bits: 23,
+    bias: 127, name: "IEEE754-single"
+}
+
+const IEEE754_64: FloatFormat = FloatFormat {
+    total_bits: 64, exponent_bits: 11, mantissa_bits: 52,
+    bias: 1023, name: "IEEE754-double"
+}
+
+// Alternative formats
+const BFLOAT16: FloatFormat = FloatFormat {
+    total_bits: 16, exponent_bits: 8, mantissa_bits: 7,
+    bias: 127, name: "BFloat16"
+}
+
+const TFLOAT32: FloatFormat = FloatFormat {
+    total_bits: 19, exponent_bits: 8, mantissa_bits: 10,
+    bias: 127, name: "TensorFloat32"
+}
+
+// Convenient aliases
+type fp16 = fp<IEEE754_16>
+type fp32 = fp<IEEE754_32>
+type fp64 = fp<IEEE754_64>
+type bf16 = fp<BFLOAT16>
+type tf32 = fp<TFLOAT32>
+
+// Component access
+impl<const F: FloatFormat> fp<F> {
+    fn sign(self) -> bit {
+        self[F.total_bits - 1]
+    }
+
+    fn exponent(self) -> bit[F.exponent_bits] {
+        self[F.mantissa_bits .. F.mantissa_bits + F.exponent_bits]
+    }
+
+    fn mantissa(self) -> bit[F.mantissa_bits] {
+        self[0 .. F.mantissa_bits]
+    }
+
+    fn is_nan(self) -> bit { /* ... */ }
+    fn is_inf(self) -> bit { /* ... */ }
+    fn is_zero(self) -> bit { /* ... */ }
+}
+```
+
+#### Fixed-Point Types
+
+```rust
+// Parametric fixed-point type
+type fixed<
+    const WIDTH: nat,
+    const FRAC: nat,
+    const SIGNED: bool = true
+> = bit[WIDTH]
+where
+    FRAC <= WIDTH
+
+// Common Q-notation formats
+type q16_16 = fixed<32, 16, true>   // 16.16 signed fixed
+type q8_8   = fixed<16, 8, true>    // 8.8 signed fixed
+type uq16_16 = fixed<32, 16, false> // Unsigned 16.16
+
+// Custom formats
+type q12_20 = fixed<32, 20, true>   // 12 integer, 20 fractional bits
+```
+
+#### Integer Types (as Degenerate Fixed-Point)
+
+```rust
+// Integer as fixed-point with FRAC=0
+type int<const WIDTH: nat, const SIGNED: bool = true> =
+    fixed<WIDTH, 0, SIGNED>
+
+// Standard aliases
+type i8   = int<8, true>
+type i16  = int<16, true>
+type i32  = int<32, true>
+type i64  = int<64, true>
+type u8   = int<8, false>
+type u16  = int<16, false>
+type u32  = int<32, false>
+type u64  = int<64, false>
+```
+
+#### Unified Numeric Trait
+
+All numeric types implement the `Numeric` trait:
+
+```rust
+trait Numeric {
+    const TOTAL_BITS: nat;
+    const IS_SIGNED: bool;
+    const IS_FLOATING: bool;
+    const IS_FIXED: bool;
+
+    fn add(self, other: Self) -> Self;
+    fn sub(self, other: Self) -> Self;
+    fn mul(self, other: Self) -> Self;
+    fn div(self, other: Self) -> Self;
+    fn lt(self, other: Self) -> bit;
+    fn eq(self, other: Self) -> bit;
+}
+
+// Example: Generic operation works for ANY numeric type
+entity Add<T, intent I: Intent = Intent::default()>
+where
+    T: Numeric
+{
+    in a: T
+    in b: T
+    out result: T
+}
+```
+
+#### Parametric Vector Types
+
+```rust
+// Generic N-dimensional vector
+type vec<T, const N: nat> = [T; N]
+where
+    T: Synthesizable
+
+// Common aliases
+type vec2<T> = vec<T, 2>
+type vec3<T> = vec<T, 3>
+type vec4<T> = vec<T, 4>
+
+// Named component access for small vectors
+impl<T> vec<T, 2> {
+    fn x(self) -> T { self[0] }
+    fn y(self) -> T { self[1] }
+}
+
+impl<T> vec<T, 3> {
+    fn x(self) -> T { self[0] }
+    fn y(self) -> T { self[1] }
+    fn z(self) -> T { self[2] }
+}
+
+impl<T> vec<T, 4> {
+    fn x(self) -> T { self[0] }
+    fn y(self) -> T { self[1] }
+    fn z(self) -> T { self[2] }
+    fn w(self) -> T { self[3] }
+}
+
+// Generic vector operations work for ANY element type and dimension
+entity VecAdd<T, const N: nat, intent I: Intent = Intent::default()>
+where
+    T: Numeric
+{
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out result: vec<T, N>
+}
+```
+
+#### Custom Formats
+
+Users can define custom numeric formats:
+
+```rust
+// Custom 24-bit floating-point
+const CUSTOM_FP24: FloatFormat = FloatFormat {
+    total_bits: 24,
+    exponent_bits: 7,
+    mantissa_bits: 16,
+    bias: 63,
+    name: "Custom24"
+}
+
+type fp24 = fp<CUSTOM_FP24>
+
+// All stdlib operations automatically work!
+signal x: fp24 = 3.14
+signal y: fp24 = sqrt(x)         // Uses generic sqrt
+signal v: vec3<fp24> = {1.0, 2.0, 3.0}
+signal n: vec3<fp24> = normalize(v)  // Uses generic normalize
 ```
 
 ### 3.2 Composite Types
@@ -1780,7 +1988,173 @@ impl ProtocolBridge {
 
 ## 8. Intent Specifications
 
-### 8.1 Entity Intent
+SKALP provides a comprehensive intent system that allows designers to specify synthesis constraints, optimization goals, and implementation strategies. Intents can be specified as annotations or used as first-class types for compile-time metaprogramming.
+
+### 8.1 Intent as a First-Class Type
+
+Intent can be used as a type parameter, enabling compile-time specialization:
+
+```rust
+// Intent type definition
+type Intent = {
+    latency: Cycles | auto,
+    throughput: PerCycle | auto,
+    accuracy: Accuracy | auto,
+    area: LUT | auto,
+    power: Milliwatts | auto,
+    optimize: Optimize,
+    overflow: OverflowMode | auto,
+    rounding: RoundingMode | auto,
+    // ... extensible
+}
+
+enum Optimize {
+    Latency,
+    Throughput,
+    Area,
+    Power,
+    Balanced
+}
+
+enum Accuracy {
+    Low,      // ~12 bits
+    Medium,   // ~18 bits
+    High      // Full precision
+}
+
+enum OverflowMode {
+    Wrap,
+    Saturate,
+    Error
+}
+
+enum RoundingMode {
+    Truncate,
+    RoundNearest,
+    RoundUp,
+    RoundDown
+}
+```
+
+#### Intent as Generic Parameter
+
+Entities can be parametrized by intent, enabling single implementations with compile-time specialization:
+
+```rust
+// Generic sqrt that specializes based on intent
+entity Sqrt<const F: FloatFormat, intent I: Intent = Intent::default()> {
+    in x: fp<F>
+    out result: fp<F>
+}
+
+impl<const F: FloatFormat, intent I> Sqrt<F, I> {
+    // Compile-time branching based on intent
+    result = if I.latency < 4 {
+        // Fast LUT-based implementation
+        lut_sqrt::<F>(x)
+    } else if I.latency < 8 {
+        // Medium-speed Newton-Raphson (1 iteration)
+        newton_raphson::<F>(x, iterations: 1)
+    } else if I.accuracy == Accuracy::High {
+        // High-accuracy Newton-Raphson (2+ iterations)
+        newton_raphson::<F>(x, iterations: 2)
+    } else {
+        // Balanced default
+        newton_raphson::<F>(x, iterations: 1)
+    }
+}
+
+// Usage - intent flows through type system
+@intent(latency: 2_cycles)
+impl FastProcessor {
+    // Automatically selects lut_sqrt implementation
+    signal r: fp32 = sqrt(x)  // Sqrt<IEEE754_32, Intent{latency:2}>
+}
+
+@intent(accuracy: High)
+impl PreciseProcessor {
+    // Automatically selects high-accuracy implementation
+    signal r: fp32 = sqrt(x)  // Sqrt<IEEE754_32, Intent{accuracy:High}>
+}
+```
+
+#### Intent Propagation
+
+Intents propagate hierarchically through the module tree:
+
+```rust
+// Parent specifies top-level intent
+@intent(optimize: Latency, latency: max(10_cycles))
+impl VideoProcessor {
+    flow {
+        // Child operations inherit intent
+        let blurred = pixels
+            |> gaussian_blur()  // Inherits: optimize=Latency, latency<=10
+
+        // Override for specific operations
+        @intent(accuracy: High, latency: 16_cycles)
+        let edges = blurred
+            |> sobel_operator()  // Uses high-accuracy, relaxed latency
+    }
+}
+```
+
+#### Intent Constraints
+
+Entities can specify intent requirements:
+
+```rust
+entity HighPerformanceModule<intent I: Intent>
+where
+    I.throughput >= 1_per_cycle,
+    I.latency <= 10_cycles
+{
+    in data: stream<bit<32>>
+    out result: stream<bit<32>>
+}
+
+// Compile-time validation
+@intent(latency: 20_cycles)  // ❌ ERROR: violates constraint
+impl Example {
+    inst hp: HighPerformanceModule<CurrentIntent> { }
+}
+```
+
+#### Intent Composition
+
+Intents can be merged and transformed:
+
+```rust
+// Define base intent
+const BASE_INTENT: Intent = Intent {
+    optimize: Optimize::Balanced,
+    area: auto,
+    latency: auto
+}
+
+// Compose intents
+const FAST_INTENT: Intent = BASE_INTENT + Intent {
+    optimize: Optimize::Latency,
+    latency: 4_cycles
+}
+
+const SMALL_INTENT: Intent = BASE_INTENT + Intent {
+    optimize: Optimize::Area,
+    area: 500_lut
+}
+
+// Use in design
+impl FastPath {
+    @intent(FAST_INTENT)
+    signal result = process(input)
+}
+```
+
+### 8.2 Traditional Intent Annotations
+
+Intent can also be specified using attribute-style annotations:
+
+#### Entity Intent
 
 ```rust
 entity Multiplier {
@@ -1794,37 +2168,212 @@ entity Multiplier {
 }
 ```
 
-### 8.2 Implementation Intent
+#### Implementation Intent
 
 ```rust
-impl Multiplier with intent(dsp_mapping: true) {
+@intent(dsp_mapping: true)
+impl Multiplier {
     product = a * b  // Maps to DSP blocks
+}
+```
+
+#### Signal-Level Intent
+
+```rust
+impl Example {
+    // Resource sharing
+    @intent(share: sqrt)
+    signal a: fp32 = sqrt(x)
+
+    @intent(share: sqrt)
+    signal b: fp32 = sqrt(y)
+
+    // Pipeline scheduling
+    @intent(pipeline: auto, latency: 8_cycles)
+    signal c: fp32 = complex_op(z)
 }
 ```
 
 ### 8.3 Intent Categories
 
+#### Performance Intent
+
 ```rust
-// Performance intent
 with intent {
     throughput: 1_sample_per_cycle,
     latency: 3_cycles,
-    frequency: 200MHz
+    frequency: 200MHz,
+    initiation_interval: 1_cycle
 }
+```
 
-// Resource intent
+#### Resource Intent
+
+```rust
 with intent {
     dsp_blocks: 4,
     bram_usage: minimal,
-    lut_usage: < 1000
+    lut_usage: < 1000,
+    resource_sharing: aggressive
 }
+```
 
-// Verification intent
+#### Memory Intent
+
+```rust
+@intent(memory: {
+    buffer: {
+        banking: 8,              // 8-way banking
+        mode: cyclic,            // Cyclic address mapping
+        impl: bram,              // Block RAM
+        partition: complete      // Fully partitioned
+    }
+})
+signal buffer: [bit<32>; 1024]
+```
+
+#### Loop Intent
+
+```rust
+@intent(loop: {
+    unroll: complete,            // Fully unroll
+    pipeline: {ii: 1, latency: auto},
+    tile: {i: 32, j: 32}        // Loop tiling
+})
+for i in 0..SIZE {
+    // ...
+}
+```
+
+#### Dataflow Intent
+
+```rust
+@intent(dataflow: {
+    mode: pipeline,              // Pipeline dataflow
+    channel_depth: 4,            // FIFO depth between stages
+    blocking: auto               // Auto backpressure
+})
+flow {
+    result = input
+        |> stage1()
+        |> stage2()
+        |> stage3()
+}
+```
+
+#### Power Intent
+
+```rust
+@intent(power: {
+    clock_gating: auto,          // Automatic clock gating
+    voltage: 0.9V,               // Operating voltage
+    power_gating: {
+        domains: [compute_array],
+        retention: true
+    }
+})
+impl PowerAwareDesign { }
+```
+
+#### Interface Intent
+
+```rust
+@intent(interface: {
+    axi: {
+        protocol: axi4,
+        burst: incr,
+        max_burst_length: 256,
+        outstanding_transactions: 4
+    }
+})
+entity DMAEngine {
+    out axi: ~AXI4
+}
+```
+
+#### Verification Intent
+
+```rust
 with intent {
     formal_verify: bounded_model_check,
     coverage: > 95%,
-    assertions: enabled
+    assertions: enabled,
+    protocol_check: axi4
 }
+```
+
+### 8.4 Intent Profiles
+
+Pre-defined intent combinations for common scenarios:
+
+```rust
+// Built-in profiles
+profile "high_performance" {
+    optimize: Latency,
+    throughput: max,
+    area: relaxed,
+    power: relaxed
+}
+
+profile "low_power" {
+    optimize: Power,
+    power: minimal,
+    clock_gating: true,
+    latency: relaxed
+}
+
+profile "minimal_area" {
+    optimize: Area,
+    area: minimal,
+    resource_sharing: aggressive,
+    latency: relaxed
+}
+
+// Use profile
+@intent(profile: "high_performance")
+impl FastProcessor {
+    // All operations use high_performance settings
+}
+
+// Override specific intent from profile
+@intent(profile: "low_power")
+impl MixedDesign {
+    // Most operations use low_power
+
+    @intent(override_profile, latency: 1_cycle)
+    signal critical = fast_op(x)  // Override for critical path
+}
+```
+
+### 8.5 Intent Resolution and Validation
+
+The compiler validates and resolves intents:
+
+```rust
+// Conflict detection
+@intent(latency: max(4_cycles))
+@intent(accuracy: High)
+impl ConflictingIntent {
+    // ❌ ERROR: No sqrt satisfies both latency<=4 AND accuracy=High
+    signal r: fp32 = sqrt(x)
+}
+
+// Helpful error message:
+// error: no implementation satisfies all intents
+//   --> example.sk:10:27
+//    |
+// 10 |     signal r: fp32 = sqrt(x)
+//    |                      ^^^^^^^ cannot find sqrt implementation
+//    |
+// note: conflicting requirements:
+//   - latency: max(4_cycles)  [from @intent on line 1]
+//   - accuracy: High          [from @intent on line 2]
+//    |
+// note: available implementations:
+//   - FP32SqrtFast: latency=4, accuracy=Medium ✗ (accuracy too low)
+//   - FP32Sqrt: latency=8, accuracy=High ✗ (latency too high)
+//    |
+// help: relax one of the constraints
 ```
 
 ## 9. Flow Blocks and Dataflow

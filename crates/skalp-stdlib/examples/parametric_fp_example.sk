@@ -1,0 +1,194 @@
+// Parametric Floating-Point Example
+//
+// Demonstrates the unified fp<const F: FloatFormat> type system
+// with compile-time specialization for different formats
+
+// ============================================================================
+// Generic FP Addition - Works for ANY FloatFormat
+// ============================================================================
+
+/// Generic floating-point adder
+///
+/// This entity works with any IEEE 754-compliant format.
+/// The implementation is monomorphized at compile-time based on F.
+entity FpAdd<const F: FloatFormat> {
+    in a: fp<F>
+    in b: fp<F>
+    out result: fp<F>
+}
+
+impl<const F: FloatFormat> FpAdd<F> {
+    // Extract fields using format-specific bit positions
+    signal a_sign: bit = a[F.total_bits - 1]
+    signal a_exp: bit<F.exponent_bits> = a[F.mantissa_bits + F.exponent_bits - 1 : F.mantissa_bits]
+    signal a_mant: bit<F.mantissa_bits> = a[F.mantissa_bits - 1 : 0]
+
+    signal b_sign: bit = b[F.total_bits - 1]
+    signal b_exp: bit<F.exponent_bits> = b[F.mantissa_bits + F.exponent_bits - 1 : F.mantissa_bits]
+    signal b_mant: bit<F.mantissa_bits> = b[F.mantissa_bits - 1 : 0]
+
+    // TODO: Implement IEEE 754 addition algorithm
+    // For now, placeholder
+    result = a
+}
+
+// ============================================================================
+// Intent-Driven FP Multiply - Optimizes based on latency/area constraints
+// ============================================================================
+
+/// Generic floating-point multiplier with intent-driven optimization
+///
+/// Uses the intent parameter to select implementation strategy:
+/// - Low latency: Parallel multiplier with DSP blocks
+/// - Low area: Sequential multiplier with time-sharing
+/// - Balanced: Pipelined multiplier
+entity FpMul<const F: FloatFormat, intent I: Intent> {
+    in a: fp<F>
+    in b: fp<F>
+    out result: fp<F>
+}
+
+impl<const F: FloatFormat, intent I> FpMul<F, I> {
+    result = if I.optimize == "latency" {
+        // Use parallel multiplier - 1 cycle, high area
+        a  // Placeholder
+    } else if I.optimize == "area" {
+        // Use sequential multiplier - N cycles, low area
+        a  // Placeholder
+    } else {
+        // Use pipelined multiplier - balanced
+        a  // Placeholder
+    }
+}
+
+// ============================================================================
+// Format-Specific Specializations
+// ============================================================================
+
+/// FP32 adder (specialized instance)
+entity FP32Add {
+    in a: fp32
+    in b: fp32
+    out result: fp32
+}
+
+impl FP32Add {
+    inst add: FpAdd<IEEE754_32> {
+        a = a,
+        b = b,
+        result => result
+    }
+}
+
+/// BFloat16 adder (specialized instance)
+entity BF16Add {
+    in a: bf16
+    in b: bf16
+    out result: bf16
+}
+
+impl BF16Add {
+    inst add: FpAdd<BFLOAT16> {
+        a = a,
+        b = b,
+        result => result
+    }
+}
+
+// ============================================================================
+// Multi-Format Vector Operations
+// ============================================================================
+
+/// Generic 3D vector dot product
+///
+/// Works with any floating-point format and vector element count
+entity VecDot<const F: FloatFormat, const N: nat> {
+    in a: [fp<F>; N]
+    in b: [fp<F>; N]
+    out result: fp<F>
+}
+
+impl<const F: FloatFormat, const N: nat> VecDot<F, N> {
+    // TODO: Implement dot product with FpAdd and FpMul
+    result = a[0]
+}
+
+/// Specialized vec3<fp32> dot product
+entity Vec3Fp32Dot {
+    in a: [fp32; 3]
+    in b: [fp32; 3]
+    out result: fp32
+}
+
+impl Vec3Fp32Dot {
+    inst dot: VecDot<IEEE754_32, 3> {
+        a = a,
+        b = b,
+        result => result
+    }
+}
+
+// ============================================================================
+// Custom Format Example
+// ============================================================================
+
+/// Custom 24-bit floating-point format
+///
+/// Useful for space-constrained applications that need more
+/// precision than FP16 but less than FP32
+const FP24_CUSTOM: FloatFormat = FloatFormat {
+    total_bits: 24,
+    exponent_bits: 7,
+    mantissa_bits: 16,
+    bias: 63,
+    name: "Custom-FP24"
+}
+
+/// Type alias for custom 24-bit float
+type fp24 = fp<FP24_CUSTOM>
+
+/// Adder using custom FP24 format
+entity FP24Add {
+    in a: fp24
+    in b: fp24
+    out result: fp24
+}
+
+impl FP24Add {
+    inst add: FpAdd<FP24_CUSTOM> {
+        a = a,
+        b = b,
+        result => result
+    }
+}
+
+// ============================================================================
+// Mixed-Precision Example
+// ============================================================================
+
+/// Mixed precision accumulator
+///
+/// Accumulates FP16 inputs in FP32 for higher precision
+entity MixedPrecisionAccumulator {
+    in data: fp16
+    in clk: clock
+    in reset: reset
+    out sum: fp32
+}
+
+impl MixedPrecisionAccumulator {
+    signal accumulator: fp32 = 0.0
+
+    on clk.rise {
+        if reset.active {
+            accumulator := 0.0
+        } else {
+            // Convert FP16 to FP32 (widening conversion)
+            // Then add to accumulator
+            // TODO: Implement conversion and addition
+            accumulator := accumulator
+        }
+    }
+
+    sum = accumulator
+}

@@ -1,0 +1,409 @@
+// Numeric Trait Examples
+//
+// Demonstrates generic algorithms using the Numeric trait
+// that work with any numeric type (fp, fixed, int)
+
+// ============================================================================
+// Generic Accumulator - Works with ANY Numeric Type
+// ============================================================================
+
+/// Generic accumulator that works with fp32, i32, q16_16, etc.
+entity Accumulator<T, const N: nat>
+where
+    T: Numeric
+{
+    in data: [T; N]
+    in clk: clock
+    in reset: reset
+    out sum: T
+}
+
+impl<T, const N: nat> Accumulator<T, N> {
+    signal acc: T = T::ZERO
+
+    on clk.rise {
+        if reset.active {
+            acc := T::ZERO
+        } else {
+            // Generic accumulation
+            signal running_sum: T = acc
+            for i in 0..N {
+                running_sum = running_sum + data[i]
+            }
+            acc := running_sum
+        }
+    }
+
+    sum = acc
+}
+
+// Specialized instances
+entity FP32Accumulator {
+    in data: [fp32; 8]
+    in clk: clock
+    in reset: reset
+    out sum: fp32
+}
+
+impl FP32Accumulator {
+    inst acc: Accumulator<fp32, 8> {
+        data = data,
+        clk = clk,
+        reset = reset,
+        sum => sum
+    }
+}
+
+entity I32Accumulator {
+    in data: [i32; 8]
+    in clk: clock
+    in reset: reset
+    out sum: i32
+}
+
+impl I32Accumulator {
+    inst acc: Accumulator<i32, 8> {
+        data = data,
+        clk = clk,
+        reset = reset,
+        sum => sum
+    }
+}
+
+entity Q16_16Accumulator {
+    in data: [q16_16; 8]
+    in clk: clock
+    in reset: reset
+    out sum: q16_16
+}
+
+impl Q16_16Accumulator {
+    inst acc: Accumulator<q16_16, 8> {
+        data = data,
+        clk = clk,
+        reset = reset,
+        sum => sum
+    }
+}
+
+// ============================================================================
+// Generic FIR Filter
+// ============================================================================
+
+/// Finite Impulse Response filter with generic numeric type
+///
+/// Works with any numeric type - automatically selects appropriate
+/// arithmetic implementation based on type.
+entity FIRFilter<T, const TAPS: nat>
+where
+    T: Numeric
+{
+    in x: T
+    in coeffs: [T; TAPS]
+    in clk: clock
+    out y: T
+}
+
+impl<T, const TAPS: nat> FIRFilter<T, TAPS> {
+    // Delay line
+    signal delays: [T; TAPS] = [T::ZERO; TAPS]
+
+    on clk.rise {
+        // Shift delay line
+        delays[0] := x
+        for i in 1..TAPS {
+            delays[i] := delays[i - 1]
+        }
+    }
+
+    // Compute filter output: y = sum(coeffs[i] * delays[i])
+    signal products: [T; TAPS]
+    for i in 0..TAPS {
+        products[i] = coeffs[i] * delays[i]
+    }
+
+    // Tree sum for efficiency
+    y = tree_sum(products)
+}
+
+// FP32 FIR filter instance
+entity FP32FIR8 {
+    in x: fp32
+    in coeffs: [fp32; 8]
+    in clk: clock
+    out y: fp32
+}
+
+impl FP32FIR8 {
+    inst fir: FIRFilter<fp32, 8> {
+        x = x,
+        coeffs = coeffs,
+        clk = clk,
+        y => y
+    }
+}
+
+// Fixed-point FIR filter instance (more efficient for DSP)
+entity Q16_16FIR8 {
+    in x: q16_16
+    in coeffs: [q16_16; 8]
+    in clk: clock
+    out y: q16_16
+}
+
+impl Q16_16FIR8 {
+    inst fir: FIRFilter<q16_16, 8> {
+        x = x,
+        coeffs = coeffs,
+        clk = clk,
+        y => y
+    }
+}
+
+// ============================================================================
+// Generic Moving Average
+// ============================================================================
+
+/// Moving average filter with generic numeric type
+entity MovingAverage<T, const WINDOW: nat>
+where
+    T: Numeric
+{
+    in x: T
+    in clk: clock
+    out avg: T
+}
+
+impl<T, const WINDOW: nat> MovingAverage<T, WINDOW> {
+    signal buffer: [T; WINDOW] = [T::ZERO; WINDOW]
+    signal sum: T = T::ZERO
+
+    on clk.rise {
+        // Shift buffer
+        signal new_sum: T = sum - buffer[WINDOW - 1] + x
+        sum := new_sum
+
+        buffer[0] := x
+        for i in 1..WINDOW {
+            buffer[i] := buffer[i - 1]
+        }
+    }
+
+    // Divide by window size
+    avg = sum / WINDOW
+}
+
+// ============================================================================
+// Generic Linear Interpolation
+// ============================================================================
+
+/// Linear interpolation: result = a + (b - a) * t
+///
+/// Works with any numeric type
+entity Lerp<T>
+where
+    T: Numeric
+{
+    in a: T
+    in b: T
+    in t: T  // Interpolation parameter [0, 1]
+    out result: T
+}
+
+impl<T> Lerp<T> {
+    signal diff: T = b - a
+    signal scaled: T = diff * t
+    result = a + scaled
+}
+
+// ============================================================================
+// Generic Min/Max Tree
+// ============================================================================
+
+/// Find minimum value in array using tree reduction
+entity MinTree<T, const N: nat>
+where
+    T: Numeric
+{
+    in values: [T; N]
+    out min: T
+}
+
+impl<T, const N: nat> MinTree<T, N> {
+    min = if N == 1 {
+        values[0]
+    } else if N == 2 {
+        if values[0] < values[1] { values[0] } else { values[1] }
+    } else {
+        // Recursive tree reduction
+        signal left_min: T = min_tree_helper(values[0 : N/2])
+        signal right_min: T = min_tree_helper(values[N/2 : N])
+        if left_min < right_min { left_min } else { right_min }
+    }
+}
+
+// ============================================================================
+// Generic Matrix-Vector Multiply
+// ============================================================================
+
+/// Matrix-vector multiplication with generic numeric type
+///
+/// Computes y = M * x where M is MxN matrix, x is N-vector
+entity MatVecMul<T, const M: nat, const N: nat>
+where
+    T: Numeric
+{
+    in matrix: [[T; N]; M]  // M rows, N columns
+    in vector: [T; N]
+    out result: [T; M]
+}
+
+impl<T, const M: nat, const N: nat> MatVecMul<T, M, N> {
+    // For each row of matrix
+    for i in 0..M {
+        // Dot product of row i with vector
+        signal products: [T; N]
+        for j in 0..N {
+            products[j] = matrix[i][j] * vector[j]
+        }
+        result[i] = tree_sum(products)
+    }
+}
+
+// Specialized 3x3 FP32 matrix-vector multiply
+entity Mat3x3Fp32VecMul {
+    in matrix: [[fp32; 3]; 3]
+    in vector: [fp32; 3]
+    out result: [fp32; 3]
+}
+
+impl Mat3x3Fp32VecMul {
+    inst mul: MatVecMul<fp32, 3, 3> {
+        matrix = matrix,
+        vector = vector,
+        result => result
+    }
+}
+
+// ============================================================================
+// Generic Polynomial Evaluation (Horner's Method)
+// ============================================================================
+
+/// Evaluate polynomial using Horner's method
+///
+/// For polynomial a0 + a1*x + a2*x^2 + ... + an*x^n
+/// Computes: (...((an*x + a(n-1))*x + a(n-2))*x + ... + a0)
+entity PolyEval<T, const DEGREE: nat>
+where
+    T: Numeric
+{
+    in x: T
+    in coeffs: [T; DEGREE + 1]  // a0, a1, ..., a_degree
+    out result: T
+}
+
+impl<T, const DEGREE: nat> PolyEval<T, DEGREE> {
+    // Start with highest degree coefficient
+    signal acc: T = coeffs[DEGREE]
+
+    // Horner's method: multiply by x and add next coefficient
+    for i in (0..DEGREE).rev() {
+        acc = acc * x + coeffs[i]
+    }
+
+    result = acc
+}
+
+// ============================================================================
+// Generic Saturation Arithmetic
+// ============================================================================
+
+/// Saturating addition - clamps to min/max instead of wrapping
+entity SatAdd<T>
+where
+    T: Numeric
+{
+    in a: T
+    in b: T
+    out result: T
+}
+
+impl<T> SatAdd<T> {
+    inst sat: NumericSatAdd<T> {
+        a = a,
+        b = b,
+        result => result
+    }
+}
+
+/// Saturating multiplication
+entity SatMul<T>
+where
+    T: Numeric
+{
+    in a: T
+    in b: T
+    out result: T
+}
+
+impl<T> SatMul<T> {
+    signal (product, overflow) = a.mul(b)
+    result = if overflow {
+        if (a.is_positive() && b.is_positive()) || (a.is_negative() && b.is_negative()) {
+            T::MAX_VALUE
+        } else {
+            T::MIN_VALUE
+        }
+    } else {
+        product
+    }
+}
+
+// ============================================================================
+// Type Conversion Example
+// ============================================================================
+
+/// Convert between different numeric types
+entity NumericConvert<FROM, TO>
+where
+    FROM: Numeric,
+    TO: Numeric
+{
+    in value: FROM
+    out result: TO
+}
+
+impl<FROM, TO> NumericConvert<FROM, TO> {
+    result = if FROM::IS_FLOATING && TO::IS_FIXED {
+        // Float to fixed: multiply by scale factor
+        let scaled = value * (1 << TO::FRAC_BITS)
+        scaled.to_bits() as TO
+    } else if FROM::IS_FIXED && TO::IS_FLOATING {
+        // Fixed to float: divide by scale factor
+        let int_val = value.to_int()
+        int_to_float::<TO>(int_val) / (1 << FROM::FRAC_BITS)
+    } else if FROM::IS_FIXED && TO::IS_FIXED {
+        // Fixed to fixed: rescale
+        if TO::FRAC_BITS > FROM::FRAC_BITS {
+            (value << (TO::FRAC_BITS - FROM::FRAC_BITS)) as TO
+        } else {
+            (value >> (FROM::FRAC_BITS - TO::FRAC_BITS)) as TO
+        }
+    } else {
+        // Integer to integer or same type: cast
+        value.to_bits() as TO
+    }
+}
+
+// Example: FP32 to Q16.16 converter
+entity FP32ToQ16_16 {
+    in value: fp32
+    out result: q16_16
+}
+
+impl FP32ToQ16_16 {
+    inst convert: NumericConvert<fp32, q16_16> {
+        value = value,
+        result => result
+    }
+}

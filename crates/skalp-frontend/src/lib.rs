@@ -8,12 +8,14 @@
 //! - HIR (High-level IR) generation
 
 pub mod ast;
+pub mod const_eval;
 pub mod constraints;
 pub mod generics;
 pub mod hir;
 pub mod hir_builder;
 pub mod lexer;
 pub mod macros;
+pub mod monomorphization;
 pub mod parse;
 pub mod parser;
 pub mod semantic;
@@ -64,7 +66,11 @@ pub fn parse_and_build_hir(source: &str) -> Result<Hir> {
     //     return Err(anyhow::anyhow!("Type checking failed with {} errors", errors.len()));
     // }
 
-    Ok(hir)
+    // Apply monomorphization to generate concrete implementations from generics
+    let mut mono_engine = monomorphization::MonomorphizationEngine::new();
+    let monomorphized_hir = mono_engine.monomorphize(&hir);
+
+    Ok(monomorphized_hir)
 }
 
 /// Parse a SKALP source file (compatibility wrapper)

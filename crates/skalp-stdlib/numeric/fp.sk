@@ -1,0 +1,588 @@
+// Floating-Point Operations
+//
+// Generic floating-point operations that work with any IEEE 754 format.
+// All operations are fully compliant with IEEE 754 standard including:
+// - Special value handling (NaN, Inf, zero, denormals)
+// - Proper rounding (round-to-nearest-even)
+// - Exception flags (invalid, overflow, underflow, inexact)
+
+use crate::numeric::formats::FloatFormat;
+use crate::numeric::traits::Numeric;
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+/// Generic floating-point type parameterized by format
+pub type fp<const F: FloatFormat> = bit[F.total_bits];
+
+// Common format aliases for convenience
+pub type fp16 = fp<IEEE754_16>;
+pub type fp32 = fp<IEEE754_32>;
+pub type fp64 = fp<IEEE754_64>;
+pub type bf16 = fp<BFLOAT16>;
+
+// ============================================================================
+// Addition
+// ============================================================================
+
+/// IEEE 754 compliant floating-point addition
+///
+/// Performs a + b with proper handling of special cases, rounding, and flags.
+///
+/// # Flags
+/// - [4] invalid:      NaN operands or Inf-Inf
+/// - [3] div_by_zero:  unused
+/// - [2] overflow:     Result too large for format
+/// - [1] underflow:    Result too small for format
+/// - [0] inexact:      Result was rounded
+pub entity FpAdd<const F: FloatFormat> {
+    in a: fp<F>
+    in b: fp<F>
+    out result: fp<F>
+    out flags: bit[5]
+}
+
+impl FpAdd<const F: FloatFormat> {
+    // Format constants
+    const W: nat = F.total_bits
+    const E: nat = F.exponent_bits
+    const M: nat = F.mantissa_bits
+    const BIAS: int = F.bias
+    const MAX_EXP: nat = (1 << E) - 1
+    const FRAC_BITS: nat = M + 1  // Include implicit bit
+
+    // Extract fields
+    signal a_sign: bit = a[W-1]
+    signal a_exp: bit[E] = a[W-2:M]
+    signal a_mant: bit[M] = a[M-1:0]
+
+    signal b_sign: bit = b[W-1]
+    signal b_exp: bit[E] = b[W-2:M]
+    signal b_mant: bit[M] = b[M-1:0]
+
+    // Classify inputs
+    signal a_zero: bit = (a_exp == 0) && (a_mant == 0)
+    signal a_denorm: bit = (a_exp == 0) && (a_mant != 0)
+    signal a_inf: bit = (a_exp == MAX_EXP) && (a_mant == 0)
+    signal a_nan: bit = (a_exp == MAX_EXP) && (a_mant != 0)
+
+    signal b_zero: bit = (b_exp == 0) && (b_mant == 0)
+    signal b_denorm: bit = (b_exp == 0) && (b_mant != 0)
+    signal b_inf: bit = (b_exp == MAX_EXP) && (b_mant == 0)
+    signal b_nan: bit = (b_exp == MAX_EXP) && (b_mant != 0)
+
+    // Build fractions with implicit bit
+    signal a_frac: bit[FRAC_BITS] = {(!a_denorm), a_mant}
+    signal b_frac: bit[FRAC_BITS] = {(!b_denorm), b_mant}
+
+    // Effective exponents (denormals act like exp=1)
+    signal a_exp_eff: bit[E] = a_denorm ? 1 : a_exp
+    signal b_exp_eff: bit[E] = b_denorm ? 1 : b_exp
+
+    // Align exponents (ensure a has larger or equal exponent)
+    signal swap: bit = b_exp_eff > a_exp_eff
+    signal large_exp: bit[E] = swap ? b_exp_eff : a_exp_eff
+    signal large_frac: bit[FRAC_BITS] = swap ? b_frac : a_frac
+    signal large_sign: bit = swap ? b_sign : a_sign
+    signal small_frac: bit[FRAC_BITS] = swap ? a_frac : b_frac
+    signal small_sign: bit = swap ? a_sign : b_sign
+
+    signal exp_diff: bit[E] = large_exp - (swap ? a_exp_eff : b_exp_eff)
+
+    // Shift small fraction with guard bits
+    const GUARD_BITS: nat = 3
+    const ALIGNED_BITS: nat = FRAC_BITS + GUARD_BITS
+    signal small_aligned: bit[ALIGNED_BITS] = ({small_frac, {GUARD_BITS{1'b0}}}) >> exp_diff
+    signal large_aligned: bit[ALIGNED_BITS] = {large_frac, {GUARD_BITS{1'b0}}}
+
+    // Add or subtract based on signs
+    signal effective_sub: bit = large_sign ^ small_sign
+    signal sum_raw: bit[ALIGNED_BITS+1] = effective_sub
+        ? {1'b0, large_aligned} - {1'b0, small_aligned}
+        : {1'b0, large_aligned} + {1'b0, small_aligned}
+
+    signal sum_sign: bit = large_sign
+
+    // Normalize (find leading one)
+    signal sum_lz: nat = clz(sum_raw)
+    signal sum_normalized: bit[ALIGNED_BITS+1] = sum_raw << sum_lz
+    signal result_exp_raw: int = (large_exp as int) - (sum_lz as int) +
+                                 (sum_raw[ALIGNED_BITS] ? 1 : 0)
+
+    // Extract mantissa and round bits
+    signal mant_raw: bit[M] = sum_normalized[ALIGNED_BITS-1:GUARD_BITS]
+    signal guard: bit = sum_normalized[GUARD_BITS-1]
+    signal round: bit = sum_normalized[GUARD_BITS-2]
+    signal sticky: bit = |sum_normalized[GUARD_BITS-3:0]
+
+    // Round to nearest even
+    signal round_up: bit = guard && (round || sticky || mant_raw[0])
+    signal mant_rounded: bit[M+1] = {1'b0, mant_raw} + round_up
+    signal result_exp_adj: int = result_exp_raw + (mant_rounded[M] as int)
+
+    signal result_mant: bit[M] = mant_rounded[M] ? mant_rounded[M:1] : mant_rounded[M-1:0]
+
+    // Detect overflow/underflow
+    signal overflow: bit = (result_exp_adj >= MAX_EXP)
+    signal underflow: bit = (result_exp_adj <= 0)
+    signal result_exp: bit[E] = underflow ? 0 :
+                                overflow ? MAX_EXP :
+                                result_exp_adj as bit[E]
+
+    // Assemble normal result
+    signal normal_result: fp<F> = {sum_sign, result_exp, result_mant}
+
+    // Handle special cases
+    signal invalid: bit = (a_inf && b_inf && (a_sign != b_sign)) || a_nan || b_nan
+    signal qnan: fp<F> = {1'b0, {E{1'b1}}, 1'b1, {(M-1){1'b0}}}
+
+    result = invalid ? qnan :
+             a_nan ? a :
+             b_nan ? b :
+             a_inf ? a :
+             b_inf ? b :
+             a_zero ? b :
+             b_zero ? a :
+             overflow ? {sum_sign, {E{1'b1}}, {M{1'b0}}} :
+             underflow ? {sum_sign, {E{1'b0}}, {M{1'b0}}} :
+             normal_result
+
+    flags = {invalid, 1'b0, overflow && !invalid, underflow && !invalid,
+             guard || round || sticky}
+}
+
+// ============================================================================
+// Subtraction
+// ============================================================================
+
+/// Floating-point subtraction (a - b = a + (-b))
+pub entity FpSub<const F: FloatFormat> {
+    in a: fp<F>
+    in b: fp<F>
+    out result: fp<F>
+    out flags: bit[5]
+}
+
+impl FpSub<const F: FloatFormat> {
+    const W: nat = F.total_bits
+
+    // Negate b and add
+    signal b_negated: fp<F> = {!b[W-1], b[W-2:0]}
+
+    let adder = FpAdd<F> {
+        a: a,
+        b: b_negated,
+        result: result,
+        flags: flags
+    }
+}
+
+// ============================================================================
+// Multiplication
+// ============================================================================
+
+/// IEEE 754 compliant floating-point multiplication
+pub entity FpMul<const F: FloatFormat> {
+    in a: fp<F>
+    in b: fp<F>
+    out result: fp<F>
+    out flags: bit[5]
+}
+
+impl FpMul<const F: FloatFormat> {
+    const W: nat = F.total_bits
+    const E: nat = F.exponent_bits
+    const M: nat = F.mantissa_bits
+    const BIAS: int = F.bias
+    const MAX_EXP: nat = (1 << E) - 1
+    const FRAC_BITS: nat = M + 1
+
+    // Extract fields
+    signal a_sign: bit = a[W-1]
+    signal a_exp: bit[E] = a[W-2:M]
+    signal a_mant: bit[M] = a[M-1:0]
+
+    signal b_sign: bit = b[W-1]
+    signal b_exp: bit[E] = b[W-2:M]
+    signal b_mant: bit[M] = b[M-1:0]
+
+    // Result sign
+    signal result_sign: bit = a_sign ^ b_sign
+
+    // Classify
+    signal a_zero: bit = (a_exp == 0) && (a_mant == 0)
+    signal a_denorm: bit = (a_exp == 0) && (a_mant != 0)
+    signal a_inf: bit = (a_exp == MAX_EXP) && (a_mant == 0)
+    signal a_nan: bit = (a_exp == MAX_EXP) && (a_mant != 0)
+
+    signal b_zero: bit = (b_exp == 0) && (b_mant == 0)
+    signal b_denorm: bit = (b_exp == 0) && (b_mant != 0)
+    signal b_inf: bit = (b_exp == MAX_EXP) && (b_mant == 0)
+    signal b_nan: bit = (b_exp == MAX_EXP) && (b_mant != 0)
+
+    // Build fractions
+    signal a_frac: bit[FRAC_BITS] = {(!a_denorm), a_mant}
+    signal b_frac: bit[FRAC_BITS] = {(!b_denorm), b_mant}
+
+    // Effective exponents
+    signal a_exp_eff: bit[E] = a_denorm ? 1 : a_exp
+    signal b_exp_eff: bit[E] = b_denorm ? 1 : b_exp
+
+    // Multiply fractions
+    const PROD_BITS: nat = FRAC_BITS * 2
+    signal product: bit[PROD_BITS] = a_frac * b_frac
+
+    // Normalize
+    signal prod_overflow: bit = product[PROD_BITS-1]
+    signal product_norm: bit[PROD_BITS] = prod_overflow ? (product >> 1) : product
+
+    // Calculate exponent
+    signal exp_sum: int = (a_exp_eff as int) + (b_exp_eff as int) - BIAS +
+                         (prod_overflow ? 1 : 0)
+
+    // Extract mantissa and round bits
+    const GUARD_BITS: nat = 3
+    signal mant_with_guard: bit[M+GUARD_BITS] =
+        product_norm[PROD_BITS-2:PROD_BITS-2-M-GUARD_BITS+1]
+
+    signal mant_raw: bit[M] = mant_with_guard[M+GUARD_BITS-1:GUARD_BITS]
+    signal guard: bit = mant_with_guard[GUARD_BITS-1]
+    signal round: bit = mant_with_guard[GUARD_BITS-2]
+    signal sticky: bit = |mant_with_guard[GUARD_BITS-3:0] ||
+                        |product_norm[PROD_BITS-2-M-GUARD_BITS:0]
+
+    // Round
+    signal round_up: bit = guard && (round || sticky || mant_raw[0])
+    signal mant_rounded: bit[M+1] = {1'b0, mant_raw} + round_up
+    signal exp_adj: int = exp_sum + (mant_rounded[M] as int)
+
+    signal result_mant: bit[M] = mant_rounded[M] ? mant_rounded[M:1] : mant_rounded[M-1:0]
+
+    // Overflow/underflow
+    signal overflow: bit = (exp_adj >= MAX_EXP)
+    signal underflow: bit = (exp_adj <= 0)
+    signal result_exp: bit[E] = underflow ? 0 :
+                                overflow ? MAX_EXP :
+                                exp_adj as bit[E]
+
+    // Assemble
+    signal normal_result: fp<F> = {result_sign, result_exp, result_mant}
+
+    // Special cases
+    signal invalid: bit = ((a_zero && b_inf) || (a_inf && b_zero)) || a_nan || b_nan
+    signal qnan: fp<F> = {1'b0, {E{1'b1}}, 1'b1, {(M-1){1'b0}}}
+    signal inf: fp<F> = {result_sign, {E{1'b1}}, {M{1'b0}}}
+    signal zero: fp<F> = {result_sign, {E{1'b0}}, {M{1'b0}}}
+
+    result = invalid ? qnan :
+             a_nan ? a :
+             b_nan ? b :
+             (a_inf || b_inf) ? inf :
+             (a_zero || b_zero) ? zero :
+             overflow ? inf :
+             underflow ? zero :
+             normal_result
+
+    flags = {invalid, 1'b0, overflow && !invalid, underflow && !invalid,
+             guard || round || sticky}
+}
+
+// ============================================================================
+// Division
+// ============================================================================
+
+/// IEEE 754 compliant floating-point division
+pub entity FpDiv<const F: FloatFormat> {
+    in a: fp<F>
+    in b: fp<F>
+    out result: fp<F>
+    out flags: bit[5]
+}
+
+impl FpDiv<const F: FloatFormat> {
+    const W: nat = F.total_bits
+    const E: nat = F.exponent_bits
+    const M: nat = F.mantissa_bits
+    const BIAS: int = F.bias
+    const MAX_EXP: nat = (1 << E) - 1
+    const FRAC_BITS: nat = M + 1
+
+    // Extract fields
+    signal a_sign: bit = a[W-1]
+    signal a_exp: bit[E] = a[W-2:M]
+    signal a_mant: bit[M] = a[M-1:0]
+
+    signal b_sign: bit = b[W-1]
+    signal b_exp: bit[E] = b[W-2:M]
+    signal b_mant: bit[M] = b[M-1:0]
+
+    // Result sign
+    signal result_sign: bit = a_sign ^ b_sign
+
+    // Classify
+    signal a_zero: bit = (a_exp == 0) && (a_mant == 0)
+    signal a_denorm: bit = (a_exp == 0) && (a_mant != 0)
+    signal a_inf: bit = (a_exp == MAX_EXP) && (a_mant == 0)
+    signal a_nan: bit = (a_exp == MAX_EXP) && (a_mant != 0)
+
+    signal b_zero: bit = (b_exp == 0) && (b_mant == 0)
+    signal b_denorm: bit = (b_exp == 0) && (b_mant != 0)
+    signal b_inf: bit = (b_exp == MAX_EXP) && (b_mant == 0)
+    signal b_nan: bit = (b_exp == MAX_EXP) && (b_mant != 0)
+
+    // Build fractions
+    signal a_frac: bit[FRAC_BITS] = {(!a_denorm), a_mant}
+    signal b_frac: bit[FRAC_BITS] = {(!b_denorm), b_mant}
+
+    // Effective exponents
+    signal a_exp_eff: bit[E] = a_denorm ? 1 : a_exp
+    signal b_exp_eff: bit[E] = b_denorm ? 1 : b_exp
+
+    // Divide fractions (shift a left by M+3 bits for quotient and guard bits)
+    const DIV_BITS: nat = FRAC_BITS + M + 3
+    signal dividend: bit[DIV_BITS] = {a_frac, {(M+3){1'b0}}}
+    signal quotient: bit[DIV_BITS] = dividend / ({1'b0, b_frac})
+
+    // Normalize
+    signal quot_msb: nat = DIV_BITS - 1 - clz(quotient)
+    signal quotient_norm: bit[DIV_BITS] = quotient << (DIV_BITS - 1 - quot_msb)
+
+    // Calculate exponent
+    signal exp_diff: int = (a_exp_eff as int) - (b_exp_eff as int) + BIAS +
+                          ((quot_msb as int) - (M + 3))
+
+    // Extract mantissa and round bits
+    const GUARD_BITS: nat = 3
+    signal mant_with_guard: bit[M+GUARD_BITS] = quotient_norm[DIV_BITS-1:DIV_BITS-M-GUARD_BITS]
+
+    signal mant_raw: bit[M] = mant_with_guard[M+GUARD_BITS-1:GUARD_BITS]
+    signal guard: bit = mant_with_guard[GUARD_BITS-1]
+    signal round: bit = mant_with_guard[GUARD_BITS-2]
+    signal sticky: bit = |mant_with_guard[GUARD_BITS-3:0] ||
+                        |quotient_norm[DIV_BITS-M-GUARD_BITS-1:0]
+
+    // Round
+    signal round_up: bit = guard && (round || sticky || mant_raw[0])
+    signal mant_rounded: bit[M+1] = {1'b0, mant_raw} + round_up
+    signal exp_adj: int = exp_diff + (mant_rounded[M] as int)
+
+    signal result_mant: bit[M] = mant_rounded[M] ? mant_rounded[M:1] : mant_rounded[M-1:0]
+
+    // Overflow/underflow
+    signal overflow: bit = (exp_adj >= MAX_EXP)
+    signal underflow: bit = (exp_adj <= 0)
+    signal result_exp: bit[E] = underflow ? 0 :
+                                overflow ? MAX_EXP :
+                                exp_adj as bit[E]
+
+    // Assemble
+    signal normal_result: fp<F> = {result_sign, result_exp, result_mant}
+
+    // Special cases
+    signal invalid: bit = ((a_zero && b_zero) || (a_inf && b_inf)) || a_nan || b_nan
+    signal div_by_zero: bit = (!a_zero && !a_inf && b_zero) && !invalid
+    signal qnan: fp<F> = {1'b0, {E{1'b1}}, 1'b1, {(M-1){1'b0}}}
+    signal inf: fp<F> = {result_sign, {E{1'b1}}, {M{1'b0}}}
+    signal zero: fp<F> = {result_sign, {E{1'b0}}, {M{1'b0}}}
+
+    result = invalid ? qnan :
+             a_nan ? a :
+             b_nan ? b :
+             div_by_zero ? inf :
+             a_inf ? inf :
+             b_inf ? zero :
+             a_zero ? zero :
+             overflow ? inf :
+             underflow ? zero :
+             normal_result
+
+    flags = {invalid, div_by_zero, overflow && !invalid, underflow && !invalid,
+             guard || round || sticky}
+}
+
+// ============================================================================
+// Square Root
+// ============================================================================
+
+/// Floating-point square root with intent-driven implementation
+pub entity FpSqrt<const F: FloatFormat, intent I: Intent = DEFAULT_INTENT> {
+    in x: fp<F>
+    out result: fp<F>
+    out flags: bit[5]
+}
+
+impl FpSqrt<const F: FloatFormat, intent I: Intent> {
+    const W: nat = F.total_bits
+    const E: nat = F.exponent_bits
+    const M: nat = F.mantissa_bits
+    const MAX_EXP: nat = (1 << E) - 1
+
+    // Extract fields
+    signal x_sign: bit = x[W-1]
+    signal x_exp: bit[E] = x[W-2:M]
+    signal x_mant: bit[M] = x[M-1:0]
+
+    // Classify
+    signal x_zero: bit = (x_exp == 0) && (x_mant == 0)
+    signal x_denorm: bit = (x_exp == 0) && (x_mant != 0)
+    signal x_inf: bit = (x_exp == MAX_EXP) && (x_mant == 0)
+    signal x_nan: bit = (x_exp == MAX_EXP) && (x_mant != 0)
+    signal x_negative: bit = x_sign && !x_zero && !x_nan
+
+    // Choose implementation based on intent
+    signal sqrt_result: fp<F> = if is_latency_optimized(I) {
+        // Fast: Parallel digit-recurrence algorithm
+        fast_sqrt<F>(x)
+    } else if is_area_optimized(I) {
+        // Small: Iterative digit-by-digit algorithm
+        small_sqrt<F>(x)
+    } else {
+        // Balanced: Pipelined Newton-Raphson
+        balanced_sqrt<F>(x)
+    }
+
+    // Special cases
+    signal invalid: bit = x_negative || x_nan
+    signal qnan: fp<F> = {1'b0, {E{1'b1}}, 1'b1, {(M-1){1'b0}}}
+
+    result = invalid ? qnan :
+             x_zero ? x :
+             x_inf ? x :
+             sqrt_result
+
+    flags = {invalid, 1'b0, 1'b0, 1'b0, 1'b0}  // Sqrt never overflows/underflows
+}
+
+// Helper functions (implementation depends on intent)
+fn fast_sqrt<const F: FloatFormat>(x: fp<F>) -> fp<F> {
+    // TODO: Implement fast parallel algorithm
+    x  // Placeholder
+}
+
+fn small_sqrt<const F: FloatFormat>(x: fp<F>) -> fp<F> {
+    // TODO: Implement small iterative algorithm
+    x  // Placeholder
+}
+
+fn balanced_sqrt<const F: FloatFormat>(x: fp<F>) -> fp<F> {
+    // TODO: Implement balanced pipelined algorithm
+    x  // Placeholder
+}
+
+// ============================================================================
+// Comparison
+// ============================================================================
+
+/// Floating-point comparison
+pub entity FpCompare<const F: FloatFormat> {
+    in a: fp<F>
+    in b: fp<F>
+    out lt: bit       // a < b
+    out eq: bit       // a == b
+    out gt: bit       // a > b
+    out unordered: bit  // NaN comparison
+}
+
+impl FpCompare<const F: FloatFormat> {
+    const W: nat = F.total_bits
+    const E: nat = F.exponent_bits
+    const M: nat = F.mantissa_bits
+    const MAX_EXP: nat = (1 << E) - 1
+
+    // Extract fields
+    signal a_sign: bit = a[W-1]
+    signal a_exp: bit[E] = a[W-2:M]
+    signal a_mant: bit[M] = a[M-1:0]
+
+    signal b_sign: bit = b[W-1]
+    signal b_exp: bit[E] = b[W-2:M]
+    signal b_mant: bit[M] = b[M-1:0]
+
+    // Classify
+    signal a_zero: bit = (a_exp == 0) && (a_mant == 0)
+    signal a_nan: bit = (a_exp == MAX_EXP) && (a_mant != 0)
+
+    signal b_zero: bit = (b_exp == 0) && (b_mant == 0)
+    signal b_nan: bit = (b_exp == MAX_EXP) && (b_mant != 0)
+
+    // Both zero (ignore sign)
+    signal both_zero: bit = a_zero && b_zero
+
+    // NaN handling
+    unordered = a_nan || b_nan
+
+    // Sign comparison
+    signal sign_lt: bit = a_sign && !b_sign  // a negative, b positive
+    signal sign_gt: bit = !a_sign && b_sign  // a positive, b negative
+    signal same_sign: bit = a_sign == b_sign
+
+    // Magnitude comparison (for same sign)
+    signal mag_lt: bit = (a_exp < b_exp) || ((a_exp == b_exp) && (a_mant < b_mant))
+    signal mag_eq: bit = (a_exp == b_exp) && (a_mant == b_mant)
+    signal mag_gt: bit = (a_exp > b_exp) || ((a_exp == b_exp) && (a_mant > b_mant))
+
+    // Final comparison
+    lt = !unordered && !both_zero && (
+        sign_lt || (same_sign && (a_sign ? mag_gt : mag_lt))
+    )
+
+    eq = !unordered && (both_zero || (same_sign && mag_eq))
+
+    gt = !unordered && !both_zero && (
+        sign_gt || (same_sign && (a_sign ? mag_lt : mag_gt))
+    )
+}
+
+// ============================================================================
+// Conversion Operations
+// ============================================================================
+
+/// Convert between floating-point formats
+pub entity FpConvert<const FROM: FloatFormat, const TO: FloatFormat> {
+    in x: fp<FROM>
+    out result: fp<TO>
+    out flags: bit[5]
+}
+
+impl FpConvert<const FROM: FloatFormat, const TO: FloatFormat> {
+    // TODO: Implement format conversion with proper rounding
+    result = x as fp<TO>  // Placeholder
+    flags = 5'b00000
+}
+
+/// Convert floating-point to integer
+pub entity FpToInt<const F: FloatFormat, const W: nat, const S: bool> {
+    in x: fp<F>
+    out result: int<W, S>
+    out flags: bit[5]
+}
+
+impl FpToInt<const F: FloatFormat, const W: nat, const S: bool> {
+    // TODO: Implement FP to int conversion
+    result = x as int<W, S>  // Placeholder
+    flags = 5'b00000
+}
+
+/// Convert integer to floating-point
+pub entity IntToFp<const W: nat, const S: bool, const F: FloatFormat> {
+    in x: int<W, S>
+    out result: fp<F>
+    out flags: bit[5]
+}
+
+impl IntToFp<const W: nat, const S: bool, const F: FloatFormat> {
+    // TODO: Implement int to FP conversion
+    result = x as fp<F>  // Placeholder
+    flags = 5'b00000
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Count leading zeros (hardware intrinsic)
+fn clz<const W: nat>(x: bit[W]) -> nat {
+    // Hardware implementation
+    intrinsic_clz(x)
+}

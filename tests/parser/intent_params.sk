@@ -1,0 +1,38 @@
+// Test intent parameters in generic declarations
+
+// Basic intent parameter
+entity Sqrt<const F: FloatFormat, intent I: Intent> {
+    in x: fp<F>
+    out result: fp<F>
+}
+
+impl<const F: FloatFormat, intent I> Sqrt<F, I> {
+    // Intent used for compile-time branching
+    result = if I.latency < 4 {
+        x  // Placeholder for LUT implementation
+    } else {
+        x  // Placeholder for iterative implementation
+    }
+}
+
+// Intent with default value
+entity FMA<T, intent I: Intent = Intent::default()> {
+    in a: T
+    in b: T
+    in c: T
+    out result: T
+}
+
+impl<T, intent I> FMA<T, I> {
+    result = a * b + c
+}
+
+// Multiple intent parameters
+entity Pipeline<const N: nat, intent DataFlow: Intent, intent Timing: Intent> {
+    in data: bit<N>
+    out result: bit<N>
+}
+
+impl<const N: nat, intent DataFlow, intent Timing> Pipeline<N, DataFlow, Timing> {
+    result = data
+}

@@ -130,12 +130,21 @@ General math functions that work with multiple types:
 
 | Module | Status | Notes |
 |--------|--------|-------|
-| fp/basic | 🚧 WIP | Add/sub/mul/div entities defined |
+| **Types** | ✅ Complete | fp16/32/64, vec2/3/4<T> fully working |
+| **Built-in Operators** | ✅ Complete | +, -, *, /, <, >, ==, etc. for FP and vectors |
+| **Simulation** | ✅ Complete | CPU and GPU (Metal) simulation working |
+| **Synthesis** | ✅ Complete | MIR/LIR lowering complete |
+| fp/basic entities | 🚧 Defined | Add/sub/mul/compare entities exist, need validation |
+| vec/basic entities | ✅ Working | Vec2/3/4 Add/Sub/Dot/Cross tested and working |
+| vec/geometric | 🚧 Partial | Distance, lerp, min/max work; normalize needs sqrt |
 | fp/transcendental | ⏳ Planned | Requires CORDIC or Taylor series |
-| fp/conversions | ⏳ Planned | Format conversions |
-| vec/basic | ⏳ Planned | Element-wise ops |
-| vec/geometric | ⏳ Planned | Dot, cross, normalize |
+| fp/conversions | ⏳ Planned | Format conversions (fp16↔32↔64) |
 | math/util | ⏳ Planned | Generic utilities |
+
+**Legend:**
+- ✅ Complete and tested
+- 🚧 Implemented but needs more testing/validation
+- ⏳ Planned for future implementation
 
 ## Usage
 

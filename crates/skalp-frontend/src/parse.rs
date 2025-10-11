@@ -397,9 +397,9 @@ impl<'a> ParseState<'a> {
         // Entity name
         self.expect(SyntaxKind::Ident);
 
-        // Optional generic parameters
+        // Optional generic arguments (values, not parameter declarations)
         if self.at(SyntaxKind::Lt) {
-            self.parse_generic_params();
+            self.parse_generic_args();
         }
 
         // Connection list
@@ -2803,6 +2803,23 @@ impl<'a> ParseState<'a> {
         else if self.at(SyntaxKind::Apostrophe) {
             self.bump(); // consume '
             self.expect(SyntaxKind::Ident); // lifetime name
+        }
+        // Check if it's an intent parameter (intent I: Intent)
+        else if self.at(SyntaxKind::IntentKw) {
+            self.bump(); // consume 'intent'
+            self.expect(SyntaxKind::Ident); // parameter name
+
+            // Optional type annotation (: Intent) or default value
+            if self.at(SyntaxKind::Colon) {
+                self.bump(); // consume ':'
+                self.parse_type(); // Intent type
+            }
+
+            // Optional default value (= Intent::default())
+            if self.at(SyntaxKind::Assign) {
+                self.bump(); // consume =
+                self.parse_type_arg_expr(); // default value
+            }
         }
         // Check if it's a const parameter (const N: nat[32])
         else if self.at(SyntaxKind::ConstKw) {

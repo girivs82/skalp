@@ -1,0 +1,77 @@
+// Test const generic parameters
+
+// Basic const parameters
+entity Register<const WIDTH: nat> {
+    in data: bit<WIDTH>
+    in clk: clock
+    out q: bit<WIDTH>
+}
+
+impl<const WIDTH: nat> Register<WIDTH> {
+    signal reg: bit<WIDTH> = 0
+
+    on clk.rise {
+        reg := data
+    }
+
+    q = reg
+}
+
+// Const parameters with defaults
+entity Memory<const DEPTH: nat = 256, const WIDTH: nat = 32> {
+    in addr: bit<clog2(DEPTH)>
+    in data: bit<WIDTH>
+    in we: bit
+    in clk: clock
+    out q: bit<WIDTH>
+}
+
+// Multiple const parameters with expressions
+entity FIFO<const DEPTH: nat, const WIDTH: nat>
+where
+    DEPTH > 0,
+    WIDTH > 0
+{
+    in data_in: bit<WIDTH>
+    in push: bit
+    in pop: bit
+    in clk: clock
+    out data_out: bit<WIDTH>
+    out full: bit
+    out empty: bit
+}
+
+impl<const DEPTH: nat, const WIDTH: nat> FIFO<DEPTH, WIDTH> {
+    signal mem: [bit<WIDTH>; DEPTH]
+    signal read_ptr: bit<clog2(DEPTH)> = 0
+    signal write_ptr: bit<clog2(DEPTH)> = 0
+    signal count: bit<clog2(DEPTH + 1)> = 0
+
+    on clk.rise {
+        if push && !full {
+            mem[write_ptr] := data_in
+            write_ptr := write_ptr + 1
+            count := count + 1
+        }
+
+        if pop && !empty {
+            read_ptr := read_ptr + 1
+            count := count - 1
+        }
+    }
+
+    data_out = mem[read_ptr]
+    full = count == DEPTH
+    empty = count == 0
+}
+
+// FloatFormat const parameter
+entity FpAdd<const F: FloatFormat> {
+    in a: fp<F>
+    in b: fp<F>
+    out result: fp<F>
+}
+
+impl<const F: FloatFormat> FpAdd<F> {
+    result = a + b
+}

@@ -510,6 +510,8 @@ pub enum GenericParameterType {
     Width,
     /// Clock domain parameter
     ClockDomain,
+    /// Intent parameter for HLS optimization
+    Intent,
 }
 
 /// Struct type definition in MIR

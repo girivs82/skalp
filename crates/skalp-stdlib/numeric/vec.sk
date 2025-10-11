@@ -1,0 +1,652 @@
+// Vector Operations
+//
+// Generic vector operations for N-dimensional vectors with any numeric type.
+// All operations work with the Numeric trait for maximum flexibility.
+
+use crate::numeric::traits::Numeric;
+use crate::numeric::fp::{fp, FpMul, FpAdd, FpDiv, FpSqrt};
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+/// Generic N-dimensional vector
+pub type vec<T, const N: nat> = T[N];
+
+// Common dimension aliases
+pub type vec2<T> = vec<T, 2>;
+pub type vec3<T> = vec<T, 3>;
+pub type vec4<T> = vec<T, 4>;
+
+// ============================================================================
+// Component Access
+// ============================================================================
+
+/// Extract vector component by index
+pub fn vec_get<T, const N: nat>(v: vec<T, N>, i: nat) -> T {
+    v[i]
+}
+
+/// Vector swizzle operations
+pub entity VecSwizzle<T, const N_IN: nat, const N_OUT: nat> {
+    in v: vec<T, N_IN>
+    in indices: nat[N_OUT]  // Component indices to extract
+    out result: vec<T, N_OUT>
+}
+
+impl VecSwizzle<T, const N_IN: nat, const N_OUT: nat> {
+    for i in 0..N_OUT {
+        result[i] = v[indices[i]]
+    }
+}
+
+// ============================================================================
+// Arithmetic Operations
+// ============================================================================
+
+/// Component-wise vector addition
+pub entity VecAdd<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out result: vec<T, N>
+}
+
+impl VecAdd<T: Numeric, const N: nat> {
+    for i in 0..N {
+        result[i] = a[i].add(b[i])
+    }
+}
+
+/// Component-wise vector subtraction
+pub entity VecSub<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out result: vec<T, N>
+}
+
+impl VecSub<T: Numeric, const N: nat> {
+    for i in 0..N {
+        result[i] = a[i].sub(b[i])
+    }
+}
+
+/// Component-wise vector multiplication (Hadamard product)
+pub entity VecMul<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out result: vec<T, N>
+}
+
+impl VecMul<T: Numeric, const N: nat> {
+    for i in 0..N {
+        result[i] = a[i].mul(b[i])
+    }
+}
+
+/// Component-wise vector division
+pub entity VecDiv<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out result: vec<T, N>
+}
+
+impl VecDiv<T: Numeric, const N: nat> {
+    for i in 0..N {
+        result[i] = a[i].div(b[i])
+    }
+}
+
+/// Scalar multiplication
+pub entity VecScale<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    in scalar: T
+    out result: vec<T, N>
+}
+
+impl VecScale<T: Numeric, const N: nat> {
+    for i in 0..N {
+        result[i] = v[i].mul(scalar)
+    }
+}
+
+/// Negate vector
+pub entity VecNegate<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out result: vec<T, N>
+}
+
+impl VecNegate<T: Numeric, const N: nat> {
+    for i in 0..N {
+        result[i] = v[i].neg()
+    }
+}
+
+// ============================================================================
+// Dot Product
+// ============================================================================
+
+/// Vector dot product (inner product)
+///
+/// result = sum(a[i] * b[i])
+pub entity VecDot<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out result: T
+}
+
+impl VecDot<T: Numeric, const N: nat> {
+    signal products: T[N]
+
+    // Multiply components
+    for i in 0..N {
+        products[i] = a[i].mul(b[i])
+    }
+
+    // Sum reduction
+    signal accumulator: T = T::ZERO
+    for i in 0..N {
+        accumulator = accumulator.add(products[i])
+    }
+
+    result = accumulator
+}
+
+// ============================================================================
+// Cross Product (3D only)
+// ============================================================================
+
+/// 3D vector cross product
+///
+/// result = a × b = (a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
+pub entity Vec3Cross<T: Numeric> {
+    in a: vec3<T>
+    in b: vec3<T>
+    out result: vec3<T>
+}
+
+impl Vec3Cross<T: Numeric> {
+    // Cross product components
+    signal x: T = a[1].mul(b[2]).sub(a[2].mul(b[1]))
+    signal y: T = a[2].mul(b[0]).sub(a[0].mul(b[2]))
+    signal z: T = a[0].mul(b[1]).sub(a[1].mul(b[0]))
+
+    result = {x, y, z}
+}
+
+// ============================================================================
+// Length and Normalization
+// ============================================================================
+
+/// Vector length (magnitude)
+///
+/// length = sqrt(dot(v, v))
+pub entity VecLength<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out length: T
+}
+
+impl VecLength<T: Numeric, const N: nat> {
+    signal dot_result: T
+
+    let dot = VecDot<T, N> {
+        a: v,
+        b: v,
+        result: dot_result
+    }
+
+    // Take square root
+    length = dot_result.sqrt()
+}
+
+/// Vector squared length (avoids sqrt)
+///
+/// length_sq = dot(v, v)
+pub entity VecLengthSq<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out length_sq: T
+}
+
+impl VecLengthSq<T: Numeric, const N: nat> {
+    let dot = VecDot<T, N> {
+        a: v,
+        b: v,
+        result: length_sq
+    }
+}
+
+/// Vector normalization (unit vector)
+///
+/// result = v / |v|
+pub entity VecNormalize<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out result: vec<T, N>
+    out valid: bit  // False if input is zero vector
+}
+
+impl VecNormalize<T: Numeric, const N: nat> {
+    signal len: T
+
+    let length = VecLength<T, N> {
+        v: v,
+        length: len
+    }
+
+    // Check for zero length
+    valid = len != T::ZERO
+
+    // Reciprocal
+    signal inv_len: T = T::ONE.div(len)
+
+    // Scale
+    let scale = VecScale<T, N> {
+        v: v,
+        scalar: inv_len,
+        result: result
+    }
+
+    // If zero length, return zero vector
+    for i in 0..N {
+        result[i] = valid ? result[i] : T::ZERO
+    }
+}
+
+/// Fast inverse square root normalization
+///
+/// Uses fast approximation for length^(-1/2)
+pub entity VecNormalizeFast<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out result: vec<T, N>
+}
+
+impl VecNormalizeFast<T: Numeric, const N: nat> {
+    signal len_sq: T
+
+    let length_sq = VecLengthSq<T, N> {
+        v: v,
+        length_sq: len_sq
+    }
+
+    // Fast inverse sqrt (Quake III algorithm for FP)
+    signal inv_sqrt: T = fast_inv_sqrt(len_sq)
+
+    // Scale
+    let scale = VecScale<T, N> {
+        v: v,
+        scalar: inv_sqrt,
+        result: result
+    }
+}
+
+// ============================================================================
+// Distance
+// ============================================================================
+
+/// Distance between two points
+///
+/// distance = |b - a|
+pub entity VecDistance<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out distance: T
+}
+
+impl VecDistance<T: Numeric, const N: nat> {
+    signal diff: vec<T, N>
+
+    let sub = VecSub<T, N> {
+        a: b,
+        b: a,
+        result: diff
+    }
+
+    let length = VecLength<T, N> {
+        v: diff,
+        length: distance
+    }
+}
+
+/// Squared distance (avoids sqrt)
+pub entity VecDistanceSq<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out distance_sq: T
+}
+
+impl VecDistanceSq<T: Numeric, const N: nat> {
+    signal diff: vec<T, N>
+
+    let sub = VecSub<T, N> {
+        a: b,
+        b: a,
+        result: diff
+    }
+
+    let length_sq = VecLengthSq<T, N> {
+        v: diff,
+        length_sq: distance_sq
+    }
+}
+
+// ============================================================================
+// Interpolation
+// ============================================================================
+
+/// Linear interpolation
+///
+/// result = a + t * (b - a) = (1-t)*a + t*b
+pub entity VecLerp<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    in t: T  // Interpolation parameter [0, 1]
+    out result: vec<T, N>
+}
+
+impl VecLerp<T: Numeric, const N: nat> {
+    signal diff: vec<T, N>
+    signal scaled: vec<T, N>
+
+    let sub = VecSub<T, N> {
+        a: b,
+        b: a,
+        result: diff
+    }
+
+    let scale = VecScale<T, N> {
+        v: diff,
+        scalar: t,
+        result: scaled
+    }
+
+    let add = VecAdd<T, N> {
+        a: a,
+        b: scaled,
+        result: result
+    }
+}
+
+/// Spherical linear interpolation (for unit vectors)
+///
+/// Interpolates along the great circle
+pub entity VecSlerp<T: Numeric, const N: nat> {
+    in a: vec<T, N>  // Assumed normalized
+    in b: vec<T, N>  // Assumed normalized
+    in t: T
+    out result: vec<T, N>
+}
+
+impl VecSlerp<T: Numeric, const N: nat> {
+    signal dot_ab: T
+
+    let dot = VecDot<T, N> {
+        a: a,
+        b: b,
+        result: dot_ab
+    }
+
+    // Angle between vectors
+    signal theta: T = acos(dot_ab)
+    signal sin_theta: T = sin(theta)
+
+    // Slerp formula: (sin((1-t)*theta)/sin(theta)) * a + (sin(t*theta)/sin(theta)) * b
+    signal t_theta: T = t.mul(theta)
+    signal one_minus_t_theta: T = (T::ONE.sub(t)).mul(theta)
+
+    signal coeff_a: T = sin(one_minus_t_theta).div(sin_theta)
+    signal coeff_b: T = sin(t_theta).div(sin_theta)
+
+    signal scaled_a: vec<T, N>
+    signal scaled_b: vec<T, N>
+
+    let scale_a = VecScale<T, N> {
+        v: a,
+        scalar: coeff_a,
+        result: scaled_a
+    }
+
+    let scale_b = VecScale<T, N> {
+        v: b,
+        scalar: coeff_b,
+        result: scaled_b
+    }
+
+    let add = VecAdd<T, N> {
+        a: scaled_a,
+        b: scaled_b,
+        result: result
+    }
+}
+
+// ============================================================================
+// Projection and Reflection
+// ============================================================================
+
+/// Project vector a onto vector b
+///
+/// proj = (a·b / b·b) * b
+pub entity VecProject<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out result: vec<T, N>
+}
+
+impl VecProject<T: Numeric, const N: nat> {
+    signal dot_ab: T
+    signal dot_bb: T
+
+    let dot1 = VecDot<T, N> {
+        a: a,
+        b: b,
+        result: dot_ab
+    }
+
+    let dot2 = VecDot<T, N> {
+        a: b,
+        b: b,
+        result: dot_bb
+    }
+
+    signal scalar: T = dot_ab.div(dot_bb)
+
+    let scale = VecScale<T, N> {
+        v: b,
+        scalar: scalar,
+        result: result
+    }
+}
+
+/// Reflect vector a across normal n
+///
+/// result = a - 2 * (a·n) * n
+pub entity VecReflect<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in n: vec<T, N>  // Assumed normalized
+    out result: vec<T, N>
+}
+
+impl VecReflect<T: Numeric, const N: nat> {
+    signal dot_an: T
+
+    let dot = VecDot<T, N> {
+        a: a,
+        b: n,
+        result: dot_an
+    }
+
+    signal two_dot: T = dot_an.add(dot_an)  // 2 * dot
+    signal scaled: vec<T, N>
+
+    let scale = VecScale<T, N> {
+        v: n,
+        scalar: two_dot,
+        result: scaled
+    }
+
+    let sub = VecSub<T, N> {
+        a: a,
+        b: scaled,
+        result: result
+    }
+}
+
+// ============================================================================
+// Comparison
+// ============================================================================
+
+/// Component-wise equality
+pub entity VecEqual<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    out equal: bit
+}
+
+impl VecEqual<T: Numeric, const N: nat> {
+    signal components_equal: bit[N]
+
+    for i in 0..N {
+        components_equal[i] = (a[i] == b[i])
+    }
+
+    equal = &components_equal  // AND reduction
+}
+
+/// Component-wise approximate equality (for floating-point)
+pub entity VecApproxEqual<T: Numeric, const N: nat> {
+    in a: vec<T, N>
+    in b: vec<T, N>
+    in epsilon: T
+    out equal: bit
+}
+
+impl VecApproxEqual<T: Numeric, const N: nat> {
+    signal diff: vec<T, N>
+
+    let sub = VecSub<T, N> {
+        a: a,
+        b: b,
+        result: diff
+    }
+
+    signal components_close: bit[N]
+
+    for i in 0..N {
+        signal abs_diff: T = abs(diff[i])
+        components_close[i] = (abs_diff < epsilon)
+    }
+
+    equal = &components_close  // AND reduction
+}
+
+// ============================================================================
+// Reduction Operations
+// ============================================================================
+
+/// Sum all components
+pub entity VecSum<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out sum: T
+}
+
+impl VecSum<T: Numeric, const N: nat> {
+    signal accumulator: T = T::ZERO
+    for i in 0..N {
+        accumulator = accumulator.add(v[i])
+    }
+    sum = accumulator
+}
+
+/// Product of all components
+pub entity VecProduct<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out product: T
+}
+
+impl VecProduct<T: Numeric, const N: nat> {
+    signal accumulator: T = T::ONE
+    for i in 0..N {
+        accumulator = accumulator.mul(v[i])
+    }
+    product = accumulator
+}
+
+/// Minimum component
+pub entity VecMin<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out min_val: T
+}
+
+impl VecMin<T: Numeric, const N: nat> {
+    signal accumulator: T = T::MAX_VALUE
+    for i in 0..N {
+        accumulator = (v[i] < accumulator) ? v[i] : accumulator
+    }
+    min_val = accumulator
+}
+
+/// Maximum component
+pub entity VecMax<T: Numeric, const N: nat> {
+    in v: vec<T, N>
+    out max_val: T
+}
+
+impl VecMax<T: Numeric, const N: nat> {
+    signal accumulator: T = T::MIN_VALUE
+    for i in 0..N {
+        accumulator = (v[i] > accumulator) ? v[i] : accumulator
+    }
+    max_val = accumulator
+}
+
+// ============================================================================
+// Construction
+// ============================================================================
+
+/// Fill vector with constant value
+pub entity VecFill<T, const N: nat> {
+    in value: T
+    out result: vec<T, N>
+}
+
+impl VecFill<T, const N: nat> {
+    for i in 0..N {
+        result[i] = value
+    }
+}
+
+/// Construct vector from components
+pub entity VecConstruct<T, const N: nat> {
+    in components: T[N]
+    out result: vec<T, N>
+}
+
+impl VecConstruct<T, const N: nat> {
+    result = components
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Fast inverse square root (for FP types)
+fn fast_inv_sqrt<T>(x: T) -> T {
+    // Quake III fast inverse square root for FP32
+    // TODO: Implement for generic FP formats
+    x  // Placeholder
+}
+
+/// Absolute value
+fn abs<T: Numeric>(x: T) -> T {
+    x.abs()
+}
+
+/// Trigonometric functions
+fn sin<T>(x: T) -> T {
+    intrinsic_sin(x)
+}
+
+fn cos<T>(x: T) -> T {
+    intrinsic_cos(x)
+}
+
+fn acos<T>(x: T) -> T {
+    intrinsic_acos(x)
+}

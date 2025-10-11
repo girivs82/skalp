@@ -1,0 +1,502 @@
+// SKALP Standard Library Showcase
+//
+// Demonstrates the clean, generic stdlib with parametric types.
+// Shows floating-point, fixed-point, integer, and vector operations.
+
+use skalp::numeric::fp::{fp32, FpAdd, FpMul, FpSqrt};
+use skalp::numeric::vec::{vec3, VecAdd, VecDot, Vec3Cross, VecNormalize};
+use skalp::numeric::fixed::{q16_16, FixedMul};
+use skalp::numeric::int::{i32, u16, IntAdd, IntMul};
+
+// ============================================================================
+// Example 1: Generic FP Pipeline (works with any format)
+// ============================================================================
+
+/// MAC (Multiply-Accumulate) unit that works with any FP format
+entity FpMAC<const F: FloatFormat> {
+    in clk: clock
+    in a: fp<F>
+    in b: fp<F>
+    in c: fp<F>
+    in enable: bit
+    out result: fp<F>
+}
+
+impl FpMAC<const F: FloatFormat> {
+    signal product: fp<F>
+    signal product_flags: bit[5]
+
+    // Multiply a * b
+    let multiplier = FpMul<F> {
+        a: a,
+        b: b,
+        result: product,
+        flags: product_flags
+    }
+
+    signal sum: fp<F>
+    signal sum_flags: bit[5]
+
+    // Add c
+    let adder = FpAdd<F> {
+        a: product,
+        b: c,
+        result: sum,
+        flags: sum_flags
+    }
+
+    // Register output
+    signal accumulator: fp<F> = fp<F>::ZERO
+
+    on(clk.rise) {
+        if enable {
+            accumulator <= sum
+        }
+    }
+
+    result = accumulator
+}
+
+// ============================================================================
+// Example 2: Vector Graphics Pipeline
+// ============================================================================
+
+/// 3D lighting calculation using generic vectors
+entity LightingPipeline<T: Numeric> {
+    in normal: vec3<T>         // Surface normal (assumed normalized)
+    in light_dir: vec3<T>      // Light direction (assumed normalized)
+    in light_color: vec3<T>    // RGB color
+    in ambient: T              // Ambient light intensity
+    out color: vec3<T>         // Final color
+}
+
+impl LightingPipeline<T: Numeric> {
+    signal dot_result: T
+
+    // Calculate N · L (diffuse component)
+    let dot = VecDot<T, 3> {
+        a: normal,
+        b: light_dir,
+        result: dot_result
+    }
+
+    // Clamp to [0, 1]
+    signal diffuse: T = (dot_result < T::ZERO) ? T::ZERO : dot_result
+
+    // Add ambient
+    signal intensity: T = diffuse.add(ambient)
+
+    // Scale light color by intensity
+    signal lit_color: vec3<T>
+    for i in 0..3 {
+        lit_color[i] = light_color[i].mul(intensity)
+    }
+
+    color = lit_color
+}
+
+// ============================================================================
+// Example 3: Physics Simulation with Multiple Numeric Types
+// ============================================================================
+
+/// Particle with configurable numeric representation
+entity Particle<T: Numeric> {
+    in clk: clock
+    in reset: bit
+    in force: vec3<T>
+    in dt: T  // Time delta
+    out position: vec3<T>
+    out velocity: vec3<T>
+}
+
+impl Particle<T: Numeric> {
+    signal pos: vec3<T> = {T::ZERO, T::ZERO, T::ZERO}
+    signal vel: vec3<T> = {T::ZERO, T::ZERO, T::ZERO}
+
+    // v' = v + (F/m) * dt  (assume m=1)
+    signal scaled_force: vec3<T>
+    for i in 0..3 {
+        scaled_force[i] = force[i].mul(dt)
+    }
+
+    signal new_vel: vec3<T>
+    let vel_update = VecAdd<T, 3> {
+        a: vel,
+        b: scaled_force,
+        result: new_vel
+    }
+
+    // p' = p + v * dt
+    signal scaled_vel: vec3<T>
+    for i in 0..3 {
+        scaled_vel[i] = vel[i].mul(dt)
+    }
+
+    signal new_pos: vec3<T>
+    let pos_update = VecAdd<T, 3> {
+        a: pos,
+        b: scaled_vel,
+        result: new_pos
+    }
+
+    on(clk.rise) {
+        if reset {
+            pos <= {T::ZERO, T::ZERO, T::ZERO}
+            vel <= {T::ZERO, T::ZERO, T::ZERO}
+        } else {
+            pos <= new_pos
+            vel <= new_vel
+        }
+    }
+
+    position = pos
+    velocity = vel
+}
+
+// ============================================================================
+// Example 4: Fixed-Point DSP
+// ============================================================================
+
+/// FIR filter using fixed-point arithmetic
+entity FIR<const NUM_TAPS: nat> {
+    in clk: clock
+    in sample: q16_16
+    in coeffs: q16_16[NUM_TAPS]
+    out filtered: q16_16
+}
+
+impl FIR<const NUM_TAPS: nat> {
+    // Delay line
+    signal delays: q16_16[NUM_TAPS] = {NUM_TAPS{0}}
+
+    // Multiply-accumulate
+    signal products: q16_16[NUM_TAPS]
+    signal product_overflow: bit[NUM_TAPS]
+
+    for i in 0..NUM_TAPS {
+        let multiplier = FixedMul<32, 16, true> {
+            a: delays[i],
+            b: coeffs[i],
+            saturate: 1'b1,
+            result: products[i],
+            overflow: product_overflow[i]
+        }
+    }
+
+    // Sum all products
+    signal accumulator: q16_16 = 0
+    for i in 0..NUM_TAPS {
+        accumulator = accumulator + products[i]
+    }
+
+    on(clk.rise) {
+        // Shift delay line
+        for i in (NUM_TAPS-1)..1 {
+            delays[i] <= delays[i-1]
+        }
+        delays[0] <= sample
+    }
+
+    filtered = accumulator
+}
+
+// ============================================================================
+// Example 5: Integer CORDIC (works with any integer width)
+// ============================================================================
+
+/// CORDIC rotation using generic integers
+entity CORDIC<const W: nat, const ITERATIONS: nat> {
+    in x_in: int<W, true>
+    in y_in: int<W, true>
+    in angle: int<W, true>
+    out x_out: int<W, true>
+    out y_out: int<W, true>
+}
+
+impl CORDIC<const W: nat, const ITERATIONS: nat> {
+    signal x: int<W, true> = x_in
+    signal y: int<W, true> = y_in
+    signal z: int<W, true> = angle
+
+    // CORDIC iterations
+    for i in 0..ITERATIONS {
+        signal x_shifted: int<W, true> = y >> i
+        signal y_shifted: int<W, true> = x >> i
+
+        signal direction: bit = z[W-1]  // Sign bit
+
+        signal x_new: int<W, true> = direction ? (x + x_shifted) : (x - x_shifted)
+        signal y_new: int<W, true> = direction ? (y - y_shifted) : (y + y_shifted)
+
+        // ATAN table lookup (would be pre-computed)
+        signal atan_val: int<W, true> = atan_table<W>(i)
+        signal z_new: int<W, true> = direction ? (z + atan_val) : (z - atan_val)
+
+        x = x_new
+        y = y_new
+        z = z_new
+    }
+
+    x_out = x
+    y_out = y
+}
+
+// ============================================================================
+// Example 6: Multi-Format Processing Pipeline
+// ============================================================================
+
+/// Process data with different numeric types in one pipeline
+entity HeterogeneousPipeline {
+    in clk: clock
+
+    // FP32 input
+    in fp_input: fp32
+
+    // Convert to Q16.16 for DSP
+    in fixed_coeffs: q16_16[8]
+
+    // Integer control
+    in enable: bit
+
+    out result: fp32
+}
+
+impl HeterogeneousPipeline {
+    // Stage 1: FP preprocessing
+    signal fp_squared: fp32
+    let squarer = FpMul<IEEE754_32> {
+        a: fp_input,
+        b: fp_input,
+        result: fp_squared,
+        flags: _
+    }
+
+    // Stage 2: Convert to fixed-point
+    // (This would use a proper conversion entity in real code)
+    signal fixed_input: q16_16 = fp_squared as q16_16
+
+    // Stage 3: Fixed-point FIR filter
+    signal filtered: q16_16
+    let fir = FIR<8> {
+        clk: clk,
+        sample: fixed_input,
+        coeffs: fixed_coeffs,
+        filtered: filtered
+    }
+
+    // Stage 4: Convert back to FP
+    signal fp_output: fp32 = filtered as fp32
+
+    // Stage 5: FP square root
+    signal sqrt_result: fp32
+    let sqrt = FpSqrt<IEEE754_32> {
+        x: fp_output,
+        result: sqrt_result,
+        flags: _
+    }
+
+    result = enable ? sqrt_result : fp32::ZERO
+}
+
+// ============================================================================
+// Example 7: Ray-Sphere Intersection (Full vector math)
+// ============================================================================
+
+/// Ray-sphere intersection using generic vector operations
+entity RaySphereIntersect {
+    in ray_origin: vec3<fp32>
+    in ray_dir: vec3<fp32>        // Assumed normalized
+    in sphere_center: vec3<fp32>
+    in sphere_radius: fp32
+    out hit: bit
+    out distance: fp32
+}
+
+impl RaySphereIntersect {
+    // Calculate ray origin - sphere center
+    signal oc: vec3<fp32>
+    let sub = VecSub<fp32, 3> {
+        a: ray_origin,
+        b: sphere_center,
+        result: oc
+    }
+
+    // a = dot(ray_dir, ray_dir) = 1 (normalized)
+    signal a: fp32 = 1.0
+
+    // b = 2 * dot(oc, ray_dir)
+    signal dot_oc_dir: fp32
+    let dot1 = VecDot<fp32, 3> {
+        a: oc,
+        b: ray_dir,
+        result: dot_oc_dir
+    }
+
+    signal b: fp32
+    let b_calc = FpAdd<IEEE754_32> {
+        a: dot_oc_dir,
+        b: dot_oc_dir,
+        result: b,
+        flags: _
+    }
+
+    // c = dot(oc, oc) - radius^2
+    signal dot_oc_oc: fp32
+    let dot2 = VecDot<fp32, 3> {
+        a: oc,
+        b: oc,
+        result: dot_oc_oc
+    }
+
+    signal radius_sq: fp32
+    let radius_sq_calc = FpMul<IEEE754_32> {
+        a: sphere_radius,
+        b: sphere_radius,
+        result: radius_sq,
+        flags: _
+    }
+
+    signal c: fp32
+    let c_calc = FpSub<IEEE754_32> {
+        a: dot_oc_oc,
+        b: radius_sq,
+        result: c,
+        flags: _
+    }
+
+    // discriminant = b^2 - 4*a*c = b^2 - 4*c
+    signal b_sq: fp32
+    let b_sq_calc = FpMul<IEEE754_32> {
+        a: b,
+        b: b,
+        result: b_sq,
+        flags: _
+    }
+
+    signal four_c: fp32 = c * 4.0  // Would use FpMul in real code
+
+    signal discriminant: fp32
+    let disc_calc = FpSub<IEEE754_32> {
+        a: b_sq,
+        b: four_c,
+        result: discriminant,
+        flags: _
+    }
+
+    // Hit if discriminant >= 0
+    hit = (discriminant >= 0.0)
+
+    // Distance = (-b - sqrt(discriminant)) / 2a = (-b - sqrt(disc)) / 2
+    signal sqrt_disc: fp32
+    let sqrt_calc = FpSqrt<IEEE754_32> {
+        x: discriminant,
+        result: sqrt_disc,
+        flags: _
+    }
+
+    signal neg_b: fp32 = -b
+    signal numerator: fp32
+    let numer_calc = FpSub<IEEE754_32> {
+        a: neg_b,
+        b: sqrt_disc,
+        result: numerator,
+        flags: _
+    }
+
+    signal dist_raw: fp32
+    let dist_calc = FpDiv<IEEE754_32> {
+        a: numerator,
+        b: 2.0,
+        result: dist_raw,
+        flags: _
+    }
+
+    distance = hit ? dist_raw : fp32::MAX_VALUE
+}
+
+// ============================================================================
+// Top-Level: Integrate Everything
+// ============================================================================
+
+entity StdlibShowcase {
+    in clk: clock
+    in reset: bit
+
+    // FP32 MAC inputs
+    in mac_a: fp32
+    in mac_b: fp32
+    in mac_c: fp32
+
+    // Lighting inputs
+    in normal: vec3<fp32>
+    in light_dir: vec3<fp32>
+
+    // Physics inputs
+    in force: vec3<fp32>
+
+    // Ray tracing inputs
+    in ray_origin: vec3<fp32>
+    in ray_dir: vec3<fp32>
+    in sphere_center: vec3<fp32>
+    in sphere_radius: fp32
+
+    // Outputs
+    out mac_result: fp32
+    out lit_color: vec3<fp32>
+    out particle_pos: vec3<fp32>
+    out ray_hit: bit
+    out ray_distance: fp32
+}
+
+impl StdlibShowcase {
+    // FP32 MAC
+    let mac = FpMAC<IEEE754_32> {
+        clk: clk,
+        a: mac_a,
+        b: mac_b,
+        c: mac_c,
+        enable: !reset,
+        result: mac_result
+    }
+
+    // Lighting
+    signal ambient: fp32 = 0.1
+    let lighting = LightingPipeline<fp32> {
+        normal: normal,
+        light_dir: light_dir,
+        light_color: {1.0, 1.0, 1.0},
+        ambient: ambient,
+        color: lit_color
+    }
+
+    // Physics (FP32 version)
+    signal dt: fp32 = 0.016  // ~60 FPS
+    let particle = Particle<fp32> {
+        clk: clk,
+        reset: reset,
+        force: force,
+        dt: dt,
+        position: particle_pos,
+        velocity: _
+    }
+
+    // Ray tracing
+    let ray_intersect = RaySphereIntersect {
+        ray_origin: ray_origin,
+        ray_dir: ray_dir,
+        sphere_center: sphere_center,
+        sphere_radius: sphere_radius,
+        hit: ray_hit,
+        distance: ray_distance
+    }
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// ATAN table for CORDIC (would be pre-computed)
+fn atan_table<const W: nat>(i: nat) -> int<W, true> {
+    // Placeholder - would contain actual ATAN values
+    0
+}

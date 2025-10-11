@@ -1,0 +1,436 @@
+// Intent-Driven Optimization Examples
+//
+// Demonstrates how intent parameters enable compile-time specialization
+// of hardware implementations based on optimization goals.
+
+// ============================================================================
+// Example 1: FFT with Intent-Driven Architecture Selection
+// ============================================================================
+
+/// Fast Fourier Transform with intent-driven implementation
+///
+/// Intent drives architectural choice:
+/// - FAST_INTENT: Parallel radix-4, fully unrolled butterflies
+/// - SMALL_INTENT: Sequential radix-2, shared butterfly
+/// - BALANCED: Pipelined radix-2 with partial unrolling
+entity FFT<const N: nat, const F: FloatFormat, intent I: Intent>
+where
+    N.is_power_of_2(),
+    F.total_bits >= 16
+{
+    in x: [fp<F>; N]
+    in clk: clock
+    in valid_in: bit
+    out y: [fp<F>; N]
+    out valid_out: bit
+}
+
+impl<const N: nat, const F: FloatFormat, intent I> FFT<N, F, I> {
+    y = if I.optimize == "latency" {
+        // Parallel architecture - 1 cycle latency, high area
+        // Radix-4 with fully unrolled butterflies
+        fft_parallel::<N, F>(x)
+
+    } else if I.optimize == "area" {
+        // Sequential architecture - N/2 * log2(N) cycles, minimal area
+        // Single butterfly shared across all stages
+        fft_sequential::<N, F>(x, clk, valid_in)
+
+    } else if I.optimize == "throughput" {
+        // Pipelined architecture - log2(N) cycle latency, II=1
+        // Pipeline registers between each stage
+        fft_pipelined::<N, F>(x, clk)
+
+    } else {
+        // Balanced: Partially pipelined radix-2
+        fft_balanced::<N, F>(x, clk, I.pipeline_depth.unwrap_or(4))
+    }
+}
+
+// Specialized instances showing different trade-offs
+entity FFT1024_Fast {
+    in x: [fp32; 1024]
+    in clk: clock
+    in valid_in: bit
+    out y: [fp32; 1024]
+    out valid_out: bit
+}
+
+impl FFT1024_Fast {
+    inst fft: FFT<1024, IEEE754_32, FAST_INTENT> {
+        x = x,
+        clk = clk,
+        valid_in = valid_in,
+        y => y,
+        valid_out => valid_out
+    }
+}
+
+entity FFT1024_Small {
+    in x: [fp32; 1024]
+    in clk: clock
+    in valid_in: bit
+    out y: [fp32; 1024]
+    out valid_out: bit
+}
+
+impl FFT1024_Small {
+    inst fft: FFT<1024, IEEE754_32, SMALL_INTENT> {
+        x = x,
+        clk = clk,
+        valid_in = valid_in,
+        y => y,
+        valid_out => valid_out
+    }
+}
+
+// ============================================================================
+// Example 2: Matrix Multiply with Memory Banking Strategy
+// ============================================================================
+
+/// Matrix multiplication with intent-driven memory banking
+///
+/// Intent controls memory architecture:
+/// - Complete banking (memory_banking = "complete"): Parallel access, all registers
+/// - Cyclic banking (memory_banking = "cyclic"): N-way banked BRAM
+/// - None (memory_banking = "none"): Single-port BRAM, sequential access
+entity MatMul<const M: nat, const N: nat, const P: nat, const F: FloatFormat, intent I: Intent>
+{
+    in a: [[fp<F>; N]; M]  // M×N matrix
+    in b: [[fp<F>; P]; N]  // N×P matrix
+    in clk: clock
+    out c: [[fp<F>; P]; M]  // M×P result
+}
+
+impl<const M: nat, const N: nat, const P: nat, const F: FloatFormat, intent I>
+    MatMul<M, N, P, F, I>
+{
+    c = if I.memory_banking == "complete" {
+        // Fully parallel - all elements in registers
+        // Area: Very high, Latency: 1 cycle
+        matmul_parallel::<M, N, P, F>(a, b)
+
+    } else if I.memory_banking == "cyclic" {
+        // Cyclic banking - parallel row/column access
+        // Area: Medium, Latency: N cycles
+        let banks = I.memory_banks.unwrap_or(4)
+        matmul_banked::<M, N, P, F>(a, b, banks, clk)
+
+    } else if I.memory_banking == "block" {
+        // Block banking - tiled computation
+        // Area: Low, Latency: M*N*P/tile_size cycles
+        matmul_tiled::<M, N, P, F>(a, b, clk)
+
+    } else {
+        // Sequential - single MAC unit
+        // Area: Minimal, Latency: M*N*P cycles
+        matmul_sequential::<M, N, P, F>(a, b, clk)
+    }
+}
+
+// Custom intent for video processing (moderate resources, high throughput)
+const VIDEO_INTENT: Intent = Intent {
+    latency: Some(16),
+    throughput: Some(1.0),
+    fmax: Some(300),
+    accuracy: "high",
+    optimize: "throughput",
+    optimize_secondary: Some("power"),
+    max_dsps: Some(64),
+    max_brams: Some(128),
+    max_luts: None,
+    max_regs: None,
+    memory_banking: "cyclic",
+    memory_banks: Some(8),
+    memory_impl: "bram",
+    loop_unroll: "partial",
+    loop_unroll_factor: Some(4),
+    loop_pipeline: "full",
+    pipeline_ii: Some(1),
+    pipeline_mode: "auto",
+    pipeline_depth: Some(8),
+    pipeline_strategy: "balanced",
+    dataflow_mode: "pipeline",
+    fifo_depth: Some(16),
+    burst_size: Some(8),
+    resource_sharing: true,
+    share_resources: None,
+    clock_gating: "auto",
+    power_gating: false,
+    activity_level: "high",
+    interface_protocol: "axis",
+    interface_mode: "nonblocking",
+    retiming: true,
+    cross_clock_binding: false,
+    target_device: Some("xcvu9p"),
+}
+
+entity MatMul4x4Video {
+    in a: [[fp32; 4]; 4]
+    in b: [[fp32; 4]; 4]
+    in clk: clock
+    out c: [[fp32; 4]; 4]
+}
+
+impl MatMul4x4Video {
+    inst matmul: MatMul<4, 4, 4, IEEE754_32, VIDEO_INTENT> {
+        a = a,
+        b = b,
+        clk = clk,
+        c => c
+    }
+}
+
+// ============================================================================
+// Example 3: Convolution with Loop Unrolling Strategy
+// ============================================================================
+
+/// 2D Convolution with intent-driven loop unrolling
+///
+/// Intent controls loop optimization:
+/// - loop_unroll = "complete": Fully unrolled, parallel computation
+/// - loop_unroll = "partial": Partially unrolled by factor
+/// - loop_unroll = "none": Sequential loop, minimal area
+entity Conv2D<
+    const H: nat,           // Input height
+    const W: nat,           // Input width
+    const K: nat,           // Kernel size (K×K)
+    const F: FloatFormat,
+    intent I: Intent
+>
+{
+    in image: [[fp<F>; W]; H]
+    in kernel: [[fp<F>; K]; K]
+    in clk: clock
+    out result: [[fp<F>; W-K+1]; H-K+1]
+}
+
+impl<const H: nat, const W: nat, const K: nat, const F: FloatFormat, intent I>
+    Conv2D<H, W, K, F, I>
+{
+    result = if I.loop_unroll == "complete" {
+        // Fully unrolled - (H-K+1)*(W-K+1) parallel MAC units
+        // Latency: K*K cycles (accumulation depth)
+        conv2d_unrolled::<H, W, K, F>(image, kernel)
+
+    } else if I.loop_unroll == "partial" {
+        // Partially unrolled - unroll factor from intent
+        let factor = I.loop_unroll_factor.unwrap_or(2)
+        conv2d_partial::<H, W, K, F>(image, kernel, factor, clk)
+
+    } else {
+        // Sequential - single MAC unit, reused
+        // Latency: (H-K+1)*(W-K+1)*K*K cycles
+        conv2d_sequential::<H, W, K, F>(image, kernel, clk)
+    }
+}
+
+// ============================================================================
+// Example 4: Square Root with Accuracy vs Latency Trade-off
+// ============================================================================
+
+/// Square root with intent-driven algorithm selection
+///
+/// Intent controls algorithm choice:
+/// - accuracy = "exact": Newton-Raphson with many iterations
+/// - accuracy = "high": Newton-Raphson with 2 iterations
+/// - accuracy = "medium": Newton-Raphson with 1 iteration
+/// - accuracy = "low": Fast reciprocal square root approximation
+entity Sqrt<const F: FloatFormat, intent I: Intent> {
+    in x: fp<F>
+    out result: fp<F>
+}
+
+impl<const F: FloatFormat, intent I> Sqrt<F, I> {
+    result = if I.accuracy == "exact" && I.optimize == "latency" {
+        // LUT-based sqrt - 1 cycle, very high area
+        lut_sqrt::<F>(x)
+
+    } else if I.accuracy == "exact" || I.optimize == "accuracy" {
+        // Newton-Raphson with 4 iterations - ~12 cycles, high accuracy
+        nr_sqrt::<F>(x, 4)
+
+    } else if I.accuracy == "high" {
+        // Newton-Raphson with 2 iterations - ~6 cycles, <0.1% error
+        nr_sqrt::<F>(x, 2)
+
+    } else if I.accuracy == "medium" {
+        // Newton-Raphson with 1 iteration - ~3 cycles, <1% error
+        nr_sqrt::<F>(x, 1)
+
+    } else {
+        // Fast approximation - 1 cycle, <10% error
+        fast_sqrt::<F>(x)
+    }
+}
+
+// ============================================================================
+// Example 5: FIR Filter with Resource Sharing
+// ============================================================================
+
+/// FIR filter with intent-driven resource sharing
+///
+/// Intent controls multiplier sharing:
+/// - resource_sharing = true: Time-multiplex single multiplier
+/// - resource_sharing = false: Parallel multipliers for each tap
+entity FIR<const TAPS: nat, const F: FloatFormat, intent I: Intent> {
+    in x: fp<F>
+    in coeffs: [fp<F>; TAPS]
+    in clk: clock
+    out y: fp<F>
+}
+
+impl<const TAPS: nat, const F: FloatFormat, intent I> FIR<TAPS, F, I> {
+    signal delays: [fp<F>; TAPS] = [fp_zero::<F>(); TAPS]
+
+    on clk.rise {
+        delays[0] := x
+        for i in 1..TAPS {
+            delays[i] := delays[i - 1]
+        }
+    }
+
+    y = if I.resource_sharing {
+        // Shared multiplier - TAPS cycles latency, 1 multiplier
+        signal acc: fp<F> = fp_zero::<F>()
+        signal counter: bit<clog2(TAPS)> = 0
+
+        on clk.rise {
+            if counter < TAPS {
+                let product = fp_mul::<F>(delays[counter], coeffs[counter])
+                acc := fp_add::<F>(acc, product)
+                counter := counter + 1
+            } else {
+                counter := 0
+                acc := fp_zero::<F>()
+            }
+        }
+
+        acc
+
+    } else {
+        // Parallel multipliers - 1 cycle latency, TAPS multipliers
+        signal products: [fp<F>; TAPS]
+        for i in 0..TAPS {
+            products[i] = fp_mul::<F>(delays[i], coeffs[i])
+        }
+        tree_sum(products)
+    }
+}
+
+// ============================================================================
+// Example 6: Intent Propagation Through Module Hierarchy
+// ============================================================================
+
+/// Top-level video pipeline - intent flows to all submodules
+entity VideoPipeline<const H: nat, const W: nat, intent I: Intent> {
+    in rgb_in: [[vec3<fp32>; W]; H]
+    in clk: clock
+    out processed_out: [[vec3<fp32>; W]; H]
+}
+
+impl<const H: nat, const W: nat, intent I> VideoPipeline<H, W, I> {
+    // Color space conversion inherits intent
+    inst csc: ColorSpaceConvert<H, W, IEEE754_32, I> {
+        rgb = rgb_in,
+        clk = clk
+    }
+
+    // Edge detection inherits intent
+    inst edge: SobelEdgeDetect<H, W, IEEE754_32, I> {
+        image = csc.yuv,
+        clk = clk
+    }
+
+    // Blur filter inherits intent
+    inst blur: GaussianBlur<H, W, 5, IEEE754_32, I> {
+        image = edge.edges,
+        clk = clk,
+        result => processed_out
+    }
+}
+
+// High-performance video instance (1080p @ 60fps)
+entity VideoPipeline1080p {
+    in rgb_in: [[vec3<fp32>; 1920]; 1080]
+    in clk: clock
+    out processed_out: [[vec3<fp32>; 1920]; 1080]
+}
+
+impl VideoPipeline1080p {
+    // Custom high-throughput intent
+    const HT_VIDEO_INTENT: Intent = Intent {
+        latency: Some(10),
+        throughput: Some(1.0),
+        fmax: Some(400),
+        optimize: "throughput",
+        pipeline_mode: "full",
+        dataflow_mode: "streaming",
+        fifo_depth: Some(32),
+        loop_unroll: "partial",
+        loop_unroll_factor: Some(8),
+        memory_banking: "cyclic",
+        memory_banks: Some(16),
+        // ... other fields from HIGH_THROUGHPUT_INTENT
+    }
+
+    inst pipeline: VideoPipeline<1080, 1920, HT_VIDEO_INTENT> {
+        rgb_in = rgb_in,
+        clk = clk,
+        processed_out => processed_out
+    }
+}
+
+// Low-power video instance (720p @ 30fps)
+entity VideoPipeline720p {
+    in rgb_in: [[vec3<fp32>; 1280]; 720]
+    in clk: clock
+    out processed_out: [[vec3<fp32>; 1280]; 720]
+}
+
+impl VideoPipeline720p {
+    inst pipeline: VideoPipeline<720, 1280, LOW_POWER_INTENT> {
+        rgb_in = rgb_in,
+        clk = clk,
+        processed_out => processed_out
+    }
+}
+
+// ============================================================================
+// Example 7: Machine Learning Inference with Mixed Intent
+// ============================================================================
+
+/// Neural network layer with intent-driven precision
+///
+/// Intent controls both performance and accuracy:
+/// - Fast mode: BFloat16 for speed
+/// - Accurate mode: FP32 for precision
+entity DenseLayer<
+    const IN_DIM: nat,
+    const OUT_DIM: nat,
+    intent I: Intent
+> {
+    in x: vec<fp32, IN_DIM>
+    in weights: [[fp32; IN_DIM]; OUT_DIM]
+    in bias: vec<fp32, OUT_DIM>
+    in clk: clock
+    out y: vec<fp32, OUT_DIM>
+}
+
+impl<const IN_DIM: nat, const OUT_DIM: nat, intent I>
+    DenseLayer<IN_DIM, OUT_DIM, I>
+{
+    y = if I.optimize == "latency" && I.accuracy != "exact" {
+        // BFloat16 compute, FP32 accumulate
+        // 2x faster, <0.5% accuracy loss
+        dense_bf16::<IN_DIM, OUT_DIM>(x, weights, bias, clk)
+
+    } else if I.optimize == "area" {
+        // Sequential MAC with single multiplier
+        dense_sequential::<IN_DIM, OUT_DIM>(x, weights, bias, clk)
+
+    } else {
+        // Parallel FP32 - full precision
+        dense_parallel::<IN_DIM, OUT_DIM>(x, weights, bias)
+    }
+}

@@ -1,0 +1,419 @@
+// Fixed-Point Operations
+//
+// Generic fixed-point arithmetic with parameterized word width, fraction bits, and signedness.
+// Format: Qm.n where m = integer bits, n = fraction bits, W = m+n
+
+use crate::numeric::traits::Numeric;
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+/// Generic fixed-point type
+///
+/// # Parameters
+/// - W: Total word width in bits
+/// - F: Number of fractional bits
+/// - S: Signed (true) or unsigned (false)
+pub type fixed<const W: nat, const F: nat, const S: bool> = bit[W];
+
+// Common Q-format aliases
+pub type q16_16 = fixed<32, 16, true>;   // Q16.16: 16 integer, 16 fraction
+pub type q8_8 = fixed<16, 8, true>;      // Q8.8:   8 integer, 8 fraction
+pub type q4_12 = fixed<16, 12, true>;    // Q4.12:  4 integer, 12 fraction
+pub type q15 = fixed<16, 15, true>;      // Q15:    1 integer (sign), 15 fraction
+pub type q31 = fixed<32, 31, true>;      // Q31:    1 integer (sign), 31 fraction
+
+pub type uq16_16 = fixed<32, 16, false>; // Unsigned Q16.16
+pub type uq8_8 = fixed<16, 8, false>;    // Unsigned Q8.8
+
+// ============================================================================
+// Addition
+// ============================================================================
+
+/// Fixed-point addition
+///
+/// When formats match, addition is simple bit addition.
+/// Overflow detection based on signedness.
+pub entity FixedAdd<const W: nat, const F: nat, const S: bool> {
+    in a: fixed<W, F, S>
+    in b: fixed<W, F, S>
+    out result: fixed<W, F, S>
+    out overflow: bit
+}
+
+impl FixedAdd<const W: nat, const F: nat, const S: bool> {
+    signal sum: bit[W+1] = {1'b0, a} + {1'b0, b}
+
+    result = sum[W-1:0]
+
+    overflow = if S {
+        // Signed overflow: signs same but result sign different
+        signal a_sign: bit = a[W-1]
+        signal b_sign: bit = b[W-1]
+        signal r_sign: bit = sum[W-1]
+        (a_sign == b_sign) && (a_sign != r_sign)
+    } else {
+        // Unsigned overflow: carry out
+        sum[W]
+    }
+}
+
+/// Fixed-point subtraction
+pub entity FixedSub<const W: nat, const F: nat, const S: bool> {
+    in a: fixed<W, F, S>
+    in b: fixed<W, F, S>
+    out result: fixed<W, F, S>
+    out overflow: bit
+}
+
+impl FixedSub<const W: nat, const F: nat, const S: bool> {
+    signal diff: bit[W+1] = {1'b0, a} - {1'b0, b}
+
+    result = diff[W-1:0]
+
+    overflow = if S {
+        signal a_sign: bit = a[W-1]
+        signal b_sign: bit = b[W-1]
+        signal r_sign: bit = diff[W-1]
+        (a_sign != b_sign) && (a_sign != r_sign)
+    } else {
+        diff[W]  // Borrow
+    }
+}
+
+// ============================================================================
+// Multiplication
+// ============================================================================
+
+/// Fixed-point multiplication
+///
+/// Product is 2W bits, then shifted right by F bits to maintain format.
+/// Optional saturation on overflow.
+pub entity FixedMul<const W: nat, const F: nat, const S: bool> {
+    in a: fixed<W, F, S>
+    in b: fixed<W, F, S>
+    in saturate: bit  // Saturate on overflow vs wrap
+    out result: fixed<W, F, S>
+    out overflow: bit
+}
+
+impl FixedMul<const W: nat, const F: nat, const S: bool> {
+    // Full product
+    const PROD_BITS: nat = W * 2
+    signal product: bit[PROD_BITS] = if S {
+        // Sign-extend for signed multiplication
+        ({{W{a[W-1]}}, a} as bit[PROD_BITS]) *
+        ({{W{b[W-1]}}, b} as bit[PROD_BITS])
+    } else {
+        // Zero-extend for unsigned
+        ({1'b0, a} as bit[PROD_BITS]) * ({1'b0, b} as bit[PROD_BITS])
+    }
+
+    // Shift right by F to maintain format
+    signal shifted: bit[PROD_BITS] = product >> F
+
+    // Extract result (middle W bits)
+    const INTEGER_BITS: nat = W - F
+    signal result_raw: bit[W] = shifted[W-1:0]
+
+    // Check for overflow
+    signal high_bits: bit[W] = shifted[PROD_BITS-1:W]
+    overflow = if S {
+        // For signed, check if high bits are not all sign extension
+        signal result_sign: bit = result_raw[W-1]
+        high_bits != {{W{result_sign}}}
+    } else {
+        // For unsigned, check if any high bits are set
+        |high_bits
+    }
+
+    // Saturate if requested
+    result = if overflow && saturate {
+        if S {
+            // Saturate to max/min based on sign
+            signal result_sign: bit = result_raw[W-1]
+            result_sign ? {1'b1, {(W-1){1'b0}}} : {1'b0, {(W-1){1'b1}}}
+        } else {
+            // Saturate to max
+            {W{1'b1}}
+        }
+    } else {
+        result_raw
+    }
+}
+
+// ============================================================================
+// Division
+// ============================================================================
+
+/// Fixed-point division
+///
+/// Dividend is shifted left by F bits before division.
+pub entity FixedDiv<const W: nat, const F: nat, const S: bool> {
+    in a: fixed<W, F, S>
+    in b: fixed<W, F, S>
+    out result: fixed<W, F, S>
+    out div_by_zero: bit
+    out overflow: bit
+}
+
+impl FixedDiv<const W: nat, const F: nat, const S: bool> {
+    div_by_zero = (b == 0)
+
+    // Shift dividend left by F bits
+    const DIV_BITS: nat = W + F
+    signal dividend: bit[DIV_BITS] = if S {
+        {{F{a[W-1]}}, a}
+    } else {
+        {{F{1'b0}}, a}
+    }
+
+    signal divisor: bit[DIV_BITS] = if S {
+        {{F{b[W-1]}}, b}
+    } else {
+        {{F{1'b0}}, b}
+    }
+
+    // Perform division
+    signal quotient: bit[DIV_BITS] = div_by_zero ? 0 : (dividend / divisor)
+
+    // Extract result
+    signal result_raw: bit[W] = quotient[W-1:0]
+
+    // Check overflow
+    signal high_bits: bit[F] = quotient[DIV_BITS-1:W]
+    overflow = if S {
+        signal result_sign: bit = result_raw[W-1]
+        high_bits != {{F{result_sign}}}
+    } else {
+        |high_bits
+    }
+
+    result = result_raw
+}
+
+// ============================================================================
+// Format Conversion
+// ============================================================================
+
+/// Convert between fixed-point formats
+pub entity FixedConvert<
+    const W_IN: nat, const F_IN: nat, const S_IN: bool,
+    const W_OUT: nat, const F_OUT: nat, const S_OUT: bool
+> {
+    in x: fixed<W_IN, F_IN, S_IN>
+    out result: fixed<W_OUT, F_OUT, S_OUT>
+    out overflow: bit
+}
+
+impl FixedConvert<W_IN, F_IN, S_IN, W_OUT, F_OUT, S_OUT> {
+    // Shift amount (positive = left, negative = right)
+    const SHIFT: int = (F_OUT as int) - (F_IN as int)
+
+    // Intermediate width to avoid truncation
+    const INTERMEDIATE_BITS: nat = max(W_IN + abs(SHIFT), W_OUT)
+
+    // Sign/zero extend input
+    signal extended: bit[INTERMEDIATE_BITS] = if S_IN {
+        {{(INTERMEDIATE_BITS - W_IN){x[W_IN-1]}}, x}
+    } else {
+        {{(INTERMEDIATE_BITS - W_IN){1'b0}}, x}
+    }
+
+    // Apply shift
+    signal shifted: bit[INTERMEDIATE_BITS] = if SHIFT >= 0 {
+        extended << (SHIFT as nat)
+    } else {
+        extended >> ((-SHIFT) as nat)
+    }
+
+    // Extract result
+    signal result_raw: bit[W_OUT] = shifted[W_OUT-1:0]
+
+    // Check overflow
+    signal high_bits: bit[INTERMEDIATE_BITS - W_OUT] = shifted[INTERMEDIATE_BITS-1:W_OUT]
+    overflow = if S_OUT {
+        signal result_sign: bit = result_raw[W_OUT-1]
+        high_bits != {{(INTERMEDIATE_BITS - W_OUT){result_sign}}}
+    } else {
+        |high_bits
+    }
+
+    result = result_raw
+}
+
+/// Convert fixed-point to integer
+pub entity FixedToInt<const W: nat, const F: nat, const S: bool> {
+    in x: fixed<W, F, S>
+    out result: int<W-F, S>
+}
+
+impl FixedToInt<const W: nat, const F: nat, const S: bool> {
+    // Shift right by F bits (discard fraction)
+    const INTEGER_BITS: nat = W - F
+    result = x[W-1:F]
+}
+
+/// Convert integer to fixed-point
+pub entity IntToFixed<const W_INT: nat, const S: bool, const W: nat, const F: nat> {
+    in x: int<W_INT, S>
+    out result: fixed<W, F, S>
+    out overflow: bit
+}
+
+impl IntToFixed<W_INT, S, W, F> {
+    const INTEGER_BITS: nat = W - F
+
+    // Check if integer fits
+    overflow = W_INT > INTEGER_BITS
+
+    // Shift left by F bits
+    signal shifted: bit[W] = if overflow {
+        {W{1'b0}}  // Return zero on overflow
+    } else {
+        {x, {F{1'b0}}}
+    }
+
+    result = shifted
+}
+
+// ============================================================================
+// Comparison
+// ============================================================================
+
+/// Fixed-point comparison (same format)
+pub entity FixedCompare<const W: nat, const F: nat, const S: bool> {
+    in a: fixed<W, F, S>
+    in b: fixed<W, F, S>
+    out lt: bit
+    out eq: bit
+    out gt: bit
+}
+
+impl FixedCompare<const W: nat, const F: nat, const S: bool> {
+    eq = (a == b)
+
+    lt = if S {
+        // Signed comparison
+        signal a_sign: bit = a[W-1]
+        signal b_sign: bit = b[W-1]
+        (a_sign && !b_sign) || ((a_sign == b_sign) && (a < b))
+    } else {
+        // Unsigned comparison
+        a < b
+    }
+
+    gt = !lt && !eq
+}
+
+// ============================================================================
+// Rounding and Truncation
+// ============================================================================
+
+/// Round fixed-point to N fractional bits
+pub entity FixedRound<const W: nat, const F: nat, const S: bool, const F_OUT: nat> {
+    in x: fixed<W, F, S>
+    out result: fixed<W, F_OUT, S>
+}
+
+impl FixedRound<const W: nat, const F: nat, const S: bool, const F_OUT: nat> {
+    // F_OUT must be <= F
+    const BITS_TO_REMOVE: nat = F - F_OUT
+
+    // Extract rounding bit
+    signal round_bit: bit = BITS_TO_REMOVE > 0 ? x[BITS_TO_REMOVE-1] : 0
+
+    // Truncate
+    signal truncated: bit[W] = x >> BITS_TO_REMOVE
+
+    // Add rounding bit
+    signal rounded: bit[W] = truncated + round_bit
+
+    result = rounded
+}
+
+/// Saturate to N total bits
+pub entity FixedSaturate<const W_IN: nat, const F: nat, const S: bool, const W_OUT: nat> {
+    in x: fixed<W_IN, F, S>
+    out result: fixed<W_OUT, F, S>
+}
+
+impl FixedSaturate<const W_IN: nat, const F: nat, const S: bool, const W_OUT: nat> {
+    // Check if value fits
+    const BITS_TO_CHECK: nat = W_IN - W_OUT
+    signal high_bits: bit[BITS_TO_CHECK] = x[W_IN-1:W_OUT]
+
+    signal overflow: bit = if S {
+        signal result_sign: bit = x[W_OUT-1]
+        high_bits != {{BITS_TO_CHECK{result_sign}}}
+    } else {
+        |high_bits
+    }
+
+    result = if overflow {
+        if S {
+            // Saturate based on sign
+            signal x_sign: bit = x[W_IN-1]
+            x_sign ? {1'b1, {(W_OUT-1){1'b0}}} : {1'b0, {(W_OUT-1){1'b1}}}
+        } else {
+            // Saturate to max
+            {W_OUT{1'b1}}
+        }
+    } else {
+        x[W_OUT-1:0]
+    }
+}
+
+// ============================================================================
+// Mathematical Functions
+// ============================================================================
+
+/// Fixed-point absolute value
+pub entity FixedAbs<const W: nat, const F: nat> {
+    in x: fixed<W, F, true>  // Signed only
+    out result: fixed<W, F, true>
+    out overflow: bit  // True if x = MIN_VALUE
+}
+
+impl FixedAbs<const W: nat, const F: nat> {
+    signal is_negative: bit = x[W-1]
+    signal negated: bit[W] = -x
+
+    // MIN_VALUE cannot be negated without overflow
+    overflow = is_negative && (negated == x)
+
+    result = is_negative ? negated : x
+}
+
+/// Fixed-point square root
+pub entity FixedSqrt<const W: nat, const F: nat, const S: bool> {
+    in x: fixed<W, F, S>
+    out result: fixed<W, F, S>
+    out error: bit  // True if x is negative (signed) or computation error
+}
+
+impl FixedSqrt<const W: nat, const F: nat, const S: bool> {
+    error = S && x[W-1]  // Negative input for signed
+
+    // Digit-by-digit algorithm
+    // Shift input left by F bits to maintain precision
+    signal shifted_input: bit[W + F] = {x, {F{1'b0}}}
+
+    // TODO: Implement Newton-Raphson or digit-by-digit square root
+    result = 0  // Placeholder
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Maximum of two values
+fn max<const N: nat>(a: nat, b: nat) -> nat {
+    a > b ? a : b
+}
+
+/// Absolute value
+fn abs(x: int) -> nat {
+    x < 0 ? -x : x
+}

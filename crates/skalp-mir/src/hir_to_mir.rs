@@ -1141,6 +1141,56 @@ impl<'hir> HirToMir<'hir> {
                     None => DataType::Array(Box::new(self.convert_type(inner_type)), 1), // Fallback
                 }
             }
+
+            // Parametric numeric types - These will be monomorphized later
+            hir::HirType::FpParametric { format } => {
+                // TODO: Evaluate format expression to get concrete FloatFormat
+                // For now, default to Float32
+                match self.try_eval_const_expr(format) {
+                    Some(_) => DataType::Float32, // Placeholder
+                    None => DataType::Float32,
+                }
+            }
+            hir::HirType::FixedParametric {
+                width,
+                frac,
+                signed: _,
+            } => {
+                // TODO: Evaluate width and frac expressions
+                // For now, map to Bit type with evaluated width
+                match (
+                    self.try_eval_const_expr(width),
+                    self.try_eval_const_expr(frac),
+                ) {
+                    (Some(w), Some(_f)) => DataType::Bit(w as usize),
+                    _ => DataType::Bit(32), // Fallback
+                }
+            }
+            hir::HirType::IntParametric { width, signed } => {
+                // Evaluate width and signed expressions
+                match (
+                    self.try_eval_const_expr(width),
+                    self.try_eval_const_expr(signed),
+                ) {
+                    (Some(w), Some(s)) if s != 0 => DataType::Int(w as usize),
+                    (Some(w), _) => DataType::Nat(w as usize),
+                    _ => DataType::Int(32), // Fallback
+                }
+            }
+            hir::HirType::VecParametric {
+                element_type,
+                dimension,
+            } => {
+                // Evaluate dimension expression
+                let inner = self.convert_type(element_type);
+                match self.try_eval_const_expr(dimension) {
+                    Some(2) => DataType::Vec2(Box::new(inner)),
+                    Some(3) => DataType::Vec3(Box::new(inner)),
+                    Some(4) => DataType::Vec4(Box::new(inner)),
+                    Some(n) => DataType::Array(Box::new(inner), n as usize),
+                    None => DataType::Vec3(Box::new(inner)), // Fallback
+                }
+            }
         }
     }
 
@@ -1250,6 +1300,7 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirGenericType::Width => GenericParameterType::Width,
             hir::HirGenericType::ClockDomain => GenericParameterType::ClockDomain,
+            hir::HirGenericType::Intent => GenericParameterType::Intent,
         }
     }
 
@@ -1531,6 +1582,33 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Vec2(element_type) => self.get_hir_type_width(element_type) * 2,
             hir::HirType::Vec3(element_type) => self.get_hir_type_width(element_type) * 3,
             hir::HirType::Vec4(element_type) => self.get_hir_type_width(element_type) * 4,
+
+            // Parametric numeric types
+            hir::HirType::FpParametric { format } => {
+                // TODO: Evaluate format to get concrete width
+                // For now, default to Float32 width
+                self.try_eval_const_expr(format).unwrap_or(32) as usize
+            }
+            hir::HirType::FixedParametric {
+                width,
+                frac: _,
+                signed: _,
+            } => {
+                // Width is the total width of the fixed-point number
+                self.try_eval_const_expr(width).unwrap_or(32) as usize
+            }
+            hir::HirType::IntParametric { width, signed: _ } => {
+                // Width is the total width of the integer
+                self.try_eval_const_expr(width).unwrap_or(32) as usize
+            }
+            hir::HirType::VecParametric {
+                element_type,
+                dimension,
+            } => {
+                let elem_width = self.get_hir_type_width(element_type);
+                let dim = self.try_eval_const_expr(dimension).unwrap_or(3) as usize;
+                elem_width * dim
+            }
         }
     }
 
