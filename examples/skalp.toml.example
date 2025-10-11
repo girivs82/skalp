@@ -1,0 +1,63 @@
+# Example SKALP manifest file
+# This file defines a library or project in the SKALP ecosystem
+
+[package]
+name = "skalp-dsp"
+version = "1.0.0"
+authors = ["SKALP Team <team@skalp.dev>"]
+description = "Digital signal processing library for SKALP"
+documentation = "https://docs.skalp.dev/dsp"
+homepage = "https://skalp.dev"
+repository = "https://github.com/skalp/dsp"
+license = "MIT OR Apache-2.0"
+keywords = ["dsp", "fft", "filter", "signal-processing"]
+categories = ["hardware", "signal-processing"]
+edition = "2024"
+
+# Library configuration
+[lib]
+name = "dsp"
+path = "src/lib.sk"
+crate_type = true
+
+# Dependencies
+[dependencies]
+# Simple version requirement
+skalp-numeric = "2.0"
+
+# Detailed specification with features
+skalp-stdlib = { version = "1.5", features = ["fp", "vec"] }
+
+# Git dependency
+skalp-experimental = { git = "https://github.com/skalp/experimental", branch = "main" }
+
+# Path dependency (for local development)
+# skalp-utils = { path = "../utils" }
+
+# Optional dependency (only included when 'advanced-filters' feature is enabled)
+skalp-advanced = { version = "0.9", optional = true }
+
+# Development dependencies (only used for tests)
+[dev-dependencies]
+skalp-testing = "1.0"
+skalp-verify = { version = "0.5", features = ["formal"] }
+
+# Feature flags
+[features]
+# Default features enabled by default
+default = ["fft", "basic-filters"]
+
+# FFT support
+fft = []
+
+# Basic filters
+basic-filters = []
+
+# Advanced filters (requires optional dependency)
+advanced-filters = ["skalp-advanced"]
+
+# All features
+full = ["fft", "basic-filters", "advanced-filters"]
+
+# GPU acceleration
+gpu = ["skalp-stdlib/metal", "skalp-numeric/simd"]

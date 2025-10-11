@@ -1,0 +1,19 @@
+[package]
+name = "skalp-manifest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# TOML parsing
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+# Path and version handling
+semver = { version = "1.0", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3.8"
