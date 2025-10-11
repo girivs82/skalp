@@ -371,6 +371,10 @@ pub enum HirExpression {
         enum_type: String,
         variant: String,
     },
+    AssociatedConstant {
+        type_name: String,
+        constant_name: String,
+    },
     StructLiteral(HirStructLiteral),
     If(HirIfExpr),
     Match(HirMatchExpr),

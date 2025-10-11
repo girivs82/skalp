@@ -749,6 +749,34 @@ impl<'hir> HirToMir<'hir> {
                 // Look up the enum variant value
                 self.resolve_enum_variant_value(enum_type, variant)
             }
+            hir::HirExpression::AssociatedConstant {
+                type_name,
+                constant_name,
+            } => {
+                // Associated constants like fp32::ZERO, T::MAX_VALUE, etc.
+                // These should be resolved during monomorphization/type checking
+                // For now, return a placeholder value
+                // TODO: Implement proper trait-based resolution of associated constants
+                //       - Look up trait implementations for the type
+                //       - Find the constant definition
+                //       - Return its value
+                // Common associated constants:
+                // - ZERO: 0
+                // - ONE: 1
+                // - MAX_VALUE: type maximum
+                // - MIN_VALUE: type minimum
+                match constant_name.as_str() {
+                    "ZERO" => Some(Expression::Literal(Value::Integer(0))),
+                    "ONE" => Some(Expression::Literal(Value::Integer(1))),
+                    "MAX_VALUE" => Some(Expression::Literal(Value::Integer(i64::MAX))),
+                    "MIN_VALUE" => Some(Expression::Literal(Value::Integer(i64::MIN))),
+                    _ => {
+                        // Unknown associated constant - return 0 as fallback
+                        // This will be properly resolved during type checking/monomorphization
+                        Some(Expression::Literal(Value::Integer(0)))
+                    }
+                }
+            }
             hir::HirExpression::If(if_expr) => {
                 // Convert if-expression to a conditional (ternary) expression in MIR
                 // MIR represents this as: condition ? then_expr : else_expr

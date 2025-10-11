@@ -2757,9 +2757,9 @@ impl HirBuilderContext {
         }
     }
 
-    /// Build path expression (e.g., State::Idle)
+    /// Build path expression (e.g., State::Idle, fp32::ZERO)
     fn build_path_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Get the enum name and variant name from the tokens
+        // Get the type/enum name and variant/constant name from the tokens
         let mut idents = Vec::new();
         for elem in node.children_with_tokens() {
             if let Some(token) = elem.as_token() {
@@ -2770,14 +2770,28 @@ impl HirBuilderContext {
         }
 
         if idents.len() >= 2 {
-            let enum_name = idents[0].clone();
-            let variant_name = idents[1].clone();
+            let type_name = idents[0].clone();
+            let member_name = idents[1].clone();
 
-            // Return enum variant expression for code generation
-            Some(HirExpression::EnumVariant {
-                enum_type: enum_name,
-                variant: variant_name,
-            })
+            // Heuristic to distinguish between enum variants and associated constants:
+            // - Associated constants are typically SCREAMING_SNAKE_CASE (all caps with underscores)
+            // - Enum variants are typically PascalCase or lowercase
+            // This heuristic works for the standard library (fp32::ZERO, T::MAX_VALUE, etc.)
+            let is_const = member_name.chars().all(|c| c.is_uppercase() || c == '_');
+
+            if is_const {
+                // Associated constant (e.g., fp32::ZERO, T::MAX_VALUE)
+                Some(HirExpression::AssociatedConstant {
+                    type_name,
+                    constant_name: member_name,
+                })
+            } else {
+                // Enum variant (e.g., State::Idle)
+                Some(HirExpression::EnumVariant {
+                    enum_type: type_name,
+                    variant: member_name,
+                })
+            }
         } else {
             None
         }
