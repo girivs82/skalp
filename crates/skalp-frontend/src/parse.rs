@@ -3540,14 +3540,48 @@ impl<'a> ParseState<'a> {
             | Some(SyntaxKind::Fp16Kw)
             | Some(SyntaxKind::Fp32Kw)
             | Some(SyntaxKind::Fp64Kw) => {
-                // Check if this is a struct literal: Type { field: value, ... } or Type<T> { field: value, ... }
-                // Look ahead for: Type { Ident : or Type { } or Type<...> { Ident : or Type<...> { }
+                // Check if this is a struct literal: Type { field: value, ... } or Type<T> { field: value, ... } or Type::<T> { ... }
+                // Look ahead for: Type { Ident : or Type { } or Type<...> { Ident : or Type<...> { } or Type::<...> { ... }
                 // Type can be Ident or type keyword (vec3, fp32, etc.)
                 let mut is_struct_literal = false;
                 let mut brace_offset = 1;
 
-                // Check for generic arguments: Type<...>
-                if self.peek_kind(1) == Some(SyntaxKind::Lt) {
+                // Check for turbofish: Type::<...>
+                if self.peek_kind(1) == Some(SyntaxKind::ColonColon)
+                    && self.peek_kind(2) == Some(SyntaxKind::Lt)
+                {
+                    // Scan forward to find the closing >
+                    let mut depth = 0;
+                    let mut offset = 2; // Start at <
+                    loop {
+                        match self.peek_kind(offset) {
+                            Some(SyntaxKind::Lt) => depth += 1,
+                            Some(SyntaxKind::Gt) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    brace_offset = offset + 1;
+                                    break;
+                                }
+                            }
+                            Some(SyntaxKind::Shr) => {
+                                // >> counts as two >
+                                depth -= 2;
+                                if depth <= 0 {
+                                    brace_offset = offset + 1;
+                                    break;
+                                }
+                            }
+                            None => break,
+                            _ => {}
+                        }
+                        offset += 1;
+                        if offset > 50 {
+                            break;
+                        }
+                    }
+                }
+                // Check for regular generic arguments: Type<...>
+                else if self.peek_kind(1) == Some(SyntaxKind::Lt) {
                     // Scan forward to find the closing >
                     let mut depth = 0;
                     let mut offset = 1; // Start at <
@@ -3785,16 +3819,70 @@ impl<'a> ParseState<'a> {
         }
     }
 
+    /// Check if we're at a turbofish call like `function::<T>(args)`
+    /// Returns true if pattern is: Ident :: < ... > (
+    fn is_turbofish_call_expr(&self) -> bool {
+        if self.current_kind() != Some(SyntaxKind::Ident) {
+            return false;
+        }
+        if self.peek_kind(1) != Some(SyntaxKind::ColonColon) {
+            return false;
+        }
+        if self.peek_kind(2) != Some(SyntaxKind::Lt) {
+            return false;
+        }
+
+        // Look ahead to find matching > followed by (
+        // We need to handle nesting: function::<A<B>>(args)
+        let mut depth = 0;
+        let mut offset = 3; // Start after "Ident :: <"
+
+        loop {
+            match self.peek_kind(offset) {
+                Some(SyntaxKind::Lt) => depth += 1,
+                Some(SyntaxKind::Gt) => {
+                    if depth == 0 {
+                        // Found matching >, check for ( after it
+                        return self.peek_kind(offset + 1) == Some(SyntaxKind::LParen);
+                    }
+                    depth -= 1;
+                }
+                Some(SyntaxKind::Shr) => {
+                    // >> counts as two >
+                    if depth == 0 {
+                        return false; // Would close too many
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.peek_kind(offset + 1) == Some(SyntaxKind::LParen);
+                    }
+                    depth -= 1;
+                }
+                None => return false, // End of input
+                _ => {}               // Continue scanning
+            }
+            offset += 1;
+
+            // Safety limit to avoid infinite loops
+            if offset > 50 {
+                return false;
+            }
+        }
+    }
+
     /// Parse identifier expression with possible postfix operations
     fn parse_identifier_expression(&mut self) {
         // Check for special patterns that need lookahead:
         // 1. Type::Variant or Type<T>::Variant (path expression)
         // 2. function<T>(args) (generic function call)
+        // 3. function::<T>(args) (turbofish call)
         // Note: Path expressions can start with identifiers OR keywords (e.g., fp32::ZERO)
         let is_simple_path = (self.current_kind() == Some(SyntaxKind::Ident)
             || self.current_kind().is_some_and(|k| k.is_keyword()))
-            && self.peek_kind(1) == Some(SyntaxKind::ColonColon);
+            && self.peek_kind(1) == Some(SyntaxKind::ColonColon)
+            && self.peek_kind(2) != Some(SyntaxKind::Lt); // Not a turbofish
         let is_generic_path = self.is_generic_path_expr();
+        let is_turbofish_call = self.is_turbofish_call_expr();
         let is_generic_call = self.is_generic_call_expr();
         let is_path = is_simple_path || is_generic_path;
 
@@ -3812,6 +3900,20 @@ impl<'a> ParseState<'a> {
             self.expect(SyntaxKind::ColonColon); // ::
             self.expect(SyntaxKind::Ident); // variant/constant name
                                             // Don't return yet - check for postfix operations like State::Active(0)
+        } else if is_turbofish_call {
+            // Parse as turbofish call: function::<T>(args)
+            self.start_node(SyntaxKind::CallExpr);
+            self.expect(SyntaxKind::Ident); // function name
+            self.expect(SyntaxKind::ColonColon); // ::
+
+            // Parse generic arguments (parse_generic_args expects and consumes the <)
+            self.parse_generic_args();
+
+            // Parse function call arguments
+            self.expect(SyntaxKind::LParen);
+            self.parse_argument_list();
+            self.expect(SyntaxKind::RParen);
+            // CallExpr is complete, but check for chained postfix operations
         } else if is_generic_call {
             // Parse as generic function call: function<T>(args)
             self.start_node(SyntaxKind::CallExpr);
@@ -3934,6 +4036,7 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse struct literal: TypeName { field: value, ... }
+    /// Supports both TypeName<T> and TypeName::<T> syntax
     fn parse_struct_literal(&mut self) {
         self.start_node(SyntaxKind::StructLiteral);
 
@@ -3954,7 +4057,12 @@ impl<'a> ParseState<'a> {
             self.error("expected type name for struct literal");
         }
 
-        // Optional generic arguments (e.g., vec3<fp32>)
+        // Optional turbofish (::) before generic arguments
+        if self.at(SyntaxKind::ColonColon) && self.peek_kind(1) == Some(SyntaxKind::Lt) {
+            self.bump(); // consume ::
+        }
+
+        // Optional generic arguments (e.g., vec3<fp32> or vec3::<fp32>)
         if self.at(SyntaxKind::Lt) {
             self.parse_generic_args();
         }
