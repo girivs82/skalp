@@ -4292,7 +4292,14 @@ impl<'a> ParseState<'a> {
     fn at_port_direction(&self) -> bool {
         matches!(
             self.current_kind(),
-            Some(SyntaxKind::InKw | SyntaxKind::InputKw | SyntaxKind::OutKw | SyntaxKind::OutputKw | SyntaxKind::InoutKw | SyntaxKind::PortKw)
+            Some(
+                SyntaxKind::InKw
+                    | SyntaxKind::InputKw
+                    | SyntaxKind::OutKw
+                    | SyntaxKind::OutputKw
+                    | SyntaxKind::InoutKw
+                    | SyntaxKind::PortKw
+            )
         )
     }
 

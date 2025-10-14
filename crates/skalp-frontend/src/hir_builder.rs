@@ -774,14 +774,12 @@ impl HirBuilderContext {
 
         for element in use_path.children_with_tokens() {
             match element {
-                rowan::NodeOrToken::Node(child) => {
-                    match child.kind() {
-                        SyntaxKind::UseTree => {
-                            has_use_tree = true;
-                        }
-                        _ => {}
+                rowan::NodeOrToken::Node(child) => match child.kind() {
+                    SyntaxKind::UseTree => {
+                        has_use_tree = true;
                     }
-                }
+                    _ => {}
+                },
                 rowan::NodeOrToken::Token(token) => {
                     if token.kind() == SyntaxKind::Ident {
                         let text = token.text().to_string();
@@ -828,7 +826,9 @@ impl HirBuilderContext {
 
         // Check for glob (*)
         if use_path.children_with_tokens().any(|c| {
-            c.as_token().map(|t| t.kind() == SyntaxKind::Star).unwrap_or(false)
+            c.as_token()
+                .map(|t| t.kind() == SyntaxKind::Star)
+                .unwrap_or(false)
         }) {
             return Some(HirImportPath::Glob { segments });
         }
@@ -848,28 +848,38 @@ impl HirBuilderContext {
 
         // Extract visibility - check for PubKw token in node or parent
         let visibility = if node.children_with_tokens().any(|child| {
-            child.as_token().map(|t| t.kind() == SyntaxKind::PubKw).unwrap_or(false)
-        }) || node.parent().and_then(|p| p.first_token_of_kind(SyntaxKind::PubKw)).is_some() {
+            child
+                .as_token()
+                .map(|t| t.kind() == SyntaxKind::PubKw)
+                .unwrap_or(false)
+        }) || node
+            .parent()
+            .and_then(|p| p.first_token_of_kind(SyntaxKind::PubKw))
+            .is_some()
+        {
             HirVisibility::Public
         } else {
             HirVisibility::Private
         };
 
         // Extract generic parameters if present
-        let generics = if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
-            self.parse_generic_params(&generic_list)
-        } else {
-            Vec::new()
-        };
+        let generics =
+            if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
+                self.parse_generic_params(&generic_list)
+            } else {
+                Vec::new()
+            };
 
         // Extract target type (the type after '=')
         // Find the TypeExpr or TypeAnnotation child node
         let target_type = node
             .children()
-            .find(|child| matches!(
-                child.kind(),
-                SyntaxKind::TypeExpr | SyntaxKind::TypeAnnotation
-            ))
+            .find(|child| {
+                matches!(
+                    child.kind(),
+                    SyntaxKind::TypeExpr | SyntaxKind::TypeAnnotation
+                )
+            })
             .map(|type_node| self.extract_hir_type(&type_node))
             .unwrap_or(HirType::Bit(1)); // Fallback to bit<1> if type not found
 
