@@ -941,6 +941,62 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse closure expression: |param: Type| { body }
+    fn parse_closure_expression(&mut self) {
+        self.start_node(SyntaxKind::ClosureExpr);
+
+        // Expect opening pipe
+        self.expect(SyntaxKind::Pipe);
+
+        // Parse parameter list
+        self.start_node(SyntaxKind::ClosureParamList);
+
+        // Parse first parameter if present
+        if !self.at(SyntaxKind::Pipe) {
+            self.parse_closure_param();
+
+            // Parse additional parameters
+            while self.at(SyntaxKind::Comma) {
+                self.bump(); // consume ','
+                if !self.at(SyntaxKind::Pipe) {
+                    self.parse_closure_param();
+                }
+            }
+        }
+
+        self.finish_node(); // ClosureParamList
+
+        // Expect closing pipe
+        self.expect(SyntaxKind::Pipe);
+
+        // Parse body (block with expression)
+        if self.at(SyntaxKind::LBrace) {
+            self.bump(); // consume '{'
+            self.parse_expression(); // Parse the body expression
+            self.expect(SyntaxKind::RBrace);
+        } else {
+            self.error("expected block expression after closure parameters");
+        }
+
+        self.finish_node(); // ClosureExpr
+    }
+
+    /// Parse closure parameter: param: Type
+    fn parse_closure_param(&mut self) {
+        self.start_node(SyntaxKind::ClosureParam);
+
+        // Parse parameter name
+        self.expect(SyntaxKind::Ident);
+
+        // Parse type annotation
+        if self.at(SyntaxKind::Colon) {
+            self.bump(); // consume ':'
+            self.parse_type();
+        }
+
+        self.finish_node();
+    }
+
     /// Parse for statement: for i in 0..3 { ... }
     fn parse_for_stmt(&mut self) {
         self.start_node(SyntaxKind::ForStmt);
@@ -3729,6 +3785,10 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::MatchKw) => {
                 self.parse_match_expression();
+            }
+            Some(SyntaxKind::Pipe) => {
+                // Closure expression: |param: Type| { body }
+                self.parse_closure_expression();
             }
             _ => {
                 self.error("expected expression");
