@@ -273,14 +273,30 @@ impl<'a> ParseState<'a> {
             self.skip_trivia();
 
             match self.current_kind() {
-                Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
-                Some(SyntaxKind::VarKw) => self.parse_variable_decl(),
+                Some(SyntaxKind::SignalKw) => {
+                    self.parse_signal_decl();
+                    // Consume optional semicolon separator
+                    if self.at(SyntaxKind::Semicolon) {
+                        self.bump();
+                    }
+                }
+                Some(SyntaxKind::VarKw) => {
+                    self.parse_variable_decl();
+                    // Consume optional semicolon separator
+                    if self.at(SyntaxKind::Semicolon) {
+                        self.bump();
+                    }
+                }
                 Some(SyntaxKind::ConstKw) => {
                     // Check if this is 'const fn' or just 'const'
                     if self.peek_kind(1) == Some(SyntaxKind::FnKw) {
                         self.parse_impl_function()
                     } else {
-                        self.parse_constant_decl()
+                        self.parse_constant_decl();
+                        // Consume optional semicolon separator
+                        if self.at(SyntaxKind::Semicolon) {
+                            self.bump();
+                        }
                     }
                 }
                 Some(SyntaxKind::FnKw) => self.parse_impl_function(),
