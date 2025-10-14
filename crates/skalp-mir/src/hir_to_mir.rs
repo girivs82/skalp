@@ -38,6 +38,9 @@ pub struct HirToMir<'hir> {
     current_entity_id: Option<hir::EntityId>,
     /// Const evaluator for evaluating const expressions (including user-defined const functions)
     const_evaluator: ConstEvaluator,
+    /// Track dynamically created variables (from let bindings in event blocks)
+    /// Maps HIR VariableId to (MIR VariableId, name, type)
+    dynamic_variables: HashMap<hir::VariableId, (VariableId, String, hir::HirType)>,
 }
 
 impl<'hir> HirToMir<'hir> {
@@ -58,6 +61,7 @@ impl<'hir> HirToMir<'hir> {
             hir: None,
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
+            dynamic_variables: HashMap::new(),
         }
     }
 
@@ -156,6 +160,21 @@ impl<'hir> HirToMir<'hir> {
                         let process = self.convert_event_block(event_block);
                         module.processes.push(process);
                     }
+
+                    // Add any dynamically created variables (from let bindings in event blocks)
+                    // Clone to avoid borrow checker issues since convert_type needs mutable self
+                    let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
+                    for (mir_var_id, name, hir_type) in dynamic_vars {
+                        let variable = Variable {
+                            id: mir_var_id,
+                            name,
+                            var_type: self.convert_type(&hir_type),
+                            initial: None,
+                        };
+                        module.variables.push(variable);
+                    }
+                    // Clear dynamic variables for next impl block
+                    self.dynamic_variables.clear();
 
                     // Convert continuous assignments
                     for hir_assign in &impl_block.assignments {
@@ -324,10 +343,27 @@ impl<'hir> HirToMir<'hir> {
             hir::HirStatement::Let(let_stmt) => {
                 // Convert let statement to assignment
                 // Let bindings are local variables that need to be treated as blocking assignments
-                let lhs = self
-                    .variable_map
-                    .get(&let_stmt.id)
-                    .map(|&id| LValue::Variable(id))?;
+
+                // Check if the variable is already registered (e.g., from impl block level)
+                // If not, create it dynamically (for let bindings inside event blocks)
+                let var_id = if let Some(&id) = self.variable_map.get(&let_stmt.id) {
+                    // Already registered
+                    id
+                } else {
+                    // Create a new MIR variable on the fly for event block let bindings
+                    let new_id = self.next_variable_id();
+                    self.variable_map.insert(let_stmt.id, new_id);
+
+                    // Track this dynamically created variable so we can add it to the module later
+                    self.dynamic_variables.insert(
+                        let_stmt.id,
+                        (new_id, let_stmt.name.clone(), let_stmt.var_type.clone()),
+                    );
+
+                    new_id
+                };
+
+                let lhs = LValue::Variable(var_id);
                 let rhs = self.convert_expression(&let_stmt.value)?;
                 Some(Statement::Assignment(Assignment {
                     lhs,
@@ -621,8 +657,37 @@ impl<'hir> HirToMir<'hir> {
                 let low = Box::new(self.convert_expression(low)?);
                 Some(LValue::RangeSelect { base, high, low })
             }
+            hir::HirLValue::FieldAccess { base, field } => {
+                // Convert struct field access to bit range
+                // First convert the base LValue
+                let base_mir = self.convert_lvalue(base)?;
+
+                // Get the type of the base to calculate field offset
+                let base_expr = self.lvalue_to_expression(base)?;
+                let (high_bit, low_bit) = self.get_field_bit_range(&base_expr, field)?;
+
+                // Create range LValue for the field access
+                let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+
+                Some(LValue::RangeSelect {
+                    base: Box::new(base_mir),
+                    high: Box::new(high_expr),
+                    low: Box::new(low_expr),
+                })
+            }
         };
         result
+    }
+
+    /// Convert LValue to HirExpression for type inference
+    fn lvalue_to_expression(&self, lval: &hir::HirLValue) -> Option<hir::HirExpression> {
+        match lval {
+            hir::HirLValue::Signal(id) => Some(hir::HirExpression::Signal(*id)),
+            hir::HirLValue::Variable(id) => Some(hir::HirExpression::Variable(*id)),
+            hir::HirLValue::Port(id) => Some(hir::HirExpression::Port(*id)),
+            _ => None, // For complex LValues, we can't easily convert back
+        }
     }
 
     /// Convert HIR expression to MIR

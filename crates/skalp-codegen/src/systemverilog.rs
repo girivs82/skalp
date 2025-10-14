@@ -150,6 +150,28 @@ fn generate_module(
         sv.push('\n');
     }
 
+    // Generate internal variable declarations
+    for variable in &mir_module.variables {
+        let (element_width, array_dim) = get_type_dimensions(&variable.var_type);
+
+        // Variables are always logic (combinational variables in processes)
+        sv.push_str(&format!(
+            "    logic {}{}{}",
+            element_width, variable.name, array_dim
+        ));
+
+        // Add initial value if present
+        if let Some(init) = &variable.initial {
+            sv.push_str(&format!(" = {}", format_value(init)));
+        }
+
+        sv.push_str(";\n");
+    }
+
+    if !mir_module.variables.is_empty() {
+        sv.push('\n');
+    }
+
     // Generate continuous assignments
     for assign in &mir_module.assignments {
         sv.push_str(&format!(

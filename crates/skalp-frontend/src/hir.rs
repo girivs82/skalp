@@ -264,6 +264,7 @@ pub enum HirLValue {
     Port(PortId),
     Index(Box<HirLValue>, HirExpression),
     Range(Box<HirLValue>, HirExpression, HirExpression),
+    FieldAccess { base: Box<HirLValue>, field: String },
 }
 
 /// Statements in HIR

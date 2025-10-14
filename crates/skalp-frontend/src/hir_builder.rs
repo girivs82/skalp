@@ -504,9 +504,14 @@ impl HirBuilderContext {
         let mut generic_args = Vec::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
             for arg_node in arg_list.children() {
-                // Each generic argument is an expression (could be a literal, const, or type)
-                if let Some(expr) = self.build_expression(&arg_node) {
-                    generic_args.push(expr);
+                // Each child is an Arg node, which contains the actual expression
+                if arg_node.kind() == SyntaxKind::Arg {
+                    // Find the expression inside the Arg node
+                    if let Some(expr_node) = arg_node.children().next() {
+                        if let Some(expr) = self.build_expression(&expr_node) {
+                            generic_args.push(expr);
+                        }
+                    }
                 }
             }
         }
@@ -1185,6 +1190,8 @@ impl HirBuilderContext {
 
         // Handle array indexing/slicing: memory[index] <= value or state[3:1] <= value
         // Parser splits this into: IdentExpr("memory"), IndexExpr("[index]"), IdentExpr("value")
+        // Also handle field access: pos.x <= value
+        // Parser splits this into: IdentExpr("pos"), FieldExpr(".x"), IdentExpr("value")
         let lhs = if exprs.len() == 3 && exprs[1].kind() == SyntaxKind::IndexExpr {
             // Combine base and index/range to form indexed lvalue
             let base = self.build_lvalue(&exprs[0])?;
@@ -1234,6 +1241,24 @@ impl HirBuilderContext {
 
                 HirLValue::Index(Box::new(base), index_expr)
             }
+        } else if exprs.len() == 3 && exprs[1].kind() == SyntaxKind::FieldExpr {
+            // Field access on LHS: pos.x <= value
+            // exprs[0] is the base (pos), exprs[1] is the field access (.x), exprs[2] is the value
+            let base = self.build_lvalue(&exprs[0])?;
+            let field_node = &exprs[1];
+
+            // Extract the field name from the FieldExpr
+            let field_name = field_node
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| t.kind() == SyntaxKind::Ident)
+                .last()
+                .map(|t| t.text().to_string())?;
+
+            HirLValue::FieldAccess {
+                base: Box::new(base),
+                field: field_name,
+            }
         } else {
             self.build_lvalue(&exprs[0])?
         };
@@ -1249,6 +1274,11 @@ impl HirBuilderContext {
             // Check if this is an indexed assignment (base[index] <= value)
             // In this case, exprs[1] is the IndexExpr which we already consumed in LHS
             if second_expr.kind() == SyntaxKind::IndexExpr {
+                // The RHS is exprs[2]
+                self.build_expression(&exprs[2])?
+            } else if second_expr.kind() == SyntaxKind::FieldExpr {
+                // Check if this is a field access on LHS (pos.x <= value)
+                // In this case, exprs[1] is the FieldExpr which we already consumed in LHS
                 // The RHS is exprs[2]
                 self.build_expression(&exprs[2])?
             } else if third_expr.kind() == SyntaxKind::FieldExpr {
@@ -1534,9 +1564,13 @@ impl HirBuilderContext {
             .map(|n| self.extract_hir_type(&n));
 
         // Extract initializer expression
-        let value = node
+        // For "let x = a + b", the parser may create multiple expression children:
+        // IdentExpr(a), BinaryExpr(+ b), etc. We want the complete expression,
+        // which is typically the LAST expression child or a BinaryExpr/UnaryExpr.
+        // Priority: BinaryExpr > UnaryExpr > other expressions
+        let expr_children: Vec<_> = node
             .children()
-            .find(|n| {
+            .filter(|n| {
                 matches!(
                     n.kind(),
                     SyntaxKind::LiteralExpr
@@ -1547,9 +1581,23 @@ impl HirBuilderContext {
                         | SyntaxKind::IndexExpr
                         | SyntaxKind::FieldExpr
                         | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
                 )
             })
-            .and_then(|n| self.build_expression(&n))?;
+            .collect();
+
+        let value_node = expr_children
+            .iter()
+            .find(|n| n.kind() == SyntaxKind::BinaryExpr)
+            .or_else(|| {
+                expr_children
+                    .iter()
+                    .find(|n| n.kind() == SyntaxKind::UnaryExpr)
+            })
+            .or_else(|| expr_children.last());
+
+        let value = value_node.and_then(|n| self.build_expression(n))?;
 
         // Allocate a variable ID for this let binding
         let id = self.next_variable_id();
@@ -2099,27 +2147,39 @@ impl HirBuilderContext {
                 }
             }
             SyntaxKind::FieldExpr => {
-                // Handle field access like struct.field
-                // For now, treat as simple identifier
-                // Look for the last identifier token
+                // Handle field access like pos.x
+                // Get all identifier tokens
                 let tokens: Vec<_> = node
                     .children_with_tokens()
                     .filter_map(|e| e.into_token())
                     .filter(|t| t.kind() == SyntaxKind::Ident)
                     .collect();
 
-                let name = tokens.last().map(|t| t.text().to_string())?;
+                if tokens.len() < 2 {
+                    return None;
+                }
 
-                // Look up as signal or variable
-                if let Some(symbol) = self.symbols.lookup(&name) {
+                // First token is the base (e.g., "pos"), last token is the field (e.g., "x")
+                let base_name = tokens.first().map(|t| t.text().to_string())?;
+                let field_name = tokens.last().map(|t| t.text().to_string())?;
+
+                // Look up the base as a signal/variable/port
+                let base_lval = if let Some(symbol) = self.symbols.lookup(&base_name) {
                     match symbol {
-                        SymbolId::Signal(id) => Some(HirLValue::Signal(*id)),
-                        SymbolId::Variable(id) => Some(HirLValue::Variable(*id)),
-                        _ => None,
+                        SymbolId::Signal(id) => HirLValue::Signal(*id),
+                        SymbolId::Variable(id) => HirLValue::Variable(*id),
+                        SymbolId::Port(id) => HirLValue::Port(*id),
+                        _ => return None,
                     }
                 } else {
-                    None
-                }
+                    return None;
+                };
+
+                // Create FieldAccess LValue - bit range calculation will happen during HIR->MIR conversion
+                Some(HirLValue::FieldAccess {
+                    base: Box::new(base_lval),
+                    field: field_name,
+                })
             }
             _ => None,
         }

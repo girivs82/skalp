@@ -148,8 +148,6 @@ pub struct InstantiationCollector {
     evaluator: ConstEvaluator,
     /// Map from entity ID to entity
     entities: HashMap<EntityId, HirEntity>,
-    /// Entities we've already processed (to avoid infinite recursion)
-    visited: HashSet<EntityId>,
 }
 
 impl InstantiationCollector {
@@ -164,7 +162,6 @@ impl InstantiationCollector {
             instantiations: HashSet::new(),
             evaluator: ConstEvaluator::new(),
             entities,
-            visited: HashSet::new(),
         }
     }
 
@@ -190,11 +187,6 @@ impl InstantiationCollector {
     fn collect_from_instance(&mut self, instance: &HirInstance) {
         // Get the entity being instantiated
         let entity_id = instance.entity;
-
-        // Avoid infinite recursion
-        if self.visited.contains(&entity_id) {
-            return;
-        }
 
         let entity = match self.entities.get(&entity_id) {
             Some(e) => e,
@@ -282,13 +274,6 @@ impl InstantiationCollector {
         };
 
         self.instantiations.insert(instantiation);
-
-        // Mark as visited
-        self.visited.insert(entity_id);
-
-        // Recursively collect from this entity's implementation
-        // (Find the implementation for this entity and process it)
-        // This would require finding the impl block and processing its instances
     }
 
     /// Extract intent name from expression
