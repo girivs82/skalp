@@ -53,17 +53,18 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
     let source = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
 
-    // Parse and build HIR
+    // Parse source to syntax tree
     let (syntax_tree, parse_errors) = parse::parse_with_errors(&source);
 
     if !parse_errors.is_empty() {
+        let error_msgs: Vec<String> = parse_errors
+            .iter()
+            .map(|e| format!("  {} at pos {}", e.message, e.position))
+            .collect();
         let error_msg = format!(
-            "Parsing failed with {} errors: {}",
+            "Parsing failed with {} errors:\n{}",
             parse_errors.len(),
-            parse_errors
-                .first()
-                .map(|e| &e.message)
-                .unwrap_or(&"unknown error".to_string())
+            error_msgs.join("\n")
         );
         anyhow::bail!(error_msg);
     }

@@ -457,20 +457,33 @@ pub enum Token {
     #[token(".")]
     Dot,
 
+    #[token("..=")]
+    DotDotEq,
+
+    #[token("..")]
+    DotDot,
+
     #[token("?")]
     Question,
 
     #[token("'")]
     Apostrophe,
 
+    // Verilog-style sized literals (must come before Lifetime to take precedence)
+    // Matches: 8'hFF, 31'b0, 4'd15, 16'h1234
+    #[regex(r"[0-9]+'\s*[bhd][0-9a-fA-F_]+", |lex| parse_sized_literal(lex.slice()))]
+    SizedLiteral(u64),
+
     // Lifetime token - 'identifier for clock domain lifetimes
-    #[regex(r"'[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
+    // This pattern now only matches when the char after ' is alphabetic (not bhd followed by digits)
+    #[regex(r"'[a-zA-Z_&&[^bhd]][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
+    #[regex(r"'[bhd][a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
     Lifetime(String),
 
     // Whitespace and comments (skipped but tracked for position)
     #[regex(r"[ \t\n\f]+", logos::skip)]
     #[regex(r"//[^\n]*", logos::skip)]
-    #[regex(r"/\*([^*]|\*+[^*/])*\*+/", logos::skip)]
+    #[regex(r"/\*[^*]*\*+([^/*][^*]*\*+)*/", logos::skip)]
     // Error token for unknown/invalid input
     Error,
 }
@@ -484,6 +497,7 @@ impl fmt::Display for Token {
             Token::DecimalLiteral(n) => write!(f, "{}", n),
             Token::BinaryLiteral(n) => write!(f, "0b{:b}", n),
             Token::HexLiteral(n) => write!(f, "0x{:x}", n),
+            Token::SizedLiteral(n) => write!(f, "{}", n),
             Token::FloatLiteral(fl) => write!(f, "{}", fl),
             Token::StringLiteral(s) => write!(f, "\"{}\"", s),
             Token::Lifetime(name) => write!(f, "'{}", name),
@@ -528,6 +542,35 @@ pub fn parse_float(input: &str) -> Option<f64> {
     }
 
     cleaned.parse::<f64>().ok()
+}
+
+/// Parse Verilog-style sized literal (e.g., 8'hFF, 31'b0, 4'd15)
+/// Format: <width>'<base><value>
+pub fn parse_sized_literal(input: &str) -> Option<u64> {
+    // Split on apostrophe
+    let parts: Vec<&str> = input.split('\'').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    // Parse the width (not used for the value, but validates format)
+    let _width = parts[0].trim().parse::<u64>().ok()?;
+
+    // Get base and value
+    let base_and_value = parts[1].trim();
+    if base_and_value.is_empty() {
+        return None;
+    }
+
+    let base_char = base_and_value.chars().next()?;
+    let value_str = &base_and_value[1..].replace('_', "");
+
+    match base_char {
+        'b' | 'B' => u64::from_str_radix(value_str, 2).ok(),
+        'h' | 'H' => u64::from_str_radix(value_str, 16).ok(),
+        'd' | 'D' => value_str.parse::<u64>().ok(),
+        _ => None,
+    }
 }
 
 /// Parse string literal (remove quotes and handle escapes)
@@ -814,5 +857,18 @@ entity Counter {
         assert_eq!(tokens[2], Token::Identifier("invalid".to_string()));
         assert_eq!(tokens[3], Token::Dollar); // $ is a valid token
         assert_eq!(tokens[4], Token::Identifier("Counter".to_string()));
+    }
+
+    #[test]
+    fn test_block_comments() {
+        let source = "entity /* comment */ Test";
+        let mut lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+
+        // Should skip the comment and only see: entity, Test
+        println!("Tokens: {:?}", tokens);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0], Token::Entity);
+        assert_eq!(tokens[1], Token::Identifier("Test".to_string()));
     }
 }

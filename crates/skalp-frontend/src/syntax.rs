@@ -218,6 +218,8 @@ pub enum SyntaxKind {
     ColonColon, // ::
     Colon,      // :
     Dot,        // .
+    DotDot,     // ..
+    DotDotEq,   // ..=
     Question,   // ?
     Apostrophe, // '
 
@@ -274,6 +276,7 @@ pub enum SyntaxKind {
     ExprStmt,
     IfStmt,
     MatchStmt,
+    ForStmt,
     BlockStmt,
     LetStmt,
     FlowStmt,
@@ -348,6 +351,10 @@ pub enum SyntaxKind {
     IfExpr,
     MatchExpr,
     CastExpr,
+    ConcatExpr,
+    TernaryExpr,
+    TupleExpr,
+    RangeExpr,
 
     // Types
     TypeExpr,
@@ -742,6 +749,8 @@ impl SyntaxKind {
             Semicolon => "';'",
             Colon => "':'",
             Dot => "'.'",
+            DotDot => "'..'",
+            DotDotEq => "'..='",
             Question => "'?'",
             Apostrophe => "'''",
 
@@ -877,6 +886,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::DecimalLiteral(_) => IntLiteral,
             Token::BinaryLiteral(_) => BinLiteral,
             Token::HexLiteral(_) => HexLiteral,
+            Token::SizedLiteral(_) => IntLiteral, // Treat sized literals as integer literals
             Token::FloatLiteral(_) => FloatLiteral,
             Token::StringLiteral(_) => StringLiteral,
             Token::Lifetime(_) => Lifetime,
@@ -931,6 +941,8 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::ColonColon => ColonColon,
             Token::Colon => Colon,
             Token::Dot => Dot,
+            Token::DotDot => DotDot,
+            Token::DotDotEq => DotDotEq,
             Token::Question => Question,
             Token::Apostrophe => Apostrophe,
 
