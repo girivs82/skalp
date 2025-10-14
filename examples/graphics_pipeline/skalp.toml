@@ -1,0 +1,71 @@
+[project]
+name = "graphics_pipeline"
+version = "0.1.0"
+authors = ["SKALP Team"]
+license = "MIT"
+description = "Professional graphics pipeline demonstrating SKALP's advanced features"
+
+[build]
+# Main entry point
+main = "src/main.sk"
+
+# Additional source directories
+src_dirs = ["src", "lib"]
+
+# Output directory
+out_dir = "build"
+
+[targets]
+# Default target: SystemVerilog
+default = "systemverilog"
+
+# Available targets
+systemverilog = { enabled = true }
+vhdl = { enabled = true }
+lir = { enabled = false }
+
+[optimization]
+# Optimization level: none, basic, aggressive
+level = "basic"
+
+# Enable specific optimizations
+dead_code_elimination = true
+constant_propagation = true
+common_subexpression_elimination = true
+
+[verification]
+# Enable assertions in generated code
+assertions = true
+
+# Enable coverage instrumentation
+coverage = false
+
+[synthesis]
+# Default FPGA family
+fpga_family = "ice40"
+
+# Target device
+fpga_device = "hx8k"
+
+# Constraint files
+constraint_files = [
+    "constraints/ice40/pins.pcf",
+    "constraints/ice40/timing.sdc"
+]
+
+[simulation]
+# Default simulator
+simulator = "verilator"
+
+# Testbench directory
+testbench_dir = "verif/testbenches"
+
+# Waveform output directory
+wave_dir = "sim/waves"
+
+[documentation]
+# Generate API documentation
+generate_docs = true
+
+# Documentation output directory
+docs_dir = "build/docs"

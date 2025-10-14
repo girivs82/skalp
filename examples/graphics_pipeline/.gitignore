@@ -1,0 +1,45 @@
+# Build outputs
+build/
+sim/
+*.vcd
+*.fst
+*.vvp
+
+# Generated SystemVerilog/VHDL (unless specifically tracked)
+*.sv
+*.vhd
+
+# Except golden reference files
+!verif/golden/**
+
+# Editor files  
+.vscode/
+.idea/
+*.swp
+*~
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+tmp/
+*.tmp
+*.log
+
+# Synthesis tool files
+*.edf
+*.edif
+*.blif
+*.json
+*.asc
+*.bin
+
+# Coverage data
+*.dat
+coverage/
+
+# Reports (unless you want to track them)
+reports/
