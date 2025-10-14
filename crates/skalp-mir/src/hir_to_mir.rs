@@ -118,6 +118,22 @@ impl<'hir> HirToMir<'hir> {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);
 
+                // Bind generic parameter default values into const evaluator for expression evaluation
+                // Track which names we bound so we can clean them up later
+                let mut bound_generic_names = Vec::new();
+                if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
+                    for generic in &entity.generics {
+                        if let Some(default_expr) = &generic.default_value {
+                            // Try to evaluate the default value and bind it
+                            if let Ok(const_val) = self.const_evaluator.eval(default_expr) {
+                                self.const_evaluator
+                                    .bind(generic.name.clone(), const_val);
+                                bound_generic_names.push(generic.name.clone());
+                            }
+                        }
+                    }
+                }
+
                 // Find the module
                 if let Some(module) = mir.modules.iter_mut().find(|m| m.id == module_id) {
                     // Add signals
@@ -188,6 +204,11 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(instance) = self.convert_instance(hir_instance) {
                             module.instances.push(instance);
                         }
+                    }
+
+                    // Clean up generic parameter bindings for this impl block
+                    for name in &bound_generic_names {
+                        self.const_evaluator.unbind(name);
                     }
                 }
             }

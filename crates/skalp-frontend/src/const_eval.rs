@@ -173,6 +173,11 @@ impl ConstEvaluator {
         self.const_bindings.extend(bindings);
     }
 
+    /// Unbind a const parameter
+    pub fn unbind(&mut self, name: &str) {
+        self.const_bindings.remove(name);
+    }
+
     /// Register a user-defined const function
     pub fn register_function(&mut self, func: HirFunction) {
         if func.is_const {

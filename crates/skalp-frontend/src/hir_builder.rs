@@ -4059,8 +4059,21 @@ impl HirBuilderContext {
                 {
                     if let Some(call_node) = width_node.first_child_of_kind(SyntaxKind::CallExpr) {
                         let mut args = Vec::new();
-                        for arg_child in call_node.children() {
-                            if let Some(arg_expr) = self.build_expression(&arg_child) {
+                        // Collect all children and identify top-level expressions
+                        // Skip IdentExpr nodes that are part of larger BinaryExpr
+                        let children: Vec<_> = call_node.children().collect();
+                        for (idx, arg_child) in children.iter().enumerate() {
+                            // Skip IdentExpr if the next node is a BinaryExpr
+                            // (it means this ident is part of the binary expr)
+                            if arg_child.kind() == SyntaxKind::IdentExpr {
+                                if idx + 1 < children.len()
+                                    && children[idx + 1].kind() == SyntaxKind::BinaryExpr
+                                {
+                                    continue; // Skip this - it's part of the next binary expr
+                                }
+                            }
+
+                            if let Some(arg_expr) = self.build_expression(arg_child) {
                                 args.push(arg_expr);
                             }
                         }
