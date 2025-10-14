@@ -15,7 +15,9 @@ pub enum SyntaxKind {
     VarKw,
     ConstKw,
     InKw,
+    InputKw,
     OutKw,
+    OutputKw,
     InoutKw,
     PortKw,
     OnKw,
@@ -462,9 +464,9 @@ impl SyntaxKind {
     pub fn is_keyword(self) -> bool {
         matches!(
             self,
-            // Core Hardware Description (12)
+            // Core Hardware Description (14)
             EntityKw | ImplKw | SignalKw | VarKw | ConstKw
-                | InKw | OutKw | InoutKw | OnKw | IfKw | ElseKw | AssignKw
+                | InKw | InputKw | OutKw | OutputKw | InoutKw | PortKw | OnKw | IfKw | ElseKw | AssignKw
             // Type System (14)
             | BitKw | BoolKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | Vec2Kw | Vec3Kw | Vec4Kw | StructKw | EnumKw | UnionKw
             // Boolean Literals (2)
@@ -553,7 +555,9 @@ impl SyntaxKind {
             VarKw => "'var'",
             ConstKw => "'const'",
             InKw => "'in'",
+            InputKw => "'input'",
             OutKw => "'out'",
+            OutputKw => "'output'",
             InoutKw => "'inout'",
             OnKw => "'on'",
             IfKw => "'if'",
@@ -790,7 +794,9 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Var => VarKw,
             Token::Const => ConstKw,
             Token::In => InKw,
+            Token::Input => InputKw,
             Token::Out => OutKw,
+            Token::Output => OutputKw,
             Token::Inout => InoutKw,
             Token::Port => PortKw,
             Token::On => OnKw,

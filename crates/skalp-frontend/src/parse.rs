@@ -383,6 +383,11 @@ impl<'a> ParseState<'a> {
 
             if self.at_port_direction() {
                 self.parse_port_decl();
+
+                // Consume optional separator (comma or semicolon)
+                if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
+                    self.bump();
+                }
             } else if self.at(SyntaxKind::RBrace) {
                 break;
             } else {
@@ -400,7 +405,9 @@ impl<'a> ParseState<'a> {
         // Port direction
         self.start_node(SyntaxKind::PortDirection);
         if self.at(SyntaxKind::InKw)
+            || self.at(SyntaxKind::InputKw)
             || self.at(SyntaxKind::OutKw)
+            || self.at(SyntaxKind::OutputKw)
             || self.at(SyntaxKind::InoutKw)
             || self.at(SyntaxKind::PortKw)
         {
@@ -4101,7 +4108,7 @@ impl<'a> ParseState<'a> {
     fn at_port_direction(&self) -> bool {
         matches!(
             self.current_kind(),
-            Some(SyntaxKind::InKw | SyntaxKind::OutKw | SyntaxKind::InoutKw | SyntaxKind::PortKw)
+            Some(SyntaxKind::InKw | SyntaxKind::InputKw | SyntaxKind::OutKw | SyntaxKind::OutputKw | SyntaxKind::InoutKw | SyntaxKind::PortKw)
         )
     }
 

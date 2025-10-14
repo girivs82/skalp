@@ -21,8 +21,12 @@ pub enum Token {
     Const,
     #[token("in")]
     In,
+    #[token("input")]
+    Input,
     #[token("out")]
     Out,
+    #[token("output")]
+    Output,
     #[token("inout")]
     Inout,
     #[token("port")]
