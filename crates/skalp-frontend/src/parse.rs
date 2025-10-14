@@ -155,13 +155,21 @@ impl<'a> ParseState<'a> {
                 lookahead += 1;
                 // Skip generic parameters after entity/trait name if present
                 if self.peek_kind(lookahead) == Some(SyntaxKind::Lt) {
-                    // Look for 'for' keyword
-                    while lookahead < 50 && self.peek_kind(lookahead).is_some() {
-                        if self.peek_kind(lookahead) == Some(SyntaxKind::ForKw) {
-                            found_for = true;
-                            break;
+                    // Skip past the generic parameters with depth tracking
+                    let mut depth = 1;
+                    lookahead += 1; // Skip the '<'
+                    while depth > 0 && lookahead < 50 && self.peek_kind(lookahead).is_some() {
+                        match self.peek_kind(lookahead) {
+                            Some(SyntaxKind::Lt) => depth += 1,
+                            Some(SyntaxKind::Gt) => depth -= 1,
+                            Some(SyntaxKind::Shr) => depth -= 2, // >> counts as two >
+                            _ => {}
                         }
                         lookahead += 1;
+                    }
+                    // Now check if immediately followed by 'for' keyword (trait impl)
+                    if self.peek_kind(lookahead) == Some(SyntaxKind::ForKw) {
+                        found_for = true;
                     }
                 } else if self.peek_kind(lookahead) == Some(SyntaxKind::ForKw) {
                     found_for = true;
@@ -276,6 +284,9 @@ impl<'a> ParseState<'a> {
                     }
                 }
                 Some(SyntaxKind::FnKw) => self.parse_impl_function(),
+                Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
+                Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
+                Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
                 Some(SyntaxKind::LetKw) => {
                     // Disambiguate between instance declaration and let binding
                     // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
@@ -309,6 +320,19 @@ impl<'a> ParseState<'a> {
                                             break;
                                         }
                                     }
+                                    Some(SyntaxKind::Shr) => {
+                                        // >> counts as two >
+                                        depth -= 2;
+                                        if depth <= 0 {
+                                            // Found closing >>, check next token
+                                            if self.peek_kind(offset + 1)
+                                                == Some(SyntaxKind::LBrace)
+                                            {
+                                                is_instance = true;
+                                            }
+                                            break;
+                                        }
+                                    }
                                     None => break,
                                     _ => {}
                                 }
@@ -329,6 +353,7 @@ impl<'a> ParseState<'a> {
                 }
                 Some(SyntaxKind::OnKw) => self.parse_event_block(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
+                Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
                 Some(SyntaxKind::CovergroupKw) => self.parse_covergroup_decl(),
@@ -383,8 +408,14 @@ impl<'a> ParseState<'a> {
         }
         self.finish_node();
 
-        // Port name
-        self.expect(SyntaxKind::Ident);
+        // Port name (allow keywords to be used as port names)
+        if self.at(SyntaxKind::Ident) {
+            self.bump();
+        } else if self.current_kind().is_some_and(|k| k.is_keyword()) {
+            self.bump(); // Allow keywords as port names (e.g., "in reset: reset")
+        } else {
+            self.error("expected identifier");
+        }
 
         // Colon and type
         self.expect(SyntaxKind::Colon);
@@ -449,7 +480,7 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse function declaration in impl block
-    /// Syntax: [const] fn name(params) -> return_type { body }
+    /// Syntax: [const] fn name[<generic_params>](params) -> return_type { body }
     fn parse_impl_function(&mut self) {
         self.start_node(SyntaxKind::FunctionDecl);
 
@@ -463,6 +494,11 @@ impl<'a> ParseState<'a> {
 
         // Function name
         self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
 
         // Parameters
         self.expect(SyntaxKind::LParen);
@@ -530,7 +566,14 @@ impl<'a> ParseState<'a> {
 
             // Parse connection: port_name: signal_name
             self.start_node(SyntaxKind::Connection);
-            self.expect(SyntaxKind::Ident); // port name
+            // Port name (allow keywords to be used as port names, like "reset")
+            if self.at(SyntaxKind::Ident) {
+                self.bump();
+            } else if self.current_kind().is_some_and(|k| k.is_keyword()) {
+                self.bump(); // Allow keywords as port names
+            } else {
+                self.error("expected port name");
+            }
             self.expect(SyntaxKind::Colon);
             self.parse_expression(); // signal expression
             self.finish_node();
@@ -707,6 +750,7 @@ impl<'a> ParseState<'a> {
             match self.current_kind() {
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
+                Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::LetKw) => self.parse_let_statement(),
                 Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
@@ -837,6 +881,10 @@ impl<'a> ParseState<'a> {
         // Parse match arms (with statements)
         self.start_node(SyntaxKind::MatchArmList);
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
             self.parse_match_arm_statement();
         }
         self.finish_node();
@@ -857,11 +905,136 @@ impl<'a> ParseState<'a> {
         // Parse match arms (with expressions)
         self.start_node(SyntaxKind::MatchArmList);
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
             self.parse_match_arm_expression();
         }
         self.finish_node();
 
         self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse for statement: for i in 0..3 { ... }
+    fn parse_for_stmt(&mut self) {
+        self.start_node(SyntaxKind::ForStmt);
+
+        self.expect(SyntaxKind::ForKw);
+
+        // Parse loop variable identifier
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::InKw);
+
+        // Parse range expression
+        self.parse_range_expr();
+
+        // Parse loop body
+        self.expect(SyntaxKind::LBrace);
+
+        // Parse statements in the loop body
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            // Parse any statement that can appear in a block
+            match self.current_kind() {
+                Some(SyntaxKind::IfKw) => self.parse_if_statement(),
+                Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
+                Some(SyntaxKind::ForKw) => self.parse_for_stmt(), // Nested for loops
+                Some(SyntaxKind::LetKw) => {
+                    // Disambiguate between instance declaration and let binding
+                    // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
+                    // Let binding: let name = expression
+                    let mut is_instance = false;
+                    if self.peek_kind(1) == Some(SyntaxKind::Ident)
+                        && self.peek_kind(2) == Some(SyntaxKind::Assign)
+                        && self.peek_kind(3) == Some(SyntaxKind::Ident)
+                    {
+                        // Check if followed by { or <
+                        if self.peek_kind(4) == Some(SyntaxKind::LBrace) {
+                            is_instance = true;
+                        } else if self.peek_kind(4) == Some(SyntaxKind::Lt) {
+                            // Generic instantiation - scan forward to find the closing >
+                            // then check if there's a { after it
+                            let mut depth = 0;
+                            let mut offset = 4;
+                            loop {
+                                match self.peek_kind(offset) {
+                                    Some(SyntaxKind::Lt) => depth += 1,
+                                    Some(SyntaxKind::Gt) => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            // Found closing >, check next token
+                                            if self.peek_kind(offset + 1)
+                                                == Some(SyntaxKind::LBrace)
+                                            {
+                                                is_instance = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    Some(SyntaxKind::Shr) => {
+                                        // >> counts as two >
+                                        depth -= 2;
+                                        if depth <= 0 {
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                    _ => {}
+                                }
+                                offset += 1;
+                                if offset > 50 {
+                                    break; // Safety limit
+                                }
+                            }
+                        }
+                    }
+
+                    if is_instance {
+                        self.parse_instance_decl()
+                    } else {
+                        self.parse_let_statement()
+                    }
+                }
+                Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
+                Some(SyntaxKind::ReturnKw) => self.parse_return_statement(),
+                Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
+                _ => {
+                    self.error("unexpected token in for loop body");
+                    self.bump(); // Consume the unexpected token to avoid infinite loop
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse range expression: 0..3 or 0..=10
+    fn parse_range_expr(&mut self) {
+        self.start_node(SyntaxKind::RangeExpr);
+
+        // Parse start expression (could be literal or identifier)
+        self.parse_expression();
+
+        // Parse range operator (.. or ..=)
+        if self.at(SyntaxKind::DotDotEq) {
+            self.bump(); // consume ..=
+        } else if self.at(SyntaxKind::DotDot) {
+            self.bump(); // consume ..
+        } else {
+            self.error("expected '..' or '..='");
+        }
+
+        // Parse end expression
+        self.parse_expression();
 
         self.finish_node();
     }
@@ -988,7 +1161,29 @@ impl<'a> ParseState<'a> {
                             self.expect(SyntaxKind::Ident); // consume path segment
                         }
 
-                        self.finish_node();
+                        // Check for tuple destructuring: State::Active(n)
+                        if self.at(SyntaxKind::LParen) {
+                            // This is a tuple struct pattern
+                            self.finish_node(); // finish the path part
+                            self.start_node(SyntaxKind::TuplePattern);
+                            self.bump(); // consume '('
+
+                            // Parse comma-separated patterns
+                            if !self.at(SyntaxKind::RParen) {
+                                self.parse_pattern();
+                                while self.at(SyntaxKind::Comma) {
+                                    self.bump();
+                                    if !self.at(SyntaxKind::RParen) {
+                                        self.parse_pattern();
+                                    }
+                                }
+                            }
+
+                            self.expect(SyntaxKind::RParen);
+                            self.finish_node();
+                        } else {
+                            self.finish_node();
+                        }
                     }
                 } else {
                     // Fallback to identifier pattern
@@ -1000,8 +1195,10 @@ impl<'a> ParseState<'a> {
             Some(SyntaxKind::IntLiteral)
             | Some(SyntaxKind::BinLiteral)
             | Some(SyntaxKind::HexLiteral)
-            | Some(SyntaxKind::StringLiteral) => {
-                // Literal pattern
+            | Some(SyntaxKind::StringLiteral)
+            | Some(SyntaxKind::TrueKw)
+            | Some(SyntaxKind::FalseKw) => {
+                // Literal pattern (including boolean literals)
                 self.start_node(SyntaxKind::LiteralPattern);
                 self.bump(); // consume the literal token
                 self.finish_node();
@@ -2114,6 +2311,70 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse type alias declaration: `pub type Name<T> = Type;`
+    fn parse_type_alias(&mut self) {
+        self.start_node(SyntaxKind::TypeAlias);
+
+        // 'type' keyword
+        self.expect(SyntaxKind::TypeKw);
+
+        // Type alias name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // '=' sign
+        self.expect(SyntaxKind::Assign);
+
+        // Target type
+        self.parse_type();
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
+    /// Parse function declaration: `pub fn name<T: Trait>(params) -> RetType { body }`
+    fn parse_function_decl(&mut self) {
+        self.start_node(SyntaxKind::FunctionDecl);
+
+        // 'fn' keyword
+        self.expect(SyntaxKind::FnKw);
+
+        // Function name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters with bounds
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // Parameter list
+        self.expect(SyntaxKind::LParen);
+        self.parse_parameter_list();
+        self.expect(SyntaxKind::RParen);
+
+        // Optional return type
+        if self.at(SyntaxKind::Arrow) {
+            self.bump();
+            self.parse_type();
+        }
+
+        // Optional where clause
+        if self.at(SyntaxKind::WhereKw) {
+            self.parse_where_clause();
+        }
+
+        // Function body
+        self.parse_block_statement();
+
+        self.finish_node();
+    }
+
     /// Parse trait body
     fn parse_trait_body(&mut self) {
         self.start_node(SyntaxKind::TraitItemList);
@@ -2428,6 +2689,11 @@ impl<'a> ParseState<'a> {
     fn parse_struct_field(&mut self) {
         self.start_node(SyntaxKind::StructField);
 
+        // Optional visibility modifier
+        if self.at(SyntaxKind::PubKw) {
+            self.parse_visibility();
+        }
+
         // Field name
         self.expect(SyntaxKind::Ident);
 
@@ -2601,9 +2867,14 @@ impl<'a> ParseState<'a> {
     fn parse_type_or_const_arg(&mut self) {
         self.start_node(SyntaxKind::Arg);
 
-        // Check if it's a literal (const argument)
+        // Check if it's a literal or boolean keyword (const argument)
         // Use simple expression to avoid consuming > as comparison operator
-        if self.current_kind().is_some_and(|k| k.is_literal()) {
+        if self.current_kind().is_some_and(|k| k.is_literal())
+            || matches!(
+                self.current_kind(),
+                Some(SyntaxKind::TrueKw) | Some(SyntaxKind::FalseKw)
+            )
+        {
             self.start_node(SyntaxKind::LiteralExpr);
             self.bump();
             self.finish_node();
@@ -2862,13 +3133,18 @@ impl<'a> ParseState<'a> {
             self.expect(SyntaxKind::RBracket);
             self.finish_node();
         } else if self.at(SyntaxKind::Lt) {
-            // Support angle bracket syntax: bit<WIDTH>
+            // Support angle bracket syntax: bit<WIDTH> or int<WIDTH, SIGNED>
             self.start_node(SyntaxKind::WidthSpec);
             self.bump(); // consume <
 
-            // Parse primary expression only (literal or identifier) to avoid
-            // consuming the closing > as a comparison operator
+            // Parse first argument (width)
             self.parse_type_arg_expr();
+
+            // Parse additional arguments if present (e.g., signedness for int<W, true>)
+            while self.at(SyntaxKind::Comma) {
+                self.bump(); // consume comma
+                self.parse_type_arg_expr();
+            }
 
             self.expect_closing_angle(); // consume >
             self.finish_node();
@@ -2935,6 +3211,12 @@ impl<'a> ParseState<'a> {
             Some(kind) if kind.is_literal() => {
                 self.start_node(SyntaxKind::LiteralExpr);
                 self.bump(); // literal value
+                self.finish_node();
+            }
+            Some(SyntaxKind::TrueKw) | Some(SyntaxKind::FalseKw) => {
+                // Boolean literals in type arguments
+                self.start_node(SyntaxKind::LiteralExpr);
+                self.bump();
                 self.finish_node();
             }
             Some(SyntaxKind::LParen) => {
@@ -3052,7 +3334,25 @@ impl<'a> ParseState<'a> {
 
     /// Parse expression with operator precedence
     fn parse_expression(&mut self) {
+        self.parse_ternary_expr();
+    }
+
+    /// Parse ternary conditional expression: condition ? true_expr : false_expr
+    fn parse_ternary_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_logical_or_expr();
+
+        if self.at(SyntaxKind::Question) {
+            self.builder.start_node_at(
+                checkpoint,
+                rowan::SyntaxKind(SyntaxKind::TernaryExpr as u16),
+            );
+            self.bump(); // consume ?
+            self.parse_logical_or_expr(); // true expression
+            self.expect(SyntaxKind::Colon);
+            self.parse_logical_or_expr(); // false expression
+            self.builder.finish_node();
+        }
     }
 
     /// Parse logical OR expression (||)
@@ -3102,6 +3402,17 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::Le)
                 | Some(SyntaxKind::Ge)
         ) {
+            // Before treating < as a comparison operator, check if this might be
+            // the start of a generic function call: identifier < type > (
+            // This can happen in expressions like: a + helper<T>(x)
+            // We already parsed 'a +', and now we're about to parse helper<T>(x)
+            // But we need to avoid treating the < as a comparison operator
+
+            // However, at this point we've already parsed the left side (e.g., 'helper')
+            // So we can't lookahead for 'Ident <'. Instead, we just proceed with
+            // comparison parsing. The real fix is in parse_identifier_expression
+            // which handles this case when the identifier is initially parsed.
+
             self.start_node(SyntaxKind::BinaryExpr);
             self.bump(); // consume relational operator
             self.parse_bitwise_or_expr();
@@ -3216,13 +3527,52 @@ impl<'a> ParseState<'a> {
                 self.finish_node();
             }
             Some(SyntaxKind::Ident) => {
-                // Check if this is a struct literal: Type { field: value, ... }
-                // Look ahead for: Ident { Ident : or Ident { }
-                let is_struct_literal = (self.peek_kind(1) == Some(SyntaxKind::LBrace)
-                    && self.peek_kind(2) == Some(SyntaxKind::Ident)
-                    && self.peek_kind(3) == Some(SyntaxKind::Colon))
-                    || (self.peek_kind(1) == Some(SyntaxKind::LBrace)
-                        && self.peek_kind(2) == Some(SyntaxKind::RBrace));
+                // Check if this is a struct literal: Type { field: value, ... } or Type<T> { field: value, ... }
+                // Look ahead for: Ident { Ident : or Ident { } or Ident<...> { Ident : or Ident<...> { }
+                let mut is_struct_literal = false;
+                let mut brace_offset = 1;
+
+                // Check for generic arguments: Ident<...>
+                if self.peek_kind(1) == Some(SyntaxKind::Lt) {
+                    // Scan forward to find the closing >
+                    let mut depth = 0;
+                    let mut offset = 1; // Start at <
+                    loop {
+                        match self.peek_kind(offset) {
+                            Some(SyntaxKind::Lt) => depth += 1,
+                            Some(SyntaxKind::Gt) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    brace_offset = offset + 1;
+                                    break;
+                                }
+                            }
+                            Some(SyntaxKind::Shr) => {
+                                // >> counts as two >
+                                depth -= 2;
+                                if depth <= 0 {
+                                    brace_offset = offset + 1;
+                                    break;
+                                }
+                            }
+                            None => break,
+                            _ => {}
+                        }
+                        offset += 1;
+                        if offset > 50 {
+                            break;
+                        }
+                    }
+                }
+
+                // Now check if there's a { at brace_offset
+                if self.peek_kind(brace_offset) == Some(SyntaxKind::LBrace) {
+                    // Check for struct literal patterns: { Ident : or { }
+                    is_struct_literal = (self.peek_kind(brace_offset + 1)
+                        == Some(SyntaxKind::Ident)
+                        && self.peek_kind(brace_offset + 2) == Some(SyntaxKind::Colon))
+                        || self.peek_kind(brace_offset + 1) == Some(SyntaxKind::RBrace);
+                }
 
                 if is_struct_literal {
                     self.parse_struct_literal();
@@ -3230,19 +3580,72 @@ impl<'a> ParseState<'a> {
                     self.parse_identifier_expression();
                 }
             }
+            // Allow specific keywords to be used as identifiers in expression contexts
+            // This handles cases like: in reset: reset, then later: if (reset.active)
+            // But NOT expression keywords like if, match, for, etc.
+            Some(kind)
+                if kind.is_keyword()
+                    && !matches!(
+                        kind,
+                        SyntaxKind::IfKw
+                            | SyntaxKind::MatchKw
+                            | SyntaxKind::ElseKw
+                            | SyntaxKind::ReturnKw
+                            | SyntaxKind::ForKw
+                    ) =>
+            {
+                self.parse_identifier_expression();
+            }
             Some(SyntaxKind::LParen) => {
-                self.start_node(SyntaxKind::ParenExpr);
-                self.bump();
-                self.parse_expression();
-                self.expect(SyntaxKind::RParen);
-                self.finish_node();
+                // Could be parenthesized expression (a) or tuple (a, b, c)
+                let checkpoint = self.builder.checkpoint();
+                self.bump(); // consume '('
 
-                // Check for cast after parenthesized expression
-                if self.at(SyntaxKind::AsKw) {
-                    self.start_node(SyntaxKind::CastExpr);
-                    self.bump(); // consume 'as'
-                    self.parse_type();
+                // Check for empty tuple ()
+                if self.at(SyntaxKind::RParen) {
+                    self.builder
+                        .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::TupleExpr as u16));
+                    self.bump(); // consume ')'
                     self.finish_node();
+                } else {
+                    // Parse first expression
+                    self.parse_expression();
+
+                    // Check if there's a comma (tuple) or just closing paren (parenthesized expr)
+                    if self.at(SyntaxKind::Comma) {
+                        // It's a tuple
+                        self.builder.start_node_at(
+                            checkpoint,
+                            rowan::SyntaxKind(SyntaxKind::TupleExpr as u16),
+                        );
+
+                        // Parse remaining tuple elements
+                        while self.at(SyntaxKind::Comma) {
+                            self.bump(); // consume ','
+                            if !self.at(SyntaxKind::RParen) {
+                                self.parse_expression();
+                            }
+                        }
+
+                        self.expect(SyntaxKind::RParen);
+                        self.finish_node();
+                    } else {
+                        // It's a parenthesized expression
+                        self.builder.start_node_at(
+                            checkpoint,
+                            rowan::SyntaxKind(SyntaxKind::ParenExpr as u16),
+                        );
+                        self.expect(SyntaxKind::RParen);
+                        self.finish_node();
+
+                        // Check for cast after parenthesized expression
+                        if self.at(SyntaxKind::AsKw) {
+                            self.start_node(SyntaxKind::CastExpr);
+                            self.bump(); // consume 'as'
+                            self.parse_type();
+                            self.finish_node();
+                        }
+                    }
                 }
             }
             Some(SyntaxKind::Bang | SyntaxKind::Tilde | SyntaxKind::Minus) => {
@@ -3253,6 +3656,9 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::LBracket) => {
                 self.parse_array_literal();
+            }
+            Some(SyntaxKind::LBrace) => {
+                self.parse_concat_expression();
             }
             Some(SyntaxKind::IfKw) => {
                 self.parse_if_expression();
@@ -3266,27 +3672,152 @@ impl<'a> ParseState<'a> {
         }
     }
 
-    /// Parse identifier expression with possible postfix operations
-    fn parse_identifier_expression(&mut self) {
-        // Check for :: ahead to determine if this is a path expression
-        let is_path = self.current_kind() == Some(SyntaxKind::Ident)
-            && self.peek_kind(1) == Some(SyntaxKind::ColonColon);
-
-        if is_path {
-            // Parse as path expression (Type::Variant)
-            self.start_node(SyntaxKind::PathExpr);
-            self.expect(SyntaxKind::Ident); // enum type name
-            self.expect(SyntaxKind::ColonColon); // ::
-            self.expect(SyntaxKind::Ident); // variant name
-            self.finish_node();
-            return;
+    /// Check if we're at a generic path expression like `Type<T>::CONST`
+    /// Returns true if pattern is: Ident < ... > ::
+    fn is_generic_path_expr(&self) -> bool {
+        // Check if current token is identifier or keyword (for cases like fp32<IEEE754_32>::ZERO)
+        if self.current_kind() != Some(SyntaxKind::Ident)
+            && !self.current_kind().is_some_and(|k| k.is_keyword())
+        {
+            return false;
+        }
+        if self.peek_kind(1) != Some(SyntaxKind::Lt) {
+            return false;
         }
 
-        // Parse as regular identifier expression
-        self.start_node(SyntaxKind::IdentExpr);
-        self.bump(); // consume identifier
+        // Look ahead to find matching > followed by ::
+        // We need to handle nesting: Type<A<B>>
+        let mut depth = 0;
+        let mut offset = 2; // Start after "Ident <"
 
-        // Handle postfix operations
+        loop {
+            match self.peek_kind(offset) {
+                Some(SyntaxKind::Lt) => depth += 1,
+                Some(SyntaxKind::Gt) => {
+                    if depth == 0 {
+                        // Found matching >, check for :: after it
+                        return self.peek_kind(offset + 1) == Some(SyntaxKind::ColonColon);
+                    }
+                    depth -= 1;
+                }
+                Some(SyntaxKind::Shr) => {
+                    // >> counts as two >
+                    if depth == 0 {
+                        return false; // Would close too many
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.peek_kind(offset + 1) == Some(SyntaxKind::ColonColon);
+                    }
+                    depth -= 1;
+                }
+                None => return false, // End of input
+                _ => {}               // Continue scanning
+            }
+            offset += 1;
+
+            // Safety limit to avoid infinite loops
+            if offset > 50 {
+                return false;
+            }
+        }
+    }
+
+    /// Check if we're at a generic function call like `function<T>(args)`
+    /// Returns true if pattern is: Ident < ... > (
+    fn is_generic_call_expr(&self) -> bool {
+        if self.current_kind() != Some(SyntaxKind::Ident) {
+            return false;
+        }
+        if self.peek_kind(1) != Some(SyntaxKind::Lt) {
+            return false;
+        }
+
+        // Look ahead to find matching > followed by (
+        // We need to handle nesting: function<A<B>>(args)
+        let mut depth = 0;
+        let mut offset = 2; // Start after "Ident <"
+
+        loop {
+            match self.peek_kind(offset) {
+                Some(SyntaxKind::Lt) => depth += 1,
+                Some(SyntaxKind::Gt) => {
+                    if depth == 0 {
+                        // Found matching >, check for ( after it
+                        return self.peek_kind(offset + 1) == Some(SyntaxKind::LParen);
+                    }
+                    depth -= 1;
+                }
+                Some(SyntaxKind::Shr) => {
+                    // >> counts as two >
+                    if depth == 0 {
+                        return false; // Would close too many
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.peek_kind(offset + 1) == Some(SyntaxKind::LParen);
+                    }
+                    depth -= 1;
+                }
+                None => return false, // End of input
+                _ => {}               // Continue scanning
+            }
+            offset += 1;
+
+            // Safety limit to avoid infinite loops
+            if offset > 50 {
+                return false;
+            }
+        }
+    }
+
+    /// Parse identifier expression with possible postfix operations
+    fn parse_identifier_expression(&mut self) {
+        // Check for special patterns that need lookahead:
+        // 1. Type::Variant or Type<T>::Variant (path expression)
+        // 2. function<T>(args) (generic function call)
+        // Note: Path expressions can start with identifiers OR keywords (e.g., fp32::ZERO)
+        let is_simple_path = (self.current_kind() == Some(SyntaxKind::Ident)
+            || self.current_kind().is_some_and(|k| k.is_keyword()))
+            && self.peek_kind(1) == Some(SyntaxKind::ColonColon);
+        let is_generic_path = self.is_generic_path_expr();
+        let is_generic_call = self.is_generic_call_expr();
+        let is_path = is_simple_path || is_generic_path;
+
+        if is_path {
+            // Parse as path expression (Type::Variant or Type<T>::Variant)
+            // Note: Type can be an identifier or keyword (e.g., fp32::ZERO)
+            self.start_node(SyntaxKind::PathExpr);
+            self.bump(); // type name (identifier or keyword)
+
+            // Parse generic arguments if present
+            if self.at(SyntaxKind::Lt) {
+                self.parse_generic_args();
+            }
+
+            self.expect(SyntaxKind::ColonColon); // ::
+            self.expect(SyntaxKind::Ident); // variant/constant name
+                                            // Don't return yet - check for postfix operations like State::Active(0)
+        } else if is_generic_call {
+            // Parse as generic function call: function<T>(args)
+            self.start_node(SyntaxKind::CallExpr);
+            self.expect(SyntaxKind::Ident); // function name
+
+            // Parse generic arguments (parse_generic_args expects and consumes the <)
+            self.parse_generic_args();
+
+            // Parse function call arguments
+            self.expect(SyntaxKind::LParen);
+            self.parse_argument_list();
+            self.expect(SyntaxKind::RParen);
+            // CallExpr is complete, but check for chained postfix operations
+        } else {
+            // Parse as regular identifier expression
+            self.start_node(SyntaxKind::IdentExpr);
+            self.bump(); // consume identifier
+        }
+
+        // Handle postfix operations (works for both path and identifier expressions)
         loop {
             match self.current_kind() {
                 Some(SyntaxKind::Dot) => {
@@ -3367,12 +3898,38 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse concatenation expression: {a, b, c}
+    fn parse_concat_expression(&mut self) {
+        self.start_node(SyntaxKind::ConcatExpr);
+        self.expect(SyntaxKind::LBrace);
+
+        // Parse comma-separated list of expressions
+        if !self.at(SyntaxKind::RBrace) {
+            self.parse_expression();
+
+            while self.at(SyntaxKind::Comma) {
+                self.bump(); // consume ','
+                if !self.at(SyntaxKind::RBrace) {
+                    self.parse_expression();
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
     /// Parse struct literal: TypeName { field: value, ... }
     fn parse_struct_literal(&mut self) {
         self.start_node(SyntaxKind::StructLiteral);
 
         // Type name (identifier)
         self.expect(SyntaxKind::Ident);
+
+        // Optional generic arguments (e.g., vec3<fp32>)
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_args();
+        }
 
         // Opening brace
         self.expect(SyntaxKind::LBrace);
@@ -4031,7 +4588,12 @@ impl ParseState<'_> {
         self.start_node(SyntaxKind::UsePath);
 
         // Parse path segments separated by ::
-        self.expect(SyntaxKind::Ident);
+        // Allow keywords as identifiers in use paths (e.g., use foo::{fp32, vec3})
+        if self.at(SyntaxKind::Ident) || self.current_kind().is_some_and(|k| k.is_keyword()) {
+            self.bump();
+        } else {
+            self.error("expected identifier");
+        }
 
         while self.at(SyntaxKind::ColonColon) {
             self.bump(); // ::
@@ -4045,13 +4607,25 @@ impl ParseState<'_> {
                 self.parse_use_tree();
                 break;
             } else {
-                // Continue path
-                self.expect(SyntaxKind::Ident);
+                // Continue path - allow keywords as identifiers
+                if self.at(SyntaxKind::Ident) || self.current_kind().is_some_and(|k| k.is_keyword())
+                {
+                    self.bump();
+                } else {
+                    self.error("expected identifier");
+                }
 
                 // Check for rename: as alias
                 if self.at(SyntaxKind::AsKw) {
                     self.bump(); // as
-                    self.expect(SyntaxKind::Ident); // alias
+                                 // Alias can also be a keyword used as identifier
+                    if self.at(SyntaxKind::Ident)
+                        || self.current_kind().is_some_and(|k| k.is_keyword())
+                    {
+                        self.bump();
+                    } else {
+                        self.error("expected identifier");
+                    }
                     break;
                 }
             }
@@ -4097,6 +4671,10 @@ impl ParseState<'_> {
             Some(SyntaxKind::ModKw) => self.parse_module_decl(),
             Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
             Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
+            Some(SyntaxKind::TypeKw) => self.parse_type_alias(),
+            Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
+            Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
+            Some(SyntaxKind::FnKw) => self.parse_function_decl(),
             _ => {
                 self.error_and_bump("expected item after visibility modifier");
             }

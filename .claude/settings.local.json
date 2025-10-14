@@ -148,7 +148,16 @@
       "Bash(RUST_LOG=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)",
       "Bash(do echo \"=== Testing: $example ===\" /Users/girivs/src/hw/hls/target/debug/skalp build -s \"$example\" -o /tmp/test_out)",
       "Bash(git reset:*)",
-      "Bash(git restore:*)"
+      "Bash(git restore:*)",
+      "Bash(do echo \"=== $example ===\" timeout 10 /Users/girivs/src/hw/hls/target/debug/skalp build -s \"$example\" -o /tmp/test_out)",
+      "Bash(/tmp/test_examples.sh:*)",
+      "Bash(do timeout 5 ./target/debug/skalp build -s \"$f\" -o /tmp/test_out)",
+      "Bash(do timeout 10 ./target/debug/skalp build -s \"$f\" -o /tmp/test_out)",
+      "Bash(do echo \"=== Testing $f ===\")",
+      "Bash(do echo \"=== Testing $example ===\")",
+      "Bash(RUST_LOG=debug timeout 3 /Users/girivs/src/hw/hls/target/debug/skalp build -s /Users/girivs/src/hw/hls/examples/complex_project/src/main.sk -o /tmp/test_complex_debug)",
+      "Bash(do)",
+      "Bash(RUST_LOG=debug timeout 3 ./target/release/skalp build -s /tmp/test_with_struct.sk -o /tmp/test_struct_debug_out)"
     ],
     "deny": [],
     "ask": []

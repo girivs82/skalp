@@ -379,6 +379,12 @@ pub enum HirExpression {
         value: Box<HirExpression>,
         count: Box<HirExpression>,
     },
+    Concat(Vec<HirExpression>),
+    Ternary {
+        condition: Box<HirExpression>,
+        true_expr: Box<HirExpression>,
+        false_expr: Box<HirExpression>,
+    },
     StructLiteral(HirStructLiteral),
     If(HirIfExpr),
     Match(HirMatchExpr),

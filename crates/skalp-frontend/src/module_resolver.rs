@@ -129,24 +129,38 @@ impl ModuleResolver {
 
     /// Load a module from a file path
     pub fn load_module(&mut self, path: &Path) -> Result<()> {
+        eprintln!("[MODULE_RESOLVER] Loading module: {:?}", path);
+
         // Check if already loaded
         if self.loaded_modules.contains_key(path) {
+            eprintln!(
+                "[MODULE_RESOLVER] Module already loaded (cached): {:?}",
+                path
+            );
             return Ok(());
         }
 
         // Check for circular dependency
         if self.loading.contains(path) {
+            eprintln!("[MODULE_RESOLVER] Circular dependency detected: {:?}", path);
             bail!("Circular dependency detected: {:?}", path);
         }
 
         // Mark as loading
+        eprintln!("[MODULE_RESOLVER] Marking as loading: {:?}", path);
         self.loading.insert(path.to_path_buf());
 
         // Read and parse the file
+        eprintln!("[MODULE_RESOLVER] Reading file: {:?}", path);
         let source = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read module file: {:?}", path))?;
 
         // Parse to syntax tree
+        eprintln!(
+            "[MODULE_RESOLVER] Parsing {} bytes from {:?}",
+            source.len(),
+            path
+        );
         let (syntax_tree, parse_errors) = parse::parse_with_errors(&source);
 
         if !parse_errors.is_empty() {
@@ -162,6 +176,7 @@ impl ModuleResolver {
         }
 
         // Build HIR
+        eprintln!("[MODULE_RESOLVER] Building HIR for {:?}", path);
         let mut builder = HirBuilderContext::new();
         let hir = builder.build(&syntax_tree).map_err(|errors| {
             anyhow::anyhow!(
@@ -173,11 +188,28 @@ impl ModuleResolver {
             )
         })?;
 
+        eprintln!(
+            "[MODULE_RESOLVER] HIR built successfully for {:?}, found {} imports",
+            path,
+            hir.imports.len()
+        );
+
         // Recursively load dependencies
-        for import in &hir.imports {
+        for (i, import) in hir.imports.iter().enumerate() {
+            eprintln!(
+                "[MODULE_RESOLVER] Processing import {}/{} from {:?}",
+                i + 1,
+                hir.imports.len(),
+                path
+            );
             let dep_path = self.resolve_import_path(import)?;
+            eprintln!("[MODULE_RESOLVER] Resolved import to: {:?}", dep_path);
             // Recursively load (this will use cache if already loaded)
             self.load_module(&dep_path)?;
+            eprintln!(
+                "[MODULE_RESOLVER] Successfully loaded dependency: {:?}",
+                dep_path
+            );
         }
 
         // Mark as done loading

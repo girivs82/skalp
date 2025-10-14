@@ -808,6 +808,46 @@ impl<'hir> HirToMir<'hir> {
                 // If count couldn't be evaluated, return placeholder
                 Some(Expression::Literal(Value::Integer(0)))
             }
+            hir::HirExpression::Concat(expressions) => {
+                // Bit concatenation: {a, b, c}
+                // In hardware, concatenation combines multiple bit vectors into a single wider vector
+                // The first element becomes the most significant bits
+                //
+                // For now, we'll use binary operations to combine the values
+                // TODO: Add proper concatenation operator in MIR
+
+                if expressions.is_empty() {
+                    return Some(Expression::Literal(Value::Integer(0)));
+                }
+
+                if expressions.len() == 1 {
+                    return self.convert_expression(&expressions[0]);
+                }
+
+                // For multiple expressions, chain them together with shifts and ORs
+                // {a, b, c} becomes (a << (width_b + width_c)) | (b << width_c) | c
+                // For now, return the first expression as a placeholder
+                // This will need proper bit width calculation and concatenation support
+                // TODO: Implement proper concatenation with bit width tracking
+                self.convert_expression(&expressions[0])
+            }
+            hir::HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
+                // Ternary conditional expression: condition ? true_expr : false_expr
+                // This is identical to an if-expression, so convert to MIR conditional
+                let cond = Box::new(self.convert_expression(condition)?);
+                let then_expr = Box::new(self.convert_expression(true_expr)?);
+                let else_expr = Box::new(self.convert_expression(false_expr)?);
+
+                Some(Expression::Conditional {
+                    cond,
+                    then_expr,
+                    else_expr,
+                })
+            }
             hir::HirExpression::If(if_expr) => {
                 // Convert if-expression to a conditional (ternary) expression in MIR
                 // MIR represents this as: condition ? then_expr : else_expr

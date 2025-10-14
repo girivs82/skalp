@@ -1,0 +1,58 @@
+// Floating-Point Format Definitions
+//
+// Defines standard IEEE 754 and other floating-point formats
+
+/// Float format specification
+pub trait FloatFormat {
+    const total_bits: nat;
+    const exponent_bits: nat;
+    const mantissa_bits: nat;
+    const bias: int;
+}
+
+/// IEEE 754 half precision (16-bit)
+pub const IEEE754_16: FloatFormat = FloatFormatImpl {
+    total_bits: 16,
+    exponent_bits: 5,
+    mantissa_bits: 10,
+    bias: 15
+};
+
+/// IEEE 754 single precision (32-bit)
+pub const IEEE754_32: FloatFormat = FloatFormatImpl {
+    total_bits: 32,
+    exponent_bits: 8,
+    mantissa_bits: 23,
+    bias: 127
+};
+
+/// IEEE 754 double precision (64-bit)
+pub const IEEE754_64: FloatFormat = FloatFormatImpl {
+    total_bits: 64,
+    exponent_bits: 11,
+    mantissa_bits: 52,
+    bias: 1023
+};
+
+/// Brain floating point (16-bit, used in ML)
+pub const BFLOAT16: FloatFormat = FloatFormatImpl {
+    total_bits: 16,
+    exponent_bits: 8,
+    mantissa_bits: 7,
+    bias: 127
+};
+
+/// Default format implementation
+struct FloatFormatImpl {
+    total_bits: nat,
+    exponent_bits: nat,
+    mantissa_bits: nat,
+    bias: int,
+}
+
+impl FloatFormat for FloatFormatImpl {
+    const total_bits: nat = self.total_bits;
+    const exponent_bits: nat = self.exponent_bits;
+    const mantissa_bits: nat = self.mantissa_bits;
+    const bias: int = self.bias;
+}

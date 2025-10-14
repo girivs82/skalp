@@ -2049,6 +2049,8 @@ impl HirBuilderContext {
             SyntaxKind::CallExpr => self.build_call_expr(node),
             SyntaxKind::StructLiteral => self.build_struct_literal(node),
             SyntaxKind::ArrayLiteral => self.build_array_literal(node),
+            SyntaxKind::ConcatExpr => self.build_concat_expr(node),
+            SyntaxKind::TernaryExpr => self.build_ternary_expr(node),
             SyntaxKind::FieldExpr => self.build_field_expr(node),
             SyntaxKind::IndexExpr => self.build_index_expr(node),
             SyntaxKind::PathExpr => self.build_path_expr(node),
@@ -2207,10 +2209,9 @@ impl HirBuilderContext {
         let function = if let Some(ident_token) = node.first_token_of_kind(SyntaxKind::Ident) {
             ident_token.text().to_string()
         } else if let Some(ident_expr) = node.first_child_of_kind(SyntaxKind::IdentExpr) {
-            let name = ident_expr
+            ident_expr
                 .first_token_of_kind(SyntaxKind::Ident)
-                .map(|t| t.text().to_string())?;
-            name
+                .map(|t| t.text().to_string())?
         } else if let Some(parent) = node.parent() {
             // Postfix call: IdentExpr and CallExpr are siblings
             // Look for preceding IdentExpr sibling
@@ -2220,10 +2221,9 @@ impl HirBuilderContext {
             if call_pos > 0 {
                 if let Some(prev_sibling) = siblings.get(call_pos - 1) {
                     if prev_sibling.kind() == SyntaxKind::IdentExpr {
-                        let name = prev_sibling
+                        prev_sibling
                             .first_token_of_kind(SyntaxKind::Ident)
-                            .map(|t| t.text().to_string())?;
-                        name
+                            .map(|t| t.text().to_string())?
                     } else {
                         return None;
                     }
@@ -2326,6 +2326,82 @@ impl HirBuilderContext {
         }
 
         None
+    }
+
+    /// Build concatenation expression: {a, b, c}
+    fn build_concat_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Collect all expression children
+        let expressions: Vec<HirExpression> = node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::StructLiteral
+                        | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::ConcatExpr
+                        | SyntaxKind::CastExpr
+                )
+            })
+            .filter_map(|n| self.build_expression(&n))
+            .collect();
+
+        if expressions.is_empty() {
+            None
+        } else {
+            Some(HirExpression::Concat(expressions))
+        }
+    }
+
+    /// Build ternary conditional expression: condition ? true_expr : false_expr
+    fn build_ternary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Collect all expression children (ignoring ? and : tokens)
+        let expressions: Vec<HirExpression> = node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::StructLiteral
+                        | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::ConcatExpr
+                        | SyntaxKind::TernaryExpr
+                        | SyntaxKind::CastExpr
+                )
+            })
+            .filter_map(|n| self.build_expression(&n))
+            .collect();
+
+        // Ternary expression should have exactly 3 parts: condition, true_expr, false_expr
+        if expressions.len() == 3 {
+            Some(HirExpression::Ternary {
+                condition: Box::new(expressions[0].clone()),
+                true_expr: Box::new(expressions[1].clone()),
+                false_expr: Box::new(expressions[2].clone()),
+            })
+        } else {
+            None
+        }
     }
 
     /// Build struct field initialization

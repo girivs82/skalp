@@ -246,6 +246,7 @@ pub enum SyntaxKind {
     StructDecl,
     EnumDecl,
     UnionDecl,
+    TypeAlias,
     UseDecl,
     ModuleDecl,
 
@@ -764,6 +765,7 @@ impl SyntaxKind {
             ProtocolDecl => "protocol declaration",
             IntentDecl => "intent declaration",
             RequirementDecl => "requirement declaration",
+            TypeAlias => "type alias",
             UseDecl => "use declaration",
             ModuleDecl => "module declaration",
             UsePath => "use path",

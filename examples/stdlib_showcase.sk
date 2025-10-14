@@ -3,10 +3,11 @@
 // Demonstrates the clean, generic stdlib with parametric types.
 // Shows floating-point, fixed-point, integer, and vector operations.
 
-use skalp::numeric::fp::{fp32, FpAdd, FpMul, FpSqrt};
-use skalp::numeric::vec::{vec3, VecAdd, VecDot, Vec3Cross, VecNormalize};
+use skalp::numeric::fp::{fp32, FpAdd, FpMul, FpSqrt, FpSub, FpDiv};
+use skalp::numeric::vec::{vec3, VecAdd, VecDot, Vec3Cross, VecNormalize, VecSub};
 use skalp::numeric::fixed::{q16_16, FixedMul};
 use skalp::numeric::int::{i32, u16, IntAdd, IntMul};
+use skalp::numeric::formats::{IEEE754_32};
 
 // ============================================================================
 // Example 1: Generic FP Pipeline (works with any format)
@@ -167,7 +168,7 @@ entity FIR<const NUM_TAPS: nat> {
 
 impl FIR<const NUM_TAPS: nat> {
     // Delay line
-    signal delays: q16_16[NUM_TAPS] = {NUM_TAPS{0}}
+    signal delays: q16_16[NUM_TAPS] = [0; NUM_TAPS]
 
     // Multiply-accumulate
     signal products: q16_16[NUM_TAPS]
@@ -177,7 +178,7 @@ impl FIR<const NUM_TAPS: nat> {
         let multiplier = FixedMul<32, 16, true> {
             a: delays[i],
             b: coeffs[i],
-            saturate: 1'b1,
+            saturate: true,
             result: products[i],
             overflow: product_overflow[i]
         }
@@ -411,7 +412,7 @@ impl RaySphereIntersect {
         flags: _
     }
 
-    distance = hit ? dist_raw : fp32::MAX_VALUE
+    distance = hit ? dist_raw : 3.4028235e38  // fp32 max value
 }
 
 // ============================================================================
@@ -498,5 +499,5 @@ impl StdlibShowcase {
 /// ATAN table for CORDIC (would be pre-computed)
 fn atan_table<const W: nat>(i: nat) -> int<W, true> {
     // Placeholder - would contain actual ATAN values
-    0
+    return 0
 }
