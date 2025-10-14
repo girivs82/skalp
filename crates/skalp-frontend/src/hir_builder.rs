@@ -774,12 +774,11 @@ impl HirBuilderContext {
 
         for element in use_path.children_with_tokens() {
             match element {
-                rowan::NodeOrToken::Node(child) => match child.kind() {
-                    SyntaxKind::UseTree => {
+                rowan::NodeOrToken::Node(child) => {
+                    if child.kind() == SyntaxKind::UseTree {
                         has_use_tree = true;
                     }
-                    _ => {}
-                },
+                }
                 rowan::NodeOrToken::Token(token) => {
                     if token.kind() == SyntaxKind::Ident {
                         let text = token.text().to_string();
