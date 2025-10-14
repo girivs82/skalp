@@ -14,6 +14,7 @@ fn create_simple_entity() -> Hir {
         requirements: vec![],
         trait_definitions: vec![],
         trait_implementations: vec![],
+        type_aliases: vec![],
         global_constraints: vec![],
         modules: vec![],
         imports: vec![],
