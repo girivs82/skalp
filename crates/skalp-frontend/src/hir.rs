@@ -24,6 +24,8 @@ pub struct Hir {
     pub trait_definitions: Vec<HirTraitDefinition>,
     /// Trait implementations
     pub trait_implementations: Vec<HirTraitImplementation>,
+    /// Type aliases
+    pub type_aliases: Vec<HirTypeAlias>,
     /// Global physical constraints
     pub global_constraints: Vec<GlobalConstraint>,
     /// Module declarations
@@ -895,6 +897,7 @@ impl HirBuilder {
             requirements: Vec::new(),
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
+            type_aliases: Vec::new(),
             global_constraints: Vec::new(),
             modules: Vec::new(),
             imports: Vec::new(),
@@ -984,6 +987,7 @@ impl Hir {
             requirements: Vec::new(),
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
+            type_aliases: Vec::new(),
             global_constraints: Vec::new(),
             modules: Vec::new(),
             imports: Vec::new(),
@@ -1093,6 +1097,27 @@ pub struct HirTraitConstImpl {
     pub name: String,
     /// Constant value
     pub value: HirExpression,
+}
+
+/// Type alias in HIR
+///
+/// Represents a named alias for an existing type.
+///
+/// Example:
+/// ```skalp
+/// pub type Vec3 = vec3<fp32>;
+/// pub type Matrix4x4 = [[fp32; 4]; 4];
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirTypeAlias {
+    /// Type alias name
+    pub name: String,
+    /// Visibility
+    pub visibility: HirVisibility,
+    /// Generic parameters
+    pub generics: Vec<HirGeneric>,
+    /// Target type (what this alias resolves to)
+    pub target_type: HirType,
 }
 
 /// Immediate assertion statement in HIR

@@ -64,6 +64,7 @@ impl MonomorphizationEngine {
             requirements: hir.requirements.clone(),
             trait_definitions: hir.trait_definitions.clone(),
             trait_implementations: hir.trait_implementations.clone(),
+            type_aliases: hir.type_aliases.clone(),
             global_constraints: hir.global_constraints.clone(),
             modules: hir.modules.clone(),
             imports: hir.imports.clone(),

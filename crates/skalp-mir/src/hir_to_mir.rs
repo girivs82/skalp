@@ -1276,7 +1276,21 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Array(inner_type, size) => {
                 DataType::Array(Box::new(self.convert_type(inner_type)), *size as usize)
             }
-            hir::HirType::Custom(_name) => DataType::Bit(1), // TODO: Resolve custom types
+            hir::HirType::Custom(name) => {
+                // Resolve custom types (type aliases) by looking them up in HIR
+                if let Some(hir) = self.hir {
+                    for type_alias in &hir.type_aliases {
+                        if type_alias.name == *name {
+                            // Found the type alias - recursively convert its target type
+                            // This handles nested type aliases correctly
+                            return self.convert_type(&type_alias.target_type);
+                        }
+                    }
+                }
+                // If type alias not found, default to Bit(1) as fallback
+                // This maintains backward compatibility for unresolved types
+                DataType::Bit(1)
+            }
             hir::HirType::Struct(struct_type) => {
                 DataType::Struct(Box::new(self.convert_struct_type(struct_type)))
             }

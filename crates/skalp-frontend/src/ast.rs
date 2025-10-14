@@ -28,6 +28,8 @@ pub enum Item {
     Trait(TraitDef),
     /// Trait implementation
     TraitImpl(TraitImpl),
+    /// Type alias
+    TypeAlias(TypeAliasDecl),
     /// Use statement (import)
     Use(UseDecl),
     /// Module declaration
@@ -818,6 +820,30 @@ pub struct ModuleDecl {
     pub name: String,
     /// Module items (if inline)
     pub items: Option<Vec<Item>>,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Type alias declaration
+///
+/// Defines a new name for an existing type.
+///
+/// Example:
+/// ```skalp
+/// pub type Vec3 = vec3<fp32>;
+/// pub type Matrix4x4 = [[fp32; 4]; 4];
+/// pub type WordSize<const W: nat> = bit<W>;
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeAliasDecl {
+    /// Visibility
+    pub visibility: Visibility,
+    /// Type alias name
+    pub name: String,
+    /// Generic parameters
+    pub generics: Vec<Generic>,
+    /// Target type (what this alias resolves to)
+    pub target_type: Type,
     /// Span in source code
     pub span: std::ops::Range<usize>,
 }

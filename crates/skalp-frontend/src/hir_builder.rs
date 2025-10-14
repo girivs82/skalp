@@ -210,6 +210,11 @@ impl HirBuilderContext {
                         hir.imports.push(import);
                     }
                 }
+                SyntaxKind::TypeAlias => {
+                    if let Some(type_alias) = self.build_type_alias(&child) {
+                        hir.type_aliases.push(type_alias);
+                    }
+                }
                 _ => {}
             }
         }
@@ -763,12 +768,25 @@ impl HirBuilderContext {
         // Find the UsePath child
         let use_path = node.first_child_of_kind(SyntaxKind::UsePath)?;
 
-        // Collect path segments
+        // Collect path segments  (before any UseTree)
         let mut segments = Vec::new();
-        for child in use_path.children() {
-            if child.kind() == SyntaxKind::Ident {
-                if let Some(token) = child.first_token() {
-                    segments.push(token.text().to_string());
+        let mut has_use_tree = false;
+
+        for element in use_path.children_with_tokens() {
+            match element {
+                rowan::NodeOrToken::Node(child) => {
+                    match child.kind() {
+                        SyntaxKind::UseTree => {
+                            has_use_tree = true;
+                        }
+                        _ => {}
+                    }
+                }
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == SyntaxKind::Ident {
+                        let text = token.text().to_string();
+                        segments.push(text);
+                    }
                 }
             }
         }
@@ -777,17 +795,90 @@ impl HirBuilderContext {
             return None;
         }
 
-        // Check for rename (as keyword)
-        // TODO: Implement renamed imports
+        // Check for UseTree (nested imports like {Foo, Bar})
+        if has_use_tree {
+            if let Some(use_tree) = use_path.first_child_of_kind(SyntaxKind::UseTree) {
+                // Parse nested import paths
+                let mut paths = Vec::new();
+                for tree_child in use_tree.children() {
+                    if tree_child.kind() == SyntaxKind::UsePath {
+                        // Extract the symbol name from this nested path (tokens, not nodes)
+                        for element in tree_child.children_with_tokens() {
+                            if let rowan::NodeOrToken::Token(token) = element {
+                                if token.kind() == SyntaxKind::Ident {
+                                    let symbol = token.text().to_string();
+                                    // Create a simple path for this symbol
+                                    paths.push(HirImportPath::Simple {
+                                        segments: vec![symbol],
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !paths.is_empty() {
+                    return Some(HirImportPath::Nested {
+                        prefix: segments,
+                        paths,
+                    });
+                }
+            }
+        }
 
         // Check for glob (*)
-        // TODO: Implement glob imports
+        if use_path.children_with_tokens().any(|c| {
+            c.as_token().map(|t| t.kind() == SyntaxKind::Star).unwrap_or(false)
+        }) {
+            return Some(HirImportPath::Glob { segments });
+        }
 
-        // Check for nested imports ({...})
-        // TODO: Implement nested imports
+        // Check for rename (as keyword)
+        // TODO: Implement renamed imports properly
 
-        // For now, just support simple paths
+        // Simple path import
         Some(HirImportPath::Simple { segments })
+    }
+
+    /// Build type alias from syntax node
+    /// Type alias: `pub type Name<T> = Type;`
+    fn build_type_alias(&mut self, node: &SyntaxNode) -> Option<HirTypeAlias> {
+        // Extract name (first Ident after TypeKw)
+        let name = self.extract_name(node)?;
+
+        // Extract visibility - check for PubKw token in node or parent
+        let visibility = if node.children_with_tokens().any(|child| {
+            child.as_token().map(|t| t.kind() == SyntaxKind::PubKw).unwrap_or(false)
+        }) || node.parent().and_then(|p| p.first_token_of_kind(SyntaxKind::PubKw)).is_some() {
+            HirVisibility::Public
+        } else {
+            HirVisibility::Private
+        };
+
+        // Extract generic parameters if present
+        let generics = if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
+            self.parse_generic_params(&generic_list)
+        } else {
+            Vec::new()
+        };
+
+        // Extract target type (the type after '=')
+        // Find the TypeExpr or TypeAnnotation child node
+        let target_type = node
+            .children()
+            .find(|child| matches!(
+                child.kind(),
+                SyntaxKind::TypeExpr | SyntaxKind::TypeAnnotation
+            ))
+            .map(|type_node| self.extract_hir_type(&type_node))
+            .unwrap_or(HirType::Bit(1)); // Fallback to bit<1> if type not found
+
+        Some(HirTypeAlias {
+            name,
+            visibility,
+            generics,
+            target_type,
+        })
     }
 
     /// Build statements from block

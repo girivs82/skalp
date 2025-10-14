@@ -183,8 +183,14 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         return Ok(());
     }
 
+    // Try to find the symbol in type aliases
+    if let Some(type_alias) = source.type_aliases.iter().find(|t| t.name == symbol_name) {
+        target.type_aliases.push(type_alias.clone());
+        return Ok(());
+    }
+
     // Symbol not found - this might be okay if it's a type or other symbol
-    // For now, we just warn but don't error
+    // For now, we don't error
     Ok(())
 }
 
@@ -223,6 +229,14 @@ fn merge_symbol_with_rename(
         return Ok(());
     }
 
+    // Try to find the symbol in type aliases
+    if let Some(type_alias) = source.type_aliases.iter().find(|t| t.name == symbol_name) {
+        let mut renamed_type_alias = type_alias.clone();
+        renamed_type_alias.name = alias.to_string();
+        target.type_aliases.push(renamed_type_alias);
+        return Ok(());
+    }
+
     Ok(())
 }
 
@@ -247,6 +261,13 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     for function in &source.functions {
         // Functions don't have visibility in current HIR, so import all
         target.functions.push(function.clone());
+    }
+
+    // Merge all public type aliases
+    for type_alias in &source.type_aliases {
+        if type_alias.visibility == HirVisibility::Public {
+            target.type_aliases.push(type_alias.clone());
+        }
     }
 
     Ok(())
@@ -313,6 +334,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         requirements: Vec::new(),
         trait_definitions: Vec::new(),
         trait_implementations: Vec::new(),
+        type_aliases: Vec::new(),
         global_constraints: Vec::new(),
         modules: Vec::new(),
         imports: Vec::new(),
