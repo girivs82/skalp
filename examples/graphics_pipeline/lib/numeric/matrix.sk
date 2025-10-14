@@ -1,0 +1,499 @@
+// Generic Matrix Operations
+//
+// Hardware-optimized matrix math using parametric types
+//
+// All functions are generic over T: Numeric, allowing them to work with:
+// - fp32, fp16, bf16 (floating-point)
+// - fixed<W,F,S> (fixed-point)
+// - int<W,S> (integer)
+
+// ============================================================================
+// Matrix Multiplication
+// ============================================================================
+
+/// 4x4 matrix multiplication: C = A × B
+///
+/// Generic over numeric type T
+///
+/// Hardware implementation:
+/// - 64 multipliers (4×4×4)
+/// - 48 adders (3 adds per output element)
+/// - Can be pipelined or sequential based on area constraints
+///
+/// For T=fp32:
+/// - Fully parallel: 64 FP32 multipliers + 48 adders
+/// - Sequential: 1 multiplier + 1 adder, 64 cycles
+/// - Pipelined: 16 multipliers, 4 cycles throughput
+pub fn matrix_multiply<T: Numeric>(a: [[T; 4]; 4], b: [[T; 4]; 4]) -> [[T; 4]; 4] {
+    let mut result: [[T; 4]; 4] = [[T::ZERO; 4]; 4];
+
+    for i in 0..4 {
+        for j in 0..4 {
+            let mut sum = T::ZERO;
+            for k in 0..4 {
+                sum = sum.add(a[i][k].mul(b[k][j]))
+            }
+            result[i][j] = sum
+        }
+    }
+
+    return result
+}
+
+/// Generic matrix multiplication (NxM × MxP)
+///
+/// More general than 4x4, useful for various matrix sizes
+pub fn matrix_multiply_generic<T: Numeric, const N: nat, const M: nat, const P: nat>(
+    a: [[T; M]; N],
+    b: [[T; P]; M]
+) -> [[T; P]; N] {
+    let mut result: [[T; P]; N] = [[T::ZERO; P]; N];
+
+    for i in 0..N {
+        for j in 0..P {
+            let mut sum = T::ZERO;
+            for k in 0..M {
+                sum = sum.add(a[i][k].mul(b[k][j]))
+            }
+            result[i][j] = sum
+        }
+    }
+
+    return result
+}
+
+// ============================================================================
+// Matrix-Vector Multiplication
+// ============================================================================
+
+/// Transform 4D vector by 4x4 matrix: v' = M × v
+///
+/// Used for:
+/// - Model-View-Projection transforms
+/// - Homogeneous coordinate transformations
+///
+/// Hardware: 16 multipliers + 12 adders (parallel)
+pub fn matrix_vector_multiply<T: Numeric>(m: [[T; 4]; 4], v: vec4<T>) -> vec4<T> {
+    return vec4 {
+        x: m[0][0].mul(v.x).add(m[0][1].mul(v.y)).add(m[0][2].mul(v.z)).add(m[0][3].mul(v.w)),
+        y: m[1][0].mul(v.x).add(m[1][1].mul(v.y)).add(m[1][2].mul(v.z)).add(m[1][3].mul(v.w)),
+        z: m[2][0].mul(v.x).add(m[2][1].mul(v.y)).add(m[2][2].mul(v.z)).add(m[2][3].mul(v.w)),
+        w: m[3][0].mul(v.x).add(m[3][1].mul(v.y)).add(m[3][2].mul(v.z)).add(m[3][3].mul(v.w))
+    }
+}
+
+/// Transform 3D vector by 4x4 matrix (assumes w=1)
+///
+/// Common case: Transform position (x,y,z,1)
+pub fn matrix_vector3_multiply<T: Numeric>(m: [[T; 4]; 4], v: vec3<T>) -> vec3<T> {
+    let w = T::ONE;
+    return vec3 {
+        x: m[0][0].mul(v.x).add(m[0][1].mul(v.y)).add(m[0][2].mul(v.z)).add(m[0][3].mul(w)),
+        y: m[1][0].mul(v.x).add(m[1][1].mul(v.y)).add(m[1][2].mul(v.z)).add(m[1][3].mul(w)),
+        z: m[2][0].mul(v.x).add(m[2][1].mul(v.y)).add(m[2][2].mul(v.z)).add(m[2][3].mul(w))
+    }
+}
+
+/// Transform 3D direction by 3x3 matrix (rotation/scale only)
+///
+/// Used for: Normal vector transforms (ignores translation)
+pub fn matrix3x3_vector_multiply<T: Numeric>(m: [[T; 3]; 3], v: vec3<T>) -> vec3<T> {
+    return vec3 {
+        x: m[0][0].mul(v.x).add(m[0][1].mul(v.y)).add(m[0][2].mul(v.z)),
+        y: m[1][0].mul(v.x).add(m[1][1].mul(v.y)).add(m[1][2].mul(v.z)),
+        z: m[2][0].mul(v.x).add(m[2][1].mul(v.y)).add(m[2][2].mul(v.z))
+    }
+}
+
+// ============================================================================
+// Matrix Transpose
+// ============================================================================
+
+/// Transpose 4x4 matrix: M^T (swap rows and columns)
+///
+/// Used for:
+/// - Normal matrix calculation (inverse transpose)
+/// - Matrix inversion algorithms
+///
+/// Hardware: Pure wiring, no computation
+pub fn matrix_transpose<T: Numeric>(m: [[T; 4]; 4]) -> [[T; 4]; 4] {
+    return [
+        [m[0][0], m[1][0], m[2][0], m[3][0]],
+        [m[0][1], m[1][1], m[2][1], m[3][1]],
+        [m[0][2], m[1][2], m[2][2], m[3][2]],
+        [m[0][3], m[1][3], m[2][3], m[3][3]]
+    ]
+}
+
+/// Transpose 3x3 matrix
+pub fn matrix3x3_transpose<T: Numeric>(m: [[T; 3]; 3]) -> [[T; 3]; 3] {
+    return [
+        [m[0][0], m[1][0], m[2][0]],
+        [m[0][1], m[1][1], m[2][1]],
+        [m[0][2], m[1][2], m[2][2]]
+    ]
+}
+
+// ============================================================================
+// Matrix Determinant
+// ============================================================================
+
+/// Determinant of 2x2 matrix
+///
+/// det(M) = ad - bc
+/// Hardware: 2 multipliers, 1 subtractor
+fn det2x2<T: Numeric>(
+    a: T, b: T,
+    c: T, d: T
+) -> T {
+    return a.mul(d).sub(b.mul(c))
+}
+
+/// Determinant of 3x3 matrix
+///
+/// Uses cofactor expansion along first row
+/// Hardware: 9 multipliers, 5 subtractors, 2 adders
+fn det3x3<T: Numeric>(m: [[T; 3]; 3]) -> T {
+    let a = m[0][0].mul(det2x2(m[1][1], m[1][2], m[2][1], m[2][2]));
+    let b = m[0][1].mul(det2x2(m[1][0], m[1][2], m[2][0], m[2][2]));
+    let c = m[0][2].mul(det2x2(m[1][0], m[1][1], m[2][0], m[2][1]));
+    return a.sub(b).add(c)
+}
+
+/// Determinant of 4x4 matrix
+///
+/// Uses cofactor expansion along first row
+/// Hardware: Expensive (requires 4x det3x3)
+pub fn matrix_determinant<T: Numeric>(m: [[T; 4]; 4]) -> T {
+    // Extract 3x3 minors for cofactor expansion
+    let minor0: [[T; 3]; 3] = [
+        [m[1][1], m[1][2], m[1][3]],
+        [m[2][1], m[2][2], m[2][3]],
+        [m[3][1], m[3][2], m[3][3]]
+    ];
+
+    let minor1: [[T; 3]; 3] = [
+        [m[1][0], m[1][2], m[1][3]],
+        [m[2][0], m[2][2], m[2][3]],
+        [m[3][0], m[3][2], m[3][3]]
+    ];
+
+    let minor2: [[T; 3]; 3] = [
+        [m[1][0], m[1][1], m[1][3]],
+        [m[2][0], m[2][1], m[2][3]],
+        [m[3][0], m[3][1], m[3][3]]
+    ];
+
+    let minor3: [[T; 3]; 3] = [
+        [m[1][0], m[1][1], m[1][2]],
+        [m[2][0], m[2][1], m[2][2]],
+        [m[3][0], m[3][1], m[3][2]]
+    ];
+
+    let a = m[0][0].mul(det3x3(minor0));
+    let b = m[0][1].mul(det3x3(minor1));
+    let c = m[0][2].mul(det3x3(minor2));
+    let d = m[0][3].mul(det3x3(minor3));
+
+    return a.sub(b).add(c).sub(d)
+}
+
+// ============================================================================
+// Matrix Inverse (Simplified)
+// ============================================================================
+
+/// Inverse of 4x4 matrix (simplified version)
+///
+/// NOTE: Full matrix inversion is VERY expensive in hardware
+/// This is a placeholder showing the structure
+///
+/// Real implementations should use:
+/// - Gauss-Jordan elimination (sequential, area-efficient)
+/// - LU decomposition (better numerical stability)
+/// - Special case optimizations (orthogonal matrices, etc.)
+///
+/// For orthogonal rotation matrices: inverse = transpose (free!)
+pub fn matrix_inverse<T: Numeric>(m: [[T; 4]; 4]) -> [[T; 4]; 4] {
+    // This is a simplified version - real implementation would use
+    // cofactor method or Gauss-Jordan elimination
+    //
+    // For graphics, often we can avoid full inverse:
+    // - Use transpose for orthogonal matrices
+    // - Pre-compute on CPU and load as constant
+    // - Use iterative approximation methods
+
+    // Placeholder: return identity matrix
+    // In production, implement full cofactor method or LU decomposition
+    return [
+        [T::ONE, T::ZERO, T::ZERO, T::ZERO],
+        [T::ZERO, T::ONE, T::ZERO, T::ZERO],
+        [T::ZERO, T::ZERO, T::ONE, T::ZERO],
+        [T::ZERO, T::ZERO, T::ZERO, T::ONE]
+    ]
+}
+
+// ============================================================================
+// Transform Matrix Construction
+// ============================================================================
+
+/// Create translation matrix: T(x, y, z)
+///
+/// Translates points by (x, y, z)
+///
+/// Matrix form:
+/// [1  0  0  x]
+/// [0  1  0  y]
+/// [0  0  1  z]
+/// [0  0  0  1]
+pub fn matrix_translate<T: Numeric>(x: T, y: T, z: T) -> [[T; 4]; 4] {
+    return [
+        [T::ONE,  T::ZERO, T::ZERO, x],
+        [T::ZERO, T::ONE,  T::ZERO, y],
+        [T::ZERO, T::ZERO, T::ONE,  z],
+        [T::ZERO, T::ZERO, T::ZERO, T::ONE]
+    ]
+}
+
+/// Create uniform scale matrix: S(s)
+///
+/// Scales all axes by factor s
+pub fn matrix_scale_uniform<T: Numeric>(s: T) -> [[T; 4]; 4] {
+    return [
+        [s,       T::ZERO, T::ZERO, T::ZERO],
+        [T::ZERO, s,       T::ZERO, T::ZERO],
+        [T::ZERO, T::ZERO, s,       T::ZERO],
+        [T::ZERO, T::ZERO, T::ZERO, T::ONE]
+    ]
+}
+
+/// Create non-uniform scale matrix: S(sx, sy, sz)
+///
+/// Scales each axis independently
+pub fn matrix_scale<T: Numeric>(sx: T, sy: T, sz: T) -> [[T; 4]; 4] {
+    return [
+        [sx,      T::ZERO, T::ZERO, T::ZERO],
+        [T::ZERO, sy,      T::ZERO, T::ZERO],
+        [T::ZERO, T::ZERO, sz,      T::ZERO],
+        [T::ZERO, T::ZERO, T::ZERO, T::ONE]
+    ]
+}
+
+/// Create rotation matrix around X axis: Rx(angle)
+///
+/// Rotates in YZ plane
+/// Requires: sin(angle) and cos(angle) as inputs
+///
+/// Matrix form:
+/// [1   0      0     0]
+/// [0   cos   -sin   0]
+/// [0   sin    cos   0]
+/// [0   0      0     1]
+pub fn matrix_rotate_x<T: Numeric>(cos_angle: T, sin_angle: T) -> [[T; 4]; 4] {
+    let neg_sin = T::ZERO.sub(sin_angle);
+    return [
+        [T::ONE,  T::ZERO,   T::ZERO, T::ZERO],
+        [T::ZERO, cos_angle, neg_sin, T::ZERO],
+        [T::ZERO, sin_angle, cos_angle, T::ZERO],
+        [T::ZERO, T::ZERO,   T::ZERO, T::ONE]
+    ]
+}
+
+/// Create rotation matrix around Y axis: Ry(angle)
+///
+/// Rotates in XZ plane
+pub fn matrix_rotate_y<T: Numeric>(cos_angle: T, sin_angle: T) -> [[T; 4]; 4] {
+    let neg_sin = T::ZERO.sub(sin_angle);
+    return [
+        [cos_angle,  T::ZERO, sin_angle, T::ZERO],
+        [T::ZERO,    T::ONE,  T::ZERO,   T::ZERO],
+        [neg_sin,    T::ZERO, cos_angle, T::ZERO],
+        [T::ZERO,    T::ZERO, T::ZERO,   T::ONE]
+    ]
+}
+
+/// Create rotation matrix around Z axis: Rz(angle)
+///
+/// Rotates in XY plane
+pub fn matrix_rotate_z<T: Numeric>(cos_angle: T, sin_angle: T) -> [[T; 4]; 4] {
+    let neg_sin = T::ZERO.sub(sin_angle);
+    return [
+        [cos_angle, neg_sin,   T::ZERO, T::ZERO],
+        [sin_angle, cos_angle, T::ZERO, T::ZERO],
+        [T::ZERO,   T::ZERO,   T::ONE,  T::ZERO],
+        [T::ZERO,   T::ZERO,   T::ZERO, T::ONE]
+    ]
+}
+
+// ============================================================================
+// Projection Matrices
+// ============================================================================
+
+/// Create perspective projection matrix
+///
+/// Parameters:
+/// - fov_y: Field of view in Y (vertical angle)
+/// - aspect: Aspect ratio (width/height)
+/// - near: Near clipping plane
+/// - far: Far clipping plane
+///
+/// Maps view frustum to normalized device coordinates [-1,1]³
+///
+/// Hardware note: This is typically computed on CPU and loaded as constant
+pub fn matrix_perspective<T: Numeric>(
+    fov_y_tan: T,  // tan(fov_y/2) - precomputed
+    aspect: T,
+    near: T,
+    far: T
+) -> [[T; 4]; 4] {
+    // f = 1 / tan(fov_y/2)
+    let f = T::ONE.div(fov_y_tan);
+    let f_aspect = f.div(aspect);
+
+    let depth_range = far.sub(near);
+    let depth_ratio = far.div(depth_range);
+    let depth_offset = far.mul(near).div(depth_range);
+    let neg_depth_offset = T::ZERO.sub(depth_offset);
+    let neg_one = T::ZERO.sub(T::ONE);
+
+    return [
+        [f_aspect, T::ZERO, T::ZERO,      T::ZERO],
+        [T::ZERO,  f,       T::ZERO,      T::ZERO],
+        [T::ZERO,  T::ZERO, depth_ratio,  neg_depth_offset],
+        [T::ZERO,  T::ZERO, neg_one,      T::ZERO]
+    ]
+}
+
+/// Create orthographic projection matrix
+///
+/// Parameters define box: [left,right] × [bottom,top] × [near,far]
+///
+/// Maps orthographic view volume to NDC [-1,1]³
+pub fn matrix_orthographic<T: Numeric>(
+    left: T,
+    right: T,
+    bottom: T,
+    top: T,
+    near: T,
+    far: T
+) -> [[T; 4]; 4] {
+    let two = T::ONE.add(T::ONE);
+
+    let width = right.sub(left);
+    let height = top.sub(bottom);
+    let depth = far.sub(near);
+
+    let sx = two.div(width);
+    let sy = two.div(height);
+    let sz = T::ONE.div(depth);
+    let neg_sz = T::ZERO.sub(sz);
+
+    let tx = right.add(left).div(width);
+    let ty = top.add(bottom).div(height);
+    let tz = near.div(depth);
+
+    let neg_tx = T::ZERO.sub(tx);
+    let neg_ty = T::ZERO.sub(ty);
+    let neg_tz = T::ZERO.sub(tz);
+
+    return [
+        [sx,      T::ZERO, T::ZERO, neg_tx],
+        [T::ZERO, sy,      T::ZERO, neg_ty],
+        [T::ZERO, T::ZERO, neg_sz,  neg_tz],
+        [T::ZERO, T::ZERO, T::ZERO, T::ONE]
+    ]
+}
+
+/// Create "look-at" view matrix
+///
+/// Positions camera at 'eye', looking at 'target', with 'up' direction
+///
+/// This is simplified - full implementation requires vector cross products
+/// and normalization (use functions from vector.sk)
+pub fn matrix_look_at<T: Numeric>(
+    eye: vec3<T>,
+    target: vec3<T>,
+    up: vec3<T>
+) -> [[T; 4]; 4] {
+    // This would typically use:
+    // - forward = normalize(target - eye)
+    // - right = normalize(cross(forward, up))
+    // - up_corrected = cross(right, forward)
+    //
+    // Then build rotation + translation matrix
+
+    // Placeholder: return identity
+    // In production, implement using vector operations
+    return [
+        [T::ONE,  T::ZERO, T::ZERO, T::ZERO],
+        [T::ZERO, T::ONE,  T::ZERO, T::ZERO],
+        [T::ZERO, T::ZERO, T::ONE,  T::ZERO],
+        [T::ZERO, T::ZERO, T::ZERO, T::ONE]
+    ]
+}
+
+// ============================================================================
+// Hardware Optimization Notes
+// ============================================================================
+
+// 1. **Matrix Multiply Optimization**:
+//    - Fully parallel: 64 multipliers + 48 adders (4x4 case)
+//    - Sequential: 1 multiplier + 1 adder, 64 cycles
+//    - Pipelined: N multipliers, ceil(64/N) cycles
+//    - Example: 16 multipliers → 4 cycle throughput, deep pipeline
+//
+// 2. **Resource Sharing**:
+//    - Share multipliers across matrix elements
+//    - Trade throughput for area
+//    - Use FSM to control sequential processing
+//
+// 3. **Fixed-Point Considerations**:
+//    - Matrix multiply can accumulate rounding errors
+//    - Use extra guard bits during accumulation
+//    - Example: Use fixed<48,24> for intermediate, convert to fixed<32,16> output
+//
+// 4. **Special Cases**:
+//    - Orthogonal matrices: inverse = transpose (free!)
+//    - Diagonal matrices: multiply = component-wise multiply (cheap)
+//    - Translation-only: skip rotation matrix multiply
+//
+// 5. **Precomputation**:
+//    - Perspective/orthographic matrices: Compute on CPU
+//    - Rotation matrices: Use CORDIC or lookup tables
+//    - Model matrices: Update infrequently, cache results
+//
+// 6. **Numerical Stability**:
+//    - Matrix inverse is numerically unstable
+//    - Prefer LU decomposition over cofactor method
+//    - For orthogonal matrices, use transpose instead
+
+// ============================================================================
+// Usage Examples
+// ============================================================================
+
+// Example 1: Model-View-Projection transform
+//   let model: [[fp32; 4]; 4] = matrix_rotate_y(cos_angle, sin_angle);
+//   let view: [[fp32; 4]; 4] = matrix_look_at(eye, target, up);
+//   let proj: [[fp32; 4]; 4] = matrix_perspective(tan_fov, aspect, near, far);
+//
+//   let mv = matrix_multiply(view, model);
+//   let mvp = matrix_multiply(proj, mv);
+//
+//   let pos: vec3<fp32> = ...;
+//   let transformed = matrix_vector3_multiply(mvp, pos);
+//
+// Example 2: Generic over numeric type
+//   fn transform_vertices<T: Numeric>(
+//       vertices: [vec3<T>; N],
+//       matrix: [[T; 4]; 4]
+//   ) -> [vec3<T>; N] {
+//       let mut result = vertices;
+//       for i in 0..N {
+//           result[i] = matrix_vector3_multiply(matrix, vertices[i])
+//       }
+//       return result
+//   }
+//
+//   // Works with any numeric type:
+//   transform_vertices::<fp32>(vertices_fp32, matrix_fp32);
+//   transform_vertices::<fp16>(vertices_fp16, matrix_fp16);
+//   transform_vertices::<fixed<32,16,true>>(vertices_fixed, matrix_fixed);

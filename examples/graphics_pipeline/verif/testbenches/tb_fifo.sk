@@ -1,0 +1,500 @@
+// Testbench for AsyncFifo
+//
+// Demonstrates:
+// - Testbench structure with clock generation
+// - Stimulus generation and checking
+// - Self-checking test cases
+// - Coverage of corner cases
+// - Valid-ready handshake protocol
+//
+// Test scenarios:
+// 1. Basic write/read operations
+// 2. Back-to-back writes
+// 3. Back-to-back reads
+// 4. Full and empty conditions
+// 5. Clock domain crossing
+// 6. Simultaneous read/write
+
+use crate::lib::fifo::async_fifo::AsyncFifo;
+
+// ============================================================================
+// Testbench Configuration
+// ============================================================================
+
+const FIFO_DEPTH: nat = 16;
+const DATA_WIDTH: nat = 32;
+const TEST_CYCLES: nat = 1000;
+
+// ============================================================================
+// Test Data Structure
+// ============================================================================
+
+/// Test vector for FIFO verification
+pub struct FifoTestVector {
+    pub write_data: bit[DATA_WIDTH],
+    pub write_enable: bit,
+    pub read_enable: bit,
+    pub expected_read_data: bit[DATA_WIDTH],
+    pub expected_empty: bit,
+    pub expected_full: bit
+}
+
+// ============================================================================
+// Testbench Entity
+// ============================================================================
+
+/// Self-checking testbench for AsyncFifo
+///
+/// Features:
+/// - Independent clock generation for write and read domains
+/// - Automatic stimulus generation
+/// - Result checking
+/// - Error reporting
+/// - Coverage tracking
+entity TestbenchAsyncFifo {
+    // No external ports - this is a standalone testbench
+
+    // Internal signals
+    signal wr_clk: clock,
+    signal rd_clk: clock,
+    signal wr_rst: bit,
+    signal rd_rst: bit,
+
+    // FIFO interface signals
+    signal wr_data: bit[DATA_WIDTH],
+    signal wr_en: bit,
+    signal wr_full: bit,
+
+    signal rd_en: bit,
+    signal rd_data: bit[DATA_WIDTH],
+    signal rd_empty: bit,
+    signal rd_valid: bit,
+
+    // Test control
+    signal test_active: bit,
+    signal test_passed: bit,
+    signal test_failed: bit,
+    signal error_count: u32,
+
+    // Test statistics
+    signal writes_completed: u32,
+    signal reads_completed: u32,
+    signal cycles_full: u32,
+    signal cycles_empty: u32,
+
+    // DUT: Device Under Test
+    let fifo = AsyncFifo::<bit[DATA_WIDTH], FIFO_DEPTH> {
+        wr_clk: wr_clk,
+        wr_rst: wr_rst,
+        wr_data: wr_data,
+        wr_en: wr_en,
+        wr_full: wr_full,
+
+        rd_clk: rd_clk,
+        rd_rst: rd_rst,
+        rd_en: rd_en,
+        rd_data: rd_data,
+        rd_empty: rd_empty,
+        rd_valid: rd_valid
+    }
+}
+
+impl TestbenchAsyncFifo {
+    // ========================================================================
+    // Clock Generation
+    // ========================================================================
+
+    // Write clock: 100 MHz (10ns period)
+    initial {
+        wr_clk = 1'b0;
+        forever {
+            #5ns;  // Half period
+            wr_clk = !wr_clk;
+        }
+    }
+
+    // Read clock: 125 MHz (8ns period) - different frequency!
+    initial {
+        rd_clk = 1'b0;
+        forever {
+            #4ns;  // Half period
+            rd_clk = !rd_clk;
+        }
+    }
+
+    // ========================================================================
+    // Reset Generation
+    // ========================================================================
+
+    initial {
+        wr_rst = 1'b1;
+        rd_rst = 1'b1;
+
+        #100ns;  // Hold reset for 100ns
+
+        wr_rst = 1'b0;
+        rd_rst = 1'b0;
+    }
+
+    // ========================================================================
+    // Test Sequence
+    // ========================================================================
+
+    initial {
+        test_active = 1'b0;
+        test_passed = 1'b0;
+        test_failed = 1'b0;
+        error_count = 0u32;
+
+        // Wait for reset to complete
+        @(negedge wr_rst);
+        #50ns;
+
+        test_active = 1'b1;
+
+        // Test 1: Basic write operations
+        $display("TEST 1: Basic Write Operations");
+        test_basic_write();
+
+        // Test 2: Basic read operations
+        $display("TEST 2: Basic Read Operations");
+        test_basic_read();
+
+        // Test 3: Back-to-back writes until full
+        $display("TEST 3: Fill FIFO");
+        test_fill_fifo();
+
+        // Test 4: Back-to-back reads until empty
+        $display("TEST 4: Drain FIFO");
+        test_drain_fifo();
+
+        // Test 5: Simultaneous read and write
+        $display("TEST 5: Simultaneous Read/Write");
+        test_simultaneous_rw();
+
+        // Test 6: Random operations
+        $display("TEST 6: Random Operations");
+        test_random_operations();
+
+        // Finish test
+        #1000ns;
+        test_active = 1'b0;
+
+        if error_count == 0u32 {
+            test_passed = 1'b1;
+            $display("✅ ALL TESTS PASSED");
+        } else {
+            test_failed = 1'b1;
+            $display("❌ TESTS FAILED with %d errors", error_count);
+        }
+
+        $finish;
+    }
+
+    // ========================================================================
+    // Test Procedures
+    // ========================================================================
+
+    /// Test 1: Basic write operations
+    fn test_basic_write() {
+        @(posedge wr_clk);
+
+        // Write single value
+        wr_data = 32'hDEADBEEF;
+        wr_en = 1'b1;
+
+        @(posedge wr_clk);
+        wr_en = 1'b0;
+
+        @(posedge wr_clk);
+
+        // Check FIFO is not empty
+        if rd_empty {
+            $error("FIFO should not be empty after write");
+            error_count = error_count + 1u32;
+        }
+
+        writes_completed = writes_completed + 1u32;
+    }
+
+    /// Test 2: Basic read operations
+    fn test_basic_read() {
+        @(posedge rd_clk);
+
+        // Enable read
+        rd_en = 1'b1;
+
+        @(posedge rd_clk);
+
+        // Check valid data
+        if !rd_valid {
+            $error("Read should be valid");
+            error_count = error_count + 1u32;
+        }
+
+        if rd_data != 32'hDEADBEEF {
+            $error("Read data mismatch: expected 0xDEADBEEF, got 0x%h", rd_data);
+            error_count = error_count + 1u32;
+        }
+
+        rd_en = 1'b0;
+        reads_completed = reads_completed + 1u32;
+    }
+
+    /// Test 3: Fill FIFO to capacity
+    fn test_fill_fifo() {
+        let mut write_count = 0u32;
+
+        // Write until full
+        while !wr_full && write_count < (FIFO_DEPTH + 4u32) {
+            @(posedge wr_clk);
+
+            wr_data = 32'h1000_0000 + write_count;
+            wr_en = 1'b1;
+
+            write_count = write_count + 1u32;
+        }
+
+        @(posedge wr_clk);
+        wr_en = 1'b0;
+
+        // Check FIFO is full
+        @(posedge wr_clk);
+        if !wr_full {
+            $error("FIFO should be full after %d writes", write_count);
+            error_count = error_count + 1u32;
+        }
+
+        writes_completed = writes_completed + write_count;
+        $display("  Filled FIFO with %d entries", write_count);
+    }
+
+    /// Test 4: Drain FIFO completely
+    fn test_drain_fifo() {
+        let mut read_count = 0u32;
+        let mut expected_data = 32'h1000_0000;
+
+        // Read until empty
+        rd_en = 1'b1;
+
+        while !rd_empty && read_count < (FIFO_DEPTH + 4u32) {
+            @(posedge rd_clk);
+
+            if rd_valid {
+                // Check data
+                if rd_data != expected_data {
+                    $error("Read data mismatch at position %d: expected 0x%h, got 0x%h",
+                           read_count, expected_data, rd_data);
+                    error_count = error_count + 1u32;
+                }
+
+                expected_data = expected_data + 1u32;
+                read_count = read_count + 1u32;
+            }
+        }
+
+        @(posedge rd_clk);
+        rd_en = 1'b0;
+
+        // Check FIFO is empty
+        @(posedge rd_clk);
+        if !rd_empty {
+            $error("FIFO should be empty after %d reads", read_count);
+            error_count = error_count + 1u32;
+        }
+
+        reads_completed = reads_completed + read_count;
+        $display("  Drained %d entries from FIFO", read_count);
+    }
+
+    /// Test 5: Simultaneous read and write
+    fn test_simultaneous_rw() {
+        // Write a few values first
+        for i in 0..4 {
+            @(posedge wr_clk);
+            wr_data = 32'h2000_0000 + i;
+            wr_en = 1'b1;
+        }
+        @(posedge wr_clk);
+        wr_en = 1'b0;
+
+        // Now read and write simultaneously
+        fork {
+            // Writer process
+            for i in 0..8 {
+                @(posedge wr_clk);
+                wr_data = 32'h3000_0000 + i;
+                wr_en = 1'b1;
+            }
+            @(posedge wr_clk);
+            wr_en = 1'b0;
+        }
+        {
+            // Reader process
+            #50ns;  // Slight delay
+            for i in 0..8 {
+                @(posedge rd_clk);
+                rd_en = 1'b1;
+            }
+            @(posedge rd_clk);
+            rd_en = 1'b0;
+        }
+
+        #500ns;  // Let both complete
+
+        $display("  Simultaneous R/W completed");
+    }
+
+    /// Test 6: Random read/write operations
+    fn test_random_operations() {
+        let mut cycle = 0u32;
+
+        while cycle < 100u32 {
+            // Random write
+            @(posedge wr_clk);
+            if !wr_full && ($random % 2 == 0) {
+                wr_data = $random;
+                wr_en = 1'b1;
+            } else {
+                wr_en = 1'b0;
+            }
+
+            // Random read (different clock domain!)
+            @(posedge rd_clk);
+            if !rd_empty && ($random % 2 == 0) {
+                rd_en = 1'b1;
+            } else {
+                rd_en = 1'b0;
+            }
+
+            cycle = cycle + 1u32;
+        }
+
+        wr_en = 1'b0;
+        rd_en = 1'b0;
+
+        $display("  Random operations completed");
+    }
+
+    // ========================================================================
+    // Monitors and Checkers
+    // ========================================================================
+
+    // Monitor: Track when FIFO is full
+    always @(posedge wr_clk) {
+        if wr_full {
+            cycles_full = cycles_full + 1u32;
+
+            // Check: Writing when full should be ignored
+            if wr_en {
+                $warning("Attempting to write when FIFO is full");
+            }
+        }
+    }
+
+    // Monitor: Track when FIFO is empty
+    always @(posedge rd_clk) {
+        if rd_empty {
+            cycles_empty = cycles_empty + 1u32;
+
+            // Check: Reading when empty should not produce valid data
+            if rd_en && rd_valid {
+                $error("Read valid when FIFO is empty");
+                error_count = error_count + 1u32;
+            }
+        }
+    }
+
+    // Monitor: Count operations
+    always @(posedge wr_clk) {
+        if wr_en && !wr_full {
+            writes_completed = writes_completed + 1u32;
+            $display("  [%0t] Write: 0x%h", $time, wr_data);
+        }
+    }
+
+    always @(posedge rd_clk) {
+        if rd_valid {
+            reads_completed = reads_completed + 1u32;
+            $display("  [%0t] Read: 0x%h", $time, rd_data);
+        }
+    }
+
+    // ========================================================================
+    // Final Report
+    // ========================================================================
+
+    final {
+        $display("");
+        $display("========================================");
+        $display("FIFO Testbench Statistics");
+        $display("========================================");
+        $display("Total writes: %d", writes_completed);
+        $display("Total reads: %d", reads_completed);
+        $display("Cycles full: %d", cycles_full);
+        $display("Cycles empty: %d", cycles_empty);
+        $display("Errors: %d", error_count);
+        $display("========================================");
+
+        if error_count == 0u32 {
+            $display("✅ Test PASSED");
+        } else {
+            $display("❌ Test FAILED");
+        }
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Generate random data for testing
+fn random_data<const W: nat>() -> bit[W] {
+    return $random;
+}
+
+/// Wait for multiple clock cycles
+fn wait_cycles(clk: clock, n: u32) {
+    for i in 0..n {
+        @(posedge clk);
+    }
+}
+
+// ============================================================================
+// Coverage Specification
+// ============================================================================
+
+/// Coverage points for FIFO verification
+///
+/// This would be used by formal verification or coverage tools
+covergroup FifoCoverage {
+    // Cover all fill levels
+    coverpoint fifo.wr_count {
+        bins empty = {0};
+        bins quarter = {1..(FIFO_DEPTH/4)};
+        bins half = {(FIFO_DEPTH/4+1)..(FIFO_DEPTH/2)};
+        bins three_quarter = {(FIFO_DEPTH/2+1)..(3*FIFO_DEPTH/4)};
+        bins full = {FIFO_DEPTH};
+    }
+
+    // Cover concurrent read and write
+    coverpoint (wr_en && rd_en) {
+        bins simultaneous = {1};
+    }
+
+    // Cover empty-to-full transition
+    cross rd_empty, wr_full {
+        bins empty_then_full = binsof(rd_empty) intersect {1} &&
+                                binsof(wr_full) intersect {1};
+    }
+}
+
+// ============================================================================
+// Waveform Dumping
+// ============================================================================
+
+initial {
+    // Dump waveforms for debugging
+    $dumpfile("sim/waves/fifo_tb.vcd");
+    $dumpvars(0, TestbenchAsyncFifo);
+}

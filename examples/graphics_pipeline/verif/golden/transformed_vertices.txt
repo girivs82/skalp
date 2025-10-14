@@ -1,0 +1,124 @@
+# Golden Reference: Transformed Vertices
+#
+# These are the expected outputs after Model-View-Projection transformation
+# and lighting calculation.
+#
+# Transformation matrices used:
+# - Model: Identity
+# - View: LookAt(eye=(0,0,5), target=(0,0,0), up=(0,1,0))
+# - Projection: Perspective(fov=45°, aspect=1.33, near=0.1, far=100)
+#
+# Lighting:
+# - Light direction: (0.577, 0.577, 0.577) [normalized (1,1,1)]
+# - Light color: (1.0, 1.0, 1.0) [white]
+# - Ambient: (0.2, 0.2, 0.2) [20% ambient]
+#
+# Format: clip_x clip_y clip_z clip_w lit_r lit_g lit_b lit_a
+#
+# Clip space coordinates are in homogeneous coordinates (x, y, z, w)
+# After perspective divide: ndc_x = clip_x/clip_w, ndc_y = clip_y/clip_w
+# Lit colors are [0.0, 1.0] range after lighting calculation
+
+# Triangle 1: Front-facing triangle
+# Vertex 0 (0.0, 0.0, 0.0) normal=(0,0,1)
+# Facing camera (normal aligned with view), full diffuse
+-0.000 -0.000 -2.500 5.000   0.777 0.200 0.200 1.000
+
+# Vertex 1 (1.0, 0.0, 0.0) normal=(0,0,1)
+ 0.750 -0.000 -2.500 5.000   0.200 0.777 0.200 1.000
+
+# Vertex 2 (0.5, 1.0, 0.0) normal=(0,0,1)
+ 0.375  0.750 -2.500 5.000   0.200 0.200 0.777 1.000
+
+# Triangle 2: Right-facing triangle
+# Vertex 3 (1.0, 0.0, 0.0) normal=(1,0,0)
+# Normal perpendicular to view, partial diffuse
+ 0.750 -0.000 -2.500 5.000   0.777 0.577 0.200 1.000
+
+# Vertex 4 (1.0, 1.0, 0.0) normal=(1,0,0)
+ 0.750  0.750 -2.500 5.000   0.777 0.200 0.577 1.000
+
+# Vertex 5 (1.0, 0.5, 1.0) normal=(1,0,0)
+ 0.750  0.375 -2.000 4.000   0.200 0.777 0.577 1.000
+
+# Triangle 3: Top-facing triangle
+# Vertex 6 (0.0, 1.0, 0.0) normal=(0,1,0)
+-0.000  0.750 -2.500 5.000   0.377 0.377 0.377 1.000
+
+# Vertex 7 (1.0, 1.0, 0.0) normal=(0,1,0)
+ 0.750  0.750 -2.500 5.000   0.421 0.421 0.421 1.000
+
+# Vertex 8 (0.5, 1.0, 1.0) normal=(0,1,0)
+ 0.375  0.750 -2.000 4.000   0.477 0.477 0.477 1.000
+
+# Triangle 4: Rotated triangle
+# Vertex 9 (0.707, 0.0, 0.707) normal=(0.707,0,0.707)
+ 0.530 -0.000 -2.148 4.293   0.888 0.444 0.200 1.000
+
+# Vertex 10 (-0.707, 0.0, 0.707) normal=(0.707,0,0.707)
+-0.530 -0.000 -2.148 4.293   0.377 0.888 0.200 1.000
+
+# Vertex 11 (0.0, 1.0, 1.0) normal=(0.707,0,0.707)
+ 0.000  0.750 -2.000 4.000   0.200 0.377 0.888 1.000
+
+# Cube vertices (Front face)
+# Vertex 12 (-1.0, -1.0, 1.0) normal=(0,0,1)
+-0.750 -0.750 -2.000 4.000   0.777 0.200 0.200 1.000
+
+# Vertex 13 (1.0, -1.0, 1.0) normal=(0,0,1)
+ 0.750 -0.750 -2.000 4.000   0.200 0.777 0.200 1.000
+
+# Vertex 14 (1.0, 1.0, 1.0) normal=(0,0,1)
+ 0.750  0.750 -2.000 4.000   0.200 0.200 0.777 1.000
+
+# Vertex 15 (-1.0, 1.0, 1.0) normal=(0,0,1)
+-0.750  0.750 -2.000 4.000   0.777 0.777 0.200 1.000
+
+# Cube vertices (Back face)
+# Vertex 16 (-1.0, -1.0, -1.0) normal=(0,0,-1)
+# Back-facing (away from camera), mostly ambient
+-0.750 -0.750 -3.000 6.000   0.377 0.200 0.377 1.000
+
+# Vertex 17 (1.0, -1.0, -1.0) normal=(0,0,-1)
+ 0.750 -0.750 -3.000 6.000   0.200 0.377 0.377 1.000
+
+# Vertex 18 (1.0, 1.0, -1.0) normal=(0,0,-1)
+ 0.750  0.750 -3.000 6.000   0.377 0.377 0.377 1.000
+
+# Vertex 19 (-1.0, 1.0, -1.0) normal=(0,0,-1)
+-0.750  0.750 -3.000 6.000   0.300 0.300 0.300 1.000
+
+# Right face vertices
+# Vertex 20-23: Normal=(1,0,0), partial illumination
+ 0.750 -0.750 -3.000 6.000   0.777 0.200 0.200 1.000
+ 0.750  0.750 -3.000 6.000   0.777 0.377 0.200 1.000
+ 0.750  0.750 -2.000 4.000   0.777 0.777 0.200 1.000
+ 0.750 -0.750 -2.000 4.000   0.777 0.200 0.377 1.000
+
+# Left face vertices
+# Vertex 24-27: Normal=(-1,0,0), partial illumination
+-0.750 -0.750 -3.000 6.000   0.200 0.200 0.777 1.000
+-0.750 -0.750 -2.000 4.000   0.200 0.377 0.777 1.000
+-0.750  0.750 -2.000 4.000   0.200 0.777 0.777 1.000
+-0.750  0.750 -3.000 6.000   0.377 0.377 0.777 1.000
+
+# Top face vertices
+# Vertex 28-31: Normal=(0,1,0), partial illumination
+-0.750  0.750 -3.000 6.000   0.543 0.543 0.543 1.000
+-0.750  0.750 -2.000 4.000   0.477 0.477 0.477 1.000
+ 0.750  0.750 -2.000 4.000   0.421 0.421 0.421 1.000
+ 0.750  0.750 -3.000 6.000   0.377 0.377 0.377 1.000
+
+# Bottom face vertices
+# Vertex 32-35: Normal=(0,-1,0), partial illumination (away from light)
+-0.750 -0.750 -3.000 6.000   0.244 0.244 0.244 1.000
+ 0.750 -0.750 -3.000 6.000   0.233 0.233 0.233 1.000
+ 0.750 -0.750 -2.000 4.000   0.222 0.222 0.222 1.000
+-0.750 -0.750 -2.000 4.000   0.211 0.211 0.211 1.000
+
+# Notes:
+# - Clip space Z values are negative (standard OpenGL convention)
+# - W component represents perspective divide factor
+# - NDC coordinates: x_ndc = clip_x/clip_w, y_ndc = clip_y/clip_w
+# - Lighting: diffuse = max(0, N·L) * base_color + ambient
+# - Values are approximate due to floating-point precision

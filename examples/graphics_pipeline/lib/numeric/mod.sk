@@ -1,0 +1,13 @@
+// Numeric Utilities Library
+//
+// Reusable mathematical operations for hardware graphics
+//
+// This module demonstrates:
+// - Generic functions with parametric types
+// - Trait bounds (T: Numeric)
+// - Hardware-optimized algorithms
+// - Reusable library structure
+
+pub mod matrix;   // Matrix operations (multiply, transpose, inverse)
+pub mod vector;   // Vector operations (add, dot, cross, normalize)
+pub mod cordic;   // CORDIC algorithms (atan, rotate, sin/cos)

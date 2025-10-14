@@ -1,0 +1,348 @@
+// Generic Vector Operations
+//
+// Hardware-optimized vector math using parametric types
+//
+// All functions are generic over T: Numeric, allowing them to work with:
+// - fp32, fp16, bf16 (floating-point)
+// - fixed<W,F,S> (fixed-point)
+// - int<W,S> (integer)
+
+// ============================================================================
+// Vector Addition
+// ============================================================================
+
+/// Generic vector addition: a + b
+///
+/// Works with any numeric type T and any dimension N
+///
+/// Hardware: Generates N parallel adders
+pub fn vec_add<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> vec<T,N> {
+    let mut result: vec<T,N> = a;
+    for i in 0..N {
+        result[i] = a[i].add(b[i])
+    }
+    return result
+}
+
+/// Vector subtraction: a - b
+pub fn vec_sub<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> vec<T,N> {
+    let mut result: vec<T,N> = a;
+    for i in 0..N {
+        result[i] = a[i].sub(b[i])
+    }
+    return result
+}
+
+/// Scalar multiplication: a * s
+pub fn vec_scale<T: Numeric, const N: nat>(a: vec<T,N>, s: T) -> vec<T,N> {
+    let mut result: vec<T,N> = a;
+    for i in 0..N {
+        result[i] = a[i].mul(s)
+    }
+    return result
+}
+
+// ============================================================================
+// Dot Product (Inner Product)
+// ============================================================================
+
+/// Dot product: a · b = a.x*b.x + a.y*b.y + ...
+///
+/// Hardware implementation:
+/// - Parallel multipliers: N * T::MUL_AREA
+/// - Tree adder: log2(N) levels
+/// - Total latency: T::MUL_LATENCY + log2(N)
+///
+/// For N=3, T=fp32:
+/// - 3 FP32 multipliers
+/// - 2-level adder tree
+/// - ~8 cycle latency
+pub fn vec_dot<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> T {
+    let mut sum = T::ZERO;
+    for i in 0..N {
+        sum = sum.add(a[i].mul(b[i]))
+    }
+    return sum
+}
+
+// ============================================================================
+// Cross Product (3D only)
+// ============================================================================
+
+/// Cross product: a × b (3D vectors only)
+///
+/// Result is perpendicular to both a and b
+/// Magnitude = |a| * |b| * sin(θ)
+///
+/// Formula:
+///   result.x = a.y * b.z - a.z * b.y
+///   result.y = a.z * b.x - a.x * b.z  
+///   result.z = a.x * b.y - a.y * b.x
+///
+/// Hardware: 6 multipliers, 3 subtracters
+pub fn vec_cross<T: Numeric>(a: vec3<T>, b: vec3<T>) -> vec3<T> {
+    return vec3 {
+        x: a.y.mul(b.z).sub(a.z.mul(b.y)),
+        y: a.z.mul(b.x).sub(a.x.mul(b.z)),
+        z: a.x.mul(b.y).sub(a.y.mul(b.x))
+    }
+}
+
+// ============================================================================
+// Vector Length (Magnitude)
+// ============================================================================
+
+/// Vector length squared: |v|² = v · v
+///
+/// Useful when you don't need the actual length (saves sqrt)
+pub fn vec_length_sq<T: Numeric, const N: nat>(v: vec<T,N>) -> T {
+    return vec_dot(v, v)
+}
+
+/// Vector length: |v| = sqrt(v · v)
+///
+/// Hardware: Requires square root unit
+/// - Dot product: N multiplies + log2(N) adds
+/// - Square root: ~20-30 cycles (iterative)
+///
+/// Consider using vec_length_sq() if possible to avoid sqrt
+pub fn vec_length<T: Numeric, const N: nat>(v: vec<T,N>) -> T {
+    let len_sq = vec_length_sq(v);
+    return T::sqrt(len_sq)
+}
+
+// ============================================================================
+// Vector Normalization
+// ============================================================================
+
+/// Normalize vector to unit length: v / |v|
+///
+/// Result has length = 1.0
+///
+/// Hardware cost:
+/// - Length calculation (dot + sqrt)
+/// - N divisions (or 1 reciprocal + N multiplies)
+///
+/// Note: Returns zero vector if input is zero (|v| = 0)
+pub fn vec_normalize<T: Numeric, const N: nat>(v: vec<T,N>) -> vec<T,N> {
+    let len = vec_length(v);
+    
+    if len.is_zero() {
+        return v  // Can't normalize zero vector
+    }
+    
+    // Option 1: Direct division (N dividers)
+    // let mut result: vec<T,N> = v;
+    // for i in 0..N {
+    //     result[i] = v[i].div(len)
+    // }
+    
+    // Option 2: Reciprocal + multiply (1 divider + N multipliers)
+    // More hardware-friendly: division is expensive
+    let inv_len = T::ONE.div(len);  // Reciprocal: 1/len
+    let mut result: vec<T,N> = v;
+    for i in 0..N {
+        result[i] = v[i].mul(inv_len)
+    }
+    
+    return result
+}
+
+/// Fast normalize using reciprocal square root approximation
+///
+/// rsqrt(x) ≈ 1/sqrt(x) using Newton-Raphson or lookup table
+///
+/// Faster and more area-efficient than full sqrt + div
+pub fn vec_normalize_fast<T: Numeric, const N: nat>(v: vec<T,N>) -> vec<T,N> {
+    let len_sq = vec_length_sq(v);
+    
+    if len_sq.is_zero() {
+        return v
+    }
+    
+    // Fast reciprocal sqrt (hardware intrinsic or approximation)
+    let inv_len = T::rsqrt(len_sq);  // 1/sqrt(len_sq)
+    
+    let mut result: vec<T,N> = v;
+    for i in 0..N {
+        result[i] = v[i].mul(inv_len)
+    }
+    
+    return result
+}
+
+// ============================================================================
+// Linear Interpolation (Lerp)
+// ============================================================================
+
+/// Linear interpolation: lerp(a, b, t) = a + t*(b - a)
+///
+/// t = 0.0 returns a
+/// t = 1.0 returns b
+/// t = 0.5 returns midpoint
+///
+/// Hardware: N multiplies + 2N adds
+pub fn vec_lerp<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>, t: T) -> vec<T,N> {
+    // lerp(a, b, t) = a + t*(b - a)
+    let diff = vec_sub(b, a);
+    let scaled = vec_scale(diff, t);
+    return vec_add(a, scaled)
+}
+
+// ============================================================================
+// Distance Between Vectors
+// ============================================================================
+
+/// Euclidean distance: |b - a|
+pub fn vec_distance<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> T {
+    let diff = vec_sub(b, a);
+    return vec_length(diff)
+}
+
+/// Distance squared (avoids sqrt)
+pub fn vec_distance_sq<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> T {
+    let diff = vec_sub(b, a);
+    return vec_length_sq(diff)
+}
+
+// ============================================================================
+// Reflection
+// ============================================================================
+
+/// Reflect vector v around normal n
+///
+/// Formula: r = v - 2*(v·n)*n
+///
+/// Used for:
+/// - Light reflection calculations
+/// - Physics collision response
+///
+/// Requires: n must be normalized (|n| = 1)
+pub fn vec_reflect<T: Numeric, const N: nat>(v: vec<T,N>, n: vec<T,N>) -> vec<T,N> {
+    let dot = vec_dot(v, n);
+    let two = T::ONE.add(T::ONE);  // 2.0
+    let scale = two.mul(dot);
+    let offset = vec_scale(n, scale);
+    return vec_sub(v, offset)
+}
+
+// ============================================================================
+// Component-wise Operations
+// ============================================================================
+
+/// Component-wise multiply: (a.x*b.x, a.y*b.y, a.z*b.z)
+///
+/// Different from dot product (which sums the products)
+pub fn vec_mul<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> vec<T,N> {
+    let mut result: vec<T,N> = a;
+    for i in 0..N {
+        result[i] = a[i].mul(b[i])
+    }
+    return result
+}
+
+/// Component-wise minimum
+pub fn vec_min<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> vec<T,N> {
+    let mut result: vec<T,N> = a;
+    for i in 0..N {
+        result[i] = if a[i].lt(b[i]) { a[i] } else { b[i] }
+    }
+    return result
+}
+
+/// Component-wise maximum
+pub fn vec_max<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> vec<T,N> {
+    let mut result: vec<T,N> = a;
+    for i in 0..N {
+        result[i] = if a[i].gt(b[i]) { a[i] } else { b[i] }
+    }
+    return result
+}
+
+/// Component-wise clamp: clamp each component to [min, max]
+pub fn vec_clamp<T: Numeric, const N: nat>(v: vec<T,N>, min: T, max: T) -> vec<T,N> {
+    let mut result: vec<T,N> = v;
+    for i in 0..N {
+        if v[i].lt(min) {
+            result[i] = min
+        } else if v[i].gt(max) {
+            result[i] = max
+        } else {
+            result[i] = v[i]
+        }
+    }
+    return result
+}
+
+// ============================================================================
+// Angle Between Vectors
+// ============================================================================
+
+/// Angle between two vectors (in radians)
+///
+/// Formula: θ = acos((a·b) / (|a|*|b|))
+///
+/// Requires: Neither vector can be zero
+///
+/// Hardware: Expensive (dot, 2x length, div, acos)
+/// Consider using dot product directly if you only need cos(θ)
+pub fn vec_angle<T: Numeric, const N: nat>(a: vec<T,N>, b: vec<T,N>) -> T {
+    let dot = vec_dot(a, b);
+    let len_a = vec_length(a);
+    let len_b = vec_length(b);
+    let denom = len_a.mul(len_b);
+    let cos_angle = dot.div(denom);
+    return T::acos(cos_angle)
+}
+
+// ============================================================================
+// Hardware Optimization Notes
+// ============================================================================
+
+// 1. **Parallel Operations**: Most vector operations are embarrassingly parallel
+//    - All N components can be processed simultaneously
+//    - Latency = single component operation
+//    - Area = N * single component area
+//
+// 2. **Pipelining**: Long operations (normalize, reflect) can be pipelined
+//    - Break into stages: dot -> sqrt -> div -> scale
+//    - High throughput, moderate latency
+//
+// 3. **Approximations**: Consider fast approximations for:
+//    - rsqrt (reciprocal sqrt): Newton-Raphson, lookup table
+//    - normalize: Use rsqrt instead of sqrt+div
+//    - length: Use Manhattan distance (sum of abs values)
+//
+// 4. **Fixed-Point**: For area-critical designs:
+//    - Use fixed<W,F,S> instead of fp32
+//    - Carefully manage fractional bits to avoid overflow
+//    - Example: fixed<32,16,true> for Q16.16 format
+//
+// 5. **Resource Sharing**: For area-constrained designs:
+//    - Share multipliers/dividers across components
+//    - Sequential processing: Process one component per cycle
+//    - Latency increases N×, but area reduces to 1× 
+
+// ============================================================================
+// Usage Examples
+// ============================================================================
+
+// Example 1: Lighting calculation (dot product)
+//   let normal: vec3<fp32> = ...;
+//   let light_dir: vec3<fp32> = ...;
+//   let intensity = vec_dot(normal, light_dir);
+//
+// Example 2: Generic over numeric type
+//   fn process<T: Numeric>(a: vec3<T>, b: vec3<T>) -> vec3<T> {
+//       let sum = vec_add(a, b);
+//       let normalized = vec_normalize(sum);
+//       return normalized
+//   }
+//
+//   let v1: vec3<fp32> = ...;
+//   let v2: vec3<fp16> = ...;
+//   let v3: vec3<fixed<32,16,true>> = ...;
+//
+//   process(v1, v1);  // ✅ Works with fp32
+//   process(v2, v2);  // ✅ Works with fp16
+//   process(v3, v3);  // ✅ Works with fixed-point

@@ -1,0 +1,520 @@
+// Formal Properties for AsyncFifo
+//
+// Demonstrates:
+// - Safety properties (nothing bad happens)
+// - Liveness properties (something good eventually happens)
+// - Assertions for runtime checking
+// - Assumptions for environment constraints
+// - Coverage goals for verification completeness
+//
+// Property types:
+// - assert: Must always be true (checked by formal tools or simulation)
+// - assume: Constrain input behavior
+// - cover: Verification goals to ensure properties are exercised
+//
+// These properties can be used for:
+// - Formal verification (model checking)
+// - Dynamic assertion checking (simulation)
+// - Coverage tracking
+
+use crate::lib::fifo::async_fifo::AsyncFifo;
+
+// ============================================================================
+// Safety Properties
+// ============================================================================
+
+/// Properties that must always hold (safety = "nothing bad ever happens")
+
+impl AsyncFifo<T, DEPTH> {
+    // ========================================================================
+    // Overflow Protection
+    // ========================================================================
+
+    /// Property: Never overflow
+    ///
+    /// Writing when full must not cause data loss or corruption
+    /// The FIFO should either ignore the write or block it
+    property no_overflow {
+        always(!(wr_en && wr_full))
+    }
+
+    /// Property: Write pointer stability when full
+    ///
+    /// Write pointer should not advance when FIFO is full
+    property wr_ptr_stable_when_full {
+        always(wr_full -> next(wr_ptr == $past(wr_ptr)))
+    }
+
+    /// Property: Full flag is accurate
+    ///
+    /// When full flag is set, count should equal DEPTH
+    property full_flag_accurate {
+        always(wr_full -> (wr_count == DEPTH))
+    }
+
+    // ========================================================================
+    // Underflow Protection
+    // ========================================================================
+
+    /// Property: Never underflow
+    ///
+    /// Reading when empty must not produce spurious data
+    /// The valid signal should be low when reading from empty FIFO
+    property no_underflow {
+        always(!(rd_en && rd_empty && rd_valid))
+    }
+
+    /// Property: Read pointer stability when empty
+    ///
+    /// Read pointer should not advance when FIFO is empty
+    property rd_ptr_stable_when_empty {
+        always(rd_empty -> next(rd_ptr == $past(rd_ptr)))
+    }
+
+    /// Property: Empty flag is accurate
+    ///
+    /// When empty flag is set, count should equal 0
+    property empty_flag_accurate {
+        always(rd_empty -> (rd_count == 0))
+    }
+
+    /// Property: No valid data when empty
+    ///
+    /// Reading from empty FIFO should not assert valid
+    property no_valid_when_empty {
+        always((rd_empty && rd_en) -> !next(rd_valid))
+    }
+
+    // ========================================================================
+    // Data Integrity
+    // ========================================================================
+
+    /// Property: Data preservation
+    ///
+    /// Data written must eventually be read out unchanged
+    /// This is a key correctness property for FIFOs
+    property data_integrity {
+        // For every write, the same data appears at read output
+        // (after appropriate delay and ordering)
+        assume(wr_en && !wr_full);
+        let write_data = wr_data;
+
+        // Eventually this data appears at read output
+        eventually(rd_valid && (rd_data == write_data))
+    }
+
+    /// Property: FIFO ordering (First-In-First-Out)
+    ///
+    /// Data must be read in the same order it was written
+    property fifo_ordering {
+        // If we write A then B, we must read A before B
+        assume(wr_en && !wr_full);
+        let data_a = wr_data;
+
+        next(assume(wr_en && !wr_full));
+        let data_b = next(wr_data);
+
+        // When we read, A must come before B
+        eventually(rd_valid && (rd_data == data_a) &&
+                   next(eventually(rd_valid && (rd_data == data_b))))
+    }
+
+    // ========================================================================
+    // Pointer Synchronization
+    // ========================================================================
+
+    /// Property: Write pointer in valid range
+    ///
+    /// Write pointer should always be within [0, DEPTH-1]
+    property wr_ptr_in_range {
+        always(wr_ptr < DEPTH)
+    }
+
+    /// Property: Read pointer in valid range
+    ///
+    /// Read pointer should always be within [0, DEPTH-1]
+    property rd_ptr_in_range {
+        always(rd_ptr < DEPTH)
+    }
+
+    /// Property: Gray code synchronizer stability
+    ///
+    /// After synchronization, gray code values should stabilize
+    /// (No metastability artifacts after sync stages)
+    property gray_sync_stable {
+        // After CDC_STAGES + 1 cycles, synchronized value should be stable
+        always(stable(rd_ptr_gray_sync, CDC_STAGES + 1))
+    }
+
+    // ========================================================================
+    // Count Accuracy
+    // ========================================================================
+
+    /// Property: Count is bounded
+    ///
+    /// FIFO count should never exceed DEPTH
+    property count_bounded {
+        always(wr_count <= DEPTH) &&
+        always(rd_count <= DEPTH)
+    }
+
+    /// Property: Count increment on write
+    ///
+    /// Writing (when not full) increases count by 1
+    property count_increment_on_write {
+        always((wr_en && !wr_full && !rd_en) ->
+               next(wr_count == $past(wr_count) + 1))
+    }
+
+    /// Property: Count decrement on read
+    ///
+    /// Reading (when not empty) decreases count by 1
+    property count_decrement_on_read {
+        always((rd_en && !rd_empty && !wr_en) ->
+               next(rd_count == $past(rd_count) - 1))
+    }
+
+    /// Property: Count unchanged on simultaneous R/W
+    ///
+    /// When reading and writing simultaneously, count stays same
+    property count_unchanged_on_simultaneous_rw {
+        always((wr_en && !wr_full && rd_en && !rd_empty) ->
+               next(wr_count == $past(wr_count)))
+    }
+
+    // ========================================================================
+    // Reset Behavior
+    // ========================================================================
+
+    /// Property: Write domain reset
+    ///
+    /// Reset should clear write side state
+    property wr_reset_behavior {
+        always(wr_rst -> (
+            next(wr_ptr == 0) &&
+            next(wr_count == 0) &&
+            next(wr_full == 0)
+        ))
+    }
+
+    /// Property: Read domain reset
+    ///
+    /// Reset should clear read side state
+    property rd_reset_behavior {
+        always(rd_rst -> (
+            next(rd_ptr == 0) &&
+            next(rd_count == 0) &&
+            next(rd_empty == 1)
+        ))
+    }
+}
+
+// ============================================================================
+// Liveness Properties
+// ============================================================================
+
+/// Properties that ensure progress (liveness = "something good eventually happens")
+
+impl AsyncFifo<T, DEPTH> {
+    /// Property: Written data eventually readable
+    ///
+    /// If we write data (and FIFO is not reset), it will eventually be readable
+    property eventual_read {
+        assume(wr_en && !wr_full && !wr_rst);
+
+        // Eventually the empty flag will be deasserted
+        eventually(!rd_empty)
+    }
+
+    /// Property: Space eventually available
+    ///
+    /// If FIFO is full and we keep reading, it will eventually have space
+    property eventual_space {
+        assume(wr_full && rd_en && !rd_empty && !rd_rst);
+
+        // Eventually the full flag will be deasserted
+        eventually(!wr_full)
+    }
+
+    /// Property: Data eventually consumed
+    ///
+    /// If FIFO is not empty and reads are enabled, data will be consumed
+    property eventual_consumption {
+        assume(!rd_empty && rd_en && !rd_rst);
+
+        // Eventually we'll read valid data
+        eventually(rd_valid)
+    }
+
+    /// Property: No permanent stalls
+    ///
+    /// System should not get stuck indefinitely
+    property no_deadlock {
+        // If both clocks are running and no resets, system should make progress
+        assume(!wr_rst && !rd_rst);
+
+        always(
+            // If data available and reads enabled, eventually read succeeds
+            (!rd_empty && rd_en) -> eventually(rd_valid)
+        ) &&
+        always(
+            // If space available and writes enabled, eventually write succeeds
+            (!wr_full && wr_en) -> eventually(wr_count > $past(wr_count))
+        )
+    }
+}
+
+// ============================================================================
+// Assumptions (Environment Constraints)
+// ============================================================================
+
+/// Assumptions about the environment behavior
+
+impl AsyncFifo<T, DEPTH> {
+    /// Assumption: Clocks are always running
+    ///
+    /// Both clock domains have active clocks
+    assume always_clocking {
+        always(posedge(wr_clk)) &&
+        always(posedge(rd_clk))
+    }
+
+    /// Assumption: Reset eventually deasserts
+    ///
+    /// System will not stay in reset forever
+    assume reset_finite {
+        eventually(!wr_rst) &&
+        eventually(!rd_rst)
+    }
+
+    /// Assumption: No write when full
+    ///
+    /// Well-behaved producer will not write when full
+    assume producer_protocol {
+        always(wr_full -> !wr_en)
+    }
+
+    /// Assumption: No read when empty
+    ///
+    /// Well-behaved consumer will not read when empty
+    assume consumer_protocol {
+        always(rd_empty -> !rd_en)
+    }
+
+    /// Assumption: Bounded write rate
+    ///
+    /// Producer will not write continuously forever
+    /// (allows progress for other operations)
+    assume bounded_writes {
+        always(
+            (wr_en for 100 cycles) ->
+            eventually(!wr_en for 10 cycles)
+        )
+    }
+
+    /// Assumption: Bounded read rate
+    ///
+    /// Consumer will not read continuously forever
+    assume bounded_reads {
+        always(
+            (rd_en for 100 cycles) ->
+            eventually(!rd_en for 10 cycles)
+        )
+    }
+}
+
+// ============================================================================
+// Coverage Goals
+// ============================================================================
+
+/// Coverage points to ensure thorough verification
+
+impl AsyncFifo<T, DEPTH> {
+    /// Cover: Fill levels
+    ///
+    /// Ensure FIFO has been tested at all fill levels
+    covergroup fill_levels {
+        coverpoint wr_count {
+            bins empty = {0};
+            bins low = {1..(DEPTH/4)};
+            bins mid_low = {(DEPTH/4+1)..(DEPTH/2)};
+            bins mid_high = {(DEPTH/2+1)..(3*DEPTH/4)};
+            bins high = {(3*DEPTH/4+1)..(DEPTH-1)};
+            bins full = {DEPTH};
+        }
+    }
+
+    /// Cover: Transitions
+    ///
+    /// Ensure all state transitions have been exercised
+    covergroup transitions {
+        // Empty to non-empty
+        coverpoint (rd_empty && !next(rd_empty)) {
+            bins empty_to_not_empty = {1};
+        }
+
+        // Non-full to full
+        coverpoint (!wr_full && next(wr_full)) {
+            bins not_full_to_full = {1};
+        }
+
+        // Full to non-full
+        coverpoint (wr_full && !next(wr_full)) {
+            bins full_to_not_full = {1};
+        }
+
+        // Non-empty to empty
+        coverpoint (!rd_empty && next(rd_empty)) {
+            bins not_empty_to_empty = {1};
+        }
+    }
+
+    /// Cover: Concurrent operations
+    ///
+    /// Ensure simultaneous read/write has been tested
+    covergroup concurrent_ops {
+        // Simultaneous read and write
+        coverpoint (wr_en && rd_en) {
+            bins simultaneous = {1};
+        }
+
+        // Write only
+        coverpoint (wr_en && !rd_en) {
+            bins write_only = {1};
+        }
+
+        // Read only
+        coverpoint (!wr_en && rd_en) {
+            bins read_only = {1};
+        }
+
+        // Idle
+        coverpoint (!wr_en && !rd_en) {
+            bins idle = {1};
+        }
+    }
+
+    /// Cover: Corner cases
+    ///
+    /// Ensure edge cases have been tested
+    covergroup corner_cases {
+        // Write exactly when becoming non-full
+        coverpoint (wr_full && next(!wr_full) && next(wr_en)) {
+            bins write_after_full = {1};
+        }
+
+        // Read exactly when becoming non-empty
+        coverpoint (rd_empty && next(!rd_empty) && next(rd_en)) {
+            bins read_after_empty = {1};
+        }
+
+        // Fill completely in one burst
+        sequence fill_burst = (wr_en for DEPTH cycles);
+
+        // Drain completely in one burst
+        sequence drain_burst = (rd_en for DEPTH cycles);
+    }
+
+    /// Cover: Clock domain crossing
+    ///
+    /// Ensure different clock relationships tested
+    covergroup clock_relationships {
+        // Write clock faster than read clock
+        // Read clock faster than write clock
+        // Equal clock rates
+        // Phase relationships
+        //
+        // Note: These would be monitored by the testbench
+        // based on actual clock behavior
+    }
+
+    /// Cover: Reset scenarios
+    ///
+    /// Ensure resets have been tested in different states
+    covergroup reset_coverage {
+        // Reset when empty
+        cross rd_empty, rd_rst {
+            bins reset_when_empty = binsof(rd_empty) intersect {1} &&
+                                     binsof(rd_rst) intersect {1};
+        }
+
+        // Reset when full
+        cross wr_full, wr_rst {
+            bins reset_when_full = binsof(wr_full) intersect {1} &&
+                                    binsof(wr_rst) intersect {1};
+        }
+
+        // Reset when partially filled
+        coverpoint ((wr_count > 0) && (wr_count < DEPTH) && wr_rst) {
+            bins reset_when_partial = {1};
+        }
+    }
+}
+
+// ============================================================================
+// Formal Verification Helpers
+// ============================================================================
+
+/// Helper function: Check if value is stable for N cycles
+fn stable<T>(value: T, n: nat) -> bool {
+    if n == 0 {
+        return true
+    } else {
+        return (value == next(value)) && next(stable(value, n-1))
+    }
+}
+
+/// Helper function: Count consecutive occurrences
+fn consecutive_count(condition: bool) -> nat {
+    if !condition {
+        return 0
+    } else {
+        return 1 + next(consecutive_count(next(condition)))
+    }
+}
+
+// ============================================================================
+// Usage with Formal Tools
+// ============================================================================
+
+// To use these properties with formal verification tools:
+//
+// 1. Bounded Model Checking (BMC):
+//    $ skalp verify --mode=bmc --depth=100 verif/properties/fifo_props.sk
+//
+// 2. K-Induction:
+//    $ skalp verify --mode=kinduction verif/properties/fifo_props.sk
+//
+// 3. Coverage-guided verification:
+//    $ skalp verify --mode=cover verif/properties/fifo_props.sk
+//
+// 4. Simulation with assertions:
+//    $ skalp sim --enable-assertions verif/testbenches/tb_fifo.sk
+//
+// Properties are checked:
+// - assert: Verified to always hold
+// - assume: Constrains environment (inputs)
+// - cover: Tracked for completeness
+
+// ============================================================================
+// Expected Results
+// ============================================================================
+
+// Safety properties should always pass:
+// ✓ no_overflow
+// ✓ no_underflow
+// ✓ data_integrity
+// ✓ fifo_ordering
+// ✓ count_bounded
+// ✓ all pointer/count properties
+//
+// Liveness properties should pass under fair assumptions:
+// ✓ eventual_read (assuming clocks running)
+// ✓ eventual_space (assuming reads continue)
+// ✓ no_deadlock (assuming fair scheduling)
+//
+// Coverage should reach 100% for:
+// ✓ All fill levels (empty to full)
+// ✓ All transitions
+// ✓ Concurrent operations
+// ✓ Corner cases

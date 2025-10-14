@@ -1,0 +1,483 @@
+// CORDIC Algorithms (COordinate Rotation DIgital Computer)
+//
+// Hardware-efficient algorithms for computing:
+// - Trigonometric functions (sin, cos, atan)
+// - Vector rotation
+// - Magnitude and phase
+//
+// CORDIC is particularly well-suited for FPGA/ASIC implementation:
+// - No multipliers required (only shifts and adds)
+// - Iterative convergence (trade iterations for precision)
+// - Small lookup tables (arctangent values)
+// - Deterministic latency
+//
+// References:
+// - Volder, J. (1959). "The CORDIC Trigonometric Computing Technique"
+// - Andraka, R. (1998). "A survey of CORDIC algorithms for FPGA based computers"
+
+// ============================================================================
+// CORDIC Constants
+// ============================================================================
+
+// Arctangent lookup table for CORDIC rotations
+// atan(2^-i) in radians, scaled to fixed-point
+//
+// For fixed<32, 28, true> (Q4.28 format):
+// - 4 integer bits: range [-8, 8) covers [-2π, 2π]
+// - 28 fractional bits: precision ~= 2^-28 ≈ 3.7e-9
+
+/// CORDIC arctangent table (first 16 iterations)
+///
+/// Values: atan(2^-i) for i = 0..15
+///
+/// Scaled for fixed<32, 28, true> format:
+/// Each value = round(atan(2^-i) * 2^28)
+const CORDIC_ATAN_TABLE: [i32; 16] = [
+    843314857,   // atan(2^0)  = 0.785398163 rad (45°)
+    497837829,   // atan(2^-1) = 0.463647609 rad
+    263043837,   // atan(2^-2) = 0.244978663 rad
+    133525159,   // atan(2^-3) = 0.124354995 rad
+    67021687,    // atan(2^-4) = 0.062418810 rad
+    33543516,    // atan(2^-5) = 0.031239833 rad
+    16771758,    // atan(2^-6) = 0.015623729 rad
+    8385879,     // atan(2^-7) = 0.007812341 rad
+    4192939,     // atan(2^-8) = 0.003906230 rad
+    2096470,     // atan(2^-9) = 0.001953123 rad
+    1048235,     // atan(2^-10) = 0.000976562 rad
+    524117,      // atan(2^-11) = 0.000488281 rad
+    262058,      // atan(2^-12) = 0.000244141 rad
+    131029,      // atan(2^-13) = 0.000122070 rad
+    65514,       // atan(2^-14) = 0.000061035 rad
+    32757        // atan(2^-15) = 0.000030518 rad
+];
+
+/// CORDIC scale factor K
+///
+/// After CORDIC iterations, results are scaled by:
+/// K = prod(sqrt(1 + 2^(-2i))) for i=0..n
+///
+/// For infinite iterations: K ≈ 1.646760258
+///
+/// To get true result, multiply by 1/K ≈ 0.607252935
+/// Scaled to fixed<32,28>: round(0.607252935 * 2^28) = 163008712
+const CORDIC_SCALE_INV: i32 = 163008712;  // 1/K in Q4.28 format
+
+// ============================================================================
+// CORDIC Rotation Mode
+// ============================================================================
+
+/// CORDIC rotation: Rotate vector (x, y) by angle
+///
+/// Given: (x₀, y₀, z₀) where z₀ is the target rotation angle
+/// Output: (xₙ, yₙ, zₙ) where:
+///   - xₙ = K(x₀·cos(z₀) - y₀·sin(z₀))
+///   - yₙ = K(x₀·sin(z₀) + y₀·cos(z₀))
+///   - zₙ ≈ 0 (residual angle)
+///
+/// Hardware:
+/// - No multipliers (only shifts and adds)
+/// - Deterministic latency: ITERATIONS cycles
+/// - Area: ~4 adders/subtractors + small ROM
+///
+/// Usage:
+///   - To compute sin/cos: Start with x=1/K, y=0, z=angle
+///   - To rotate vector: Start with x, y, z=angle
+pub fn cordic_rotate<const W: nat, const F: nat, const ITERATIONS: nat>(
+    x_in: int<W, true>,
+    y_in: int<W, true>,
+    angle: int<W, true>
+) -> (int<W, true>, int<W, true>) {
+    let mut x = x_in;
+    let mut y = y_in;
+    let mut z = angle;
+
+    // Iterative CORDIC rotation
+    for i in 0..ITERATIONS {
+        // Determine rotation direction
+        let d = if z.lt(int<W, true>::ZERO) {
+            int<W, true>::ONE.neg()  // Rotate clockwise
+        } else {
+            int<W, true>::ONE         // Rotate counter-clockwise
+        };
+
+        // Shift amounts (x >> i, y >> i)
+        let x_shifted = x.shr(i);
+        let y_shifted = y.shr(i);
+
+        // Pseudo-rotation:
+        //   x' = x - d * (y >> i)
+        //   y' = y + d * (x >> i)
+        //   z' = z - d * atan(2^-i)
+
+        let x_new = if d.lt(int<W, true>::ZERO) {
+            x.add(y_shifted)
+        } else {
+            x.sub(y_shifted)
+        };
+
+        let y_new = if d.lt(int<W, true>::ZERO) {
+            y.sub(x_shifted)
+        } else {
+            y.add(x_shifted)
+        };
+
+        // Update angle (lookup atan value from table)
+        // Note: This requires proper fixed-point conversion
+        // In real hardware, would index CORDIC_ATAN_TABLE[i]
+        let atan_i = int<W, true>::from_const(CORDIC_ATAN_TABLE[i]);
+        let z_new = if d.lt(int<W, true>::ZERO) {
+            z.add(atan_i)
+        } else {
+            z.sub(atan_i)
+        };
+
+        x = x_new;
+        y = y_new;
+        z = z_new;
+    }
+
+    return (x, y)
+}
+
+// ============================================================================
+// CORDIC Vectoring Mode
+// ============================================================================
+
+/// CORDIC vectoring: Compute magnitude and phase
+///
+/// Given: (x₀, y₀, z₀=0)
+/// Output: (xₙ, yₙ≈0, zₙ) where:
+///   - xₙ = K·sqrt(x₀² + y₀²)  [magnitude]
+///   - yₙ ≈ 0                   [converges to zero]
+///   - zₙ = atan2(y₀, x₀)       [phase angle]
+///
+/// Usage:
+///   - To compute atan2(y, x): Start with x, y, z=0
+///   - To compute magnitude: Use xₙ, then multiply by 1/K
+pub fn cordic_vectoring<const W: nat, const F: nat, const ITERATIONS: nat>(
+    x_in: int<W, true>,
+    y_in: int<W, true>
+) -> (int<W, true>, int<W, true>) {
+    let mut x = x_in;
+    let mut y = y_in;
+    let mut z = int<W, true>::ZERO;
+
+    // Iterative CORDIC vectoring
+    for i in 0..ITERATIONS {
+        // Determine rotation direction (drive y toward zero)
+        let d = if y.lt(int<W, true>::ZERO) {
+            int<W, true>::ONE         // y negative, rotate counter-clockwise
+        } else {
+            int<W, true>::ONE.neg()  // y positive, rotate clockwise
+        };
+
+        let x_shifted = x.shr(i);
+        let y_shifted = y.shr(i);
+
+        // Pseudo-rotation:
+        //   x' = x - d * (y >> i)
+        //   y' = y + d * (x >> i)
+        //   z' = z - d * atan(2^-i)
+
+        let x_new = if d.lt(int<W, true>::ZERO) {
+            x.add(y_shifted)
+        } else {
+            x.sub(y_shifted)
+        };
+
+        let y_new = if d.lt(int<W, true>::ZERO) {
+            y.sub(x_shifted)
+        } else {
+            y.add(x_shifted)
+        };
+
+        let atan_i = int<W, true>::from_const(CORDIC_ATAN_TABLE[i]);
+        let z_new = if d.lt(int<W, true>::ZERO) {
+            z.add(atan_i)
+        } else {
+            z.sub(atan_i)
+        };
+
+        x = x_new;
+        y = y_new;
+        z = z_new;
+    }
+
+    // Return (magnitude*K, angle)
+    return (x, z)
+}
+
+// ============================================================================
+// High-Level Trigonometric Functions
+// ============================================================================
+
+/// Compute sin(angle) using CORDIC
+///
+/// Returns: sin(angle) in fixed-point format
+///
+/// Algorithm:
+/// 1. Start with x = 1/K, y = 0
+/// 2. Rotate by angle using CORDIC
+/// 3. Result: y = sin(angle), x = cos(angle)
+pub fn cordic_sin<const W: nat, const F: nat, const ITERATIONS: nat>(
+    angle: int<W, true>
+) -> int<W, true> {
+    // Start with unit vector (scaled by 1/K)
+    let x_init = int<W, true>::from_const(CORDIC_SCALE_INV);
+    let y_init = int<W, true>::ZERO;
+
+    let (x_result, y_result) = cordic_rotate::<W, F, ITERATIONS>(x_init, y_init, angle);
+
+    return y_result  // sin(angle)
+}
+
+/// Compute cos(angle) using CORDIC
+pub fn cordic_cos<const W: nat, const F: nat, const ITERATIONS: nat>(
+    angle: int<W, true>
+) -> int<W, true> {
+    let x_init = int<W, true>::from_const(CORDIC_SCALE_INV);
+    let y_init = int<W, true>::ZERO;
+
+    let (x_result, y_result) = cordic_rotate::<W, F, ITERATIONS>(x_init, y_init, angle);
+
+    return x_result  // cos(angle)
+}
+
+/// Compute both sin and cos simultaneously
+///
+/// More efficient than calling sin() and cos() separately
+pub fn cordic_sincos<const W: nat, const F: nat, const ITERATIONS: nat>(
+    angle: int<W, true>
+) -> (int<W, true>, int<W, true>) {
+    let x_init = int<W, true>::from_const(CORDIC_SCALE_INV);
+    let y_init = int<W, true>::ZERO;
+
+    let (cos_result, sin_result) = cordic_rotate::<W, F, ITERATIONS>(x_init, y_init, angle);
+
+    return (sin_result, cos_result)
+}
+
+/// Compute atan2(y, x) using CORDIC vectoring mode
+///
+/// Returns: Angle in radians [-π, π]
+///
+/// This is the most common arctangent function:
+/// - Handles all quadrants correctly
+/// - Returns signed angle
+pub fn cordic_atan2<const W: nat, const F: nat, const ITERATIONS: nat>(
+    y: int<W, true>,
+    x: int<W, true>
+) -> int<W, true> {
+    let (magnitude, angle) = cordic_vectoring::<W, F, ITERATIONS>(x, y);
+    return angle
+}
+
+/// Compute magnitude: sqrt(x² + y²)
+///
+/// Using CORDIC vectoring mode
+pub fn cordic_magnitude<const W: nat, const F: nat, const ITERATIONS: nat>(
+    x: int<W, true>,
+    y: int<W, true>
+) -> int<W, true> {
+    let (magnitude_scaled, angle) = cordic_vectoring::<W, F, ITERATIONS>(x, y);
+
+    // Scale by 1/K to get true magnitude
+    let scale_inv = int<W, true>::from_const(CORDIC_SCALE_INV);
+
+    // Fixed-point multiply: (magnitude_scaled * scale_inv) >> F
+    let product = magnitude_scaled.mul(scale_inv);
+    let magnitude = product.shr(F);
+
+    return magnitude
+}
+
+// ============================================================================
+// Pipelined CORDIC Entity
+// ============================================================================
+
+/// Hardware entity: Pipelined CORDIC processor
+///
+/// Implements fully pipelined CORDIC rotation
+/// - One iteration per pipeline stage
+/// - Throughput: 1 result per cycle (after initial latency)
+/// - Latency: ITERATIONS cycles
+///
+/// This is a hardware-optimized version that processes
+/// multiple vectors simultaneously in pipeline stages
+entity PipelinedCordic<const W: nat, const F: nat, const ITERATIONS: nat> {
+    // Input ports
+    input x_in: int<W, true>,
+    input y_in: int<W, true>,
+    input angle_in: int<W, true>,
+    input valid_in: bit,
+
+    // Output ports
+    output x_out: int<W, true>,
+    output y_out: int<W, true>,
+    output valid_out: bit,
+
+    // Clock and reset
+    input clk: clock,
+    input rst: bit,
+
+    // Pipeline registers for each stage
+    signal x_stage: [int<W, true>; ITERATIONS],
+    signal y_stage: [int<W, true>; ITERATIONS],
+    signal z_stage: [int<W, true>; ITERATIONS],
+    signal valid_stage: [bit; ITERATIONS],
+
+    // CORDIC iteration stages
+    for i in 0..ITERATIONS {
+        always @(posedge clk) {
+            if rst {
+                x_stage[i] = int<W, true>::ZERO;
+                y_stage[i] = int<W, true>::ZERO;
+                z_stage[i] = int<W, true>::ZERO;
+                valid_stage[i] = 0b0;
+            } else {
+                // Get inputs (from previous stage or input ports)
+                let x_prev = if i == 0 { x_in } else { x_stage[i-1] };
+                let y_prev = if i == 0 { y_in } else { y_stage[i-1] };
+                let z_prev = if i == 0 { angle_in } else { z_stage[i-1] };
+                let valid_prev = if i == 0 { valid_in } else { valid_stage[i-1] };
+
+                // CORDIC iteration
+                let d = if z_prev.lt(int<W, true>::ZERO) {
+                    int<W, true>::ONE.neg()
+                } else {
+                    int<W, true>::ONE
+                };
+
+                let x_shifted = x_prev.shr(i);
+                let y_shifted = y_prev.shr(i);
+
+                let x_next = if d.lt(int<W, true>::ZERO) {
+                    x_prev.add(y_shifted)
+                } else {
+                    x_prev.sub(y_shifted)
+                };
+
+                let y_next = if d.lt(int<W, true>::ZERO) {
+                    y_prev.sub(x_shifted)
+                } else {
+                    y_prev.add(x_shifted)
+                };
+
+                let atan_i = int<W, true>::from_const(CORDIC_ATAN_TABLE[i]);
+                let z_next = if d.lt(int<W, true>::ZERO) {
+                    z_prev.add(atan_i)
+                } else {
+                    z_prev.sub(atan_i)
+                };
+
+                // Store in pipeline registers
+                x_stage[i] = x_next;
+                y_stage[i] = y_next;
+                z_stage[i] = z_next;
+                valid_stage[i] = valid_prev;
+            }
+        }
+    }
+
+    // Output assignment (last stage)
+    assign x_out = x_stage[ITERATIONS-1];
+    assign y_out = y_stage[ITERATIONS-1];
+    assign valid_out = valid_stage[ITERATIONS-1];
+}
+
+// ============================================================================
+// Hardware Optimization Notes
+// ============================================================================
+
+// 1. **No Multipliers**: CORDIC uses only shifts and adds
+//    - Critical for resource-constrained FPGAs
+//    - Much smaller area than multiply-based methods
+//    - Example: sin/cos using Taylor series needs 5-6 multipliers
+//              CORDIC needs 0 multipliers
+//
+// 2. **Trade Iterations for Precision**:
+//    - 8 iterations: ~8-bit precision
+//    - 12 iterations: ~12-bit precision
+//    - 16 iterations: ~16-bit precision
+//    - 24 iterations: ~24-bit precision
+//    - Each iteration adds 1 pipeline stage
+//
+// 3. **Pipelined vs Sequential**:
+//    - Sequential: Reuse logic, lower area, ITERATIONS cycles per result
+//    - Pipelined: High throughput (1/cycle), larger area
+//    - Hybrid: Partially pipeline (e.g., 2 iterations per stage)
+//
+// 4. **Fixed-Point Format**:
+//    - Need sufficient fractional bits for precision
+//    - Recommended: F ≥ W/2 for good precision
+//    - Example: W=32, F=28 (Q4.28) gives ~28-bit precision
+//
+// 5. **Lookup Table Optimization**:
+//    - CORDIC_ATAN_TABLE is small (16 entries × W bits)
+//    - Can use ROM, distributed RAM, or synthesized constants
+//    - Total size: ~512 bits for 16 iterations @ 32-bit width
+//
+// 6. **Convergence Range**:
+//    - Rotation mode: Valid for angles in [-π/2, π/2]
+//    - For angles outside range: Use quadrant reduction
+//    - Example: angle > π/2 → rotate by π/2, then apply remainder
+//
+// 7. **Scale Factor Handling**:
+//    - Can pre-scale inputs by K (multiply by 1.646...)
+//    - Or post-scale outputs by 1/K (multiply by 0.607...)
+//    - For sin/cos: Start with x = 1/K eliminates post-scaling
+
+// ============================================================================
+// Usage Examples
+// ============================================================================
+
+// Example 1: Compute sin/cos at compile-time angle
+//   const ANGLE_45_DEG: i32 = 843314857;  // 45° in Q4.28 format
+//   let (sin_val, cos_val) = cordic_sincos::<32, 28, 16>(
+//       int<32, true>::from_const(ANGLE_45_DEG)
+//   );
+//
+// Example 2: Rotate a 2D vector
+//   let x: int<32, true> = ...;  // Vector x component
+//   let y: int<32, true> = ...;  // Vector y component
+//   let angle: int<32, true> = ...;  // Rotation angle
+//
+//   let (x_rotated, y_rotated) = cordic_rotate::<32, 28, 16>(x, y, angle);
+//
+// Example 3: Compute atan2 for vector
+//   let dy: int<32, true> = ...;
+//   let dx: int<32, true> = ...;
+//   let angle = cordic_atan2::<32, 28, 16>(dy, dx);
+//
+// Example 4: Pipelined entity instantiation
+//   let cordic_core = PipelinedCordic::<32, 28, 16> {
+//       x_in: vertex_x,
+//       y_in: vertex_y,
+//       angle_in: rotation_angle,
+//       valid_in: data_valid,
+//       clk: sys_clk,
+//       rst: sys_rst
+//   };
+//
+//   // Use outputs after ITERATIONS cycle latency
+//   let rotated_x = cordic_core.x_out;
+//   let rotated_y = cordic_core.y_out;
+
+// ============================================================================
+// References and Further Reading
+// ============================================================================
+
+// Papers:
+// - Volder, J. (1959). "The CORDIC Trigonometric Computing Technique"
+//   IRE Transactions on Electronic Computers, EC-8(3), pp. 330-334
+//
+// - Andraka, R. (1998). "A survey of CORDIC algorithms for FPGA based computers"
+//   Proceedings of the 1998 ACM/SIGDA sixth international symposium on FPGAs
+//
+// - Walther, J. (1971). "A unified algorithm for elementary functions"
+//   Proceedings of the Spring Joint Computer Conference
+//
+// Online Resources:
+// - Wikipedia: CORDIC - https://en.wikipedia.org/wiki/CORDIC
+// - Xilinx CORDIC IP Core - https://www.xilinx.com/products/intellectual-property/cordic.html
+// - CORDIC FAQ - http://www.dspguru.com/dsp/faqs/cordic

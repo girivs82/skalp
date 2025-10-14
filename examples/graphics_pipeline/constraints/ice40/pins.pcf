@@ -1,0 +1,190 @@
+# Pin Constraints for Lattice iCE40 FPGA
+#
+# Target: iCE40-HX8K Breakout Board
+# Format: PCF (Physical Constraints File)
+#
+# Usage: Used by nextpnr-ice40 place-and-route tool
+#   nextpnr-ice40 --hx8k --package ct256 --pcf pins.pcf --json design.json
+
+# ============================================================================
+# Clock Inputs
+# ============================================================================
+
+# System clock (100 MHz oscillator)
+set_io sys_clk J3
+
+# Video pixel clock (25 MHz - generated from PLL)
+# Note: May be internal signal, not pinned
+
+# ============================================================================
+# Reset Button
+# ============================================================================
+
+# Active-high reset button
+set_io sys_rst K11
+
+# ============================================================================
+# AXI4-Lite Interface (from CPU/MCU)
+# ============================================================================
+
+# Write address channel
+set_io axi_awvalid B1
+set_io axi_awready B2
+set_io axi_awaddr[0] C1
+set_io axi_awaddr[1] C2
+set_io axi_awaddr[2] D1
+set_io axi_awaddr[3] D2
+set_io axi_awaddr[4] E1
+set_io axi_awaddr[5] E2
+set_io axi_awaddr[6] F1
+set_io axi_awaddr[7] F2
+set_io axi_awaddr[8] G1
+set_io axi_awaddr[9] G2
+set_io axi_awaddr[10] H1
+set_io axi_awaddr[11] H2
+
+# Write data channel
+set_io axi_wvalid J1
+set_io axi_wready J2
+set_io axi_wdata[0] K1
+set_io axi_wdata[1] K2
+set_io axi_wdata[2] L1
+set_io axi_wdata[3] L2
+set_io axi_wdata[4] M1
+set_io axi_wdata[5] M2
+set_io axi_wdata[6] N1
+set_io axi_wdata[7] N2
+# ... (additional data bits 8-31 would be mapped)
+
+# Write response channel
+set_io axi_bvalid P1
+set_io axi_bready P2
+set_io axi_bresp[0] R1
+set_io axi_bresp[1] R2
+
+# Read address channel
+set_io axi_arvalid A3
+set_io axi_arready B3
+set_io axi_araddr[0] C3
+set_io axi_araddr[1] D3
+# ... (similar to awaddr)
+
+# Read data channel
+set_io axi_rvalid A4
+set_io axi_rready B4
+set_io axi_rdata[0] C4
+set_io axi_rdata[1] D4
+# ... (32-bit data bus)
+
+# ============================================================================
+# Video Output (VGA/HDMI)
+# ============================================================================
+
+# Horizontal sync
+set_io video_hsync T15
+
+# Vertical sync
+set_io video_vsync T14
+
+# Red channel (8-bit)
+set_io video_r[0] T13
+set_io video_r[1] R12
+set_io video_r[2] T12
+set_io video_r[3] R11
+set_io video_r[4] T11
+set_io video_r[5] R10
+set_io video_r[6] T10
+set_io video_r[7] R9
+
+# Green channel (8-bit)
+set_io video_g[0] T9
+set_io video_g[1] R8
+set_io video_g[2] T8
+set_io video_g[3] R7
+set_io video_g[4] T7
+set_io video_g[5] R6
+set_io video_g[6] T6
+set_io video_g[7] R5
+
+# Blue channel (8-bit)
+set_io video_b[0] T5
+set_io video_b[1] R4
+set_io video_b[2] T4
+set_io video_b[3] R3
+set_io video_b[4] T3
+set_io video_b[5] R2
+set_io video_b[6] T2
+set_io video_b[7] R1
+
+# Video data enable (optional)
+set_io video_de T16
+
+# Pixel clock output
+set_io video_clk P16
+
+# ============================================================================
+# Memory Interface (External SRAM/DRAM for framebuffer)
+# ============================================================================
+
+# Address bus (16-bit for 64KB SRAM)
+set_io mem_addr[0] A15
+set_io mem_addr[1] B15
+set_io mem_addr[2] C15
+set_io mem_addr[3] D15
+set_io mem_addr[4] E15
+set_io mem_addr[5] F15
+set_io mem_addr[6] G15
+set_io mem_addr[7] H15
+set_io mem_addr[8] A14
+set_io mem_addr[9] B14
+set_io mem_addr[10] C14
+set_io mem_addr[11] D14
+set_io mem_addr[12] E14
+set_io mem_addr[13] F14
+set_io mem_addr[14] G14
+set_io mem_addr[15] H14
+
+# Data bus (32-bit)
+set_io mem_data[0] A13
+set_io mem_data[1] B13
+# ... (data bits 2-31)
+
+# Control signals
+set_io mem_we_n A12    # Write enable (active low)
+set_io mem_oe_n B12    # Output enable (active low)
+set_io mem_ce_n C12    # Chip enable (active low)
+
+# ============================================================================
+# Debug LEDs
+# ============================================================================
+
+set_io led[0] B5   # Status LED
+set_io led[1] B4   # Busy indicator
+set_io led[2] A2   # Error indicator
+set_io led[3] A1   # Pipeline active
+
+# ============================================================================
+# Debug UART (for logging)
+# ============================================================================
+
+set_io uart_tx B7
+set_io uart_rx B6
+
+# ============================================================================
+# Notes
+# ============================================================================
+
+# Pin assignments are for iCE40-HX8K-CT256 package
+# Adjust as needed for your specific board
+#
+# Pin constraints reference:
+# - iCE40 HX8K datasheet: Lattice TN1248
+# - Board schematic: Check your specific board documentation
+#
+# To verify pin assignments:
+#   icebox_explain --chip hx8k design.asc
+#
+# Common iCE40 packages:
+# - CT256: 256-pin BGA
+# - TQ144: 144-pin TQFP
+# - CB132: 132-pin caBGA
