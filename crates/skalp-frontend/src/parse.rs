@@ -3526,13 +3526,20 @@ impl<'a> ParseState<'a> {
                 self.bump();
                 self.finish_node();
             }
-            Some(SyntaxKind::Ident) => {
+            Some(SyntaxKind::Ident)
+            | Some(SyntaxKind::Vec2Kw)
+            | Some(SyntaxKind::Vec3Kw)
+            | Some(SyntaxKind::Vec4Kw)
+            | Some(SyntaxKind::Fp16Kw)
+            | Some(SyntaxKind::Fp32Kw)
+            | Some(SyntaxKind::Fp64Kw) => {
                 // Check if this is a struct literal: Type { field: value, ... } or Type<T> { field: value, ... }
-                // Look ahead for: Ident { Ident : or Ident { } or Ident<...> { Ident : or Ident<...> { }
+                // Look ahead for: Type { Ident : or Type { } or Type<...> { Ident : or Type<...> { }
+                // Type can be Ident or type keyword (vec3, fp32, etc.)
                 let mut is_struct_literal = false;
                 let mut brace_offset = 1;
 
-                // Check for generic arguments: Ident<...>
+                // Check for generic arguments: Type<...>
                 if self.peek_kind(1) == Some(SyntaxKind::Lt) {
                     // Scan forward to find the closing >
                     let mut depth = 0;
@@ -3923,8 +3930,22 @@ impl<'a> ParseState<'a> {
     fn parse_struct_literal(&mut self) {
         self.start_node(SyntaxKind::StructLiteral);
 
-        // Type name (identifier)
-        self.expect(SyntaxKind::Ident);
+        // Type name (identifier or type keyword like vec3, fp32)
+        if self.at(SyntaxKind::Ident)
+            || matches!(
+                self.current_kind(),
+                Some(SyntaxKind::Vec2Kw)
+                    | Some(SyntaxKind::Vec3Kw)
+                    | Some(SyntaxKind::Vec4Kw)
+                    | Some(SyntaxKind::Fp16Kw)
+                    | Some(SyntaxKind::Fp32Kw)
+                    | Some(SyntaxKind::Fp64Kw)
+            )
+        {
+            self.bump();
+        } else {
+            self.error("expected type name for struct literal");
+        }
 
         // Optional generic arguments (e.g., vec3<fp32>)
         if self.at(SyntaxKind::Lt) {
