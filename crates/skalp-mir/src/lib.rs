@@ -34,6 +34,7 @@ use skalp_frontend::Hir;
 
 /// Lower HIR to MIR
 pub fn lower_to_mir(hir: &Hir) -> Result<Mir> {
+    // Monomorphization already happened in the frontend
     // Use the actual HIR to MIR transformer
     let mut transformer = HirToMir::new();
     let mir = transformer.transform(hir);

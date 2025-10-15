@@ -100,7 +100,7 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
         anyhow::bail!(error_msg);
     }
 
-    // Build HIR
+    // Build HIR (first pass - will have incomplete instances for imported entities)
     let mut builder = hir_builder::HirBuilderContext::new();
     let mut hir = builder.build(&syntax_tree).map_err(|errors| {
         anyhow::anyhow!(
@@ -121,12 +121,54 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
     hir = merge_imports(&hir, &dependencies, &resolver)
         .context("Failed to merge imported symbols")?;
 
+    // Second pass: Rebuild instances now that all entities are available
+    hir = rebuild_instances_with_imports(&hir, file_path)
+        .context("Failed to rebuild instances with imports")?;
+
     // Monomorphize
     use monomorphization::MonomorphizationEngine;
     let mut engine = MonomorphizationEngine::new();
     let monomorphized_hir = engine.monomorphize(&hir);
 
     Ok(monomorphized_hir)
+}
+
+/// Rebuild instances with imported entities now available
+fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
+    use std::fs;
+
+    // Read the source file again
+    let source = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read source file for rebuild: {:?}", file_path))?;
+
+    // Parse to syntax tree
+    let (syntax_tree, _) = parse::parse_with_errors(&source);
+
+    // Create a new builder with all entities pre-registered
+    let mut builder = hir_builder::HirBuilderContext::new();
+
+    // Pre-register all entities in the symbol table
+    for entity in &hir.entities {
+        builder.preregister_entity(entity);
+    }
+
+    // Rebuild implementations (this will now find imported entities)
+    let rebuilt_hir = builder.build(&syntax_tree).map_err(|errors| {
+        anyhow::anyhow!(
+            "HIR rebuild failed: {}",
+            errors
+                .first()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "unknown error".to_string())
+        )
+    })?;
+
+    // Keep all entities from the merged HIR (including imports)
+    // But use implementations from the rebuilt HIR (which now have correct instances)
+    let mut final_hir = hir.clone();
+    final_hir.implementations = rebuilt_hir.implementations;
+
+    Ok(final_hir)
 }
 
 /// Merge imported symbols from dependencies into HIR
@@ -194,7 +236,27 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
     // Try to find the symbol in entities
     if let Some(entity) = source.entities.iter().find(|e| e.name == symbol_name) {
-        target.entities.push(entity.clone());
+        // Assign a new unique entity ID to avoid collisions
+        let new_entity_id = hir::EntityId(
+            target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1
+        );
+
+        // Renumber ports to avoid collisions
+        let next_port_id = target.entities.iter()
+            .flat_map(|e| e.ports.iter())
+            .map(|p| p.id.0)
+            .max()
+            .unwrap_or(0) + 1;
+
+        let mut imported_entity = entity.clone();
+        imported_entity.id = new_entity_id;
+
+        // Renumber all ports
+        for (i, port) in imported_entity.ports.iter_mut().enumerate() {
+            port.id = hir::PortId(next_port_id + i as u32);
+        }
+
+        target.entities.push(imported_entity);
         return Ok(());
     }
 
@@ -217,6 +279,16 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
     // Try to find the symbol in type aliases
     if let Some(type_alias) = source.type_aliases.iter().find(|t| t.name == symbol_name) {
         target.type_aliases.push(type_alias.clone());
+        return Ok(());
+    }
+
+    // Try to find the symbol in user-defined types (structs, enums, unions)
+    if let Some(user_type) = source
+        .user_defined_types
+        .iter()
+        .find(|t| t.name == symbol_name)
+    {
+        target.user_defined_types.push(user_type.clone());
         return Ok(());
     }
 
@@ -268,6 +340,37 @@ fn merge_symbol_with_rename(
         return Ok(());
     }
 
+    // Try to find the symbol in user-defined types (structs, enums, unions)
+    if let Some(user_type) = source
+        .user_defined_types
+        .iter()
+        .find(|t| t.name == symbol_name)
+    {
+        let mut renamed_user_type = user_type.clone();
+        renamed_user_type.name = alias.to_string();
+        // Also need to update the name in the type_def itself
+        renamed_user_type.type_def = match &renamed_user_type.type_def {
+            hir::HirType::Struct(s) => {
+                let mut new_struct = s.clone();
+                new_struct.name = alias.to_string();
+                hir::HirType::Struct(new_struct)
+            }
+            hir::HirType::Enum(e) => {
+                let mut new_enum = e.as_ref().clone();
+                new_enum.name = alias.to_string();
+                hir::HirType::Enum(Box::new(new_enum))
+            }
+            hir::HirType::Union(u) => {
+                let mut new_union = u.clone();
+                new_union.name = alias.to_string();
+                hir::HirType::Union(new_union)
+            }
+            other => other.clone(),
+        };
+        target.user_defined_types.push(renamed_user_type);
+        return Ok(());
+    }
+
     Ok(())
 }
 
@@ -298,6 +401,13 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     for type_alias in &source.type_aliases {
         if type_alias.visibility == HirVisibility::Public {
             target.type_aliases.push(type_alias.clone());
+        }
+    }
+
+    // Merge all public user-defined types (structs, enums, unions)
+    for user_type in &source.user_defined_types {
+        if user_type.visibility == HirVisibility::Public {
+            target.user_defined_types.push(user_type.clone());
         }
     }
 
@@ -366,6 +476,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         trait_definitions: Vec::new(),
         trait_implementations: Vec::new(),
         type_aliases: Vec::new(),
+        user_defined_types: Vec::new(),
         global_constraints: Vec::new(),
         modules: Vec::new(),
         imports: Vec::new(),

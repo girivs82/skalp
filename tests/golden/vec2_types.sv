@@ -2,12 +2,13 @@
 // Design: main
 
 module Vec2Test (
-    input [63:0] v,
+    input [31:0] v_x,
+    input [31:0] v_y,
     output [31:0] x,
     output [31:0] y
 );
 
-    assign x = v[31:0];
-    assign y = v[63:32];
+    assign x = v_x;
+    assign y = v_y;
 
 endmodule

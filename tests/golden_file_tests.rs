@@ -390,21 +390,16 @@ impl Vec2Test {
     let golden = GoldenTest::new("vec2_types");
     let verilog = compile_to_verilog(source);
 
-    // Verify vec2<fp32> is 64-bit (2 * 32)
+    // Verify vec2<fp32> is flattened into separate 32-bit ports
     assert!(
-        verilog.contains("[63:0]"),
-        "vec2<fp32> should be 64-bit:\n{}",
+        verilog.contains("v_x") && verilog.contains("v_y"),
+        "vec2<fp32> should be flattened into v_x and v_y:\n{}",
         verilog
     );
-    // Verify component access (port_0 is the input v)
+    // Verify both components are 32-bit
     assert!(
-        verilog.contains("[31:0]"),
-        "Should have x component (bits [31:0]):\n{}",
-        verilog
-    );
-    assert!(
-        verilog.contains("[63:32]"),
-        "Should have y component (bits [63:32]):\n{}",
+        verilog.contains("[31:0] v_x") && verilog.contains("[31:0] v_y"),
+        "Both components should be [31:0]:\n{}",
         verilog
     );
 
@@ -431,20 +426,19 @@ impl Vec3Test {
     let golden = GoldenTest::new("vec3_types");
     let verilog = compile_to_verilog(source);
 
-    // Verify vec3<bit<16>> is 48-bit (3 * 16)
-    assert!(verilog.contains("[47:0]"), "vec3<bit<16>> should be 48-bit");
-    // Verify component access
+    // Verify vec3<bit<16>> is flattened into separate 16-bit ports
     assert!(
-        verilog.contains("[15:0]"),
-        "Should have x component (bits [15:0])"
+        verilog.contains("v_x") && verilog.contains("v_y") && verilog.contains("v_z"),
+        "vec3<bit<16>> should be flattened into v_x, v_y, v_z:\n{}",
+        verilog
     );
+    // Verify all components are 16-bit
     assert!(
-        verilog.contains("[31:16]"),
-        "Should have y component (bits [31:16])"
-    );
-    assert!(
-        verilog.contains("[47:32]"),
-        "Should have z component (bits [47:32])"
+        verilog.contains("[15:0] v_x")
+            && verilog.contains("[15:0] v_y")
+            && verilog.contains("[15:0] v_z"),
+        "All components should be [15:0]:\n{}",
+        verilog
     );
 
     golden.assert_eq("sv", &verilog);
@@ -472,24 +466,23 @@ impl Vec4Test {
     let golden = GoldenTest::new("vec4_types");
     let verilog = compile_to_verilog(source);
 
-    // Verify vec4<bit<8>> is 32-bit (4 * 8)
-    assert!(verilog.contains("[31:0]"), "vec4<bit<8>> should be 32-bit");
-    // Verify component access
+    // Verify vec4<bit<8>> is flattened into separate 8-bit ports
     assert!(
-        verilog.contains("[7:0]"),
-        "Should have x component (bits [7:0])"
+        verilog.contains("v_x")
+            && verilog.contains("v_y")
+            && verilog.contains("v_z")
+            && verilog.contains("v_w"),
+        "vec4<bit<8>> should be flattened into v_x, v_y, v_z, v_w:\n{}",
+        verilog
     );
+    // Verify all components are 8-bit
     assert!(
-        verilog.contains("[15:8]"),
-        "Should have y component (bits [15:8])"
-    );
-    assert!(
-        verilog.contains("[23:16]"),
-        "Should have z component (bits [23:16])"
-    );
-    assert!(
-        verilog.contains("[31:24]"),
-        "Should have w component (bits [31:24])"
+        verilog.contains("[7:0] v_x")
+            && verilog.contains("[7:0] v_y")
+            && verilog.contains("[7:0] v_z")
+            && verilog.contains("[7:0] v_w"),
+        "All components should be [7:0]:\n{}",
+        verilog
     );
 
     golden.assert_eq("sv", &verilog);
@@ -514,9 +507,17 @@ impl VecFPMixed {
     let golden = GoldenTest::new("vec_fp_mixed");
     let verilog = compile_to_verilog(source);
 
-    // Verify mixed vector and FP types
-    assert!(verilog.contains("[63:0]"), "vec2<fp32> should be 64-bit");
-    assert!(verilog.contains("[47:0]"), "vec3<fp16> should be 48-bit");
+    // Verify mixed vector and FP types are flattened
+    assert!(
+        verilog.contains("v2_x") && verilog.contains("v2_y"),
+        "vec2<fp32> should be flattened into v2_x, v2_y:\n{}",
+        verilog
+    );
+    assert!(
+        verilog.contains("v3_x") && verilog.contains("v3_y") && verilog.contains("v3_z"),
+        "vec3<fp16> should be flattened into v3_x, v3_y, v3_z:\n{}",
+        verilog
+    );
 
     golden.assert_eq("sv", &verilog);
 }

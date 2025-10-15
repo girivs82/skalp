@@ -8,21 +8,26 @@ use crate::monomorphization::collector::{Instantiation, IntentValue};
 use std::collections::HashMap;
 
 /// Monomorphization engine
-pub struct MonomorphizationEngine {
+pub struct MonomorphizationEngine<'hir> {
     /// Const evaluator
     evaluator: ConstEvaluator,
+    /// Reference to HIR for type resolution
+    hir: Option<&'hir Hir>,
 }
 
-impl MonomorphizationEngine {
+impl<'hir> MonomorphizationEngine<'hir> {
     /// Create a new monomorphization engine
     pub fn new() -> Self {
         Self {
             evaluator: ConstEvaluator::new(),
+            hir: None,
         }
     }
 
     /// Monomorphize the entire HIR
-    pub fn monomorphize(&mut self, hir: &Hir) -> Hir {
+    pub fn monomorphize(&mut self, hir: &'hir Hir) -> Hir {
+        // Store HIR reference for type resolution
+        self.hir = Some(hir);
         use crate::monomorphization::InstantiationCollector;
 
         // Step 1: Collect all generic instantiations
@@ -156,6 +161,7 @@ impl MonomorphizationEngine {
             trait_definitions: hir.trait_definitions.clone(),
             trait_implementations: hir.trait_implementations.clone(),
             type_aliases: hir.type_aliases.clone(),
+            user_defined_types: hir.user_defined_types.clone(),
             global_constraints: hir.global_constraints.clone(),
             modules: hir.modules.clone(),
             imports: hir.imports.clone(),
@@ -370,6 +376,36 @@ impl MonomorphizationEngine {
         }
     }
 
+    /// Resolve a custom type to its actual definition
+    fn resolve_custom_type(&self, ty: &HirType) -> HirType {
+        match ty {
+            HirType::Custom(name) => {
+                // Look up the type in HIR's user-defined types
+                if let Some(hir) = self.hir {
+                    for user_type in &hir.user_defined_types {
+                        if user_type.name == *name {
+                            // Found it - return the type definition
+                            // Don't recursively resolve to avoid infinite loops
+                            return user_type.type_def.clone();
+                        }
+                    }
+
+                    // Also check type aliases
+                    for type_alias in &hir.type_aliases {
+                        if type_alias.name == *name {
+                            // Recursively resolve type aliases
+                            return self.resolve_custom_type(&type_alias.target_type);
+                        }
+                    }
+                }
+                // Type not found - return as-is
+                ty.clone()
+            }
+            // For non-custom types, return as-is
+            _ => ty.clone(),
+        }
+    }
+
     /// Substitute type parameters in a type
     #[allow(clippy::only_used_in_recursion)]
     fn substitute_type(&self, ty: &HirType, instantiation: &Instantiation) -> HirType {
@@ -377,16 +413,22 @@ impl MonomorphizationEngine {
             // Custom type might be a type parameter
             HirType::Custom(name) => {
                 if let Some(concrete_ty) = instantiation.type_args.get(name) {
-                    concrete_ty.clone()
+                    // Recursively substitute and resolve the concrete type
+                    let substituted = self.substitute_type(concrete_ty, instantiation);
+                    // Resolve custom types to their definitions
+                    self.resolve_custom_type(&substituted)
                 } else {
-                    ty.clone()
+                    // Not a type parameter - try to resolve as a user-defined type
+                    self.resolve_custom_type(ty)
                 }
             }
 
             // Array: recursively substitute element type
             HirType::Array(elem, size) => {
                 let elem_substituted = self.substitute_type(elem, instantiation);
-                HirType::Array(Box::new(elem_substituted), *size)
+                // Also resolve any custom types in the element
+                let elem_resolved = self.resolve_custom_type(&elem_substituted);
+                HirType::Array(Box::new(elem_resolved), *size)
             }
 
             // Parametric types: evaluate to concrete types
@@ -534,10 +576,12 @@ impl MonomorphizationEngine {
             // Vec types - recursively substitute element type
             HirType::Vec2(elem) | HirType::Vec3(elem) | HirType::Vec4(elem) => {
                 let elem_substituted = self.substitute_type(elem, instantiation);
+                // Also resolve any custom types in the element
+                let elem_resolved = self.resolve_custom_type(&elem_substituted);
                 match ty {
-                    HirType::Vec2(_) => HirType::Vec2(Box::new(elem_substituted)),
-                    HirType::Vec3(_) => HirType::Vec3(Box::new(elem_substituted)),
-                    HirType::Vec4(_) => HirType::Vec4(Box::new(elem_substituted)),
+                    HirType::Vec2(_) => HirType::Vec2(Box::new(elem_resolved)),
+                    HirType::Vec3(_) => HirType::Vec3(Box::new(elem_resolved)),
+                    HirType::Vec4(_) => HirType::Vec4(Box::new(elem_resolved)),
                     _ => unreachable!(),
                 }
             }
@@ -882,7 +926,7 @@ impl MonomorphizationEngine {
     }
 }
 
-impl Default for MonomorphizationEngine {
+impl<'hir> Default for MonomorphizationEngine<'hir> {
     fn default() -> Self {
         Self::new()
     }

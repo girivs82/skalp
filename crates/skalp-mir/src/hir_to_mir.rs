@@ -8,6 +8,17 @@ use skalp_frontend::const_eval::ConstEvaluator;
 use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
 
+/// Information about a flattened port or signal field
+#[derive(Debug, Clone)]
+struct FlattenedField {
+    /// MIR port/signal ID for this field
+    id: u32,
+    /// Field path (e.g., ["position", "x"] for vertex.position.x)
+    field_path: Vec<String>,
+    /// Leaf type of this field
+    leaf_type: DataType,
+}
+
 /// HIR to MIR transformer
 pub struct HirToMir<'hir> {
     /// Next module ID
@@ -24,10 +35,14 @@ pub struct HirToMir<'hir> {
     next_clock_domain_id: u32,
     /// Entity to module ID mapping
     entity_map: HashMap<hir::EntityId, ModuleId>,
-    /// Port ID mapping (HIR to MIR)
+    /// Port ID mapping (HIR to MIR) - now 1-to-many for flattened structs
     port_map: HashMap<hir::PortId, PortId>,
-    /// Signal ID mapping (HIR to MIR)
+    /// Flattened ports: HIR port ID -> list of flattened MIR ports
+    flattened_ports: HashMap<hir::PortId, Vec<FlattenedField>>,
+    /// Signal ID mapping (HIR to MIR) - now 1-to-many for flattened structs
     signal_map: HashMap<hir::SignalId, SignalId>,
+    /// Flattened signals: HIR signal ID -> list of flattened MIR signals
+    flattened_signals: HashMap<hir::SignalId, Vec<FlattenedField>>,
     /// Variable ID mapping (HIR to MIR)
     variable_map: HashMap<hir::VariableId, VariableId>,
     /// Clock domain ID mapping (HIR to MIR)
@@ -55,7 +70,9 @@ impl<'hir> HirToMir<'hir> {
             next_clock_domain_id: 0,
             entity_map: HashMap::new(),
             port_map: HashMap::new(),
+            flattened_ports: HashMap::new(),
             signal_map: HashMap::new(),
+            flattened_signals: HashMap::new(),
             variable_map: HashMap::new(),
             clock_domain_map: HashMap::new(),
             hir: None,
@@ -94,19 +111,33 @@ impl<'hir> HirToMir<'hir> {
                 module.parameters.push(parameter);
             }
 
-            // Convert ports
+            // Convert ports - flatten structs/vectors into individual ports
             for hir_port in &entity.ports {
-                let port_id = self.next_port_id();
-                self.port_map.insert(hir_port.id, port_id);
+                let port_type = self.convert_type(&hir_port.port_type);
+                let direction = self.convert_port_direction(&hir_port.direction);
 
-                let port = Port {
-                    id: port_id,
-                    name: hir_port.name.clone(),
-                    direction: self.convert_port_direction(&hir_port.direction),
-                    port_type: self.convert_type(&hir_port.port_type),
-                    physical_constraints: hir_port.physical_constraints.clone(),
-                };
-                module.ports.push(port);
+                let (flattened_ports, flattened_fields) = self.flatten_port(
+                    &hir_port.name,
+                    &port_type,
+                    direction,
+                    hir_port.physical_constraints.clone(),
+                );
+
+                // If we have multiple flattened ports, store the flattening info
+                if flattened_ports.len() > 1 {
+                    self.flattened_ports
+                        .insert(hir_port.id, flattened_fields.clone());
+                }
+
+                // For simple mapping (first port or single non-struct port)
+                if let Some(first_port) = flattened_ports.first() {
+                    self.port_map.insert(hir_port.id, first_port.id);
+                }
+
+                // Add all flattened ports to the module
+                for port in flattened_ports {
+                    module.ports.push(port);
+                }
             }
 
             mir.add_module(module);
@@ -135,22 +166,37 @@ impl<'hir> HirToMir<'hir> {
 
                 // Find the module
                 if let Some(module) = mir.modules.iter_mut().find(|m| m.id == module_id) {
-                    // Add signals
+                    // Add signals - flatten structs/vectors into individual signals
                     for hir_signal in &impl_block.signals {
-                        let signal_id = self.next_signal_id();
-                        self.signal_map.insert(hir_signal.id, signal_id);
+                        let signal_type = self.convert_type(&hir_signal.signal_type);
+                        let initial = hir_signal
+                            .initial_value
+                            .as_ref()
+                            .and_then(|expr| self.convert_literal_expr(expr));
+                        let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
 
-                        let signal = Signal {
-                            id: signal_id,
-                            name: hir_signal.name.clone(),
-                            signal_type: self.convert_type(&hir_signal.signal_type),
-                            initial: hir_signal
-                                .initial_value
-                                .as_ref()
-                                .and_then(|expr| self.convert_literal_expr(expr)),
-                            clock_domain: hir_signal.clock_domain.map(|id| ClockDomainId(id.0)),
-                        };
-                        module.signals.push(signal);
+                        let (flattened_signals, flattened_fields) = self.flatten_signal(
+                            &hir_signal.name,
+                            &signal_type,
+                            initial,
+                            clock_domain,
+                        );
+
+                        // If we have multiple flattened signals, store the flattening info
+                        if flattened_signals.len() > 1 {
+                            self.flattened_signals
+                                .insert(hir_signal.id, flattened_fields.clone());
+                        }
+
+                        // For simple mapping (first signal or single non-struct signal)
+                        if let Some(first_signal) = flattened_signals.first() {
+                            self.signal_map.insert(hir_signal.id, first_signal.id);
+                        }
+
+                        // Add all flattened signals to the module
+                        for signal in flattened_signals {
+                            module.signals.push(signal);
+                        }
                     }
 
                     // Add variables
@@ -177,8 +223,10 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Add any dynamically created variables (from let bindings in event blocks)
-                    // Clone to avoid borrow checker issues since convert_type needs mutable self
+                    // Note: Duplicates are already handled at creation time - each unique name
+                    // only gets one variable ID, which is reused by all let bindings with that name
                     let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
+
                     for (mir_var_id, name, hir_type) in dynamic_vars {
                         let variable = Variable {
                             id: mir_var_id,
@@ -191,11 +239,10 @@ impl<'hir> HirToMir<'hir> {
                     // Clear dynamic variables for next impl block
                     self.dynamic_variables.clear();
 
-                    // Convert continuous assignments
+                    // Convert continuous assignments (may expand to multiple for structs)
                     for hir_assign in &impl_block.assignments {
-                        if let Some(assign) = self.convert_continuous_assignment(hir_assign) {
-                            module.assignments.push(assign);
-                        }
+                        let assigns = self.convert_continuous_assignment_expanded(hir_assign);
+                        module.assignments.extend(assigns);
                     }
 
                     // Convert module instances
@@ -320,7 +367,17 @@ impl<'hir> HirToMir<'hir> {
     fn convert_statement(&mut self, stmt: &hir::HirStatement) -> Option<Statement> {
         match stmt {
             hir::HirStatement::Assignment(assign) => {
-                self.convert_assignment(assign).map(Statement::Assignment)
+                let assigns = self.convert_assignment_expanded(assign);
+                match assigns.len() {
+                    0 => None,
+                    1 => Some(Statement::Assignment(assigns.into_iter().next().unwrap())),
+                    _ => {
+                        // Multiple assignments from struct expansion - wrap in block
+                        Some(Statement::Block(Block {
+                            statements: assigns.into_iter().map(Statement::Assignment).collect(),
+                        }))
+                    }
+                }
             }
             hir::HirStatement::If(if_stmt) => {
                 // Try synthesis resolution first for complex conditionals
@@ -370,15 +427,30 @@ impl<'hir> HirToMir<'hir> {
                     // Already registered
                     id
                 } else {
-                    // Create a new MIR variable on the fly for event block let bindings
-                    let new_id = self.next_variable_id();
-                    self.variable_map.insert(let_stmt.id, new_id);
+                    // Check if we already have a dynamic variable with this name
+                    // If so, reuse its ID to avoid duplicate declarations
+                    let existing_var = self.dynamic_variables.values().find(|(_, name, _)| {
+                        name == &let_stmt.name
+                    });
 
-                    // Track this dynamically created variable so we can add it to the module later
-                    self.dynamic_variables.insert(
-                        let_stmt.id,
-                        (new_id, let_stmt.name.clone(), let_stmt.var_type.clone()),
-                    );
+                    let new_id = if let Some((existing_id, _, _)) = existing_var {
+                        // Reuse the existing variable ID for this name
+                        *existing_id
+                    } else {
+                        // Create a new MIR variable on the fly for event block let bindings
+                        let new_id = self.next_variable_id();
+
+                        // Track this dynamically created variable so we can add it to the module later
+                        self.dynamic_variables.insert(
+                            let_stmt.id,
+                            (new_id, let_stmt.name.clone(), let_stmt.var_type.clone()),
+                        );
+
+                        new_id
+                    };
+
+                    // Map this HIR variable ID to the MIR variable ID (whether new or reused)
+                    self.variable_map.insert(let_stmt.id, new_id);
 
                     new_id
                 };
@@ -479,6 +551,21 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR assignment to MIR assignment
+    /// Convert HIR assignment - may expand to multiple MIR assignments for struct types
+    fn convert_assignment_expanded(&mut self, assign: &hir::HirAssignment) -> Vec<Assignment> {
+        // Try to expand struct-to-struct assignments
+        if let Some(assignments) = self.try_expand_struct_assignment(assign) {
+            return assignments;
+        }
+
+        // Fall back to single assignment
+        if let Some(single) = self.convert_assignment(assign) {
+            vec![single]
+        } else {
+            vec![]
+        }
+    }
+
     fn convert_assignment(&mut self, assign: &hir::HirAssignment) -> Option<Assignment> {
         let lhs = self.convert_lvalue(&assign.lhs)?;
         let rhs = self.convert_expression(&assign.rhs)?;
@@ -491,7 +578,168 @@ impl<'hir> HirToMir<'hir> {
         Some(Assignment { lhs, rhs, kind })
     }
 
-    /// Convert continuous assignment
+    /// Try to expand a struct assignment into multiple field assignments
+    fn try_expand_struct_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<Assignment>> {
+        // Get assignment kind
+        let kind = match assign.assignment_type {
+            hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
+            hir::HirAssignmentType::Blocking => AssignmentKind::Blocking,
+            hir::HirAssignmentType::Combinational => AssignmentKind::Blocking,
+        };
+
+        // Check if LHS is a simple signal/port that was flattened
+        let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
+            hir::HirLValue::Signal(id) => {
+                if self.flattened_signals.contains_key(id) {
+                    (id.0, true)
+                } else {
+                    return None;
+                }
+            }
+            hir::HirLValue::Port(id) => {
+                if self.flattened_ports.contains_key(id) {
+                    (id.0, false)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None, // Not a simple signal/port
+        };
+
+        // Check if RHS is a field access or signal that can be expanded
+        let (rhs_hir_id, rhs_is_signal, rhs_field_path) = match &assign.rhs {
+            hir::HirExpression::Signal(id) => {
+                if self.flattened_signals.contains_key(id) {
+                    (id.0, true, vec![])
+                } else {
+                    return None;
+                }
+            }
+            hir::HirExpression::Port(id) => {
+                if self.flattened_ports.contains_key(id) {
+                    (id.0, false, vec![])
+                } else {
+                    return None;
+                }
+            }
+            hir::HirExpression::FieldAccess { base, field } => {
+                // Extract field path and base signal/port
+                let mut field_path = vec![field.clone()];
+                let mut current = base.as_ref();
+                loop {
+                    match current {
+                        hir::HirExpression::FieldAccess {
+                            base: inner_base,
+                            field: inner_field,
+                        } => {
+                            field_path.insert(0, inner_field.clone());
+                            current = inner_base.as_ref();
+                        }
+                        hir::HirExpression::Signal(id) => {
+                            if self.flattened_signals.contains_key(id) {
+                                break (id.0, true, field_path);
+                            } else {
+                                return None;
+                            }
+                        }
+                        hir::HirExpression::Port(id) => {
+                            if self.flattened_ports.contains_key(id) {
+                                break (id.0, false, field_path);
+                            } else {
+                                return None;
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        };
+
+        // Get flattened fields for LHS and RHS
+        let lhs_fields = if lhs_is_signal {
+            self.flattened_signals.get(&hir::SignalId(lhs_hir_id))?
+        } else {
+            self.flattened_ports.get(&hir::PortId(lhs_hir_id))?
+        };
+
+        let rhs_fields_all = if rhs_is_signal {
+            self.flattened_signals.get(&hir::SignalId(rhs_hir_id))?
+        } else {
+            self.flattened_ports.get(&hir::PortId(rhs_hir_id))?
+        };
+
+        // If RHS has a field path, filter to only those fields
+        let rhs_fields: Vec<_> = if rhs_field_path.is_empty() {
+            rhs_fields_all.clone()
+        } else {
+            // Find fields that start with the field path
+            rhs_fields_all
+                .iter()
+                .filter(|f| f.field_path.starts_with(&rhs_field_path))
+                .cloned()
+                .collect()
+        };
+
+        // Check if field counts match
+        if lhs_fields.len() != rhs_fields.len() {
+            return None;
+        }
+
+        // Generate assignments for each field
+        let mut assignments = Vec::new();
+        for (lhs_field, rhs_field) in lhs_fields.iter().zip(rhs_fields.iter()) {
+            let lhs_lval = if lhs_is_signal {
+                LValue::Signal(SignalId(lhs_field.id))
+            } else {
+                LValue::Port(PortId(lhs_field.id))
+            };
+
+            let rhs_expr = if rhs_is_signal {
+                Expression::Ref(LValue::Signal(SignalId(rhs_field.id)))
+            } else {
+                Expression::Ref(LValue::Port(PortId(rhs_field.id)))
+            };
+
+            assignments.push(Assignment {
+                lhs: lhs_lval,
+                rhs: rhs_expr,
+                kind,
+            });
+        }
+
+        Some(assignments)
+    }
+
+    /// Convert continuous assignment - may expand to multiple assignments for struct types
+    fn convert_continuous_assignment_expanded(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Vec<ContinuousAssign> {
+        // Only combinational assignments become continuous assigns
+        if !matches!(
+            assign.assignment_type,
+            hir::HirAssignmentType::Combinational
+        ) {
+            return vec![];
+        }
+
+        // Try to expand struct-to-struct assignments
+        if let Some(assigns) = self.try_expand_struct_continuous_assignment(assign) {
+            return assigns;
+        }
+
+        // Fall back to single assignment
+        if let Some(single) = self.convert_continuous_assignment(assign) {
+            vec![single]
+        } else {
+            vec![]
+        }
+    }
+
     fn convert_continuous_assignment(
         &mut self,
         assign: &hir::HirAssignment,
@@ -508,6 +756,134 @@ impl<'hir> HirToMir<'hir> {
         let rhs = self.convert_expression(&assign.rhs)?;
 
         Some(ContinuousAssign { lhs, rhs })
+    }
+
+    /// Try to expand a struct continuous assignment into multiple field assignments
+    fn try_expand_struct_continuous_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<ContinuousAssign>> {
+        // Check if LHS is a simple signal/port that was flattened
+        let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
+            hir::HirLValue::Signal(id) => {
+                if self.flattened_signals.contains_key(id) {
+                    (id.0, true)
+                } else {
+                    return None;
+                }
+            }
+            hir::HirLValue::Port(id) => {
+                if self.flattened_ports.contains_key(id) {
+                    (id.0, false)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None, // Not a simple signal/port
+        };
+
+        // Check if RHS is a field access or signal that can be expanded
+        let (rhs_hir_id, rhs_is_signal, rhs_field_path) = match &assign.rhs {
+            hir::HirExpression::Signal(id) => {
+                if self.flattened_signals.contains_key(id) {
+                    (id.0, true, vec![])
+                } else {
+                    return None;
+                }
+            }
+            hir::HirExpression::Port(id) => {
+                if self.flattened_ports.contains_key(id) {
+                    (id.0, false, vec![])
+                } else {
+                    return None;
+                }
+            }
+            hir::HirExpression::FieldAccess { base, field } => {
+                // Extract field path and base signal/port
+                let mut field_path = vec![field.clone()];
+                let mut current = base.as_ref();
+                loop {
+                    match current {
+                        hir::HirExpression::FieldAccess {
+                            base: inner_base,
+                            field: inner_field,
+                        } => {
+                            field_path.insert(0, inner_field.clone());
+                            current = inner_base.as_ref();
+                        }
+                        hir::HirExpression::Signal(id) => {
+                            if self.flattened_signals.contains_key(id) {
+                                break (id.0, true, field_path);
+                            } else {
+                                return None;
+                            }
+                        }
+                        hir::HirExpression::Port(id) => {
+                            if self.flattened_ports.contains_key(id) {
+                                break (id.0, false, field_path);
+                            } else {
+                                return None;
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        };
+
+        // Get flattened fields for LHS and RHS
+        let lhs_fields = if lhs_is_signal {
+            self.flattened_signals.get(&hir::SignalId(lhs_hir_id))?
+        } else {
+            self.flattened_ports.get(&hir::PortId(lhs_hir_id))?
+        };
+
+        let rhs_fields_all = if rhs_is_signal {
+            self.flattened_signals.get(&hir::SignalId(rhs_hir_id))?
+        } else {
+            self.flattened_ports.get(&hir::PortId(rhs_hir_id))?
+        };
+
+        // If RHS has a field path, filter to only those fields
+        let rhs_fields: Vec<_> = if rhs_field_path.is_empty() {
+            rhs_fields_all.clone()
+        } else {
+            // Find fields that start with the field path
+            rhs_fields_all
+                .iter()
+                .filter(|f| f.field_path.starts_with(&rhs_field_path))
+                .cloned()
+                .collect()
+        };
+
+        // Check if field counts match
+        if lhs_fields.len() != rhs_fields.len() {
+            return None;
+        }
+
+        // Generate continuous assignments for each field
+        let mut assignments = Vec::new();
+        for (lhs_field, rhs_field) in lhs_fields.iter().zip(rhs_fields.iter()) {
+            let lhs_lval = if lhs_is_signal {
+                LValue::Signal(SignalId(lhs_field.id))
+            } else {
+                LValue::Port(PortId(lhs_field.id))
+            };
+
+            let rhs_expr = if rhs_is_signal {
+                Expression::Ref(LValue::Signal(SignalId(rhs_field.id)))
+            } else {
+                Expression::Ref(LValue::Port(PortId(rhs_field.id)))
+            };
+
+            assignments.push(ContinuousAssign {
+                lhs: lhs_lval,
+                rhs: rhs_expr,
+            });
+        }
+
+        Some(assignments)
     }
 
     /// Convert module instance
@@ -678,15 +1054,59 @@ impl<'hir> HirToMir<'hir> {
                 Some(LValue::RangeSelect { base, high, low })
             }
             hir::HirLValue::FieldAccess { base, field } => {
-                // Convert struct field access to bit range
-                // First convert the base LValue
-                let base_mir = self.convert_lvalue(base)?;
+                // Check if this is a field access on a flattened signal/port
+                // Build the complete field path from nested accesses
+                let mut field_path = vec![field.clone()];
+                let mut current_base = base.as_ref();
 
-                // Get the type of the base to calculate field offset
+                // Walk up the chain to find the root signal/port and complete field path
+                loop {
+                    match current_base {
+                        hir::HirLValue::FieldAccess {
+                            base: inner_base,
+                            field: inner_field,
+                        } => {
+                            field_path.insert(0, inner_field.clone());
+                            current_base = inner_base.as_ref();
+                        }
+                        hir::HirLValue::Signal(sig_id) => {
+                            // Check if this signal was flattened
+                            if let Some(flattened) = self.flattened_signals.get(sig_id) {
+                                // Find the flattened field with matching path
+                                for flat_field in flattened {
+                                    if flat_field.field_path == field_path {
+                                        return Some(LValue::Signal(SignalId(flat_field.id)));
+                                    }
+                                }
+                            }
+                            // Not flattened or field not found - fall back to old behavior
+                            break;
+                        }
+                        hir::HirLValue::Port(port_id) => {
+                            // Check if this port was flattened
+                            if let Some(flattened) = self.flattened_ports.get(port_id) {
+                                // Find the flattened field with matching path
+                                for flat_field in flattened {
+                                    if flat_field.field_path == field_path {
+                                        return Some(LValue::Port(PortId(flat_field.id)));
+                                    }
+                                }
+                            }
+                            // Not flattened or field not found - fall back to old behavior
+                            break;
+                        }
+                        _ => {
+                            // Complex base - fall back to old behavior
+                            break;
+                        }
+                    }
+                }
+
+                // Fallback: convert struct field access to bit range (for non-flattened types)
+                let base_mir = self.convert_lvalue(base)?;
                 let base_expr = self.lvalue_to_expression(base)?;
                 let (high_bit, low_bit) = self.get_field_bit_range(&base_expr, field)?;
 
-                // Create range LValue for the field access
                 let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
                 let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
 
@@ -1362,8 +1782,17 @@ impl<'hir> HirToMir<'hir> {
                 DataType::Array(Box::new(self.convert_type(inner_type)), *size as usize)
             }
             hir::HirType::Custom(name) => {
-                // Resolve custom types (type aliases) by looking them up in HIR
+                // Resolve custom types by looking them up in HIR
                 if let Some(hir) = self.hir {
+                    // First check user-defined types (structs, enums, unions)
+                    for user_type in &hir.user_defined_types {
+                        if user_type.name == *name {
+                            // Found the user-defined type - convert its type_def
+                            return self.convert_type(&user_type.type_def);
+                        }
+                    }
+
+                    // Then check type aliases
                     for type_alias in &hir.type_aliases {
                         if type_alias.name == *name {
                             // Found the type alias - recursively convert its target type
@@ -1372,7 +1801,7 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
                 }
-                // If type alias not found, default to Bit(1) as fallback
+                // If type not found, default to Bit(1) as fallback
                 // This maintains backward compatibility for unresolved types
                 DataType::Bit(1)
             }
@@ -1690,49 +2119,93 @@ impl<'hir> HirToMir<'hir> {
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<Expression> {
-        // Convert the base expression to an LValue
-        let base_lval = match base {
-            hir::HirExpression::Signal(id) => {
-                if let Some(signal_id) = self.signal_map.get(id) {
-                    LValue::Signal(*signal_id)
-                } else {
-                    // Maybe this "signal" is actually a port that's represented as a signal in HIR
-                    if let Some(port_id) = self.port_map.values().find(|&&pid| {
-                        // Check if this signal ID corresponds to a port
-                        // This is a heuristic - we may need a better mapping
-                        pid.0 == id.0 // Compare the underlying numeric IDs
-                    }) {
-                        LValue::Port(*port_id)
-                    } else {
-                        return None;
+        // Build the complete field path from nested accesses
+        let mut field_path = vec![field_name.to_string()];
+        let mut current_base = base;
+
+        // Walk up the chain to find the root signal/port/variable
+        loop {
+            match current_base {
+                hir::HirExpression::FieldAccess {
+                    base: inner_base,
+                    field: inner_field,
+                } => {
+                    field_path.insert(0, inner_field.clone());
+                    current_base = inner_base.as_ref();
+                }
+                hir::HirExpression::Signal(sig_id) => {
+                    // Check if this signal was flattened
+                    if let Some(flattened) = self.flattened_signals.get(sig_id) {
+                        // Find the flattened field with matching path
+                        for flat_field in flattened {
+                            if flat_field.field_path == field_path {
+                                return Some(Expression::Ref(LValue::Signal(SignalId(
+                                    flat_field.id,
+                                ))));
+                            }
+                        }
                     }
+                    // Not flattened - use mapped signal ID (or fall back to bit range)
+                    if let Some(signal_id) = self.signal_map.get(sig_id) {
+                        // Fall back to bit range approach
+                        let base_lval = LValue::Signal(*signal_id);
+                        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
+                            base: Box::new(base_lval),
+                            high: Box::new(high_expr),
+                            low: Box::new(low_expr),
+                        }));
+                    }
+                    return None;
+                }
+                hir::HirExpression::Port(port_id) => {
+                    // Check if this port was flattened
+                    if let Some(flattened) = self.flattened_ports.get(port_id) {
+                        // Find the flattened field with matching path
+                        for flat_field in flattened {
+                            if flat_field.field_path == field_path {
+                                return Some(Expression::Ref(LValue::Port(PortId(flat_field.id))));
+                            }
+                        }
+                    }
+                    // Not flattened - use mapped port ID (or fall back to bit range)
+                    if let Some(port_id_mir) = self.port_map.get(port_id) {
+                        // Fall back to bit range approach
+                        let base_lval = LValue::Port(*port_id_mir);
+                        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
+                            base: Box::new(base_lval),
+                            high: Box::new(high_expr),
+                            low: Box::new(low_expr),
+                        }));
+                    }
+                    return None;
+                }
+                hir::HirExpression::Variable(var_id) => {
+                    // Variables don't get flattened the same way, use bit range approach
+                    if let Some(var_id_mir) = self.variable_map.get(var_id) {
+                        let base_lval = LValue::Variable(*var_id_mir);
+                        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
+                            base: Box::new(base_lval),
+                            high: Box::new(high_expr),
+                            low: Box::new(low_expr),
+                        }));
+                    }
+                    return None;
+                }
+                _ => {
+                    // Complex base - can't handle
+                    return None;
                 }
             }
-            hir::HirExpression::Port(id) => {
-                let port_id = *self.port_map.get(id)?;
-                LValue::Port(port_id)
-            }
-            hir::HirExpression::Variable(id) => {
-                let var_id = *self.variable_map.get(id)?;
-                LValue::Variable(var_id)
-            }
-            _ => {
-                return None;
-            }
-        };
-
-        // Get the type of the base expression to find field offset
-        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
-
-        // Create bit slice expressions
-        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
-        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
-
-        Some(Expression::Ref(LValue::RangeSelect {
-            base: Box::new(base_lval),
-            high: Box::new(high_expr),
-            low: Box::new(low_expr),
-        }))
+        }
     }
 
     /// Get the bit range for a struct field or vector component
@@ -2273,6 +2746,204 @@ impl<'hir> HirToMir<'hir> {
         }
 
         count
+    }
+
+    /// Flatten a port with struct/vector type into multiple MIR ports
+    /// Returns the list of created ports and flattened field information
+    fn flatten_port(
+        &mut self,
+        base_name: &str,
+        port_type: &DataType,
+        direction: PortDirection,
+        physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
+    ) -> (Vec<Port>, Vec<FlattenedField>) {
+        let mut ports = Vec::new();
+        let mut fields = Vec::new();
+        self.flatten_port_recursive(
+            base_name,
+            port_type,
+            direction,
+            physical_constraints.as_ref(),
+            vec![],
+            &mut ports,
+            &mut fields,
+        );
+        (ports, fields)
+    }
+
+    /// Recursively flatten a port
+    #[allow(clippy::too_many_arguments)]
+    fn flatten_port_recursive(
+        &mut self,
+        name: &str,
+        port_type: &DataType,
+        direction: PortDirection,
+        physical_constraints: Option<&skalp_frontend::hir::PhysicalConstraints>,
+        field_path: Vec<String>,
+        ports: &mut Vec<Port>,
+        fields: &mut Vec<FlattenedField>,
+    ) {
+        match port_type {
+            DataType::Struct(struct_type) => {
+                // Recursively flatten each field
+                for field in &struct_type.fields {
+                    let field_name = format!("{}_{}", name, field.name);
+                    let mut new_path = field_path.clone();
+                    new_path.push(field.name.clone());
+                    self.flatten_port_recursive(
+                        &field_name,
+                        &field.field_type,
+                        direction,
+                        physical_constraints,
+                        new_path,
+                        ports,
+                        fields,
+                    );
+                }
+            }
+            DataType::Vec2(element_type)
+            | DataType::Vec3(element_type)
+            | DataType::Vec4(element_type) => {
+                let components = match port_type {
+                    DataType::Vec2(_) => vec!["x", "y"],
+                    DataType::Vec3(_) => vec!["x", "y", "z"],
+                    DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                    _ => unreachable!(),
+                };
+
+                for component in components {
+                    let comp_name = format!("{}_{}", name, component);
+                    let mut new_path = field_path.clone();
+                    new_path.push(component.to_string());
+                    self.flatten_port_recursive(
+                        &comp_name,
+                        element_type,
+                        direction,
+                        physical_constraints,
+                        new_path,
+                        ports,
+                        fields,
+                    );
+                }
+            }
+            _ => {
+                // Leaf type - create actual port
+                let port_id = self.next_port_id();
+                let port = Port {
+                    id: port_id,
+                    name: name.to_string(),
+                    direction,
+                    port_type: port_type.clone(),
+                    physical_constraints: physical_constraints.cloned(),
+                };
+                ports.push(port);
+
+                fields.push(FlattenedField {
+                    id: port_id.0,
+                    field_path,
+                    leaf_type: port_type.clone(),
+                });
+            }
+        }
+    }
+
+    /// Flatten a signal with struct/vector type into multiple MIR signals
+    /// Returns the list of created signals and flattened field information
+    fn flatten_signal(
+        &mut self,
+        base_name: &str,
+        signal_type: &DataType,
+        initial: Option<Value>,
+        clock_domain: Option<ClockDomainId>,
+    ) -> (Vec<Signal>, Vec<FlattenedField>) {
+        let mut signals = Vec::new();
+        let mut fields = Vec::new();
+        self.flatten_signal_recursive(
+            base_name,
+            signal_type,
+            initial,
+            clock_domain,
+            vec![],
+            &mut signals,
+            &mut fields,
+        );
+        (signals, fields)
+    }
+
+    /// Recursively flatten a signal
+    #[allow(clippy::too_many_arguments)]
+    fn flatten_signal_recursive(
+        &mut self,
+        name: &str,
+        signal_type: &DataType,
+        initial: Option<Value>,
+        clock_domain: Option<ClockDomainId>,
+        field_path: Vec<String>,
+        signals: &mut Vec<Signal>,
+        fields: &mut Vec<FlattenedField>,
+    ) {
+        match signal_type {
+            DataType::Struct(struct_type) => {
+                // Recursively flatten each field
+                for field in &struct_type.fields {
+                    let field_name = format!("{}_{}", name, field.name);
+                    let mut new_path = field_path.clone();
+                    new_path.push(field.name.clone());
+                    self.flatten_signal_recursive(
+                        &field_name,
+                        &field.field_type,
+                        None, // Don't propagate initial value for struct fields
+                        clock_domain,
+                        new_path,
+                        signals,
+                        fields,
+                    );
+                }
+            }
+            DataType::Vec2(element_type)
+            | DataType::Vec3(element_type)
+            | DataType::Vec4(element_type) => {
+                let components = match signal_type {
+                    DataType::Vec2(_) => vec!["x", "y"],
+                    DataType::Vec3(_) => vec!["x", "y", "z"],
+                    DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                    _ => unreachable!(),
+                };
+
+                for component in components {
+                    let comp_name = format!("{}_{}", name, component);
+                    let mut new_path = field_path.clone();
+                    new_path.push(component.to_string());
+                    self.flatten_signal_recursive(
+                        &comp_name,
+                        element_type,
+                        None,
+                        clock_domain,
+                        new_path,
+                        signals,
+                        fields,
+                    );
+                }
+            }
+            _ => {
+                // Leaf type - create actual signal
+                let signal_id = self.next_signal_id();
+                let signal = Signal {
+                    id: signal_id,
+                    name: name.to_string(),
+                    signal_type: signal_type.clone(),
+                    initial,
+                    clock_domain,
+                };
+                signals.push(signal);
+
+                fields.push(FlattenedField {
+                    id: signal_id.0,
+                    field_path,
+                    leaf_type: signal_type.clone(),
+                });
+            }
+        }
     }
 }
 

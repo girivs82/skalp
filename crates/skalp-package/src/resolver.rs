@@ -237,6 +237,7 @@ mod tests {
             dependencies: HashMap::new(),
             dev_dependencies: HashMap::new(),
             lib: None,
+            build: None,
             features: HashMap::new(),
             workspace: None,
             patch: HashMap::new(),

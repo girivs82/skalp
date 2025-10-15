@@ -388,6 +388,9 @@ pub enum SyntaxKind {
     SelfType,
     StructType,
     EnumType,
+    InlineStructType,
+    InlineEnumType,
+    InlineUnionType,
 
     // Type parts
     WidthSpec,

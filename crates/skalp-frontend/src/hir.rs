@@ -26,6 +26,8 @@ pub struct Hir {
     pub trait_implementations: Vec<HirTraitImplementation>,
     /// Type aliases
     pub type_aliases: Vec<HirTypeAlias>,
+    /// User-defined types (struct, enum, union definitions)
+    pub user_defined_types: Vec<HirUserDefinedType>,
     /// Global physical constraints
     pub global_constraints: Vec<GlobalConstraint>,
     /// Module declarations
@@ -899,6 +901,7 @@ impl HirBuilder {
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
             type_aliases: Vec::new(),
+            user_defined_types: Vec::new(),
             global_constraints: Vec::new(),
             modules: Vec::new(),
             imports: Vec::new(),
@@ -989,6 +992,7 @@ impl Hir {
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
             type_aliases: Vec::new(),
+            user_defined_types: Vec::new(),
             global_constraints: Vec::new(),
             modules: Vec::new(),
             imports: Vec::new(),
@@ -1119,6 +1123,28 @@ pub struct HirTypeAlias {
     pub generics: Vec<HirGeneric>,
     /// Target type (what this alias resolves to)
     pub target_type: HirType,
+}
+
+/// User-defined type definition in HIR
+///
+/// Represents a struct, enum, or union type definition that can be imported.
+///
+/// Example:
+/// ```skalp
+/// pub struct Vec3 {
+///     pub x: fp32,
+///     pub y: fp32,
+///     pub z: fp32
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirUserDefinedType {
+    /// Type name
+    pub name: String,
+    /// Visibility
+    pub visibility: HirVisibility,
+    /// The actual type definition
+    pub type_def: HirType,
 }
 
 /// Immediate assertion statement in HIR

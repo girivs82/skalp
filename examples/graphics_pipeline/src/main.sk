@@ -272,13 +272,11 @@ impl GraphicsPipelineTop {
         wr_en: vertex_fifo_wr_en,
         wr_data: vertex_fifo_wr_data,
         wr_full: vertex_fifo_wr_full,
-        wr_count: _,  // Unused
         rd_clk: geom_clk,
         rd_rst: geom_rst,
         rd_en: vertex_fifo_rd_en,
         rd_data: vertex_fifo_rd_data,
-        rd_empty: vertex_fifo_rd_empty,
-        rd_count: _   // Unused
+        rd_empty: vertex_fifo_rd_empty
     }
 
     // Connect FIFO to geometry processor
@@ -304,13 +302,11 @@ impl GraphicsPipelineTop {
         wr_en: xform_fifo_wr_en,
         wr_data: xform_fifo_wr_data,
         wr_full: xform_fifo_wr_full,
-        wr_count: _,
         rd_clk: pixel_clk,
         rd_rst: pixel_rst,
         rd_en: xform_fifo_rd_en,
         rd_data: xform_fifo_rd_data,
-        rd_empty: xform_fifo_rd_empty,
-        rd_count: _
+        rd_empty: xform_fifo_rd_empty
     }
 
     // Connect geometry processor output to transform FIFO

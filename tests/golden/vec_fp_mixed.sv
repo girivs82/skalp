@@ -2,13 +2,16 @@
 // Design: main
 
 module VecFPMixed (
-    input [63:0] v2,
-    input [47:0] v3,
+    input [31:0] v2_x,
+    input [31:0] v2_y,
+    input [15:0] v3_x,
+    input [15:0] v3_y,
+    input [15:0] v3_z,
     output [31:0] sum2,
     output [15:0] sum3
 );
 
-    assign sum2 = (v2[31:0] + v2[63:32]);
-    assign sum3 = ((v3[15:0] + v3[31:16]) + v3[47:32]);
+    assign sum2 = (v2_x + v2_y);
+    assign sum3 = ((v3_x + v3_y) + v3_z);
 
 endmodule

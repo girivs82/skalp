@@ -63,6 +63,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::IntentKw) => self.parse_intent_decl(),
                 Some(SyntaxKind::RequirementKw) => self.parse_requirement_decl(),
                 Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
+                Some(SyntaxKind::TypeKw) => self.parse_type_alias(),
                 Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
                 Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
                 Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
@@ -380,6 +381,15 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ProveKw) => self.parse_prove_statement(),
                 Some(SyntaxKind::Ident) => {
                     // Could be an assignment or start of another construct
+                    self.parse_assignment_or_statement();
+                }
+                // Port direction keywords can also be used as signal names in assignments
+                Some(SyntaxKind::InKw)
+                | Some(SyntaxKind::InputKw)
+                | Some(SyntaxKind::OutKw)
+                | Some(SyntaxKind::OutputKw)
+                | Some(SyntaxKind::InoutKw) => {
+                    // Treat as identifier in assignment context
                     self.parse_assignment_or_statement();
                 }
                 Some(SyntaxKind::RBrace) => break,
@@ -3130,6 +3140,33 @@ impl<'a> ParseState<'a> {
                     self.expect(SyntaxKind::Ident); // consume associated type name
                 }
 
+                self.finish_node();
+            }
+            Some(SyntaxKind::StructKw) => {
+                // Inline struct type: struct { field1: Type1, field2: Type2 }
+                self.start_node(SyntaxKind::InlineStructType);
+                self.bump(); // consume 'struct'
+                self.expect(SyntaxKind::LBrace);
+                self.parse_struct_fields();
+                self.expect(SyntaxKind::RBrace);
+                self.finish_node();
+            }
+            Some(SyntaxKind::EnumKw) => {
+                // Inline enum type: enum { Variant1, Variant2(Type), Variant3 { field: Type } }
+                self.start_node(SyntaxKind::InlineEnumType);
+                self.bump(); // consume 'enum'
+                self.expect(SyntaxKind::LBrace);
+                self.parse_enum_variants();
+                self.expect(SyntaxKind::RBrace);
+                self.finish_node();
+            }
+            Some(SyntaxKind::UnionKw) => {
+                // Inline union type: union { field1: Type1, field2: Type2 }
+                self.start_node(SyntaxKind::InlineUnionType);
+                self.bump(); // consume 'union'
+                self.expect(SyntaxKind::LBrace);
+                self.parse_struct_fields(); // Unions use same field syntax as structs
+                self.expect(SyntaxKind::RBrace);
                 self.finish_node();
             }
             _ => {

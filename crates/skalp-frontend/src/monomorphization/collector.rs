@@ -5,7 +5,7 @@
 use crate::const_eval::{ConstEvaluator, ConstValue};
 use crate::hir::{
     EntityId, Hir, HirEntity, HirExpression, HirGeneric, HirGenericType, HirImplementation,
-    HirInstance, HirType,
+    HirInstance, HirPort, HirType,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -136,23 +136,38 @@ fn mangle_type(ty: &HirType) -> String {
         HirType::FixedParametric { .. } => "fixed".to_string(),
         HirType::IntParametric { .. } => "int".to_string(),
         HirType::VecParametric { .. } => "vec".to_string(),
+        // Vector types
+        HirType::Vec2(elem) => format!("vec2_{}", mangle_type(elem)),
+        HirType::Vec3(elem) => format!("vec3_{}", mangle_type(elem)),
+        HirType::Vec4(elem) => format!("vec4_{}", mangle_type(elem)),
+        // Struct types
+        HirType::Struct(struct_type) => struct_type.name.clone(),
+        // Other parametric types
+        HirType::Nat(_) => "nat".to_string(),
+        HirType::Int(_) => "int".to_string(),
+        HirType::Logic(_) => "logic".to_string(),
+        HirType::Bool => "bool".to_string(),
         _ => "unknown".to_string(),
     }
 }
 
 /// Collects all generic instantiations from HIR
-pub struct InstantiationCollector {
+pub struct InstantiationCollector<'hir> {
     /// All discovered instantiations
     instantiations: HashSet<Instantiation>,
     /// Const evaluator for parameter values
     evaluator: ConstEvaluator,
     /// Map from entity ID to entity
     entities: HashMap<EntityId, HirEntity>,
+    /// Reference to HIR for type lookups
+    hir: &'hir Hir,
+    /// Current implementation context (for looking up signals/variables)
+    current_impl: Option<&'hir HirImplementation>,
 }
 
-impl InstantiationCollector {
+impl<'hir> InstantiationCollector<'hir> {
     /// Create a new instantiation collector
-    pub fn new(hir: &Hir) -> Self {
+    pub fn new(hir: &'hir Hir) -> Self {
         let mut entities = HashMap::new();
         for entity in &hir.entities {
             entities.insert(entity.id, entity.clone());
@@ -162,11 +177,13 @@ impl InstantiationCollector {
             instantiations: HashSet::new(),
             evaluator: ConstEvaluator::new(),
             entities,
+            hir,
+            current_impl: None,
         }
     }
 
     /// Collect all instantiations from the HIR
-    pub fn collect(mut self, hir: &Hir) -> HashSet<Instantiation> {
+    pub fn collect(mut self, hir: &'hir Hir) -> HashSet<Instantiation> {
         // Start from all implementations
         for implementation in &hir.implementations {
             self.collect_from_implementation(implementation);
@@ -176,11 +193,17 @@ impl InstantiationCollector {
     }
 
     /// Collect instantiations from an implementation
-    fn collect_from_implementation(&mut self, implementation: &HirImplementation) {
+    fn collect_from_implementation(&mut self, implementation: &'hir HirImplementation) {
+        // Set current implementation context
+        self.current_impl = Some(implementation);
+
         // Collect from all module instances
         for instance in &implementation.instances {
             self.collect_from_instance(instance);
         }
+
+        // Clear current implementation context
+        self.current_impl = None;
     }
 
     /// Collect instantiation from a module instance
@@ -199,7 +222,7 @@ impl InstantiationCollector {
         }
 
         // Build instantiation record
-        let type_args = HashMap::new();
+        let mut type_args = HashMap::new();
         let mut const_args = HashMap::new();
         let mut intent_args = HashMap::new();
 
@@ -214,8 +237,10 @@ impl InstantiationCollector {
 
             match &generic.param_type {
                 HirGenericType::Type => {
-                    // Type parameter - would extract type from expression
-                    // For now, skip
+                    // Type parameter - extract type from expression
+                    if let Some(ty) = self.extract_type_from_expr(arg) {
+                        type_args.insert(generic.name.clone(), ty);
+                    }
                 }
                 HirGenericType::Const(_const_type) => {
                     // Const parameter - evaluate the argument expression
@@ -264,6 +289,11 @@ impl InstantiationCollector {
             }
         }
 
+        // If type_args is still empty, try to infer from port connections
+        if type_args.is_empty() {
+            type_args = self.infer_type_args_from_connections(entity, instance);
+        }
+
         // Create instantiation record
         let instantiation = Instantiation {
             entity_name: entity.name.clone(),
@@ -274,6 +304,148 @@ impl InstantiationCollector {
         };
 
         self.instantiations.insert(instantiation);
+    }
+
+    /// Extract type from expression
+    ///
+    /// Since type arguments aren't directly represented in HirExpression yet,
+    /// we try to infer them from various expression forms.
+    fn extract_type_from_expr(&self, expr: &HirExpression) -> Option<HirType> {
+        match expr {
+            // Custom type reference might be stored as a constant identifier
+            HirExpression::Constant(const_id) => {
+                // Try to look up the constant name and match it to a type
+                // For now, we can't extract types from constants without more context
+                None
+            }
+            // Cast expressions contain type information
+            HirExpression::Cast(cast_expr) => {
+                Some(cast_expr.target_type.clone())
+            }
+            // For other expressions, we can't extract type information
+            // Type arguments should ideally be passed as a separate mechanism
+            _ => None,
+        }
+    }
+
+    /// Infer type arguments from port connections
+    ///
+    /// When generic type arguments aren't explicitly provided, we can sometimes
+    /// infer them from the types of signals connected to generic ports.
+    fn infer_type_args_from_connections(
+        &self,
+        entity: &HirEntity,
+        instance: &HirInstance,
+    ) -> HashMap<String, HirType> {
+        let mut inferred_types = HashMap::new();
+
+        // Build map of generic type parameter names
+        let mut type_param_names = HashSet::new();
+        for generic in &entity.generics {
+            if matches!(generic.param_type, HirGenericType::Type) {
+                type_param_names.insert(generic.name.clone());
+            }
+        }
+
+        // For each port, check if its type is a generic parameter
+        // If so, try to infer the concrete type from the connection
+        for port in &entity.ports {
+            // Check if port type is a generic type parameter
+            let param_name = match &port.port_type {
+                HirType::Custom(name) if type_param_names.contains(name) => name.clone(),
+                HirType::Vec2(elem) => {
+                    if let HirType::Custom(name) = elem.as_ref() {
+                        if type_param_names.contains(name) {
+                            name.clone()
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                HirType::Vec3(elem) | HirType::Vec4(elem) => {
+                    if let HirType::Custom(name) = elem.as_ref() {
+                        if type_param_names.contains(name) {
+                            name.clone()
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                HirType::Array(elem, _) => {
+                    if let HirType::Custom(name) = elem.as_ref() {
+                        if type_param_names.contains(name) {
+                            name.clone()
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+
+            // Find the connection for this port
+            if let Some(connection) = instance.connections.iter().find(|c| c.port == port.name) {
+                // Try to infer the type from the connected expression
+                if let Some(concrete_type) = self.infer_expr_type(&connection.expr) {
+                    inferred_types.entry(param_name.clone()).or_insert(concrete_type);
+                }
+            }
+        }
+
+        inferred_types
+    }
+
+    /// Try to infer the type of an expression
+    ///
+    /// This is a simplified type inference that handles common cases.
+    /// A full type inference would require the complete type context.
+    fn infer_expr_type(&self, expr: &HirExpression) -> Option<HirType> {
+        match expr {
+            // For struct literals, infer the struct type
+            HirExpression::StructLiteral(struct_lit) => {
+                Some(HirType::Custom(struct_lit.type_name.clone()))
+            }
+            // Cast expressions have explicit types
+            HirExpression::Cast(cast_expr) => Some(cast_expr.target_type.clone()),
+            // Signal references
+            HirExpression::Signal(signal_id) => {
+                if let Some(impl_ctx) = self.current_impl {
+                    impl_ctx.signals.iter()
+                        .find(|s| s.id == *signal_id)
+                        .map(|s| s.signal_type.clone())
+                } else {
+                    None
+                }
+            }
+            // Port references
+            HirExpression::Port(port_id) => {
+                // Look up port from all entities
+                for entity in self.hir.entities.iter() {
+                    if let Some(port) = entity.ports.iter().find(|p| p.id == *port_id) {
+                        return Some(port.port_type.clone());
+                    }
+                }
+                None
+            }
+            // Variable references
+            HirExpression::Variable(var_id) => {
+                if let Some(impl_ctx) = self.current_impl {
+                    impl_ctx.variables.iter()
+                        .find(|v| v.id == *var_id)
+                        .map(|v| v.var_type.clone())
+                } else {
+                    None
+                }
+            }
+            // For other expressions, we'd need full type inference
+            _ => None,
+        }
     }
 
     /// Extract intent name from expression

@@ -97,7 +97,7 @@ fn generate_module(
 
     sv.push_str("(\n");
 
-    // Generate port list
+    // Generate port list (MIR already has flattened ports)
     let mut ports = Vec::new();
     for port in &mir_module.ports {
         let direction = match port.direction {
@@ -106,7 +106,6 @@ fn generate_module(
             skalp_mir::PortDirection::InOut => "inout",
         };
 
-        // Split type into element width and array dimensions
         let (element_width, array_dim) = get_type_dimensions(&port.port_type);
         ports.push(format!(
             "    {} {}{}{}",
@@ -121,7 +120,7 @@ fn generate_module(
 
     sv.push_str(");\n\n");
 
-    // Generate internal signal declarations
+    // Generate internal signal declarations (MIR already has flattened signals)
     for signal in &mir_module.signals {
         let (element_width, array_dim) = get_type_dimensions(&signal.signal_type);
 
@@ -172,16 +171,17 @@ fn generate_module(
         sv.push('\n');
     }
 
-    // Generate continuous assignments
+    // Generate continuous assignments - expand struct assignments
+    let mut assignment_count = 0;
     for assign in &mir_module.assignments {
-        sv.push_str(&format!(
-            "    assign {} = {};\n",
-            format_lvalue_with_context(&assign.lhs, mir_module),
-            format_expression_with_context(&assign.rhs, mir_module)
-        ));
+        let expanded = expand_struct_assignment(&assign.lhs, &assign.rhs, mir_module);
+        for (lhs_str, rhs_str) in expanded {
+            sv.push_str(&format!("    assign {} = {};\n", lhs_str, rhs_str));
+            assignment_count += 1;
+        }
     }
 
-    if !mir_module.assignments.is_empty() {
+    if assignment_count > 0 {
         sv.push('\n');
     }
 
@@ -240,18 +240,106 @@ fn generate_instance(
     // Instance name
     sv.push_str(&format!("{} (\n", instance.name));
 
-    // Port connections
-    let connections: Vec<String> = instance
-        .connections
-        .iter()
-        .map(|(port_name, expr)| {
-            format!(
-                "        .{}({})",
-                port_name,
-                format_expression_with_context(expr, parent_module)
-            )
-        })
-        .collect();
+    // Port connections - expand struct/vector ports into individual flattened connections
+    let mut connections: Vec<String> = Vec::new();
+
+    for (port_name, expr) in &instance.connections {
+        // Look up the port in the instantiated module to get its type
+        let port = instantiated_module
+            .ports
+            .iter()
+            .find(|p| p.name == *port_name);
+
+        if let Some(port) = port {
+            // Port found by exact name - expand based on its type
+            let expanded_connections =
+                expand_port_connection(port_name, &port.port_type, expr, parent_module);
+
+            // Format each expanded connection
+            for (port_field, signal_expr) in expanded_connections {
+                connections.push(format!("        .{}({})", port_field, signal_expr));
+            }
+        } else {
+            // Port not found by exact name - check if there are flattened ports with this prefix
+            // This handles the case where HIR had "vertex" but MIR flattened it to
+            // "vertex_position_x", "vertex_position_y", etc.
+            // We need to distinguish between scalar ports like "vertex_valid" and
+            // flattened struct fields like "vertex_position_x"
+            let prefix = format!("{}_", port_name);
+            let flattened_ports: Vec<_> = instantiated_module
+                .ports
+                .iter()
+                .filter(|p| {
+                    // Port must start with prefix
+                    if !p.name.starts_with(&prefix) {
+                        return false;
+                    }
+                    let suffix = &p.name[port_name.len()..];
+                    // Check if this is a flattened struct/vector field
+                    // Two patterns indicate flattening:
+                    // 1. Nested struct: base_field_subfield (2+ underscores in suffix)
+                    // 2. Vector components: base_x, base_y, base_z, base_w (1 underscore + component)
+                    let underscore_count = suffix.chars().filter(|&c| c == '_').count();
+                    if underscore_count >= 2 {
+                        // Nested struct field
+                        true
+                    } else if underscore_count == 1 {
+                        // Check if it's a vector component (_x, _y, _z, _w)
+                        suffix.ends_with("_x")
+                            || suffix.ends_with("_y")
+                            || suffix.ends_with("_z")
+                            || suffix.ends_with("_w")
+                    } else {
+                        false
+                    }
+                })
+                .collect();
+
+            if !flattened_ports.is_empty() {
+                // Found flattened ports - we need to infer the structure and expand
+                // Get the signal name from the expression
+                if let skalp_mir::Expression::Ref(lvalue) = expr {
+                    let signal_full_name = format_lvalue_with_context(lvalue, parent_module);
+
+                    // The signal might be referencing a flattened field (like geom_vertex_position_x)
+                    // We need to extract the base name (like geom_vertex)
+                    // Check if the signal name has a suffix matching the first flattened port
+                    let first_port_suffix = &flattened_ports[0].name[port_name.len()..];
+                    let signal_base_name = if signal_full_name.ends_with(first_port_suffix) {
+                        // Strip the suffix to get the base name
+                        &signal_full_name[..signal_full_name.len() - first_port_suffix.len()]
+                    } else {
+                        // Signal doesn't have the expected suffix, use as-is
+                        &signal_full_name
+                    };
+
+                    // For each flattened port, construct a matching signal name
+                    for port in flattened_ports {
+                        // Extract the suffix after the port_name prefix
+                        let suffix = &port.name[port_name.len()..]; // includes the leading _
+                        let signal_name = format!("{}{}", signal_base_name, suffix);
+                        connections.push(format!("        .{}({})", port.name, signal_name));
+                    }
+                } else {
+                    // Expression is not a simple reference, can't expand
+                    // Use simple connection and hope for the best
+                    connections.push(format!(
+                        "        .{}({})",
+                        port_name,
+                        format_expression_with_context(expr, parent_module)
+                    ));
+                }
+            } else {
+                // No ports found at all - use simple connection
+                connections.push(format!(
+                    "        .{}({})",
+                    port_name,
+                    format_expression_with_context(expr, parent_module)
+                ));
+            }
+        }
+    }
+
     sv.push_str(&connections.join(",\n"));
     sv.push_str("\n    );\n");
 
@@ -864,6 +952,476 @@ fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
         skalp_mir::DataType::Vec2(element_type) => get_type_width(element_type) * 2,
         skalp_mir::DataType::Vec3(element_type) => get_type_width(element_type) * 3,
         skalp_mir::DataType::Vec4(element_type) => get_type_width(element_type) * 4,
+    }
+}
+
+/// Flatten a port with struct type into individual signals
+/// For example: vertex: Vertex becomes vertex_position_x, vertex_position_y, etc.
+fn flatten_port_to_signals(
+    name: &str,
+    port_type: &DataType,
+    direction: &str,
+    ports: &mut Vec<String>,
+) {
+    match port_type {
+        DataType::Struct(struct_type) => {
+            // Recursively flatten each field
+            for field in &struct_type.fields {
+                let field_name = format!("{}_{}", name, field.name);
+                flatten_port_to_signals(&field_name, &field.field_type, direction, ports);
+            }
+        }
+        DataType::Vec2(element_type) => {
+            // Flatten Vec2 into x, y components
+            let x_name = format!("{}_x", name);
+            let y_name = format!("{}_y", name);
+            flatten_port_to_signals(&x_name, element_type, direction, ports);
+            flatten_port_to_signals(&y_name, element_type, direction, ports);
+        }
+        DataType::Vec3(element_type) => {
+            // Flatten Vec3 into x, y, z components
+            let x_name = format!("{}_x", name);
+            let y_name = format!("{}_y", name);
+            let z_name = format!("{}_z", name);
+            flatten_port_to_signals(&x_name, element_type, direction, ports);
+            flatten_port_to_signals(&y_name, element_type, direction, ports);
+            flatten_port_to_signals(&z_name, element_type, direction, ports);
+        }
+        DataType::Vec4(element_type) => {
+            // Flatten Vec4 into x, y, z, w components
+            let x_name = format!("{}_x", name);
+            let y_name = format!("{}_y", name);
+            let z_name = format!("{}_z", name);
+            let w_name = format!("{}_w", name);
+            flatten_port_to_signals(&x_name, element_type, direction, ports);
+            flatten_port_to_signals(&y_name, element_type, direction, ports);
+            flatten_port_to_signals(&z_name, element_type, direction, ports);
+            flatten_port_to_signals(&w_name, element_type, direction, ports);
+        }
+        _ => {
+            // Non-struct type - add as single port
+            let (element_width, array_dim) = get_type_dimensions(port_type);
+            ports.push(format!(
+                "    {} {}{}{}",
+                direction, element_width, name, array_dim
+            ));
+        }
+    }
+}
+
+/// Expand a struct assignment into individual field assignments
+/// Returns a vector of (lhs_string, rhs_string) pairs
+fn expand_struct_assignment(
+    lhs: &skalp_mir::LValue,
+    rhs: &skalp_mir::Expression,
+    module: &Module,
+) -> Vec<(String, String)> {
+    let mut assignments = Vec::new();
+
+    // Get the base lvalue and its type
+    let (base_lvalue, lvalue_type) = match lhs {
+        skalp_mir::LValue::Signal(id) => {
+            let signal = module.signals.iter().find(|s| s.id == *id);
+            if let Some(sig) = signal {
+                (lhs, &sig.signal_type)
+            } else {
+                // If signal not found, return as-is
+                assignments.push((
+                    format_lvalue_with_context(lhs, module),
+                    format_expression_with_context(rhs, module),
+                ));
+                return assignments;
+            }
+        }
+        skalp_mir::LValue::Port(id) => {
+            let port = module.ports.iter().find(|p| p.id == *id);
+            if let Some(p) = port {
+                (lhs, &p.port_type)
+            } else {
+                // If port not found, return as-is
+                assignments.push((
+                    format_lvalue_with_context(lhs, module),
+                    format_expression_with_context(rhs, module),
+                ));
+                return assignments;
+            }
+        }
+        _ => {
+            // For other lvalue types (bit select, range select, etc.), return as-is
+            assignments.push((
+                format_lvalue_with_context(lhs, module),
+                format_expression_with_context(rhs, module),
+            ));
+            return assignments;
+        }
+    };
+
+    // Check if it's a struct or vector type that needs expansion
+    match lvalue_type {
+        DataType::Struct(struct_type) => {
+            // Get the base name for LHS
+            let lhs_base_name = format_lvalue_with_context(base_lvalue, module);
+
+            // Check if RHS is also a signal/port reference to expand from
+            let rhs_base_name = if let skalp_mir::Expression::Ref(rhs_lvalue) = rhs {
+                Some(format_lvalue_with_context(rhs_lvalue, module))
+            } else {
+                None
+            };
+
+            // Expand each field
+            for field in &struct_type.fields {
+                let lhs_field_name = format!("{}_{}", lhs_base_name, field.name);
+                let rhs_field_expr = if let Some(ref rhs_name) = rhs_base_name {
+                    format!("{}_{}", rhs_name, field.name)
+                } else {
+                    // RHS is not a simple reference, can't expand
+                    // This shouldn't happen for simple struct assignments
+                    format_expression_with_context(rhs, module)
+                };
+
+                // Recursively expand nested structs
+                expand_field_assignment(
+                    &lhs_field_name,
+                    &rhs_field_expr,
+                    &field.field_type,
+                    &mut assignments,
+                );
+            }
+        }
+        DataType::Vec2(element_type)
+        | DataType::Vec3(element_type)
+        | DataType::Vec4(element_type) => {
+            // Get the base name for LHS
+            let lhs_base_name = format_lvalue_with_context(base_lvalue, module);
+
+            // Check if RHS is also a signal/port reference
+            let rhs_base_name = if let skalp_mir::Expression::Ref(rhs_lvalue) = rhs {
+                Some(format_lvalue_with_context(rhs_lvalue, module))
+            } else {
+                None
+            };
+
+            // Determine component names based on vector type
+            let components = match lvalue_type {
+                DataType::Vec2(_) => vec!["x", "y"],
+                DataType::Vec3(_) => vec!["x", "y", "z"],
+                DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                _ => unreachable!(),
+            };
+
+            // Expand each component
+            for component in components {
+                let lhs_comp_name = format!("{}_{}", lhs_base_name, component);
+                let rhs_comp_expr = if let Some(ref rhs_name) = rhs_base_name {
+                    format!("{}_{}", rhs_name, component)
+                } else {
+                    format_expression_with_context(rhs, module)
+                };
+
+                expand_field_assignment(
+                    &lhs_comp_name,
+                    &rhs_comp_expr,
+                    element_type,
+                    &mut assignments,
+                );
+            }
+        }
+        _ => {
+            // Not a struct type, return as single assignment
+            assignments.push((
+                format_lvalue_with_context(lhs, module),
+                format_expression_with_context(rhs, module),
+            ));
+        }
+    }
+
+    assignments
+}
+
+/// Helper to recursively expand nested struct fields
+fn expand_field_assignment(
+    lhs_name: &str,
+    rhs_expr: &str,
+    field_type: &DataType,
+    assignments: &mut Vec<(String, String)>,
+) {
+    match field_type {
+        DataType::Struct(struct_type) => {
+            // Recursively expand nested struct fields
+            for field in &struct_type.fields {
+                let nested_lhs = format!("{}_{}", lhs_name, field.name);
+                let nested_rhs = format!("{}_{}", rhs_expr, field.name);
+                expand_field_assignment(&nested_lhs, &nested_rhs, &field.field_type, assignments);
+            }
+        }
+        DataType::Vec2(element_type)
+        | DataType::Vec3(element_type)
+        | DataType::Vec4(element_type) => {
+            let components = match field_type {
+                DataType::Vec2(_) => vec!["x", "y"],
+                DataType::Vec3(_) => vec!["x", "y", "z"],
+                DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                _ => unreachable!(),
+            };
+
+            for component in components {
+                let nested_lhs = format!("{}_{}", lhs_name, component);
+                let nested_rhs = format!("{}_{}", rhs_expr, component);
+                expand_field_assignment(&nested_lhs, &nested_rhs, element_type, assignments);
+            }
+        }
+        _ => {
+            // Leaf field - add assignment
+            assignments.push((lhs_name.to_string(), rhs_expr.to_string()));
+        }
+    }
+}
+
+/// Expand a port connection for flattened struct/vector types
+/// Returns a vector of (port_field_name, signal_field_expr) pairs
+/// This handles entity instantiation where both ports and signals may be flattened
+fn expand_port_connection(
+    port_name: &str,
+    port_type: &DataType,
+    signal_expr: &skalp_mir::Expression,
+    parent_module: &Module,
+) -> Vec<(String, String)> {
+    let mut connections = Vec::new();
+
+    match port_type {
+        DataType::Struct(struct_type) => {
+            // Get the signal base name if it's a simple reference
+            let signal_base_name = if let skalp_mir::Expression::Ref(lvalue) = signal_expr {
+                Some(format_lvalue_with_context(lvalue, parent_module))
+            } else {
+                None
+            };
+
+            // Expand each field
+            for field in &struct_type.fields {
+                let port_field_name = format!("{}_{}", port_name, field.name);
+                let signal_field_name = if let Some(ref signal_name) = signal_base_name {
+                    format!("{}_{}", signal_name, field.name)
+                } else {
+                    // Can't expand non-reference expressions, use as-is
+                    format_expression_with_context(signal_expr, parent_module)
+                };
+
+                // Recursively expand nested types
+                expand_port_connection_field(
+                    &port_field_name,
+                    &signal_field_name,
+                    &field.field_type,
+                    &mut connections,
+                );
+            }
+        }
+        DataType::Vec2(element_type)
+        | DataType::Vec3(element_type)
+        | DataType::Vec4(element_type) => {
+            // Get the signal base name
+            let signal_base_name = if let skalp_mir::Expression::Ref(lvalue) = signal_expr {
+                Some(format_lvalue_with_context(lvalue, parent_module))
+            } else {
+                None
+            };
+
+            // Determine components
+            let components = match port_type {
+                DataType::Vec2(_) => vec!["x", "y"],
+                DataType::Vec3(_) => vec!["x", "y", "z"],
+                DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                _ => unreachable!(),
+            };
+
+            // Expand each component
+            for component in components {
+                let port_comp_name = format!("{}_{}", port_name, component);
+                let signal_comp_name = if let Some(ref signal_name) = signal_base_name {
+                    format!("{}_{}", signal_name, component)
+                } else {
+                    format_expression_with_context(signal_expr, parent_module)
+                };
+
+                expand_port_connection_field(
+                    &port_comp_name,
+                    &signal_comp_name,
+                    element_type,
+                    &mut connections,
+                );
+            }
+        }
+        _ => {
+            // Scalar type - single connection
+            connections.push((
+                port_name.to_string(),
+                format_expression_with_context(signal_expr, parent_module),
+            ));
+        }
+    }
+
+    connections
+}
+
+/// Helper to recursively expand nested struct/vector fields in port connections
+fn expand_port_connection_field(
+    port_field_name: &str,
+    signal_field_name: &str,
+    field_type: &DataType,
+    connections: &mut Vec<(String, String)>,
+) {
+    match field_type {
+        DataType::Struct(struct_type) => {
+            // Recursively expand nested struct
+            for field in &struct_type.fields {
+                let nested_port = format!("{}_{}", port_field_name, field.name);
+                let nested_signal = format!("{}_{}", signal_field_name, field.name);
+                expand_port_connection_field(
+                    &nested_port,
+                    &nested_signal,
+                    &field.field_type,
+                    connections,
+                );
+            }
+        }
+        DataType::Vec2(element_type)
+        | DataType::Vec3(element_type)
+        | DataType::Vec4(element_type) => {
+            let components = match field_type {
+                DataType::Vec2(_) => vec!["x", "y"],
+                DataType::Vec3(_) => vec!["x", "y", "z"],
+                DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                _ => unreachable!(),
+            };
+
+            for component in components {
+                let nested_port = format!("{}_{}", port_field_name, component);
+                let nested_signal = format!("{}_{}", signal_field_name, component);
+                expand_port_connection_field(
+                    &nested_port,
+                    &nested_signal,
+                    element_type,
+                    connections,
+                );
+            }
+        }
+        _ => {
+            // Leaf field - add connection
+            connections.push((port_field_name.to_string(), signal_field_name.to_string()));
+        }
+    }
+}
+
+/// Flatten a signal with struct type into individual declarations
+/// For example: vertex: Vertex becomes vertex_position_x, vertex_position_y, etc.
+fn flatten_signal_to_declarations(
+    name: &str,
+    signal_type: &DataType,
+    reg_or_wire: &str,
+    initial_value: &Option<skalp_mir::Value>,
+    declarations: &mut Vec<String>,
+) {
+    match signal_type {
+        DataType::Struct(struct_type) => {
+            // Recursively flatten each field
+            for field in &struct_type.fields {
+                let field_name = format!("{}_{}", name, field.name);
+                // For struct fields, we don't propagate the initial value
+                // (would need to extract field values from struct literal)
+                flatten_signal_to_declarations(
+                    &field_name,
+                    &field.field_type,
+                    reg_or_wire,
+                    &None,
+                    declarations,
+                );
+            }
+        }
+        DataType::Vec2(element_type) => {
+            // Flatten Vec2 into x, y components
+            flatten_signal_to_declarations(
+                &format!("{}_x", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+            flatten_signal_to_declarations(
+                &format!("{}_y", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+        }
+        DataType::Vec3(element_type) => {
+            // Flatten Vec3 into x, y, z components
+            flatten_signal_to_declarations(
+                &format!("{}_x", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+            flatten_signal_to_declarations(
+                &format!("{}_y", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+            flatten_signal_to_declarations(
+                &format!("{}_z", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+        }
+        DataType::Vec4(element_type) => {
+            // Flatten Vec4 into x, y, z, w components
+            flatten_signal_to_declarations(
+                &format!("{}_x", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+            flatten_signal_to_declarations(
+                &format!("{}_y", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+            flatten_signal_to_declarations(
+                &format!("{}_z", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+            flatten_signal_to_declarations(
+                &format!("{}_w", name),
+                element_type,
+                reg_or_wire,
+                &None,
+                declarations,
+            );
+        }
+        _ => {
+            // Non-struct type - add as single declaration
+            let (element_width, array_dim) = get_type_dimensions(signal_type);
+            let mut decl = format!("    {} {}{}{}", reg_or_wire, element_width, name, array_dim);
+
+            // Add initial value if present
+            if let Some(init) = initial_value {
+                decl.push_str(&format!(" = {}", format_value(init)));
+            }
+
+            declarations.push(decl);
+        }
     }
 }
 

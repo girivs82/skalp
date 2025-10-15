@@ -158,7 +158,10 @@
       "Bash(RUST_LOG=debug timeout 3 /Users/girivs/src/hw/hls/target/debug/skalp build -s /Users/girivs/src/hw/hls/examples/complex_project/src/main.sk -o /tmp/test_complex_debug)",
       "Bash(do)",
       "Bash(RUST_LOG=debug timeout 3 ./target/release/skalp build -s /tmp/test_with_struct.sk -o /tmp/test_struct_debug_out)",
-      "Bash(./Users/girivs/src/hw/hls/target/release/skalp build:*)"
+      "Bash(./Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Bash(bash -c 'for example in examples/*.sk; do echo \"\"=== $example ===\"\" && timeout 10 ./target/release/skalp build -s \"\"$example\"\" -o /tmp/test_out 2>&1 | tail -3; echo \"\"\"\"; done')",
+      "Bash(do echo \"=== Testing: $file ===\" timeout 5 ./target/release/skalp build -s \"$file\" -o /tmp/test_numeric)",
+      "Bash(verilator:*)"
     ],
     "deny": [],
     "ask": []

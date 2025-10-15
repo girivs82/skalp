@@ -117,6 +117,12 @@ impl HirBuilderContext {
         }
     }
 
+    /// Pre-register entities from merged HIR (for handling imports)
+    pub fn preregister_entity(&mut self, entity: &HirEntity) {
+        self.symbols.entities.insert(entity.name.clone(), entity.id);
+        self.built_entities.insert(entity.name.clone(), entity.clone());
+    }
+
     /// Build HIR from syntax tree
     pub fn build(&mut self, root: &SyntaxNode) -> Result<Hir, Vec<HirError>> {
         // Type checking is temporarily disabled during HIR building to avoid conflicts
@@ -177,26 +183,89 @@ impl HirBuilderContext {
                 }
                 SyntaxKind::StructDecl => {
                     if let Some(struct_type) = self.build_struct_type(&child) {
-                        // Store struct type for later reference
+                        let name = struct_type.name.clone();
+                        let type_def = HirType::Struct(struct_type);
+
+                        // Extract visibility
+                        let visibility = if child.children_with_tokens().any(|c| {
+                            c.as_token()
+                                .map(|t| t.kind() == SyntaxKind::PubKw)
+                                .unwrap_or(false)
+                        }) {
+                            HirVisibility::Public
+                        } else {
+                            HirVisibility::Private
+                        };
+
+                        // Store struct type for later reference in symbol table
                         self.symbols
                             .user_types
-                            .insert(struct_type.name.clone(), HirType::Struct(struct_type));
+                            .insert(name.clone(), type_def.clone());
+
+                        // Add to HIR for export
+                        hir.user_defined_types.push(HirUserDefinedType {
+                            name,
+                            visibility,
+                            type_def,
+                        });
                     }
                 }
                 SyntaxKind::EnumDecl => {
                     if let Some(enum_type) = self.build_enum_type(&child) {
-                        // Store enum type for later reference
+                        let name = enum_type.name.clone();
+                        let type_def = HirType::Enum(Box::new(enum_type));
+
+                        // Extract visibility
+                        let visibility = if child.children_with_tokens().any(|c| {
+                            c.as_token()
+                                .map(|t| t.kind() == SyntaxKind::PubKw)
+                                .unwrap_or(false)
+                        }) {
+                            HirVisibility::Public
+                        } else {
+                            HirVisibility::Private
+                        };
+
+                        // Store enum type for later reference in symbol table
                         self.symbols
                             .user_types
-                            .insert(enum_type.name.clone(), HirType::Enum(Box::new(enum_type)));
+                            .insert(name.clone(), type_def.clone());
+
+                        // Add to HIR for export
+                        hir.user_defined_types.push(HirUserDefinedType {
+                            name,
+                            visibility,
+                            type_def,
+                        });
                     }
                 }
                 SyntaxKind::UnionDecl => {
                     if let Some(union_type) = self.build_union_type(&child) {
-                        // Store union type for later reference
+                        let name = union_type.name.clone();
+                        let type_def = HirType::Union(union_type);
+
+                        // Extract visibility
+                        let visibility = if child.children_with_tokens().any(|c| {
+                            c.as_token()
+                                .map(|t| t.kind() == SyntaxKind::PubKw)
+                                .unwrap_or(false)
+                        }) {
+                            HirVisibility::Public
+                        } else {
+                            HirVisibility::Private
+                        };
+
+                        // Store union type for later reference in symbol table
                         self.symbols
                             .user_types
-                            .insert(union_type.name.clone(), HirType::Union(union_type));
+                            .insert(name.clone(), type_def.clone());
+
+                        // Add to HIR for export
+                        hir.user_defined_types.push(HirUserDefinedType {
+                            name,
+                            visibility,
+                            type_def,
+                        });
                     }
                 }
                 SyntaxKind::FunctionDecl => {
@@ -475,6 +544,34 @@ impl HirBuilderContext {
         Some(implementation)
     }
 
+    /// Convert generic argument expression based on parameter type
+    fn convert_generic_arg_expr(
+        &self,
+        expr: HirExpression,
+        param_type: &HirGenericType,
+    ) -> HirExpression {
+        match param_type {
+            HirGenericType::Type => {
+                // For type parameters, convert identifier/generic param to type reference
+                match &expr {
+                    HirExpression::GenericParam(name) => {
+                        // Wrap the type in a Cast expression so the collector can extract it
+                        HirExpression::Cast(HirCastExpr {
+                            expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
+                            target_type: HirType::Custom(name.clone()),
+                        })
+                    }
+                    _ => expr, // Already a proper expression (e.g., from parse_type)
+                }
+            }
+            HirGenericType::Const(_) | HirGenericType::Width => {
+                // Const and width parameters stay as expressions
+                expr
+            }
+            _ => expr, // Other parameter types pass through unchanged
+        }
+    }
+
     /// Build instance declaration
     fn build_instance(&mut self, node: &SyntaxNode) -> Option<HirInstance> {
         let id = InstanceId(0); // TODO: Add instance ID generation
@@ -500,18 +597,43 @@ impl HirBuilderContext {
         // Look up entity ID
         let entity = *self.symbols.entities.get(&entity_name)?;
 
+        // Get the entity definition's generic parameters (clone to avoid borrow issues)
+        let entity_generics = self
+            .built_entities
+            .get(&entity_name)
+            .map(|e| e.generics.clone())
+            .unwrap_or_default();
+
         // Extract generic arguments if present
         let mut generic_args = Vec::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
+            let mut arg_index = 0;
             for arg_node in arg_list.children() {
                 // Each child is an Arg node, which contains the actual expression
                 if arg_node.kind() == SyntaxKind::Arg {
-                    // Find the expression inside the Arg node
+                    // Find the expression or type inside the Arg node
                     if let Some(expr_node) = arg_node.children().next() {
-                        if let Some(expr) = self.build_expression(&expr_node) {
-                            generic_args.push(expr);
+                        let mut expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
+                            // For type arguments, build the type and wrap in a Cast expression
+                            let ty = self.build_hir_type(&expr_node);
+                            Some(HirExpression::Cast(HirCastExpr {
+                                expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
+                                target_type: ty,
+                            }))
+                        } else {
+                            self.build_expression(&expr_node)
+                        };
+
+                        if let Some(mut e) = expr {
+                            // Convert expression to appropriate form based on generic parameter type
+                            if arg_index < entity_generics.len() {
+                                let param = &entity_generics[arg_index];
+                                e = self.convert_generic_arg_expr(e, &param.param_type);
+                            }
+                            generic_args.push(e);
                         }
                     }
+                    arg_index += 1;
                 }
             }
         }
@@ -3966,6 +4088,18 @@ impl HirBuilderContext {
                         return HirType::Custom(type_name);
                     }
                 }
+                SyntaxKind::InlineStructType => {
+                    // Inline struct: struct { field1: Type1, field2: Type2 }
+                    return self.build_inline_struct_type(&child);
+                }
+                SyntaxKind::InlineEnumType => {
+                    // Inline enum: enum { Variant1, Variant2, ... }
+                    return self.build_inline_enum_type(&child);
+                }
+                SyntaxKind::InlineUnionType => {
+                    // Inline union: union { field1: Type1, field2: Type2 }
+                    return self.build_inline_union_type(&child);
+                }
                 _ => {}
             }
         }
@@ -4461,6 +4595,81 @@ impl HirBuilderContext {
             name,
             fields,
             packed: false, // TODO: Check for packed attribute
+        })
+    }
+
+    /// Build inline struct type from syntax node
+    /// Inline struct: `struct { x: bit[32], y: bit[32] }`
+    fn build_inline_struct_type(&mut self, node: &SyntaxNode) -> HirType {
+        let mut fields = Vec::new();
+
+        // Find the field list (directly under this node, since it's inline)
+        if let Some(field_list) = node.first_child_of_kind(SyntaxKind::StructFieldList) {
+            for field_node in field_list.children_of_kind(SyntaxKind::StructField) {
+                if let Some(field) = self.build_struct_field(&field_node) {
+                    fields.push(field);
+                }
+            }
+        }
+
+        // Generate an anonymous name for the inline struct
+        let name = format!("__inline_struct_{}", self.next_entity_id);
+
+        HirType::Struct(HirStructType {
+            name,
+            fields,
+            packed: false,
+        })
+    }
+
+    /// Build inline enum type from syntax node
+    /// Inline enum: `enum { Idle, Active, Done }`
+    fn build_inline_enum_type(&mut self, node: &SyntaxNode) -> HirType {
+        let mut variants = Vec::new();
+
+        // Find the variant list
+        if let Some(variant_list) = node.first_child_of_kind(SyntaxKind::EnumVariantList) {
+            for variant_node in variant_list.children_of_kind(SyntaxKind::EnumVariant) {
+                if let Some(variant) = self.build_enum_variant(&variant_node) {
+                    variants.push(variant);
+                }
+            }
+        }
+
+        // Generate an anonymous name for the inline enum
+        let name = format!("__inline_enum_{}", self.next_entity_id);
+
+        // Default base type is nat[32]
+        let base_type = Box::new(HirType::Nat(32));
+
+        HirType::Enum(Box::new(HirEnumType {
+            name,
+            variants,
+            base_type,
+        }))
+    }
+
+    /// Build inline union type from syntax node
+    /// Inline union: `union { x: bit[32], y: float32 }`
+    fn build_inline_union_type(&mut self, node: &SyntaxNode) -> HirType {
+        let mut fields = Vec::new();
+
+        // Find the field list
+        if let Some(field_list) = node.first_child_of_kind(SyntaxKind::UnionFieldList) {
+            for field_node in field_list.children_of_kind(SyntaxKind::UnionField) {
+                if let Some(field) = self.build_struct_field(&field_node) {
+                    fields.push(field);
+                }
+            }
+        }
+
+        // Generate an anonymous name for the inline union
+        let name = format!("__inline_union_{}", self.next_entity_id);
+
+        HirType::Union(HirUnionType {
+            name,
+            fields,
+            packed: false,
         })
     }
 

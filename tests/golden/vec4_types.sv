@@ -2,16 +2,19 @@
 // Design: main
 
 module Vec4Test (
-    input [31:0] v,
+    input [7:0] v_x,
+    input [7:0] v_y,
+    input [7:0] v_z,
+    input [7:0] v_w,
     output [7:0] x,
     output [7:0] y,
     output [7:0] z,
     output [7:0] w
 );
 
-    assign x = v[7:0];
-    assign y = v[15:8];
-    assign z = v[23:16];
-    assign w = v[31:24];
+    assign x = v_x;
+    assign y = v_y;
+    assign z = v_z;
+    assign w = v_w;
 
 endmodule

@@ -2,14 +2,16 @@
 // Design: main
 
 module Vec3Test (
-    input [47:0] v,
+    input [15:0] v_x,
+    input [15:0] v_y,
+    input [15:0] v_z,
     output [15:0] x,
     output [15:0] y,
     output [15:0] z
 );
 
-    assign x = v[15:0];
-    assign y = v[31:16];
-    assign z = v[47:32];
+    assign x = v_x;
+    assign y = v_y;
+    assign z = v_z;
 
 endmodule

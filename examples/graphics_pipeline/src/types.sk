@@ -1,35 +1,28 @@
 // Common Type Definitions for Graphics Pipeline
 //
-// This module provides type definitions using currently supported SKALP types.
-// Uses bit[N] for numeric values (representing fp32 bit patterns)
-// Future: Will migrate to fp32, fp16, fixed<W,F,S> when implemented
+// This module provides type definitions using SKALP's built-in parametric types.
+// Leverages vec2/vec3/vec4<fp32> for vector operations
+// All types are automatically flattened during synthesis for optimal hardware generation
 
 // ============================================================================
-// Vector Type Aliases (using bit vectors for now)
+// Vector Type Aliases (using built-in parametric types)
 // ============================================================================
 
-/// 3D vector using 32-bit values (fp32 bit patterns)
+/// 3D vector using IEEE 754 single-precision floating-point
 ///
-/// Each component is 32 bits (will be fp32 in future)
-pub struct Vec3 {
-    pub x: bit[32],
-    pub y: bit[32],
-    pub z: bit[32]
-}
+/// Built-in vec3 type with fp32 components
+/// Automatically flattened to individual signals during synthesis
+pub type Vec3 = vec3<fp32>;
 
-/// 4D vector using 32-bit values (for homogeneous coordinates)
-pub struct Vec4 {
-    pub x: bit[32],
-    pub y: bit[32],
-    pub z: bit[32],
-    pub w: bit[32]
-}
+/// 4D vector using fp32 (for homogeneous coordinates)
+///
+/// Built-in vec4 type with fp32 components
+pub type Vec4 = vec4<fp32>;
 
-/// 2D vector (for texture coordinates)
-pub struct Vec2 {
-    pub x: bit[32],
-    pub y: bit[32]
-}
+/// 2D vector using fp32 (for texture coordinates)
+///
+/// Built-in vec2 type with fp32 components
+pub type Vec2 = vec2<fp32>;
 
 // ============================================================================
 // Matrix Type Alias
@@ -162,8 +155,9 @@ pub fn default_color() -> Color {
 // This types.sk file provides:
 //
 // 1. **Vector Types**: Vec2, Vec3, Vec4 for positions, normals, colors
-//    - Currently using bit[32] (representing fp32 bit patterns)
-//    - Future: Will use native fp32 types when available
+//    - Using built-in vec2/vec3/vec4<fp32> parametric types
+//    - Automatically flattened to individual fp32 signals during synthesis
+//    - Native IEEE 754 single-precision floating-point support
 //
 // 2. **Matrix Types**: Matrix4x4 for transformations
 //    - Represented as array of Vec4 rows
