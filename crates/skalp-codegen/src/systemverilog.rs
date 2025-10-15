@@ -6,6 +6,7 @@
 use anyhow::Result;
 use skalp_lir::LirDesign;
 use skalp_mir::mir::PriorityMux;
+use skalp_mir::type_width; // Use shared type width calculations
 use skalp_mir::{
     Assignment, AssignmentKind, DataType, EdgeType, EnumType, Mir, Module, Process, ProcessKind,
     Statement, StructType,
@@ -910,49 +911,12 @@ fn get_type_dimensions(data_type: &skalp_mir::DataType) -> (String, String) {
 }
 
 /// Get the width in bits of a data type
+///
+/// **Note:** Uses the shared type_width module for consistent width calculation.
+/// After Phase 2 of the refactoring, MIR ports and signals should only have
+/// scalar types. If composite types appear here, it indicates a bug in HIR→MIR.
 fn get_type_width(data_type: &skalp_mir::DataType) -> usize {
-    match data_type {
-        skalp_mir::DataType::Bit(width)
-        | skalp_mir::DataType::Logic(width)
-        | skalp_mir::DataType::Int(width)
-        | skalp_mir::DataType::Nat(width) => *width,
-        skalp_mir::DataType::Bool => 1, // Boolean is 1 bit
-        // Parametric types use their default width for calculations
-        skalp_mir::DataType::BitParam { default, .. }
-        | skalp_mir::DataType::LogicParam { default, .. }
-        | skalp_mir::DataType::IntParam { default, .. }
-        | skalp_mir::DataType::NatParam { default, .. } => *default,
-        skalp_mir::DataType::Clock { .. } => 1,
-        skalp_mir::DataType::Reset { .. } => 1,
-        skalp_mir::DataType::Event => 1,
-        skalp_mir::DataType::Array(element_type, size) => get_type_width(element_type) * size,
-        skalp_mir::DataType::Struct(struct_type) => {
-            let mut total_width = 0;
-            for field in &struct_type.fields {
-                total_width += get_type_width(&field.field_type);
-            }
-            total_width
-        }
-        skalp_mir::DataType::Enum(_) => 32, // Default enum width
-        skalp_mir::DataType::Union(union_type) => {
-            let mut max_width = 0;
-            for field in &union_type.fields {
-                let width = get_type_width(&field.field_type);
-                if width > max_width {
-                    max_width = width;
-                }
-            }
-            max_width
-        }
-        // Floating-point types have fixed widths
-        skalp_mir::DataType::Float16 => 16,
-        skalp_mir::DataType::Float32 => 32,
-        skalp_mir::DataType::Float64 => 64,
-        // Vector types - width is element_width * component_count
-        skalp_mir::DataType::Vec2(element_type) => get_type_width(element_type) * 2,
-        skalp_mir::DataType::Vec3(element_type) => get_type_width(element_type) * 3,
-        skalp_mir::DataType::Vec4(element_type) => get_type_width(element_type) * 4,
-    }
+    type_width::get_type_width(data_type)
 }
 
 /// Flatten a port with struct type into individual signals
