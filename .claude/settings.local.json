@@ -164,7 +164,8 @@
       "Bash(verilator:*)",
       "Bash(skalp:*)",
       "Bash(make:*)",
-      "Bash(RUST_LOG=skalp_frontend=debug ./target/release/skalp build:*)"
+      "Bash(RUST_LOG=skalp_frontend=debug ./target/release/skalp build:*)",
+      "Bash(RUST_LOG=skalp_frontend=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)"
     ],
     "deny": [],
     "ask": []

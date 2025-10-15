@@ -378,7 +378,8 @@ impl HirBuilderContext {
     /// Build port from syntax node
     fn build_port(&mut self, node: &SyntaxNode) -> Option<HirPort> {
         let id = self.next_port_id();
-        let name = self.extract_name(node)?;
+        // Use extract_name_allow_keywords for ports since keywords are valid port names
+        let name = self.extract_name_allow_keywords(node)?;
 
         // Get direction
         let direction = if let Some(dir_node) = node.first_child_of_kind(SyntaxKind::PortDirection)
@@ -3690,6 +3691,17 @@ impl HirBuilderContext {
         node.children_with_tokens()
             .filter_map(|elem| elem.into_token())
             .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())
+    }
+
+    /// Extract name that allows keywords (for contexts like port names where keywords are valid)
+    fn extract_name_allow_keywords(&self, node: &SyntaxNode) -> Option<String> {
+        node.children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| {
+                // Accept identifiers and keywords
+                t.kind() == SyntaxKind::Ident || t.kind().is_keyword()
+            })
             .map(|t| t.text().to_string())
     }
 

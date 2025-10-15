@@ -433,7 +433,8 @@ impl<'a> ParseState<'a> {
         if self.at(SyntaxKind::InKw)
             || self.at(SyntaxKind::InputKw)
             || self.at(SyntaxKind::OutKw)
-            || self.at(SyntaxKind::OutputKw)
+            // Note: OutputKw should NOT be accepted as a direction keyword
+            // Only OutKw is valid - OutputKw is a legacy synonym that creates conflicts
             || self.at(SyntaxKind::InoutKw)
             || self.at(SyntaxKind::PortKw)
         {
@@ -4333,7 +4334,8 @@ impl<'a> ParseState<'a> {
                 SyntaxKind::InKw
                     | SyntaxKind::InputKw
                     | SyntaxKind::OutKw
-                    | SyntaxKind::OutputKw
+                    // Note: OutputKw is NOT a valid port direction - only OutKw is valid
+                    // OutputKw is a synonym that should be treated as an identifier in port names
                     | SyntaxKind::InoutKw
                     | SyntaxKind::PortKw
             )
