@@ -15,8 +15,8 @@
 //! ONLY scalar types in ports and signals (no DataType::Struct, etc.).
 
 use crate::mir::{
-    Assignment, AssignmentKind, DataType, Expression, LValue, Port, PortDirection, PortId,
-    Signal, SignalId, StructType, Value, ClockDomainId,
+    Assignment, AssignmentKind, ClockDomainId, DataType, Expression, LValue, Port, PortDirection,
+    PortId, Signal, SignalId, StructType, Value,
 };
 
 /// Information about a flattened field
@@ -38,7 +38,9 @@ pub struct TypeFlattener {
 impl TypeFlattener {
     /// Create a new type flattener with starting ID
     pub fn new(starting_id: u32) -> Self {
-        Self { next_id: starting_id }
+        Self {
+            next_id: starting_id,
+        }
     }
 
     /// Flatten a port with composite type into multiple scalar ports
@@ -331,6 +333,7 @@ impl TypeFlattener {
     }
 
     /// Create a leaf port (scalar type)
+    #[allow(clippy::too_many_arguments)]
     fn create_leaf_port(
         &mut self,
         name: &str,
@@ -488,6 +491,7 @@ impl TypeFlattener {
     }
 
     /// Create a leaf signal (scalar type)
+    #[allow(clippy::too_many_arguments)]
     fn create_leaf_signal(
         &mut self,
         name: &str,
@@ -608,7 +612,8 @@ mod tests {
 
     #[test]
     fn test_field_path() {
-        let path = TypeFlattener::get_field_path("vertex", &["position".to_string(), "x".to_string()]);
+        let path =
+            TypeFlattener::get_field_path("vertex", &["position".to_string(), "x".to_string()]);
         assert_eq!(path, "vertex_position_x");
 
         let path2 = TypeFlattener::get_field_path("data", &[]);

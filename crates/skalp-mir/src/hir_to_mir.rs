@@ -4,7 +4,7 @@
 //! to the mid-level MIR suitable for code generation
 
 use crate::mir::*;
-use crate::type_flattening::{TypeFlattener, FlattenedField as TypeFlattenedField};
+use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
 use skalp_frontend::const_eval::ConstEvaluator;
 use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
@@ -2766,12 +2766,8 @@ impl<'hir> HirToMir<'hir> {
     ) -> (Vec<Port>, Vec<FlattenedField>) {
         // Use shared TypeFlattener with current port ID counter
         let mut flattener = TypeFlattener::new(self.next_port_id);
-        let (ports, type_fields) = flattener.flatten_port(
-            base_name,
-            port_type,
-            direction,
-            physical_constraints,
-        );
+        let (ports, type_fields) =
+            flattener.flatten_port(base_name, port_type, direction, physical_constraints);
 
         // Update our port ID counter based on how many ports were created
         self.next_port_id += ports.len() as u32;
@@ -2802,12 +2798,8 @@ impl<'hir> HirToMir<'hir> {
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
         // Use shared TypeFlattener with current signal ID counter
         let mut flattener = TypeFlattener::new(self.next_signal_id);
-        let (signals, type_fields) = flattener.flatten_signal(
-            base_name,
-            signal_type,
-            initial,
-            clock_domain,
-        );
+        let (signals, type_fields) =
+            flattener.flatten_signal(base_name, signal_type, initial, clock_domain);
 
         // Update our signal ID counter based on how many signals were created
         self.next_signal_id += signals.len() as u32;

@@ -15,7 +15,7 @@
 //! **Invariant:** Width calculations are deterministic and consistent across
 //! all passes.
 
-use crate::mir::{DataType, StructType, EnumType, UnionType};
+use crate::mir::{DataType, EnumType, StructType, UnionType};
 
 /// Calculate the bit width of a MIR data type
 ///

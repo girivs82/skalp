@@ -175,7 +175,10 @@ pub fn parse_instance_signal_name(hierarchical_name: &str) -> (Vec<String>, Stri
     }
 
     let signal = parts[parts.len() - 1].to_string();
-    let instances: Vec<String> = parts[..parts.len() - 1].iter().map(|s| s.to_string()).collect();
+    let instances: Vec<String> = parts[..parts.len() - 1]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     (instances, signal)
 }
@@ -272,10 +275,7 @@ mod tests {
 
     #[test]
     fn test_make_instance_signal_name() {
-        assert_eq!(
-            make_instance_signal_name("fifo", "wr_ptr"),
-            "fifo.wr_ptr"
-        );
+        assert_eq!(make_instance_signal_name("fifo", "wr_ptr"), "fifo.wr_ptr");
         assert_eq!(
             make_instance_signal_name("processor", "busy"),
             "processor.busy"
@@ -288,10 +288,7 @@ mod tests {
             make_nested_instance_signal_name(&["stage1", "fifo"], "wr_ptr"),
             "stage1.fifo.wr_ptr"
         );
-        assert_eq!(
-            make_nested_instance_signal_name(&[], "signal"),
-            "signal"
-        );
+        assert_eq!(make_nested_instance_signal_name(&[], "signal"), "signal");
     }
 
     #[test]
