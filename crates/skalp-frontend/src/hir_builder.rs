@@ -4065,12 +4065,11 @@ impl HirBuilderContext {
                         for (idx, arg_child) in children.iter().enumerate() {
                             // Skip IdentExpr if the next node is a BinaryExpr
                             // (it means this ident is part of the binary expr)
-                            if arg_child.kind() == SyntaxKind::IdentExpr {
-                                if idx + 1 < children.len()
-                                    && children[idx + 1].kind() == SyntaxKind::BinaryExpr
-                                {
-                                    continue; // Skip this - it's part of the next binary expr
-                                }
+                            if arg_child.kind() == SyntaxKind::IdentExpr
+                                && idx + 1 < children.len()
+                                && children[idx + 1].kind() == SyntaxKind::BinaryExpr
+                            {
+                                continue; // Skip this - it's part of the next binary expr
                             }
 
                             if let Some(arg_expr) = self.build_expression(arg_child) {
