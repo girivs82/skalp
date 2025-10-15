@@ -3310,6 +3310,36 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// Extract base signal name from LValue (handles arrays, bit/range selection)
+    fn extract_base_signal_for_instance(
+        &self,
+        lvalue: &LValue,
+        inst_prefix: &str,
+        child_module: &Module,
+    ) -> Option<String> {
+        match lvalue {
+            LValue::Signal(sig_id) => {
+                // Direct signal reference
+                if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                    Some(format!("{}.{}", inst_prefix, signal.name))
+                } else {
+                    None
+                }
+            }
+            LValue::BitSelect { base, index: _ } => {
+                // Array/bit index: extract base signal
+                // e.g., mem[wr_ptr] -> base is "mem"
+                self.extract_base_signal_for_instance(base, inst_prefix, child_module)
+            }
+            LValue::RangeSelect { base, high: _, low: _ } => {
+                // Bit range slice: extract base signal
+                // e.g., data[7:0] -> base is "data"
+                self.extract_base_signal_for_instance(base, inst_prefix, child_module)
+            }
+            _ => None,
+        }
+    }
+
     /// Collect assignment targets in a sequential block for an instance
     #[allow(clippy::only_used_in_recursion)]
     fn collect_assignment_targets_for_instance(
@@ -3322,19 +3352,16 @@ impl<'a> MirToSirConverter<'a> {
     ) {
         match statement {
             Statement::Assignment(assign) => {
-                // Get LHS signal name with prefix
-                let lhs_signal = match &assign.lhs {
-                    LValue::Signal(sig_id) => {
-                        if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id)
-                        {
-                            format!("{}.{}", inst_prefix, signal.name)
-                        } else {
-                            return; // Skip if not found
-                        }
-                    }
-                    _ => return,
-                };
-                targets.insert(lhs_signal);
+                // Extract base signal from LHS (handles array indices, field access, etc.)
+                let lhs_signal = self.extract_base_signal_for_instance(
+                    &assign.lhs,
+                    inst_prefix,
+                    child_module,
+                );
+
+                if let Some(sig_name) = lhs_signal {
+                    targets.insert(sig_name);
+                }
             }
             Statement::If(if_stmt) => {
                 // Recursively collect from both branches
@@ -3663,7 +3690,8 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) -> usize {
-        match expr {
+        eprintln!("🔧 create_expression_node_for_instance: inst={}, expr={:?}", inst_prefix, std::mem::discriminant(expr));
+        let result = match expr {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => {
                 // Map through ports if needed
@@ -3735,7 +3763,9 @@ impl<'a> MirToSirConverter<'a> {
                 // For unsupported expressions, create a zero constant
                 self.create_constant_node(0, 1)
             }
-        }
+        };
+        eprintln!("🔧 create_expression_node_for_instance: returning node {}", result);
+        result
     }
 
     /// Collect input signal references from expression

@@ -852,6 +852,19 @@ impl<'a> MetalShaderGenerator<'a> {
             SirNodeKind::ArrayWrite => self.generate_array_write(sir, node),
             _ => {}
         }
+
+        // Handle nodes with multiple outputs: copy first output to all additional outputs
+        // This handles cases like FIFO outputs where connect_node_to_signal adds extra outputs
+        if node.outputs.len() > 1 {
+            let first_output = &node.outputs[0].signal_id;
+            for additional_output in &node.outputs[1..] {
+                self.write_indented(&format!(
+                    "signals->{} = signals->{};\n",
+                    self.sanitize_name(&additional_output.signal_id),
+                    self.sanitize_name(first_output)
+                ));
+            }
+        }
     }
 
     fn generate_flipflop_update_v2(&mut self, sir: &SirModule, node: &SirNode, edge: &ClockEdge) {

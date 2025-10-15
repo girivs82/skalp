@@ -276,17 +276,23 @@ impl<'hir> MonomorphizationEngine<'hir> {
             })
             .collect();
 
-        // Specialize event blocks - substitute expressions in statements
+        // Specialize event blocks - substitute expressions in statements AND remap trigger port IDs
         let specialized_event_blocks = impl_block
             .event_blocks
             .iter()
             .map(|event_block| {
                 let mut new_event_block = event_block.clone();
-                // Substitute statements within event block
+                // CRITICAL: Substitute statements AND remap port IDs within event block
                 new_event_block.statements = event_block
                     .statements
                     .iter()
-                    .map(|stmt| self.substitute_statement(stmt, &instantiation.const_args))
+                    .map(|stmt| self.substitute_statement_with_ports(stmt, &instantiation.const_args, port_id_map))
+                    .collect();
+                // CRITICAL: Remap trigger port IDs to match specialized entity ports
+                new_event_block.triggers = event_block
+                    .triggers
+                    .iter()
+                    .map(|trigger| self.remap_event_trigger_ports(trigger, port_id_map))
                     .collect();
                 new_event_block
             })
@@ -307,11 +313,12 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
     }
 
-    /// Substitute const parameters in a statement
-    fn substitute_statement(
+    /// Substitute const parameters AND remap port IDs in a statement
+    fn substitute_statement_with_ports(
         &self,
         stmt: &crate::hir::HirStatement,
         const_args: &HashMap<String, ConstValue>,
+        port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> crate::hir::HirStatement {
         use crate::hir::HirStatement;
 
@@ -319,20 +326,25 @@ impl<'hir> MonomorphizationEngine<'hir> {
             HirStatement::Assignment(assign) => {
                 let mut new_assign = assign.clone();
                 new_assign.rhs = self.substitute_expr(&assign.rhs, const_args);
+                // CRITICAL: Remap port IDs in assignment
+                new_assign.lhs = self.remap_lvalue_ports(&assign.lhs, port_id_map);
+                new_assign.rhs = self.remap_expr_ports(&new_assign.rhs, port_id_map);
                 HirStatement::Assignment(new_assign)
             }
             HirStatement::If(if_stmt) => {
                 let mut new_if = if_stmt.clone();
                 new_if.condition = self.substitute_expr(&if_stmt.condition, const_args);
+                // CRITICAL: Remap port IDs in condition!
+                new_if.condition = self.remap_expr_ports(&new_if.condition, port_id_map);
                 new_if.then_statements = if_stmt
                     .then_statements
                     .iter()
-                    .map(|s| self.substitute_statement(s, const_args))
+                    .map(|s| self.substitute_statement_with_ports(s, const_args, port_id_map))
                     .collect();
                 new_if.else_statements = if_stmt.else_statements.as_ref().map(|stmts| {
                     stmts
                         .iter()
-                        .map(|s| self.substitute_statement(s, const_args))
+                        .map(|s| self.substitute_statement_with_ports(s, const_args, port_id_map))
                         .collect()
                 });
                 HirStatement::If(new_if)
@@ -340,6 +352,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
             HirStatement::Match(match_stmt) => {
                 let mut new_match = match_stmt.clone();
                 new_match.expr = self.substitute_expr(&match_stmt.expr, const_args);
+                // CRITICAL: Remap port IDs in match expression
+                new_match.expr = self.remap_expr_ports(&new_match.expr, port_id_map);
                 // Substitute in all match arms
                 new_match.arms = match_stmt
                     .arms
@@ -349,7 +363,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         new_arm.statements = arm
                             .statements
                             .iter()
-                            .map(|s| self.substitute_statement(s, const_args))
+                            .map(|s| self.substitute_statement_with_ports(s, const_args, port_id_map))
                             .collect();
                         new_arm
                     })
@@ -359,6 +373,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
             HirStatement::Let(let_stmt) => {
                 let mut new_let = let_stmt.clone();
                 new_let.value = self.substitute_expr(&let_stmt.value, const_args);
+                // CRITICAL: Remap port IDs in let value
+                new_let.value = self.remap_expr_ports(&new_let.value, port_id_map);
                 new_let.var_type = self.substitute_type(
                     &let_stmt.var_type,
                     &Instantiation {
@@ -803,6 +819,35 @@ impl<'hir> MonomorphizationEngine<'hir> {
         instantiations
             .iter()
             .find(|inst| inst.entity_id == entity.id && inst.const_args == const_args)
+    }
+
+    /// Remap port IDs in an event trigger
+    fn remap_event_trigger_ports(
+        &self,
+        trigger: &crate::hir::HirEventTrigger,
+        port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
+    ) -> crate::hir::HirEventTrigger {
+        use crate::hir::{HirEventSignal, HirEventTrigger};
+
+        let new_signal = match &trigger.signal {
+            HirEventSignal::Port(old_port_id) => {
+                if let Some(&new_port_id) = port_id_map.get(old_port_id) {
+                    HirEventSignal::Port(new_port_id)
+                } else {
+                    // Port not in map - keep old ID (shouldn't happen for well-formed code)
+                    trigger.signal.clone()
+                }
+            }
+            HirEventSignal::Signal(_) => {
+                // Signal IDs don't change during entity specialization
+                trigger.signal.clone()
+            }
+        };
+
+        HirEventTrigger {
+            signal: new_signal,
+            edge: trigger.edge.clone(),
+        }
     }
 
     /// Remap port IDs in an LValue
