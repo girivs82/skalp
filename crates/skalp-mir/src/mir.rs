@@ -113,6 +113,53 @@ pub struct Variable {
 pub struct VariableId(pub u32);
 
 /// Data types in MIR
+///
+/// # MIR Type Invariants (Post-HIR→MIR Transformation)
+///
+/// After HIR→MIR transformation is complete, **all ports and signals must have scalar types only**.
+/// Composite types (Struct, Vec2/Vec3/Vec4, Array, Enum, Union) should be **flattened** into
+/// individual scalar signals/ports during the HIR→MIR transformation.
+///
+/// ## Flattening Rules
+///
+/// - **Struct types**: Flattened into individual fields with names like `base_field1_field2`
+/// - **Vec2/Vec3/Vec4**: Flattened into components `base_x`, `base_y`, `base_z`, `base_w`
+/// - **Arrays**: Flattened into indexed elements `base_0`, `base_1`, etc.
+/// - **Enums**: Converted to their base type representation
+/// - **Unions**: Flattened to their largest field width
+///
+/// ## Validation
+///
+/// The `skalp_mir::mir_validation::validate_mir()` function enforces this invariant.
+/// It is automatically called after HIR→MIR transformation in `lower_to_mir()`.
+/// If composite types appear in ports/signals after transformation, validation will panic
+/// with a detailed error message indicating a bug in `hir_to_mir.rs`.
+///
+/// ## Type Width Calculation
+///
+/// Use `skalp_mir::type_width::get_type_width()` for consistent width calculation.
+/// This function will panic if composite types are passed to it, ensuring bugs are
+/// caught early.
+///
+/// ## Example
+///
+/// ```ignore
+/// // HIR (before transformation):
+/// port vertex: Vertex;  // Vertex is a struct { position: Vec3<f32>, color: bit[32] }
+///
+/// // MIR (after transformation):
+/// port vertex_position_x: Float32;
+/// port vertex_position_y: Float32;
+/// port vertex_position_z: Float32;
+/// port vertex_color: Bit(32);
+/// ```
+///
+/// ## See Also
+///
+/// - `skalp_mir::type_flattening` - Struct/vector flattening utilities
+/// - `skalp_mir::type_width` - Type width calculation utilities
+/// - `skalp_mir::signal_naming` - Naming convention utilities
+/// - `skalp_mir::mir_validation` - MIR invariant validation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataType {
     /// Bit vector (synthesis-friendly)
