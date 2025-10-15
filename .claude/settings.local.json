@@ -161,7 +161,10 @@
       "Bash(./Users/girivs/src/hw/hls/target/release/skalp build:*)",
       "Bash(bash -c 'for example in examples/*.sk; do echo \"\"=== $example ===\"\" && timeout 10 ./target/release/skalp build -s \"\"$example\"\" -o /tmp/test_out 2>&1 | tail -3; echo \"\"\"\"; done')",
       "Bash(do echo \"=== Testing: $file ===\" timeout 5 ./target/release/skalp build -s \"$file\" -o /tmp/test_numeric)",
-      "Bash(verilator:*)"
+      "Bash(verilator:*)",
+      "Bash(skalp:*)",
+      "Bash(make:*)",
+      "Bash(RUST_LOG=skalp_frontend=debug ./target/release/skalp build:*)"
     ],
     "deny": [],
     "ask": []

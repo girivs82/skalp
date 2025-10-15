@@ -26,7 +26,7 @@ entity GeometryProcessor4 {
     in light_color: Vec3
     in ambient: Vec3
     out output_valid: bit
-    out output: TransformedVertex
+    out transformed_vertex: TransformedVertex
     in output_ready: bit
     out busy: bit
     out vertices_processed: bit[32]
@@ -64,7 +64,7 @@ impl GeometryProcessor4 {
     output_valid = (state == 1)
     busy = (state != 0)
     vertices_processed = count
-    output = out_vertex
+    transformed_vertex = out_vertex
 }
 
 /// Top-level Graphics Pipeline Accelerator
@@ -247,7 +247,7 @@ impl GraphicsPipelineTop {
         light_color: light_color,
         ambient: ambient_color,
         output_valid: geom_output_valid,
-        output: geom_output,
+        transformed_vertex: geom_output,
         output_ready: geom_output_ready,
         busy: geom_busy,
         vertices_processed: geom_vertices_count
