@@ -10,6 +10,7 @@ use crate::sir::*;
 use skalp_mir::{Mir, Module, DataType, Process, Statement, Expression, LValue, Value};
 use skalp_mir::{SensitivityList, EdgeType as MirEdgeType, BinaryOp as MirBinaryOp};
 use skalp_mir::{UnaryOp as MirUnaryOp, ReduceOp as MirReduceOp, Block};
+use skalp_mir::type_width; // Use shared type width calculations
 use std::collections::HashMap;
 use bitvec::prelude::*;
 
@@ -69,6 +70,7 @@ impl MirToSir {
         self.port_map.clear();
 
         // Transform ports to signals first
+        // Input ports will have SignalRef nodes created for them to copy inputs→signals
         for port in &module.ports {
             let sir_signal = SirSignal {
                 id: self.next_signal_id(),
@@ -474,17 +476,12 @@ impl MirToSir {
     }
 
     /// Get the width of a data type in bits
+    ///
+    /// **Note:** Uses the shared type_width module for consistent width calculation.
+    /// If composite types (struct/enum/union/vec/array) appear here, it indicates
+    /// a bug in HIR→MIR transformation - the validation should have caught this.
     fn get_data_type_width(&self, data_type: &DataType) -> usize {
-        match data_type {
-            DataType::Bit(width) => *width,
-            DataType::Logic(width) => *width,
-            DataType::Int(width) => *width,
-            DataType::Nat(width) => *width,
-            DataType::Clock { .. } => 1,
-            DataType::Reset { .. } => 1,
-            DataType::Event => 1,
-            _ => 1, // TODO: Handle struct, enum, union types
-        }
+        type_width::get_type_width(data_type)
     }
 
     /// Update signals to be registers based on sequential block usage
