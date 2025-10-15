@@ -1458,6 +1458,20 @@ fn is_signal_assigned_in_block(signal_id: &skalp_mir::SignalId, block: &skalp_mi
                     }
                 }
             }
+            Statement::Case(case_stmt) => {
+                // Check all case items
+                for item in &case_stmt.items {
+                    if is_signal_assigned_in_block(signal_id, &item.block) {
+                        return true;
+                    }
+                }
+                // Check default case
+                if let Some(default_block) = &case_stmt.default {
+                    if is_signal_assigned_in_block(signal_id, default_block) {
+                        return true;
+                    }
+                }
+            }
             Statement::Block(block) => {
                 if is_signal_assigned_in_block(signal_id, block) {
                     return true;

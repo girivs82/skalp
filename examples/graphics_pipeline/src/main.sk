@@ -157,13 +157,12 @@ impl GraphicsPipelineTop {
             viewport_width <= 640
             viewport_height <= 480
             cmd_valid <= 0
-            vertices_processed <= 0
             triangles_drawn <= 0
             frames_rendered <= 0
         } else {
             // AXI write transaction handling
             if axi_awvalid && axi_wvalid && axi_awready {
-                let addr = axi_awaddr[15:0]
+                let addr: bit[16] = axi_awaddr[15:0]
 
                 // Register map (simplified - would decode properly in real design)
                 match addr {
@@ -198,7 +197,7 @@ impl GraphicsPipelineTop {
 
     on(sys_clk.rise) {
         if axi_arvalid && axi_arready {
-            let addr = axi_araddr[15:0]
+            let addr: bit[16] = axi_araddr[15:0]
             match addr {
                 0x1000 => axi_read_data <= vertices_processed
                 0x1004 => axi_read_data <= triangles_drawn
@@ -363,9 +362,9 @@ impl GraphicsPipelineTop {
     }
 
     // Video timing generation (simplified)
-    video_hsync = (pixel_x >= 656 && pixel_x < 752)
-    video_vsync = (pixel_y >= 490 && pixel_y < 492)
-    video_de = (pixel_x < 640 && pixel_y < 480)
+    video_hsync = ((pixel_x >= 656) && (pixel_x < 752))
+    video_vsync = ((pixel_y >= 490) && (pixel_y < 492))
+    video_de = ((pixel_x < 640) && (pixel_y < 480))
 
     // Video output (placeholder - would come from framebuffer)
     video_r = pixel_valid ? 0xFF : 0
