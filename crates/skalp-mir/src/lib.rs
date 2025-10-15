@@ -11,9 +11,15 @@ pub mod cdc_analysis;
 pub mod compiler;
 pub mod hir_to_mir;
 pub mod mir;
+pub mod mir_validation;
 pub mod optimize;
 pub mod timing;
 pub mod transform;
+
+// Shared utility modules for consistent transformations
+pub mod signal_naming;
+pub mod type_flattening;
+pub mod type_width;
 
 // Re-export main types
 pub use cdc_analysis::{CdcAnalyzer, CdcSeverity, CdcViolation, CdcViolationType};
@@ -27,6 +33,7 @@ pub use mir::{
     SensitivityList, Signal, SignalId, Statement, StructField, StructType, UnaryOp, UnionType,
     Value, Variable, VariableId,
 };
+pub use mir_validation::{validate_mir, ValidationError};
 pub use optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 
 use anyhow::Result;
@@ -39,7 +46,11 @@ pub fn lower_to_mir(hir: &Hir) -> Result<Mir> {
     let mut transformer = HirToMir::new();
     let mir = transformer.transform(hir);
 
-    // Debug info removed
+    // Validate MIR invariants
+    // This catches bugs early if type flattening isn't complete
+    if let Err(e) = validate_mir(&mir) {
+        anyhow::bail!("MIR validation failed: {}", e);
+    }
 
     Ok(mir)
 }

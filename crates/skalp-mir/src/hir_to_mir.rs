@@ -4,6 +4,7 @@
 //! to the mid-level MIR suitable for code generation
 
 use crate::mir::*;
+use crate::type_flattening::{TypeFlattener, FlattenedField as TypeFlattenedField};
 use skalp_frontend::const_eval::ConstEvaluator;
 use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
@@ -56,6 +57,8 @@ pub struct HirToMir<'hir> {
     /// Track dynamically created variables (from let bindings in event blocks)
     /// Maps HIR VariableId to (MIR VariableId, name, type)
     dynamic_variables: HashMap<hir::VariableId, (VariableId, String, hir::HirType)>,
+    /// Type flattener for consistent struct/vector expansion
+    type_flattener: TypeFlattener,
 }
 
 impl<'hir> HirToMir<'hir> {
@@ -79,6 +82,7 @@ impl<'hir> HirToMir<'hir> {
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
             dynamic_variables: HashMap::new(),
+            type_flattener: TypeFlattener::new(0), // Will be re-initialized per use
         }
     }
 
@@ -429,9 +433,10 @@ impl<'hir> HirToMir<'hir> {
                 } else {
                     // Check if we already have a dynamic variable with this name
                     // If so, reuse its ID to avoid duplicate declarations
-                    let existing_var = self.dynamic_variables.values().find(|(_, name, _)| {
-                        name == &let_stmt.name
-                    });
+                    let existing_var = self
+                        .dynamic_variables
+                        .values()
+                        .find(|(_, name, _)| name == &let_stmt.name);
 
                     let new_id = if let Some((existing_id, _, _)) = existing_var {
                         // Reuse the existing variable ID for this name
@@ -2750,6 +2755,8 @@ impl<'hir> HirToMir<'hir> {
 
     /// Flatten a port with struct/vector type into multiple MIR ports
     /// Returns the list of created ports and flattened field information
+    ///
+    /// **New Implementation:** Uses the shared TypeFlattener module for consistent flattening
     fn flatten_port(
         &mut self,
         base_name: &str,
@@ -2757,98 +2764,35 @@ impl<'hir> HirToMir<'hir> {
         direction: PortDirection,
         physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
     ) -> (Vec<Port>, Vec<FlattenedField>) {
-        let mut ports = Vec::new();
-        let mut fields = Vec::new();
-        self.flatten_port_recursive(
+        // Use shared TypeFlattener with current port ID counter
+        let mut flattener = TypeFlattener::new(self.next_port_id);
+        let (ports, type_fields) = flattener.flatten_port(
             base_name,
             port_type,
             direction,
-            physical_constraints.as_ref(),
-            vec![],
-            &mut ports,
-            &mut fields,
+            physical_constraints,
         );
+
+        // Update our port ID counter based on how many ports were created
+        self.next_port_id += ports.len() as u32;
+
+        // Convert TypeFlattenedField to our local FlattenedField type
+        let fields: Vec<FlattenedField> = type_fields
+            .into_iter()
+            .map(|tf| FlattenedField {
+                id: tf.id,
+                field_path: tf.field_path,
+                leaf_type: tf.leaf_type,
+            })
+            .collect();
+
         (ports, fields)
-    }
-
-    /// Recursively flatten a port
-    #[allow(clippy::too_many_arguments)]
-    fn flatten_port_recursive(
-        &mut self,
-        name: &str,
-        port_type: &DataType,
-        direction: PortDirection,
-        physical_constraints: Option<&skalp_frontend::hir::PhysicalConstraints>,
-        field_path: Vec<String>,
-        ports: &mut Vec<Port>,
-        fields: &mut Vec<FlattenedField>,
-    ) {
-        match port_type {
-            DataType::Struct(struct_type) => {
-                // Recursively flatten each field
-                for field in &struct_type.fields {
-                    let field_name = format!("{}_{}", name, field.name);
-                    let mut new_path = field_path.clone();
-                    new_path.push(field.name.clone());
-                    self.flatten_port_recursive(
-                        &field_name,
-                        &field.field_type,
-                        direction,
-                        physical_constraints,
-                        new_path,
-                        ports,
-                        fields,
-                    );
-                }
-            }
-            DataType::Vec2(element_type)
-            | DataType::Vec3(element_type)
-            | DataType::Vec4(element_type) => {
-                let components = match port_type {
-                    DataType::Vec2(_) => vec!["x", "y"],
-                    DataType::Vec3(_) => vec!["x", "y", "z"],
-                    DataType::Vec4(_) => vec!["x", "y", "z", "w"],
-                    _ => unreachable!(),
-                };
-
-                for component in components {
-                    let comp_name = format!("{}_{}", name, component);
-                    let mut new_path = field_path.clone();
-                    new_path.push(component.to_string());
-                    self.flatten_port_recursive(
-                        &comp_name,
-                        element_type,
-                        direction,
-                        physical_constraints,
-                        new_path,
-                        ports,
-                        fields,
-                    );
-                }
-            }
-            _ => {
-                // Leaf type - create actual port
-                let port_id = self.next_port_id();
-                let port = Port {
-                    id: port_id,
-                    name: name.to_string(),
-                    direction,
-                    port_type: port_type.clone(),
-                    physical_constraints: physical_constraints.cloned(),
-                };
-                ports.push(port);
-
-                fields.push(FlattenedField {
-                    id: port_id.0,
-                    field_path,
-                    leaf_type: port_type.clone(),
-                });
-            }
-        }
     }
 
     /// Flatten a signal with struct/vector type into multiple MIR signals
     /// Returns the list of created signals and flattened field information
+    ///
+    /// **New Implementation:** Uses the shared TypeFlattener module for consistent flattening
     fn flatten_signal(
         &mut self,
         base_name: &str,
@@ -2856,94 +2800,29 @@ impl<'hir> HirToMir<'hir> {
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
-        let mut signals = Vec::new();
-        let mut fields = Vec::new();
-        self.flatten_signal_recursive(
+        // Use shared TypeFlattener with current signal ID counter
+        let mut flattener = TypeFlattener::new(self.next_signal_id);
+        let (signals, type_fields) = flattener.flatten_signal(
             base_name,
             signal_type,
             initial,
             clock_domain,
-            vec![],
-            &mut signals,
-            &mut fields,
         );
+
+        // Update our signal ID counter based on how many signals were created
+        self.next_signal_id += signals.len() as u32;
+
+        // Convert TypeFlattenedField to our local FlattenedField type
+        let fields: Vec<FlattenedField> = type_fields
+            .into_iter()
+            .map(|tf| FlattenedField {
+                id: tf.id,
+                field_path: tf.field_path,
+                leaf_type: tf.leaf_type,
+            })
+            .collect();
+
         (signals, fields)
-    }
-
-    /// Recursively flatten a signal
-    #[allow(clippy::too_many_arguments)]
-    fn flatten_signal_recursive(
-        &mut self,
-        name: &str,
-        signal_type: &DataType,
-        initial: Option<Value>,
-        clock_domain: Option<ClockDomainId>,
-        field_path: Vec<String>,
-        signals: &mut Vec<Signal>,
-        fields: &mut Vec<FlattenedField>,
-    ) {
-        match signal_type {
-            DataType::Struct(struct_type) => {
-                // Recursively flatten each field
-                for field in &struct_type.fields {
-                    let field_name = format!("{}_{}", name, field.name);
-                    let mut new_path = field_path.clone();
-                    new_path.push(field.name.clone());
-                    self.flatten_signal_recursive(
-                        &field_name,
-                        &field.field_type,
-                        None, // Don't propagate initial value for struct fields
-                        clock_domain,
-                        new_path,
-                        signals,
-                        fields,
-                    );
-                }
-            }
-            DataType::Vec2(element_type)
-            | DataType::Vec3(element_type)
-            | DataType::Vec4(element_type) => {
-                let components = match signal_type {
-                    DataType::Vec2(_) => vec!["x", "y"],
-                    DataType::Vec3(_) => vec!["x", "y", "z"],
-                    DataType::Vec4(_) => vec!["x", "y", "z", "w"],
-                    _ => unreachable!(),
-                };
-
-                for component in components {
-                    let comp_name = format!("{}_{}", name, component);
-                    let mut new_path = field_path.clone();
-                    new_path.push(component.to_string());
-                    self.flatten_signal_recursive(
-                        &comp_name,
-                        element_type,
-                        None,
-                        clock_domain,
-                        new_path,
-                        signals,
-                        fields,
-                    );
-                }
-            }
-            _ => {
-                // Leaf type - create actual signal
-                let signal_id = self.next_signal_id();
-                let signal = Signal {
-                    id: signal_id,
-                    name: name.to_string(),
-                    signal_type: signal_type.clone(),
-                    initial,
-                    clock_domain,
-                };
-                signals.push(signal);
-
-                fields.push(FlattenedField {
-                    id: signal_id.0,
-                    field_path,
-                    leaf_type: signal_type.clone(),
-                });
-            }
-        }
     }
 }
 
