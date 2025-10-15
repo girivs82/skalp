@@ -1,164 +1,82 @@
 // Common Type Definitions for Graphics Pipeline
 //
-// This module demonstrates SKALP's parametric type system:
-// - Parametric vectors: vec<T, N>
-// - Parametric matrices: [[T; R]; C]
-// - Parametric integers: int<W, S>, u8, u16, u32
-// - Parametric floating-point: fp<F>, fp32, fp16
-// - Fixed-point: fixed<W, F, S>
-//
-// Instead of manual bit[N] types, we use semantic types that express intent.
-
-// Import SKALP standard library types
-// (In a real implementation, these would be imported from skalp::numeric)
-// use skalp::numeric::fp::{fp32, fp16};
-// use skalp::numeric::vec::{vec2, vec3, vec4};
-// use skalp::numeric::int::{u8, u16, u32, i32};
-// use skalp::numeric::fixed::{fixed};
+// This module provides type definitions using currently supported SKALP types.
+// Uses bit[N] for numeric values (representing fp32 bit patterns)
+// Future: Will migrate to fp32, fp16, fixed<W,F,S> when implemented
 
 // ============================================================================
-// Parametric Vector Type Aliases
+// Vector Type Aliases (using bit vectors for now)
 // ============================================================================
 
-/// 2D vector using 32-bit floating-point (for texture coordinates)
+/// 3D vector using 32-bit values (fp32 bit patterns)
 ///
-/// Benefits over manual struct:
-/// - Type safety: Can't accidentally mix vec2 and vec3
-/// - Generic algorithms: Works with any T: Numeric
-/// - Stdlib operations: Built-in add, dot, normalize, etc.
-pub type Vec2 = vec2<fp32>;
+/// Each component is 32 bits (will be fp32 in future)
+pub struct Vec3 {
+    pub x: bit[32],
+    pub y: bit[32],
+    pub z: bit[32]
+}
 
-/// 3D vector using 32-bit floating-point (for positions, normals, colors)
+/// 4D vector using 32-bit values (for homogeneous coordinates)
+pub struct Vec4 {
+    pub x: bit[32],
+    pub y: bit[32],
+    pub z: bit[32],
+    pub w: bit[32]
+}
+
+/// 2D vector (for texture coordinates)
+pub struct Vec2 {
+    pub x: bit[32],
+    pub y: bit[32]
+}
+
+// ============================================================================
+// Matrix Type Alias
+// ============================================================================
+
+/// 4x4 transformation matrix
 ///
-/// Example usage:
-///   let pos: Vec3 = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
-///   let len = pos.length();  // Built-in method
-pub type Vec3 = vec3<fp32>;
-
-/// 4D vector using 32-bit floating-point (for homogeneous coordinates)
-///
-/// Used for:
-/// - Homogeneous positions after MVP transform
-/// - Quaternions (w, x, y, z)
-pub type Vec4 = vec4<fp32>;
-
-// Alternative precisions for specific use cases:
-
-/// Half-precision 3D vector (for bandwidth-critical applications)
-pub type Vec3Half = vec3<fp16>;
-
-/// Fixed-point 3D vector (for area-optimized implementations)
-/// Q16.16 format: 16 integer bits, 16 fractional bits
-pub type Vec3Fixed = vec3<fixed<32, 16, true>>;
+/// Represented as array of Vec4 (each row is a Vec4)
+pub type Matrix4x4 = [Vec4; 4];
 
 // ============================================================================
-// Parametric Matrix Type Aliases
-// ============================================================================
-
-/// 4x4 transformation matrix using 32-bit floating-point
-///
-/// Parametric type: [[fp32; 4]; 4]
-/// - Array of 4 rows, each row is array of 4 fp32 values
-/// - Can be used with generic matrix operations
-/// - Type-safe: Can't accidentally use 3x3 matrix
-pub type Matrix4x4 = [[fp32; 4]; 4];
-
-/// 3x3 matrix for rotation/scale only (no translation)
-pub type Matrix3x3 = [[fp32; 3]; 3];
-
-/// Half-precision matrix (saves bandwidth and area)
-pub type Matrix4x4Half = [[fp16; 4]; 4];
-
-// ============================================================================
-// Integer Type Aliases (Semantic Names)
-// ============================================================================
-
-/// Vertex index into vertex buffer
-/// Using u32 instead of bit[32] expresses intent: unsigned integer
-pub type VertexIndex = u32;
-
-/// Triangle index
-pub type TriangleIndex = u32;
-
-/// Pixel coordinate (unsigned 16-bit)
-pub type PixelCoord = u16;
-
-/// Screen coordinate using fixed-point (Q8.8 format)
-/// 8 integer bits, 8 fractional bits: range [-128, 127.996]
-pub type ScreenCoord = fixed<16, 8, true>;
-
-/// Z-buffer depth value (Q16.16 format for high precision)
-pub type DepthValue = fixed<32, 16, false>;  // Unsigned: [0, 65535.9999]
-
-// ============================================================================
-// Color Types
+// Color Type
 // ============================================================================
 
 /// RGBA color (8-bit per channel)
-///
-/// Note: Color channels are u8 (unsigned 8-bit integer)
-/// Total size: 32 bits
 pub struct Color {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8
+    pub r: bit[8],
+    pub g: bit[8],
+    pub b: bit[8],
+    pub a: bit[8]
 }
-
-/// HDR color using floating-point (high dynamic range)
-pub type ColorHDR = vec4<fp32>;  // RGBA with FP32
-
-/// Half-precision color (bandwidth optimization)
-pub type ColorHalf = vec4<fp16>;
 
 // ============================================================================
 // Vertex Data Structures
 // ============================================================================
 
 /// Input vertex attributes
-///
-/// Generic over numeric type T for flexibility:
-/// - T = fp32: Standard precision
-/// - T = fp16: Half precision for mobile/low-power
-/// - T = fixed<W,F,S>: Fixed-point for ASIC
-pub struct Vertex<T: Numeric> {
-    pub position: vec3<T>,
-    pub normal: vec3<T>,
-    pub color: vec4<T>  // RGBA color in [0,1] range
+pub struct Vertex {
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub color: Vec4  // RGBA color (as bit patterns)
 }
-
-// Convenient type aliases for common configurations:
-
-/// Standard vertex with fp32
-pub type VertexFP32 = Vertex<fp32>;
-
-/// Half-precision vertex
-pub type VertexFP16 = Vertex<fp16>;
-
-/// Fixed-point vertex (Q16.16)
-pub type VertexFixed = Vertex<fixed<32, 16, true>>;
 
 /// Transformed vertex (after geometry processing)
-///
-/// Position is vec4 (homogeneous coordinates with w component)
-/// Normal remains vec3 (direction vector)
-pub struct TransformedVertex<T: Numeric> {
-    pub position: vec4<T>,   // Homogeneous position (x, y, z, w)
-    pub normal: vec3<T>,     // Surface normal
-    pub color: vec4<T>,      // RGBA color
-    pub tex_coord: vec2<T>   // Texture coordinates (optional)
+pub struct TransformedVertex {
+    pub position: Vec4,   // Homogeneous position (x, y, z, w)
+    pub normal: Vec3,     // Surface normal
+    pub color: Vec4,      // RGBA color
+    pub tex_coord: Vec2   // Texture coordinates
 }
 
-pub type TransformedVertexFP32 = TransformedVertex<fp32>;
-
 /// Screen-space vertex (after viewport transform)
-///
-/// Uses screen coordinates (pixels) and depth
 pub struct ScreenVertex {
-    pub x: ScreenCoord,      // Screen X in pixels (fixed-point)
-    pub y: ScreenCoord,      // Screen Y in pixels
-    pub depth: DepthValue,   // Z-buffer depth
-    pub color: Color         // Final pixel color (8-bit)
+    pub x: bit[16],      // Screen X in pixels
+    pub y: bit[16],      // Screen Y in pixels
+    pub depth: bit[32],  // Z-buffer depth
+    pub color: Color     // Final pixel color (8-bit)
 }
 
 // ============================================================================
@@ -166,8 +84,6 @@ pub struct ScreenVertex {
 // ============================================================================
 
 /// Command opcodes for graphics operations
-///
-/// Represents commands sent from CPU via AXI interface
 pub enum CommandOpcode {
     Nop = 0,           // No operation
     DrawTriangle = 1,  // Draw single triangle
@@ -179,13 +95,9 @@ pub enum CommandOpcode {
 }
 
 /// Graphics command with opcode and data
-///
-/// Command format:
-/// - opcode: 4 bits (0-15)
-/// - vertex_addr: 28 bits (256M vertex buffer)
 pub struct Command {
-    pub opcode: CommandOpcode,
-    pub vertex_addr: u32  // Address in vertex buffer
+    pub opcode: bit[4],      // 4 bits for opcode (0-15)
+    pub vertex_addr: bit[28] // 28 bits for vertex buffer address
 }
 
 // ============================================================================
@@ -213,104 +125,83 @@ pub enum RasterizerState {
 }
 
 // ============================================================================
-// Configuration Structures
+// Utility Functions
 // ============================================================================
 
-/// Viewport configuration
+/// Create identity matrix (4x4)
 ///
-/// Defines screen region and depth range
-pub struct ViewportConfig {
-    pub x: u16,         // Top-left X
-    pub y: u16,         // Top-left Y
-    pub width: u16,     // Width in pixels
-    pub height: u16,    // Height in pixels
-    pub min_depth: DepthValue,  // Near plane
-    pub max_depth: DepthValue   // Far plane
-}
-
-/// Lighting configuration
-///
-/// Simple Phong lighting model
-pub struct LightingConfig<T: Numeric> {
-    pub light_dir: vec3<T>,      // Directional light (normalized)
-    pub light_color: vec3<T>,    // Light RGB intensity
-    pub ambient: vec3<T>,        // Ambient light RGB
-    pub specular_exp: T          // Specular exponent (shininess)
-}
-
-pub type LightingConfigFP32 = LightingConfig<fp32>;
-
-// ============================================================================
-// Utility Functions (Generic)
-// ============================================================================
-
-/// Create identity matrix
-///
-/// Generic over numeric type T
-pub fn identity_matrix<T: Numeric>() -> [[T; 4]; 4] {
+/// Returns matrix with 1.0 (0x3F800000 in IEEE 754) on diagonal
+pub fn identity_matrix() -> Matrix4x4 {
     return [
-        [T::ONE, T::ZERO, T::ZERO, T::ZERO],
-        [T::ZERO, T::ONE, T::ZERO, T::ZERO],
-        [T::ZERO, T::ZERO, T::ONE, T::ZERO],
-        [T::ZERO, T::ZERO, T::ZERO, T::ONE]
+        Vec4 { x: 0x3F800000, y: 0, z: 0, w: 0 },  // [1, 0, 0, 0]
+        Vec4 { x: 0, y: 0x3F800000, z: 0, w: 0 },  // [0, 1, 0, 0]
+        Vec4 { x: 0, y: 0, z: 0x3F800000, w: 0 },  // [0, 0, 1, 0]
+        Vec4 { x: 0, y: 0, z: 0, w: 0x3F800000 }   // [0, 0, 0, 1]
     ]
 }
 
-/// Create zero vector
-pub fn zero_vec3<T: Numeric>() -> vec3<T> {
-    return vec3 { x: T::ZERO, y: T::ZERO, z: T::ZERO }
+/// Create zero Vec3
+pub fn zero_vec3() -> Vec3 {
+    return Vec3 { x: 0, y: 0, z: 0 }
 }
 
-/// Create zero vector (vec4)
-pub fn zero_vec4<T: Numeric>() -> vec4<T> {
-    return vec4 { x: T::ZERO, y: T::ZERO, z: T::ZERO, w: T::ZERO }
+/// Create zero Vec4
+pub fn zero_vec4() -> Vec4 {
+    return Vec4 { x: 0, y: 0, z: 0, w: 0 }
 }
 
-// ============================================================================
-// Type Safety Examples
-// ============================================================================
-
-// BEFORE (raw bits - no type safety):
-//   signal pos: bit[96];  // What is this? Vec3? Color? Matrix row?
-//   pos = some_data;      // Could be wrong type, no checking!
-
-// AFTER (parametric types - full type safety):
-//   signal pos: Vec3;     // Clearly a 3D position
-//   signal color: Color;  // Clearly a color
-//   pos = color;          // ❌ Compile error: type mismatch!
-
-// Generic functions work with any numeric type:
-//   fn process<T: Numeric>(v: vec3<T>) -> vec3<T> { ... }
-//
-//   let v1: vec3<fp32> = ...;
-//   let v2: vec3<fp16> = ...;
-//   let v3: vec3<fixed<32,16,true>> = ...;
-//
-//   process(v1);  // ✅ Works with fp32
-//   process(v2);  // ✅ Works with fp16
-//   process(v3);  // ✅ Works with fixed-point
+/// Create default color (white, opaque)
+pub fn default_color() -> Color {
+    return Color { r: 0xFF, g: 0xFF, b: 0xFF, a: 0xFF }
+}
 
 // ============================================================================
 // Module Documentation
 // ============================================================================
 
-// This types.sk file demonstrates:
+// This types.sk file provides:
 //
-// 1. **Parametric Types**: Using vec<T,N>, [[T;R];C], int<W,S>, fp<F>
-//    - Better than raw bit[N]: Semantic meaning, type safety, reusability
+// 1. **Vector Types**: Vec2, Vec3, Vec4 for positions, normals, colors
+//    - Currently using bit[32] (representing fp32 bit patterns)
+//    - Future: Will use native fp32 types when available
 //
-// 2. **Type Aliases**: Creating domain-specific names (Vec3, Matrix4x4)
-//    - Makes code self-documenting
-//    - Easy to change precision globally
+// 2. **Matrix Types**: Matrix4x4 for transformations
+//    - Represented as array of Vec4 rows
+//    - Used for model, view, projection matrices
 //
-// 3. **Generic Structs**: Vertex<T: Numeric> works with any numeric type
-//    - Single definition, multiple instantiations
-//    - Monomorphization creates specialized versions
+// 3. **Vertex Structures**: Vertex, TransformedVertex, ScreenVertex
+//    - Track different stages of vertex processing pipeline
+//    - Clear separation of coordinate spaces
 //
-// 4. **Fixed-Point**: ScreenCoord, DepthValue use fixed<W,F,S>
-//    - Hardware-friendly alternative to floating-point
-//    - Explicit precision control
+// 4. **Command Types**: For CPU-GPU communication via AXI
+//    - CommandOpcode enum for different operations
+//    - Command struct with opcode and data
 //
-// 5. **Numeric Trait**: T: Numeric enables generic algorithms
-//    - identity_matrix<T>() works with fp32, fp16, fixed, etc.
-//    - Reusable across different numeric types
+// 5. **State Enums**: For FSM control
+//    - GeometryState: Vertex processing pipeline states
+//    - RasterizerState: Pixel generation pipeline states
+//
+// 6. **Utility Functions**: Common operations
+//    - identity_matrix(): 4x4 identity
+//    - zero_vec3/4(): Zero vectors
+//    - default_color(): White color
+//
+// ## Upgrade Path (Future)
+//
+// When parametric types are fully supported, this will migrate to:
+//
+// ```skalp
+// pub type Vec3 = vec3<fp32>;
+// pub type Matrix4x4 = [[fp32; 4]; 4];
+// pub struct Vertex<T: Numeric> {
+//     pub position: vec3<T>,
+//     pub normal: vec3<T>,
+//     pub color: vec4<T>
+// }
+// ```
+//
+// This will enable:
+// - Type-safe numeric operations
+// - Generic algorithms over numeric types
+// - Automatic precision selection (fp32, fp16, fixed-point)
+// - Better optimization opportunities
