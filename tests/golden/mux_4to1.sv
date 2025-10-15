@@ -6,7 +6,8 @@ module Mux4to1 (
     input [7:0] b,
     input [7:0] c,
     input [7:0] d,
-    input [1:0] sel
+    input [1:0] sel,
+    output [7:0] out
 );
 
 endmodule

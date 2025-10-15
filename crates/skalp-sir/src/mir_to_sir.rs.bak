@@ -3541,6 +3541,140 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     /// Create expression node for instance context
+    fn create_expression_node_for_instance(
+        &mut self,
+        expr: &Expression,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+    ) -> usize {
+        match expr {
+            Expression::Ref(lvalue) => {
+                // Map signal reference through ports
+                eprintln!(
+                    "🔍 Expression::Ref processing lvalue: {:?} in instance {}",
+                    lvalue, inst_prefix
+                );
+                if let Some(sig_name) =
+                    self.get_signal_from_lvalue(lvalue, inst_prefix, port_mapping, child_module)
+                {
+                    eprintln!("   ✓ get_signal_from_lvalue returned: {}", sig_name);
+                    self.create_signal_ref(&sig_name)
+                } else {
+                    eprintln!("   ✗ get_signal_from_lvalue returned None, trying fallback");
+                    // Try to resolve as a simple signal name for debugging
+                    let fallback_name = match lvalue {
+                        LValue::Signal(sig_id) => {
+                            // Try to find the signal in child module
+                            if let Some(signal) =
+                                child_module.signals.iter().find(|s| s.id == *sig_id)
+                            {
+                                format!("{}.{}", inst_prefix, signal.name)
+                            } else if let Some(port) =
+                                child_module.ports.iter().find(|p| p.id.0 == sig_id.0)
+                            {
+                                // Port reference - map through port_mapping
+                                if let Some(parent_expr) = port_mapping.get(&port.name) {
+                                    self.get_signal_name_from_expression(parent_expr)
+                                } else {
+                                    eprintln!(
+                                        "⚠️ Port {} not in port_mapping for instance {}",
+                                        port.name, inst_prefix
+                                    );
+                                    port.name.clone()
+                                }
+                            } else {
+                                eprintln!(
+                                    "⚠️ Unresolved signal {:?} in instance {}",
+                                    sig_id, inst_prefix
+                                );
+                                "unknown".to_string()
+                            }
+                        }
+                        LValue::Port(port_id) => {
+                            // Direct port reference
+                            eprintln!(
+                                "🔍 LValue::Port matched for port_id={:?} in instance {}",
+                                port_id, inst_prefix
+                            );
+                            if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id)
+                            {
+                                eprintln!("   Found port: {}", port.name);
+                                // Map through port_mapping
+                                if let Some(parent_expr) = port_mapping.get(&port.name) {
+                                    let resolved =
+                                        self.get_signal_name_from_expression(parent_expr);
+                                    eprintln!(
+                                        "   Port {} mapped to expression → signal: {}",
+                                        port.name, resolved
+                                    );
+                                    resolved
+                                } else {
+                                    eprintln!(
+                                        "⚠️ Port {} not in port_mapping for instance {}",
+                                        port.name, inst_prefix
+                                    );
+                                    port.name.clone()
+                                }
+                            } else {
+                                eprintln!(
+                                    "⚠️ Unresolved port {:?} in instance {}",
+                                    port_id, inst_prefix
+                                );
+                                "unknown".to_string()
+                            }
+                        }
+                        _ => {
+                            eprintln!("⚠️ Complex lvalue {:?} in instance {}", lvalue, inst_prefix);
+                            "complex_lvalue".to_string()
+                        }
+                    };
+                    self.create_signal_ref(&fallback_name)
+                }
+            }
+            Expression::Literal(value) => {
+                // Create constant node
+                let (val, width) = match value {
+                    skalp_mir::Value::Integer(i) => {
+                        let w = if *i <= 0xFF {
+                            8
+                        } else if *i <= 0xFFFF {
+                            16
+                        } else {
+                            32
+                        };
+                        (*i as u64, w)
+                    }
+                    skalp_mir::Value::BitVector { width, value } => (*value, *width),
+                    _ => (0, 8),
+                };
+                self.create_constant_node(val, width)
+            }
+            Expression::Binary { op, left, right } => {
+                let left_node = self.create_expression_node_for_instance(
+                    left,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
+                let right_node = self.create_expression_node_for_instance(
+                    right,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
+
+                // Use the existing create_binary_op_node which handles BinaryOp correctly
+                self.create_binary_op_node(op, left_node, right_node)
+            }
+            _ => {
+                // For complex expressions, create a placeholder
+                let node_id = self.node_counter;
+                self.node_counter += 1;
+                node_id
+            }
+        }
+    }
 
     /// Convert a statement from child module with instance prefix
     fn convert_statement_for_instance(

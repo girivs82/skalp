@@ -68,7 +68,28 @@ impl Testbench {
         if mir.modules.is_empty() {
             anyhow::bail!("No modules found in design");
         }
-        let top_module = &mir.modules[mir.modules.len() - 1]; // Last module is typically top
+
+        // Find the top-level module: the module that is NOT instantiated by any other module
+        // Collect all module IDs that are instantiated
+        let mut instantiated_modules = std::collections::HashSet::new();
+        for module in &mir.modules {
+            for instance in &module.instances {
+                instantiated_modules.insert(instance.module);
+            }
+        }
+
+        // Find the module that is not instantiated (the top-level)
+        let top_module = mir
+            .modules
+            .iter()
+            .find(|m| !instantiated_modules.contains(&m.id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not find top-level module (no module is uninstantiated). \
+                     This might indicate a circular dependency or all modules are instantiated."
+                )
+            })?;
+
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
         // Create simulator and load design

@@ -319,9 +319,7 @@ impl<'hir> InstantiationCollector<'hir> {
                 None
             }
             // Cast expressions contain type information
-            HirExpression::Cast(cast_expr) => {
-                Some(cast_expr.target_type.clone())
-            }
+            HirExpression::Cast(cast_expr) => Some(cast_expr.target_type.clone()),
             // For other expressions, we can't extract type information
             // Type arguments should ideally be passed as a separate mechanism
             _ => None,
@@ -393,7 +391,9 @@ impl<'hir> InstantiationCollector<'hir> {
             if let Some(connection) = instance.connections.iter().find(|c| c.port == port.name) {
                 // Try to infer the type from the connected expression
                 if let Some(concrete_type) = self.infer_expr_type(&connection.expr) {
-                    inferred_types.entry(param_name.clone()).or_insert(concrete_type);
+                    inferred_types
+                        .entry(param_name.clone())
+                        .or_insert(concrete_type);
                 }
             }
         }
@@ -416,7 +416,9 @@ impl<'hir> InstantiationCollector<'hir> {
             // Signal references
             HirExpression::Signal(signal_id) => {
                 if let Some(impl_ctx) = self.current_impl {
-                    impl_ctx.signals.iter()
+                    impl_ctx
+                        .signals
+                        .iter()
                         .find(|s| s.id == *signal_id)
                         .map(|s| s.signal_type.clone())
                 } else {
@@ -436,7 +438,9 @@ impl<'hir> InstantiationCollector<'hir> {
             // Variable references
             HirExpression::Variable(var_id) => {
                 if let Some(impl_ctx) = self.current_impl {
-                    impl_ctx.variables.iter()
+                    impl_ctx
+                        .variables
+                        .iter()
                         .find(|v| v.id == *var_id)
                         .map(|v| v.var_type.clone())
                 } else {

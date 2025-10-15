@@ -284,19 +284,173 @@ impl FifoTest {
 
     #[tokio::test]
     async fn test_graphics_pipeline_multi_clock_domains() {
-        println!("🎨 Testing Graphics Pipeline Multi-Clock Domain Operation");
-        println!("   Note: This is an integration test showing clock domain setup");
-        println!("   Full pipeline testing requires more complete implementation");
+        println!("🎨 Testing Graphics Pipeline End-to-End");
+        println!("   Testing full data flow: sys_clk → geom_clk → pixel_clk");
 
-        // For now, just verify the testbench infrastructure works
-        // with the multi-clock setup that would be used for full testing
+        // Use the proper test design file from the graphics_pipeline verification directory
+        let test_design_path = "examples/graphics_pipeline/verif/testbenches/tb_pipeline_e2e.sk";
 
-        println!("   ✅ Multi-clock testbench infrastructure verified");
-        println!("   📋 TODO: Implement full pipeline test when:");
-        println!("      - GeometryProcessor4 has real transformations");
-        println!("      - AsyncFIFO implementation is complete");
-        println!("      - Video timing generator is implemented");
+        let mut tb = Testbench::new(test_design_path)
+            .await
+            .expect("Failed to create testbench");
 
-        println!("✅ Graphics pipeline infrastructure test PASSED!");
+        println!("   ✅ Testbench created");
+
+        // ============================================================
+        // Reset all clock domains
+        // ============================================================
+        println!("   🔄 Resetting all clock domains...");
+        tb.set("sys_rst", 1u8)
+            .set("geom_rst", 1u8)
+            .set("pixel_rst", 1u8)
+            .set("write_valid", 0u8)
+            .set("read_ready", 0u8);
+
+        // Reset for 2 cycles on each clock
+        tb.clock_multi(&[("sys_clk", 2), ("geom_clk", 2), ("pixel_clk", 2)])
+            .await;
+
+        // Release reset
+        tb.set("sys_rst", 0u8)
+            .set("geom_rst", 0u8)
+            .set("pixel_rst", 0u8);
+
+        tb.clock_multi(&[("sys_clk", 1), ("geom_clk", 1), ("pixel_clk", 1)])
+            .await;
+
+        println!("   ✅ All clock domains reset");
+
+        // ============================================================
+        // Write test vertices to system clock domain
+        // ============================================================
+        println!("   📝 Writing test vertices to system clock domain...");
+
+        let test_vertices = [
+            (0x40000000u32, 0x40400000u32, 0x40800000u32), // (2.0, 3.0, 4.0)
+            (0x40A00000u32, 0x40C00000u32, 0x40E00000u32), // (5.0, 6.0, 7.0)
+            (0x41000000u32, 0x41100000u32, 0x41200000u32), // (8.0, 9.0, 10.0)
+        ];
+
+        for (i, &(x, y, z)) in test_vertices.iter().enumerate() {
+            // IMPORTANT: Struct fields are flattened with underscores, not dots
+            // write_vertex.x becomes write_vertex_x (defined in hir_to_mir.rs flatten_port)
+            tb.set("write_vertex_x", x)
+                .set("write_vertex_y", y)
+                .set("write_vertex_z", z)
+                .set("write_valid", 1u8);
+
+            tb.clock_signal("sys_clk", 1).await;
+
+            println!(
+                "      Wrote vertex {}: ({:08X}, {:08X}, {:08X})",
+                i, x, y, z
+            );
+        }
+
+        tb.set("write_valid", 0u8);
+        tb.clock_signal("sys_clk", 1).await;
+
+        println!("   ✅ Vertices written to input FIFO");
+
+        // ============================================================
+        // Run geometry clock to process vertices
+        // ============================================================
+        println!("   ⚙️  Processing vertices in geometry clock domain...");
+
+        // Run geometry and pixel clocks together to allow CDC synchronization
+        // CDC requires multiple clock cycles on both domains to propagate signals
+        // Each vertex needs:
+        //   - 2-3 cycles for input FIFO CDC (sys_clk → geom_clk)
+        //   - 2 cycles to read and process
+        //   - 2-3 cycles for output FIFO CDC (geom_clk → pixel_clk)
+        println!("   ⏳ Running clocks for CDC and processing...");
+
+        for cycle in 0..50 {
+            // Run geometry clock (faster processing)
+            tb.clock_signal("geom_clk", 1).await;
+
+            // Also run pixel clock every few cycles for CDC
+            if cycle % 2 == 0 {
+                tb.clock_signal("pixel_clk", 1).await;
+            }
+
+            // Also run system clock occasionally for full CDC chain
+            if cycle % 3 == 0 {
+                tb.clock_signal("sys_clk", 1).await;
+            }
+        }
+
+        println!("   ✅ Clock cycles complete");
+
+        // ============================================================
+        // Read processed vertices from pixel clock domain
+        // ============================================================
+        println!("   📖 Reading processed vertices from pixel clock domain...");
+
+        tb.set("read_ready", 1u8);
+
+        let mut read_vertices = Vec::new();
+
+        for i in 0..test_vertices.len() {
+            // Check if data is available
+            let read_valid: u8 = tb.get_as("read_valid").await;
+            if read_valid == 0 {
+                println!("      ⚠️  No more data available after {} vertices", i);
+                break;
+            }
+
+            // Read the vertex (using underscore notation for flattened struct fields)
+            let x: u32 = tb.get_as("read_vertex_x").await;
+            let y: u32 = tb.get_as("read_vertex_y").await;
+            let z: u32 = tb.get_as("read_vertex_z").await;
+
+            read_vertices.push((x, y, z));
+
+            println!("      Read vertex {}: ({:08X}, {:08X}, {:08X})", i, x, y, z);
+
+            // Clock to advance to next vertex
+            tb.clock_signal("pixel_clk", 1).await;
+        }
+
+        println!("   ✅ Read {} vertices from output", read_vertices.len());
+
+        // ============================================================
+        // Verify data integrity through the pipeline
+        // ============================================================
+        println!("   ✔️  Verifying data integrity...");
+
+        assert_eq!(
+            read_vertices.len(),
+            test_vertices.len(),
+            "Should read same number of vertices as written"
+        );
+
+        for (i, (&written, &read)) in test_vertices.iter().zip(read_vertices.iter()).enumerate() {
+            assert_eq!(
+                written, read,
+                "Vertex {} data should match (written: {:08X?}, read: {:08X?})",
+                i, written, read
+            );
+        }
+
+        println!("   ✅ All vertices passed through correctly!");
+
+        // ============================================================
+        // Verify pipeline status
+        // ============================================================
+        println!("   📊 Checking pipeline status...");
+
+        let busy: u8 = tb.get_as("geom_busy").await;
+        println!("      Pipeline busy: {}", busy);
+
+        println!("✅ Graphics Pipeline End-to-End Test PASSED!");
+        println!("   ✅ System clock domain (write) works");
+        println!("   ✅ Geometry clock domain (processing) works");
+        println!("   ✅ Pixel clock domain (read) works");
+        println!("   ✅ CDC FIFOs transfer data correctly");
+        println!(
+            "   ✅ All {} vertices preserved through pipeline",
+            test_vertices.len()
+        );
     }
 }

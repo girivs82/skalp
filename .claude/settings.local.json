@@ -165,7 +165,17 @@
       "Bash(skalp:*)",
       "Bash(make:*)",
       "Bash(RUST_LOG=skalp_frontend=debug ./target/release/skalp build:*)",
-      "Bash(RUST_LOG=skalp_frontend=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)"
+      "Bash(RUST_LOG=skalp_frontend=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Bash(/tmp/debug_input_port:*)",
+      "Bash(RUST_LOG=debug cargo test:*)",
+      "Bash(./debug_geometry_metal)",
+      "Bash(./test_port_bug)",
+      "Bash(./test_compound)",
+      "Bash(./debug_mir)",
+      "Bash(./debug_mir2)",
+      "Bash(./debug_hir)",
+      "Bash(./test_compound_fixed)",
+      "Bash(./test_fixed)"
     ],
     "deny": [],
     "ask": []

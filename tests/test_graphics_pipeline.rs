@@ -9,8 +9,7 @@ mod graphics_pipeline_tests {
         println!("🎨 Graphics Pipeline Compilation Test");
 
         // Parse and build HIR from the graphics pipeline source
-        let graphics_pipeline_path =
-            Path::new("examples/graphics_pipeline/src/main.sk");
+        let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");
 
         println!("1️⃣ Parsing graphics pipeline source and building HIR...");
         let hir = parse_and_build_hir_from_file(graphics_pipeline_path)
@@ -21,9 +20,7 @@ mod graphics_pipeline_tests {
         println!("   ✅ HIR imports: {}", hir.imports.len());
 
         // Verify expected entities are present
-        let entity_names: Vec<&str> = hir.entities.iter()
-            .map(|e| e.name.as_str())
-            .collect();
+        let entity_names: Vec<&str> = hir.entities.iter().map(|e| e.name.as_str()).collect();
 
         println!("   Entities found:");
         for name in &entity_names {
@@ -32,11 +29,11 @@ mod graphics_pipeline_tests {
 
         // Check for key entities
         assert!(
-            entity_names.iter().any(|&n| n == "GraphicsPipelineTop"),
+            entity_names.contains(&"GraphicsPipelineTop"),
             "Should have GraphicsPipelineTop entity"
         );
         assert!(
-            entity_names.iter().any(|&n| n == "GeometryProcessor4"),
+            entity_names.contains(&"GeometryProcessor4"),
             "Should have GeometryProcessor4 entity"
         );
         assert!(
@@ -45,8 +42,7 @@ mod graphics_pipeline_tests {
         );
 
         println!("2️⃣ Compiling to MIR...");
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::None);
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
         let mir = compiler
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
@@ -54,7 +50,9 @@ mod graphics_pipeline_tests {
         println!("   ✅ MIR modules: {}", mir.modules.len());
 
         // Find the top module (should be GraphicsPipelineTop)
-        let top_module = mir.modules.iter()
+        let top_module = mir
+            .modules
+            .iter()
             .find(|m| m.name == "GraphicsPipelineTop")
             .expect("Should have GraphicsPipelineTop module");
 
@@ -66,7 +64,9 @@ mod graphics_pipeline_tests {
         println!("      - Assignments: {}", top_module.assignments.len());
 
         // Verify multi-clock domain structure
-        let clock_ports: Vec<_> = top_module.ports.iter()
+        let clock_ports: Vec<_> = top_module
+            .ports
+            .iter()
             .filter(|p| format!("{:?}", p.port_type).contains("Clock"))
             .collect();
 
@@ -80,7 +80,9 @@ mod graphics_pipeline_tests {
         println!("   🔌 Instances:");
         for instance in &top_module.instances {
             // Get module name from the mir modules
-            let module_name = mir.modules.iter()
+            let module_name = mir
+                .modules
+                .iter()
                 .find(|m| m.id == instance.module)
                 .map(|m| m.name.as_str())
                 .unwrap_or("unknown");
@@ -102,8 +104,8 @@ mod graphics_pipeline_tests {
 
         // Need to lower to LIR first
         let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
-        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
-            .expect("Failed to generate SystemVerilog");
+        let sv_code =
+            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
 
         println!("   ✅ Generated {} bytes of SystemVerilog", sv_code.len());
 
@@ -121,8 +123,7 @@ mod graphics_pipeline_tests {
     fn test_graphics_pipeline_types() {
         println!("🎨 Graphics Pipeline Type Definitions Test");
 
-        let graphics_pipeline_path =
-            Path::new("examples/graphics_pipeline/src/main.sk");
+        let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");
 
         let hir = parse_and_build_hir_from_file(graphics_pipeline_path)
             .expect("Failed to parse graphics pipeline");
@@ -130,7 +131,9 @@ mod graphics_pipeline_tests {
         println!("   User-defined types: {}", hir.user_defined_types.len());
 
         // Check for expected types from types.sk
-        let type_names: Vec<&str> = hir.user_defined_types.iter()
+        let type_names: Vec<&str> = hir
+            .user_defined_types
+            .iter()
             .map(|t| t.name.as_str())
             .collect();
 
@@ -144,11 +147,14 @@ mod graphics_pipeline_tests {
         let mut found_types = 0;
 
         for expected in &expected_types {
-            if type_names.iter().any(|&n| n == *expected) {
+            if type_names.contains(expected) {
                 println!("   ✅ Found type: {}", expected);
                 found_types += 1;
             } else {
-                println!("   ⚠️  Missing type: {} (may be renamed during import)", expected);
+                println!(
+                    "   ⚠️  Missing type: {} (may be renamed during import)",
+                    expected
+                );
             }
         }
 
@@ -164,8 +170,7 @@ mod graphics_pipeline_tests {
     fn test_graphics_pipeline_axi_interface() {
         println!("🎨 Graphics Pipeline AXI Interface Test");
 
-        let graphics_pipeline_path =
-            Path::new("examples/graphics_pipeline/src/main.sk");
+        let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");
 
         let hir = parse_and_build_hir_from_file(graphics_pipeline_path)
             .expect("Failed to parse graphics pipeline");
@@ -175,7 +180,9 @@ mod graphics_pipeline_tests {
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
 
-        let top_module = mir.modules.iter()
+        let top_module = mir
+            .modules
+            .iter()
             .find(|m| m.name == "GraphicsPipelineTop")
             .expect("Should have GraphicsPipelineTop module");
 
@@ -183,11 +190,23 @@ mod graphics_pipeline_tests {
 
         // AXI4-Lite write address channel
         let axi_ports = vec![
-            "axi_awaddr", "axi_awvalid", "axi_awready",
-            "axi_wdata", "axi_wstrb", "axi_wvalid", "axi_wready",
-            "axi_bresp", "axi_bvalid", "axi_bready",
-            "axi_araddr", "axi_arvalid", "axi_arready",
-            "axi_rdata", "axi_rresp", "axi_rvalid", "axi_rready",
+            "axi_awaddr",
+            "axi_awvalid",
+            "axi_awready",
+            "axi_wdata",
+            "axi_wstrb",
+            "axi_wvalid",
+            "axi_wready",
+            "axi_bresp",
+            "axi_bvalid",
+            "axi_bready",
+            "axi_araddr",
+            "axi_arvalid",
+            "axi_arready",
+            "axi_rdata",
+            "axi_rresp",
+            "axi_rvalid",
+            "axi_rready",
         ];
 
         let mut found_ports = 0;
@@ -199,8 +218,10 @@ mod graphics_pipeline_tests {
         }
 
         assert_eq!(
-            found_ports, axi_ports.len(),
-            "Should have all {} AXI4-Lite ports", axi_ports.len()
+            found_ports,
+            axi_ports.len(),
+            "Should have all {} AXI4-Lite ports",
+            axi_ports.len()
         );
 
         println!("✅ Graphics pipeline AXI interface test PASSED!");
@@ -210,8 +231,7 @@ mod graphics_pipeline_tests {
     fn test_graphics_pipeline_video_outputs() {
         println!("🎨 Graphics Pipeline Video Output Test");
 
-        let graphics_pipeline_path =
-            Path::new("examples/graphics_pipeline/src/main.sk");
+        let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");
 
         let hir = parse_and_build_hir_from_file(graphics_pipeline_path)
             .expect("Failed to parse graphics pipeline");
@@ -221,15 +241,21 @@ mod graphics_pipeline_tests {
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
 
-        let top_module = mir.modules.iter()
+        let top_module = mir
+            .modules
+            .iter()
             .find(|m| m.name == "GraphicsPipelineTop")
             .expect("Should have GraphicsPipelineTop module");
 
         println!("   Checking video output ports...");
 
         let video_ports = vec![
-            "video_hsync", "video_vsync", "video_de",
-            "video_r", "video_g", "video_b",
+            "video_hsync",
+            "video_vsync",
+            "video_de",
+            "video_r",
+            "video_g",
+            "video_b",
         ];
 
         let mut found_ports = 0;
@@ -241,8 +267,10 @@ mod graphics_pipeline_tests {
         }
 
         assert_eq!(
-            found_ports, video_ports.len(),
-            "Should have all {} video output ports", video_ports.len()
+            found_ports,
+            video_ports.len(),
+            "Should have all {} video output ports",
+            video_ports.len()
         );
 
         println!("✅ Graphics pipeline video output test PASSED!");
@@ -251,24 +279,22 @@ mod graphics_pipeline_tests {
     #[tokio::test]
     async fn test_graphics_pipeline_synthesis() {
         use skalp_backends::{
-            BackendFactory, FpgaTarget, OptimizationGoals, OptimizationTarget,
-            PowerConstraints, SynthesisConfig, TargetPlatform, TimingConstraint,
+            BackendFactory, FpgaTarget, OptimizationGoals, OptimizationTarget, PowerConstraints,
+            SynthesisConfig, TargetPlatform, TimingConstraint,
         };
         use skalp_lir::lower_to_lir;
         use std::collections::HashMap;
 
         println!("🎨 Graphics Pipeline Synthesis Test");
 
-        let graphics_pipeline_path =
-            Path::new("examples/graphics_pipeline/src/main.sk");
+        let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");
 
         println!("1️⃣ Building HIR...");
         let hir = parse_and_build_hir_from_file(graphics_pipeline_path)
             .expect("Failed to parse graphics pipeline");
 
         println!("2️⃣ Compiling to MIR...");
-        let compiler = MirCompiler::new()
-            .with_optimization_level(OptimizationLevel::Basic);
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
         let mir = compiler
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
@@ -317,8 +343,8 @@ mod graphics_pipeline_tests {
         };
 
         println!("5️⃣ Running synthesis...");
-        let backend = BackendFactory::create_backend(&ice40_target)
-            .expect("Failed to create iCE40 backend");
+        let backend =
+            BackendFactory::create_backend(&ice40_target).expect("Failed to create iCE40 backend");
 
         let synthesis_results = backend
             .synthesize(&lir, &synthesis_config)

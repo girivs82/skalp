@@ -108,9 +108,16 @@ impl<'a> MetalShaderGenerator<'a> {
         }
 
         // All intermediate signals (avoiding duplicates)
+        // IMPORTANT: Skip signals that are input ports - they're already in the Inputs struct
+        let input_names: std::collections::HashSet<String> =
+            sir.inputs.iter().map(|i| i.name.clone()).collect();
         for signal in &sir.signals {
             let sanitized_name = self.sanitize_name(&signal.name);
-            if !signal.is_state && added_names.insert(sanitized_name.clone()) {
+            // Skip input port signals - they belong in Inputs struct, not Signals
+            if !signal.is_state
+                && !input_names.contains(&signal.name)
+                && added_names.insert(sanitized_name.clone())
+            {
                 let (base_type, array_suffix) = self.get_metal_type_parts(&signal.sir_type);
                 self.write_indented(&format!(
                     "{} {}{};\n",
@@ -883,6 +890,19 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 // Update all register outputs with the data input value from signals
                 for output in &node.outputs {
+                    eprintln!(
+                        "DEBUG Metal gen: Looking up output.signal_id='{}' in state_elements",
+                        output.signal_id
+                    );
+                    eprintln!(
+                        "DEBUG Metal gen: state_elements keys: {:?}",
+                        sir.state_elements.keys().collect::<Vec<_>>()
+                    );
+                    eprintln!(
+                        "DEBUG Metal gen: Lookup result: {:?}",
+                        sir.state_elements.get(&output.signal_id)
+                    );
+
                     if let Some(state_elem) = sir.state_elements.get(&output.signal_id) {
                         // Check if this is an array type
                         let output_type = self.get_signal_sir_type(sir, &output.signal_id);

@@ -237,16 +237,18 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
     // Try to find the symbol in entities
     if let Some(entity) = source.entities.iter().find(|e| e.name == symbol_name) {
         // Assign a new unique entity ID to avoid collisions
-        let new_entity_id = hir::EntityId(
-            target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1
-        );
+        let new_entity_id =
+            hir::EntityId(target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1);
 
         // Renumber ports to avoid collisions
-        let next_port_id = target.entities.iter()
+        let next_port_id = target
+            .entities
+            .iter()
             .flat_map(|e| e.ports.iter())
             .map(|p| p.id.0)
             .max()
-            .unwrap_or(0) + 1;
+            .unwrap_or(0)
+            + 1;
 
         let mut imported_entity = entity.clone();
         imported_entity.id = new_entity_id;

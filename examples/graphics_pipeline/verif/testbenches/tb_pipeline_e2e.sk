@@ -1,0 +1,232 @@
+// End-to-End Pipeline Test Design
+//
+// Tests complete data flow through all three clock domains with CDC via AsyncFIFO
+// This is a test-specific design (DUT for verification), not production code
+
+// Generic AsyncFIFO implementation (inline for now)
+// TODO: Replace with proper lib import once module system supports it
+
+entity AsyncFifo<T, const DEPTH: nat> {
+    in wr_clk: clock
+    in wr_rst: reset(active_high)
+    in wr_en: bit
+    in wr_data: T
+    out wr_full: bit
+
+    in rd_clk: clock
+    in rd_rst: reset(active_high)
+    in rd_en: bit
+    out rd_data: T
+    out rd_empty: bit
+}
+
+impl AsyncFifo<T, const DEPTH: nat> {
+    signal mem: [T; DEPTH]
+
+    signal wr_ptr: bit[9]
+    signal wr_ptr_gray: bit[9]
+    signal rd_ptr_gray_sync1: bit[9]
+    signal rd_ptr_gray_sync2: bit[9]
+
+    signal rd_ptr: bit[9]
+    signal rd_ptr_gray: bit[9]
+    signal wr_ptr_gray_sync1: bit[9]
+    signal wr_ptr_gray_sync2: bit[9]
+
+    on(wr_clk.rise) {
+        if wr_rst {
+            wr_ptr <= 0
+            wr_ptr_gray <= 0
+            rd_ptr_gray_sync1 <= 0
+            rd_ptr_gray_sync2 <= 0
+        } else {
+            rd_ptr_gray_sync1 <= rd_ptr_gray
+            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1
+
+            if wr_en && !wr_full {
+                mem[wr_ptr % DEPTH] <= wr_data
+                wr_ptr <= wr_ptr + 1
+                wr_ptr_gray <= (wr_ptr + 1) ^ ((wr_ptr + 1) >> 1)
+            }
+        }
+    }
+
+    // Write domain full flag (combinational logic)
+    wr_full = if ((wr_ptr + 1) ^ ((wr_ptr + 1) >> 1)) == rd_ptr_gray_sync2 { 1 } else { 0 }
+
+    on(rd_clk.rise) {
+        if rd_rst {
+            rd_ptr <= 0
+            rd_ptr_gray <= 0
+            wr_ptr_gray_sync1 <= 0
+            wr_ptr_gray_sync2 <= 0
+        } else {
+            wr_ptr_gray_sync1 <= wr_ptr_gray
+            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1
+
+            if rd_en && !rd_empty {
+                rd_ptr <= rd_ptr + 1
+                rd_ptr_gray <= (rd_ptr + 1) ^ ((rd_ptr + 1) >> 1)
+            }
+        }
+    }
+
+    rd_empty = if rd_ptr_gray == wr_ptr_gray_sync2 { 1 } else { 0 }
+    rd_data = mem[rd_ptr % DEPTH]
+}
+
+// Simple vertex structure for testing
+struct SimpleVertex {
+    x: bit[32]
+    y: bit[32]
+    z: bit[32]
+}
+
+// Simplified geometry processor for testing
+entity SimpleGeometryProcessor {
+    in clk: clock
+    in rst: reset(active_high)
+    in vertex_valid: bit
+    in vertex_in: SimpleVertex
+    out vertex_ready: bit
+    out output_valid: bit
+    out output: SimpleVertex
+    in output_ready: bit
+}
+
+impl SimpleGeometryProcessor {
+    signal state: bit[1]
+    signal out_vertex: SimpleVertex
+
+    on(clk.rise) {
+        if rst {
+            state <= 0
+        } else {
+            if state == 0 && vertex_valid {
+                // Passthrough transformation
+                out_vertex <= vertex_in
+                state <= 1
+            } else if state == 1 && output_ready {
+                state <= 0
+            }
+        }
+    }
+
+    vertex_ready = (state == 0)
+    output_valid = (state == 1)
+    output = out_vertex
+}
+
+// End-to-end pipeline test top-level
+entity SimplePipelineTop {
+    // System clock domain (write side)
+    in sys_clk: clock
+    in sys_rst: reset(active_high)
+    in write_vertex: SimpleVertex
+    in write_valid: bit
+    out write_ready: bit
+
+    // Geometry clock domain (processing)
+    in geom_clk: clock
+    in geom_rst: reset(active_high)
+
+    // Pixel clock domain (read side)
+    in pixel_clk: clock
+    in pixel_rst: reset(active_high)
+    in read_ready: bit
+    out read_valid: bit
+    out read_vertex: SimpleVertex
+
+    // Status
+    out geom_busy: bit
+}
+
+impl SimplePipelineTop {
+    // ============================================================
+    // CDC FIFO 1: sys_clk → geom_clk
+    // ============================================================
+    signal input_fifo_wr_en: bit
+    signal input_fifo_wr_data: SimpleVertex
+    signal input_fifo_wr_full: bit
+    signal input_fifo_rd_en: bit
+    signal input_fifo_rd_data: SimpleVertex
+    signal input_fifo_rd_empty: bit
+
+    let input_fifo = AsyncFifo<SimpleVertex, 8> {
+        wr_clk: sys_clk,
+        wr_rst: sys_rst,
+        wr_en: input_fifo_wr_en,
+        wr_data: input_fifo_wr_data,
+        wr_full: input_fifo_wr_full,
+        rd_clk: geom_clk,
+        rd_rst: geom_rst,
+        rd_en: input_fifo_rd_en,
+        rd_data: input_fifo_rd_data,
+        rd_empty: input_fifo_rd_empty
+    }
+
+    // Connect write interface to input FIFO
+    input_fifo_wr_en = write_valid && !input_fifo_wr_full
+    input_fifo_wr_data = write_vertex
+    write_ready = !input_fifo_wr_full
+
+    // ============================================================
+    // Geometry Processing (geom_clk domain)
+    // ============================================================
+    signal geom_vertex_valid: bit
+    signal geom_vertex_ready: bit
+    signal geom_output_valid: bit
+    signal geom_output: SimpleVertex
+    signal geom_output_ready: bit
+
+    let geometry = SimpleGeometryProcessor {
+        clk: geom_clk,
+        rst: geom_rst,
+        vertex_valid: geom_vertex_valid,
+        vertex_in: input_fifo_rd_data,
+        vertex_ready: geom_vertex_ready,
+        output_valid: geom_output_valid,
+        output: geom_output,
+        output_ready: geom_output_ready
+    }
+
+    // Connect input FIFO to geometry processor
+    geom_vertex_valid = !input_fifo_rd_empty
+    input_fifo_rd_en = geom_vertex_ready && !input_fifo_rd_empty
+
+    // ============================================================
+    // CDC FIFO 2: geom_clk → pixel_clk
+    // ============================================================
+    signal output_fifo_wr_en: bit
+    signal output_fifo_wr_data: SimpleVertex
+    signal output_fifo_wr_full: bit
+    signal output_fifo_rd_en: bit
+    signal output_fifo_rd_data: SimpleVertex
+    signal output_fifo_rd_empty: bit
+
+    let output_fifo = AsyncFifo<SimpleVertex, 32> {
+        wr_clk: geom_clk,
+        wr_rst: geom_rst,
+        wr_en: output_fifo_wr_en,
+        wr_data: output_fifo_wr_data,
+        wr_full: output_fifo_wr_full,
+        rd_clk: pixel_clk,
+        rd_rst: pixel_rst,
+        rd_en: output_fifo_rd_en,
+        rd_data: output_fifo_rd_data,
+        rd_empty: output_fifo_rd_empty
+    }
+
+    // Connect geometry processor to output FIFO
+    output_fifo_wr_en = geom_output_valid && !output_fifo_wr_full
+    output_fifo_wr_data = geom_output
+    geom_output_ready = !output_fifo_wr_full
+
+    // Connect output FIFO to read interface
+    output_fifo_rd_en = read_ready && !output_fifo_rd_empty
+    read_valid = !output_fifo_rd_empty
+    read_vertex = output_fifo_rd_data
+
+    // Status
+    geom_busy = geom_output_valid || !input_fifo_rd_empty || !output_fifo_rd_empty
+}
