@@ -126,8 +126,7 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(default_expr) = &generic.default_value {
                             // Try to evaluate the default value and bind it
                             if let Ok(const_val) = self.const_evaluator.eval(default_expr) {
-                                self.const_evaluator
-                                    .bind(generic.name.clone(), const_val);
+                                self.const_evaluator.bind(generic.name.clone(), const_val);
                                 bound_generic_names.push(generic.name.clone());
                             }
                         }
