@@ -295,17 +295,8 @@ impl GpuRuntime {
                             .map(|c| c.previous_value)
                             .unwrap_or(false);
 
-                        eprintln!(
-                            "DEBUG execute_sequential: clock={}, current={}, prev={}",
-                            input.name, current_value, prev_value
-                        );
-
                         if current_value && !prev_value {
                             // Rising edge detected
-                            eprintln!(
-                                "DEBUG execute_sequential: RISING EDGE DETECTED on {}",
-                                input.name
-                            );
                             has_edge = true;
                         }
                     }
@@ -314,11 +305,8 @@ impl GpuRuntime {
         }
 
         if !has_edge {
-            eprintln!("DEBUG execute_sequential: NO EDGE, skipping sequential update");
             return Ok(());
         }
-
-        eprintln!("DEBUG execute_sequential: EXECUTING SEQUENTIAL KERNEL");
 
         if let Some(pipeline) = self.pipelines.get("sequential") {
             let command_buffer = self.device.command_queue.new_command_buffer();
@@ -514,23 +502,24 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn step(&mut self) -> SimulationResult<SimulationState> {
-        // CRITICAL TWO-PHASE EXECUTION for correct non-blocking semantics:
+        // CRITICAL THREE-PHASE EXECUTION for correct non-blocking semantics:
 
         // Phase 1: Combinational logic computes values that will be sampled by flip-flops
         // This ensures that when we read from state elements in sequential assignments,
         // we get the OLD values (before the clock edge updates them)
         self.execute_combinational().await?;
 
-        // Capture outputs BEFORE sequential update (for correct pipeline timing)
-        self.capture_outputs()?;
-
         // Phase 2: Sequential logic updates registers on clock edge
         // Flip-flops sample their data inputs (computed in phase 1) and update register values
         self.execute_sequential().await?;
 
         // Phase 3: Re-execute combinational logic to update internal signals based on new register state
-        // This ensures internal signals are ready for the next cycle, but outputs remain from Phase 1
+        // This ensures outputs reflect the NEW state after the clock edge
         self.execute_combinational().await?;
+
+        // Capture outputs AFTER final combinational phase (for correct combinational output timing)
+        // Combinational outputs like `ready = (state == 0)` should immediately reflect the new state
+        self.capture_outputs()?;
 
         self.current_cycle += 1;
 
