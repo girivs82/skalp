@@ -122,6 +122,14 @@ impl GpuRuntime {
             }
         }
 
+        // Initialize inputs to zero to prevent undefined behavior
+        if let Some(input_buffer) = &self.input_buffer {
+            let ptr = input_buffer.contents();
+            unsafe {
+                std::ptr::write_bytes(ptr, 0, input_size as usize);
+            }
+        }
+
         Ok(())
     }
 
@@ -152,9 +160,14 @@ impl GpuRuntime {
             size += self.get_metal_type_size(output.width) as u64;
         }
 
-        // All non-state signals
+        // Build set of input port names to exclude
+        let input_names: std::collections::HashSet<&str> =
+            module.inputs.iter().map(|i| i.name.as_str()).collect();
+
+        // All non-state signals (excluding input ports)
+        // Input ports are in the Inputs struct, not the Signals struct
         for signal in &module.signals {
-            if !signal.is_state {
+            if !signal.is_state && !input_names.contains(signal.name.as_str()) {
                 size += self.get_metal_type_size(signal.width) as u64;
             }
         }
@@ -259,6 +272,8 @@ impl GpuRuntime {
                 command_buffer.wait_until_completed();
             }
         }
+
+        // No debug here - moved to step() function
 
         Ok(())
     }
@@ -376,7 +391,7 @@ impl GpuRuntime {
                 }
             }
 
-            // Read intermediate signals from signal buffer (skipping outputs)
+            // Read intermediate signals from signal buffer (skipping outputs and input ports)
             if let Some(signal_buffer) = &self.signal_buffer {
                 let signal_ptr = signal_buffer.contents() as *const u8;
                 // Skip past outputs in signal buffer to get to intermediate signals
@@ -386,9 +401,16 @@ impl GpuRuntime {
                     .map(|o| self.get_metal_type_size(o.width))
                     .sum::<usize>();
 
-                // Read intermediate signals (skipping outputs and state elements)
+                // Build set of input port names to exclude (they're in Inputs struct, not Signals)
+                let input_names: std::collections::HashSet<_> =
+                    module.inputs.iter().map(|i| i.name.as_str()).collect();
+
+                // Read intermediate signals (skipping outputs, input ports, and state elements)
                 for signal in &module.signals {
-                    if !signal.is_state && !output_names.contains(&signal.name) {
+                    if !signal.is_state
+                        && !output_names.contains(&signal.name)
+                        && !input_names.contains(signal.name.as_str())
+                    {
                         let metal_size = self.get_metal_type_size(signal.width);
                         let bytes_needed = signal.width.div_ceil(8);
                         let mut value = vec![0u8; bytes_needed];
@@ -513,7 +535,9 @@ impl SimulationRuntime for GpuRuntime {
         self.current_cycle += 1;
 
         // Debug: Print register values when they have meaningful data
-        if self.current_cycle >= 1 && self.current_cycle <= 35 {
+        // Disabled debug output - enable by changing false to true
+        #[allow(clippy::overly_complex_bool_expr)]
+        if false {
             if let Some(register_buffer) = &self.register_buffer {
                 let register_ptr = register_buffer.contents() as *const u32;
                 let reg0 = unsafe { *register_ptr.offset(0) };
@@ -523,24 +547,31 @@ impl SimulationRuntime for GpuRuntime {
                 let reg4 = unsafe { *register_ptr.offset(4) };
                 let reg5 = unsafe { *register_ptr.offset(5) };
 
-                // Check input values
+                // Check input values - print ALL inputs
                 if let Some(input_buffer) = &self.input_buffer {
                     let input_ptr = input_buffer.contents() as *const u32;
-                    let rst = unsafe { *input_ptr.offset(1) };
-                    let instruction = unsafe { *input_ptr.offset(2) };
-                    let data_in = unsafe { *input_ptr.offset(3) };
+                    // Print first 8 input words
+                    let in0 = unsafe { *input_ptr.offset(0) };
+                    let in1 = unsafe { *input_ptr.offset(1) };
+                    let in2 = unsafe { *input_ptr.offset(2) };
+                    let in3 = unsafe { *input_ptr.offset(3) };
+                    let in4 = unsafe { *input_ptr.offset(4) };
+                    let in5 = unsafe { *input_ptr.offset(5) };
+                    let in6 = unsafe { *input_ptr.offset(6) };
 
-                    // Also check signal buffer
+                    // Also check signal buffer for intermediate values
                     if let Some(signal_buffer) = &self.signal_buffer {
                         let signal_ptr = signal_buffer.contents() as *const u32;
-                        let result_signal = unsafe { *signal_ptr.offset(0) };
-                        let valid_signal = unsafe { *signal_ptr.offset(1) };
+                        let sig0 = unsafe { *signal_ptr.offset(0) };
+                        let sig1 = unsafe { *signal_ptr.offset(1) };
+                        let sig2 = unsafe { *signal_ptr.offset(2) };
+                        let sig3 = unsafe { *signal_ptr.offset(3) };
 
-                        eprintln!("DEBUG Cycle {}: rst={}, instr=0x{:04X}, data={}, regs=[{},{},{},{},{},{}], signals=[result={}, valid={}]",
-                            self.current_cycle, rst, instruction, data_in, reg0, reg1, reg2, reg3, reg4, reg5, result_signal, valid_signal);
+                        eprintln!("DEBUG Cycle {}: inputs=[0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}], regs=[{},{},{},{},{},{}], sigs=[0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}]",
+                            self.current_cycle, in0, in1, in2, in3, in4, in5, in6, reg0, reg1, reg2, reg3, reg4, reg5, sig0, sig1, sig2, sig3);
                     } else {
-                        eprintln!("DEBUG Cycle {}: rst={}, instr=0x{:04X}, data={}, regs=[{},{},{},{},{},{}]",
-                            self.current_cycle, rst, instruction, data_in, reg0, reg1, reg2, reg3, reg4, reg5);
+                        eprintln!("DEBUG Cycle {}: inputs=[0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}], regs=[{},{},{},{},{},{}]",
+                            self.current_cycle, in0, in1, in2, in3, in4, in5, in6, reg0, reg1, reg2, reg3, reg4, reg5);
                     }
                 }
             }

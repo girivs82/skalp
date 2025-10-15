@@ -120,7 +120,8 @@ impl HirBuilderContext {
     /// Pre-register entities from merged HIR (for handling imports)
     pub fn preregister_entity(&mut self, entity: &HirEntity) {
         self.symbols.entities.insert(entity.name.clone(), entity.id);
-        self.built_entities.insert(entity.name.clone(), entity.clone());
+        self.built_entities
+            .insert(entity.name.clone(), entity.clone());
     }
 
     /// Build HIR from syntax tree
@@ -614,7 +615,7 @@ impl HirBuilderContext {
                 if arg_node.kind() == SyntaxKind::Arg {
                     // Find the expression or type inside the Arg node
                     if let Some(expr_node) = arg_node.children().next() {
-                        let mut expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
+                        let expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
                             // For type arguments, build the type and wrap in a Cast expression
                             let ty = self.build_hir_type(&expr_node);
                             Some(HirExpression::Cast(HirCastExpr {
@@ -1601,21 +1602,38 @@ impl HirBuilderContext {
 
     /// Build if statement
     fn build_if_statement(&mut self, node: &SyntaxNode) -> Option<HirIfStatement> {
-        // Get condition expression - prefer complex expressions (Binary, Unary, Paren) over simple ones (Ident, Literal)
-        // This avoids selecting the left operand of a binary expression instead of the full expression
-        let condition = node
-            .children()
-            .find(|n| {
-                matches!(
-                    n.kind(),
+        // Get condition expression - we need to find the TOP-LEVEL expression node that is a direct child
+        // of the IfStmt, not nested expressions. The parser creates: IfStmt -> Expression -> BlockStmt
+        //
+        // CRITICAL FIX: For compound conditions like "state == 0 && enable", we must select the outermost
+        // BinaryExpr (the && node), not an inner one (the == node). Simply using .find() would return
+        // the first match encountered during traversal, which could be an inner expression.
+        //
+        // Solution: Find the expression node that is a DIRECT CHILD of the IfStmt node (not nested deeper).
+        // We look for expression nodes BEFORE the first BlockStmt (the then-block).
+        let condition = {
+            let mut found_condition = None;
+            for child in node.children() {
+                // Stop when we hit the then-block
+                if child.kind() == SyntaxKind::BlockStmt {
+                    break;
+                }
+                // Capture any expression node (prefer complex over simple)
+                let is_complex = matches!(
+                    child.kind(),
                     SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr | SyntaxKind::ParenExpr
-                )
-            })
-            .or_else(|| {
-                node.children()
-                    .find(|n| matches!(n.kind(), SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr))
-            })
-            .and_then(|n| self.build_expression(&n))?;
+                );
+                let is_simple = matches!(
+                    child.kind(),
+                    SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr
+                );
+
+                if is_complex || (is_simple && found_condition.is_none()) {
+                    found_condition = Some(child);
+                }
+            }
+            found_condition.and_then(|n| self.build_expression(&n))?
+        };
 
         // Get then and else blocks
         let blocks: Vec<_> = node.children_of_kind(SyntaxKind::BlockStmt);

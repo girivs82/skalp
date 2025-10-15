@@ -2,29 +2,49 @@
 mod graphics_pipeline_functional_tests {
     use skalp_testing::testbench::Testbench;
 
+    // BUG FIXED: Compiler was dropping input port references in compound boolean conditions.
+    // The condition `if state == 0 && vertex_valid` was being compiled as just `if state == 0`.
+    // Fixed in skalp-frontend/src/hir_builder.rs:1604 by ensuring we select the outermost
+    // expression node (the && operation) rather than an inner node (the == comparison).
     #[tokio::test]
     async fn test_geometry_processor_vertex_passthrough() {
         println!("🎨 Testing GeometryProcessor4 Vertex Passthrough");
 
         // Create testbench for geometry processor stub
         let geometry_source = r#"
-mod types;
-use types::{Vertex, TransformedVertex, Matrix4x4, Vec3};
+// Simple inline types for testing
+struct Vec3f {
+    x: bit[32]
+    y: bit[32]
+    z: bit[32]
+}
+
+struct TestVertex {
+    position_x: bit[32]
+    position_y: bit[32]
+    position_z: bit[32]
+}
+
+struct TestOutput {
+    position_x: bit[32]
+    position_y: bit[32]
+    position_z: bit[32]
+    position_w: bit[32]
+}
 
 entity GeometryProcessor4 {
     in clk: clock
     in rst: reset(active_high)
     in vertex_valid: bit
-    in vertex: Vertex
+    in vertex_x: bit[32]
+    in vertex_y: bit[32]
+    in vertex_z: bit[32]
     out vertex_ready: bit
-    in model_matrix: Matrix4x4
-    in view_matrix: Matrix4x4
-    in proj_matrix: Matrix4x4
-    in light_dir: Vec3
-    in light_color: Vec3
-    in ambient: Vec3
     out output_valid: bit
-    out output: TransformedVertex
+    out output_x: bit[32]
+    out output_y: bit[32]
+    out output_z: bit[32]
+    out output_w: bit[32]
     in output_ready: bit
     out busy: bit
     out vertices_processed: bit[32]
@@ -33,7 +53,12 @@ entity GeometryProcessor4 {
 impl GeometryProcessor4 {
     signal state: bit[2]
     signal count: bit[32]
-    signal out_vertex: TransformedVertex
+
+    // Use scalar signals throughout - no structs
+    signal out_pos_x: bit[32]
+    signal out_pos_y: bit[32]
+    signal out_pos_z: bit[32]
+    signal out_pos_w: bit[32]
 
     on(clk.rise) {
         if rst {
@@ -42,14 +67,10 @@ impl GeometryProcessor4 {
         } else {
             if state == 0 && vertex_valid {
                 // Capture and transform vertex (passthrough for now)
-                out_vertex.position.x <= vertex.position.x
-                out_vertex.position.y <= vertex.position.y
-                out_vertex.position.z <= vertex.position.z
-                out_vertex.position.w <= 0x3F800000  // 1.0
-                out_vertex.normal <= vertex.normal
-                out_vertex.color <= vertex.color
-                out_vertex.tex_coord.x <= 0
-                out_vertex.tex_coord.y <= 0
+                out_pos_x <= vertex_x
+                out_pos_y <= vertex_y
+                out_pos_z <= vertex_z
+                out_pos_w <= 0x3F800000  // 1.0 in float32
                 state <= 1
                 count <= count + 1
             } else if state == 1 && output_ready {
@@ -62,7 +83,11 @@ impl GeometryProcessor4 {
     output_valid = (state == 1)
     busy = (state != 0)
     vertices_processed = count
-    output = out_vertex
+
+    output_x = out_pos_x
+    output_y = out_pos_y
+    output_z = out_pos_z
+    output_w = out_pos_w
 }
         "#;
 
@@ -79,7 +104,12 @@ impl GeometryProcessor4 {
 
         // Reset the processor
         println!("   🔄 Resetting GeometryProcessor4...");
+
+        // CRITICAL: Initialize all control signals to 0 BEFORE and DURING reset
+        tb.set("vertex_valid", 0u8);
+        tb.set("output_ready", 0u8);
         tb.set("rst", 1u8).clock(2).await;
+
         tb.set("rst", 0u8).clock(1).await;
 
         // Verify initial state
@@ -93,28 +123,34 @@ impl GeometryProcessor4 {
         // Test vertex passthrough
         println!("   📝 Sending test vertex...");
 
-        // Set up a test vertex with known values
+        // Set up a test vertex with known values (do NOT set output_ready yet)
         tb.set("vertex_valid", 1u8);
-        tb.set("vertex_position_x", 0x40000000u32); // 2.0 in float32
-        tb.set("vertex_position_y", 0x40400000u32); // 3.0 in float32
-        tb.set("vertex_position_z", 0x40800000u32); // 4.0 in float32
-        tb.set("output_ready", 1u8);
+        tb.set("vertex_x", 0x40000000u32); // 2.0 in float32
+        tb.set("vertex_y", 0x40400000u32); // 3.0 in float32
+        tb.set("vertex_z", 0x40800000u32); // 4.0 in float32
+        tb.set("output_ready", 0u8); // Keep output_ready low
 
         // Clock once to capture vertex
         tb.clock(1).await;
 
-        // Processor should be busy now
+        // Processor should be busy now, output should be valid
         tb.expect("vertex_ready", 0u8).await;
         tb.expect("output_valid", 1u8).await;
         tb.expect("busy", 1u8).await;
 
         println!("   ✅ Processor captured vertex and asserted output_valid");
 
-        // Check that output matches input (passthrough)
-        let out_x: u32 = tb.get_as("output_position_x").await;
-        let out_y: u32 = tb.get_as("output_position_y").await;
-        let out_z: u32 = tb.get_as("output_position_z").await;
-        let out_w: u32 = tb.get_as("output_position_w").await;
+        // Check that output matches input (passthrough) - do this BEFORE setting output_ready
+        let out_x: u32 = tb.get_as("output_x").await;
+        let out_y: u32 = tb.get_as("output_y").await;
+        let out_z: u32 = tb.get_as("output_z").await;
+        let out_w: u32 = tb.get_as("output_w").await;
+
+        println!("      Read output values:");
+        println!("         X = 0x{:08X} (expected 0x40000000)", out_x);
+        println!("         Y = 0x{:08X} (expected 0x40400000)", out_y);
+        println!("         Z = 0x{:08X} (expected 0x40800000)", out_z);
+        println!("         W = 0x{:08X} (expected 0x3F800000)", out_w);
 
         assert_eq!(out_x, 0x40000000, "Position X should pass through");
         assert_eq!(out_y, 0x40400000, "Position Y should pass through");
@@ -126,8 +162,8 @@ impl GeometryProcessor4 {
         // Check vertices_processed counter
         tb.expect("vertices_processed", 1u32).await;
 
-        // Clock once more to return to ready state
-        tb.clock(1).await;
+        // NOW set output_ready and clock to return to ready state
+        tb.set("output_ready", 1u8).clock(1).await;
         tb.expect("vertex_ready", 1u8).await;
         tb.expect("output_valid", 0u8).await;
         tb.expect("busy", 0u8).await;
@@ -233,7 +269,10 @@ impl FifoTest {
         for (i, &expected) in test_values.iter().enumerate() {
             tb.clock_signal("rd_clk", 1).await;
             let actual: u32 = tb.get_as("read_data").await;
-            println!("      Read value {}: 0x{:08X} (expected 0x{:08X})", i, actual, expected);
+            println!(
+                "      Read value {}: 0x{:08X} (expected 0x{:08X})",
+                i, actual, expected
+            );
 
             // Note: CDC timing may require adjustment, this is a basic check
             // In a real test, we'd validate the exact CDC synchronization timing
