@@ -926,7 +926,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
     }
 }
 
-impl<'hir> Default for MonomorphizationEngine<'hir> {
+impl Default for MonomorphizationEngine<'_> {
     fn default() -> Self {
         Self::new()
     }
