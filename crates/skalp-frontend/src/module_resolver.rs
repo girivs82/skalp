@@ -31,6 +31,44 @@ impl ModuleResolver {
     pub fn new(root_dir: PathBuf) -> Self {
         let mut search_paths = vec![root_dir.clone()];
 
+        // Try to read skalp.toml to get src_dirs configuration
+        let manifest_path = root_dir.join("skalp.toml");
+        if manifest_path.exists() {
+            eprintln!("[MODULE_RESOLVER] Found skalp.toml at: {:?}", manifest_path);
+            if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = toml::from_str::<serde_json::Value>(&contents) {
+                    // Try to extract src_dirs from [build] section
+                    if let Some(build) = manifest.get("build") {
+                        if let Some(src_dirs_value) = build.get("src_dirs") {
+                            if let Some(src_dirs) = src_dirs_value.as_array() {
+                                eprintln!(
+                                    "[MODULE_RESOLVER] Found {} src_dirs in skalp.toml",
+                                    src_dirs.len()
+                                );
+                                for dir in src_dirs {
+                                    if let Some(dir_str) = dir.as_str() {
+                                        let dir_path = root_dir.join(dir_str);
+                                        if dir_path.exists() {
+                                            eprintln!(
+                                                "[MODULE_RESOLVER] Adding src_dir: {:?}",
+                                                dir_path
+                                            );
+                                            search_paths.push(dir_path);
+                                        } else {
+                                            eprintln!(
+                                                "[MODULE_RESOLVER] Warning: src_dir does not exist: {:?}",
+                                                dir_path
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Add standard library path if it exists
         if let Ok(stdlib_path) = std::env::var("SKALP_STDLIB_PATH") {
             search_paths.push(PathBuf::from(stdlib_path));
@@ -51,6 +89,14 @@ impl ModuleResolver {
                     search_paths.push(dev_path);
                 }
             }
+        }
+
+        eprintln!(
+            "[MODULE_RESOLVER] Initialized with {} search paths:",
+            search_paths.len()
+        );
+        for (i, path) in search_paths.iter().enumerate() {
+            eprintln!("[MODULE_RESOLVER]   {}: {:?}", i + 1, path);
         }
 
         Self {

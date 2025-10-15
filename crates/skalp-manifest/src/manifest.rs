@@ -23,6 +23,10 @@ pub struct Manifest {
     #[serde(default)]
     pub lib: Option<LibraryConfig>,
 
+    /// Build configuration
+    #[serde(default)]
+    pub build: Option<BuildConfig>,
+
     /// Features
     #[serde(default)]
     pub features: HashMap<String, Vec<String>>,
@@ -119,6 +123,22 @@ pub struct WorkspaceConfig {
     /// Packages to exclude
     #[serde(default)]
     pub exclude: Vec<String>,
+}
+
+/// Build configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildConfig {
+    /// Main entry point (default: "src/main.sk")
+    #[serde(default)]
+    pub main: Option<String>,
+
+    /// Additional source directories to search for modules
+    #[serde(default)]
+    pub src_dirs: Vec<String>,
+
+    /// Output directory (default: "build")
+    #[serde(default)]
+    pub out_dir: Option<String>,
 }
 
 impl Manifest {
@@ -386,6 +406,7 @@ mod tests {
             dependencies: HashMap::new(),
             dev_dependencies: HashMap::new(),
             lib: None,
+            build: None,
             features: HashMap::new(),
             workspace: None,
             patch: HashMap::new(),

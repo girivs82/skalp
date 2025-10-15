@@ -35,16 +35,47 @@ use anyhow::{Context, Result};
 use module_resolver::ModuleResolver;
 use std::path::{Path, PathBuf};
 
+/// Find the project root by searching for skalp.toml
+///
+/// Searches upward from the source file, but only up to 3 levels
+/// to avoid finding unrelated project manifests
+fn find_project_root(start_path: &Path) -> Option<PathBuf> {
+    let mut current = start_path.to_path_buf();
+
+    // If start_path is a file, start from its parent
+    if current.is_file() {
+        current = current.parent()?.to_path_buf();
+    }
+
+    // Walk up the directory tree looking for skalp.toml (max 3 levels)
+    for _ in 0..3 {
+        let manifest_path = current.join("skalp.toml");
+        if manifest_path.exists() {
+            return Some(current);
+        }
+
+        // Try to go up one level
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return None, // Reached the filesystem root
+        }
+    }
+
+    None
+}
+
 /// Parse and build HIR from a file with full module resolution
 pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
     use module_resolver::ModuleResolver;
     use std::fs;
 
-    // Get the root directory (parent of the file)
-    let root_dir = file_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
+    // Find the project root by looking for skalp.toml
+    let root_dir = find_project_root(file_path).unwrap_or_else(|| {
+        file_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    });
 
     // Create module resolver
     let mut resolver = ModuleResolver::new(root_dir);

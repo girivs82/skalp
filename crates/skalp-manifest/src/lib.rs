@@ -9,7 +9,7 @@ pub mod manifest;
 
 pub use dependency::{Dependency, DependencySpec, VersionReq};
 pub use error::{ManifestError, Result};
-pub use manifest::{LibraryConfig, Manifest, Package};
+pub use manifest::{BuildConfig, LibraryConfig, Manifest, Package};
 
 use std::path::Path;
 

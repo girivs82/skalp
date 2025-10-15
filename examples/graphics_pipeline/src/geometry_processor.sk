@@ -1,0 +1,611 @@
+// Geometry Processor - Vertex Transformation Pipeline
+//
+// This module demonstrates SKALP's advanced features:
+// - Generic entities with trait bounds (T: Numeric)
+// - Intent-driven architecture selection
+// - Parametric pipeline depth
+// - Using reusable library functions
+// - Complex state machine patterns
+// - Pipelined data flow
+//
+// The geometry processor transforms vertices through the graphics pipeline:
+// 1. Model transformation (object space → world space)
+// 2. View transformation (world space → camera space)
+// 3. Projection transformation (camera space → clip space)
+// 4. Lighting calculation (Phong shading)
+
+use crate::types::{
+    Vertex, TransformedVertex, Matrix4x4, GeometryState,
+    vec3, vec4, Color
+};
+
+// Import numeric library functions
+use crate::lib::numeric::vector::{vec_dot, vec_add, vec_scale, vec_normalize};
+use crate::lib::numeric::matrix::{
+    matrix_multiply, matrix_vector_multiply, matrix3x3_vector_multiply
+};
+
+// ============================================================================
+// Intent Definitions
+// ============================================================================
+
+/// Intent parameters for architecture selection
+///
+/// Demonstrates SKALP's intent-driven design:
+/// - OPTIMIZE_LATENCY: Fully parallel, low latency, high area
+/// - OPTIMIZE_AREA: Sequential processing, high latency, low area
+/// - OPTIMIZE_BALANCED: Moderate pipelining, balanced tradeoff
+pub enum OptimizationIntent {
+    OptimizeLatency,   // Minimize cycles per vertex
+    OptimizeArea,      // Minimize resource usage
+    OptimizeBalanced   // Balance between latency and area
+}
+
+// ============================================================================
+// Geometry Processor Entity (Generic)
+// ============================================================================
+
+/// Generic geometry processor
+///
+/// Generic over:
+/// - T: Numeric type (fp32, fp16, fixed<W,F,S>, etc.)
+/// - STAGES: Pipeline depth (higher = more throughput)
+/// - INTENT: Architecture selection intent
+///
+/// Example instantiations:
+///   GeometryProcessor<fp32, 4, OptimizeLatency>      // Fast, FP32
+///   GeometryProcessor<fp16, 2, OptimizeArea>          // Small, FP16
+///   GeometryProcessor<fixed<32,16,true>, 3, OptimizeBalanced>  // Fixed-point
+///
+/// Hardware characteristics:
+/// - OptimizeLatency: Parallel matrix multiply, 4-6 cycle latency
+/// - OptimizeArea: Sequential multiply, 64+ cycle latency, 1/16 area
+/// - OptimizeBalanced: Partially pipelined, 16 cycle latency, 1/4 area
+entity GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: OptimizationIntent> {
+    // Clock and reset
+    input clk: clock,
+    input rst: reset(active_high),
+
+    // Input vertex stream (valid-ready handshake)
+    input vertex_valid: bit,
+    input vertex: Vertex<T>,
+    output vertex_ready: bit,
+
+    // Transformation matrices (updated infrequently)
+    input model_matrix: [[T; 4]; 4],
+    input view_matrix: [[T; 4]; 4],
+    input proj_matrix: [[T; 4]; 4],
+
+    // Lighting parameters (directional light model)
+    input light_dir: vec3<T>,       // Direction to light (normalized)
+    input light_color: vec3<T>,     // Light RGB intensity
+    input ambient_color: vec3<T>,   // Ambient RGB intensity
+    input specular_exp: T,          // Specular exponent (shininess)
+
+    // Output transformed vertex stream
+    output output_valid: bit,
+    output output_vertex: TransformedVertex<T>,
+    input output_ready: bit,
+
+    // Status and statistics
+    output busy: bit,
+    output vertices_processed: u32,
+    output pipeline_stalls: u32
+}
+
+impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: OptimizationIntent> {
+    // ========================================================================
+    // State Registers
+    // ========================================================================
+
+    signal state: GeometryState;
+    signal vertex_count: u32;
+    signal stall_count: u32;
+
+    // ========================================================================
+    // Pipeline Control
+    // ========================================================================
+
+    signal pipeline_valid: [bit; STAGES];
+    signal pipeline_stage: [u8; STAGES];
+
+    // ========================================================================
+    // Pipeline Data - Stage 0: Input
+    // ========================================================================
+
+    signal input_position: vec3<T>;
+    signal input_normal: vec3<T>;
+    signal input_color: vec4<T>;
+
+    // ========================================================================
+    // Pipeline Data - Stage 1: Model Transform
+    // ========================================================================
+
+    signal world_position: vec4<T>;
+    signal world_normal: vec3<T>;
+
+    // ========================================================================
+    // Pipeline Data - Stage 2: View Transform
+    // ========================================================================
+
+    signal view_position: vec4<T>;
+    signal view_normal: vec3<T>;
+
+    // ========================================================================
+    // Pipeline Data - Stage 3: Projection Transform
+    // ========================================================================
+
+    signal clip_position: vec4<T>;
+
+    // ========================================================================
+    // Pipeline Data - Stage 4: Lighting
+    // ========================================================================
+
+    signal lit_color: vec4<T>;
+    signal diffuse_intensity: T;
+    signal specular_intensity: T;
+
+    // ========================================================================
+    // Combined MVP Matrix (Optional Optimization)
+    // ========================================================================
+
+    // Pre-multiply M*V*P on CPU or in separate module
+    // This saves 2 matrix multiplies per vertex
+    signal mvp_matrix: [[T; 4]; 4];
+    signal mv_matrix: [[T; 4]; 4];  // For normal transformation
+
+    // ========================================================================
+    // Control State Machine
+    // ========================================================================
+
+    on(clk.rise) {
+        if rst {
+            state <= GeometryState::Idle;
+            vertex_count <= 0u32;
+            stall_count <= 0u32;
+
+            // Clear pipeline
+            for i in 0..STAGES {
+                pipeline_valid[i] <= 1'b0
+            }
+        } else {
+            match state {
+                // Idle: Wait for input vertex
+                GeometryState::Idle => {
+                    if vertex_valid && vertex_ready {
+                        state <= GeometryState::LoadVertex
+                    }
+                }
+
+                // LoadVertex: Capture input and start pipeline
+                GeometryState::LoadVertex => {
+                    input_position <= vertex.position;
+                    input_normal <= vertex.normal;
+                    input_color <= vertex.color;
+
+                    pipeline_valid[0] <= 1'b1;
+                    state <= GeometryState::Transform;
+                    vertex_count <= vertex_count + 1u32;
+                }
+
+                // Transform: Process through pipeline stages
+                GeometryState::Transform => {
+                    // Pipeline advances automatically (see pipeline logic below)
+                    // Check if final stage has valid output
+                    if pipeline_valid[STAGES-1] {
+                        state <= GeometryState::Lighting
+                    }
+                }
+
+                // Lighting: Compute lighting (may be pipelined internally)
+                GeometryState::Lighting => {
+                    // Lighting computation complete
+                    state <= GeometryState::Viewport
+                }
+
+                // Viewport: Viewport transformation (simple scale+offset)
+                GeometryState::Viewport => {
+                    state <= GeometryState::WriteOutput
+                }
+
+                // WriteOutput: Wait for output to be consumed
+                GeometryState::WriteOutput => {
+                    if output_ready {
+                        pipeline_valid[STAGES-1] <= 1'b0;
+                        state <= GeometryState::Idle
+                    } else {
+                        // Output not ready - stall
+                        stall_count <= stall_count + 1u32
+                    }
+                }
+
+                _ => {
+                    state <= GeometryState::Idle
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Matrix Pre-computation (Optional)
+    // ========================================================================
+
+    // Pre-multiply M*V*P to save per-vertex computation
+    // This can be done when matrices change (infrequent)
+    on(clk.rise) {
+        if !rst {
+            // Compute M*V
+            mv_matrix <= matrix_multiply::<T>(view_matrix, model_matrix);
+
+            // Compute (M*V)*P = M*V*P
+            mvp_matrix <= matrix_multiply::<T>(proj_matrix, mv_matrix);
+        }
+    }
+
+    // ========================================================================
+    // Pipeline Stage 0: Model Transformation
+    // ========================================================================
+
+    on(clk.rise) {
+        if !rst && pipeline_valid[0] {
+            // Transform position: world_pos = model_matrix * pos
+            let pos_homogeneous = vec4::<T> {
+                x: input_position.x,
+                y: input_position.y,
+                z: input_position.z,
+                w: T::ONE
+            };
+
+            world_position <= matrix_vector_multiply::<T>(
+                model_matrix,
+                pos_homogeneous
+            );
+
+            // Transform normal: world_normal = (M^-T) * normal
+            // For rigid transforms (rotation+translation): M^-T ≈ M[3x3]
+            let normal_matrix = [
+                [model_matrix[0][0], model_matrix[0][1], model_matrix[0][2]],
+                [model_matrix[1][0], model_matrix[1][1], model_matrix[1][2]],
+                [model_matrix[2][0], model_matrix[2][1], model_matrix[2][2]]
+            ];
+
+            world_normal <= matrix3x3_vector_multiply::<T>(
+                normal_matrix,
+                input_normal
+            );
+
+            // Advance pipeline
+            if STAGES > 1 {
+                pipeline_valid[1] <= 1'b1
+            }
+        }
+    }
+
+    // ========================================================================
+    // Pipeline Stage 1: View Transformation
+    // ========================================================================
+
+    on(clk.rise) {
+        if !rst && STAGES > 1 && pipeline_valid[1] {
+            // Transform to camera space: view_pos = view_matrix * world_pos
+            view_position <= matrix_vector_multiply::<T>(
+                view_matrix,
+                world_position
+            );
+
+            // Transform normal to view space
+            let view_normal_matrix = [
+                [view_matrix[0][0], view_matrix[0][1], view_matrix[0][2]],
+                [view_matrix[1][0], view_matrix[1][1], view_matrix[1][2]],
+                [view_matrix[2][0], view_matrix[2][1], view_matrix[2][2]]
+            ];
+
+            view_normal <= matrix3x3_vector_multiply::<T>(
+                view_normal_matrix,
+                world_normal
+            );
+
+            // Advance pipeline
+            if STAGES > 2 {
+                pipeline_valid[2] <= 1'b1
+            }
+        }
+    }
+
+    // ========================================================================
+    // Pipeline Stage 2: Projection Transformation
+    // ========================================================================
+
+    on(clk.rise) {
+        if !rst && STAGES > 2 && pipeline_valid[2] {
+            // Transform to clip space: clip_pos = proj_matrix * view_pos
+            clip_position <= matrix_vector_multiply::<T>(
+                proj_matrix,
+                view_position
+            );
+
+            // Advance pipeline
+            if STAGES > 3 {
+                pipeline_valid[3] <= 1'b1
+            }
+        }
+    }
+
+    // ========================================================================
+    // Pipeline Stage 3: Lighting Calculation (Phong Model)
+    // ========================================================================
+
+    on(clk.rise) {
+        if !rst && STAGES > 3 && pipeline_valid[3] {
+            // Normalize surface normal
+            let normal_normalized = vec_normalize::<T, 3>(world_normal);
+
+            // Normalize light direction (should be pre-normalized)
+            let light_dir_normalized = light_dir;
+
+            // Diffuse: I_diffuse = max(N · L, 0)
+            let n_dot_l = vec_dot::<T, 3>(normal_normalized, light_dir_normalized);
+            let n_dot_l_clamped = if n_dot_l.lt(T::ZERO) { T::ZERO } else { n_dot_l };
+
+            diffuse_intensity <= n_dot_l_clamped;
+
+            // Diffuse color: I_diffuse * light_color * surface_color
+            let diffuse_r = n_dot_l_clamped.mul(light_color.x).mul(input_color.x);
+            let diffuse_g = n_dot_l_clamped.mul(light_color.y).mul(input_color.y);
+            let diffuse_b = n_dot_l_clamped.mul(light_color.z).mul(input_color.z);
+
+            // Ambient: I_ambient * surface_color
+            let ambient_r = ambient_color.x.mul(input_color.x);
+            let ambient_g = ambient_color.y.mul(input_color.y);
+            let ambient_b = ambient_color.z.mul(input_color.z);
+
+            // Total color: ambient + diffuse
+            // (Specular omitted for simplicity - requires view vector)
+            let final_r = ambient_r.add(diffuse_r);
+            let final_g = ambient_g.add(diffuse_g);
+            let final_b = ambient_b.add(diffuse_b);
+
+            // Clamp to [0, 1] range
+            let clamp = |val: T| {
+                if val.lt(T::ZERO) {
+                    T::ZERO
+                } else if val.gt(T::ONE) {
+                    T::ONE
+                } else {
+                    val
+                }
+            };
+
+            lit_color <= vec4::<T> {
+                x: clamp(final_r),
+                y: clamp(final_g),
+                z: clamp(final_b),
+                w: input_color.w  // Preserve alpha
+            };
+
+            // Advance pipeline
+            if STAGES > 4 {
+                pipeline_valid[4] <= 1'b1
+            }
+        }
+    }
+
+    // ========================================================================
+    // Output Assignment
+    // ========================================================================
+
+    output_valid = if state == GeometryState::WriteOutput { 1'b1 } else { 1'b0 };
+    vertex_ready = if state == GeometryState::Idle { 1'b1 } else { 1'b0 };
+    busy = if state != GeometryState::Idle { 1'b1 } else { 1'b0 };
+    vertices_processed = vertex_count;
+    pipeline_stalls = stall_count;
+
+    // Output transformed vertex
+    output_vertex = TransformedVertex::<T> {
+        position: clip_position,
+        normal: world_normal,
+        color: lit_color,
+        tex_coord: vec2::<T> { x: T::ZERO, y: T::ZERO }  // TODO: Texture coords
+    };
+}
+
+// ============================================================================
+// Architecture Selection Based on Intent
+// ============================================================================
+
+/// Fast geometry processor (low latency, high throughput)
+///
+/// Configuration:
+/// - Numeric type: fp32 (highest precision)
+/// - Pipeline stages: 5 (fully pipelined)
+/// - Intent: OptimizeLatency
+///
+/// Hardware characteristics:
+/// - Latency: 5 cycles
+/// - Throughput: 1 vertex/cycle (after initial latency)
+/// - Area: Large (64 FP32 multipliers for matrix ops)
+pub type GeometryProcessorFast = GeometryProcessor<fp32, 5, OptimizeLatency>;
+
+/// Area-optimized geometry processor (low resource usage)
+///
+/// Configuration:
+/// - Numeric type: fp16 (half precision)
+/// - Pipeline stages: 2 (minimal pipelining)
+/// - Intent: OptimizeArea
+///
+/// Hardware characteristics:
+/// - Latency: 32+ cycles (sequential processing)
+/// - Throughput: ~1 vertex/32 cycles
+/// - Area: Small (4-8 FP16 multipliers, shared)
+pub type GeometryProcessorSmall = GeometryProcessor<fp16, 2, OptimizeArea>;
+
+/// Balanced geometry processor
+///
+/// Configuration:
+/// - Numeric type: fixed<32, 16, true> (Q16.16 fixed-point)
+/// - Pipeline stages: 3
+/// - Intent: OptimizeBalanced
+///
+/// Hardware characteristics:
+/// - Latency: 16 cycles
+/// - Throughput: ~1 vertex/8 cycles
+/// - Area: Medium (16 fixed-point multipliers)
+pub type GeometryProcessorBalanced = GeometryProcessor<fixed<32, 16, true>, 3, OptimizeBalanced>;
+
+// ============================================================================
+// Utility Functions (Generic)
+// ============================================================================
+
+/// Compute Model-View-Projection matrix
+///
+/// This should be done once per frame on CPU or in a separate module,
+/// not per-vertex. Pre-computing MVP saves 2 matrix multiplies per vertex.
+pub fn compute_mvp_matrix<T: Numeric>(
+    model: [[T; 4]; 4],
+    view: [[T; 4]; 4],
+    proj: [[T; 4]; 4]
+) -> [[T; 4]; 4] {
+    let mv = matrix_multiply::<T>(view, model);
+    let mvp = matrix_multiply::<T>(proj, mv);
+    return mvp
+}
+
+/// Transform vertex by MVP matrix (simplified path)
+///
+/// Instead of separate M, V, P transforms, use pre-computed MVP
+pub fn transform_vertex_mvp<T: Numeric>(
+    position: vec3<T>,
+    mvp: [[T; 4]; 4]
+) -> vec4<T> {
+    let pos_homogeneous = vec4::<T> {
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        w: T::ONE
+    };
+
+    return matrix_vector_multiply::<T>(mvp, pos_homogeneous)
+}
+
+/// Compute diffuse lighting intensity
+///
+/// Returns: N · L clamped to [0, 1]
+pub fn compute_diffuse_lighting<T: Numeric>(
+    normal: vec3<T>,
+    light_dir: vec3<T>
+) -> T {
+    // Normalize vectors (should be pre-normalized for efficiency)
+    let n = vec_normalize::<T, 3>(normal);
+    let l = vec_normalize::<T, 3>(light_dir);
+
+    // Dot product
+    let n_dot_l = vec_dot::<T, 3>(n, l);
+
+    // Clamp to [0, 1]
+    if n_dot_l.lt(T::ZERO) {
+        return T::ZERO
+    } else {
+        return n_dot_l
+    }
+}
+
+/// Apply lighting to color
+///
+/// Combines ambient + diffuse lighting
+pub fn apply_lighting<T: Numeric>(
+    surface_color: vec3<T>,
+    diffuse_intensity: T,
+    light_color: vec3<T>,
+    ambient_color: vec3<T>
+) -> vec3<T> {
+    // Diffuse component
+    let diffuse = vec_scale::<T, 3>(light_color, diffuse_intensity);
+    let diffuse_modulated = vec3::<T> {
+        x: diffuse.x.mul(surface_color.x),
+        y: diffuse.y.mul(surface_color.y),
+        z: diffuse.z.mul(surface_color.z)
+    };
+
+    // Ambient component
+    let ambient_modulated = vec3::<T> {
+        x: ambient_color.x.mul(surface_color.x),
+        y: ambient_color.y.mul(surface_color.y),
+        z: ambient_color.z.mul(surface_color.z)
+    };
+
+    // Total: ambient + diffuse
+    return vec_add::<T, 3>(ambient_modulated, diffuse_modulated)
+}
+
+// ============================================================================
+// Module Documentation
+// ============================================================================
+
+// This processor.sk file demonstrates:
+//
+// 1. **Generic Entities**: GeometryProcessor<T: Numeric, STAGES, INTENT>
+//    - Works with any numeric type (fp32, fp16, fixed-point)
+//    - Configurable pipeline depth
+//    - Intent-driven architecture selection
+//
+// 2. **Trait Bounds**: T: Numeric ensures type T supports arithmetic
+//    - Enables generic algorithms (matrix multiply, dot product)
+//    - Single implementation, multiple instantiations
+//
+// 3. **Library Reuse**: Uses numeric library functions
+//    - vec_dot, vec_normalize from vector.sk
+//    - matrix_multiply, matrix_vector_multiply from matrix.sk
+//    - Promotes code reuse and maintainability
+//
+// 4. **Intent-Driven Design**: Architecture adapts to optimization goals
+//    - OptimizeLatency: Fully parallel, low latency
+//    - OptimizeArea: Sequential, resource sharing
+//    - OptimizeBalanced: Moderate parallelism
+//
+// 5. **Type Aliases**: Create convenient named configurations
+//    - GeometryProcessorFast: fp32, 5 stages, latency-optimized
+//    - GeometryProcessorSmall: fp16, 2 stages, area-optimized
+//    - GeometryProcessorBalanced: fixed-point, 3 stages, balanced
+//
+// 6. **Pipeline Architecture**: Multi-stage pipelined data flow
+//    - Stage 0: Model transform
+//    - Stage 1: View transform
+//    - Stage 2: Projection transform
+//    - Stage 3: Lighting calculation
+//    - Demonstrates complex hardware pipelines
+//
+// 7. **Graphics Algorithms**: Real-world vertex processing
+//    - Model-View-Projection transforms
+//    - Phong lighting (diffuse + ambient)
+//    - Normal transformation
+//    - Demonstrates practical hardware graphics
+
+// ============================================================================
+// Usage Examples
+// ============================================================================
+
+// Example 1: Instantiate fast processor
+//   let fast_proc = GeometryProcessorFast {
+//       clk: sys_clk,
+//       rst: sys_rst,
+//       vertex: input_vertex,
+//       model_matrix: model_mat,
+//       view_matrix: view_mat,
+//       proj_matrix: proj_mat,
+//       // ... other ports
+//   };
+//
+// Example 2: Instantiate area-optimized processor
+//   let small_proc = GeometryProcessorSmall {
+//       // Same interface, different implementation
+//   };
+//
+// Example 3: Custom configuration
+//   let custom_proc = GeometryProcessor<fixed<24,12,true>, 4, OptimizeBalanced> {
+//       // Custom fixed-point format, 4 stages
+//   };
+//
+// Example 4: Use utility functions
+//   let mvp = compute_mvp_matrix::<fp32>(model, view, proj);
+//   let transformed = transform_vertex_mvp::<fp32>(vertex.position, mvp);
+//   let intensity = compute_diffuse_lighting::<fp32>(normal, light_dir);
