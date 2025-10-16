@@ -206,8 +206,12 @@ impl OptimizationPass for DeadCodeElimination {
             }
 
             // Mark used items in continuous assignments
+            // CRITICAL: Also mark LHS as used, because continuous assignments define
+            // combinational signals that might be consumed by module instances or outputs
             for assign in &module.assignments {
                 self.mark_used_in_expression(&assign.rhs);
+                // Mark LHS as used too - it's a combinational signal that drives something
+                self.mark_used_in_lvalue(&assign.lhs);
             }
 
             // Mark used items in module instances

@@ -2038,13 +2038,25 @@ impl<'a> MirToSirConverter<'a> {
                 .find(|p| p.id == *port_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| format!("port_{}", port_id.0)),
-            LValue::Signal(sig_id) => self
-                .mir
-                .signals
-                .iter()
-                .find(|s| s.id == *sig_id)
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| format!("signal_{}", sig_id.0)),
+            LValue::Signal(sig_id) => {
+                let result = self
+                    .mir
+                    .signals
+                    .iter()
+                    .find(|s| s.id == *sig_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| {
+                        eprintln!(
+                            "⚠️  Signal ID {} not found in MIR signals! Available signals:",
+                            sig_id.0
+                        );
+                        for sig in &self.mir.signals {
+                            eprintln!("     - Signal {}: {}", sig.id.0, sig.name);
+                        }
+                        format!("signal_{}", sig_id.0)
+                    });
+                result
+            }
             LValue::Variable(var_id) => self
                 .mir
                 .variables
