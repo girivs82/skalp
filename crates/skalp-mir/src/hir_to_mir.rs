@@ -120,22 +120,12 @@ impl<'hir> HirToMir<'hir> {
                 let port_type = self.convert_type(&hir_port.port_type);
                 let direction = self.convert_port_direction(&hir_port.direction);
 
-                eprintln!(
-                    "🔍 HIR→MIR: Flattening port '{}' in entity '{}': HIR ID = {:?}, HIR type = {:?}, MIR type = {:?}, direction = {:?}",
-                    hir_port.name, entity.name, hir_port.id, hir_port.port_type, port_type, direction
-                );
-
                 let (flattened_ports, flattened_fields) = self.flatten_port(
                     &hir_port.name,
                     &port_type,
                     direction,
                     hir_port.physical_constraints.clone(),
                 );
-
-                eprintln!("   → Flattened into {} ports", flattened_ports.len());
-                for (idx, p) in flattened_ports.iter().enumerate() {
-                    eprintln!("      Port {}: {} (ID={:?})", idx, p.name, p.id);
-                }
 
                 // If we have multiple flattened ports, store the flattening info
                 if flattened_ports.len() > 1 {
@@ -1245,32 +1235,23 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<Vec<ContinuousAssign>> {
-        eprintln!("🔍 try_expand_struct_continuous_assignment: LHS={:?}, RHS={:?}", assign.lhs, assign.rhs);
-
         // Check if LHS is a simple signal/port that was flattened
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
                 if self.flattened_signals.contains_key(id) {
-                    eprintln!("   LHS is flattened signal ID {}", id.0);
                     (id.0, true)
                 } else {
-                    eprintln!("   ❌ LHS signal ID {} not in flattened_signals", id.0);
                     return None;
                 }
             }
             hir::HirLValue::Port(id) => {
                 if self.flattened_ports.contains_key(id) {
-                    eprintln!("   LHS is flattened port ID {}", id.0);
                     (id.0, false)
                 } else {
-                    eprintln!("   ❌ LHS port ID {} not in flattened_ports", id.0);
                     return None;
                 }
             }
-            _ => {
-                eprintln!("   ❌ LHS is not a simple signal/port");
-                return None; // Not a simple signal/port
-            }
+            _ => return None, // Not a simple signal/port
         };
 
         // Check if RHS is a field access or signal that can be expanded
@@ -1374,7 +1355,6 @@ impl<'hir> HirToMir<'hir> {
             });
         }
 
-        eprintln!("   ✅ EXPANDED STRUCT CONTINUOUS ASSIGNMENT into {} field assignments", assignments.len());
         Some(assignments)
     }
 

@@ -672,12 +672,6 @@ impl HirBuilderContext {
             })
             .map(|t| t.text().to_string())?;
 
-        eprintln!("🔍 build_connection: port_name = '{}'", port_name);
-        eprintln!("   Node children:");
-        for child in node.children() {
-            eprintln!("     - {:?}", child.kind());
-        }
-
         // Get the expression (everything after the colon)
         let expr_node = node.children().find(|n| {
             matches!(
@@ -689,18 +683,9 @@ impl HirBuilderContext {
                     | SyntaxKind::FieldExpr
                     | SyntaxKind::IndexExpr
             )
-        });
+        })?;
 
-        if expr_node.is_none() {
-            eprintln!("   ❌ No matching expression node found for port '{}'", port_name);
-            return None;
-        }
-
-        eprintln!("   ✅ Found expression node: {:?}", expr_node.as_ref().unwrap().kind());
-
-        let expr = self.build_expression(expr_node.as_ref().unwrap())?;
-
-        eprintln!("   ✅ Built expression successfully");
+        let expr = self.build_expression(&expr_node)?;
 
         Some(HirConnection {
             port: port_name,
