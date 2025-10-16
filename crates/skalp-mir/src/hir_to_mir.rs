@@ -120,12 +120,22 @@ impl<'hir> HirToMir<'hir> {
                 let port_type = self.convert_type(&hir_port.port_type);
                 let direction = self.convert_port_direction(&hir_port.direction);
 
+                eprintln!(
+                    "🔍 HIR→MIR: Flattening port '{}' in entity '{}': HIR ID = {:?}, HIR type = {:?}, MIR type = {:?}, direction = {:?}",
+                    hir_port.name, entity.name, hir_port.id, hir_port.port_type, port_type, direction
+                );
+
                 let (flattened_ports, flattened_fields) = self.flatten_port(
                     &hir_port.name,
                     &port_type,
                     direction,
                     hir_port.physical_constraints.clone(),
                 );
+
+                eprintln!("   → Flattened into {} ports", flattened_ports.len());
+                for (idx, p) in flattened_ports.iter().enumerate() {
+                    eprintln!("      Port {}: {} (ID={:?})", idx, p.name, p.id);
+                }
 
                 // If we have multiple flattened ports, store the flattening info
                 if flattened_ports.len() > 1 {
@@ -1235,23 +1245,32 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<Vec<ContinuousAssign>> {
+        eprintln!("🔍 try_expand_struct_continuous_assignment: LHS={:?}, RHS={:?}", assign.lhs, assign.rhs);
+
         // Check if LHS is a simple signal/port that was flattened
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
                 if self.flattened_signals.contains_key(id) {
+                    eprintln!("   LHS is flattened signal ID {}", id.0);
                     (id.0, true)
                 } else {
+                    eprintln!("   ❌ LHS signal ID {} not in flattened_signals", id.0);
                     return None;
                 }
             }
             hir::HirLValue::Port(id) => {
                 if self.flattened_ports.contains_key(id) {
+                    eprintln!("   LHS is flattened port ID {}", id.0);
                     (id.0, false)
                 } else {
+                    eprintln!("   ❌ LHS port ID {} not in flattened_ports", id.0);
                     return None;
                 }
             }
-            _ => return None, // Not a simple signal/port
+            _ => {
+                eprintln!("   ❌ LHS is not a simple signal/port");
+                return None; // Not a simple signal/port
+            }
         };
 
         // Check if RHS is a field access or signal that can be expanded
@@ -1355,6 +1374,7 @@ impl<'hir> HirToMir<'hir> {
             });
         }
 
+        eprintln!("   ✅ EXPANDED STRUCT CONTINUOUS ASSIGNMENT into {} field assignments", assignments.len());
         Some(assignments)
     }
 
@@ -1366,7 +1386,11 @@ impl<'hir> HirToMir<'hir> {
         // Convert connections
         // CRITICAL FIX for Bug #10: Expand struct/array connections into flattened field connections
         let mut connections = std::collections::HashMap::new();
+
+        eprintln!("🔍 convert_instance: Processing {} connections for instance {}", instance.connections.len(), instance.name);
         for conn in &instance.connections {
+            eprintln!("   Connection: {} → {:?}", conn.port, conn.expr);
+
             // Check if this port is flattened (struct or array type)
             // If so, we need to create multiple connections for each flattened field
 
@@ -1375,6 +1399,9 @@ impl<'hir> HirToMir<'hir> {
 
             // Find the port in the entity
             let port_opt = entity.ports.iter().find(|p| p.name == conn.port);
+            if port_opt.is_none() {
+                eprintln!("   ⚠️  Port '{}' not found in entity!", conn.port);
+            }
 
             // Check if the RHS expression is a reference to a flattened signal/port
             let expanded_connections = if let Some(port) = port_opt {
@@ -1421,17 +1448,33 @@ impl<'hir> HirToMir<'hir> {
         let (base_hir_id, is_signal) = match rhs_expr {
             hir::HirExpression::Signal(id) => (id.0, true),
             hir::HirExpression::Port(id) => (id.0, false),
-            _ => return None, // Complex expression, can't expand
+            _ => {
+                eprintln!("   ❌ RHS is not a simple Signal/Port expression: {:?}", rhs_expr);
+                return None; // Complex expression, can't expand
+            }
         };
 
         // Get flattened fields for the RHS signal/port
+        eprintln!("   Looking for flattened fields: {}({})", if is_signal { "Signal" } else { "Port" }, base_hir_id);
         let rhs_fields = if is_signal {
-            self.flattened_signals.get(&hir::SignalId(base_hir_id))?.clone()
+            match self.flattened_signals.get(&hir::SignalId(base_hir_id)) {
+                Some(fields) => fields.clone(),
+                None => {
+                    eprintln!("   ❌ Signal ID {} not found in flattened_signals", base_hir_id);
+                    return None;
+                }
+            }
         } else {
-            self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
+            match self.flattened_ports.get(&hir::PortId(base_hir_id)) {
+                Some(fields) => fields.clone(),
+                None => {
+                    eprintln!("   ❌ Port ID {} not found in flattened_ports", base_hir_id);
+                    return None;
+                }
+            }
         };
 
-        eprintln!("   RHS has {} flattened fields", rhs_fields.len());
+        eprintln!("   ✅ RHS has {} flattened fields", rhs_fields.len());
 
         // Create connections for each flattened field
         let mut connections = Vec::new();

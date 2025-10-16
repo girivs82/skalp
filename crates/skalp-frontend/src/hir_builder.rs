@@ -661,10 +661,22 @@ impl HirBuilderContext {
 
     /// Build connection
     fn build_connection(&mut self, node: &SyntaxNode) -> Option<HirConnection> {
-        // Get port name (first identifier)
+        // Get port name (first identifier OR keyword, since keywords can be used as port names)
         let port_name = node
             .first_token_of_kind(SyntaxKind::Ident)
+            .or_else(|| {
+                // If not an Ident, look for any keyword token
+                node.children_with_tokens()
+                    .filter_map(|elem| elem.into_token())
+                    .find(|t| t.kind().is_keyword())
+            })
             .map(|t| t.text().to_string())?;
+
+        eprintln!("🔍 build_connection: port_name = '{}'", port_name);
+        eprintln!("   Node children:");
+        for child in node.children() {
+            eprintln!("     - {:?}", child.kind());
+        }
 
         // Get the expression (everything after the colon)
         let expr_node = node.children().find(|n| {
@@ -677,9 +689,18 @@ impl HirBuilderContext {
                     | SyntaxKind::FieldExpr
                     | SyntaxKind::IndexExpr
             )
-        })?;
+        });
 
-        let expr = self.build_expression(&expr_node)?;
+        if expr_node.is_none() {
+            eprintln!("   ❌ No matching expression node found for port '{}'", port_name);
+            return None;
+        }
+
+        eprintln!("   ✅ Found expression node: {:?}", expr_node.as_ref().unwrap().kind());
+
+        let expr = self.build_expression(expr_node.as_ref().unwrap())?;
+
+        eprintln!("   ✅ Built expression successfully");
 
         Some(HirConnection {
             port: port_name,
