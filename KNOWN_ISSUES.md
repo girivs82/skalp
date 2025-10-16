@@ -72,6 +72,9 @@ Modified `MonomorphizationEngine::monomorphize` in `crates/skalp-frontend/src/mo
 ### Status
 ✅ **FIXED** - Monomorphization now produces deterministic EntityId assignment across runs
 
+### Note
+While this fix ensures correct instance mapping, the `test_graphics_pipeline_multi_clock_domains` test still reads zeros. This appears to be a separate GPU simulator execution issue (not a compilation bug), requiring further investigation into Metal shader execution or AsyncFifo sequential logic.
+
 ---
 
 ## ✅ FIXED: Imported Generic Module Implementations Not Merged (Bug #17)
