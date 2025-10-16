@@ -26,6 +26,21 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
         "🌟 MIR TO SIR: Starting hierarchical conversion for module '{}'",
         top_module.name
     );
+    eprintln!("📊 Available modules in MIR:");
+    for m in &mir.modules {
+        eprintln!(
+            "   - {} (ID={:?}): {} signals",
+            m.name,
+            m.id,
+            m.signals.len()
+        );
+        if m.name.contains("AsyncFifo_8") {
+            eprintln!("      🔍 AsyncFifo_8 signals:");
+            for sig in m.signals.iter().take(15) {
+                eprintln!("         - {}: {:?}", sig.name, sig.signal_type);
+            }
+        }
+    }
 
     let mut sir = SirModule::new(top_module.name.clone());
     let mut converter = MirToSirConverter::new(&mut sir, top_module, mir);
@@ -3006,13 +3021,24 @@ impl<'a> MirToSirConverter<'a> {
                 .iter()
                 .find(|m| m.id == instance.module)
                 .unwrap_or_else(|| {
+                    eprintln!(
+                        "❌ ERROR: Module {:?} not found for instance '{}'",
+                        instance.module, instance.name
+                    );
+                    eprintln!("Available modules:");
+                    for m in &self.mir_design.modules {
+                        eprintln!("   - {:?}: {}", m.id, m.name);
+                    }
                     panic!(
                         "Module {:?} not found for instance {}",
                         instance.module, instance.name
                     )
                 });
 
-            println!("      ├─ Child module: {}", child_module.name);
+            println!(
+                "      ├─ Child module: {} (ID={:?})",
+                child_module.name, child_module.id
+            );
             println!("      ├─ Ports: {}", child_module.ports.len());
             println!("      ├─ Signals: {}", child_module.signals.len());
             println!("      ├─ Processes: {}", child_module.processes.len());
@@ -3034,45 +3060,82 @@ impl<'a> MirToSirConverter<'a> {
         child_module: &Module,
         inst_prefix: &str,
     ) {
-        println!("      🔨 Elaborating instance '{}'", inst_prefix);
+        println!(
+            "      🔨 Elaborating instance '{}' (module has {} signals)",
+            inst_prefix,
+            child_module.signals.len()
+        );
+        println!("         All signals in module:");
+        for sig in &child_module.signals {
+            println!("            - {}: {:?}", sig.name, sig.signal_type);
+        }
 
         // Step 1: Create signals for child module's internal signals
         // These get prefixed with instance name (e.g., "stage1.reg")
+        // IMPORTANT: We must flatten composite types (structs, arrays) into scalar signals
         for signal in &child_module.signals {
-            let prefixed_name = format!("{}.{}", inst_prefix, signal.name);
-            let sir_type = self.convert_type(&signal.signal_type);
-            let width = sir_type.width();
+            let _prefixed_name = format!("{}.{}", inst_prefix, signal.name);
 
             // Check if this signal is a register in the child module
-            let is_register = self.is_signal_sequential_in_module(signal.id, child_module);
+            // WORKAROUND for Bug #8 (HIR→MIR doesn't expand array index assignments):
+            // If this signal is part of a flattened array, check if ANY sibling is sequential
+            let is_register = self.is_signal_or_sibling_sequential(signal, child_module);
 
-            println!(
-                "         ├─ Signal: {} (width={}, is_reg={})",
-                prefixed_name, width, is_register
+            // Use TypeFlattener to handle composite types (structs, arrays, etc.)
+            let mut flattener = skalp_mir::type_flattening::TypeFlattener::default();
+            let (flattened_signals, _fields) = flattener.flatten_signal(
+                &signal.name,
+                &signal.signal_type,
+                signal.initial.clone(),
+                signal.clock_domain,
             );
 
-            self.sir.signals.push(SirSignal {
-                name: prefixed_name.clone(),
-                width,
-                sir_type: sir_type.clone(),
-                driver_node: None,
-                fanout_nodes: Vec::new(),
-                is_state: is_register,
-            });
+            println!(
+                "         ├─ Signal: {} (type={:?}) → {} flattened signals (is_reg={})",
+                signal.name,
+                signal.signal_type,
+                flattened_signals.len(),
+                is_register
+            );
 
-            if is_register {
-                self.sir.state_elements.insert(
-                    prefixed_name.clone(),
-                    StateElement {
-                        name: prefixed_name,
-                        width,
-                        reset_value: None,
-                        clock: String::new(),
-                        reset: None,
-                    },
-                );
+            // Create SIR signals for each flattened component
+            for flat_signal in flattened_signals {
+                let full_name = format!("{}.{}", inst_prefix, flat_signal.name);
+                let sir_type = self.convert_type(&flat_signal.signal_type);
+                let width = sir_type.width();
+
+                println!("            ├─ Flattened: {} (width={})", full_name, width);
+
+                self.sir.signals.push(SirSignal {
+                    name: full_name.clone(),
+                    width,
+                    sir_type: sir_type.clone(),
+                    driver_node: None,
+                    fanout_nodes: Vec::new(),
+                    is_state: is_register,
+                });
+
+                if is_register {
+                    eprintln!("            ✅ Adding to state_elements: {}", full_name);
+                    self.sir.state_elements.insert(
+                        full_name.clone(),
+                        StateElement {
+                            name: full_name,
+                            width,
+                            reset_value: None,
+                            clock: String::new(),
+                            reset: None,
+                        },
+                    );
+                }
             }
         }
+
+        eprintln!(
+            "         📊 After elaborating '{}': total {} state_elements",
+            inst_prefix,
+            self.sir.state_elements.len()
+        );
 
         // Step 2: Convert child module's logic with instance prefix
         // This includes both combinational assignments and sequential processes
@@ -3220,7 +3283,10 @@ impl<'a> MirToSirConverter<'a> {
                         "🕐 CLOCK MAPPING: Attempting to map clock_lvalue={:?} for instance '{}'",
                         clock_lvalue, inst_prefix
                     );
-                    eprintln!("   port_mapping keys: {:?}", port_mapping.keys().collect::<Vec<_>>());
+                    eprintln!(
+                        "   port_mapping keys: {:?}",
+                        port_mapping.keys().collect::<Vec<_>>()
+                    );
 
                     let clock_signal = if let Some(sig_name) = self.get_signal_from_lvalue(
                         clock_lvalue,
@@ -3249,49 +3315,75 @@ impl<'a> MirToSirConverter<'a> {
                             &mut targets,
                         );
                     }
+                    eprintln!(
+                        "📊 Collected {} targets for sequential process in '{}':",
+                        targets.len(),
+                        inst_prefix
+                    );
+                    for t in &targets {
+                        eprintln!("      - {}", t);
+                    }
 
                     // For each target, synthesize conditional logic and create FlipFlop
+                    // CRITICAL: If target is a base signal for a flattened array, we need to
+                    // create FlipFlops for ALL flattened elements
                     for target in targets {
-                        // Build combinational logic (including MUXes for conditionals)
-                        let data_node = self.synthesize_sequential_logic_for_instance(
-                            &process.body.statements,
-                            inst_prefix,
-                            port_mapping,
-                            child_module,
-                            &target,
+                        // Expand target if it's a flattened array base
+                        let expanded_targets = self.expand_flattened_target(&target);
+
+                        eprintln!(
+                            "🔍 Target '{}' expanded to {} signals",
+                            target,
+                            expanded_targets.len()
                         );
 
-                        let node_id = self.node_counter;
-                        self.node_counter += 1;
+                        for actual_target in expanded_targets {
+                            // Build combinational logic (including MUXes for conditionals)
+                            let data_node = self.synthesize_sequential_logic_for_instance(
+                                &process.body.statements,
+                                inst_prefix,
+                                port_mapping,
+                                child_module,
+                                &actual_target,
+                            );
 
-                        // Create FlipFlop node with clock and synthesized data
-                        let ff_node = SirNode {
-                            id: node_id,
-                            kind: SirNodeKind::FlipFlop {
-                                clock_edge: clock_edge.clone(),
-                            },
-                            inputs: vec![
-                                SignalRef {
-                                    signal_id: clock_signal.clone(),
-                                    bit_range: None,
+                            let node_id = self.node_counter;
+                            self.node_counter += 1;
+
+                            // Create FlipFlop node with clock and synthesized data
+                            let ff_node = SirNode {
+                                id: node_id,
+                                kind: SirNodeKind::FlipFlop {
+                                    clock_edge: clock_edge.clone(),
                                 },
-                                SignalRef {
-                                    signal_id: format!("node_{}_out", data_node),
+                                inputs: vec![
+                                    SignalRef {
+                                        signal_id: clock_signal.clone(),
+                                        bit_range: None,
+                                    },
+                                    SignalRef {
+                                        signal_id: format!("node_{}_out", data_node),
+                                        bit_range: None,
+                                    },
+                                ],
+                                outputs: vec![SignalRef {
+                                    signal_id: actual_target.clone(),
                                     bit_range: None,
-                                },
-                            ],
-                            outputs: vec![SignalRef {
-                                signal_id: target.clone(),
-                                bit_range: None,
-                            }],
-                            clock_domain: Some(clock_signal.clone()),
-                        };
+                                }],
+                                clock_domain: Some(clock_signal.clone()),
+                            };
 
-                        self.sir.sequential_nodes.push(ff_node);
+                            self.sir.sequential_nodes.push(ff_node);
 
-                        // Mark the signal as having this driver
-                        if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == target) {
-                            sig.driver_node = Some(node_id);
+                            // Mark the signal as having this driver
+                            if let Some(sig) = self
+                                .sir
+                                .signals
+                                .iter_mut()
+                                .find(|s| s.name == actual_target)
+                            {
+                                sig.driver_node = Some(node_id);
+                            }
                         }
                     }
                 }
@@ -3310,7 +3402,33 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// Expand a target signal if it's a base for flattened array elements
+    /// Example: "input_fifo.mem" → ["input_fifo.mem_0_x", "input_fifo.mem_0_y", ...]
+    fn expand_flattened_target(&self, target: &str) -> Vec<String> {
+        // Check if there are any signals that start with this target as a prefix
+        // followed by underscore (indicating flattened array elements)
+        let prefix = format!("{}_", target);
+        let mut expanded: Vec<String> = self
+            .sir
+            .signals
+            .iter()
+            .filter(|sig| sig.name.starts_with(&prefix))
+            .map(|sig| sig.name.clone())
+            .collect();
+
+        if expanded.is_empty() {
+            // Not a flattened array base - return the target itself
+            vec![target.to_string()]
+        } else {
+            // Sort to ensure consistent ordering (mem_0_x, mem_0_y, mem_0_z, mem_1_x, ...)
+            expanded.sort();
+            expanded
+        }
+    }
+
     /// Extract base signal name from LValue (handles arrays, bit/range selection)
+    /// For flattened arrays, this strips the index suffix to get the true base
+    /// Example: mem_0_x -> mem, mem_5_z -> mem
     fn extract_base_signal_for_instance(
         &self,
         lvalue: &LValue,
@@ -3320,24 +3438,62 @@ impl<'a> MirToSirConverter<'a> {
         match lvalue {
             LValue::Signal(sig_id) => {
                 // Direct signal reference
-                if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
-                    Some(format!("{}.{}", inst_prefix, signal.name))
-                } else {
-                    None
-                }
+                child_module
+                    .signals
+                    .iter()
+                    .find(|s| s.id == *sig_id)
+                    .map(|signal| format!("{}.{}", inst_prefix, signal.name))
             }
             LValue::BitSelect { base, index: _ } => {
-                // Array/bit index: extract base signal
-                // e.g., mem[wr_ptr] -> base is "mem"
+                // Array/bit index: extract base signal and strip flattened index suffix
+                // e.g., mem[wr_ptr] where base resolves to "mem_0_x" -> we want just "mem"
                 self.extract_base_signal_for_instance(base, inst_prefix, child_module)
+                    .map(|base_name| self.strip_flattened_index_suffix(&base_name))
             }
-            LValue::RangeSelect { base, high: _, low: _ } => {
+            LValue::RangeSelect {
+                base,
+                high: _,
+                low: _,
+            } => {
                 // Bit range slice: extract base signal
                 // e.g., data[7:0] -> base is "data"
                 self.extract_base_signal_for_instance(base, inst_prefix, child_module)
             }
             _ => None,
         }
+    }
+
+    /// Strip flattened array index suffix from a signal name
+    /// Examples:
+    ///   "input_fifo.mem_0_x" -> "input_fifo.mem"
+    ///   "input_fifo.mem_7_z" -> "input_fifo.mem"
+    ///   "input_fifo.wr_ptr" -> "input_fifo.wr_ptr" (unchanged)
+    fn strip_flattened_index_suffix(&self, name: &str) -> String {
+        // Try to match pattern: <base>_<digit>_<field> or <base>_<digit>
+        // We need to be careful not to strip legitimate signal names like "wr_ptr_gray"
+
+        // Look for the pattern: "_<digit>_<letter>" or "_<digit>" at the end
+        if let Some(last_underscore_pos) = name.rfind('_') {
+            let after_underscore = &name[last_underscore_pos + 1..];
+
+            // Check if it's a single letter (struct field) or empty
+            if after_underscore.len() <= 1 && after_underscore.chars().all(|c| c.is_alphabetic()) {
+                // This might be "_x", "_y", "_z" - check for preceding digit
+                if let Some(prev_underscore_pos) = name[..last_underscore_pos].rfind('_') {
+                    let between = &name[prev_underscore_pos + 1..last_underscore_pos];
+                    if between.chars().all(|c| c.is_ascii_digit()) {
+                        // Found pattern "_<digit>_<letter>" - strip both
+                        return name[..prev_underscore_pos].to_string();
+                    }
+                }
+            } else if after_underscore.chars().all(|c| c.is_ascii_digit()) {
+                // Pattern: "_<digit>" at the end - strip it
+                return name[..last_underscore_pos].to_string();
+            }
+        }
+
+        // No flattened index pattern found - return as-is
+        name.to_string()
     }
 
     /// Collect assignment targets in a sequential block for an instance
@@ -3353,11 +3509,8 @@ impl<'a> MirToSirConverter<'a> {
         match statement {
             Statement::Assignment(assign) => {
                 // Extract base signal from LHS (handles array indices, field access, etc.)
-                let lhs_signal = self.extract_base_signal_for_instance(
-                    &assign.lhs,
-                    inst_prefix,
-                    child_module,
-                );
+                let lhs_signal =
+                    self.extract_base_signal_for_instance(&assign.lhs, inst_prefix, child_module);
 
                 if let Some(sig_name) = lhs_signal {
                     targets.insert(sig_name);
@@ -3529,26 +3682,51 @@ impl<'a> MirToSirConverter<'a> {
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
-                    let lhs = match &assign.lhs {
-                        LValue::Signal(sig_id) => {
-                            if let Some(signal) =
-                                child_module.signals.iter().find(|s| s.id == *sig_id)
-                            {
-                                format!("{}.{}", inst_prefix, signal.name)
-                            } else {
-                                continue;
-                            }
+                    // Extract the base signal name from the LValue
+                    // For flattened arrays, we need to strip the index suffix
+                    let lhs_base = match &assign.lhs {
+                        LValue::Signal(sig_id) => child_module
+                            .signals
+                            .iter()
+                            .find(|s| s.id == *sig_id)
+                            .map(|signal| format!("{}.{}", inst_prefix, signal.name)),
+                        LValue::BitSelect { base, .. } => {
+                            // Array index like mem[wr_ptr]
+                            // Extract base signal and strip flattened index suffix
+                            let extracted = self.extract_base_signal_for_instance(
+                                base,
+                                inst_prefix,
+                                child_module,
+                            );
+                            let stripped = extracted
+                                .as_ref()
+                                .map(|base_name| self.strip_flattened_index_suffix(base_name));
+                            stripped
                         }
-                        _ => continue,
+                        _ => None,
                     };
 
-                    if lhs == target {
-                        return Some(self.create_expression_node_for_instance(
-                            &assign.rhs,
-                            inst_prefix,
-                            port_mapping,
-                            child_module,
-                        ));
+                    if let Some(lhs) = lhs_base {
+                        // For comparison, also strip the target's flattened index suffix
+                        // This allows "input_fifo.mem" to match "input_fifo.mem_0_x"
+                        let target_stripped = self.strip_flattened_index_suffix(target);
+
+                        if lhs == target_stripped {
+                            // WORKAROUND for Bug #8: The RHS might reference a flattened signal
+                            // using only the first element (e.g., data_x). We need to adapt it
+                            // to match the target's field (e.g., if target is mem_0_y, use data_y).
+                            let adapted_rhs = self.adapt_rhs_for_flattened_target(
+                                &assign.rhs,
+                                target,
+                                child_module,
+                            );
+                            return Some(self.create_expression_node_for_instance(
+                                &adapted_rhs,
+                                inst_prefix,
+                                port_mapping,
+                                child_module,
+                            ));
+                        }
                     }
                 }
                 Statement::If(nested_if) => {
@@ -3566,8 +3744,6 @@ impl<'a> MirToSirConverter<'a> {
         }
         None
     }
-
-    /// Create expression node for instance context
 
     /// Convert a statement from child module with instance prefix
     fn convert_statement_for_instance(
@@ -3672,12 +3848,8 @@ impl<'a> MirToSirConverter<'a> {
         _node_id: usize,
     ) {
         // Build the full expression tree recursively with port mapping
-        let result_node = self.create_expression_node_for_instance(
-            expr,
-            inst_prefix,
-            port_mapping,
-            child_module,
-        );
+        let result_node =
+            self.create_expression_node_for_instance(expr, inst_prefix, port_mapping, child_module);
         // Connect the result node's output to the target signal
         self.connect_node_to_signal(result_node, output_signal);
     }
@@ -3690,7 +3862,11 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) -> usize {
-        eprintln!("🔧 create_expression_node_for_instance: inst={}, expr={:?}", inst_prefix, std::mem::discriminant(expr));
+        eprintln!(
+            "🔧 create_expression_node_for_instance: inst={}, expr={:?}",
+            inst_prefix,
+            std::mem::discriminant(expr)
+        );
         let result = match expr {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => {
@@ -3705,8 +3881,12 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
             Expression::Binary { op, left, right } => {
-                let left_node =
-                    self.create_expression_node_for_instance(left, inst_prefix, port_mapping, child_module);
+                let left_node = self.create_expression_node_for_instance(
+                    left,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
                 let right_node = self.create_expression_node_for_instance(
                     right,
                     inst_prefix,
@@ -3729,8 +3909,12 @@ impl<'a> MirToSirConverter<'a> {
                 then_expr,
                 else_expr,
             } => {
-                let cond_node =
-                    self.create_expression_node_for_instance(cond, inst_prefix, port_mapping, child_module);
+                let cond_node = self.create_expression_node_for_instance(
+                    cond,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                );
                 let then_node = self.create_expression_node_for_instance(
                     then_expr,
                     inst_prefix,
@@ -3764,11 +3948,15 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_constant_node(0, 1)
             }
         };
-        eprintln!("🔧 create_expression_node_for_instance: returning node {}", result);
+        eprintln!(
+            "🔧 create_expression_node_for_instance: returning node {}",
+            result
+        );
         result
     }
 
     /// Collect input signal references from expression
+    #[allow(dead_code)]
     fn collect_expression_inputs(
         &self,
         expr: &Expression,
@@ -3881,7 +4069,10 @@ impl<'a> MirToSirConverter<'a> {
                         eprintln!("         → Mapped through port_mapping to: {}", mapped_name);
                         Some(mapped_name)
                     } else {
-                        eprintln!("         → No mapping found in port_mapping for port '{}'", port.name);
+                        eprintln!(
+                            "         → No mapping found in port_mapping for port '{}'",
+                            port.name
+                        );
                         // No mapping - use prefixed port name as fallback
                         Some(format!("{}.{}", inst_prefix, port.name))
                     }
@@ -3943,6 +4134,264 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
         false
+    }
+
+    /// Check if signal or any of its flattened siblings is sequential
+    ///
+    /// WORKAROUND for Bug #8: HIR→MIR doesn't properly expand array index assignments
+    /// like `mem[index] <= value` on flattened arrays. It only assigns to the first
+    /// flattened element (e.g., mem_0_x), so only that element is detected as sequential.
+    ///
+    /// This function checks if the signal OR any sibling with a matching flattened name
+    /// pattern is sequential. For example, if mem_0_x is sequential, then mem_0_y, mem_0_z,
+    /// mem_1_x, etc. should all be treated as sequential.
+    fn is_signal_or_sibling_sequential(&self, signal: &skalp_mir::Signal, module: &Module) -> bool {
+        // First check the signal itself
+        if self.is_signal_sequential_in_module(signal.id, module) {
+            return true;
+        }
+
+        // Check if this signal is part of a flattened array by looking for the pattern:
+        // base_N_field or base_N where N is a digit
+        let signal_name = &signal.name;
+
+        // Try to extract the base name (everything before the flattened array index)
+        // Pattern: "mem_0_x" -> base = "mem"
+        // Pattern: "mem_5_z" -> base = "mem"
+        // Pattern: "wr_ptr" -> no pattern, return false
+
+        // Look for all signals that might be siblings in the same flattened array
+        // and check if ANY of them are sequential
+        for other_signal in &module.signals {
+            if other_signal.id == signal.id {
+                continue; // Skip self (already checked)
+            }
+
+            // Check if this could be a sibling in a flattened array
+            // Heuristic: if both names share a common prefix and differ by a digit/field suffix
+            if self.are_flattened_siblings(signal_name, &other_signal.name)
+                && self.is_signal_sequential_in_module(other_signal.id, module)
+            {
+                eprintln!(
+                    "      ⚠️ SIBLING DETECTED: '{}' is sequential, so '{}' should be too!",
+                    other_signal.name, signal_name
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if two signal names are siblings in a flattened array
+    /// Examples:
+    ///   - "mem_0_x" and "mem_0_y" -> true (same array element, different fields)
+    ///   - "mem_0_x" and "mem_1_x" -> true (different array elements, same field)
+    ///   - "mem_0_x" and "wr_ptr" -> false (not related)
+    fn are_flattened_siblings(&self, name1: &str, name2: &str) -> bool {
+        // Extract components: base, index, field for each name
+        let components1 = self.parse_flattened_name(name1);
+        let components2 = self.parse_flattened_name(name2);
+
+        if let (Some((base1, _, _)), Some((base2, _, _))) = (components1, components2) {
+            // They're siblings if they have the same base name
+            base1 == base2
+        } else {
+            false
+        }
+    }
+
+    /// Parse a flattened signal name into (base, index, field) components
+    /// Examples:
+    ///   - "mem_0_x" -> Some(("mem", "0", "x"))  (array of structs)
+    ///   - "mem_7_z" -> Some(("mem", "7", "z"))  (array of structs)
+    ///   - "wr_data_x" -> Some(("wr_data", "", "x"))  (struct, no array)
+    ///   - "wr_ptr" -> None (not a flattened name)
+    fn parse_flattened_name(&self, name: &str) -> Option<(String, String, String)> {
+        let parts: Vec<&str> = name.split('_').collect();
+
+        // Pattern 1: base_N_field (at least 3 parts, second-to-last is digit)
+        // Example: mem_0_x, mem_7_z
+        if parts.len() >= 3 {
+            // Check if the second-to-last part is a digit (the array index)
+            let potential_index = parts[parts.len() - 2];
+            if potential_index.chars().all(|c| c.is_ascii_digit()) {
+                let base = parts[..parts.len() - 2].join("_");
+                let index = potential_index.to_string();
+                let field = parts[parts.len() - 1].to_string();
+                return Some((base, index, field));
+            }
+        }
+
+        // Pattern 2: base_field (struct flattening, no array index)
+        // Example: wr_data_x, wr_data_y
+        // Check if the last part is a single letter (struct field like x, y, z, w)
+        if parts.len() >= 2 {
+            let potential_field = parts[parts.len() - 1];
+            if potential_field.len() == 1 && potential_field.chars().all(|c| c.is_alphabetic()) {
+                // Make sure the preceding part is NOT a digit (to avoid confusing with Pattern 3)
+                let preceding = parts[parts.len() - 2];
+                if !preceding.chars().all(|c| c.is_ascii_digit()) {
+                    let base = parts[..parts.len() - 1].join("_");
+                    let field = potential_field.to_string();
+                    return Some((base, String::new(), field));
+                }
+            }
+        }
+
+        // Pattern 3: base_N (exactly 2 parts, second is digit - array without struct)
+        if parts.len() == 2 && parts[1].chars().all(|c| c.is_ascii_digit()) {
+            let base = parts[0].to_string();
+            let index = parts[1].to_string();
+            return Some((base, index, String::new()));
+        }
+
+        None
+    }
+
+    /// Adapt RHS expression to match target's field suffix
+    ///
+    /// WORKAROUND for Bug #8: When assigning to flattened arrays, the RHS might
+    /// reference only the first flattened element. This function adapts the RHS
+    /// to use the correct field based on the target.
+    ///
+    /// Example:
+    ///   - Target: "input_fifo.mem_0_y" (field = "y")
+    ///   - RHS: Ref(Signal(data_x))
+    ///   - Result: Ref(Signal(data_y))
+    fn adapt_rhs_for_flattened_target(
+        &self,
+        rhs: &Expression,
+        target: &str,
+        child_module: &Module,
+    ) -> Expression {
+        // Extract the field suffix from the target
+        // Remove instance prefix first (e.g., "input_fifo.mem_0_y" -> "mem_0_y")
+        let target_short = target.split('.').next_back().unwrap_or(target);
+        let target_field = if let Some((_, _, field)) = self.parse_flattened_name(target_short) {
+            if !field.is_empty() {
+                Some(field)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // If target has no field, return RHS unchanged
+        let target_field = match target_field {
+            Some(f) => f,
+            None => return rhs.clone(),
+        };
+
+        // Recursively adapt the expression
+        self.adapt_expression_field(rhs, &target_field, child_module)
+    }
+
+    /// Recursively adapt an expression to use a different field suffix
+    fn adapt_expression_field(
+        &self,
+        expr: &Expression,
+        target_field: &str,
+        child_module: &Module,
+    ) -> Expression {
+        match expr {
+            Expression::Ref(lvalue) => {
+                Expression::Ref(self.adapt_lvalue_field(lvalue, target_field, child_module))
+            }
+            Expression::Binary { op, left, right } => Expression::Binary {
+                op: *op,
+                left: Box::new(self.adapt_expression_field(left, target_field, child_module)),
+                right: Box::new(self.adapt_expression_field(right, target_field, child_module)),
+            },
+            Expression::Unary { op, operand } => Expression::Unary {
+                op: *op,
+                operand: Box::new(self.adapt_expression_field(operand, target_field, child_module)),
+            },
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => Expression::Conditional {
+                cond: Box::new(self.adapt_expression_field(cond, target_field, child_module)),
+                then_expr: Box::new(self.adapt_expression_field(
+                    then_expr,
+                    target_field,
+                    child_module,
+                )),
+                else_expr: Box::new(self.adapt_expression_field(
+                    else_expr,
+                    target_field,
+                    child_module,
+                )),
+            },
+            // For other expression types, return as-is
+            _ => expr.clone(),
+        }
+    }
+
+    /// Adapt an LValue to use a different field suffix
+    fn adapt_lvalue_field(
+        &self,
+        lvalue: &LValue,
+        target_field: &str,
+        child_module: &Module,
+    ) -> LValue {
+        match lvalue {
+            LValue::Signal(sig_id) => {
+                // Find the signal in the child module
+                if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                    // Check if this signal is a flattened element
+                    if let Some((base, index, current_field)) =
+                        self.parse_flattened_name(&signal.name)
+                    {
+                        if !current_field.is_empty() && current_field != target_field {
+                            // Build new name based on whether there's an array index
+                            let new_name = if index.is_empty() {
+                                // Struct only: base_field
+                                format!("{}_{}", base, target_field)
+                            } else {
+                                // Array of structs: base_index_field
+                                format!("{}_{}_{}", base, index, target_field)
+                            };
+                            // Find the signal with the new name
+                            if let Some(new_signal) =
+                                child_module.signals.iter().find(|s| s.name == new_name)
+                            {
+                                return LValue::Signal(new_signal.id);
+                            }
+                        }
+                    }
+                }
+                lvalue.clone()
+            }
+            LValue::Port(port_id) => {
+                // Similar logic for ports
+                if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
+                    if let Some((base, index, current_field)) =
+                        self.parse_flattened_name(&port.name)
+                    {
+                        if !current_field.is_empty() && current_field != target_field {
+                            // Build new name based on whether there's an array index
+                            let new_name = if index.is_empty() {
+                                // Struct only: base_field
+                                format!("{}_{}", base, target_field)
+                            } else {
+                                // Array of structs: base_index_field
+                                format!("{}_{}_{}", base, index, target_field)
+                            };
+                            if let Some(new_port) =
+                                child_module.ports.iter().find(|p| p.name == new_name)
+                            {
+                                return LValue::Port(new_port.id);
+                            }
+                        }
+                    }
+                }
+                lvalue.clone()
+            }
+            _ => lvalue.clone(),
+        }
     }
 
     /// Flatten instances for a specific module (used for recursion)

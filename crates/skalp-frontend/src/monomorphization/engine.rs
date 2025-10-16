@@ -286,7 +286,13 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 new_event_block.statements = event_block
                     .statements
                     .iter()
-                    .map(|stmt| self.substitute_statement_with_ports(stmt, &instantiation.const_args, port_id_map))
+                    .map(|stmt| {
+                        self.substitute_statement_with_ports(
+                            stmt,
+                            &instantiation.const_args,
+                            port_id_map,
+                        )
+                    })
                     .collect();
                 // CRITICAL: Remap trigger port IDs to match specialized entity ports
                 new_event_block.triggers = event_block
@@ -363,7 +369,9 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         new_arm.statements = arm
                             .statements
                             .iter()
-                            .map(|s| self.substitute_statement_with_ports(s, const_args, port_id_map))
+                            .map(|s| {
+                                self.substitute_statement_with_ports(s, const_args, port_id_map)
+                            })
                             .collect();
                         new_arm
                     })

@@ -173,6 +173,10 @@ impl<'hir> HirToMir<'hir> {
                     // Add signals - flatten structs/vectors into individual signals
                     for hir_signal in &impl_block.signals {
                         let signal_type = self.convert_type(&hir_signal.signal_type);
+                        eprintln!(
+                            "🔍 HIR→MIR: Flattening signal '{}': HIR type = {:?}, MIR type = {:?}",
+                            hir_signal.name, hir_signal.signal_type, signal_type
+                        );
                         let initial = hir_signal
                             .initial_value
                             .as_ref()
@@ -185,6 +189,7 @@ impl<'hir> HirToMir<'hir> {
                             initial,
                             clock_domain,
                         );
+                        eprintln!("   → Flattened into {} signals", flattened_signals.len());
 
                         // If we have multiple flattened signals, store the flattening info
                         if flattened_signals.len() > 1 {
@@ -200,6 +205,18 @@ impl<'hir> HirToMir<'hir> {
                         // Add all flattened signals to the module
                         for signal in flattened_signals {
                             module.signals.push(signal);
+                        }
+                    }
+                    eprintln!(
+                        "✅ Module '{}' (ID={:?}) now has {} total signals",
+                        module.name,
+                        module.id,
+                        module.signals.len()
+                    );
+                    if module.name.contains("AsyncFifo_8") {
+                        eprintln!("🔍 AsyncFifo_8 signals:");
+                        for sig in &module.signals {
+                            eprintln!("      - {}: {:?}", sig.name, sig.signal_type);
                         }
                     }
 

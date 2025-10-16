@@ -175,7 +175,9 @@
       "Bash(./debug_mir2)",
       "Bash(./debug_hir)",
       "Bash(./test_compound_fixed)",
-      "Bash(./test_fixed)"
+      "Bash(./test_fixed)",
+      "Bash(SKALP_DUMP_MIR=1 cargo test:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test:*)"
     ],
     "deny": [],
     "ask": []
