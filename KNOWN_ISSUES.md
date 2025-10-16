@@ -375,7 +375,44 @@ Modified `expand_flattened_target` to:
 ✅ **FIXED** - Duplicate FlipFlops eliminated from hierarchical elaboration
 
 ### Note
-While Bug #23 is fixed, `test_graphics_pipeline_multi_clock_domains` still reads zeros. This is a different issue requiring investigation (likely AsyncFIFO logic or GPU simulator execution).
+While Bug #23 is fixed, `test_graphics_pipeline_multi_clock_domains` still reads zeros. This was due to Bug #24 (clock mapping failure).
+
+---
+
+## ✅ FIXED: Clock Signal Mapping Fails in Hierarchical Elaboration (Bug #24)
+
+### Issue (FIXED in commit b272f73)
+When generic entities were monomorphized, port IDs were renumbered, but MIR Process objects still referenced the original port IDs. This caused clock signal mapping to fail, resulting in FlipFlops using a non-existent 'clk' signal instead of the correct 'wr_clk' or 'rd_clk'.
+
+### Evidence
+FlipFlops showed: `clock='clk'` (non-existent)
+Should have been: `clock='wr_clk'` or `clock='rd_clk'`
+FIFO memory never got written because FlipFlops never clocked
+
+### Root Cause
+Port ID lookup in `get_signal_from_lvalue` (mir_to_sir.rs:4268) failed because:
+1. Monomorphization renumbers port IDs in specialized entities (PortId(0-9) → PortId(10-19))
+2. Process objects retain original port IDs from generic entity
+3. Direct ID lookup fails → falls back to "clk" → FlipFlops don't clock
+
+### Fix Applied
+Added index-based fallback in `get_signal_from_lvalue`:
+- First try direct port ID lookup (works for non-monomorphized entities)
+- If that fails, use port ID value as an index (port order preserved during specialization)
+- Port at index 0 in original entity → port at index 0 in specialized entity
+
+**File Modified**: `crates/skalp-sir/src/mir_to_sir.rs:4268-4296`
+
+### Verification
+✅ FlipFlops now use correct clocks: 'wr_clk', 'rd_clk' instead of 'clk'
+✅ No more "MAPPING FAILED" errors
+✅ Clock mapping works for monomorphized generic entities
+
+### Status
+✅ **FIXED** - Clock signal mapping now works correctly for specialized generic entities
+
+### Note
+FIFO tests still read zeros due to a different issue (Bug #25) - but clock mapping is now working correctly.
 
 ---
 
