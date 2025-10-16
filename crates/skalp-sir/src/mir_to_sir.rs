@@ -2838,10 +2838,6 @@ impl<'a> MirToSirConverter<'a> {
             // For non-state signals, return existing driver if available
             if let Some(signal) = self.sir.signals.iter().find(|s| s.name == name) {
                 if let Some(driver) = signal.driver_node {
-                    println!(
-                        "      ✅ DRIVER FOUND: {} already has driver node_{}",
-                        name, driver
-                    );
                     return driver;
                 }
                 println!(
@@ -3857,26 +3853,17 @@ impl<'a> MirToSirConverter<'a> {
         child_module: &Module,
         target: &str,
     ) -> Option<usize> {
-        eprintln!(
-            "🔍 find_assignment: Looking for target '{}' in {} statements",
-            target,
-            statements.len()
-        );
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
                     // Extract the base signal name from the LValue
                     // For flattened arrays, we need to strip the index suffix
                     let lhs_base = match &assign.lhs {
-                        LValue::Signal(sig_id) => {
-                            let result = child_module
-                                .signals
-                                .iter()
-                                .find(|s| s.id == *sig_id)
-                                .map(|signal| format!("{}.{}", inst_prefix, signal.name));
-                            eprintln!("   📝 Found Assignment: LValue::Signal -> {:?}", result);
-                            result
-                        }
+                        LValue::Signal(sig_id) => child_module
+                            .signals
+                            .iter()
+                            .find(|s| s.id == *sig_id)
+                            .map(|signal| format!("{}.{}", inst_prefix, signal.name)),
                         LValue::BitSelect { base, .. } => {
                             // Array index like mem[wr_ptr]
                             // Extract base signal and strip flattened index suffix
@@ -3885,34 +3872,19 @@ impl<'a> MirToSirConverter<'a> {
                                 inst_prefix,
                                 child_module,
                             );
-                            eprintln!(
-                                "   📝 Found Assignment: LValue::BitSelect, base extracted = {:?}",
-                                extracted
-                            );
-                            let stripped = extracted
+                            extracted
                                 .as_ref()
-                                .map(|base_name| self.strip_flattened_index_suffix(base_name));
-                            eprintln!("   📝   After stripping: {:?}", stripped);
-                            stripped
+                                .map(|base_name| self.strip_flattened_index_suffix(base_name))
                         }
-                        _ => {
-                            eprintln!("   📝 Found Assignment: Other LValue type (skipped)");
-                            None
-                        }
+                        _ => None,
                     };
 
                     if let Some(lhs) = lhs_base {
                         // For comparison, also strip the target's flattened index suffix
                         // This allows "input_fifo.mem" to match "input_fifo.mem_0_x"
                         let target_stripped = self.strip_flattened_index_suffix(target);
-                        eprintln!(
-                            "   🎯 Comparing: lhs='{}' vs target_stripped='{}'",
-                            lhs, target_stripped
-                        );
 
                         if lhs == target_stripped {
-                            eprintln!("   ✅ MATCH FOUND! Creating expression node (proper fix: no adaptation needed)");
-
                             // With the proper HIR→MIR fix, the RHS already has correct field references
                             // No adaptation needed!
                             return Some(self.create_expression_node_for_instance(
@@ -3921,13 +3893,10 @@ impl<'a> MirToSirConverter<'a> {
                                 port_mapping,
                                 child_module,
                             ));
-                        } else {
-                            eprintln!("   ❌ No match (lhs != target_stripped)");
                         }
                     }
                 }
                 Statement::If(nested_if) => {
-                    eprintln!("   🔀 Found nested If statement - recursively handling");
                     // Recursively handle nested if
                     return Some(self.synthesize_conditional_for_instance(
                         nested_if,
@@ -3937,12 +3906,21 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                     ));
                 }
-                _ => {
-                    eprintln!("   ⏭️  Skipping statement (not Assignment or If)");
+                Statement::Block(block) => {
+                    // Recursively search within the block
+                    if let Some(result) = self.find_assignment_in_branch_for_instance(
+                        &block.statements,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                    ) {
+                        return Some(result);
+                    }
                 }
+                _ => {}
             }
         }
-        eprintln!("   ⚠️  No assignment found for target '{}'", target);
         None
     }
 
@@ -4239,53 +4217,31 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) -> Option<String> {
-        eprintln!("      get_signal_from_lvalue: lvalue={:?}", lvalue);
         match lvalue {
             LValue::Signal(sig_id) => {
+                // LValue::Signal should only match signals, not ports
+                // (ports have their own LValue::Port variant)
                 if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
-                    eprintln!("         → Found as child signal: {}", signal.name);
                     Some(format!("{}.{}", inst_prefix, signal.name))
-                } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
-                    eprintln!("         → Found as child port: {}", port.name);
-                    // Input port - map to parent signal
-                    if let Some(parent_expr) = port_mapping.get(&port.name) {
-                        let mapped_name = self.get_signal_name_from_expression(parent_expr);
-                        eprintln!("         → Mapped through port_mapping to: {}", mapped_name);
-                        Some(mapped_name)
-                    } else {
-                        eprintln!("         → No mapping found in port_mapping");
-                        Some(format!("{}.{}", inst_prefix, port.name))
-                    }
                 } else {
-                    eprintln!("         → Not found as signal or port in child module");
                     None
                 }
             }
             LValue::Port(port_id) => {
                 // Direct port reference - map to parent signal through port connections
                 if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
-                    eprintln!("         → Found as child port (direct): {}", port.name);
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
                         let mapped_name = self.get_signal_name_from_expression(parent_expr);
-                        eprintln!("         → Mapped through port_mapping to: {}", mapped_name);
                         Some(mapped_name)
                     } else {
-                        eprintln!(
-                            "         → No mapping found in port_mapping for port '{}'",
-                            port.name
-                        );
                         // No mapping - use prefixed port name as fallback
                         Some(format!("{}.{}", inst_prefix, port.name))
                     }
                 } else {
-                    eprintln!("         → Port not found in child module");
                     None
                 }
             }
-            _ => {
-                eprintln!("         → Unsupported LValue type");
-                None
-            }
+            _ => None,
         }
     }
 
