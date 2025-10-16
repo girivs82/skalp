@@ -1505,47 +1505,47 @@ impl<'a> MirToSirConverter<'a> {
         if_stmt: &IfStatement,
         targets: &mut std::collections::HashSet<String>,
     ) {
-        // Collect targets from then branch
-        for stmt in &if_stmt.then_block.statements {
-            if let Statement::Assignment(assign) = stmt {
-                // Skip array writes (handled separately)
-                if let LValue::BitSelect { index, .. } = &assign.lhs {
-                    if self.evaluate_constant_expression(index).is_none() {
-                        continue; // Dynamic array write, skip
-                    }
-                }
-
-                let target = self.lvalue_to_string(&assign.lhs);
-                // Skip output ports that should only have continuous assignments
-                if !self.is_output_port(&target) {
-                    targets.insert(target);
-                }
-            }
-        }
+        // CRITICAL FIX: Recursively collect targets from then branch (including nested If and Block)
+        self.collect_targets_from_block(&if_stmt.then_block.statements, targets);
 
         // Collect targets from else branch (recursively for else-if chains)
         if let Some(else_block) = &if_stmt.else_block {
-            for stmt in &else_block.statements {
-                match stmt {
-                    Statement::Assignment(assign) => {
-                        // Skip array writes (handled separately)
-                        if let LValue::BitSelect { index, .. } = &assign.lhs {
-                            if self.evaluate_constant_expression(index).is_none() {
-                                continue; // Dynamic array write, skip
-                            }
-                        }
+            self.collect_targets_from_block(&else_block.statements, targets);
+        }
+    }
 
-                        let target = self.lvalue_to_string(&assign.lhs);
-                        // Skip output ports that should only have continuous assignments
-                        if !self.is_output_port(&target) {
-                            targets.insert(target);
+    /// CRITICAL FIX: Recursively collect assignment targets from nested structures
+    /// This handles cases where expanded array assignments are nested in Block statements
+    fn collect_targets_from_block(
+        &self,
+        statements: &[Statement],
+        targets: &mut std::collections::HashSet<String>,
+    ) {
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    // Skip array writes (handled separately)
+                    if let LValue::BitSelect { index, .. } = &assign.lhs {
+                        if self.evaluate_constant_expression(index).is_none() {
+                            continue; // Dynamic array write, skip
                         }
                     }
-                    Statement::If(nested_if) => {
-                        self.collect_assignment_targets(nested_if, targets);
+
+                    let target = self.lvalue_to_string(&assign.lhs);
+                    // Skip output ports that should only have continuous assignments
+                    if !self.is_output_port(&target) {
+                        targets.insert(target);
                     }
-                    _ => {}
                 }
+                Statement::If(nested_if) => {
+                    // Recurse into nested if statements
+                    self.collect_assignment_targets(nested_if, targets);
+                }
+                Statement::Block(block) => {
+                    // Recurse into nested blocks (CRITICAL for expanded array assignments)
+                    self.collect_targets_from_block(&block.statements, targets);
+                }
+                _ => {}
             }
         }
     }

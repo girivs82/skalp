@@ -230,3 +230,48 @@ mod gpu_simulation_tests {
         assert!(testbench.all_tests_passed(), "Some tests failed");
     }
 }
+#[cfg(test)]
+mod test_array_write {
+    use skalp_testing::testbench::Testbench;
+
+    #[tokio::test]
+    async fn test_simple_array_write() {
+        println!("\n🧪 Testing simple array write in sequential block");
+        
+        let mut tb = Testbench::new("/tmp/test_array_write_simple.sk")
+            .await
+            .expect("Failed to create testbench");
+        
+        println!("✅ Testbench created");
+        
+        // Reset
+        tb.set("rst", 1u8);
+        tb.clock(2).await;
+        tb.set("rst", 0u8);
+        tb.clock(1).await;
+        
+        println!("✅ Reset complete");
+        
+        // Write 0xDEADBEEF to address 0
+        tb.set("wr_en", 1u8)
+          .set("wr_data", 0xDEADBEEFu32)
+          .set("wr_addr", 0u8);
+        
+        tb.clock(1).await;
+        println!("✅ Wrote 0xDEADBEEF to mem[0]");
+        
+        // Disable write
+        tb.set("wr_en", 0u8);
+        tb.clock(1).await;
+        
+        // Read from mem[0]
+        let rd_data: u32 = tb.get_as("rd_data").await;
+        
+        println!("📖 Read from mem[0]: {:08X}", rd_data);
+        println!("📖 Expected: DEADBEEF");
+        
+        assert_eq!(rd_data, 0xDEADBEEF, "Should read back written value");
+        
+        println!("✅ Test PASSED!");
+    }
+}

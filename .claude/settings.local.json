@@ -179,7 +179,8 @@
       "Bash(SKALP_DUMP_MIR=1 cargo test:*)",
       "Bash(RUST_BACKTRACE=1 cargo test:*)",
       "Bash(env RUST_BACKTRACE=1 cargo test:*)",
-      "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test:*)"
+      "Bash(env SKALP_UPDATE_GOLDEN=1 cargo test:*)",
+      "Bash(/tmp/debug_mir_to_sir:*)"
     ],
     "deny": [],
     "ask": []
