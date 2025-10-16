@@ -35,6 +35,45 @@ Four critical bugs in hierarchical elaboration for GPU simulator:
 
 ---
 
+## ✅ FIXED: Non-Deterministic Monomorphization (Bug #18)
+
+### Issue (FIXED in commit TBD)
+Monomorphization used a `HashSet<Instantiation>` to collect generic instantiations, causing non-deterministic EntityId assignment. When multiple generic entities were instantiated (e.g., `AsyncFifo<Data, 8>` and `AsyncFifo<Data, 32>`), they would get assigned EntityIds in random order across runs. This caused instance references to point to the wrong specialized entities.
+
+### Example:
+```skalp
+// Two AsyncFifo instances with different depths
+let input_fifo = AsyncFifo<SimpleVertex, 8> { ... }
+let output_fifo = AsyncFifo<SimpleVertex, 32> { ... }
+```
+
+**Before fix**: Hash iteration order was non-deterministic
+- Run 1: AsyncFifo_8 → EntityId(3), AsyncFifo_32 → EntityId(4)
+- Run 2: AsyncFifo_32 → EntityId(3), AsyncFifo_8 → EntityId(4)
+- Instance references would be swapped between runs!
+
+**After fix**: Sorted by mangled name for deterministic ordering
+- AsyncFifo_32_SimpleVertex → EntityId(3) (always)
+- AsyncFifo_8_SimpleVertex → EntityId(4) (always)
+
+### Root Cause
+The `InstantiationCollector::collect()` returned `HashSet<Instantiation>`, which has non-deterministic iteration order. During monomorphization, specialized entities were created in hash order, causing inconsistent EntityId assignment.
+
+### Fix Applied
+Modified `MonomorphizationEngine::monomorphize` in `crates/skalp-frontend/src/monomorphization/engine.rs`:
+1. Convert `HashSet<Instantiation>` to `Vec<Instantiation>`
+2. Sort by `mangled_name()` for deterministic ordering
+3. Updated `find_matching_instantiation` signature to accept `&[Instantiation]` instead of `&HashSet<Instantiation>`
+
+**Files Changed**:
+- `crates/skalp-frontend/src/monomorphization/engine.rs:42-45` (sort instantiations)
+- `crates/skalp-frontend/src/monomorphization/engine.rs:812` (update function signature)
+
+### Status
+✅ **FIXED** - Monomorphization now produces deterministic EntityId assignment across runs
+
+---
+
 ## ✅ FIXED: Imported Generic Module Implementations Not Merged (Bug #17)
 
 ### Issue (FIXED)

@@ -32,12 +32,17 @@ impl<'hir> MonomorphizationEngine<'hir> {
 
         // Step 1: Collect all generic instantiations
         let collector = InstantiationCollector::new(hir);
-        let instantiations = collector.collect(hir);
+        let instantiations_set = collector.collect(hir);
 
         // If no generic instantiations found, return unchanged
-        if instantiations.is_empty() {
+        if instantiations_set.is_empty() {
             return hir.clone();
         }
+
+        // CRITICAL FIX: Convert HashSet to sorted Vec for deterministic ordering
+        // This ensures that specialized entities get consistent EntityIds across runs
+        let mut instantiations: Vec<Instantiation> = instantiations_set.into_iter().collect();
+        instantiations.sort_by(|a, b| a.mangled_name().cmp(&b.mangled_name()));
 
         // Step 2: Find next available entity ID and port ID
         let mut next_entity_id = hir.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1;
@@ -804,7 +809,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         &self,
         entity: &HirEntity,
         instance: &crate::hir::HirInstance,
-        instantiations: &'a std::collections::HashSet<Instantiation>,
+        instantiations: &'a [Instantiation],
     ) -> Option<&'a Instantiation> {
         // Evaluate instance's generic arguments
         let mut const_args = HashMap::new();
