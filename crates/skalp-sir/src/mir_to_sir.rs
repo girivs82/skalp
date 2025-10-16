@@ -3350,50 +3350,49 @@ impl<'a> MirToSirConverter<'a> {
     ) {
         // Translate LHS: if it's a port (output), map to parent signal
         // Otherwise prefix with instance name
-        eprintln!(
-            "🔍 convert_child_assignment: LHS = {:?} in instance {}",
-            assign.lhs, inst_prefix
-        );
         let lhs_signal = match &assign.lhs {
             LValue::Signal(sig_id) => {
                 if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
-                    eprintln!("   → Internal signal: {}.{}", inst_prefix, signal.name);
                     format!("{}.{}", inst_prefix, signal.name)
                 } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
-                    eprintln!("   → Port: {} (direction={:?})", port.name, port.direction);
                     // Output port - this connects to parent signal
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
                         let parent_sig = self.get_signal_name_from_expression(parent_expr);
-                        eprintln!("   → Mapped to parent signal: {}", parent_sig);
                         parent_sig
                     } else {
-                        eprintln!("   ⚠️ Port {} not in connections!", port.name);
                         format!("{}.{}", inst_prefix, port.name)
                     }
                 } else {
-                    eprintln!("   ⚠️ Signal {:?} not found", sig_id);
                     format!("{}.unknown", inst_prefix)
                 }
             }
             LValue::Port(port_id) => {
-                eprintln!("   → Direct LValue::Port({:?})", port_id);
+                // First try direct ID lookup
                 if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
-                    eprintln!("   → Port: {} (direction={:?})", port.name, port.direction);
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
                         let parent_sig = self.get_signal_name_from_expression(parent_expr);
-                        eprintln!("   → Mapped to parent signal: {}", parent_sig);
                         parent_sig
                     } else {
-                        eprintln!("   ⚠️ Port {} not in connections!", port.name);
                         format!("{}.{}", inst_prefix, port.name)
                     }
                 } else {
-                    eprintln!("   ⚠️ Port {:?} not found", port_id);
-                    format!("{}.unknown_port", inst_prefix)
+                    // BUG#25 FIX: Same as Bug#24 - port IDs renumbered during monomorphization
+                    // Fall back to index-based lookup for continuous assignments to output ports
+                    let port_index = port_id.0 as usize;
+                    if port_index < child_module.ports.len() {
+                        let port = &child_module.ports[port_index];
+                        if let Some(parent_expr) = port_mapping.get(&port.name) {
+                            let parent_sig = self.get_signal_name_from_expression(parent_expr);
+                            parent_sig
+                        } else {
+                            format!("{}.{}", inst_prefix, port.name)
+                        }
+                    } else {
+                        format!("{}.unknown_port", inst_prefix)
+                    }
                 }
             }
             _ => {
-                eprintln!("   → Complex LHS: {:?}", assign.lhs);
                 format!("{}.complex_lhs", inst_prefix)
             }
         };
