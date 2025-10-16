@@ -166,7 +166,27 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     // Keep all entities from the merged HIR (including imports)
     // But use implementations from the rebuilt HIR (which now have correct instances)
     let mut final_hir = hir.clone();
-    final_hir.implementations = rebuilt_hir.implementations;
+
+    // CRITICAL FIX (Bug #22): Don't overwrite ALL implementations!
+    // The merged HIR includes implementations from imported modules (like AsyncFifo).
+    // Only replace implementations for entities that were rebuilt (main file entities).
+
+    // Find which entity IDs have implementations in the rebuilt HIR
+    let rebuilt_entity_ids: std::collections::HashSet<_> = rebuilt_hir
+        .implementations
+        .iter()
+        .map(|impl_block| impl_block.entity)
+        .collect();
+
+    // Keep only imported implementations (those NOT rebuilt)
+    final_hir
+        .implementations
+        .retain(|impl_block| !rebuilt_entity_ids.contains(&impl_block.entity));
+
+    // Add the rebuilt implementations
+    final_hir
+        .implementations
+        .extend(rebuilt_hir.implementations);
 
     Ok(final_hir)
 }
