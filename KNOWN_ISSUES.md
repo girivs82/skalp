@@ -1,21 +1,89 @@
 # Known Issues and Limitations
 
-## GPU Simulator Data Flow Limitations
+## ✅ FIXED: GPU Simulator Hierarchical Elaboration (Bugs #13-16)
+
+### Issues (FIXED in commits c63fa8b, 9508b5d, 63f4fa7, a57eda4, f06cbc1)
+Four critical bugs in hierarchical elaboration for GPU simulator:
+
+**Bug #13** - SignalId/PortId Type Confusion
+- **Issue**: Comparing SignalId with PortId by numeric value caused incorrect signal resolution
+- **Fix**: Removed buggy fallback, LValue::Signal now only matches signals
+- **File**: `crates/skalp-sir/src/mir_to_sir.rs:4256-4265`
+
+**Bug #14** - Missing Block Statement Recursion
+- **Issue**: Flattened struct assignments wrapped in Block statements were being ignored
+- **Fix**: Added Statement::Block case with recursive search
+- **File**: `crates/skalp-sir/src/mir_to_sir.rs:3915-3926`
+
+**Bug #15** - Non-Deterministic HashSet Ordering
+- **Issue**: FlipFlops created in random order, connecting to wrong data nodes
+- **Fix**: Changed from HashSet to Vec with sort()+dedup() for deterministic ordering
+- **File**: `crates/skalp-sir/src/mir_to_sir.rs:3457-3473`
+
+**Bug #16** - LValue::Signal Not Stripping Flattened Suffixes
+- **Issue**: Assignment matching failed because LHS wasn't stripping suffixes like `mem_0_x` → `mem`
+- **Fix**: Strip flattened suffixes from LValue::Signal during assignment search
+- **File**: `crates/skalp-sir/src/mir_to_sir.rs:3861-3872`
+
+### Verification
+- ✅ Simple geometry processor test passes (struct assignments work)
+- ✅ Data paths verified correct (port mapping, conditionals, MUX trees)
+- ✅ Assignment matching works for all flattened elements
+
+### Status
+✅ **FIXED** - Hierarchical elaboration now works correctly for struct/array assignments
+
+---
+
+## Imported Generic Modules Not Instantiated
 
 ### Issue
-The GPU-accelerated simulator (Metal-based) has issues with data flow:
-- Input ports read in sequential blocks return 0
-- FIFO read data returns 0
-- Only constant assignments work correctly in sequential blocks
+When a generic entity is imported from another module and instantiated with `let`, the monomorphized instance is not added to the MIR module's instances list. This prevents hierarchical elaboration from processing the child module.
+
+### Example (BROKEN):
+```skalp
+mod async_fifo;
+use async_fifo::AsyncFifo;
+
+impl MyModule {
+    let fifo = AsyncFifo<Data, 8> {  // Instance not created in MIR!
+        wr_clk: clk,
+        ...
+    }
+}
+```
+
+### Workaround (WORKS):
+Define the generic entity inline in the same file instead of importing:
+```skalp
+// Define inline
+entity AsyncFifo<T, const DEPTH: nat> { ... }
+
+impl MyModule {
+    let fifo = AsyncFifo<Data, 8> {  // ✅ Instance created correctly
+        wr_clk: clk,
+        ...
+    }
+}
+```
+
+### Evidence
+- Simple FIFO test (imports AsyncFifo): 0 instances in MIR
+- Full pipeline test (defines inline): 3 instances in MIR (input_fifo, geometry, output_fifo)
+
+### Root Cause
+The MIR compiler's monomorphization doesn't properly register instances when the generic entity is imported from another module. This is a **frontend/MIR bug**, not a SIR/elaboration bug.
 
 ### Impact
-Functional testing is limited. Complex designs compile to correct SystemVerilog but cannot be fully simulated with the GPU simulator.
-
-### Workaround
-Use Verilator or other SystemVerilog simulators for functional verification.
+Cannot use shared library modules for generic components like FIFOs. Each top-level module must define its own copy.
 
 ### Priority
-MEDIUM - Affects testing but not production code generation
+HIGH - Severely limits code reuse and modularity
+
+### Fix Required
+- Investigate monomorphization in `crates/skalp-mir` or `crates/skalp-frontend`
+- Ensure imported generic entities create instances in the importing module
+- Add test case for imported generic instantiation
 
 ---
 
