@@ -338,40 +338,44 @@ impl FifoTest {
 
 ---
 
-## ⚠️ OPEN: Multiple FlipFlops Created for Same Signal (Bug #23)
+## ✅ FIXED: Multiple FlipFlops Created for Same Signal (Bug #23)
 
-### Issue
-When multiple AsyncFifo instances are used in a pipeline with different clock domains, the Metal shader generates duplicate FlipFlop assignments to the same register, causing data corruption.
+### Issue (FIXED in commit bb6e7ba)
+When multiple module instances with sequential logic were elaborated into the parent module, signals could get duplicate FlipFlop assignments, causing data corruption. For example, AsyncFIFO CDC synchronizers had 3 FlipFlops instead of 1.
 
 ### Evidence
-Metal shader for `test_graphics_pipeline_multi_clock_domains` shows:
+Metal shader for `test_graphics_pipeline_multi_clock_domains` showed:
 ```metal
 registers->output_fifo_rd_ptr_gray_sync1 = signals->node_2384_out & 0x1FF;  // geom_rst MUX
 registers->output_fifo_rd_ptr_gray_sync1 = signals->node_2448_out & 0x1FF;  // pixel_rst MUX (duplicate!)
 registers->output_fifo_rd_ptr_gray_sync1 = signals->node_2458_out & 0x1FF;  // pixel_rst MUX (duplicate!)
 ```
 
-Only the last assignment takes effect, causing earlier values to be lost.
+Only the last assignment took effect, causing earlier values to be lost.
 
-### Analysis
-- Signal `rd_ptr_gray_sync1` is in WRITE clock domain (wr_clk) in AsyncFifo
-- Should only have ONE FlipFlop with clock=geom_clk, reset=geom_rst
-- But THREE FlipFlops are being created:
-  1. One with geom_rst (correct - write domain)
-  2. Two with pixel_rst (incorrect - read domain)
+### Root Cause
+The `expand_flattened_target` function (mir_to_sir.rs:3583) used blind prefix matching without first checking if the target signal exists. This caused:
+- `input_fifo.wr_ptr` to incorrectly expand to `["wr_ptr_gray", "wr_ptr_gray_sync1", "wr_ptr_gray_sync2"]`
+- Creating FlipFlops for unrelated signals that happen to share a prefix
 
-### Root Cause (Under Investigation)
-Likely in `convert_child_process` or `collect_assignment_targets_for_instance`:
-- Signals might be collected from wrong clock domain process
-- Or FlipFlops are being created multiple times for nested if/else blocks
-- File: `crates/skalp-sir/src/mir_to_sir.rs` around lines 3418-3500
+### Fix Applied
+Modified `expand_flattened_target` to:
+1. First check if the target signal exists in SIR → return just that signal
+2. Only expand to array elements if the base signal doesn't exist (was flattened)
+3. Verify expanded signals match array element pattern: `_<digit>` or `_<digit>_<field>`
 
-### Impact
-- ✅ Single AsyncFifo instances work (`test_async_fifo_clock_domain_crossing` passes)
-- ❌ Multiple AsyncFifo instances fail (`test_graphics_pipeline_multi_clock_domains` reads zeros)
+**File Changed**: `crates/skalp-sir/src/mir_to_mir.rs:3583-3628`
+
+### Verification
+✅ Metal shader now shows single FlipFlop per CDC signal (was 3, now 1)
+✅ No more duplicate register assignments in generated GPU code
+✅ Each CDC synchronizer signal has exactly one driver
 
 ### Status
-🔍 **UNDER INVESTIGATION** - Compiler bug in hierarchical elaboration of multi-clock-domain modules
+✅ **FIXED** - Duplicate FlipFlops eliminated from hierarchical elaboration
+
+### Note
+While Bug #23 is fixed, `test_graphics_pipeline_multi_clock_domains` still reads zeros. This is a different issue requiring investigation (likely AsyncFIFO logic or GPU simulator execution).
 
 ---
 
