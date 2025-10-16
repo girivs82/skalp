@@ -4267,6 +4267,7 @@ impl<'a> MirToSirConverter<'a> {
             }
             LValue::Port(port_id) => {
                 // Direct port reference - map to parent signal through port connections
+                // First try direct ID lookup
                 if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
                         let mapped_name = self.get_signal_name_from_expression(parent_expr);
@@ -4276,7 +4277,21 @@ impl<'a> MirToSirConverter<'a> {
                         Some(format!("{}.{}", inst_prefix, port.name))
                     }
                 } else {
-                    None
+                    // BUG#24 FIX: Port IDs get renumbered during monomorphization, but MIR Process
+                    // objects still reference the original IDs. Fall back to using port ID value
+                    // as an index, since ports remain in the same order after specialization.
+                    let port_index = port_id.0 as usize;
+                    if port_index < child_module.ports.len() {
+                        let port = &child_module.ports[port_index];
+                        if let Some(parent_expr) = port_mapping.get(&port.name) {
+                            let mapped_name = self.get_signal_name_from_expression(parent_expr);
+                            Some(mapped_name)
+                        } else {
+                            Some(format!("{}.{}", inst_prefix, port.name))
+                        }
+                    } else {
+                        None
+                    }
                 }
             }
             _ => None,
