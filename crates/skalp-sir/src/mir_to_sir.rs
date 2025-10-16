@@ -2,7 +2,7 @@ use crate::sir::*;
 use skalp_mir::mir::PortDirection as MirPortDirection;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::{
-    Block, DataType, EdgeType, Expression, IfStatement, LValue, Mir, Module, ProcessKind,
+    BinaryOp, Block, DataType, EdgeType, Expression, IfStatement, LValue, Mir, Module, ProcessKind,
     SensitivityList, Statement, Value,
 };
 use std::collections::HashMap;
@@ -3676,6 +3676,32 @@ impl<'a> MirToSirConverter<'a> {
         name.to_string()
     }
 
+    /// Extract element index from flattened array element name
+    /// e.g., "input_fifo.mem_3_x" → Some(3), "input_fifo.mem_5" → Some(5)
+    /// Returns None if no index pattern found
+    fn extract_element_index(&self, name: &str) -> Option<usize> {
+        // Look for pattern: <base>_<digit>_<field> or <base>_<digit>
+        if let Some(last_underscore_pos) = name.rfind('_') {
+            let after_underscore = &name[last_underscore_pos + 1..];
+
+            // Check if it's a single letter (struct field)
+            if after_underscore.len() == 1 && after_underscore.chars().all(|c| c.is_alphabetic()) {
+                // Pattern: "_<digit>_<letter>" - check for preceding digit
+                if let Some(prev_underscore_pos) = name[..last_underscore_pos].rfind('_') {
+                    let between = &name[prev_underscore_pos + 1..last_underscore_pos];
+                    if let Ok(idx) = between.parse::<usize>() {
+                        return Some(idx);
+                    }
+                }
+            } else if let Ok(idx) = after_underscore.parse::<usize>() {
+                // Pattern: "_<digit>" at the end
+                return Some(idx);
+            }
+        }
+
+        None
+    }
+
     /// Collect assignment targets in a sequential block for an instance
     #[allow(clippy::only_used_in_recursion)]
     fn collect_assignment_targets_for_instance(
@@ -3771,6 +3797,62 @@ impl<'a> MirToSirConverter<'a> {
                             } else {
                                 continue;
                             }
+                        }
+                        LValue::BitSelect { base, index } => {
+                            // Array assignment: mem[index_expr] <= value_expr
+                            // For flattened target like "input_fifo.mem_3_x", we need to create:
+                            // if index_expr == 3 then value_expr else mem_3_x
+
+                            // Extract the base signal name
+                            if let Some(base_name) = self.extract_base_signal_for_instance(
+                                base,
+                                inst_prefix,
+                                child_module,
+                            ) {
+                                let stripped_base = self.strip_flattened_index_suffix(&base_name);
+                                let stripped_target = self.strip_flattened_index_suffix(target);
+
+                                if stripped_base == stripped_target {
+                                    // This array assignment is for our target
+                                    // Extract the element index from the flattened name
+                                    // e.g., "input_fifo.mem_3_x" → 3
+                                    if let Some(element_idx) = self.extract_element_index(target) {
+                                        eprintln!(
+                                            "🔍 BUG#26 FIX: Array assignment {}[index] <= value, target={}, element_idx={}",
+                                            stripped_base, target, element_idx
+                                        );
+
+                                        // Create condition: index_expr == element_idx
+                                        let index_node = self.create_expression_node_for_instance(
+                                            index,
+                                            inst_prefix,
+                                            port_mapping,
+                                            child_module,
+                                        );
+                                        let const_idx = self.create_constant_node(element_idx as u64, 32);
+                                        let cond_node = self.create_binary_op_node(
+                                            &BinaryOp::Equal,
+                                            index_node,
+                                            const_idx,
+                                        );
+
+                                        // Create value node (RHS)
+                                        let value_node = self.create_expression_node_for_instance(
+                                            &assign.rhs,
+                                            inst_prefix,
+                                            port_mapping,
+                                            child_module,
+                                        );
+
+                                        // Create current value node (keep current value if condition false)
+                                        let current_node = self.create_signal_ref(target);
+
+                                        // Create MUX: cond ? value : current
+                                        return self.create_mux_node(cond_node, value_node, current_node);
+                                    }
+                                }
+                            }
+                            continue;
                         }
                         _ => continue,
                     };
@@ -4078,11 +4160,6 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) -> usize {
-        eprintln!(
-            "🔧 create_expression_node_for_instance: inst={}, expr={:?}",
-            inst_prefix,
-            std::mem::discriminant(expr)
-        );
         let result = match expr {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => {

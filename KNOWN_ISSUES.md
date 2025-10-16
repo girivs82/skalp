@@ -453,3 +453,59 @@ Likely issues in AsyncFifo implementation (not compiler):
 
 ### Next Steps
 Investigate AsyncFifo implementation logic (in `examples/graphics_pipeline/lib/async_fifo.sk`) to fix data propagation, not compiler infrastructure.
+
+---
+
+## ⚠️ CRITICAL: Modulo Operations Lost in Array Index Expressions (Bug #26)
+
+### Issue (IN PROGRESS)
+When generic entities with const parameters are specialized, modulo expressions in array indices like `mem[wr_ptr % DEPTH]` are being replaced with signal references that don't exist. This causes FIFO memories to only write to index 0.
+
+### Evidence
+Debug output shows the index expression in HIR is already simplified:
+```
+🔍 HIR index expression: Signal(SignalId(1))
+✅ Converted index expression: Ref(Signal(SignalId(127)))
+📊 Is Binary(Mod)? false
+```
+
+But SignalId(1) / SignalId(127) don't exist in the AsyncFifo_8 module's signals list.
+
+### Root Cause (Under Investigation)
+The expression `wr_ptr % DEPTH` where `DEPTH=8` is being replaced with a signal reference during monomorphization or an earlier pass. The replacement signal should hold the modulo result, but it's never created with its defining expression.
+
+**Trace**:
+1. Source: `mem[wr_ptr % DEPTH] <= wr_data` where `DEPTH` is a const generic parameter
+2. After specialization: HIR has `mem[Signal(SignalId(1))] <= wr_data`
+3. Signal(SignalId(1)) doesn't exist → wrong conditions generated
+4. HIR→MIR expansion generates: `if Signal(127) == 0 then mem_0 <= data`
+5. But Signal(127) is undefined → condition is always false or wrong
+
+### Impact
+- FIFO only writes to `mem[0]` when condition happens to match
+- Never writes to `mem[1..7]` because the modulo operation is lost
+- Test reads zeros because data never propagates through FIFO
+
+### Attempted Fix
+Initially tried to fix in MIR→SIR by handling `BitSelect` array assignments, but the problem is earlier - the HIR already has the wrong expression before MIR conversion.
+
+### Files to Investigate
+- `crates/skalp-frontend/src/monomorphization/engine.rs` - How const generic expressions are handled
+- `crates/skalp-frontend/src/monomorphization/collector.rs` - Expression substitution during specialization
+- `crates/skalp-mir/src/hir_to_mir.rs:752-909` - Array index expansion (correctly handles Signal refs, but those refs are invalid)
+
+### Possible Solutions
+1. Prevent extraction of array index expressions into temporary signals
+2. When extracting, ensure the signal is created with a continuous assignment
+3. During array expansion in HIR→MIR, inline the expression tree instead of using signal refs
+4. Fix the monomorphization pass to preserve expression trees for array indices
+
+### Priority
+CRITICAL - Prevents all arrays with dynamic indices using const generic expressions from working correctly
+
+### Status
+🔍 **IN PROGRESS** - Root cause identified in monomorphization, fix location being determined
+
+**Debug Changes Made** (not committed):
+- Added debug output to show HIR/MIR index expressions in `hir_to_mir.rs:828-831`
+- Added debug output to trace statement types in `mir_to_sir.rs:3786-3791`
