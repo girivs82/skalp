@@ -3481,6 +3481,7 @@ impl<'a> MirToSirConverter<'a> {
                             &mut targets,
                         );
                     }
+
                     // Deduplicate while preserving order
                     targets.sort();
                     targets.dedup();
@@ -3491,12 +3492,6 @@ impl<'a> MirToSirConverter<'a> {
                     for target in targets {
                         // Expand target if it's a flattened array base
                         let expanded_targets = self.expand_flattened_target(&target);
-
-                        eprintln!(
-                            "🔍 Target '{}' expanded to {} signals",
-                            target,
-                            expanded_targets.len()
-                        );
 
                         for actual_target in expanded_targets {
                             // Build combinational logic (including MUXes for conditionals)
@@ -3566,19 +3561,44 @@ impl<'a> MirToSirConverter<'a> {
     /// Expand a target signal if it's a base for flattened array elements
     /// Example: "input_fifo.mem" → ["input_fifo.mem_0_x", "input_fifo.mem_0_y", ...]
     fn expand_flattened_target(&self, target: &str) -> Vec<String> {
-        // Check if there are any signals that start with this target as a prefix
-        // followed by underscore (indicating flattened array elements)
+        // CRITICAL: First check if the target signal exists as-is
+        // If it does, return just that signal without expansion
+        // This prevents incorrectly expanding "wr_ptr" to match "wr_ptr_gray", "wr_ptr_gray_sync1", etc.
+        if self.sir.signals.iter().any(|sig| sig.name == target) {
+            return vec![target.to_string()];
+        }
+
+        // If signal doesn't exist, it might be a flattened array base (e.g., "mem")
+        // Check if there are flattened array elements: <target>_<digit> or <target>_<digit>_<field>
         let prefix = format!("{}_", target);
         let mut expanded: Vec<String> = self
             .sir
             .signals
             .iter()
-            .filter(|sig| sig.name.starts_with(&prefix))
+            .filter(|sig| {
+                if !sig.name.starts_with(&prefix) {
+                    return false;
+                }
+
+                // Verify it's an array element pattern: _<digit>_<field> or _<digit>
+                let suffix = &sig.name[prefix.len()..];
+
+                // Check for pattern: <digit>_<field> or just <digit>
+                if let Some(underscore_pos) = suffix.find('_') {
+                    // Pattern: <digit>_<field>
+                    let index_part = &suffix[..underscore_pos];
+                    index_part.chars().all(|c| c.is_ascii_digit())
+                } else {
+                    // Pattern: just <digit>
+                    suffix.chars().all(|c| c.is_ascii_digit())
+                }
+            })
             .map(|sig| sig.name.clone())
             .collect();
 
         if expanded.is_empty() {
-            // Not a flattened array base - return the target itself
+            // Not a flattened array base and signal doesn't exist - return as-is
+            // This might be an error case, but let the caller handle it
             vec![target.to_string()]
         } else {
             // Sort to ensure consistent ordering (mem_0_x, mem_0_y, mem_0_z, mem_1_x, ...)
