@@ -177,7 +177,8 @@
       "Bash(./test_compound_fixed)",
       "Bash(./test_fixed)",
       "Bash(SKALP_DUMP_MIR=1 cargo test:*)",
-      "Bash(RUST_BACKTRACE=1 cargo test:*)"
+      "Bash(RUST_BACKTRACE=1 cargo test:*)",
+      "Bash(env RUST_BACKTRACE=1 cargo test:*)"
     ],
     "deny": [],
     "ask": []

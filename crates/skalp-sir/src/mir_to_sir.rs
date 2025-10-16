@@ -3077,9 +3077,9 @@ impl<'a> MirToSirConverter<'a> {
             let _prefixed_name = format!("{}.{}", inst_prefix, signal.name);
 
             // Check if this signal is a register in the child module
-            // WORKAROUND for Bug #8 (HIR→MIR doesn't expand array index assignments):
-            // If this signal is part of a flattened array, check if ANY sibling is sequential
-            let is_register = self.is_signal_or_sibling_sequential(signal, child_module);
+            // With the proper HIR→MIR fix, all array elements have their own assignments
+            // so we can just check this specific signal
+            let is_register = self.is_signal_sequential_in_module(signal.id, child_module);
 
             // Use TypeFlattener to handle composite types (structs, arrays, etc.)
             let mut flattener = skalp_mir::type_flattening::TypeFlattener::default();
@@ -3164,6 +3164,117 @@ impl<'a> MirToSirConverter<'a> {
         let mut port_mapping: HashMap<String, Expression> = HashMap::new();
         for (port_name, parent_expr) in &instance.connections {
             port_mapping.insert(port_name.clone(), parent_expr.clone());
+
+            // CRITICAL FIX for Bug #8: If this port was flattened from a struct/array,
+            // we need to also add mappings for all the flattened field ports.
+            // Example: "wr_data" → write_vertex becomes:
+            //   "wr_data_x" → write_vertex_x
+            //   "wr_data_y" → write_vertex_y
+            //   "wr_data_z" → write_vertex_z
+            //
+            // Find all child ports that start with port_name_ (flattened variants)
+            let port_prefix = format!("{}_", port_name);
+            eprintln!("   🔎 Checking for flattened ports with prefix '{}'", port_prefix);
+            for child_port in &child_module.ports {
+                eprintln!("      Child port: '{}'", child_port.name);
+                if child_port.name.starts_with(&port_prefix) {
+                    eprintln!("      ✅ MATCHES PREFIX!");
+
+                    // This is a flattened field port like "wr_data_x"
+                    // Get the suffix (e.g., "x" from "wr_data_x")
+                    let suffix = &child_port.name[port_prefix.len()..];
+
+                    // Create corresponding parent signal name
+                    // If parent_expr is a Ref to a signal/port, create Ref to signal_suffix
+                    // Parent signals/ports are in self.mir (the parent module being elaborated)
+                    eprintln!("         Suffix: '{}', parent_expr: {:?}", suffix, parent_expr);
+                    let parent_flattened_expr = if let Expression::Ref(lval) = parent_expr {
+                        eprintln!("         Parent is Expression::Ref");
+                        if let LValue::Signal(parent_sig_id) = lval {
+                            eprintln!("         Parent is LValue::Signal({:?})", parent_sig_id);
+                            // Find parent signal in MIR module
+                            let parent_sig_opt = self.mir.signals.iter()
+                                .find(|s| s.id == *parent_sig_id);
+                            eprintln!("         Found parent signal: {:?}", parent_sig_opt.map(|s| &s.name));
+
+                            if let Some(parent_sig) = parent_sig_opt {
+                                // CRITICAL: The parent might ALREADY be flattened (e.g., "wr_data_x")
+                                // If so, we need to REPLACE the last field, not append
+                                let parent_flattened_name = if let Some((base, idx, current_field)) =
+                                    self.parse_flattened_name(&parent_sig.name)
+                                {
+                                    if !current_field.is_empty() {
+                                        // Parent is already flattened - replace the field
+                                        eprintln!("         Parent ALREADY flattened with base '{}', idx '{}', field '{}', replacing with '{}'", base, idx, current_field, suffix);
+                                        // Reconstruct with new field
+                                        if idx.is_empty() {
+                                            format!("{}_{}", base, suffix)
+                                        } else {
+                                            format!("{}_{}_{}", base, idx, suffix)
+                                        }
+                                    } else {
+                                        // Not flattened - append suffix
+                                        format!("{}_{}", parent_sig.name, suffix)
+                                    }
+                                } else {
+                                    // Not a flattened name - append suffix
+                                    format!("{}_{}", parent_sig.name, suffix)
+                                };
+
+                                eprintln!("         Looking for flattened: '{}'", parent_flattened_name);
+                                let parent_flattened_sig_opt = self.mir.signals.iter()
+                                    .find(|s| s.name == parent_flattened_name);
+                                eprintln!("         Found flattened signal: {:?}", parent_flattened_sig_opt.map(|s| &s.name));
+
+                                parent_flattened_sig_opt.map(|s| Expression::Ref(LValue::Signal(s.id)))
+                            } else {
+                                None
+                            }
+                        } else if let LValue::Port(parent_port_id) = lval {
+                            eprintln!("         Parent is LValue::Port({:?})", parent_port_id);
+                            // Find parent port in MIR module
+                            let orig_port_opt = self.mir.ports.iter()
+                                .find(|p| p.id == *parent_port_id);
+
+                            if let Some(orig_port) = orig_port_opt {
+                                // Same fix as for signals - check if already flattened
+                                let parent_flattened_name = if let Some((base, idx, current_field)) =
+                                    self.parse_flattened_name(&orig_port.name)
+                                {
+                                    if !current_field.is_empty() {
+                                        // Port is already flattened - replace the field
+                                        if idx.is_empty() {
+                                            format!("{}_{}", base, suffix)
+                                        } else {
+                                            format!("{}_{}_{}", base, idx, suffix)
+                                        }
+                                    } else {
+                                        format!("{}_{}", orig_port.name, suffix)
+                                    }
+                                } else {
+                                    format!("{}_{}", orig_port.name, suffix)
+                                };
+
+                                let parent_flattened_port_opt = self.mir.ports.iter()
+                                    .find(|p| p.name == parent_flattened_name);
+
+                                parent_flattened_port_opt.map(|p| Expression::Ref(LValue::Port(p.id)))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(expr) = parent_flattened_expr {
+                        eprintln!("   🔗 EXPANDING PORT MAPPING: {} → {:?}", child_port.name, expr);
+                        port_mapping.insert(child_port.name.clone(), expr);
+                    }
+                }
+            }
         }
 
         // Convert combinational assignments from child module
@@ -3508,9 +3619,25 @@ impl<'a> MirToSirConverter<'a> {
     ) {
         match statement {
             Statement::Assignment(assign) => {
-                // Extract base signal from LHS (handles array indices, field access, etc.)
-                let lhs_signal =
-                    self.extract_base_signal_for_instance(&assign.lhs, inst_prefix, child_module);
+                // With the proper HIR→MIR fix, each flattened element has its own assignment
+                // So we should collect the ACTUAL signal name, not the stripped base
+                let lhs_signal = match &assign.lhs {
+                    LValue::Signal(sig_id) => {
+                        child_module
+                            .signals
+                            .iter()
+                            .find(|s| s.id == *sig_id)
+                            .map(|signal| format!("{}.{}", inst_prefix, signal.name))
+                    }
+                    LValue::Port(port_id) => {
+                        child_module
+                            .ports
+                            .iter()
+                            .find(|p| p.id == *port_id)
+                            .map(|port| format!("{}.{}", inst_prefix, port.name))
+                    }
+                    _ => None,
+                };
 
                 if let Some(sig_name) = lhs_signal {
                     targets.insert(sig_name);
@@ -3537,6 +3664,18 @@ impl<'a> MirToSirConverter<'a> {
                             targets,
                         );
                     }
+                }
+            }
+            Statement::Block(block) => {
+                // Handle blocks (created by expanded assignments)
+                for stmt in &block.statements {
+                    self.collect_assignment_targets_for_instance(
+                        stmt,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        targets,
+                    );
                 }
             }
             _ => {}
@@ -3679,17 +3818,22 @@ impl<'a> MirToSirConverter<'a> {
         child_module: &Module,
         target: &str,
     ) -> Option<usize> {
+        eprintln!("🔍 find_assignment: Looking for target '{}' in {} statements", target, statements.len());
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
                     // Extract the base signal name from the LValue
                     // For flattened arrays, we need to strip the index suffix
                     let lhs_base = match &assign.lhs {
-                        LValue::Signal(sig_id) => child_module
-                            .signals
-                            .iter()
-                            .find(|s| s.id == *sig_id)
-                            .map(|signal| format!("{}.{}", inst_prefix, signal.name)),
+                        LValue::Signal(sig_id) => {
+                            let result = child_module
+                                .signals
+                                .iter()
+                                .find(|s| s.id == *sig_id)
+                                .map(|signal| format!("{}.{}", inst_prefix, signal.name));
+                            eprintln!("   📝 Found Assignment: LValue::Signal -> {:?}", result);
+                            result
+                        }
                         LValue::BitSelect { base, .. } => {
                             // Array index like mem[wr_ptr]
                             // Extract base signal and strip flattened index suffix
@@ -3698,38 +3842,43 @@ impl<'a> MirToSirConverter<'a> {
                                 inst_prefix,
                                 child_module,
                             );
+                            eprintln!("   📝 Found Assignment: LValue::BitSelect, base extracted = {:?}", extracted);
                             let stripped = extracted
                                 .as_ref()
                                 .map(|base_name| self.strip_flattened_index_suffix(base_name));
+                            eprintln!("   📝   After stripping: {:?}", stripped);
                             stripped
                         }
-                        _ => None,
+                        _ => {
+                            eprintln!("   📝 Found Assignment: Other LValue type (skipped)");
+                            None
+                        }
                     };
 
                     if let Some(lhs) = lhs_base {
                         // For comparison, also strip the target's flattened index suffix
                         // This allows "input_fifo.mem" to match "input_fifo.mem_0_x"
                         let target_stripped = self.strip_flattened_index_suffix(target);
+                        eprintln!("   🎯 Comparing: lhs='{}' vs target_stripped='{}'", lhs, target_stripped);
 
                         if lhs == target_stripped {
-                            // WORKAROUND for Bug #8: The RHS might reference a flattened signal
-                            // using only the first element (e.g., data_x). We need to adapt it
-                            // to match the target's field (e.g., if target is mem_0_y, use data_y).
-                            let adapted_rhs = self.adapt_rhs_for_flattened_target(
-                                &assign.rhs,
-                                target,
-                                child_module,
-                            );
+                            eprintln!("   ✅ MATCH FOUND! Creating expression node (proper fix: no adaptation needed)");
+
+                            // With the proper HIR→MIR fix, the RHS already has correct field references
+                            // No adaptation needed!
                             return Some(self.create_expression_node_for_instance(
-                                &adapted_rhs,
+                                &assign.rhs,
                                 inst_prefix,
                                 port_mapping,
                                 child_module,
                             ));
+                        } else {
+                            eprintln!("   ❌ No match (lhs != target_stripped)");
                         }
                     }
                 }
                 Statement::If(nested_if) => {
+                    eprintln!("   🔀 Found nested If statement - recursively handling");
                     // Recursively handle nested if
                     return Some(self.synthesize_conditional_for_instance(
                         nested_if,
@@ -3739,9 +3888,12 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                     ));
                 }
-                _ => {}
+                _ => {
+                    eprintln!("   ⏭️  Skipping statement (not Assignment or If)");
+                }
             }
         }
+        eprintln!("   ⚠️  No assignment found for target '{}'", target);
         None
     }
 

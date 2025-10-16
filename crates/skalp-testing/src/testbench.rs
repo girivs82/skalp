@@ -58,9 +58,9 @@ impl Testbench {
         // Parse and build HIR
         let hir = parse_and_build_hir(&source)?;
 
-        // Compile to MIR
-        // TEMPORARY: Disable optimizations to avoid DCE bug with array-indexed signals
-        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        // Compile to MIR with optimizations
+        // The proper HIR→MIR fix ensures array assignments are expanded correctly
+        let compiler = MirCompiler::new();
         let mir = compiler
             .compile_to_mir(&hir)
             .map_err(|e| anyhow::anyhow!("{}", e))?;

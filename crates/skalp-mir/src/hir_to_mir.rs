@@ -575,6 +575,14 @@ impl<'hir> HirToMir<'hir> {
     /// Convert HIR assignment to MIR assignment
     /// Convert HIR assignment - may expand to multiple MIR assignments for struct types
     fn convert_assignment_expanded(&mut self, assign: &hir::HirAssignment) -> Vec<Assignment> {
+        // CRITICAL FIX for Bug #8: Try to expand array index assignments first
+        // This handles cases like: mem[index] <= data
+        // Must come BEFORE struct expansion to catch array-of-struct assignments
+        if let Some(assignments) = self.try_expand_array_index_assignment(assign) {
+            eprintln!("🔧 EXPANDED ARRAY INDEX ASSIGNMENT into {} assignments", assignments.len());
+            return assignments;
+        }
+
         // Try to expand struct-to-struct assignments
         if let Some(assignments) = self.try_expand_struct_assignment(assign) {
             return assignments;
@@ -734,6 +742,270 @@ impl<'hir> HirToMir<'hir> {
         }
 
         Some(assignments)
+    }
+
+    /// Try to expand an array index assignment into multiple conditional assignments
+    ///
+    /// This handles assignments like: `mem[index] <= data` where `mem` is a flattened array
+    ///
+    /// For each flattened element, generates:
+    /// ```
+    /// mem_N_field <= (index == N) ? data_field : mem_N_field
+    /// ```
+    ///
+    /// This is the ROOT CAUSE FIX for Bug #8: Properly expanding array assignments at HIR→MIR level
+    fn try_expand_array_index_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<Assignment>> {
+        eprintln!("🔍 try_expand_array_index_assignment: Checking assignment");
+
+        // Get assignment kind
+        let kind = match assign.assignment_type {
+            hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
+            hir::HirAssignmentType::Blocking => AssignmentKind::Blocking,
+            hir::HirAssignmentType::Combinational => AssignmentKind::Blocking,
+        };
+
+        // Check if LHS is an array index: signal[index] or port[index]
+        let (base_hir_lval, index_expr, is_signal) = match &assign.lhs {
+            hir::HirLValue::Index(base, index) => {
+                eprintln!("   ✅ LHS is Index");
+                // Check if base is a flattened signal or port
+                match base.as_ref() {
+                    hir::HirLValue::Signal(sig_id) => {
+                        if self.flattened_signals.contains_key(sig_id) {
+                            eprintln!("   ✅ Base is flattened signal");
+                            (sig_id.0, index, true)
+                        } else {
+                            eprintln!("   ❌ Base signal not flattened");
+                            return None;
+                        }
+                    }
+                    hir::HirLValue::Port(port_id) => {
+                        if self.flattened_ports.contains_key(port_id) {
+                            eprintln!("   ✅ Base is flattened port");
+                            (port_id.0, index, false)
+                        } else {
+                            eprintln!("   ❌ Base port not flattened");
+                            return None;
+                        }
+                    }
+                    _ => {
+                        eprintln!("   ❌ Base is not simple signal/port");
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                eprintln!("   ❌ LHS is not Index");
+                return None;
+            }
+        };
+
+        // Get flattened fields for the base array (clone to avoid borrow issues)
+        let base_fields = if is_signal {
+            self.flattened_signals.get(&hir::SignalId(base_hir_lval))?.clone()
+        } else {
+            self.flattened_ports.get(&hir::PortId(base_hir_lval))?.clone()
+        };
+
+        eprintln!("   📊 Found {} flattened fields for base", base_fields.len());
+
+        // Convert the index expression to MIR
+        let mir_index = self.convert_expression(index_expr)?;
+        eprintln!("   ✅ Converted index expression");
+
+        // Convert the RHS expression to MIR
+        let mir_rhs = self.convert_expression(&assign.rhs)?;
+        eprintln!("   ✅ Converted RHS expression");
+
+        // Group flattened fields by array index
+        // field_path will be like ["0", "x"], ["0", "y"], ["1", "x"], etc.
+        let mut array_indices: std::collections::HashMap<String, Vec<FlattenedField>> =
+            std::collections::HashMap::new();
+
+        for field in base_fields {
+            if let Some(first_component) = field.field_path.first() {
+                // Check if first component is a numeric index
+                if first_component.chars().all(|c| c.is_ascii_digit()) {
+                    array_indices.entry(first_component.clone())
+                        .or_insert_with(Vec::new)
+                        .push(field);
+                }
+            }
+        }
+
+        eprintln!("   📊 Found {} array indices", array_indices.keys().len());
+
+        if array_indices.is_empty() {
+            eprintln!("   ❌ No array indices found - not an array of composites");
+            return None;
+        }
+
+        // Generate assignments for each flattened element
+        let mut assignments = Vec::new();
+
+        for (idx_str, fields_at_index) in array_indices {
+            let array_index: usize = idx_str.parse().ok()?;
+            eprintln!("   🔧 Generating assignments for index {}", array_index);
+
+            // Create condition: index == array_index
+            let index_literal = Expression::Literal(Value::Integer(array_index as i64));
+            let condition = Expression::Binary {
+                op: BinaryOp::Equal,
+                left: Box::new(mir_index.clone()),
+                right: Box::new(index_literal),
+            };
+
+            // For each field at this index (e.g., x, y, z for a struct element)
+            for field_info in &fields_at_index {
+                eprintln!("      - Field: {:?}", field_info.field_path);
+
+                // Build LHS: mem_N_field
+                let lhs_lval = if is_signal {
+                    LValue::Signal(SignalId(field_info.id))
+                } else {
+                    LValue::Port(PortId(field_info.id))
+                };
+
+                // Build RHS for this specific field
+                // Need to adapt mir_rhs to reference the correct field
+                let rhs_for_field = self.adapt_rhs_for_array_element(&mir_rhs, field_info);
+
+                // Create self-reference for "keep" value: mem_N_field
+                let keep_value = Expression::Ref(lhs_lval.clone());
+
+                // Build conditional: (index == N) ? data_field : mem_N_field
+                let conditional_rhs = Expression::Conditional {
+                    cond: Box::new(condition.clone()),
+                    then_expr: Box::new(rhs_for_field),
+                    else_expr: Box::new(keep_value),
+                };
+
+                assignments.push(Assignment {
+                    lhs: lhs_lval,
+                    rhs: conditional_rhs,
+                    kind,
+                });
+            }
+        }
+
+        eprintln!("   ✅ Generated {} total assignments", assignments.len());
+        Some(assignments)
+    }
+
+    /// Adapt RHS expression to reference the correct field for an array element
+    ///
+    /// For example, if RHS is `Expression::Ref(LValue::Signal(wr_data))` and we need field "x",
+    /// this should return `Expression::Ref(LValue::Signal(wr_data_x))`
+    fn adapt_rhs_for_array_element(
+        &self,
+        rhs: &Expression,
+        target_field: &FlattenedField,
+    ) -> Expression {
+        // Extract the struct field suffix from target_field.field_path
+        // For ["0", "x"], we want "x"
+        // For ["0", "position", "x"], we want "position_x"
+        let field_suffix: Vec<String> = target_field.field_path.iter()
+            .skip(1) // Skip the array index
+            .cloned()
+            .collect();
+
+        if field_suffix.is_empty() {
+            // No struct fields, just array - return RHS as-is
+            return rhs.clone();
+        }
+
+        // Recursively adapt the expression to reference the field
+        self.adapt_expression_for_field(rhs, &field_suffix)
+    }
+
+    /// Recursively adapt an expression to reference a specific field
+    fn adapt_expression_for_field(&self, expr: &Expression, field_path: &[String]) -> Expression {
+        match expr {
+            Expression::Ref(lval) => {
+                Expression::Ref(self.adapt_lvalue_for_field(lval, field_path))
+            }
+            Expression::Binary { op, left, right } => {
+                Expression::Binary {
+                    op: *op,
+                    left: Box::new(self.adapt_expression_for_field(left, field_path)),
+                    right: Box::new(self.adapt_expression_for_field(right, field_path)),
+                }
+            }
+            Expression::Unary { op, operand } => {
+                Expression::Unary {
+                    op: *op,
+                    operand: Box::new(self.adapt_expression_for_field(operand, field_path)),
+                }
+            }
+            Expression::Conditional { cond, then_expr, else_expr } => {
+                Expression::Conditional {
+                    cond: Box::new(self.adapt_expression_for_field(cond, field_path)),
+                    then_expr: Box::new(self.adapt_expression_for_field(then_expr, field_path)),
+                    else_expr: Box::new(self.adapt_expression_for_field(else_expr, field_path)),
+                }
+            }
+            // Literals and other non-reference expressions don't need adaptation
+            _ => expr.clone(),
+        }
+    }
+
+    /// Adapt an LValue to reference a specific field
+    fn adapt_lvalue_for_field(&self, lval: &LValue, field_path: &[String]) -> LValue {
+        match lval {
+            LValue::Signal(sig_id) => {
+                // Find the corresponding flattened field
+                // Search through flattened_signals to find one matching this signal + field path
+                for (hir_sig_id, fields) in &self.flattened_signals {
+                    for field in fields {
+                        if SignalId(field.id) == *sig_id {
+                            // Found the base signal - now find the sibling with matching field suffix
+                            for sibling in fields {
+                                if sibling.field_path.ends_with(field_path) {
+                                    return LValue::Signal(SignalId(sibling.id));
+                                }
+                            }
+                        }
+                    }
+                }
+                // If not found, return as-is
+                lval.clone()
+            }
+            LValue::Port(port_id) => {
+                // Find the corresponding flattened field
+                for (hir_port_id, fields) in &self.flattened_ports {
+                    for field in fields {
+                        if PortId(field.id) == *port_id {
+                            // Found the base port - now find the sibling with matching field suffix
+                            for sibling in fields {
+                                if sibling.field_path.ends_with(field_path) {
+                                    return LValue::Port(PortId(sibling.id));
+                                }
+                            }
+                        }
+                    }
+                }
+                // If not found, return as-is
+                lval.clone()
+            }
+            // For other LValue types, recurse on base
+            LValue::BitSelect { base, index } => {
+                LValue::BitSelect {
+                    base: Box::new(self.adapt_lvalue_for_field(base, field_path)),
+                    index: index.clone(),
+                }
+            }
+            LValue::RangeSelect { base, high, low } => {
+                LValue::RangeSelect {
+                    base: Box::new(self.adapt_lvalue_for_field(base, field_path)),
+                    high: high.clone(),
+                    low: low.clone(),
+                }
+            }
+            _ => lval.clone(),
+        }
     }
 
     /// Convert continuous assignment - may expand to multiple assignments for struct types
