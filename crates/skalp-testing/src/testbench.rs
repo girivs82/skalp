@@ -24,12 +24,13 @@
 //! ```
 
 use anyhow::Result;
-use skalp_frontend::parse_and_build_hir;
+use skalp_frontend::{parse_and_build_hir, parse_and_build_hir_from_file};
 use skalp_mir::{MirCompiler, OptimizationLevel};
 use skalp_sim::{SimulationConfig, Simulator};
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 /// High-level testbench builder for ergonomic verification
 pub struct Testbench {
@@ -53,10 +54,10 @@ impl Testbench {
 
     /// Create a new testbench with custom simulation config
     pub async fn with_config(source_path: &str, config: SimulationConfig) -> Result<Self> {
-        let source = fs::read_to_string(source_path)?;
-
-        // Parse and build HIR
-        let hir = parse_and_build_hir(&source)?;
+        // Parse and build HIR with full module resolution support
+        // This handles imports like "mod async_fifo; use async_fifo::AsyncFifo"
+        let path = Path::new(source_path);
+        let hir = parse_and_build_hir_from_file(path)?;
 
         // Compile to MIR with optimizations
         // The proper HIR→MIR fix ensures array assignments are expanded correctly

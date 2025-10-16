@@ -236,6 +236,8 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
     // Try to find the symbol in entities
     if let Some(entity) = source.entities.iter().find(|e| e.name == symbol_name) {
+        let old_entity_id = entity.id;
+
         // Assign a new unique entity ID to avoid collisions
         let new_entity_id =
             hir::EntityId(target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1);
@@ -259,6 +261,19 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         }
 
         target.entities.push(imported_entity);
+
+        // CRITICAL: Also merge the implementation for this entity (needed for generic entities)
+        if let Some(impl_block) = source
+            .implementations
+            .iter()
+            .find(|i| i.entity == old_entity_id)
+        {
+            let mut imported_impl = impl_block.clone();
+            // Update implementation to point to the new entity ID
+            imported_impl.entity = new_entity_id;
+            target.implementations.push(imported_impl);
+        }
+
         return Ok(());
     }
 
@@ -308,9 +323,45 @@ fn merge_symbol_with_rename(
 ) -> Result<()> {
     // Try to find the symbol in entities
     if let Some(entity) = source.entities.iter().find(|e| e.name == symbol_name) {
+        let old_entity_id = entity.id;
+
+        // Assign a new unique entity ID to avoid collisions
+        let new_entity_id =
+            hir::EntityId(target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1);
+
+        // Renumber ports to avoid collisions
+        let next_port_id = target
+            .entities
+            .iter()
+            .flat_map(|e| e.ports.iter())
+            .map(|p| p.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+
         let mut renamed_entity = entity.clone();
+        renamed_entity.id = new_entity_id;
         renamed_entity.name = alias.to_string();
+
+        // Renumber all ports
+        for (i, port) in renamed_entity.ports.iter_mut().enumerate() {
+            port.id = hir::PortId(next_port_id + i as u32);
+        }
+
         target.entities.push(renamed_entity);
+
+        // CRITICAL: Also merge the implementation for this entity (needed for generic entities)
+        if let Some(impl_block) = source
+            .implementations
+            .iter()
+            .find(|i| i.entity == old_entity_id)
+        {
+            let mut renamed_impl = impl_block.clone();
+            // Update implementation to point to the new entity ID
+            renamed_impl.entity = new_entity_id;
+            target.implementations.push(renamed_impl);
+        }
+
         return Ok(());
     }
 
@@ -380,10 +431,46 @@ fn merge_symbol_with_rename(
 fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     use hir::HirVisibility;
 
-    // Merge all public entities
+    // Merge all public entities (and their implementations)
     for entity in &source.entities {
         if entity.visibility == HirVisibility::Public {
-            target.entities.push(entity.clone());
+            let old_entity_id = entity.id;
+
+            // Assign new unique entity ID
+            let new_entity_id =
+                hir::EntityId(target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1);
+
+            // Renumber ports to avoid collisions
+            let next_port_id = target
+                .entities
+                .iter()
+                .flat_map(|e| e.ports.iter())
+                .map(|p| p.id.0)
+                .max()
+                .unwrap_or(0)
+                + 1;
+
+            let mut imported_entity = entity.clone();
+            imported_entity.id = new_entity_id;
+
+            // Renumber all ports
+            for (i, port) in imported_entity.ports.iter_mut().enumerate() {
+                port.id = hir::PortId(next_port_id + i as u32);
+            }
+
+            target.entities.push(imported_entity);
+
+            // Also merge the implementation for this entity (needed for generic entities)
+            if let Some(impl_block) = source
+                .implementations
+                .iter()
+                .find(|i| i.entity == old_entity_id)
+            {
+                let mut imported_impl = impl_block.clone();
+                // Update implementation to point to the new entity ID
+                imported_impl.entity = new_entity_id;
+                target.implementations.push(imported_impl);
+            }
         }
     }
 

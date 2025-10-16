@@ -35,55 +35,43 @@ Four critical bugs in hierarchical elaboration for GPU simulator:
 
 ---
 
-## Imported Generic Modules Not Instantiated
+## ✅ FIXED: Imported Generic Module Implementations Not Merged (Bug #17)
 
-### Issue
-When a generic entity is imported from another module and instantiated with `let`, the monomorphized instance is not added to the MIR module's instances list. This prevents hierarchical elaboration from processing the child module.
+### Issue (FIXED)
+When a generic entity was imported from another module (`mod async_fifo; use async_fifo::AsyncFifo`), only the entity definition was copied to the importing module's HIR, but NOT the implementation. This prevented monomorphization from working because there was no implementation body to specialize.
 
-### Example (BROKEN):
+### Example (NOW WORKS):
 ```skalp
 mod async_fifo;
 use async_fifo::AsyncFifo;
 
 impl MyModule {
-    let fifo = AsyncFifo<Data, 8> {  // Instance not created in MIR!
+    let fifo = AsyncFifo<Data, 8> {  // ✅ Now works correctly!
         wr_clk: clk,
         ...
     }
 }
 ```
-
-### Workaround (WORKS):
-Define the generic entity inline in the same file instead of importing:
-```skalp
-// Define inline
-entity AsyncFifo<T, const DEPTH: nat> { ... }
-
-impl MyModule {
-    let fifo = AsyncFifo<Data, 8> {  // ✅ Instance created correctly
-        wr_clk: clk,
-        ...
-    }
-}
-```
-
-### Evidence
-- Simple FIFO test (imports AsyncFifo): 0 instances in MIR
-- Full pipeline test (defines inline): 3 instances in MIR (input_fifo, geometry, output_fifo)
 
 ### Root Cause
-The MIR compiler's monomorphization doesn't properly register instances when the generic entity is imported from another module. This is a **frontend/MIR bug**, not a SIR/elaboration bug.
+The `merge_symbol` function in `crates/skalp-frontend/src/lib.rs` only copied the entity definition but not its associated implementation block. The monomorphization engine needs both to create specialized instances.
 
-### Impact
-Cannot use shared library modules for generic components like FIFOs. Each top-level module must define its own copy.
+### Fix Applied (commit TBD)
+Modified three functions in `crates/skalp-frontend/src/lib.rs`:
+1. `merge_symbol` - Now also merges the implementation for imported entities
+2. `merge_symbol_with_rename` - Same fix for renamed imports
+3. `merge_all_symbols` - Same fix for glob imports
 
-### Priority
-HIGH - Severely limits code reuse and modularity
+Additionally fixed `Testbench::with_config` in `crates/skalp-testing/src/testbench.rs` to use `parse_and_build_hir_from_file` instead of `parse_and_build_hir` so module resolution works properly.
 
-### Fix Required
-- Investigate monomorphization in `crates/skalp-mir` or `crates/skalp-frontend`
-- Ensure imported generic entities create instances in the importing module
-- Add test case for imported generic instantiation
+**Files Changed**:
+- `/Users/girivs/src/hw/hls/crates/skalp-frontend/src/lib.rs:265-275` (merge_symbol)
+- `/Users/girivs/src/hw/hls/crates/skalp-frontend/src/lib.rs:349-357` (merge_symbol_with_rename)
+- `/Users/girivs/src/hw/hls/crates/skalp-frontend/src/lib.rs:455-461` (merge_all_symbols)
+- `/Users/girivs/src/hw/hls/crates/skalp-testing/src/testbench.rs:56-60` (with_config)
+
+### Status
+✅ **FIXED** - Imported generic entities and their implementations are now properly merged
 
 ---
 
