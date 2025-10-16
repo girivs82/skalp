@@ -70,8 +70,15 @@ Additionally fixed `Testbench::with_config` in `crates/skalp-testing/src/testben
 - `/Users/girivs/src/hw/hls/crates/skalp-frontend/src/lib.rs:455-461` (merge_all_symbols)
 - `/Users/girivs/src/hw/hls/crates/skalp-testing/src/testbench.rs:56-60` (with_config)
 
+### Verification
+✅ **VERIFIED WORKING**: Full pipeline test (`test_graphics_pipeline_multi_clock_domains`) correctly:
+- Imports AsyncFifo entity and implementation from `examples/graphics_pipeline/lib/async_fifo.sk`
+- Creates 3 instances in SimplePipelineTop (input_fifo, geometry, output_fifo)
+- Collects 2 AsyncFifo instantiations for monomorphization
+- Specializes AsyncFifo for `SimpleVertex` type with depth 8
+
 ### Status
-✅ **FIXED** - Imported generic entities and their implementations are now properly merged
+✅ **FIXED and VERIFIED** - Imported generic entities and their implementations are now properly merged and monomorphized correctly
 
 ---
 
