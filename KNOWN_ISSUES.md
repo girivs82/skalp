@@ -338,6 +338,43 @@ impl FifoTest {
 
 ---
 
+## ⚠️ OPEN: Multiple FlipFlops Created for Same Signal (Bug #23)
+
+### Issue
+When multiple AsyncFifo instances are used in a pipeline with different clock domains, the Metal shader generates duplicate FlipFlop assignments to the same register, causing data corruption.
+
+### Evidence
+Metal shader for `test_graphics_pipeline_multi_clock_domains` shows:
+```metal
+registers->output_fifo_rd_ptr_gray_sync1 = signals->node_2384_out & 0x1FF;  // geom_rst MUX
+registers->output_fifo_rd_ptr_gray_sync1 = signals->node_2448_out & 0x1FF;  // pixel_rst MUX (duplicate!)
+registers->output_fifo_rd_ptr_gray_sync1 = signals->node_2458_out & 0x1FF;  // pixel_rst MUX (duplicate!)
+```
+
+Only the last assignment takes effect, causing earlier values to be lost.
+
+### Analysis
+- Signal `rd_ptr_gray_sync1` is in WRITE clock domain (wr_clk) in AsyncFifo
+- Should only have ONE FlipFlop with clock=geom_clk, reset=geom_rst
+- But THREE FlipFlops are being created:
+  1. One with geom_rst (correct - write domain)
+  2. Two with pixel_rst (incorrect - read domain)
+
+### Root Cause (Under Investigation)
+Likely in `convert_child_process` or `collect_assignment_targets_for_instance`:
+- Signals might be collected from wrong clock domain process
+- Or FlipFlops are being created multiple times for nested if/else blocks
+- File: `crates/skalp-sir/src/mir_to_sir.rs` around lines 3418-3500
+
+### Impact
+- ✅ Single AsyncFifo instances work (`test_async_fifo_clock_domain_crossing` passes)
+- ❌ Multiple AsyncFifo instances fail (`test_graphics_pipeline_multi_clock_domains` reads zeros)
+
+### Status
+🔍 **UNDER INVESTIGATION** - Compiler bug in hierarchical elaboration of multi-clock-domain modules
+
+---
+
 ## ⚠️ PARTIALLY RESOLVED: AsyncFifo GPU Simulator Tests (Bug #20)
 
 ### Issue
