@@ -579,7 +579,10 @@ impl<'hir> HirToMir<'hir> {
         // This handles cases like: mem[index] <= data
         // Must come BEFORE struct expansion to catch array-of-struct assignments
         if let Some(assignments) = self.try_expand_array_index_assignment(assign) {
-            eprintln!("🔧 EXPANDED ARRAY INDEX ASSIGNMENT into {} assignments", assignments.len());
+            eprintln!(
+                "🔧 EXPANDED ARRAY INDEX ASSIGNMENT into {} assignments",
+                assignments.len()
+            );
             return assignments;
         }
 
@@ -805,12 +808,19 @@ impl<'hir> HirToMir<'hir> {
 
         // Get flattened fields for the base array (clone to avoid borrow issues)
         let base_fields = if is_signal {
-            self.flattened_signals.get(&hir::SignalId(base_hir_lval))?.clone()
+            self.flattened_signals
+                .get(&hir::SignalId(base_hir_lval))?
+                .clone()
         } else {
-            self.flattened_ports.get(&hir::PortId(base_hir_lval))?.clone()
+            self.flattened_ports
+                .get(&hir::PortId(base_hir_lval))?
+                .clone()
         };
 
-        eprintln!("   📊 Found {} flattened fields for base", base_fields.len());
+        eprintln!(
+            "   📊 Found {} flattened fields for base",
+            base_fields.len()
+        );
 
         // Convert the index expression to MIR
         let mir_index = self.convert_expression(index_expr)?;
@@ -829,8 +839,9 @@ impl<'hir> HirToMir<'hir> {
             if let Some(first_component) = field.field_path.first() {
                 // Check if first component is a numeric index
                 if first_component.chars().all(|c| c.is_ascii_digit()) {
-                    array_indices.entry(first_component.clone())
-                        .or_insert_with(Vec::new)
+                    array_indices
+                        .entry(first_component.clone())
+                        .or_default()
                         .push(field);
                 }
             }
@@ -953,20 +964,32 @@ impl<'hir> HirToMir<'hir> {
         };
 
         eprintln!("🔧 ARRAY INDEX READ EXPANSION:");
-        eprintln!("   LHS: {} (flattened struct)", if lhs_is_signal { "signal" } else { "port" });
-        eprintln!("   RHS: array[index] where array is {} (flattened array)", if array_is_signal { "signal" } else { "port" });
+        eprintln!(
+            "   LHS: {} (flattened struct)",
+            if lhs_is_signal { "signal" } else { "port" }
+        );
+        eprintln!(
+            "   RHS: array[index] where array is {} (flattened array)",
+            if array_is_signal { "signal" } else { "port" }
+        );
 
         // Get flattened fields for LHS (struct) and array (array base)
         let lhs_fields = if lhs_is_signal {
-            self.flattened_signals.get(&hir::SignalId(lhs_hir_id))?.clone()
+            self.flattened_signals
+                .get(&hir::SignalId(lhs_hir_id))?
+                .clone()
         } else {
             self.flattened_ports.get(&hir::PortId(lhs_hir_id))?.clone()
         };
 
         let array_fields = if array_is_signal {
-            self.flattened_signals.get(&hir::SignalId(array_hir_id))?.clone()
+            self.flattened_signals
+                .get(&hir::SignalId(array_hir_id))?
+                .clone()
         } else {
-            self.flattened_ports.get(&hir::PortId(array_hir_id))?.clone()
+            self.flattened_ports
+                .get(&hir::PortId(array_hir_id))?
+                .clone()
         };
 
         // Group array fields by index
@@ -976,8 +999,9 @@ impl<'hir> HirToMir<'hir> {
         for field in array_fields {
             if let Some(first_component) = field.field_path.first() {
                 if first_component.chars().all(|c| c.is_ascii_digit()) {
-                    array_by_index.entry(first_component.clone())
-                        .or_insert_with(Vec::new)
+                    array_by_index
+                        .entry(first_component.clone())
+                        .or_default()
                         .push(field);
                 }
             }
@@ -1014,10 +1038,8 @@ impl<'hir> HirToMir<'hir> {
                 let fields_at_index = array_by_index.get(*idx_str)?;
                 let matching_array_field = fields_at_index.iter().find(|f| {
                     // Get the field suffix (everything after array index)
-                    let array_field_suffix: Vec<String> = f.field_path.iter()
-                        .skip(1)
-                        .cloned()
-                        .collect();
+                    let array_field_suffix: Vec<String> =
+                        f.field_path.iter().skip(1).cloned().collect();
                     let array_field_suffix_str = array_field_suffix.join("_");
                     array_field_suffix_str == field_suffix
                 })?;
@@ -1061,7 +1083,10 @@ impl<'hir> HirToMir<'hir> {
             });
         }
 
-        eprintln!("   ✅ Generated {} continuous assignments with mux logic", assignments.len());
+        eprintln!(
+            "   ✅ Generated {} continuous assignments with mux logic",
+            assignments.len()
+        );
         Some(assignments)
     }
 
@@ -1077,7 +1102,9 @@ impl<'hir> HirToMir<'hir> {
         // Extract the struct field suffix from target_field.field_path
         // For ["0", "x"], we want "x"
         // For ["0", "position", "x"], we want "position_x"
-        let field_suffix: Vec<String> = target_field.field_path.iter()
+        let field_suffix: Vec<String> = target_field
+            .field_path
+            .iter()
             .skip(1) // Skip the array index
             .cloned()
             .collect();
@@ -1094,29 +1121,25 @@ impl<'hir> HirToMir<'hir> {
     /// Recursively adapt an expression to reference a specific field
     fn adapt_expression_for_field(&self, expr: &Expression, field_path: &[String]) -> Expression {
         match expr {
-            Expression::Ref(lval) => {
-                Expression::Ref(self.adapt_lvalue_for_field(lval, field_path))
-            }
-            Expression::Binary { op, left, right } => {
-                Expression::Binary {
-                    op: *op,
-                    left: Box::new(self.adapt_expression_for_field(left, field_path)),
-                    right: Box::new(self.adapt_expression_for_field(right, field_path)),
-                }
-            }
-            Expression::Unary { op, operand } => {
-                Expression::Unary {
-                    op: *op,
-                    operand: Box::new(self.adapt_expression_for_field(operand, field_path)),
-                }
-            }
-            Expression::Conditional { cond, then_expr, else_expr } => {
-                Expression::Conditional {
-                    cond: Box::new(self.adapt_expression_for_field(cond, field_path)),
-                    then_expr: Box::new(self.adapt_expression_for_field(then_expr, field_path)),
-                    else_expr: Box::new(self.adapt_expression_for_field(else_expr, field_path)),
-                }
-            }
+            Expression::Ref(lval) => Expression::Ref(self.adapt_lvalue_for_field(lval, field_path)),
+            Expression::Binary { op, left, right } => Expression::Binary {
+                op: *op,
+                left: Box::new(self.adapt_expression_for_field(left, field_path)),
+                right: Box::new(self.adapt_expression_for_field(right, field_path)),
+            },
+            Expression::Unary { op, operand } => Expression::Unary {
+                op: *op,
+                operand: Box::new(self.adapt_expression_for_field(operand, field_path)),
+            },
+            Expression::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => Expression::Conditional {
+                cond: Box::new(self.adapt_expression_for_field(cond, field_path)),
+                then_expr: Box::new(self.adapt_expression_for_field(then_expr, field_path)),
+                else_expr: Box::new(self.adapt_expression_for_field(else_expr, field_path)),
+            },
             // Literals and other non-reference expressions don't need adaptation
             _ => expr.clone(),
         }
@@ -1161,19 +1184,15 @@ impl<'hir> HirToMir<'hir> {
                 lval.clone()
             }
             // For other LValue types, recurse on base
-            LValue::BitSelect { base, index } => {
-                LValue::BitSelect {
-                    base: Box::new(self.adapt_lvalue_for_field(base, field_path)),
-                    index: index.clone(),
-                }
-            }
-            LValue::RangeSelect { base, high, low } => {
-                LValue::RangeSelect {
-                    base: Box::new(self.adapt_lvalue_for_field(base, field_path)),
-                    high: high.clone(),
-                    low: low.clone(),
-                }
-            }
+            LValue::BitSelect { base, index } => LValue::BitSelect {
+                base: Box::new(self.adapt_lvalue_for_field(base, field_path)),
+                index: index.clone(),
+            },
+            LValue::RangeSelect { base, high, low } => LValue::RangeSelect {
+                base: Box::new(self.adapt_lvalue_for_field(base, field_path)),
+                high: high.clone(),
+                low: low.clone(),
+            },
             _ => lval.clone(),
         }
     }
@@ -1195,7 +1214,10 @@ impl<'hir> HirToMir<'hir> {
         // This handles cases like: rd_data = mem[index]
         // This is the RHS counterpart to Bug #8 (array index writes)
         if let Some(assigns) = self.try_expand_array_index_read_assignment(assign) {
-            eprintln!("🔧 EXPANDED ARRAY INDEX READ into {} continuous assignments", assigns.len());
+            eprintln!(
+                "🔧 EXPANDED ARRAY INDEX READ into {} continuous assignments",
+                assigns.len()
+            );
             return assigns;
         }
 
@@ -1367,7 +1389,11 @@ impl<'hir> HirToMir<'hir> {
         // CRITICAL FIX for Bug #10: Expand struct/array connections into flattened field connections
         let mut connections = std::collections::HashMap::new();
 
-        eprintln!("🔍 convert_instance: Processing {} connections for instance {}", instance.connections.len(), instance.name);
+        eprintln!(
+            "🔍 convert_instance: Processing {} connections for instance {}",
+            instance.connections.len(),
+            instance.name
+        );
         for conn in &instance.connections {
             eprintln!("   Connection: {} → {:?}", conn.port, conn.expr);
 
@@ -1375,7 +1401,12 @@ impl<'hir> HirToMir<'hir> {
             // If so, we need to create multiple connections for each flattened field
 
             // First, try to get the HIR port from the entity to check its type
-            let entity = self.hir.as_ref()?.entities.iter().find(|e| e.id == instance.entity)?;
+            let entity = self
+                .hir
+                .as_ref()?
+                .entities
+                .iter()
+                .find(|e| e.id == instance.entity)?;
 
             // Find the port in the entity
             let port_opt = entity.ports.iter().find(|p| p.name == conn.port);
@@ -1386,11 +1417,17 @@ impl<'hir> HirToMir<'hir> {
             // Check if the RHS expression is a reference to a flattened signal/port
             let expanded_connections = if let Some(port) = port_opt {
                 // Check if port type is a struct or array that gets flattened
-                let needs_expansion = matches!(port.port_type, hir::HirType::Struct(_) | hir::HirType::Array(_, _));
+                let needs_expansion = matches!(
+                    port.port_type,
+                    hir::HirType::Struct(_) | hir::HirType::Array(_, _)
+                );
 
                 if needs_expansion {
                     // Try to expand the connection
-                    eprintln!("🔧 EXPANDING INSTANCE CONNECTION: {} (type={:?})", conn.port, port.port_type);
+                    eprintln!(
+                        "🔧 EXPANDING INSTANCE CONNECTION: {} (type={:?})",
+                        conn.port, port.port_type
+                    );
                     self.expand_instance_connection(&conn.port, &conn.expr)?
                 } else {
                     // Simple connection
@@ -1429,18 +1466,28 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Signal(id) => (id.0, true),
             hir::HirExpression::Port(id) => (id.0, false),
             _ => {
-                eprintln!("   ❌ RHS is not a simple Signal/Port expression: {:?}", rhs_expr);
+                eprintln!(
+                    "   ❌ RHS is not a simple Signal/Port expression: {:?}",
+                    rhs_expr
+                );
                 return None; // Complex expression, can't expand
             }
         };
 
         // Get flattened fields for the RHS signal/port
-        eprintln!("   Looking for flattened fields: {}({})", if is_signal { "Signal" } else { "Port" }, base_hir_id);
+        eprintln!(
+            "   Looking for flattened fields: {}({})",
+            if is_signal { "Signal" } else { "Port" },
+            base_hir_id
+        );
         let rhs_fields = if is_signal {
             match self.flattened_signals.get(&hir::SignalId(base_hir_id)) {
                 Some(fields) => fields.clone(),
                 None => {
-                    eprintln!("   ❌ Signal ID {} not found in flattened_signals", base_hir_id);
+                    eprintln!(
+                        "   ❌ Signal ID {} not found in flattened_signals",
+                        base_hir_id
+                    );
                     return None;
                 }
             }
@@ -1474,7 +1521,10 @@ impl<'hir> HirToMir<'hir> {
                 Expression::Ref(LValue::Port(PortId(rhs_field.id)))
             };
 
-            eprintln!("      {} → signal/port ID {}", port_field_name, rhs_field.id);
+            eprintln!(
+                "      {} → signal/port ID {}",
+                port_field_name, rhs_field.id
+            );
             connections.push((port_field_name, rhs_field_expr));
         }
 

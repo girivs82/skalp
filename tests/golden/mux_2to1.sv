@@ -8,4 +8,6 @@ module Mux2to1 (
     output [7:0] out
 );
 
+    assign out = (sel ? a : b);
+
 endmodule

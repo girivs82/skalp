@@ -10,4 +10,6 @@ module Mux4to1 (
     output [7:0] out
 );
 
+    assign out = ((sel == 0) ? a : ((sel == 1) ? b : ((sel == 2) ? c : ((sel == 3) ? d : 0))));
+
 endmodule
