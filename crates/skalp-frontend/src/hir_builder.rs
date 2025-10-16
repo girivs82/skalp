@@ -2241,8 +2241,16 @@ impl HirBuilderContext {
     fn build_lvalue(&mut self, node: &SyntaxNode) -> Option<HirLValue> {
         match node.kind() {
             SyntaxKind::IdentExpr => {
+                // Accept both identifiers AND keywords (like "output") as L-value names
+                // This is needed because the parser allows keywords as signal/port names
                 let name = node
                     .first_token_of_kind(SyntaxKind::Ident)
+                    .or_else(|| {
+                        // If not an Ident, look for any keyword token
+                        node.children_with_tokens()
+                            .filter_map(|elem| elem.into_token())
+                            .find(|t| t.kind().is_keyword())
+                    })
                     .map(|t| t.text().to_string())?;
 
                 // Look up symbol
