@@ -191,8 +191,10 @@ impl<'hir> HirToMir<'hir> {
                         );
                         eprintln!("   → Flattened into {} signals", flattened_signals.len());
 
-                        // If we have multiple flattened signals, store the flattening info
-                        if flattened_signals.len() > 1 {
+                        // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
+                        // Even single-field structs need mapping because field name != signal name
+                        // (e.g., signal "data: SimpleData" → flattened signal "data_value")
+                        if !flattened_fields.is_empty() {
                             self.flattened_signals
                                 .insert(hir_signal.id, flattened_fields.clone());
                         }

@@ -222,6 +222,13 @@ impl FifoTest {
         "#;
 
         let temp_dir = std::env::temp_dir();
+
+        // Copy async_fifo module to temp directory so it can be found
+        let async_fifo_source = std::fs::read_to_string("examples/graphics_pipeline/lib/async_fifo.sk")
+            .expect("Failed to read async_fifo.sk");
+        std::fs::write(temp_dir.join("async_fifo.sk"), async_fifo_source)
+            .expect("Failed to write async_fifo.sk to temp");
+
         let source_file = temp_dir.join("fifo_cdc_test.sk");
         std::fs::write(&source_file, fifo_source).expect("Failed to write test source");
 
