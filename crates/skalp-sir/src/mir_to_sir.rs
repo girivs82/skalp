@@ -3857,11 +3857,19 @@ impl<'a> MirToSirConverter<'a> {
                     // Extract the base signal name from the LValue
                     // For flattened arrays, we need to strip the index suffix
                     let lhs_base = match &assign.lhs {
-                        LValue::Signal(sig_id) => child_module
-                            .signals
-                            .iter()
-                            .find(|s| s.id == *sig_id)
-                            .map(|signal| format!("{}.{}", inst_prefix, signal.name)),
+                        LValue::Signal(sig_id) => {
+                            // Extract signal name and strip flattened suffix
+                            // For array elements like "mem_0_x", strip to "mem"
+                            // For struct fields like "vertex_x", strip to "vertex"
+                            child_module
+                                .signals
+                                .iter()
+                                .find(|s| s.id == *sig_id)
+                                .map(|signal| {
+                                    let full_name = format!("{}.{}", inst_prefix, signal.name);
+                                    self.strip_flattened_index_suffix(&full_name)
+                                })
+                        }
                         LValue::BitSelect { base, .. } => {
                             // Array index like mem[wr_ptr]
                             // Extract base signal and strip flattened index suffix
