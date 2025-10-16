@@ -826,7 +826,6 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert the index expression to MIR
         let mir_index = self.convert_expression(index_expr)?;
-        eprintln!("   ✅ Converted index expression");
 
         // Convert the RHS expression to MIR
         let mir_rhs = self.convert_expression(&assign.rhs)?;
@@ -1853,7 +1852,59 @@ impl<'hir> HirToMir<'hir> {
                 None
             }
             hir::HirExpression::Index(base, index) => {
-                // Convert index expression to bit select
+                // BUG #27 FIX: Check if this is a constant index into a flattened array
+                // If so, directly reference the flattened signal instead of creating BitSelect
+                let mut try_const_array_index = || -> Option<Expression> {
+                    // Check if base is a flattened signal or port
+                    let (base_hir_id, is_signal) = match base.as_ref() {
+                        hir::HirExpression::Signal(id) => {
+                            if self.flattened_signals.contains_key(id) {
+                                (id.0, true)
+                            } else {
+                                return None;
+                            }
+                        }
+                        hir::HirExpression::Port(id) => {
+                            if self.flattened_ports.contains_key(id) {
+                                (id.0, false)
+                            } else {
+                                return None;
+                            }
+                        }
+                        _ => return None,
+                    };
+
+                    // Try to evaluate index as constant
+                    let index_val = self.try_eval_const_expr(index)?;
+
+                    // Get flattened fields
+                    let fields = if is_signal {
+                        self.flattened_signals.get(&hir::SignalId(base_hir_id))?
+                    } else {
+                        self.flattened_ports.get(&hir::PortId(base_hir_id))?
+                    };
+
+                    // Find the field with matching index
+                    let index_str = index_val.to_string();
+                    for field in fields {
+                        if field.field_path.first() == Some(&index_str) && field.field_path.len() == 1 {
+                            // Found it! Return direct signal/port reference
+                            return if is_signal {
+                                Some(Expression::Ref(LValue::Signal(SignalId(field.id))))
+                            } else {
+                                Some(Expression::Ref(LValue::Port(PortId(field.id))))
+                            };
+                        }
+                    }
+                    None
+                };
+
+                // Try constant array index optimization
+                if let Some(expr) = try_const_array_index() {
+                    return Some(expr);
+                }
+
+                // Fall back to bit select
                 let base_lval = self.expr_to_lvalue(base)?;
                 let index_expr = self.convert_expression(index)?;
                 Some(Expression::Ref(LValue::BitSelect {

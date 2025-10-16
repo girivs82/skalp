@@ -1,5 +1,65 @@
 # Known Issues and Limitations
 
+## ✅ FIXED: Array Index Expression Parsing (Bug #26 and #27)
+
+### Issues (FIXED in commits TBD)
+Two related bugs in array indexing that prevented correct array operations in sequential and combinational logic.
+
+**Bug #26** - HIR Builder Dropped Binary Expressions in Array Indices
+- **Issue**: When parsing `mem[wr_ptr % DEPTH]`, the HIR builder's `.find()` returned the first child (`wr_ptr` IdentExpr) instead of the complete expression (`wr_ptr % DEPTH` BinaryExpr)
+- **Impact**: Array writes used only the pointer variable without modulo, causing FIFO to only write to indices matching the pointer value
+- **Root Cause**: `IndexExpr` node had multiple children `[IdentExpr(wr_ptr), BinaryExpr(% DEPTH)]`, but `.find()` returns first match
+- **Fix**: Prefer `BinaryExpr` over `IdentExpr` when both are present - check for BinaryExpr first, fall back to simpler expressions
+- **File**: `crates/skalp-frontend/src/hir_builder.rs:1854-1914`
+
+**Bug #27** - Constant Array Reads Incorrectly Sliced
+- **Issue**: Reading `mem[0]` from flattened array created `mem_0[0:0]` (bit 0 only) instead of `mem_0` (full 32-bit value)
+- **Impact**: Array reads always returned 0 because only bit 0 was being read
+- **Root Cause**: Constant array index expressions were converted to `BitSelect` LValues, which then created slice nodes in SIR
+- **Fix**: When converting `Index` expressions, check if it's a constant index into a flattened array and directly reference the flattened signal (e.g., `mem[0]` → Signal(mem_0)) instead of creating BitSelect
+- **File**: `crates/skalp-mir/src/hir_to_mir.rs:1854-1914`
+
+### Example (NOW WORKS):
+```skalp
+signal mem: [bit[32]; 4]
+signal wr_idx: bit[3]
+
+on(clk.rise) {
+    if wr_en {
+        mem[wr_idx % 4] <= wr_data  // ✅ Bug #26 fix: modulo preserved
+    }
+}
+
+read_data = mem[0]  // ✅ Bug #27 fix: reads full 32 bits, not just bit 0
+```
+
+**Generated SystemVerilog (After Fixes)**:
+```systemverilog
+// Bug #26 fix: Modulo operation preserved in conditions
+mem_0 <= (((wr_idx % 4) == 0) ? wr_data : mem_0);
+mem_1 <= (((wr_idx % 4) == 1) ? wr_data : mem_1);
+mem_2 <= (((wr_idx % 4) == 2) ? wr_data : mem_2);
+mem_3 <= (((wr_idx % 4) == 3) ? wr_data : mem_3);
+
+// Bug #27 fix: Direct reference to flattened signal, no slicing
+assign read_data = mem_0;  // NOT mem_0[0]!
+```
+
+### Verification
+✅ Simple array modulo write test passes on GPU simulator
+✅ Constant index reads work correctly (read full value, not just bit 0)
+✅ SystemVerilog codegen produces correct modulo conditions
+✅ Metal shader generates correct modulo operations and comparisons
+
+### Status
+✅ **FIXED** - Both array indexing bugs resolved
+
+**Files Changed**:
+- `crates/skalp-frontend/src/hir_builder.rs:1859-1914` (Bug #26: prefer BinaryExpr in array indices)
+- `crates/skalp-mir/src/hir_to_mir.rs:1854-1914` (Bug #27: constant array index optimization)
+
+---
+
 ## ✅ FIXED: GPU Simulator Hierarchical Elaboration (Bugs #13-16)
 
 ### Issues (FIXED in commits c63fa8b, 9508b5d, 63f4fa7, a57eda4, f06cbc1)
@@ -456,56 +516,13 @@ Investigate AsyncFifo implementation logic (in `examples/graphics_pipeline/lib/a
 
 ---
 
-## ⚠️ CRITICAL: Modulo Operations Lost in Array Index Expressions (Bug #26)
-
-### Issue (IN PROGRESS)
-When generic entities with const parameters are specialized, modulo expressions in array indices like `mem[wr_ptr % DEPTH]` are being replaced with signal references that don't exist. This causes FIFO memories to only write to index 0.
-
-### Evidence
-Debug output shows the index expression in HIR is already simplified:
-```
-🔍 HIR index expression: Signal(SignalId(1))
-✅ Converted index expression: Ref(Signal(SignalId(127)))
-📊 Is Binary(Mod)? false
-```
-
-But SignalId(1) / SignalId(127) don't exist in the AsyncFifo_8 module's signals list.
-
-### Root Cause (Under Investigation)
-The expression `wr_ptr % DEPTH` where `DEPTH=8` is being replaced with a signal reference during monomorphization or an earlier pass. The replacement signal should hold the modulo result, but it's never created with its defining expression.
-
-**Trace**:
-1. Source: `mem[wr_ptr % DEPTH] <= wr_data` where `DEPTH` is a const generic parameter
-2. After specialization: HIR has `mem[Signal(SignalId(1))] <= wr_data`
-3. Signal(SignalId(1)) doesn't exist → wrong conditions generated
-4. HIR→MIR expansion generates: `if Signal(127) == 0 then mem_0 <= data`
-5. But Signal(127) is undefined → condition is always false or wrong
-
-### Impact
-- FIFO only writes to `mem[0]` when condition happens to match
-- Never writes to `mem[1..7]` because the modulo operation is lost
-- Test reads zeros because data never propagates through FIFO
-
-### Attempted Fix
-Initially tried to fix in MIR→SIR by handling `BitSelect` array assignments, but the problem is earlier - the HIR already has the wrong expression before MIR conversion.
-
-### Files to Investigate
-- `crates/skalp-frontend/src/monomorphization/engine.rs` - How const generic expressions are handled
-- `crates/skalp-frontend/src/monomorphization/collector.rs` - Expression substitution during specialization
-- `crates/skalp-mir/src/hir_to_mir.rs:752-909` - Array index expansion (correctly handles Signal refs, but those refs are invalid)
-
-### Possible Solutions
-1. Prevent extraction of array index expressions into temporary signals
-2. When extracting, ensure the signal is created with a continuous assignment
-3. During array expansion in HIR→MIR, inline the expression tree instead of using signal refs
-4. Fix the monomorphization pass to preserve expression trees for array indices
-
-### Priority
-CRITICAL - Prevents all arrays with dynamic indices using const generic expressions from working correctly
+## ⚠️ HISTORICAL: Modulo Operations in Array Index Expressions (Bug #26)
 
 ### Status
-🔍 **IN PROGRESS** - Root cause identified in monomorphization, fix location being determined
+✅ **FIXED** - See "Array Index Expression Parsing (Bug #26 and #27)" at the top of this document for the complete fix.
 
-**Debug Changes Made** (not committed):
-- Added debug output to show HIR/MIR index expressions in `hir_to_mir.rs:828-831`
-- Added debug output to trace statement types in `mir_to_sir.rs:3786-3791`
+### Original Issue Description
+Modulo expressions in array indices like `mem[wr_ptr % DEPTH]` were being dropped by the HIR builder, causing FIFO memories to only write to incorrect indices.
+
+### Fix Summary
+The HIR builder's `.find()` was returning the first child node (IdentExpr) instead of the complete expression tree (BinaryExpr). Fixed by preferring BinaryExpr when parsing array index expressions.

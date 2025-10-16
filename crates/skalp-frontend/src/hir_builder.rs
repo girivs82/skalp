@@ -1357,15 +1357,20 @@ impl HirBuilderContext {
                 }
             } else {
                 // Single index: signal[index]
+                // BUG#26 FIX: Prefer BinaryExpr over IdentExpr/LiteralExpr
+                // The parser creates children like [IdentExpr(wr_ptr), BinaryExpr(% DEPTH)]
+                // for expressions like `mem[wr_ptr % DEPTH]`. We need to use the BinaryExpr
+                // which contains the full expression tree, not just the first IdentExpr.
                 let index_expr = index_node
                     .children()
-                    .find(|n| {
-                        matches!(
-                            n.kind(),
-                            SyntaxKind::IdentExpr
-                                | SyntaxKind::LiteralExpr
-                                | SyntaxKind::BinaryExpr
-                        )
+                    .find(|n| n.kind() == SyntaxKind::BinaryExpr)
+                    .or_else(|| {
+                        index_node.children().find(|n| {
+                            matches!(
+                                n.kind(),
+                                SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr
+                            )
+                        })
                     })
                     .and_then(|n| self.build_expression(&n))?;
 
@@ -3531,6 +3536,7 @@ impl HirBuilderContext {
             if children.is_empty() {
                 return None;
             }
+
             let base = Box::new(self.build_expression(&base_expr)?);
             let index = Box::new(self.build_expression(&children[0])?);
             Some(HirExpression::Index(base, index))
