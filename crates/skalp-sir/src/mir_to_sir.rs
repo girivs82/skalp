@@ -3856,34 +3856,33 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::Assignment(assign) => {
                     // Extract the base signal name from the LValue
                     // For flattened arrays, we need to strip the index suffix
-                    let lhs_base = match &assign.lhs {
-                        LValue::Signal(sig_id) => {
-                            // Extract signal name and strip flattened suffix
-                            // For array elements like "mem_0_x", strip to "mem"
-                            // For struct fields like "vertex_x", strip to "vertex"
-                            child_module
-                                .signals
-                                .iter()
-                                .find(|s| s.id == *sig_id)
-                                .map(|signal| {
-                                    let full_name = format!("{}.{}", inst_prefix, signal.name);
-                                    self.strip_flattened_index_suffix(&full_name)
-                                })
-                        }
-                        LValue::BitSelect { base, .. } => {
-                            // Array index like mem[wr_ptr]
-                            // Extract base signal and strip flattened index suffix
-                            let extracted = self.extract_base_signal_for_instance(
-                                base,
-                                inst_prefix,
-                                child_module,
-                            );
-                            extracted
-                                .as_ref()
-                                .map(|base_name| self.strip_flattened_index_suffix(base_name))
-                        }
-                        _ => None,
-                    };
+                    let lhs_base =
+                        match &assign.lhs {
+                            LValue::Signal(sig_id) => {
+                                // Extract signal name and strip flattened suffix
+                                // For array elements like "mem_0_x", strip to "mem"
+                                // For struct fields like "vertex_x", strip to "vertex"
+                                child_module.signals.iter().find(|s| s.id == *sig_id).map(
+                                    |signal| {
+                                        let full_name = format!("{}.{}", inst_prefix, signal.name);
+                                        self.strip_flattened_index_suffix(&full_name)
+                                    },
+                                )
+                            }
+                            LValue::BitSelect { base, .. } => {
+                                // Array index like mem[wr_ptr]
+                                // Extract base signal and strip flattened index suffix
+                                let extracted = self.extract_base_signal_for_instance(
+                                    base,
+                                    inst_prefix,
+                                    child_module,
+                                );
+                                extracted
+                                    .as_ref()
+                                    .map(|base_name| self.strip_flattened_index_suffix(base_name))
+                            }
+                            _ => None,
+                        };
 
                     if let Some(lhs) = lhs_base {
                         // For comparison, also strip the target's flattened index suffix
@@ -4227,11 +4226,11 @@ impl<'a> MirToSirConverter<'a> {
             LValue::Signal(sig_id) => {
                 // LValue::Signal should only match signals, not ports
                 // (ports have their own LValue::Port variant)
-                if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
-                    Some(format!("{}.{}", inst_prefix, signal.name))
-                } else {
-                    None
-                }
+                child_module
+                    .signals
+                    .iter()
+                    .find(|s| s.id == *sig_id)
+                    .map(|signal| format!("{}.{}", inst_prefix, signal.name))
             }
             LValue::Port(port_id) => {
                 // Direct port reference - map to parent signal through port connections
