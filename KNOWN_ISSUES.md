@@ -19,6 +19,48 @@ MEDIUM - Affects testing but not production code generation
 
 ---
 
+## CRITICAL: HIR Builder Drops Continuous Assignments to Struct-Typed Output Ports
+
+### Issue
+Continuous assignments to struct-typed output ports in impl blocks are silently dropped and never appear in the HIR. Single-field output ports (like `bit`) work correctly.
+
+### Example (BROKEN):
+```skalp
+entity MyEntity {
+    out output: SimpleVertex  // Struct-typed output port
+}
+
+impl MyEntity {
+    signal out_vertex: SimpleVertex
+
+    output_valid = (state == 1)  // ✅ Works - single bit port
+    output = out_vertex           // ❌ Silently dropped - struct port
+}
+```
+
+### Evidence
+- HIR port ID for `output`: PortId(16)
+- Port successfully flattened into: output_x, output_y, output_z
+- NO assignment with LHS=Port(PortId(16)) found in HIR
+- Only assignments to single-field ports reach MIR
+
+### Root Cause
+The HIR builder (hir_builder.rs) `build_implementation()` function is filtering out or not parsing continuous assignments to struct-typed output ports. This may be:
+- Parser not recognizing the syntax
+- HIR builder deliberately filtering output port assignments
+- Scope/visibility issue where output ports aren't in symbol table during impl parsing
+
+### Files Affected
+- `/examples/graphics_pipeline/verif/testbenches/tb_pipeline_e2e.sk` - SimpleGeometryProcessor uses broken pattern
+
+### Priority
+CRITICAL - This silently generates incorrect hardware
+
+### Fix Required
+Investigate `build_implementation()` in `crates/skalp-frontend/src/hir_builder.rs` to understand why continuous assignments to struct-typed output ports aren't being added to the impl block's assignments list.
+
+---
+
 ## CRITICAL: Struct Field Assignments in Sequential Blocks
 
 ### Issue
