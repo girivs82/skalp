@@ -19,45 +19,49 @@ MEDIUM - Affects testing but not production code generation
 
 ---
 
-## CRITICAL: HIR Builder Drops Continuous Assignments to Struct-Typed Output Ports
+## ✅ FIXED: Keyword Port Names (Bugs #11 and #12)
 
-### Issue
-Continuous assignments to struct-typed output ports in impl blocks are silently dropped and never appear in the HIR. Single-field output ports (like `bit`) work correctly.
+### Issues (FIXED in commits dc55e0d and e5368e1)
+Two related bugs where reserved keywords used as port names were silently dropped:
+1. **Bug #11**: Instance connections using keyword port names were dropped
+2. **Bug #12**: Continuous assignments to keyword-named ports were dropped
 
-### Example (BROKEN):
+### Example (NOW WORKS):
 ```skalp
 entity MyEntity {
-    out output: SimpleVertex  // Struct-typed output port
+    out output: SimpleVertex  // "output" is a keyword
 }
 
 impl MyEntity {
     signal out_vertex: SimpleVertex
+    output = out_vertex  // ✅ Now works correctly
+}
 
-    output_valid = (state == 1)  // ✅ Works - single bit port
-    output = out_vertex           // ❌ Silently dropped - struct port
+let geometry = MyEntity {
+    output: geom_output  // ✅ Now works correctly
 }
 ```
 
-### Evidence
-- HIR port ID for `output`: PortId(16)
-- Port successfully flattened into: output_x, output_y, output_z
-- NO assignment with LHS=Port(PortId(16)) found in HIR
-- Only assignments to single-field ports reach MIR
-
 ### Root Cause
-The HIR builder (hir_builder.rs) `build_implementation()` function is filtering out or not parsing continuous assignments to struct-typed output ports. This may be:
-- Parser not recognizing the syntax
-- HIR builder deliberately filtering output port assignments
-- Scope/visibility issue where output ports aren't in symbol table during impl parsing
+Both `build_connection()` and `build_lvalue()` in hir_builder.rs only looked for
+`Ident` tokens. When keywords like "output" were used as port names, they were
+tokenized as `OutputKw` instead of `Ident`, causing the functions to return None.
 
-### Files Affected
-- `/examples/graphics_pipeline/verif/testbenches/tb_pipeline_e2e.sk` - SimpleGeometryProcessor uses broken pattern
+### Fix Applied
+Both functions now accept both identifier AND keyword tokens:
+```rust
+let name = node
+    .first_token_of_kind(SyntaxKind::Ident)
+    .or_else(|| {
+        node.children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind().is_keyword())
+    })
+    .map(|t| t.text().to_string())?;
+```
 
-### Priority
-CRITICAL - This silently generates incorrect hardware
-
-### Fix Required
-Investigate `build_implementation()` in `crates/skalp-frontend/src/hir_builder.rs` to understand why continuous assignments to struct-typed output ports aren't being added to the impl block's assignments list.
+### Status
+✅ **FIXED** - Reserved keywords can now be used as port names in all contexts
 
 ---
 
