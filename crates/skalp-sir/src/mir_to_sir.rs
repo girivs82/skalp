@@ -3455,7 +3455,10 @@ impl<'a> MirToSirConverter<'a> {
                     // This mirrors how the regular (non-hierarchical) conversion works
 
                     // Collect all targets assigned in this sequential block
-                    let mut targets = std::collections::HashSet::new();
+                    // CRITICAL: Use Vec instead of HashSet to preserve deterministic order
+                    // HashSet iteration order is unpredictable, causing FlipFlops to connect
+                    // to wrong data nodes (Bug #15)
+                    let mut targets = Vec::new();
                     for statement in &process.body.statements {
                         self.collect_assignment_targets_for_instance(
                             statement,
@@ -3465,14 +3468,9 @@ impl<'a> MirToSirConverter<'a> {
                             &mut targets,
                         );
                     }
-                    eprintln!(
-                        "📊 Collected {} targets for sequential process in '{}':",
-                        targets.len(),
-                        inst_prefix
-                    );
-                    for t in &targets {
-                        eprintln!("      - {}", t);
-                    }
+                    // Deduplicate while preserving order
+                    targets.sort();
+                    targets.dedup();
 
                     // For each target, synthesize conditional logic and create FlipFlop
                     // CRITICAL: If target is a base signal for a flattened array, we need to
@@ -3654,7 +3652,7 @@ impl<'a> MirToSirConverter<'a> {
         inst_prefix: &str,
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
-        targets: &mut std::collections::HashSet<String>,
+        targets: &mut Vec<String>,
     ) {
         match statement {
             Statement::Assignment(assign) => {
@@ -3675,7 +3673,7 @@ impl<'a> MirToSirConverter<'a> {
                 };
 
                 if let Some(sig_name) = lhs_signal {
-                    targets.insert(sig_name);
+                    targets.push(sig_name);
                 }
             }
             Statement::If(if_stmt) => {
