@@ -35,6 +35,39 @@ Four critical bugs in hierarchical elaboration for GPU simulator:
 
 ---
 
+## ⚠️ PARTIAL: GPU Simulator Sequential Array Assignments (Bug #19)
+
+### Issue
+Sequential array assignments in GPU simulator read zeros instead of written values.
+
+### Root Causes Identified & Fixed
+**✅ FIXED**: MIR→SIR conversion was not creating FlipFlop nodes for expanded array assignments
+
+The `collect_assignment_targets` function only looked at immediate statements, failing to recurse into nested If and Block statements. Expanded array assignments like:
+```
+if (wr_en) {
+    mem_0 <= (wr_addr == 0) ? wr_data : mem_0
+    mem_1 <= (wr_addr == 1) ? wr_data : mem_1
+}
+```
+
+Were nested in Block statements and weren't being collected as targets.
+
+**Fix Applied**: Created recursive `collect_targets_from_block` helper that processes nested If and Block statements.
+
+### Remaining Issue
+⚠️ FlipFlop nodes are now created, but MUX logic for conditional assignments is not generating correct values. The nodes (`node_3_out`, etc.) that should compute `(wr_addr == N) ? wr_data : mem_N` are producing zeros.
+
+Investigation needed in `synthesize_conditional_assignment` function.
+
+### Status
+🔄 **PARTIALLY FIXED** - FlipFlops created, but MUX logic needs investigation
+
+**Files Changed**:
+- `crates/skalp-sir/src/mir_to_sir.rs:1503-1551` (recursive target collection)
+
+---
+
 ## ✅ FIXED: Non-Deterministic Monomorphization (Bug #18)
 
 ### Issue (FIXED in commit TBD)
