@@ -895,6 +895,176 @@ impl<'hir> HirToMir<'hir> {
         Some(assignments)
     }
 
+    /// Expand array index read expressions for flattened arrays (Bug #9 - RHS counterpart to Bug #8)
+    ///
+    /// Handles cases like: rd_data = mem[rd_addr]
+    /// Where:
+    /// - LHS is a flattened struct: rd_data → rd_data_x, rd_data_y, rd_data_z
+    /// - RHS is an indexed flattened array: mem[rd_addr] → mem_0_x, ..., mem_7_z
+    ///
+    /// Expands to multiplexer logic for each field:
+    /// rd_data_x = (rd_addr == 0) ? mem_0_x : (rd_addr == 1) ? mem_1_x : ... : mem_7_x
+    fn try_expand_array_index_read_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<ContinuousAssign>> {
+        // Check if LHS is a flattened signal/port (struct)
+        let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
+            hir::HirLValue::Signal(id) => {
+                if self.flattened_signals.contains_key(id) {
+                    (id.0, true)
+                } else {
+                    return None;
+                }
+            }
+            hir::HirLValue::Port(id) => {
+                if self.flattened_ports.contains_key(id) {
+                    (id.0, false)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+
+        // Check if RHS is an Index expression
+        let (array_base, index_expr) = match &assign.rhs {
+            hir::HirExpression::Index(base, index) => (base.as_ref(), index.as_ref()),
+            _ => return None,
+        };
+
+        // Check if the array base is a flattened signal/port
+        let (array_hir_id, array_is_signal) = match array_base {
+            hir::HirExpression::Signal(id) => {
+                if self.flattened_signals.contains_key(id) {
+                    (id.0, true)
+                } else {
+                    return None;
+                }
+            }
+            hir::HirExpression::Port(id) => {
+                if self.flattened_ports.contains_key(id) {
+                    (id.0, false)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+
+        eprintln!("🔧 ARRAY INDEX READ EXPANSION:");
+        eprintln!("   LHS: {} (flattened struct)", if lhs_is_signal { "signal" } else { "port" });
+        eprintln!("   RHS: array[index] where array is {} (flattened array)", if array_is_signal { "signal" } else { "port" });
+
+        // Get flattened fields for LHS (struct) and array (array base)
+        let lhs_fields = if lhs_is_signal {
+            self.flattened_signals.get(&hir::SignalId(lhs_hir_id))?.clone()
+        } else {
+            self.flattened_ports.get(&hir::PortId(lhs_hir_id))?.clone()
+        };
+
+        let array_fields = if array_is_signal {
+            self.flattened_signals.get(&hir::SignalId(array_hir_id))?.clone()
+        } else {
+            self.flattened_ports.get(&hir::PortId(array_hir_id))?.clone()
+        };
+
+        // Group array fields by index
+        let mut array_by_index: std::collections::HashMap<String, Vec<FlattenedField>> =
+            std::collections::HashMap::new();
+
+        for field in array_fields {
+            if let Some(first_component) = field.field_path.first() {
+                if first_component.chars().all(|c| c.is_ascii_digit()) {
+                    array_by_index.entry(first_component.clone())
+                        .or_insert_with(Vec::new)
+                        .push(field);
+                }
+            }
+        }
+
+        eprintln!("   Array has {} indices", array_by_index.len());
+        eprintln!("   LHS has {} fields", lhs_fields.len());
+
+        // Convert index expression
+        let mir_index = self.convert_expression(index_expr)?;
+
+        // Generate continuous assignments with multiplexer logic
+        let mut assignments = Vec::new();
+
+        for lhs_field in &lhs_fields {
+            // Extract the field suffix for this LHS field
+            // For rd_data_x, we want "x"
+            // For rd_data_position_x, we want "position_x"
+            let field_suffix = lhs_field.field_path.join("_");
+
+            eprintln!("   Building mux for LHS field: {}", field_suffix);
+
+            // Build multiplexer by iterating from last index to first
+            // Result: (index == 0) ? mem_0_x : (index == 1) ? mem_1_x : ... : mem_7_x
+            let mut sorted_indices: Vec<_> = array_by_index.keys().collect();
+            sorted_indices.sort_by_key(|s| s.parse::<usize>().unwrap_or(0));
+
+            let mut mux_expr: Option<Expression> = None;
+
+            for idx_str in sorted_indices.iter().rev() {
+                let array_index: usize = idx_str.parse().ok()?;
+
+                // Find the field at this index that matches our LHS field suffix
+                let fields_at_index = array_by_index.get(*idx_str)?;
+                let matching_array_field = fields_at_index.iter().find(|f| {
+                    // Get the field suffix (everything after array index)
+                    let array_field_suffix: Vec<String> = f.field_path.iter()
+                        .skip(1)
+                        .cloned()
+                        .collect();
+                    let array_field_suffix_str = array_field_suffix.join("_");
+                    array_field_suffix_str == field_suffix
+                })?;
+
+                // Create reference to this array element's field
+                let array_element_ref = if array_is_signal {
+                    Expression::Ref(LValue::Signal(SignalId(matching_array_field.id)))
+                } else {
+                    Expression::Ref(LValue::Port(PortId(matching_array_field.id)))
+                };
+
+                if mux_expr.is_none() {
+                    // First iteration (highest index) - use as default
+                    mux_expr = Some(array_element_ref);
+                } else {
+                    // Subsequent iterations - wrap previous with conditional
+                    let condition = Expression::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(mir_index.clone()),
+                        right: Box::new(Expression::Literal(Value::Integer(array_index as i64))),
+                    };
+
+                    mux_expr = Some(Expression::Conditional {
+                        cond: Box::new(condition),
+                        then_expr: Box::new(array_element_ref),
+                        else_expr: Box::new(mux_expr.unwrap()),
+                    });
+                }
+            }
+
+            // Create LHS reference
+            let lhs_lval = if lhs_is_signal {
+                LValue::Signal(SignalId(lhs_field.id))
+            } else {
+                LValue::Port(PortId(lhs_field.id))
+            };
+
+            assignments.push(ContinuousAssign {
+                lhs: lhs_lval,
+                rhs: mux_expr?,
+            });
+        }
+
+        eprintln!("   ✅ Generated {} continuous assignments with mux logic", assignments.len());
+        Some(assignments)
+    }
+
     /// Adapt RHS expression to reference the correct field for an array element
     ///
     /// For example, if RHS is `Expression::Ref(LValue::Signal(wr_data))` and we need field "x",
@@ -1019,6 +1189,14 @@ impl<'hir> HirToMir<'hir> {
             hir::HirAssignmentType::Combinational
         ) {
             return vec![];
+        }
+
+        // CRITICAL FIX for Bug #9: Try to expand array index read assignments first
+        // This handles cases like: rd_data = mem[index]
+        // This is the RHS counterpart to Bug #8 (array index writes)
+        if let Some(assigns) = self.try_expand_array_index_read_assignment(assign) {
+            eprintln!("🔧 EXPANDED ARRAY INDEX READ into {} continuous assignments", assigns.len());
+            return assigns;
         }
 
         // Try to expand struct-to-struct assignments
@@ -1186,10 +1364,38 @@ impl<'hir> HirToMir<'hir> {
         let module_id = *self.entity_map.get(&instance.entity)?;
 
         // Convert connections
+        // CRITICAL FIX for Bug #10: Expand struct/array connections into flattened field connections
         let mut connections = std::collections::HashMap::new();
         for conn in &instance.connections {
-            if let Some(expr) = self.convert_expression(&conn.expr) {
-                connections.insert(conn.port.clone(), expr);
+            // Check if this port is flattened (struct or array type)
+            // If so, we need to create multiple connections for each flattened field
+
+            // First, try to get the HIR port from the entity to check its type
+            let entity = self.hir.as_ref()?.entities.iter().find(|e| e.id == instance.entity)?;
+
+            // Find the port in the entity
+            let port_opt = entity.ports.iter().find(|p| p.name == conn.port);
+
+            // Check if the RHS expression is a reference to a flattened signal/port
+            let expanded_connections = if let Some(port) = port_opt {
+                // Check if port type is a struct or array that gets flattened
+                let needs_expansion = matches!(port.port_type, hir::HirType::Struct(_) | hir::HirType::Array(_, _));
+
+                if needs_expansion {
+                    // Try to expand the connection
+                    eprintln!("🔧 EXPANDING INSTANCE CONNECTION: {} (type={:?})", conn.port, port.port_type);
+                    self.expand_instance_connection(&conn.port, &conn.expr)?
+                } else {
+                    // Simple connection
+                    vec![(conn.port.clone(), self.convert_expression(&conn.expr)?)]
+                }
+            } else {
+                // Port not found in entity, use default conversion
+                vec![(conn.port.clone(), self.convert_expression(&conn.expr)?)]
+            };
+
+            for (port_name, expr) in expanded_connections {
+                connections.insert(port_name, expr);
             }
         }
 
@@ -1199,6 +1405,57 @@ impl<'hir> HirToMir<'hir> {
             connections,
             parameters: std::collections::HashMap::new(),
         })
+    }
+
+    /// Expand a struct/array instance connection into multiple flattened connections
+    /// Example: rd_data: input_fifo_rd_data becomes:
+    ///   rd_data_x: input_fifo_rd_data_x
+    ///   rd_data_y: input_fifo_rd_data_y
+    ///   rd_data_z: input_fifo_rd_data_z
+    fn expand_instance_connection(
+        &self,
+        base_port_name: &str,
+        rhs_expr: &hir::HirExpression,
+    ) -> Option<Vec<(String, Expression)>> {
+        // Get the base signal/port from RHS
+        let (base_hir_id, is_signal) = match rhs_expr {
+            hir::HirExpression::Signal(id) => (id.0, true),
+            hir::HirExpression::Port(id) => (id.0, false),
+            _ => return None, // Complex expression, can't expand
+        };
+
+        // Get flattened fields for the RHS signal/port
+        let rhs_fields = if is_signal {
+            self.flattened_signals.get(&hir::SignalId(base_hir_id))?.clone()
+        } else {
+            self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
+        };
+
+        eprintln!("   RHS has {} flattened fields", rhs_fields.len());
+
+        // Create connections for each flattened field
+        let mut connections = Vec::new();
+        for rhs_field in &rhs_fields {
+            // Build port name: base_port_name + field_path
+            // For example: rd_data + ["x"] = rd_data_x
+            let port_field_name = if rhs_field.field_path.is_empty() {
+                base_port_name.to_string()
+            } else {
+                format!("{}_{}", base_port_name, rhs_field.field_path.join("_"))
+            };
+
+            // Create expression referencing the flattened RHS field
+            let rhs_field_expr = if is_signal {
+                Expression::Ref(LValue::Signal(SignalId(rhs_field.id)))
+            } else {
+                Expression::Ref(LValue::Port(PortId(rhs_field.id)))
+            };
+
+            eprintln!("      {} → signal/port ID {}", port_field_name, rhs_field.id);
+            connections.push((port_field_name, rhs_field_expr));
+        }
+
+        Some(connections)
     }
 
     /// Convert HIR if statement to MIR
