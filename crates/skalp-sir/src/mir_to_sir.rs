@@ -1669,6 +1669,19 @@ impl<'a> MirToSirConverter<'a> {
                     let nested_result = self.synthesize_conditional_assignment(nested_if, target);
                     nested_if_results.push(nested_result);
                 }
+                Statement::Block(block) => {
+                    // CRITICAL FIX: Recurse into nested blocks (same bug as Bug #19)
+                    // Expanded array assignments are wrapped in Block statements
+                    println!(
+                        "         📦 BLOCK found in branch for target={}, recursing...",
+                        target
+                    );
+                    if let Some(result) =
+                        self.process_branch_with_dependencies(&block.statements, target)
+                    {
+                        return Some(result);
+                    }
+                }
                 _ => {}
             }
         }

@@ -35,36 +35,58 @@ Four critical bugs in hierarchical elaboration for GPU simulator:
 
 ---
 
-## ⚠️ PARTIAL: GPU Simulator Sequential Array Assignments (Bug #19)
+## ✅ FIXED: GPU Simulator Sequential Array Assignments (Bug #19)
 
-### Issue
-Sequential array assignments in GPU simulator read zeros instead of written values.
+### Issues (FIXED in commits a1d087f, TBD)
+Sequential array assignments in GPU simulator were reading zeros instead of written values due to two related bugs in MIR→SIR conversion.
 
-### Root Causes Identified & Fixed
-**✅ FIXED**: MIR→SIR conversion was not creating FlipFlop nodes for expanded array assignments
+**Bug #19a** - Missing FlipFlop Nodes
+- **Issue**: `collect_assignment_targets` didn't recurse into nested If and Block statements
+- **Impact**: Expanded array assignments wrapped in Block statements weren't collected
+- **Fix**: Created recursive `collect_targets_from_block` helper
+- **File**: `crates/skalp-sir/src/mir_to_sir.rs:1503-1551`
 
-The `collect_assignment_targets` function only looked at immediate statements, failing to recurse into nested If and Block statements. Expanded array assignments like:
-```
-if (wr_en) {
-    mem_0 <= (wr_addr == 0) ? wr_data : mem_0
-    mem_1 <= (wr_addr == 1) ? wr_data : mem_1
+**Bug #19b** - Incorrect MUX Logic Generation
+- **Issue**: `process_branch_with_dependencies` didn't recurse into Block statements
+- **Impact**: Assignment expressions `(wr_addr == N) ? wr_data : mem_N` weren't found, causing simple signal refs instead of MUX trees
+- **Fix**: Added `Statement::Block` case that recurses into nested blocks
+- **File**: `crates/skalp-sir/src/mir_to_sir.rs:1672-1682`
+
+### Example (NOW WORKS):
+```skalp
+signal mem: [bit[32]; 4]
+on(clk.rise) {
+    if wr_en {
+        mem[wr_addr] <= wr_data  // ✅ Correctly generates MUX tree
+    }
 }
 ```
 
-Were nested in Block statements and weren't being collected as targets.
+**Generated SystemVerilog**:
+```systemverilog
+mem_0 <= ((wr_addr == 0) ? wr_data : mem_0);
+mem_1 <= ((wr_addr == 1) ? wr_data : mem_1);
+// etc.
+```
 
-**Fix Applied**: Created recursive `collect_targets_from_block` helper that processes nested If and Block statements.
+**Generated Metal Shader**:
+```metal
+node_32 = (wr_addr == 0)
+node_35 = node_32 ? wr_data : mem_0
+registers->mem_0 = node_35
+```
 
-### Remaining Issue
-⚠️ FlipFlop nodes are now created, but MUX logic for conditional assignments is not generating correct values. The nodes (`node_3_out`, etc.) that should compute `(wr_addr == N) ? wr_data : mem_N` are producing zeros.
-
-Investigation needed in `synthesize_conditional_assignment` function.
+### Verification
+✅ Simple array write test passes on GPU simulator
+✅ SystemVerilog codegen produces correct MUX logic
+✅ Metal shader produces correct conditional assignment trees
 
 ### Status
-🔄 **PARTIALLY FIXED** - FlipFlops created, but MUX logic needs investigation
+✅ **FIXED** - Both FlipFlop creation and MUX logic generation now work correctly
 
 **Files Changed**:
 - `crates/skalp-sir/src/mir_to_sir.rs:1503-1551` (recursive target collection)
+- `crates/skalp-sir/src/mir_to_sir.rs:1672-1682` (recursive MUX synthesis)
 
 ---
 
@@ -249,3 +271,30 @@ HIGH - This silently generates incorrect hardware
 - Enhance `try_expand_struct_assignment` in `crates/skalp-mir/src/hir_to_mir.rs` to handle field access on LHS
 - Ensure flattened signals are properly tracked through sequential assignments
 - Update `is_register` logic to recognize flattened field assignments
+
+---
+
+## ⚠️ OPEN: AsyncFifo GPU Simulator Tests Still Read Zeros (Bug #20)
+
+### Issue
+After fixing Bug #19 (MUX logic generation), AsyncFifo GPU simulator tests still read zeros instead of written values.
+
+### Status
+- ✅ FlipFlop nodes are created correctly (Bug #19a fixed)
+- ✅ MUX logic generates correct conditionals (Bug #19b fixed)
+- ✅ Simple array write tests pass
+- ❌ AsyncFifo-based tests (`test_async_fifo_clock_domain_crossing`, `test_graphics_pipeline_multi_clock_domains`) still fail
+
+### Hypothesis
+This appears to be a different issue from Bug #19 - likely related to:
+1. AsyncFifo implementation logic (read/write pointer management)
+2. Clock domain crossing synchronization
+3. Gray code conversion or pointer synchronization
+4. FIFO full/empty flag logic
+
+### Failing Tests
+- `test_async_fifo_clock_domain_crossing` - Direct AsyncFifo test
+- `test_graphics_pipeline_multi_clock_domains` - Full pipeline with AsyncFifos
+
+### Next Steps
+Investigate AsyncFifo sequential logic in GPU simulator to determine why data isn't being written/read correctly despite correct MUX synthesis.

@@ -42,7 +42,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // CRITICAL FIX: Convert HashSet to sorted Vec for deterministic ordering
         // This ensures that specialized entities get consistent EntityIds across runs
         let mut instantiations: Vec<Instantiation> = instantiations_set.into_iter().collect();
-        instantiations.sort_by(|a, b| a.mangled_name().cmp(&b.mangled_name()));
+        instantiations.sort_by_key(|a| a.mangled_name());
 
         // Step 2: Find next available entity ID and port ID
         let mut next_entity_id = hir.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1;
