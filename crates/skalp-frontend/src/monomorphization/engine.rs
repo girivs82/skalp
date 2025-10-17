@@ -709,6 +709,27 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 }
             }
 
+            // Index expression - recursively substitute base and index
+            // BUG #30 FIX: Array index expressions need const param substitution
+            // Example: mem[rd_ptr % DEPTH] where DEPTH is a const generic
+            HirExpression::Index(base, index) => {
+                let base_subst = self.substitute_expr(base, const_args);
+                let index_subst = self.substitute_expr(index, const_args);
+                HirExpression::Index(Box::new(base_subst), Box::new(index_subst))
+            }
+
+            // Range expression - recursively substitute base, high, and low
+            HirExpression::Range(base, high, low) => {
+                let base_subst = self.substitute_expr(base, const_args);
+                let high_subst = self.substitute_expr(high, const_args);
+                let low_subst = self.substitute_expr(low, const_args);
+                HirExpression::Range(
+                    Box::new(base_subst),
+                    Box::new(high_subst),
+                    Box::new(low_subst),
+                )
+            }
+
             // Other expressions pass through
             _ => expr.clone(),
         }

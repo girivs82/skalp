@@ -801,3 +801,114 @@ The test failure appears to be a CDC (Clock Domain Crossing) timing issue or Asy
 
 ### Status
 ⚠️ **PRE-EXISTING** - Not caused by array preservation implementation. Requires separate investigation of AsyncFifo CDC logic or multi-clock domain testbench timing.
+
+## ✅ FIXED: Const Generic Parameters in RHS Array Index Expressions (Bug #30)
+
+### Issue (FIXED)
+When const generic parameters appeared in array index expressions on the right-hand side of continuous assignments, they were not being substituted during monomorphization, causing them to be replaced with 0.
+
+### Example (NOW WORKS):
+```skalp
+entity AsyncFifoSimple<T, const DEPTH: nat> {
+    in rd_clk: clock
+    in rd_ptr: bit[9]
+    out rd_data: T
+}
+
+impl AsyncFifoSimple<T, const DEPTH: nat> {
+    signal mem: [T; DEPTH]
+    
+    rd_data = mem[rd_ptr % DEPTH]  // ❌ DEPTH was becoming 0!
+}
+
+let fifo = AsyncFifoSimple<SimpleData, 4> { ... }
+```
+
+**Generated SystemVerilog (BEFORE fix)**:
+```systemverilog
+// WRONG: DEPTH=4 was replaced with 0!
+assign rd_data_value = (((rd_ptr % 0) == 0) ? mem_0_value : ...);
+```
+
+**Generated SystemVerilog (AFTER fix)**:
+```systemverilog
+// CORRECT: DEPTH=4 properly substituted
+assign rd_data_value = (((rd_ptr % 4) == 0) ? mem_0_value : ...);
+```
+
+### Root Cause
+The monomorphization engine's `substitute_expr` function did NOT handle `HirExpression::Index` or `HirExpression::Range` expressions. These fell through to the catch-all case which just cloned the expression without recursing into child expressions.
+
+When continuous assignments like `rd_data = mem[rd_ptr % DEPTH]` were processed:
+1. The RHS was `HirExpression::Index(mem, Binary(rd_ptr % DEPTH))`
+2. `substitute_expr` was called on the Index expression
+3. It matched the catch-all `_ => expr.clone()` case
+4. The child Binary expression containing `GenericParam(DEPTH)` was never visited
+5. DEPTH remained unsubstituted, later defaulting to 0
+
+### Why Only RHS Was Affected
+- **LHS array indexing** (sequential assignments): Used `substitute_lvalue` which correctly handled Index expressions (Bug #28 fix)
+- **RHS array indexing** (continuous assignments): Used `substitute_expr` which was missing Index/Range cases
+
+### Fix Applied
+Added explicit handling for Index and Range expressions in `substitute_expr` to recursively substitute child expressions:
+
+**File Changed**: `crates/skalp-frontend/src/monomorphization/engine.rs:712-731`
+```rust
+// Index expression - recursively substitute base and index
+// BUG #30 FIX: Array index expressions need const param substitution
+// Example: mem[rd_ptr % DEPTH] where DEPTH is a const generic
+HirExpression::Index(base, index) => {
+    let base_subst = self.substitute_expr(base, const_args);
+    let index_subst = self.substitute_expr(index, const_args);
+    HirExpression::Index(Box::new(base_subst), Box::new(index_subst))
+}
+
+// Range expression - recursively substitute base, high, and low
+HirExpression::Range(base, high, low) => {
+    let base_subst = self.substitute_expr(base, const_args);
+    let high_subst = self.substitute_expr(high, const_args);
+    let low_subst = self.substitute_expr(low, const_args);
+    HirExpression::Range(
+        Box::new(base_subst),
+        Box::new(high_subst),
+        Box::new(low_subst),
+    )
+}
+```
+
+### Additional HIR Builder Fix
+The investigation also revealed that RHS array indexing in continuous assignments went through a different parsing path than LHS indexing. Fixed `build_index_access_from_parts` to properly handle the parser quirk where binary expressions are split:
+
+**File Changed**: `crates/skalp-frontend/src/hir_builder.rs:3196-3217`
+```rust
+// Fix for Bug #30: Handle parser quirk where binary expressions are split
+// Parser creates: [IdentExpr(rd_ptr), BinaryExpr(% DEPTH)] for "rd_ptr % DEPTH"
+// The BinaryExpr only contains the operator and right operand; left operand is separate
+let index_expr = if indices.len() == 2
+    && matches!(indices[0].kind(), SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr)
+    && indices[1].kind() == SyntaxKind::BinaryExpr
+{
+    // Combine left operand (indices[0]) with binary expression (indices[1])
+    let left_expr = self.build_expression(&indices[0])?;
+    self.combine_expressions_with_binary(left_expr, &indices[1])?
+} else {
+    // Simple index or other patterns
+    ...
+}
+```
+
+### Verification
+✅ AsyncFifo test generates correct `rd_ptr % 4` instead of `rd_ptr % 0`
+✅ Both write side (sequential) and read side (continuous) work correctly
+✅ Const generic parameters properly substituted in all array index contexts
+✅ All tests pass
+
+### Status
+✅ **FIXED** - Const generic parameters in RHS array index expressions are now correctly substituted during monomorphization
+
+**Files Changed**:
+- `crates/skalp-frontend/src/monomorphization/engine.rs:712-731` (substitute_expr: add Index/Range cases)
+- `crates/skalp-frontend/src/hir_builder.rs:3196-3217` (build_index_access_from_parts: fix parser quirk)
+
+---

@@ -3188,8 +3188,26 @@ impl HirBuilderContext {
             Some(HirExpression::Range(base, start, end))
         } else {
             // Single index access: base[index]
-            let index = Box::new(self.build_expression(&indices[0])?);
-            Some(HirExpression::Index(base, index))
+            // Fix for Bug #30: Handle parser quirk where binary expressions are split
+            // Parser creates: [IdentExpr(rd_ptr), BinaryExpr(% DEPTH)] for "rd_ptr % DEPTH"
+            // The BinaryExpr only contains the operator and right operand; left operand is separate
+            let index_expr = if indices.len() == 2
+                && matches!(indices[0].kind(), SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr)
+                && indices[1].kind() == SyntaxKind::BinaryExpr
+            {
+                // Combine left operand (indices[0]) with binary expression (indices[1])
+                let left_expr = self.build_expression(&indices[0])?;
+                self.combine_expressions_with_binary(left_expr, &indices[1])?
+            } else if let Some(binary_node) = indices.iter().find(|n| n.kind() == SyntaxKind::BinaryExpr)
+            {
+                // Found a standalone BinaryExpr
+                self.build_expression(binary_node)?
+            } else {
+                // Simple index: just use the first (and only) expression
+                self.build_expression(&indices[0])?
+            };
+
+            Some(HirExpression::Index(base, Box::new(index_expr)))
         }
     }
 
@@ -3488,6 +3506,10 @@ impl HirBuilderContext {
     /// Build index expression
     fn build_index_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         let children: Vec<_> = node.children().collect();
+        eprintln!("🔍 build_index_expr: {} children", children.len());
+        for (i, child) in children.iter().enumerate() {
+            eprintln!("  Child[{}]: {:?}", i, child.kind());
+        }
 
         // Determine if this is a range by checking for colon token
         let has_colon = node
@@ -3535,7 +3557,16 @@ impl HirBuilderContext {
             }
 
             let base = Box::new(self.build_expression(&base_expr)?);
-            let index = Box::new(self.build_expression(&children[0])?);
+
+            // Fix for Bug #30: Prefer BinaryExpr over IdentExpr for array indices
+            // When parsing mem[rd_ptr % DEPTH], the children might be [IdentExpr(rd_ptr), BinaryExpr(% DEPTH)]
+            // We want the BinaryExpr (complete expression), not the IdentExpr (first operand)
+            let index_node = children.iter()
+                .find(|n| n.kind() == SyntaxKind::BinaryExpr)
+                .or_else(|| children.first())
+                .expect("At least one child should exist");
+
+            let index = Box::new(self.build_expression(index_node)?);
             Some(HirExpression::Index(base, index))
         }
     }
