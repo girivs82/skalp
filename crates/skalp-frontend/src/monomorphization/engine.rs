@@ -272,10 +272,12 @@ impl<'hir> MonomorphizationEngine<'hir> {
             .iter()
             .map(|assignment| {
                 let mut new_assignment = assignment.clone();
+                // BUG #28 FIX: Substitute const params in BOTH LHS and RHS
+                new_assignment.lhs = self.substitute_lvalue(&assignment.lhs, &instantiation.const_args);
                 new_assignment.rhs =
                     self.substitute_expr(&assignment.rhs, &instantiation.const_args);
                 // Remap port IDs in both LHS and RHS
-                new_assignment.lhs = self.remap_lvalue_ports(&assignment.lhs, port_id_map);
+                new_assignment.lhs = self.remap_lvalue_ports(&new_assignment.lhs, port_id_map);
                 new_assignment.rhs = self.remap_expr_ports(&new_assignment.rhs, port_id_map);
                 new_assignment
             })
@@ -336,9 +338,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
         match stmt {
             HirStatement::Assignment(assign) => {
                 let mut new_assign = assign.clone();
+                // BUG #28 FIX: Substitute const params in BOTH LHS and RHS
+                new_assign.lhs = self.substitute_lvalue(&assign.lhs, const_args);
                 new_assign.rhs = self.substitute_expr(&assign.rhs, const_args);
                 // CRITICAL: Remap port IDs in assignment
-                new_assign.lhs = self.remap_lvalue_ports(&assign.lhs, port_id_map);
+                new_assign.lhs = self.remap_lvalue_ports(&new_assign.lhs, port_id_map);
                 new_assign.rhs = self.remap_expr_ports(&new_assign.rhs, port_id_map);
                 HirStatement::Assignment(new_assign)
             }
@@ -630,7 +634,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
             // Generic parameter reference - substitute with value
             HirExpression::GenericParam(name) => {
                 if let Some(value) = const_args.get(name) {
-                    // Convert ConstValue to HirExpression
                     self.const_value_to_expr(value)
                 } else {
                     expr.clone()
@@ -860,6 +863,40 @@ impl<'hir> MonomorphizationEngine<'hir> {
         HirEventTrigger {
             signal: new_signal,
             edge: trigger.edge.clone(),
+        }
+    }
+
+    /// Substitute const parameters in an LValue (BUG #28 FIX)
+    /// This is needed because LValues can contain index expressions with GenericParam references
+    /// Example: mem[wr_ptr % DEPTH] where DEPTH is a const generic parameter
+    #[allow(clippy::only_used_in_recursion)]
+    fn substitute_lvalue(
+        &self,
+        lvalue: &crate::hir::HirLValue,
+        const_args: &HashMap<String, ConstValue>,
+    ) -> crate::hir::HirLValue {
+        use crate::hir::HirLValue;
+
+        match lvalue {
+            HirLValue::Index(base, idx) => {
+                let new_base = self.substitute_lvalue(base, const_args);
+                let new_idx = self.substitute_expr(idx, const_args);  // BUG #28 FIX: substitute const params!
+                HirLValue::Index(Box::new(new_base), new_idx)
+            }
+            HirLValue::Range(base, high, low) => {
+                let new_base = self.substitute_lvalue(base, const_args);
+                let new_high = self.substitute_expr(high, const_args);  // BUG #28 FIX: substitute const params!
+                let new_low = self.substitute_expr(low, const_args);  // BUG #28 FIX: substitute const params!
+                HirLValue::Range(Box::new(new_base), new_high, new_low)
+            }
+            HirLValue::FieldAccess { base, field } => {
+                let new_base = self.substitute_lvalue(base, const_args);
+                HirLValue::FieldAccess {
+                    base: Box::new(new_base),
+                    field: field.clone(),
+                }
+            }
+            _ => lvalue.clone(),
         }
     }
 

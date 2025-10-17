@@ -60,6 +60,133 @@ assign read_data = mem_0;  // NOT mem_0[0]!
 
 ---
 
+## ✅ FIXED: Const Generic Parameters Replaced with 0 (Bug #28)
+
+### Issue (FIXED in commit TBD)
+When generic entities were instantiated with const generic parameters, the actual parameter values were being replaced with 0 in the generated code. This caused critical failures like modulo-by-zero and incorrect array sizes.
+
+### Evidence
+Compiling a simple AsyncFIFO test with `AsyncFifoSimple<TestData, 4>` (DEPTH=4) generates:
+```systemverilog
+// WRONG: Should be (wr_ptr % 4), not (wr_ptr % 0)!
+mem_2_value <= (((wr_ptr % 0) == 2) ? wr_data_value : mem_2_value);
+mem_1_value <= (((wr_ptr % 0) == 1) ? wr_data_value : mem_1_value);
+mem_3_value <= (((wr_ptr % 0) == 3) ? wr_data_value : mem_3_value);
+mem_0_value <= (((wr_ptr % 0) == 0) ? wr_data_value : mem_0_value);
+```
+
+The const generic parameter `DEPTH` (value 4) is being replaced with 0 throughout the generated code.
+
+### Impact
+- **CRITICAL**: Modulo by zero causes division errors
+- **CRITICAL**: Array indexing logic completely broken
+- **CRITICAL**: FIFO memory operations fail - all reads return zeros
+- Affects ALL code using const generic parameters
+
+### Root Cause (IDENTIFIED)
+The monomorphization collector silently fails to evaluate const generic arguments:
+
+**File**: `crates/skalp-frontend/src/monomorphization/collector.rs:245-249`
+```rust
+HirGenericType::Const(_const_type) => {
+    // Const parameter - evaluate the argument expression
+    if let Ok(value) = self.evaluator.eval(arg) {
+        const_args.insert(generic.name.clone(), value);
+    }
+    // ⚠️ BUG: If evaluation FAILS, silently skips!
+    // This leaves const_args missing the entry for DEPTH
+    // Later code likely defaults to 0 when the parameter is missing
+}
+```
+
+When `self.evaluator.eval(arg)` returns `Err`, the const_args entry is NOT inserted. The missing parameter then defaults to 0 during code generation.
+
+### Example (BROKEN):
+```skalp
+entity AsyncFifoSimple<T, const DEPTH: nat> {
+    in wr_data: T
+    out rd_data: T
+}
+
+impl AsyncFifoSimple<T, const DEPTH: nat> {
+    signal mem: [T; DEPTH]
+    signal wr_ptr: bit[9]
+
+    on(wr_clk.rise) {
+        if wr_en && !wr_full {
+            mem[wr_ptr % DEPTH] <= wr_data  // ❌ Becomes: mem[wr_ptr % 0]
+            wr_ptr <= wr_ptr + 1
+        }
+    }
+
+    rd_data = mem[rd_ptr % DEPTH]  // ❌ Becomes: mem[rd_ptr % 0]
+}
+
+// Instantiation
+let fifo = AsyncFifoSimple<TestData, 4> {  // DEPTH should be 4
+    wr_data: wr_data_struct,
+    rd_data: rd_data_struct
+}
+```
+
+### Debug Evidence
+From `/tmp/test_async_fifo_simple_out/design.sv`:
+- Line 78-81: All modulo operations show `% 0` instead of `% 4`
+- Line 65: Array read uses incorrect indexing due to modulo-by-zero
+
+### Files Involved
+- `crates/skalp-frontend/src/monomorphization/collector.rs:245-249` - Where const args should be collected
+- `crates/skalp-frontend/src/monomorphization/engine.rs` - Where const args should be bound during specialization
+- `crates/skalp-frontend/src/const_eval.rs` - The const expression evaluator
+
+### Hypothesis
+The const argument expression (literal `4`) may not be in the expected format for the evaluator:
+- Evaluator expects `HirExpression::Literal(4)`
+- Collector might be passing a different expression type
+- Or the evaluator doesn't have the right context to evaluate the expression
+
+### Fix Required
+1. Add debug logging to collector.rs:246-249 to see:
+   - What expression is being evaluated for DEPTH parameter
+   - Whether `evaluator.eval(arg)` succeeds or fails
+   - What error is returned if it fails
+2. Fix the evaluation to correctly extract literal values from generic arguments
+3. Add error handling - fail compilation instead of silently defaulting to 0
+
+### Priority
+**CRITICAL** - This blocks all functionality using const generic parameters, including:
+- AsyncFIFO (all depths broken)
+- Any parameterized array sizes
+- Any parameterized bit widths
+- Generic numeric computations
+
+### Status
+✅ **FIXED** - Monomorphization engine now correctly substitutes const generic parameters in LValue index expressions
+
+### Fix Applied
+The bug was NOT in the collector (which correctly evaluated const args) but in the monomorphization engine's implementation specialization. The engine was substituting const parameters in RHS expressions and conditions, but NOT in LHS index expressions.
+
+**Root Cause**: In `specialize_implementation` and `substitute_statement_with_ports`, assignments only called:
+- `substitute_expr` on the RHS ✅
+- `remap_lvalue_ports` on the LHS (only remaps port IDs, doesn't substitute const params) ❌
+
+**Solution**: Created new `substitute_lvalue` function that recursively substitutes const generic parameters in:
+- Index expressions: `mem[wr_ptr % DEPTH]` → `mem[wr_ptr % 4]`
+- Range expressions: `signal[HIGH:LOW]` → `signal[7:0]`
+- Field access expressions (recursively)
+
+Updated both regular assignments and event block assignments to call `substitute_lvalue` before `remap_lvalue_ports`.
+
+**Files Changed**:
+- `crates/skalp-frontend/src/monomorphization/engine.rs:870-904` (new `substitute_lvalue` function)
+- `crates/skalp-frontend/src/monomorphization/engine.rs:276` (regular assignments)
+- `crates/skalp-frontend/src/monomorphization/engine.rs:340` (event block assignments)
+
+### Test Case
+Created `/tmp/test_async_fifo_simple.sk` to isolate and reproduce the bug.
+
+---
+
 ## ✅ FIXED: GPU Simulator Hierarchical Elaboration (Bugs #13-16)
 
 ### Issues (FIXED in commits c63fa8b, 9508b5d, 63f4fa7, a57eda4, f06cbc1)

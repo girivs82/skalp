@@ -127,8 +127,11 @@ impl<'hir> HirToMir<'hir> {
                     hir_port.physical_constraints.clone(),
                 );
 
-                // If we have multiple flattened ports, store the flattening info
-                if flattened_ports.len() > 1 {
+                // BUG #29 FIX: Track ALL flattened composite types, not just multi-field ones
+                // For single-field structs like TestData{value}, we still need to track the flattening
+                // because the type changed (Struct→Bit) and the name changed (rd_data→rd_data_value)
+                // This matches the signal flattening logic (Bug #21 fix)
+                if !flattened_fields.is_empty() {
                     self.flattened_ports
                         .insert(hir_port.id, flattened_fields.clone());
                 }
@@ -964,16 +967,6 @@ impl<'hir> HirToMir<'hir> {
             _ => return None,
         };
 
-        eprintln!("🔧 ARRAY INDEX READ EXPANSION:");
-        eprintln!(
-            "   LHS: {} (flattened struct)",
-            if lhs_is_signal { "signal" } else { "port" }
-        );
-        eprintln!(
-            "   RHS: array[index] where array is {} (flattened array)",
-            if array_is_signal { "signal" } else { "port" }
-        );
-
         // Get flattened fields for LHS (struct) and array (array base)
         let lhs_fields = if lhs_is_signal {
             self.flattened_signals
@@ -1008,9 +1001,6 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        eprintln!("   Array has {} indices", array_by_index.len());
-        eprintln!("   LHS has {} fields", lhs_fields.len());
-
         // Convert index expression
         let mir_index = self.convert_expression(index_expr)?;
 
@@ -1022,8 +1012,6 @@ impl<'hir> HirToMir<'hir> {
             // For rd_data_x, we want "x"
             // For rd_data_position_x, we want "position_x"
             let field_suffix = lhs_field.field_path.join("_");
-
-            eprintln!("   Building mux for LHS field: {}", field_suffix);
 
             // Build multiplexer by iterating from last index to first
             // Result: (index == 0) ? mem_0_x : (index == 1) ? mem_1_x : ... : mem_7_x
@@ -1084,10 +1072,6 @@ impl<'hir> HirToMir<'hir> {
             });
         }
 
-        eprintln!(
-            "   ✅ Generated {} continuous assignments with mux logic",
-            assignments.len()
-        );
         Some(assignments)
     }
 
@@ -1901,6 +1885,126 @@ impl<'hir> HirToMir<'hir> {
 
                 // Try constant array index optimization
                 if let Some(expr) = try_const_array_index() {
+                    return Some(expr);
+                }
+
+                // BUG #29 FIX: Check if this is a dynamic index into a flattened array
+                // If so, generate a MUX tree instead of BitSelect
+                let mut try_dynamic_array_index = || -> Option<Expression> {
+                    // Check if base is a flattened signal or port
+                    let (base_hir_id, is_signal) = match base.as_ref() {
+                        hir::HirExpression::Signal(id) => {
+                            if self.flattened_signals.contains_key(id) {
+                                (id.0, true)
+                            } else {
+                                return None;
+                            }
+                        }
+                        hir::HirExpression::Port(id) => {
+                            if self.flattened_ports.contains_key(id) {
+                                (id.0, false)
+                            } else {
+                                return None;
+                            }
+                        }
+                        _ => return None,
+                    };
+
+                    // Get flattened fields and clone to avoid borrow issues
+                    let fields = if is_signal {
+                        self.flattened_signals.get(&hir::SignalId(base_hir_id))?.clone()
+                    } else {
+                        self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
+                    };
+
+                    // Group fields by array index (first component of path)
+                    // For simple arrays: ["0"], ["1"], etc.
+                    // For arrays of structs: ["0", "x"], ["0", "y"], ["1", "x"], ["1", "y"], etc.
+                    use std::collections::HashMap as StdHashMap;
+                    let mut array_groups: StdHashMap<usize, Vec<FlattenedField>> = StdHashMap::new();
+
+                    for field in &fields {
+                        if let Some(first) = field.field_path.first() {
+                            // Check if first component is numeric (array index)
+                            if first.chars().all(|c| c.is_ascii_digit()) {
+                                if let Ok(idx) = first.parse::<usize>() {
+                                    array_groups.entry(idx).or_default().push(field.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    // Must have at least one array element
+                    if array_groups.is_empty() {
+                        return None;
+                    }
+
+                    // Convert array_groups to sorted vec
+                    let mut array_elements: Vec<(usize, Vec<FlattenedField>)> = array_groups.into_iter().collect();
+                    array_elements.sort_by_key(|(idx, _)| *idx);
+
+                    // Convert index expression to MIR (needs mutable borrow)
+                    let mir_index = self.convert_expression(index)?;
+
+                    // NOTE: For arrays of structs, we can't build struct literals in MIR
+                    // because MIR only has scalar expressions. The array read should be
+                    // handled by try_expand_array_index_read_assignment which creates
+                    // multiple assignments (one per struct field).
+                    //
+                    // This code path is only for simple scalar arrays where a single
+                    // MUX tree can select the value.
+
+                    // Build element expressions - only handle simple scalar arrays here
+                    let mut element_exprs: Vec<(usize, Expression)> = Vec::new();
+
+                    for (array_idx, group_fields) in &array_elements {
+                        if group_fields.len() == 1 && group_fields[0].field_path.len() == 1 {
+                            // Simple scalar array element - just reference the field
+                            let field = &group_fields[0];
+                            let elem_expr = if is_signal {
+                                Expression::Ref(LValue::Signal(SignalId(field.id)))
+                            } else {
+                                Expression::Ref(LValue::Port(PortId(field.id)))
+                            };
+                            element_exprs.push((*array_idx, elem_expr));
+                        } else {
+                            // Array of structs - this should be handled by try_expand_array_index_read_assignment
+                            // instead of here. Fall back to BitSelect.
+                            return None;
+                        }
+                    }
+
+                    // Build MUX tree: (idx == 0) ? elem_0 : ((idx == 1) ? elem_1 : ...)
+                    let mut mux_expr = None;
+
+                    // Build from last to first (nested ternaries)
+                    for (array_idx, elem_expr) in element_exprs.iter().rev() {
+                        if let Some(else_expr) = mux_expr {
+                            // Build condition: index == array_idx
+                            let index_literal = Expression::Literal(Value::Integer(*array_idx as i64));
+                            let condition = Expression::Binary {
+                                op: BinaryOp::Equal,
+                                left: Box::new(mir_index.clone()),
+                                right: Box::new(index_literal),
+                            };
+
+                            // Build ternary: condition ? elem_expr : else_expr
+                            mux_expr = Some(Expression::Conditional {
+                                cond: Box::new(condition),
+                                then_expr: Box::new(elem_expr.clone()),
+                                else_expr: Box::new(else_expr),
+                            });
+                        } else {
+                            // Last element (no else branch)
+                            mux_expr = Some(elem_expr.clone());
+                        }
+                    }
+
+                    mux_expr
+                };
+
+                // Try dynamic array index expansion
+                if let Some(expr) = try_dynamic_array_index() {
                     return Some(expr);
                 }
 
