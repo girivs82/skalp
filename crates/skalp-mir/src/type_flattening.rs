@@ -43,6 +43,39 @@ impl TypeFlattener {
         }
     }
 
+    /// Check if a type is a scalar type (no composite structure)
+    ///
+    /// Scalar types include: Bit, Bool, Logic, Int, Nat, Clock, Reset, Event, Float*
+    /// These can be used as array elements without further flattening.
+    fn is_scalar_type(data_type: &DataType) -> bool {
+        matches!(
+            data_type,
+            DataType::Bit(_)
+                | DataType::Bool
+                | DataType::Logic(_)
+                | DataType::Int(_)
+                | DataType::Nat(_)
+                | DataType::Clock { .. }
+                | DataType::Reset { .. }
+                | DataType::Event
+                | DataType::Float16
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::BitParam { .. }
+                | DataType::LogicParam { .. }
+                | DataType::IntParam { .. }
+                | DataType::NatParam { .. }
+        )
+    }
+
+    /// Check if we should preserve an array structure instead of flattening it
+    ///
+    /// Arrays of scalar types should be preserved to allow synthesis tools
+    /// to choose optimal implementation (MUX trees, distributed RAM, block RAM, etc.)
+    fn should_preserve_array(element_type: &DataType) -> bool {
+        Self::is_scalar_type(element_type)
+    }
+
     /// Flatten a port with composite type into multiple scalar ports
     ///
     /// # Arguments
@@ -262,20 +295,38 @@ impl TypeFlattener {
                 }
             }
             DataType::Array(element_type, size) => {
-                // Expand arrays into individual elements
-                for i in 0..*size {
-                    let elem_name = format!("{}_{}", name, i);
-                    let mut new_path = field_path.clone();
-                    new_path.push(i.to_string());
-                    self.flatten_port_recursive(
-                        &elem_name,
-                        element_type,
+                // NEW: Preserve arrays of scalar types for synthesis flexibility
+                // Arrays of scalar types become packed arrays in SystemVerilog,
+                // allowing synthesis tools to choose optimal implementation
+                // (MUX trees, distributed RAM, block RAM, etc.)
+                if Self::should_preserve_array(element_type) {
+                    // Keep array intact - create port with array type
+                    self.create_leaf_port(
+                        name,
+                        port_type,
                         direction,
                         physical_constraints,
-                        new_path,
+                        field_path,
                         ports,
                         fields,
                     );
+                } else {
+                    // Arrays of composite types (structs, vectors) still get flattened
+                    // Example: [Vec3; 4] → elem_0_x, elem_0_y, elem_0_z, elem_1_x, ...
+                    for i in 0..*size {
+                        let elem_name = format!("{}_{}", name, i);
+                        let mut new_path = field_path.clone();
+                        new_path.push(i.to_string());
+                        self.flatten_port_recursive(
+                            &elem_name,
+                            element_type,
+                            direction,
+                            physical_constraints,
+                            new_path,
+                            ports,
+                            fields,
+                        );
+                    }
                 }
             }
             DataType::Enum(enum_type) => {
@@ -375,6 +426,10 @@ impl TypeFlattener {
         signals: &mut Vec<Signal>,
         fields: &mut Vec<FlattenedField>,
     ) {
+        eprintln!(
+            "🔍 flatten_signal_recursive: name='{}', type={:?}",
+            name, signal_type
+        );
         match signal_type {
             DataType::Struct(struct_type) => {
                 // Recursively flatten each struct field
@@ -420,20 +475,43 @@ impl TypeFlattener {
                 }
             }
             DataType::Array(element_type, size) => {
-                // Expand arrays into individual elements
-                for i in 0..*size {
-                    let elem_name = format!("{}_{}", name, i);
-                    let mut new_path = field_path.clone();
-                    new_path.push(i.to_string());
-                    self.flatten_signal_recursive(
-                        &elem_name,
-                        element_type,
-                        None,
+                // NEW: Preserve arrays of scalar types for synthesis flexibility
+                // Arrays of scalar types become packed arrays in SystemVerilog,
+                // allowing synthesis tools to choose optimal implementation
+                let should_preserve = Self::should_preserve_array(element_type);
+                eprintln!(
+                    "🔍 ARRAY FLATTEN: element_type={:?}, should_preserve={}",
+                    element_type, should_preserve
+                );
+                if should_preserve {
+                    // Keep array intact - create signal with array type
+                    eprintln!("   ✅ PRESERVING array '{}' as single signal", name);
+                    self.create_leaf_signal(
+                        name,
+                        signal_type,
+                        initial,
                         clock_domain,
-                        new_path,
+                        field_path,
                         signals,
                         fields,
                     );
+                } else {
+                    eprintln!("   ❌ FLATTENING array '{}' into {} elements", name, size);
+                    // Arrays of composite types still get flattened
+                    for i in 0..*size {
+                        let elem_name = format!("{}_{}", name, i);
+                        let mut new_path = field_path.clone();
+                        new_path.push(i.to_string());
+                        self.flatten_signal_recursive(
+                            &elem_name,
+                            element_type,
+                            None,
+                            clock_domain,
+                            new_path,
+                            signals,
+                            fields,
+                        );
+                    }
                 }
             }
             DataType::Enum(enum_type) => {

@@ -214,11 +214,23 @@ pub fn is_scalar_type(data_type: &DataType) -> bool {
 
 /// Check if a data type is composite and needs flattening
 ///
+/// Arrays of scalar types are intentionally preserved (not considered composite)
+/// to allow synthesis tools to choose optimal implementation.
+///
 /// # Returns
-/// true if the type needs flattening (Struct, Enum, Union, Vec*, Array)
-/// false if the type is already scalar
+/// true if the type needs flattening (Struct, Enum, Union, Vec*, Array of composites)
+/// false if the type is synthesis-friendly (scalar or array of scalars)
 pub fn is_composite_type(data_type: &DataType) -> bool {
-    !is_scalar_type(data_type)
+    match data_type {
+        // Arrays of scalars are preserved - not composite
+        DataType::Array(element_type, _) => {
+            // Only consider array composite if its element type is composite
+            // This allows `[bit[32]; 16]` but rejects `[Vec3; 4]`
+            is_composite_type(element_type)
+        }
+        // All other cases: scalar types return false, composite types return true
+        _ => !is_scalar_type(data_type),
+    }
 }
 
 #[cfg(test)]
@@ -334,12 +346,24 @@ mod tests {
 
     #[test]
     fn test_is_composite_type() {
+        // Scalar types are not composite
         assert!(!is_composite_type(&DataType::Bit(32)));
+        assert!(!is_composite_type(&DataType::Float32));
+
+        // Vector types are composite
         assert!(is_composite_type(&DataType::Vec3(Box::new(
             DataType::Float32
         ))));
-        assert!(is_composite_type(&DataType::Array(
+
+        // Arrays of scalars are NOT composite (intentionally preserved)
+        assert!(!is_composite_type(&DataType::Array(
             Box::new(DataType::Bit(8)),
+            4
+        )));
+
+        // Arrays of composites ARE composite (need flattening)
+        assert!(is_composite_type(&DataType::Array(
+            Box::new(DataType::Vec3(Box::new(DataType::Float32))),
             4
         )));
     }

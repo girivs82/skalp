@@ -225,17 +225,17 @@ mod simulation_suite {
 
         // Read data back
         for i in 0..8u8 {
-            sim.set_input("rd_en", vec![1]).await.unwrap();
+            // Read the data BEFORE advancing rd_ptr
+            // rd_data is combinational: rd_data = memory[rd_ptr]
+            let data = sim.get_output("rd_data").await.unwrap();
+            assert_eq!(data[0], i * 10, "Read data should match written data");
 
-            // Clock to propagate the read
+            // Now assert rd_en and clock to advance rd_ptr for next read
+            sim.set_input("rd_en", vec![1]).await.unwrap();
             sim.set_input("clk", vec![0]).await.unwrap();
             sim.step_simulation().await.unwrap();
             sim.set_input("clk", vec![1]).await.unwrap();
             sim.step_simulation().await.unwrap();
-
-            // Now read the data
-            let data = sim.get_output("rd_data").await.unwrap();
-            assert_eq!(data[0], i * 10, "Read data should match written data");
         }
 
         sim.set_input("rd_en", vec![0]).await.unwrap();

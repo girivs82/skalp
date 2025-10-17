@@ -7,10 +7,12 @@
 //! produce well-formed MIR.
 //!
 //! **Key Invariants:**
-//! 1. **Scalar Types Only:** All ports and signals must have scalar types
-//!    (no DataType::Struct, DataType::Vec*, DataType::Array)
-//! 2. **Type Flattening Complete:** All composite types should be flattened
-//!    during HIR→MIR transformation
+//! 1. **Synthesis-Friendly Types:** All ports and signals must be synthesis-friendly
+//!    (scalars or arrays of scalars, no Struct/Vec*/Enum/Union/Array-of-composites)
+//! 2. **Type Flattening Complete:** Composite types (except arrays of scalars) should
+//!    be flattened during HIR→MIR transformation
+//! 3. **Array Preservation:** Arrays of scalar types are intentionally preserved
+//!    to allow synthesis tools to choose optimal implementation
 //!
 //! **Usage:**
 //! Call `validate_mir()` after HIR→MIR transformation to verify invariants.
@@ -299,15 +301,56 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_array_type_fails() {
+    fn test_validate_array_of_scalars_ok() {
+        // Arrays of scalar types are intentionally preserved
+        let module = Module {
+            id: ModuleId(0),
+            name: "GoodModule".to_string(),
+            parameters: vec![],
+            ports: vec![Port {
+                id: PortId(0),
+                name: "data_array".to_string(),
+                port_type: DataType::Array(Box::new(DataType::Bit(8)), 16),
+                direction: PortDirection::Input,
+                physical_constraints: None,
+            }],
+            signals: vec![Signal {
+                id: SignalId(0),
+                name: "memory".to_string(),
+                signal_type: DataType::Array(Box::new(DataType::Bit(32)), 4),
+                initial: None,
+                clock_domain: None,
+            }],
+            variables: vec![],
+            processes: vec![],
+            assignments: vec![],
+            instances: vec![],
+            clock_domains: vec![],
+        };
+
+        let mir = Mir {
+            name: "test_design".to_string(),
+            modules: vec![module],
+        };
+
+        // Should pass - arrays of scalars are allowed
+        assert!(validate_mir(&mir).is_ok());
+    }
+
+    #[test]
+    fn test_validate_array_of_composites_fails() {
+        // Arrays of composite types (like Vec3) should still be flattened
         let module = Module {
             id: ModuleId(0),
             name: "BadModule".to_string(),
             parameters: vec![],
             ports: vec![Port {
                 id: PortId(0),
-                name: "data_array".to_string(),
-                port_type: DataType::Array(Box::new(DataType::Bit(8)), 16),
+                name: "vec_array".to_string(),
+                port_type: DataType::Array(
+                    Box::new(DataType::Vec3(Box::new(DataType::Float32))),
+                    4,
+                ),
                 direction: PortDirection::Input,
                 physical_constraints: None,
             }],
@@ -326,5 +369,17 @@ mod tests {
 
         let result = validate_mir(&mir);
         assert!(result.is_err());
+
+        if let Err(ValidationError::CompositePortType {
+            module_name,
+            port_name,
+            ..
+        }) = result
+        {
+            assert_eq!(module_name, "BadModule");
+            assert_eq!(port_name, "vec_array");
+        } else {
+            panic!("Expected CompositePortType error");
+        }
     }
 }

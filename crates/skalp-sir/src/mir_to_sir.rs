@@ -2505,9 +2505,21 @@ impl<'a> MirToSirConverter<'a> {
         let array_signal = self.node_to_signal_ref(array);
         let index_signal = self.node_to_signal_ref(index);
 
-        // Get the array signal to determine element width
-        // For now, assume 8-bit elements (we'll need to track this properly later)
-        let element_width = 8; // TODO: Get from array type info
+        // Get the array signal to determine element width and type
+        let array_type = self.get_signal_type(&array_signal.signal_id);
+        let (element_type, element_width) = match &array_type {
+            SirType::Array(elem_type, _size) => {
+                let width = elem_type.width();
+                ((**elem_type).clone(), width)
+            }
+            _ => {
+                eprintln!(
+                    "⚠️  WARNING: Array read from non-array type {:?}, defaulting to 8-bit",
+                    array_type
+                );
+                (SirType::Bits(8), 8)
+            }
+        };
 
         let output_signal_name = format!("node_{}_out", node_id);
         let output_signal = SignalRef {
@@ -2517,7 +2529,7 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.signals.push(SirSignal {
             name: output_signal_name,
             width: element_width,
-            sir_type: SirType::Bits(element_width),
+            sir_type: element_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),

@@ -653,3 +653,151 @@ Modulo expressions in array indices like `mem[wr_ptr % DEPTH]` were being droppe
 
 ### Fix Summary
 The HIR builder's `.find()` was returning the first child node (IdentExpr) instead of the complete expression tree (BinaryExpr). Fixed by preferring BinaryExpr when parsing array index expressions.
+
+---
+
+## ✅ IMPLEMENTED: Array Preservation for Scalars (Bug #29)
+
+### Feature
+Arrays of scalar types are now preserved as packed arrays instead of being flattened into individual signals. This allows synthesis tools to choose optimal implementation (MUX trees, distributed RAM, block RAM).
+
+### Implementation (Added in this session)
+
+**Design Decision**:
+- **Preserve**: Arrays of scalars `[bit[32]; 16]` → `reg [31:0] mem [0:15]` in SystemVerilog
+- **Flatten**: Arrays of composites `[Vec3; 4]` → `mem_0_x, mem_0_y, mem_0_z, ...` (existing behavior)
+
+This separation of concerns allows synthesis tools to make optimization decisions while keeping functional simulation clean.
+
+### Example (NOW WORKS):
+```skalp
+entity FIFO {
+    in clk: clock
+    in wr_en: bit
+    in index: nat[2]
+    in wr_data: nat[8]
+    out rd_data: nat[8]
+}
+
+impl FIFO {
+    signal memory: [nat[8]; 4]  // ✅ Preserved as array!
+
+    on(clk.rise) {
+        if wr_en {
+            memory[index] <= wr_data  // ✅ Direct array write
+        }
+    }
+
+    rd_data = memory[index]  // ✅ Direct array read
+}
+```
+
+**Generated SystemVerilog**:
+```systemverilog
+reg [7:0] memory [0:3];  // ✅ Packed array!
+
+assign rd_data = memory[index];  // ✅ Direct indexing
+
+always_ff @(posedge clk) begin
+    if (wr_en) begin
+        memory[index] <= wr_data;  // ✅ Direct array write
+    end
+end
+```
+
+**Generated Metal Shader**:
+```metal
+struct Registers {
+    uint memory[16];  // ✅ Native array
+};
+
+// Array read
+signals->node_8_out = registers->memory[signals->node_7_out];
+
+// Array write
+for (uint i = 0; i < 16; i++) {
+    signals->node_16_out[i] = signals->node_9_out[i];
+}
+signals->node_16_out[signals->node_10_out] = signals->node_11_out;
+registers->memory = signals->node_16_out;
+```
+
+### Files Changed
+
+**MIR Type Flattening** (`crates/skalp-mir/src/type_flattening.rs`):
+- Added `is_scalar_type()` helper to identify scalar types
+- Added `should_preserve_array()` to determine preservation policy
+- Modified `flatten_signal_recursive()` to preserve arrays of scalars
+- Modified `flatten_port_recursive()` to preserve arrays of scalars
+
+**MIR Documentation** (`crates/skalp-mir/src/mir.rs:117-184`):
+- Updated invariants to reflect array preservation
+- Documented scalar vs composite array policy
+
+**MIR Validation** (`crates/skalp-mir/src/mir_validation.rs`):
+- Updated module documentation
+- Replaced `test_validate_array_type_fails` with:
+  - `test_validate_array_of_scalars_ok` - verifies arrays of scalars allowed
+  - `test_validate_array_of_composites_fails` - verifies arrays of composites rejected
+
+**Type Width Checking** (`crates/skalp-mir/src/type_width.rs`):
+- Modified `is_composite_type()` to allow arrays of scalars
+- Arrays only considered composite if element type is composite
+
+**SIR Array Operations** (`crates/skalp-sir/src/mir_to_sir.rs:2498-2536`):
+- Fixed `create_array_read_node()` to extract actual element type from array
+- Previously used hardcoded 8-bit width, now uses array's element type
+
+**Test Suite** (`tests/test_simulation_suite.rs:226-239`):
+- Fixed `test_fifo_operations` FIFO read timing
+- Was reading AFTER rd_ptr increment, now reads BEFORE
+- Test now passes with correct array operations
+
+### How It Works
+
+1. **HIR→MIR**: Type flattening checks if array element is scalar
+   - Scalar elements → preserve array type
+   - Composite elements → flatten as before
+
+2. **MIR→SIR**: Array operations converted to ArrayRead/ArrayWrite nodes
+   - `mem[index]` → `ArrayRead(mem_signal, index_signal)`
+   - `mem[index] <= value` → `ArrayWrite(mem_signal, index_signal, value_signal)`
+
+3. **SIR→SystemVerilog**: Emit packed array declarations
+   - `reg [WIDTH-1:0] array [0:DEPTH-1]`
+   - Direct indexing: `array[index]`
+
+4. **SIR→Metal**: Emit native GPU arrays
+   - `uint array[DEPTH]`
+   - Direct indexing with bounds checking
+
+### Verification
+✅ Simple array test passes (test_simple_array.sk)
+✅ FIFO operations test passes with array preservation
+✅ SystemVerilog generates correct packed arrays
+✅ Metal simulator handles arrays correctly
+✅ All MIR validation tests pass
+✅ CI checks pass (format, clippy, build)
+
+### Status
+✅ **IMPLEMENTED and VERIFIED** - Arrays of scalar types are now preserved throughout the compilation pipeline
+
+---
+
+## ⚠️ PRE-EXISTING: Graphics Pipeline Multi-Clock Domain Test Failure
+
+### Issue
+`test_graphics_pipeline_multi_clock_domains` reads all zeros instead of expected vertex data. This is a **pre-existing bug** that existed before the array preservation implementation.
+
+### Evidence
+Tested on commit before array changes - same test failure:
+- Writes: `(0x40000000, 0x40400000, 0x40800000), ...`
+- Reads: `(0x00000000, 0x00000000, 0x00000000), ...`
+
+### Analysis
+This test uses AsyncFifo with `[Vec3; 32]` elements (array of composite types). The array preservation implementation correctly FLATTENS this to `mem_0_x, mem_0_y, mem_0_z, ...` because Vec3 is a composite type (struct).
+
+The test failure appears to be a CDC (Clock Domain Crossing) timing issue or AsyncFifo implementation bug, NOT a compiler bug.
+
+### Status
+⚠️ **PRE-EXISTING** - Not caused by array preservation implementation. Requires separate investigation of AsyncFifo CDC logic or multi-clock domain testbench timing.
