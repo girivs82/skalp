@@ -412,6 +412,10 @@ impl FifoTest {
 
         println!("   ✅ Vertices written to input FIFO");
 
+        // Check if writes were accepted
+        let write_ready: u8 = tb.get_as("write_ready").await;
+        println!("   🔍 Debug: write_ready = {}", write_ready);
+
         // ============================================================
         // Run geometry clock to process vertices
         // ============================================================
@@ -441,6 +445,11 @@ impl FifoTest {
         }
 
         println!("   ✅ Clock cycles complete");
+
+        // Check pipeline status before reading
+        let busy: u8 = tb.get_as("geom_busy").await;
+        let read_valid_pre: u8 = tb.get_as("read_valid").await;
+        println!("   🔍 Debug before read: geom_busy={}, read_valid={}", busy, read_valid_pre);
 
         // ============================================================
         // Read processed vertices from pixel clock domain

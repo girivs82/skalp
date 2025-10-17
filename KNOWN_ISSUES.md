@@ -913,7 +913,65 @@ let index_expr = if indices.len() == 2
 
 ---
 
-## ✅ MAJOR PROGRESS: GPU Simulator Multi-Clock Support (Bug #32)
+## ⚠️ CRITICAL: Multi-Field Struct Array Assignments (Bug #33)
+
+### Issue
+When writing to arrays of multi-field structs (e.g., `[Vec3; 8]` where `Vec3` has x, y, z fields), the generated SystemVerilog assigns ALL fields from the SAME source signal instead of from individual field signals.
+
+### Evidence
+Compiling AsyncFifo with `Vec3` struct (3 fields) generates:
+```systemverilog
+mem_1_x <= (((wr_ptr % 4) == 1) ? port_3 : mem_1_x);  // WRONG!
+mem_1_y <= (((wr_ptr % 4) == 1) ? port_3 : mem_1_y);  // WRONG! Should be port_4
+mem_1_z <= (((wr_ptr % 4) == 1) ? port_3 : mem_1_z);  // WRONG! Should be port_5
+```
+
+All three fields read from `port_3` (wr_data_x) instead of `port_3`, `port_4`, `port_5` (wr_data_x/y/z).
+
+### Impact
+- **CRITICAL**: All multi-field struct arrays write garbage data
+- AsyncFifo with Vec3/SimpleVertex structs reads all zeros
+- Graphics pipeline test fails (reads zeros instead of vertex data)
+- Only single-field structs work correctly
+
+### Root Cause
+In `hir_to_mir.rs:adapt_lvalue_for_field()`, when adapting the RHS expression for each struct field, the function isn't correctly finding sibling fields in the flattened collection. The port_map maps the struct to the FIRST field's ID, but the sibling field lookup fails.
+
+**File**: `crates/skalp-mir/src/hir_to_mir.rs:1149-1180`
+
+### Example (BROKEN):
+```skalp
+struct Vec3 {
+    x: bit[32]
+    y: bit[32]
+    z: bit[32]
+}
+
+entity AsyncFifo<T, const DEPTH: nat> {
+    in wr_data: T
+}
+
+impl AsyncFifo<T, const DEPTH: nat> {
+    signal mem: [T; DEPTH]
+
+    on(wr_clk.rise) {
+        if wr_en {
+            mem[wr_ptr % DEPTH] <= wr_data  // ❌ All fields use wr_data_x!
+        }
+    }
+}
+```
+
+### Test Case
+Created `/tmp/test_async_fifo_multi_field.sk` which compiles but generates incorrect SystemVerilog.
+
+### Status
+⚠️ **ACTIVE BUG** - Blocks graphics pipeline test and all multi-field struct array use cases
+
+### Priority
+**CRITICAL** - This prevents AsyncFifo and other designs from working with realistic struct types
+
+##✅ MAJOR PROGRESS: GPU Simulator Multi-Clock Support (Bug #32)
 
 ### Status Update (2025-01-17)
 ✅ **4 out of 5 tests passing (80% pass rate)**
