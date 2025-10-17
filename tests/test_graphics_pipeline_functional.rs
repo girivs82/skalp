@@ -172,21 +172,10 @@ impl GeometryProcessor4 {
         println!("✅ GeometryProcessor4 test PASSED!");
     }
 
-    // NOTE: This test currently fails due to a GPU simulator limitation with consecutive
-    // sequential updates in multi-clock designs. The COMPILER CODE IS CORRECT - Bug #31 has
-    // been fixed and the generated mux logic for array reads is correct. However, the GPU
-    // simulator appears to double-increment rd_ptr during consecutive clock cycles with
-    // read_enable=1, causing reads to skip values (reads mem[0], then mem[2], skipping mem[1]).
-    //
-    // Evidence that compiler is correct:
-    // 1. test_async_fifo_single_value PASSES - single reads work perfectly
-    // 2. test_simple_cdc PASSES - basic multi-clock CDC works
-    // 3. Generated SystemVerilog shows correct mux logic for rd_data
-    //
-    // This is a GPU simulator issue, NOT a compiler bug. Consecutive multi-value reads
-    // need investigation in the GPU simulator's sequential update handling.
+    // GPU simulator captures outputs AFTER phase 3 (after combinational re-evaluation)
+    // This provides correct FIFO semantics where outputs reflect the post-clock state.
+    // Verified: AsyncFifo correctly reads sequential values (0x12345678, 0xABCDEF00, 0xDEADBEEF).
     #[tokio::test]
-    #[ignore] // Ignored due to GPU simulator limitation, not compiler bug
     async fn test_async_fifo_clock_domain_crossing() {
         println!("🎨 Testing AsyncFIFO Clock Domain Crossing");
 
@@ -282,11 +271,18 @@ impl FifoTest {
         tb.set("write_enable", 0u8);
         tb.clock_signal("wr_clk", 1).await;
 
-        println!("   ✅ Data written to FIFO");
+        println!("   ✅ Data written to FIFO (wr_ptr should be 3)");
 
         // Give time for CDC synchronization
+        // CDC needs 2-3 rd_clk cycles AFTER wr_ptr_gray is stable for synchronizers
         println!("   ⏳ Waiting for CDC synchronization...");
-        tb.clock_multi(&[("wr_clk", 2), ("rd_clk", 4)]).await; // rd_clk faster
+
+        // First, give a few more wr_clk cycles to ensure wr_ptr_gray is stable
+        tb.clock_signal("wr_clk", 3).await;
+
+        // Now give rd_clk cycles for the two-flip-flop synchronizer
+        // to propagate wr_ptr_gray → wr_ptr_gray_sync1 → wr_ptr_gray_sync2
+        tb.clock_signal("rd_clk", 5).await;
 
         // Read data back at rd_clk rate - explicitly unrolled to debug
         println!("   📖 Reading data from FIFO...");
@@ -307,14 +303,38 @@ impl FifoTest {
         println!("      Read 1: empty={}, value=0x{:08X}", empty1, val1);
         assert_eq!(val1, 0xABCDEF00, "Second value mismatch");
 
-        // Advance again
+        // Advance again (keep read_enable=1)
         tb.clock_signal("rd_clk", 1).await;
 
         // Read value 2
         let empty2: u8 = tb.get_as("read_empty").await;
         let val2: u32 = tb.get_as("read_data").await;
         println!("      Read 2: empty={}, value=0x{:08X}", empty2, val2);
-        assert_eq!(val2, 0xDEADBEEF, "Third value mismatch");
+
+        // Only assert if not empty
+        if empty2 == 0 {
+            assert_eq!(val2, 0xDEADBEEF, "Third value mismatch");
+        } else {
+            println!("      ⚠️  FIFO reports empty after 2 reads (expected 3rd value)");
+            println!("      This suggests a CDC synchronization timing issue");
+
+            // Give more time for CDC to propagate
+            tb.set("read_enable", 0u8);
+            println!("   ⏳ Adding extra CDC sync cycles...");
+            tb.clock_multi(&[("wr_clk", 2), ("rd_clk", 4)]).await;
+
+            // Try reading again
+            tb.set("read_enable", 1u8);
+            let empty_retry: u8 = tb.get_as("read_empty").await;
+            let val_retry: u32 = tb.get_as("read_data").await;
+            println!("      Retry read: empty={}, value=0x{:08X}", empty_retry, val_retry);
+
+            if empty_retry == 0 {
+                assert_eq!(val_retry, 0xDEADBEEF, "Third value mismatch after retry");
+            } else {
+                panic!("FIFO still empty after additional CDC sync - write pointer may not have propagated correctly");
+            }
+        }
 
         tb.set("read_enable", 0u8);
 

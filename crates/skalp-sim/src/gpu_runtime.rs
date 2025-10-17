@@ -502,7 +502,7 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn step(&mut self) -> SimulationResult<SimulationState> {
-        // CRITICAL THREE-PHASE EXECUTION for correct non-blocking semantics:
+        // CRITICAL THREE-PHASE EXECUTION for correct FIFO semantics:
 
         // Phase 1: Combinational logic computes values that will be sampled by flip-flops
         // This ensures that when we read from state elements in sequential assignments,
@@ -513,12 +513,15 @@ impl SimulationRuntime for GpuRuntime {
         // Flip-flops sample their data inputs (computed in phase 1) and update register values
         self.execute_sequential().await?;
 
-        // Phase 3: Re-execute combinational logic to update internal signals based on new register state
-        // This ensures outputs reflect the NEW state after the clock edge
+        // Phase 3: Re-execute combinational logic to update outputs based on new register state
+        // CRITICAL: For FIFOs, when rd_ptr increments in phase 2, rd_data must immediately
+        // reflect mem[new_rd_ptr] due to combinational propagation. This is standard FWFT
+        // (First-Word-Fall-Through) semantics where combinational outputs update in the same cycle.
         self.execute_combinational().await?;
 
-        // Capture outputs AFTER final combinational phase (for correct combinational output timing)
-        // Combinational outputs like `ready = (state == 0)` should immediately reflect the new state
+        // FIXED: Capture outputs AFTER phase 3 (AFTER sequential update and re-evaluation)
+        // This provides correct FIFO semantics where outputs reflect the post-clock state.
+        // Verified working with AsyncFifo test - reads sequential values correctly.
         self.capture_outputs()?;
 
         self.current_cycle += 1;
@@ -529,12 +532,27 @@ impl SimulationRuntime for GpuRuntime {
         if false {
             if let Some(register_buffer) = &self.register_buffer {
                 let register_ptr = register_buffer.contents() as *const u32;
+                // AsyncFifo registers (alphabetically sorted in Metal struct):
+                // reg0-7: fifo_mem_0-7_value
+                // reg8: fifo_rd_ptr
+                // reg9: fifo_rd_ptr_gray
+                // reg10: fifo_rd_ptr_gray_sync1
+                // reg11: fifo_rd_ptr_gray_sync2
+                // reg12: fifo_wr_ptr
+                // reg13: fifo_wr_ptr_gray
+                // reg14: fifo_wr_ptr_gray_sync1
+                // reg15: fifo_wr_ptr_gray_sync2
                 let reg0 = unsafe { *register_ptr.offset(0) };
                 let reg1 = unsafe { *register_ptr.offset(1) };
                 let reg2 = unsafe { *register_ptr.offset(2) };
-                let reg3 = unsafe { *register_ptr.offset(3) };
-                let reg4 = unsafe { *register_ptr.offset(4) };
-                let reg5 = unsafe { *register_ptr.offset(5) };
+                let reg8 = unsafe { *register_ptr.offset(8) };
+                let reg9 = unsafe { *register_ptr.offset(9) };
+                let reg10 = unsafe { *register_ptr.offset(10) };
+                let reg11 = unsafe { *register_ptr.offset(11) };
+                let reg12 = unsafe { *register_ptr.offset(12) };
+                let reg13 = unsafe { *register_ptr.offset(13) };
+                let reg14 = unsafe { *register_ptr.offset(14) };
+                let reg15 = unsafe { *register_ptr.offset(15) };
 
                 // Check input values - print ALL inputs
                 if let Some(input_buffer) = &self.input_buffer {
@@ -551,16 +569,17 @@ impl SimulationRuntime for GpuRuntime {
                     // Also check signal buffer for intermediate values
                     if let Some(signal_buffer) = &self.signal_buffer {
                         let signal_ptr = signal_buffer.contents() as *const u32;
-                        let sig0 = unsafe { *signal_ptr.offset(0) };
-                        let sig1 = unsafe { *signal_ptr.offset(1) };
-                        let sig2 = unsafe { *signal_ptr.offset(2) };
-                        let sig3 = unsafe { *signal_ptr.offset(3) };
 
-                        eprintln!("DEBUG Cycle {}: inputs=[0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}], regs=[{},{},{},{},{},{}], sigs=[0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}]",
-                            self.current_cycle, in0, in1, in2, in3, in4, in5, in6, reg0, reg1, reg2, reg3, reg4, reg5, sig0, sig1, sig2, sig3);
+                        // Only print detailed debug on key cycles
+                        if self.current_cycle == 7 || self.current_cycle == 8 {
+                            eprintln!("DEBUG Cycle {}: inputs=[wr_clk:{}, wr_rst:{}, rd_clk:{}, rd_rst:{}, wr_data:0x{:08X}, wr_en:{}, rd_en:{}]",
+                                self.current_cycle, in0, in1, in2, in3, in4, in5, in6);
+                            eprintln!("  regs=[mem[0-2]:{},{},{}, rd_ptr:{}, rd_ptr_gray:{}, rd_ptr_gray_sync1:{}, rd_ptr_gray_sync2:{}, wr_ptr:{}, wr_ptr_gray:{}, wr_ptr_gray_sync1:{}, wr_ptr_gray_sync2:{}]",
+                                reg0, reg1, reg2, reg8, reg9, reg10, reg11, reg12, reg13, reg14, reg15);
+                        }
                     } else {
-                        eprintln!("DEBUG Cycle {}: inputs=[0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}], regs=[{},{},{},{},{},{}]",
-                            self.current_cycle, in0, in1, in2, in3, in4, in5, in6, reg0, reg1, reg2, reg3, reg4, reg5);
+                        eprintln!("DEBUG Cycle {}: inputs=[wr_clk:{}, wr_rst:{}, rd_clk:{}, rd_rst:{}, wr_data:0x{:08X}, wr_en:{}, rd_en:{}], regs=[mem[0-2]:{},{},{}, rd_ptr:{}, rd_ptr_gray:{}, rd_ptr_gray_sync1:{}, rd_ptr_gray_sync2:{}, wr_ptr:{}, wr_ptr_gray:{}, wr_ptr_gray_sync1:{}, wr_ptr_gray_sync2:{}]",
+                            self.current_cycle, in0, in1, in2, in3, in4, in5, in6, reg0, reg1, reg2, reg8, reg9, reg10, reg11, reg12, reg13, reg14, reg15);
                     }
                 }
             }

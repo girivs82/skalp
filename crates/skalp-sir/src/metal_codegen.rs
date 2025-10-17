@@ -885,7 +885,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
             // Find which clock input this is
             if let Some(clock_input) = sir.inputs.iter().find(|i| i.name == *clock_signal) {
-                let _edge_condition = match edge {
+                let edge_condition = match edge {
                     ClockEdge::Rising => {
                         // Check for rising edge: was 0, now 1
                         format!("inputs->{} == 1", self.sanitize_name(&clock_input.name))
@@ -896,10 +896,11 @@ impl<'a> MetalShaderGenerator<'a> {
                     ClockEdge::Both => "true".to_string(),
                 };
 
-                // Note: Don't check clock value here since GPU runtime already ensures this kernel
-                // only executes on the correct clock edge
-                // self.write_indented(&format!("if ({}) {{\n", edge_condition));
-                // self.indent += 1;
+                // FIXED: Check clock value to support multi-clock designs
+                // Each flip-flop should only update when its specific clock has the right edge
+                // This is critical for CDC (clock domain crossing) circuits like AsyncFifo
+                self.write_indented(&format!("if ({}) {{\n", edge_condition));
+                self.indent += 1;
 
                 // Update all register outputs with the data input value from signals
                 for output in &node.outputs {
@@ -964,8 +965,8 @@ impl<'a> MetalShaderGenerator<'a> {
                     }
                 }
 
-                // self.indent -= 1;
-                // self.write_indented("}\n");
+                self.indent -= 1;
+                self.write_indented("}\n");
             }
         }
     }

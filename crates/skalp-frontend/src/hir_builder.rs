@@ -3192,13 +3192,17 @@ impl HirBuilderContext {
             // Parser creates: [IdentExpr(rd_ptr), BinaryExpr(% DEPTH)] for "rd_ptr % DEPTH"
             // The BinaryExpr only contains the operator and right operand; left operand is separate
             let index_expr = if indices.len() == 2
-                && matches!(indices[0].kind(), SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr)
+                && matches!(
+                    indices[0].kind(),
+                    SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr
+                )
                 && indices[1].kind() == SyntaxKind::BinaryExpr
             {
                 // Combine left operand (indices[0]) with binary expression (indices[1])
                 let left_expr = self.build_expression(&indices[0])?;
                 self.combine_expressions_with_binary(left_expr, &indices[1])?
-            } else if let Some(binary_node) = indices.iter().find(|n| n.kind() == SyntaxKind::BinaryExpr)
+            } else if let Some(binary_node) =
+                indices.iter().find(|n| n.kind() == SyntaxKind::BinaryExpr)
             {
                 // Found a standalone BinaryExpr
                 self.build_expression(binary_node)?
@@ -3561,7 +3565,8 @@ impl HirBuilderContext {
             // Fix for Bug #30: Prefer BinaryExpr over IdentExpr for array indices
             // When parsing mem[rd_ptr % DEPTH], the children might be [IdentExpr(rd_ptr), BinaryExpr(% DEPTH)]
             // We want the BinaryExpr (complete expression), not the IdentExpr (first operand)
-            let index_node = children.iter()
+            let index_node = children
+                .iter()
                 .find(|n| n.kind() == SyntaxKind::BinaryExpr)
                 .or_else(|| children.first())
                 .expect("At least one child should exist");
