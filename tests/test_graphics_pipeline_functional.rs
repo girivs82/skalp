@@ -461,4 +461,72 @@ impl FifoTest {
             test_vertices.len()
         );
     }
+
+    #[tokio::test]
+    async fn test_simple_cdc() {
+        println!("🧪 Testing Simple CDC");
+
+        let source = r#"
+entity SimpleCDC {
+    in wr_clk: clock
+    in wr_rst: reset(active_high)
+    in wr_data: bit[32]
+    in wr_en: bit
+    
+    in rd_clk: clock
+    in rd_rst: reset(active_high)
+    out rd_data: bit[32]
+}
+
+impl SimpleCDC {
+    signal data_reg: bit[32]
+    
+    on(wr_clk.rise) {
+        if wr_rst {
+            data_reg <= 0
+        } else {
+            if wr_en {
+                data_reg <= wr_data
+            }
+        }
+    }
+    
+    rd_data = data_reg
+}
+        "#;
+
+        let temp_dir = std::env::temp_dir();
+        let source_file = temp_dir.join("simple_cdc_test.sk");
+        std::fs::write(&source_file, source).expect("Failed to write test source");
+
+        let mut tb = Testbench::new(source_file.to_str().unwrap())
+            .await
+            .expect("Failed to create testbench");
+
+        println!("   ✅ Testbench created");
+
+        // Reset both domains
+        tb.set("wr_rst", 1u8).set("rd_rst", 1u8);
+        tb.clock_multi(&[("wr_clk", 2), ("rd_clk", 2)]).await;
+
+        tb.set("wr_rst", 0u8).set("rd_rst", 0u8);
+        tb.clock_multi(&[("wr_clk", 1), ("rd_clk", 1)]).await;
+
+        // Write a value on wr_clk
+        tb.set("wr_data", 0x12345678u32).set("wr_en", 1u8);
+        tb.clock_signal("wr_clk", 1).await;
+        tb.set("wr_en", 0u8);
+
+        println!("   📝 Wrote 0x12345678 on wr_clk");
+
+        // Try to read it on rd_clk domain (should see it immediately since it's async)
+        let value: u32 = tb.get_as("rd_data").await;
+        println!("   📖 Read 0x{:08X} from rd_data", value);
+
+        assert_eq!(
+            value, 0x12345678,
+            "Should read written value across clock domains"
+        );
+        println!("✅ Simple CDC test PASSED!");
+    }
 }

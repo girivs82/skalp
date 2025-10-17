@@ -939,13 +939,17 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
             }
-            _ => return None,
+            _ => {
+                return None;
+            }
         };
 
         // Check if RHS is an Index expression
         let (array_base, index_expr) = match &assign.rhs {
             hir::HirExpression::Index(base, index) => (base.as_ref(), index.as_ref()),
-            _ => return None,
+            _ => {
+                return None;
+            }
         };
 
         // Check if the array base is a flattened signal/port
@@ -964,7 +968,9 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
             }
-            _ => return None,
+            _ => {
+                return None;
+            }
         };
 
         // Get flattened fields for LHS (struct) and array (array base)
@@ -1030,6 +1036,15 @@ impl<'hir> HirToMir<'hir> {
                     let array_field_suffix: Vec<String> =
                         f.field_path.iter().skip(1).cloned().collect();
                     let array_field_suffix_str = array_field_suffix.join("_");
+
+                    // BUG #31 FIX: When LHS field_path is empty ([]), it means we're working with
+                    // an already-flattened leaf port (e.g., rd_data_value). In this case, we should
+                    // match array elements that also have a single-component suffix after the index.
+                    // Example: LHS=rd_data_value (field_path=[]), array=mem_N_value (field_path=["N","value"])
+                    if field_suffix.is_empty() && array_field_suffix.len() == 1 {
+                        return true;
+                    }
+
                     array_field_suffix_str == field_suffix
                 })?;
 
