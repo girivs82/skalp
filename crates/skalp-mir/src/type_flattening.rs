@@ -426,10 +426,6 @@ impl TypeFlattener {
         signals: &mut Vec<Signal>,
         fields: &mut Vec<FlattenedField>,
     ) {
-        eprintln!(
-            "🔍 flatten_signal_recursive: name='{}', type={:?}",
-            name, signal_type
-        );
         match signal_type {
             DataType::Struct(struct_type) => {
                 // Recursively flatten each struct field
@@ -479,13 +475,8 @@ impl TypeFlattener {
                 // Arrays of scalar types become packed arrays in SystemVerilog,
                 // allowing synthesis tools to choose optimal implementation
                 let should_preserve = Self::should_preserve_array(element_type);
-                eprintln!(
-                    "🔍 ARRAY FLATTEN: element_type={:?}, should_preserve={}",
-                    element_type, should_preserve
-                );
                 if should_preserve {
                     // Keep array intact - create signal with array type
-                    eprintln!("   ✅ PRESERVING array '{}' as single signal", name);
                     self.create_leaf_signal(
                         name,
                         signal_type,
@@ -496,7 +487,6 @@ impl TypeFlattener {
                         fields,
                     );
                 } else {
-                    eprintln!("   ❌ FLATTENING array '{}' into {} elements", name, size);
                     // Arrays of composite types still get flattened
                     for i in 0..*size {
                         let elem_name = format!("{}_{}", name, i);
