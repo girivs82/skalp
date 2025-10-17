@@ -40,10 +40,16 @@ pub struct HirToMir<'hir> {
     port_map: HashMap<hir::PortId, PortId>,
     /// Flattened ports: HIR port ID -> list of flattened MIR ports
     flattened_ports: HashMap<hir::PortId, Vec<FlattenedField>>,
+    /// Reverse port lookup: MIR port ID -> (HIR port ID, field path)
+    /// BUG #33 FIX: This allows finding the correct HIR port for a given MIR port
+    port_to_hir: HashMap<PortId, (hir::PortId, Vec<String>)>,
     /// Signal ID mapping (HIR to MIR) - now 1-to-many for flattened structs
     signal_map: HashMap<hir::SignalId, SignalId>,
     /// Flattened signals: HIR signal ID -> list of flattened MIR signals
     flattened_signals: HashMap<hir::SignalId, Vec<FlattenedField>>,
+    /// Reverse signal lookup: MIR signal ID -> (HIR signal ID, field path)
+    /// BUG #33 FIX: This allows finding the correct HIR signal for a given MIR signal
+    signal_to_hir: HashMap<SignalId, (hir::SignalId, Vec<String>)>,
     /// Variable ID mapping (HIR to MIR)
     variable_map: HashMap<hir::VariableId, VariableId>,
     /// Clock domain ID mapping (HIR to MIR)
@@ -74,8 +80,10 @@ impl<'hir> HirToMir<'hir> {
             entity_map: HashMap::new(),
             port_map: HashMap::new(),
             flattened_ports: HashMap::new(),
+            port_to_hir: HashMap::new(),
             signal_map: HashMap::new(),
             flattened_signals: HashMap::new(),
+            signal_to_hir: HashMap::new(),
             variable_map: HashMap::new(),
             clock_domain_map: HashMap::new(),
             hir: None,
@@ -134,6 +142,12 @@ impl<'hir> HirToMir<'hir> {
                 if !flattened_fields.is_empty() {
                     self.flattened_ports
                         .insert(hir_port.id, flattened_fields.clone());
+                }
+
+                // BUG #33 FIX: Also populate reverse map for each flattened port
+                for field in &flattened_fields {
+                    self.port_to_hir
+                        .insert(PortId(field.id), (hir_port.id, field.field_path.clone()));
                 }
 
                 // For simple mapping (first port or single non-struct port)
@@ -200,6 +214,14 @@ impl<'hir> HirToMir<'hir> {
                         if !flattened_fields.is_empty() {
                             self.flattened_signals
                                 .insert(hir_signal.id, flattened_fields.clone());
+                        }
+
+                        // BUG #33 FIX: Also populate reverse map for each flattened signal
+                        for field in &flattened_fields {
+                            self.signal_to_hir.insert(
+                                SignalId(field.id),
+                                (hir_signal.id, field.field_path.clone()),
+                            );
                         }
 
                         // For simple mapping (first signal or single non-struct signal)
@@ -832,7 +854,6 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert the RHS expression to MIR
         let mir_rhs = self.convert_expression(&assign.rhs)?;
-        eprintln!("   ✅ Converted RHS expression");
 
         // Group flattened fields by array index
         // field_path will be like ["0", "x"], ["0", "y"], ["1", "x"], etc.
@@ -1149,38 +1170,33 @@ impl<'hir> HirToMir<'hir> {
     fn adapt_lvalue_for_field(&self, lval: &LValue, field_path: &[String]) -> LValue {
         match lval {
             LValue::Signal(sig_id) => {
-                // Find the corresponding flattened field
-                // Search through flattened_signals to find one matching this signal + field path
-                for (hir_sig_id, fields) in &self.flattened_signals {
-                    for field in fields {
-                        if SignalId(field.id) == *sig_id {
-                            // Found the base signal - now find the sibling with matching field suffix
-                            for sibling in fields {
-                                if sibling.field_path.ends_with(field_path) {
-                                    return LValue::Signal(SignalId(sibling.id));
-                                }
+                // BUG #33 FIX: Use reverse map to find the HIR signal this MIR signal belongs to
+                if let Some((hir_sig_id, _mir_field_path)) = self.signal_to_hir.get(sig_id) {
+                    // Get all sibling fields for this HIR signal
+                    if let Some(fields) = self.flattened_signals.get(hir_sig_id) {
+                        // Find the sibling whose path ends with the requested field_path
+                        for sibling in fields {
+                            if sibling.field_path.ends_with(field_path) {
+                                return LValue::Signal(SignalId(sibling.id));
                             }
                         }
                     }
                 }
-                // If not found, return as-is
                 lval.clone()
             }
             LValue::Port(port_id) => {
-                // Find the corresponding flattened field
-                for (hir_port_id, fields) in &self.flattened_ports {
-                    for field in fields {
-                        if PortId(field.id) == *port_id {
-                            // Found the base port - now find the sibling with matching field suffix
-                            for sibling in fields {
-                                if sibling.field_path.ends_with(field_path) {
-                                    return LValue::Port(PortId(sibling.id));
-                                }
+                // BUG #33 FIX: Use reverse map to find the HIR port this MIR port belongs to
+                if let Some((hir_port_id, _mir_field_path)) = self.port_to_hir.get(port_id) {
+                    // Get all sibling fields for this HIR port
+                    if let Some(fields) = self.flattened_ports.get(hir_port_id) {
+                        // Find the sibling whose path ends with the requested field_path
+                        for sibling in fields {
+                            if sibling.field_path.ends_with(field_path) {
+                                return LValue::Port(PortId(sibling.id));
                             }
                         }
                     }
                 }
-                // If not found, return as-is
                 lval.clone()
             }
             // For other LValue types, recurse on base

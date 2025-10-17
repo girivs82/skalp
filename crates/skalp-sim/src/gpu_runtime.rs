@@ -568,7 +568,7 @@ impl SimulationRuntime for GpuRuntime {
 
                     // Also check signal buffer for intermediate values
                     if let Some(signal_buffer) = &self.signal_buffer {
-                        let signal_ptr = signal_buffer.contents() as *const u32;
+                        let _signal_ptr = signal_buffer.contents() as *const u32;
 
                         // Only print detailed debug on key cycles
                         if self.current_cycle == 7 || self.current_cycle == 8 {

@@ -913,10 +913,10 @@ let index_expr = if indices.len() == 2
 
 ---
 
-## ⚠️ CRITICAL: Multi-Field Struct Array Assignments (Bug #33)
+## ✅ FIXED: Multi-Field Struct Array Assignments (Bug #33)
 
-### Issue
-When writing to arrays of multi-field structs (e.g., `[Vec3; 8]` where `Vec3` has x, y, z fields), the generated SystemVerilog assigns ALL fields from the SAME source signal instead of from individual field signals.
+### Issue (FIXED)
+When writing to arrays of multi-field structs (e.g., `[Vec3; 8]` where `Vec3` has x, y, z fields), the generated SystemVerilog was assigning ALL fields from the SAME source signal instead of from individual field signals.
 
 ### Evidence
 Compiling AsyncFifo with `Vec3` struct (3 fields) generates:
@@ -934,10 +934,30 @@ All three fields read from `port_3` (wr_data_x) instead of `port_3`, `port_4`, `
 - Graphics pipeline test fails (reads zeros instead of vertex data)
 - Only single-field structs work correctly
 
-### Root Cause
-In `hir_to_mir.rs:adapt_lvalue_for_field()`, when adapting the RHS expression for each struct field, the function isn't correctly finding sibling fields in the flattened collection. The port_map maps the struct to the FIRST field's ID, but the sibling field lookup fails.
+### Root Cause (IDENTIFIED AND FIXED)
+The bug was in **module merging port remapping**, NOT in monomorphization or HIR→MIR conversion:
 
-**File**: `crates/skalp-mir/src/hir_to_mir.rs:1149-1180`
+1. When `AsyncFifo` is imported from a module:
+   - Entity's port IDs are renumbered to avoid collisions with main module (e.g., port 4 → port 18)
+   - But implementation expressions still reference OLD port IDs (port 4 from source module)
+
+2. During HIR→MIR conversion:
+   - Expression `HirExpression::Port(4)` is converted (wrong port from source module)
+   - Looks up port_map for HIR port 4 → finds MIR port 4 (from main module, not AsyncFifo!)
+   - RHS becomes `Ref(Port(4))` instead of `Ref(Port(18))` (the remapped port)
+
+3. When expanding array writes for each struct field (x, y, z):
+   - ALL fields use the same wrong port: `Port(4)` (wr_data_x from main module)
+   - Should use: `Port(18)`, `Port(19)`, `Port(20)` (wr_data_x/y/z from AsyncFifo after renumbering)
+
+**Proof**: Debug output showed:
+- Original AsyncFifo impl referenced Port(4), Port(8), Port(9) (from AsyncFifo's source module)
+- After merge, ports were renumbered to 14-23
+- But impl expressions still had Port(4), Port(8), Port(9) - NOT in the map!
+- Port_id_map only had entries for 14-23, causing lookups to fail
+
+**Investigation History**:
+Initially thought bug was in monomorphization (because implementations appeared after monomorphization). Deep investigation with debug output revealed the ORIGINAL generic AsyncFifo implementation (before monomorphization) already had wrong port IDs. This led to discovering the real bug was in module merging, which happens BEFORE monomorphization.
 
 ### Example (BROKEN):
 ```skalp
@@ -962,14 +982,39 @@ impl AsyncFifo<T, const DEPTH: nat> {
 }
 ```
 
+### Fix Applied
+The bug was in **module merging**, not monomorphization. When entities were imported from modules, their port IDs were renumbered to avoid collisions, but the implementation expressions still referenced the OLD port IDs.
+
+**Root Cause**: In `/Users/girivs/src/hw/hls/crates/skalp-frontend/src/lib.rs`, the `merge_symbol`, `merge_symbol_with_rename`, and `merge_all_symbols` functions renumbered entity ports but did NOT remap the port IDs in the associated implementations.
+
+**Solution**: Created `remap_impl_ports()` and related helpers to recursively remap port IDs in:
+- Assignment LHS and RHS expressions
+- Event block triggers and statements
+- All nested expressions (Binary, Unary, Index, Range, FieldAccess, If, Call, Concat)
+
+Applied the fix to all three merge functions so imported implementations correctly reference the renumbered ports.
+
+**Files Changed**:
+- `crates/skalp-frontend/src/lib.rs:255-446` (remap helpers and merge fixes)
+
+### Verification
+✅ **SystemVerilog Now Correct**:
+```systemverilog
+mem_1_x <= (((wr_ptr % 4) == 1) ? wr_data_x : mem_1_x);  // ✅ Correct!
+mem_1_y <= (((wr_ptr % 4) == 1) ? wr_data_y : mem_1_y);  // ✅ Correct!
+mem_1_z <= (((wr_ptr % 4) == 1) ? wr_data_z : mem_1_z);  // ✅ Correct!
+```
+
+Each field now correctly reads from its own source instead of all from the same source!
+
 ### Test Case
-Created `/tmp/test_async_fifo_multi_field.sk` which compiles but generates incorrect SystemVerilog.
+Created `/tmp/test_async_fifo_multi_field.sk` which now compiles AND generates correct SystemVerilog.
 
 ### Status
-⚠️ **ACTIVE BUG** - Blocks graphics pipeline test and all multi-field struct array use cases
+✅ **FIXED** - Module merge now correctly remaps port IDs in imported implementations
 
-### Priority
-**CRITICAL** - This prevents AsyncFifo and other designs from working with realistic struct types
+### Note
+While Bug #33 is fixed, `test_graphics_pipeline_multi_clock_domains` still reads zeros. This is a separate issue - either with the AsyncFifo implementation logic itself or with GPU simulator multi-clock domain execution, not a compiler bug.
 
 ##✅ MAJOR PROGRESS: GPU Simulator Multi-Clock Support (Bug #32)
 

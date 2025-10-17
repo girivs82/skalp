@@ -252,6 +252,199 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
     Ok(merged_hir)
 }
 
+/// Remap port IDs in an implementation (BUG #33 FIX)
+/// This is needed when merging modules - port IDs get renumbered but impl expressions still reference old IDs
+fn remap_impl_ports(
+    mut impl_block: hir::HirImplementation,
+    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+) -> hir::HirImplementation {
+    // Remap ports in assignments
+    for assignment in &mut impl_block.assignments {
+        assignment.lhs = remap_lvalue_ports(&assignment.lhs, port_id_map);
+        assignment.rhs = remap_expr_ports(&assignment.rhs, port_id_map);
+    }
+
+    // Remap ports in event blocks
+    for event_block in &mut impl_block.event_blocks {
+        // Remap trigger ports
+        for trigger in &mut event_block.triggers {
+            if let hir::HirEventSignal::Port(old_id) = trigger.signal {
+                if let Some(&new_id) = port_id_map.get(&old_id) {
+                    trigger.signal = hir::HirEventSignal::Port(new_id);
+                }
+            }
+        }
+
+        // Remap ports in statements
+        for statement in &mut event_block.statements {
+            *statement = remap_statement_ports(statement, port_id_map);
+        }
+    }
+
+    impl_block
+}
+
+/// Remap port IDs in an LValue
+fn remap_lvalue_ports(
+    lvalue: &hir::HirLValue,
+    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+) -> hir::HirLValue {
+    match lvalue {
+        hir::HirLValue::Port(old_id) => port_id_map
+            .get(old_id)
+            .map_or(lvalue.clone(), |&new_id| hir::HirLValue::Port(new_id)),
+        hir::HirLValue::Index(base, idx) => {
+            let new_base = remap_lvalue_ports(base, port_id_map);
+            let new_idx = remap_expr_ports(idx, port_id_map);
+            hir::HirLValue::Index(Box::new(new_base), new_idx)
+        }
+        hir::HirLValue::Range(base, high, low) => {
+            let new_base = remap_lvalue_ports(base, port_id_map);
+            let new_high = remap_expr_ports(high, port_id_map);
+            let new_low = remap_expr_ports(low, port_id_map);
+            hir::HirLValue::Range(Box::new(new_base), new_high, new_low)
+        }
+        hir::HirLValue::FieldAccess { base, field } => {
+            let new_base = remap_lvalue_ports(base, port_id_map);
+            hir::HirLValue::FieldAccess {
+                base: Box::new(new_base),
+                field: field.clone(),
+            }
+        }
+        _ => lvalue.clone(),
+    }
+}
+
+/// Remap port IDs in an expression
+fn remap_expr_ports(
+    expr: &hir::HirExpression,
+    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+) -> hir::HirExpression {
+    match expr {
+        hir::HirExpression::Port(old_id) => port_id_map
+            .get(old_id)
+            .map_or(expr.clone(), |&new_id| hir::HirExpression::Port(new_id)),
+        hir::HirExpression::Binary(bin) => {
+            let left = remap_expr_ports(&bin.left, port_id_map);
+            let right = remap_expr_ports(&bin.right, port_id_map);
+            hir::HirExpression::Binary(hir::HirBinaryExpr {
+                op: bin.op.clone(),
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+        hir::HirExpression::Unary(unary) => {
+            let operand = remap_expr_ports(&unary.operand, port_id_map);
+            hir::HirExpression::Unary(hir::HirUnaryExpr {
+                op: unary.op.clone(),
+                operand: Box::new(operand),
+            })
+        }
+        hir::HirExpression::Index(base, index) => {
+            let new_base = remap_expr_ports(base, port_id_map);
+            let new_index = remap_expr_ports(index, port_id_map);
+            hir::HirExpression::Index(Box::new(new_base), Box::new(new_index))
+        }
+        hir::HirExpression::Range(base, high, low) => {
+            let new_base = remap_expr_ports(base, port_id_map);
+            let new_high = remap_expr_ports(high, port_id_map);
+            let new_low = remap_expr_ports(low, port_id_map);
+            hir::HirExpression::Range(Box::new(new_base), Box::new(new_high), Box::new(new_low))
+        }
+        hir::HirExpression::FieldAccess { base, field } => {
+            let new_base = remap_expr_ports(base, port_id_map);
+            hir::HirExpression::FieldAccess {
+                base: Box::new(new_base),
+                field: field.clone(),
+            }
+        }
+        hir::HirExpression::Call(call) => {
+            let new_args = call
+                .args
+                .iter()
+                .map(|arg| remap_expr_ports(arg, port_id_map))
+                .collect();
+            hir::HirExpression::Call(hir::HirCallExpr {
+                function: call.function.clone(),
+                args: new_args,
+            })
+        }
+        hir::HirExpression::If(if_expr) => {
+            let new_cond = remap_expr_ports(&if_expr.condition, port_id_map);
+            let new_then = remap_expr_ports(&if_expr.then_expr, port_id_map);
+            let new_else = remap_expr_ports(&if_expr.else_expr, port_id_map);
+            hir::HirExpression::If(hir::HirIfExpr {
+                condition: Box::new(new_cond),
+                then_expr: Box::new(new_then),
+                else_expr: Box::new(new_else),
+            })
+        }
+        hir::HirExpression::Concat(exprs) => {
+            let new_exprs = exprs
+                .iter()
+                .map(|e| remap_expr_ports(e, port_id_map))
+                .collect();
+            hir::HirExpression::Concat(new_exprs)
+        }
+        _ => expr.clone(),
+    }
+}
+
+/// Remap port IDs in a statement
+fn remap_statement_ports(
+    stmt: &hir::HirStatement,
+    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+) -> hir::HirStatement {
+    match stmt {
+        hir::HirStatement::Assignment(assign) => {
+            let mut new_assign = assign.clone();
+            new_assign.lhs = remap_lvalue_ports(&assign.lhs, port_id_map);
+            new_assign.rhs = remap_expr_ports(&assign.rhs, port_id_map);
+            hir::HirStatement::Assignment(new_assign)
+        }
+        hir::HirStatement::If(if_stmt) => {
+            let mut new_if = if_stmt.clone();
+            new_if.condition = remap_expr_ports(&if_stmt.condition, port_id_map);
+            new_if.then_statements = if_stmt
+                .then_statements
+                .iter()
+                .map(|s| remap_statement_ports(s, port_id_map))
+                .collect();
+            new_if.else_statements = if_stmt.else_statements.as_ref().map(|stmts| {
+                stmts
+                    .iter()
+                    .map(|s| remap_statement_ports(s, port_id_map))
+                    .collect()
+            });
+            hir::HirStatement::If(new_if)
+        }
+        hir::HirStatement::Match(match_stmt) => {
+            let mut new_match = match_stmt.clone();
+            new_match.expr = remap_expr_ports(&match_stmt.expr, port_id_map);
+            new_match.arms = match_stmt
+                .arms
+                .iter()
+                .map(|arm| {
+                    let mut new_arm = arm.clone();
+                    new_arm.statements = arm
+                        .statements
+                        .iter()
+                        .map(|s| remap_statement_ports(s, port_id_map))
+                        .collect();
+                    new_arm
+                })
+                .collect();
+            hir::HirStatement::Match(new_match)
+        }
+        hir::HirStatement::Let(let_stmt) => {
+            let mut new_let = let_stmt.clone();
+            new_let.value = remap_expr_ports(&let_stmt.value, port_id_map);
+            hir::HirStatement::Let(new_let)
+        }
+        _ => stmt.clone(),
+    }
+}
+
 /// Merge a specific symbol from a module into the current HIR
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
     // Try to find the symbol in entities
@@ -275,14 +468,19 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         let mut imported_entity = entity.clone();
         imported_entity.id = new_entity_id;
 
-        // Renumber all ports
+        // Renumber all ports and build port ID mapping
+        let mut port_id_map = std::collections::HashMap::new();
         for (i, port) in imported_entity.ports.iter_mut().enumerate() {
-            port.id = hir::PortId(next_port_id + i as u32);
+            let old_id = port.id;
+            let new_id = hir::PortId(next_port_id + i as u32);
+            port_id_map.insert(old_id, new_id);
+            port.id = new_id;
         }
 
         target.entities.push(imported_entity);
 
         // CRITICAL: Also merge the implementation for this entity (needed for generic entities)
+        // BUG #33 FIX: Remap port IDs in the implementation to match the renumbered ports!
         if let Some(impl_block) = source
             .implementations
             .iter()
@@ -291,6 +489,8 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             let mut imported_impl = impl_block.clone();
             // Update implementation to point to the new entity ID
             imported_impl.entity = new_entity_id;
+            // BUG #33 FIX: Remap port IDs in all assignments
+            imported_impl = remap_impl_ports(imported_impl, &port_id_map);
             target.implementations.push(imported_impl);
         }
 
@@ -363,14 +563,19 @@ fn merge_symbol_with_rename(
         renamed_entity.id = new_entity_id;
         renamed_entity.name = alias.to_string();
 
-        // Renumber all ports
+        // Renumber all ports and build port ID mapping
+        let mut port_id_map = std::collections::HashMap::new();
         for (i, port) in renamed_entity.ports.iter_mut().enumerate() {
-            port.id = hir::PortId(next_port_id + i as u32);
+            let old_id = port.id;
+            let new_id = hir::PortId(next_port_id + i as u32);
+            port_id_map.insert(old_id, new_id);
+            port.id = new_id;
         }
 
         target.entities.push(renamed_entity);
 
         // CRITICAL: Also merge the implementation for this entity (needed for generic entities)
+        // BUG #33 FIX: Remap port IDs in the implementation to match the renumbered ports!
         if let Some(impl_block) = source
             .implementations
             .iter()
@@ -379,6 +584,8 @@ fn merge_symbol_with_rename(
             let mut renamed_impl = impl_block.clone();
             // Update implementation to point to the new entity ID
             renamed_impl.entity = new_entity_id;
+            // BUG #33 FIX: Remap port IDs in all assignments
+            renamed_impl = remap_impl_ports(renamed_impl, &port_id_map);
             target.implementations.push(renamed_impl);
         }
 
@@ -473,14 +680,19 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
             let mut imported_entity = entity.clone();
             imported_entity.id = new_entity_id;
 
-            // Renumber all ports
+            // Renumber all ports and build port ID mapping
+            let mut port_id_map = std::collections::HashMap::new();
             for (i, port) in imported_entity.ports.iter_mut().enumerate() {
-                port.id = hir::PortId(next_port_id + i as u32);
+                let old_id = port.id;
+                let new_id = hir::PortId(next_port_id + i as u32);
+                port_id_map.insert(old_id, new_id);
+                port.id = new_id;
             }
 
             target.entities.push(imported_entity);
 
             // Also merge the implementation for this entity (needed for generic entities)
+            // BUG #33 FIX: Remap port IDs in the implementation to match the renumbered ports!
             if let Some(impl_block) = source
                 .implementations
                 .iter()
@@ -489,6 +701,8 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                 let mut imported_impl = impl_block.clone();
                 // Update implementation to point to the new entity ID
                 imported_impl.entity = new_entity_id;
+                // BUG #33 FIX: Remap port IDs in all assignments
+                imported_impl = remap_impl_ports(imported_impl, &port_id_map);
                 target.implementations.push(imported_impl);
             }
         }
