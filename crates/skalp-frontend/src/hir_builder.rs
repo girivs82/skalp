@@ -1366,10 +1366,7 @@ impl HirBuilderContext {
                     .find(|n| n.kind() == SyntaxKind::BinaryExpr)
                     .or_else(|| {
                         index_node.children().find(|n| {
-                            matches!(
-                                n.kind(),
-                                SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr
-                            )
+                            matches!(n.kind(), SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr)
                         })
                     })
                     .and_then(|n| self.build_expression(&n))?;

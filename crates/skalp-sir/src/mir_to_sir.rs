@@ -3357,8 +3357,7 @@ impl<'a> MirToSirConverter<'a> {
                 } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
                     // Output port - this connects to parent signal
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
-                        let parent_sig = self.get_signal_name_from_expression(parent_expr);
-                        parent_sig
+                        self.get_signal_name_from_expression(parent_expr)
                     } else {
                         format!("{}.{}", inst_prefix, port.name)
                     }
@@ -3370,8 +3369,7 @@ impl<'a> MirToSirConverter<'a> {
                 // First try direct ID lookup
                 if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
-                        let parent_sig = self.get_signal_name_from_expression(parent_expr);
-                        parent_sig
+                        self.get_signal_name_from_expression(parent_expr)
                     } else {
                         format!("{}.{}", inst_prefix, port.name)
                     }
@@ -3382,8 +3380,7 @@ impl<'a> MirToSirConverter<'a> {
                     if port_index < child_module.ports.len() {
                         let port = &child_module.ports[port_index];
                         if let Some(parent_expr) = port_mapping.get(&port.name) {
-                            let parent_sig = self.get_signal_name_from_expression(parent_expr);
-                            parent_sig
+                            self.get_signal_name_from_expression(parent_expr)
                         } else {
                             format!("{}.{}", inst_prefix, port.name)
                         }
@@ -3829,7 +3826,8 @@ impl<'a> MirToSirConverter<'a> {
                                             port_mapping,
                                             child_module,
                                         );
-                                        let const_idx = self.create_constant_node(element_idx as u64, 32);
+                                        let const_idx =
+                                            self.create_constant_node(element_idx as u64, 32);
                                         let cond_node = self.create_binary_op_node(
                                             &BinaryOp::Equal,
                                             index_node,
@@ -3848,7 +3846,11 @@ impl<'a> MirToSirConverter<'a> {
                                         let current_node = self.create_signal_ref(target);
 
                                         // Create MUX: cond ? value : current
-                                        return self.create_mux_node(cond_node, value_node, current_node);
+                                        return self.create_mux_node(
+                                            cond_node,
+                                            value_node,
+                                            current_node,
+                                        );
                                     }
                                 }
                             }

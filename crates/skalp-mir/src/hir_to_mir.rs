@@ -1871,7 +1871,9 @@ impl<'hir> HirToMir<'hir> {
                     // Find the field with matching index
                     let index_str = index_val.to_string();
                     for field in fields {
-                        if field.field_path.first() == Some(&index_str) && field.field_path.len() == 1 {
+                        if field.field_path.first() == Some(&index_str)
+                            && field.field_path.len() == 1
+                        {
                             // Found it! Return direct signal/port reference
                             return if is_signal {
                                 Some(Expression::Ref(LValue::Signal(SignalId(field.id))))
@@ -1912,7 +1914,9 @@ impl<'hir> HirToMir<'hir> {
 
                     // Get flattened fields and clone to avoid borrow issues
                     let fields = if is_signal {
-                        self.flattened_signals.get(&hir::SignalId(base_hir_id))?.clone()
+                        self.flattened_signals
+                            .get(&hir::SignalId(base_hir_id))?
+                            .clone()
                     } else {
                         self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
                     };
@@ -1921,7 +1925,8 @@ impl<'hir> HirToMir<'hir> {
                     // For simple arrays: ["0"], ["1"], etc.
                     // For arrays of structs: ["0", "x"], ["0", "y"], ["1", "x"], ["1", "y"], etc.
                     use std::collections::HashMap as StdHashMap;
-                    let mut array_groups: StdHashMap<usize, Vec<FlattenedField>> = StdHashMap::new();
+                    let mut array_groups: StdHashMap<usize, Vec<FlattenedField>> =
+                        StdHashMap::new();
 
                     for field in &fields {
                         if let Some(first) = field.field_path.first() {
@@ -1940,7 +1945,8 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Convert array_groups to sorted vec
-                    let mut array_elements: Vec<(usize, Vec<FlattenedField>)> = array_groups.into_iter().collect();
+                    let mut array_elements: Vec<(usize, Vec<FlattenedField>)> =
+                        array_groups.into_iter().collect();
                     array_elements.sort_by_key(|(idx, _)| *idx);
 
                     // Convert index expression to MIR (needs mutable borrow)
@@ -1981,7 +1987,8 @@ impl<'hir> HirToMir<'hir> {
                     for (array_idx, elem_expr) in element_exprs.iter().rev() {
                         if let Some(else_expr) = mux_expr {
                             // Build condition: index == array_idx
-                            let index_literal = Expression::Literal(Value::Integer(*array_idx as i64));
+                            let index_literal =
+                                Expression::Literal(Value::Integer(*array_idx as i64));
                             let condition = Expression::Binary {
                                 op: BinaryOp::Equal,
                                 left: Box::new(mir_index.clone()),

@@ -273,7 +273,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
             .map(|assignment| {
                 let mut new_assignment = assignment.clone();
                 // BUG #28 FIX: Substitute const params in BOTH LHS and RHS
-                new_assignment.lhs = self.substitute_lvalue(&assignment.lhs, &instantiation.const_args);
+                new_assignment.lhs =
+                    self.substitute_lvalue(&assignment.lhs, &instantiation.const_args);
                 new_assignment.rhs =
                     self.substitute_expr(&assignment.rhs, &instantiation.const_args);
                 // Remap port IDs in both LHS and RHS
@@ -880,13 +881,13 @@ impl<'hir> MonomorphizationEngine<'hir> {
         match lvalue {
             HirLValue::Index(base, idx) => {
                 let new_base = self.substitute_lvalue(base, const_args);
-                let new_idx = self.substitute_expr(idx, const_args);  // BUG #28 FIX: substitute const params!
+                let new_idx = self.substitute_expr(idx, const_args); // BUG #28 FIX: substitute const params!
                 HirLValue::Index(Box::new(new_base), new_idx)
             }
             HirLValue::Range(base, high, low) => {
                 let new_base = self.substitute_lvalue(base, const_args);
-                let new_high = self.substitute_expr(high, const_args);  // BUG #28 FIX: substitute const params!
-                let new_low = self.substitute_expr(low, const_args);  // BUG #28 FIX: substitute const params!
+                let new_high = self.substitute_expr(high, const_args); // BUG #28 FIX: substitute const params!
+                let new_low = self.substitute_expr(low, const_args); // BUG #28 FIX: substitute const params!
                 HirLValue::Range(Box::new(new_base), new_high, new_low)
             }
             HirLValue::FieldAccess { base, field } => {
