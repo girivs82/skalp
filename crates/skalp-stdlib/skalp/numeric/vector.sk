@@ -170,7 +170,7 @@ impl Vec3Cross<T: Numeric> {
     signal y: T = a[2].mul(b[0]).sub(a[0].mul(b[2]))
     signal z: T = a[0].mul(b[1]).sub(a[1].mul(b[0]))
 
-    result = {x, y, z}
+    result = [x, y, z]
 }
 
 // ============================================================================

@@ -2906,8 +2906,34 @@ impl HirBuilderContext {
             }
         } else {
             // Regular array literal: [elem1, elem2, ...]
-            // TODO: Implement array literal lists
-            // For now, return None as this isn't fully implemented
+            let elements: Vec<_> = node
+                .children()
+                .filter(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                            | SyntaxKind::RangeExpr
+                            | SyntaxKind::TernaryExpr
+                            | SyntaxKind::ArrayLiteral
+                            | SyntaxKind::ConcatExpr
+                    )
+                })
+                .filter_map(|n| self.build_expression(&n))
+                .collect();
+
+            if !elements.is_empty() {
+                return Some(HirExpression::ArrayLiteral(elements));
+            }
         }
 
         None
@@ -3490,7 +3516,11 @@ impl HirBuilderContext {
             .find(|t| {
                 matches!(
                     t.kind(),
-                    SyntaxKind::Bang | SyntaxKind::Tilde | SyntaxKind::Minus
+                    SyntaxKind::Bang
+                        | SyntaxKind::Tilde
+                        | SyntaxKind::Minus
+                        | SyntaxKind::Amp
+                        | SyntaxKind::Caret
                 )
             })
             .and_then(|t| self.token_to_unary_op(t.kind()))?;
@@ -5087,6 +5117,9 @@ impl HirBuilderContext {
             SyntaxKind::Bang => Some(HirUnaryOp::Not),
             SyntaxKind::Minus => Some(HirUnaryOp::Negate),
             SyntaxKind::Tilde => Some(HirUnaryOp::BitwiseNot),
+            SyntaxKind::Amp => Some(HirUnaryOp::AndReduce),
+            SyntaxKind::Pipe => Some(HirUnaryOp::OrReduce),
+            SyntaxKind::Caret => Some(HirUnaryOp::XorReduce),
             _ => None,
         }
     }

@@ -3690,7 +3690,11 @@ impl<'a> ParseState<'a> {
     fn parse_unary_expr(&mut self) {
         if matches!(
             self.current_kind(),
-            Some(SyntaxKind::Bang) | Some(SyntaxKind::Tilde) | Some(SyntaxKind::Minus)
+            Some(SyntaxKind::Bang)
+                | Some(SyntaxKind::Tilde)
+                | Some(SyntaxKind::Minus)
+                | Some(SyntaxKind::Amp)
+                | Some(SyntaxKind::Caret)
         ) {
             self.start_node(SyntaxKind::UnaryExpr);
             self.bump(); // consume unary operator
@@ -3867,17 +3871,83 @@ impl<'a> ParseState<'a> {
                         self.expect(SyntaxKind::RParen);
                         self.finish_node();
 
-                        // Check for cast after parenthesized expression
-                        if self.at(SyntaxKind::AsKw) {
-                            self.start_node(SyntaxKind::CastExpr);
-                            self.bump(); // consume 'as'
-                            self.parse_type();
+                        // Handle postfix operations on parenthesized expressions
+                        // This allows (expr).method(), (expr)[index], (expr)(args), (expr) as Type
+                        let mut has_postfix = false;
+                        loop {
+                            match self.current_kind() {
+                                Some(SyntaxKind::Dot) => {
+                                    // Field access or method call on parenthesized expression
+                                    if has_postfix {
+                                        self.finish_node(); // finish previous postfix node
+                                    }
+                                    self.start_node(SyntaxKind::FieldExpr);
+                                    self.bump(); // consume dot
+
+                                    if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::IntLiteral)
+                                    {
+                                        self.bump(); // consume field name or tuple index
+                                    } else {
+                                        self.error("expected field name or tuple index after '.'");
+                                    }
+                                    has_postfix = true;
+                                }
+                                Some(SyntaxKind::LBracket) => {
+                                    // Array/bit indexing on parenthesized expression
+                                    if has_postfix {
+                                        self.finish_node(); // finish previous postfix node
+                                    }
+                                    self.start_node(SyntaxKind::IndexExpr);
+                                    self.bump(); // consume '['
+                                    self.parse_expression();
+
+                                    // Check for range indexing [start:end]
+                                    if self.at(SyntaxKind::Colon) {
+                                        self.bump(); // consume ':'
+                                        self.parse_expression();
+                                    }
+
+                                    self.expect(SyntaxKind::RBracket);
+                                    has_postfix = true;
+                                }
+                                Some(SyntaxKind::LParen) => {
+                                    // Function call on parenthesized expression
+                                    if has_postfix {
+                                        self.finish_node(); // finish previous postfix node
+                                    }
+                                    self.start_node(SyntaxKind::CallExpr);
+                                    self.bump(); // consume '('
+                                    self.parse_argument_list();
+                                    self.expect(SyntaxKind::RParen);
+                                    has_postfix = true;
+                                }
+                                Some(SyntaxKind::AsKw) => {
+                                    // Type cast on parenthesized expression
+                                    if has_postfix {
+                                        self.finish_node(); // finish previous postfix node
+                                    }
+                                    self.start_node(SyntaxKind::CastExpr);
+                                    self.bump(); // consume 'as'
+                                    self.parse_type();
+                                    has_postfix = true;
+                                }
+                                _ => break,
+                            }
+                        }
+                        // Finish the final postfix node if any
+                        if has_postfix {
                             self.finish_node();
                         }
                     }
                 }
             }
-            Some(SyntaxKind::Bang | SyntaxKind::Tilde | SyntaxKind::Minus) => {
+            Some(
+                SyntaxKind::Bang
+                | SyntaxKind::Tilde
+                | SyntaxKind::Minus
+                | SyntaxKind::Amp
+                | SyntaxKind::Caret,
+            ) => {
                 self.start_node(SyntaxKind::UnaryExpr);
                 self.bump();
                 self.parse_primary_expression();

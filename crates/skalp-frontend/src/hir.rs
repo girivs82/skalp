@@ -394,6 +394,9 @@ pub enum HirExpression {
     /// Tuple literal expression
     /// Example: (result, valid, error_code)
     TupleLiteral(Vec<HirExpression>),
+    /// Array literal expression
+    /// Example: [1, 2, 3, 4]
+    ArrayLiteral(Vec<HirExpression>),
     If(HirIfExpr),
     Match(HirMatchExpr),
     Cast(HirCastExpr),
@@ -493,6 +496,12 @@ pub enum HirUnaryOp {
     Not,
     Negate,
     BitwiseNot,
+    /// Reduction AND (&array) - ANDs all bits together
+    AndReduce,
+    /// Reduction OR (|array) - ORs all bits together
+    OrReduce,
+    /// Reduction XOR (^array) - XORs all bits together
+    XorReduce,
 }
 
 /// Function call in HIR

@@ -2340,6 +2340,11 @@ impl<'hir> HirToMir<'hir> {
                 // This is then packed into a bit vector like any other struct
                 self.convert_tuple_literal(elements)
             }
+            hir::HirExpression::ArrayLiteral(elements) => {
+                // Convert array literal [a, b, c] to concatenation of elements
+                // The elements are concatenated in order: {a, b, c} in SystemVerilog
+                self.convert_array_literal(elements)
+            }
             hir::HirExpression::Block {
                 statements,
                 result_expr,
@@ -2442,6 +2447,32 @@ impl<'hir> HirToMir<'hir> {
         // Multi-element tuple - concatenate all elements
         // Elements are packed from left to right: (a, b, c) becomes {a, b, c}
         // In bit representation: MSB is 'a', LSB is 'c'
+        Some(Expression::Concat(element_exprs))
+    }
+
+    /// Convert array literal to concatenation expression
+    fn convert_array_literal(&mut self, elements: &[hir::HirExpression]) -> Option<Expression> {
+        // Convert each array element expression
+        let mut element_exprs = Vec::new();
+        for element in elements {
+            let element_expr = self.convert_expression(element)?;
+            element_exprs.push(element_expr);
+        }
+
+        // Handle empty array
+        if element_exprs.is_empty() {
+            return None;
+        }
+
+        // Single-element array - still create a concat to maintain array semantics
+        // [x] is different from x in type context
+        if element_exprs.len() == 1 {
+            return Some(element_exprs.into_iter().next().unwrap());
+        }
+
+        // Multi-element array - concatenate all elements
+        // Array elements are packed from left to right: [a, b, c] becomes {a, b, c}
+        // In SystemVerilog: element 0 is at MSB, element N-1 is at LSB
         Some(Expression::Concat(element_exprs))
     }
 
@@ -2740,6 +2771,9 @@ impl<'hir> HirToMir<'hir> {
             hir::HirUnaryOp::Not => UnaryOp::Not,
             hir::HirUnaryOp::BitwiseNot => UnaryOp::BitwiseNot,
             hir::HirUnaryOp::Negate => UnaryOp::Negate,
+            hir::HirUnaryOp::AndReduce => UnaryOp::Reduce(ReduceOp::And),
+            hir::HirUnaryOp::OrReduce => UnaryOp::Reduce(ReduceOp::Or),
+            hir::HirUnaryOp::XorReduce => UnaryOp::Reduce(ReduceOp::Xor),
         }
     }
 

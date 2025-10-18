@@ -563,6 +563,14 @@ impl ConstEvaluator {
                     "Bitwise NOT requires integer".to_string(),
                 )),
             },
+
+            // Reduction operators cannot be evaluated at compile time
+            // They require runtime array values
+            HirUnaryOp::AndReduce | HirUnaryOp::OrReduce | HirUnaryOp::XorReduce => {
+                Err(EvalError::NotConstant(
+                    "Reduction operators cannot be evaluated at compile time".to_string(),
+                ))
+            }
         }
     }
 }
