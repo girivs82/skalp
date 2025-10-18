@@ -504,9 +504,40 @@ impl<'a> MetalShaderGenerator<'a> {
             let width = high - low + 1;
             let shift = low;
 
-            // Get the input signal's type to determine if it's a vector
+            // Get the input signal's type to determine if it's an array, vector, or bit vector
             let input_signal = sir.signals.iter().find(|s| s.name == *input);
             let input_type = input_signal.map(|s| &s.sir_type);
+
+            // BUG #36 FIX: Check if this is an array type - if so, this is an array element read, not a bit slice
+            if let Some(SirType::Array(elem_type, _size)) = input_type {
+                // This is a constant index array read disguised as a slice
+                // The slice is trying to extract one element from the array
+                // For arrays, the "shift" is actually the array index
+                let array_index = shift / elem_type.width();
+
+                let array_location = if sir.state_elements.contains_key(input) {
+                    format!("registers->{}", self.sanitize_name(input))
+                } else {
+                    format!("signals->{}", self.sanitize_name(input))
+                };
+
+                eprintln!(
+                    "   🎯 ARRAY ELEMENT READ: {}[{}] (elem_width={}, shift={}, index={})",
+                    input,
+                    array_index,
+                    elem_type.width(),
+                    shift,
+                    array_index
+                );
+
+                self.write_indented(&format!(
+                    "signals->{} = {}[{}];\n",
+                    self.sanitize_name(output),
+                    array_location,
+                    array_index
+                ));
+                return;
+            }
 
             // Map signal names to register names for flip-flop outputs
             let input_ref = if sir.state_elements.contains_key(input) {

@@ -1281,10 +1281,10 @@ The compiler now correctly handles multi-field struct arrays in both SystemVeril
 
 ---
 
-## ⚠️ OPEN: Metal Shader Codegen for Array Element Reads (Bug #36)
+## ✅ FIXED: Metal Shader Codegen for Array Element Reads (Bug #36)
 
-### Issue
-Metal shader codegen generates invalid code for constant array index reads in combinational assignments. The code attempts to shift the entire array instead of reading a single element.
+### Issue (FIXED)
+Metal shader codegen was generating invalid code for constant array index reads in combinational assignments. The code attempted to shift the entire array instead of reading a single element.
 
 ### Example (BROKEN):
 ```skalp
@@ -1340,8 +1340,35 @@ This appears to be in the SIR→Metal conversion, where array reads are not bein
 2. Ensure constant index reads generate `array[index]` instead of `(array >> index)`
 3. Re-enable test once fixed
 
+### Fix Applied
+Modified `generate_slice()` in Metal shader codegen to detect array types and generate proper array element indexing instead of bit-shift operations.
+
+**Root Cause**: The `generate_slice()` function treated all Slice nodes as bit-slice operations using shift (`>>`) and mask (`&`) operations. When the input signal was an array type (`uint[4]`), this generated invalid Metal code trying to shift an entire array.
+
+**Solution**: Added type checking at the beginning of `generate_slice()`:
+1. Check if the input signal type is `SirType::Array`
+2. If it's an array, interpret the slice as an array element read instead of a bit slice
+3. Calculate the array index: `array_index = shift / elem_type.width()`
+4. Generate proper array indexing: `signals->output = array_location[index];`
+5. Early return to skip the bit-slice code path
+
+**File Changed**: `crates/skalp-sir/src/metal_codegen.rs:generate_slice()`
+
+### Generated Metal Shader (AFTER FIX):
+```metal
+// CORRECT: Direct array element read
+signals->node_1_out = signals->node_0_out[0];
+//                    ^^^^^^^^^^^^^^^^^^^^^
+//                    Properly indexes array element 0!
+```
+
+### Verification
+✅ `test_simple_array_write` - now PASSES (reads correct value 0xDEADBEEF)
+✅ Metal shader generates correct array indexing
+✅ Test re-enabled (no longer marked `#[ignore]`)
+
 ### Status
-⚠️ **OPEN** - Metal shader codegen needs fix for array element reads
+✅ **FIXED** - Metal shader codegen now correctly handles array element reads
 
 ---
 
