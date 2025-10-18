@@ -1,0 +1,17 @@
+entity TupleDestructTest {
+    in clk: clock
+    in input_val: bit[32]
+    out result: bit[32]
+}
+
+impl TupleDestructTest {
+    signal reg_result: bit[32] = 0
+
+    on(clk.rise) {
+        let tuple: (bit[32], bit[8]) = (input_val + 10, input_val[7:0]);
+        let (a, b) = tuple;  // Test tuple destructuring
+        reg_result <= a;
+    }
+
+    result = reg_result
+}

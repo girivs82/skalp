@@ -1,0 +1,14 @@
+entity MatchTupleTest {
+    in val: bit[32]
+    out result: bit[32]
+}
+
+impl MatchTupleTest {
+    result = match val {
+        0 => 0,
+        _ => {
+            let (a, b) = (val, val[7:0]);
+            a
+        }
+    }
+}
