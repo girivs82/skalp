@@ -4666,31 +4666,6 @@ impl HirBuilderContext {
                 SyntaxKind::Fp64Type => {
                     return HirType::Float64;
                 }
-                SyntaxKind::Vec2Type => {
-                    // Extract element type from vec2<T>
-                    let element_type = child
-                        .children()
-                        .map(|c| self.extract_hir_type(&c))
-                        .next()
-                        .unwrap_or(HirType::Float32); // Default to fp32 if not specified
-                    return HirType::Vec2(Box::new(element_type));
-                }
-                SyntaxKind::Vec3Type => {
-                    let element_type = child
-                        .children()
-                        .map(|c| self.extract_hir_type(&c))
-                        .next()
-                        .unwrap_or(HirType::Float32);
-                    return HirType::Vec3(Box::new(element_type));
-                }
-                SyntaxKind::Vec4Type => {
-                    let element_type = child
-                        .children()
-                        .map(|c| self.extract_hir_type(&c))
-                        .next()
-                        .unwrap_or(HirType::Float32);
-                    return HirType::Vec4(Box::new(element_type));
-                }
                 SyntaxKind::ArrayType => {
                     return self.build_array_type(&child);
                 }

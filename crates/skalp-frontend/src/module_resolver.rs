@@ -129,6 +129,7 @@ impl ModuleResolver {
     /// Examples:
     /// - `use skalp::numeric::fp` -> `skalp/numeric/fp.sk`
     /// - `use foo::bar::Baz` -> `foo/bar.sk` (Baz is a symbol in bar.sk)
+    /// - `use crate::foo::bar` -> `<root_dir>/foo/bar.sk`
     pub fn resolve_import_path(&self, import: &HirImport) -> Result<PathBuf> {
         let segments = match &import.path {
             HirImportPath::Simple { segments } => segments,
@@ -139,6 +140,53 @@ impl ModuleResolver {
 
         if segments.is_empty() {
             bail!("Empty import path");
+        }
+
+        // Handle `crate::` prefix - resolve relative to root_dir
+        if segments.first().map(|s| s.as_str()) == Some("crate") {
+            eprintln!("[MODULE_RESOLVER] Resolving crate:: import");
+            // Skip the "crate" segment and resolve from root_dir
+            let remaining_segments = &segments[1..];
+
+            // Try full path as module
+            let mut full_path = self.root_dir.clone();
+            for segment in remaining_segments {
+                full_path.push(segment);
+            }
+            full_path.set_extension("sk");
+
+            if full_path.exists() {
+                return Ok(full_path);
+            }
+
+            // Try without last segment (last segment is symbol name)
+            if remaining_segments.len() > 1 {
+                let mut partial_path = self.root_dir.clone();
+                for segment in &remaining_segments[..remaining_segments.len() - 1] {
+                    partial_path.push(segment);
+                }
+                partial_path.set_extension("sk");
+
+                if partial_path.exists() {
+                    return Ok(partial_path);
+                }
+            }
+
+            // Try with lib.sk (module directory with lib.sk file)
+            let mut lib_path = self.root_dir.clone();
+            for segment in remaining_segments {
+                lib_path.push(segment);
+            }
+            lib_path.push("lib.sk");
+
+            if lib_path.exists() {
+                return Ok(lib_path);
+            }
+
+            bail!(
+                "Could not find crate module for import: {}",
+                segments.join("::")
+            );
         }
 
         // Try to resolve the path

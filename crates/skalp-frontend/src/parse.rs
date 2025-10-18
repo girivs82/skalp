@@ -3185,30 +3185,6 @@ impl<'a> ParseState<'a> {
                 // FP64 has fixed width (64-bit), no width specifier
                 self.finish_node();
             }
-            Some(SyntaxKind::Vec2Kw) => {
-                self.start_node(SyntaxKind::Vec2Type);
-                self.bump(); // consume 'vec2'
-                self.expect(SyntaxKind::Lt); // expect '<'
-                self.parse_type(); // parse element type
-                self.expect_closing_angle(); // expect '>'
-                self.finish_node();
-            }
-            Some(SyntaxKind::Vec3Kw) => {
-                self.start_node(SyntaxKind::Vec3Type);
-                self.bump(); // consume 'vec3'
-                self.expect(SyntaxKind::Lt); // expect '<'
-                self.parse_type(); // parse element type
-                self.expect_closing_angle(); // expect '>'
-                self.finish_node();
-            }
-            Some(SyntaxKind::Vec4Kw) => {
-                self.start_node(SyntaxKind::Vec4Type);
-                self.bump(); // consume 'vec4'
-                self.expect(SyntaxKind::Lt); // expect '<'
-                self.parse_type(); // parse element type
-                self.expect_closing_angle(); // expect '>'
-                self.finish_node();
-            }
             Some(SyntaxKind::LBracket) => {
                 // Array type [element_type; size]
                 self.parse_array_type();
@@ -3742,9 +3718,6 @@ impl<'a> ParseState<'a> {
                 self.finish_node();
             }
             Some(SyntaxKind::Ident)
-            | Some(SyntaxKind::Vec2Kw)
-            | Some(SyntaxKind::Vec3Kw)
-            | Some(SyntaxKind::Vec4Kw)
             | Some(SyntaxKind::Fp16Kw)
             | Some(SyntaxKind::Fp32Kw)
             | Some(SyntaxKind::Fp64Kw) => {
@@ -4262,12 +4235,7 @@ impl<'a> ParseState<'a> {
         if self.at(SyntaxKind::Ident)
             || matches!(
                 self.current_kind(),
-                Some(SyntaxKind::Vec2Kw)
-                    | Some(SyntaxKind::Vec3Kw)
-                    | Some(SyntaxKind::Vec4Kw)
-                    | Some(SyntaxKind::Fp16Kw)
-                    | Some(SyntaxKind::Fp32Kw)
-                    | Some(SyntaxKind::Fp64Kw)
+                Some(SyntaxKind::Fp16Kw) | Some(SyntaxKind::Fp32Kw) | Some(SyntaxKind::Fp64Kw)
             )
         {
             self.bump();

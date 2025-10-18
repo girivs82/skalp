@@ -372,7 +372,10 @@ impl FPVariants {
     golden.assert_eq("sv", &verilog);
 }
 
+// DEPRECATED: vec2/vec3/vec4 are no longer built-in types with field access.
+// They are now stdlib type aliases to arrays. Use array indexing instead.
 #[test]
+#[ignore]
 fn test_vec2_types_golden() {
     let source = r#"
 entity Vec2Test {
@@ -406,7 +409,9 @@ impl Vec2Test {
     golden.assert_eq("sv", &verilog);
 }
 
+// DEPRECATED: vec2/vec3/vec4 are no longer built-in types with field access.
 #[test]
+#[ignore]
 fn test_vec3_types_golden() {
     let source = r#"
 entity Vec3Test {
@@ -444,7 +449,9 @@ impl Vec3Test {
     golden.assert_eq("sv", &verilog);
 }
 
+// DEPRECATED: vec2/vec3/vec4 are no longer built-in types with field access.
 #[test]
+#[ignore]
 fn test_vec4_types_golden() {
     let source = r#"
 entity Vec4Test {
@@ -488,7 +495,9 @@ impl Vec4Test {
     golden.assert_eq("sv", &verilog);
 }
 
+// DEPRECATED: vec2/vec3 are no longer built-in types with field access.
 #[test]
+#[ignore]
 fn test_vec_fp_mixed_golden() {
     let source = r#"
 entity VecFPMixed {

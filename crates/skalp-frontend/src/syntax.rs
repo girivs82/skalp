@@ -38,9 +38,6 @@ pub enum SyntaxKind {
     Fp16Kw,
     Fp32Kw,
     Fp64Kw,
-    Vec2Kw,
-    Vec3Kw,
-    Vec4Kw,
     StructKw,
     EnumKw,
     UnionKw,
@@ -378,9 +375,6 @@ pub enum SyntaxKind {
     Fp16Type,
     Fp32Type,
     Fp64Type,
-    Vec2Type,
-    Vec3Type,
-    Vec4Type,
     IdentType,
     ArrayType,
     ArraySize,
@@ -475,7 +469,7 @@ impl SyntaxKind {
             EntityKw | ImplKw | SignalKw | VarKw | ConstKw
                 | InKw | InputKw | OutKw | OutputKw | InoutKw | PortKw | OnKw | IfKw | ElseKw | AssignKw
             // Type System (14)
-            | BitKw | BoolKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | Vec2Kw | Vec3Kw | Vec4Kw | StructKw | EnumKw | UnionKw
+            | BitKw | BoolKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | StructKw | EnumKw | UnionKw
             // Boolean Literals (2)
             | TrueKw | FalseKw
             // Traits and Generics (5)
@@ -584,9 +578,6 @@ impl SyntaxKind {
             Fp16Kw => "'fp16'",
             Fp32Kw => "'fp32'",
             Fp64Kw => "'fp64'",
-            Vec2Kw => "'vec2'",
-            Vec3Kw => "'vec3'",
-            Vec4Kw => "'vec4'",
             StructKw => "'struct'",
             EnumKw => "'enum'",
             UnionKw => "'union'",
@@ -824,9 +815,6 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Fp16 => Fp16Kw,
             Token::Fp32 => Fp32Kw,
             Token::Fp64 => Fp64Kw,
-            Token::Vec2 => Vec2Kw,
-            Token::Vec3 => Vec3Kw,
-            Token::Vec4 => Vec4Kw,
             Token::Struct => StructKw,
             Token::Enum => EnumKw,
             Token::Union => UnionKw,
