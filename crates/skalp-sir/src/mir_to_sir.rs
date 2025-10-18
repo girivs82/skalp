@@ -506,9 +506,22 @@ impl<'a> MirToSirConverter<'a> {
 
         // Process ALL statements sequentially
         // This handles ResolvedConditional statements with proper dependency tracking
-        for stmt in statements {
+        eprintln!(
+            "🔍 SEQUENTIAL BLOCK: Processing {} statements",
+            statements.len()
+        );
+        for (stmt_idx, stmt) in statements.iter().enumerate() {
+            eprintln!(
+                "   Statement {}: {:?}",
+                stmt_idx,
+                std::mem::discriminant(stmt)
+            );
             match stmt {
                 Statement::Assignment(assign) => {
+                    eprintln!(
+                        "      Assignment target: {}",
+                        self.lvalue_to_string(&assign.lhs)
+                    );
                     // Check if this is an array write (BitSelect with non-constant index)
                     eprintln!(
                         "DEBUG: Assignment lhs type: {:?}",
@@ -565,6 +578,14 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
+                    eprintln!(
+                        "      ResolvedConditional target: {}",
+                        self.lvalue_to_string(&resolved.target)
+                    );
+                    eprintln!(
+                        "      ResolvedConditional has {} branches",
+                        resolved.resolved.cases.len()
+                    );
                     // Check if this is an array write (BitSelect with non-constant index)
                     eprintln!(
                         "DEBUG: ResolvedConditional target type: {:?}",
@@ -2097,16 +2118,6 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_expression_node(&mut self, expr: &Expression) -> usize {
-        // Debug all expression types to understand the conversion path
-        match expr {
-            Expression::Binary { .. } => eprintln!("🔍 EXPR: Binary"),
-            Expression::Ref(_) => eprintln!("🔍 EXPR: Ref"),
-            Expression::Literal(_) => eprintln!("🔍 EXPR: Literal"),
-            Expression::Conditional { .. } => eprintln!("🔍 EXPR: Conditional"),
-            Expression::Concat(_) => eprintln!("🔍 EXPR: Concat"),
-            Expression::Unary { .. } => eprintln!("🔍 EXPR: Unary"),
-            _ => eprintln!("🔍 EXPR: Other"),
-        }
         match expr {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
@@ -3840,6 +3851,10 @@ impl<'a> MirToSirConverter<'a> {
                                         );
                                         let const_idx =
                                             self.create_constant_node(element_idx as u64, 32);
+                                        eprintln!(
+                                            "   🔢 Created constant node {} with value {} for target={}",
+                                            const_idx, element_idx, target
+                                        );
                                         let cond_node = self.create_binary_op_node(
                                             &BinaryOp::Equal,
                                             index_node,
@@ -3982,44 +3997,48 @@ impl<'a> MirToSirConverter<'a> {
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
-                    // Extract the base signal name from the LValue
-                    // For flattened arrays, we need to strip the index suffix
-                    let lhs_base =
-                        match &assign.lhs {
-                            LValue::Signal(sig_id) => {
-                                // Extract signal name and strip flattened suffix
-                                // For array elements like "mem_0_x", strip to "mem"
-                                // For struct fields like "vertex_x", strip to "vertex"
-                                child_module.signals.iter().find(|s| s.id == *sig_id).map(
-                                    |signal| {
-                                        let full_name = format!("{}.{}", inst_prefix, signal.name);
-                                        self.strip_flattened_index_suffix(&full_name)
-                                    },
-                                )
-                            }
-                            LValue::BitSelect { base, .. } => {
-                                // Array index like mem[wr_ptr]
-                                // Extract base signal and strip flattened index suffix
-                                let extracted = self.extract_base_signal_for_instance(
-                                    base,
-                                    inst_prefix,
-                                    child_module,
-                                );
-                                extracted
-                                    .as_ref()
-                                    .map(|base_name| self.strip_flattened_index_suffix(base_name))
-                            }
-                            _ => None,
+                    // BUG #34 FIX: After HIR→MIR expansion, each flattened element (mem_0_x, mem_1_x, etc.)
+                    // has its own assignment with a unique RHS expression (containing the correct index literal).
+                    // We must match the EXACT signal name, not the stripped base, otherwise all targets
+                    // will match the first assignment and use the wrong constant!
+
+                    let lhs_signal = match &assign.lhs {
+                        LValue::Signal(sig_id) => {
+                            // Signal assignment - use EXACT name, don't strip!
+                            // Each flattened element has its own assignment in MIR
+                            child_module
+                                .signals
+                                .iter()
+                                .find(|s| s.id == *sig_id)
+                                .map(|signal| format!("{}.{}", inst_prefix, signal.name))
+                        }
+                        LValue::BitSelect { base, .. } => {
+                            // Array index like mem[wr_ptr] - strip to match flattened targets
+                            // This case shouldn't happen after HIR→MIR expansion, but keep for safety
+                            let extracted = self.extract_base_signal_for_instance(
+                                base,
+                                inst_prefix,
+                                child_module,
+                            );
+                            extracted
+                                .as_ref()
+                                .map(|base_name| self.strip_flattened_index_suffix(base_name))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(lhs) = lhs_signal {
+                        // For Signal assignments: exact match (fifo.mem_0_x == fifo.mem_0_x)
+                        // For BitSelect assignments: compare stripped names
+                        let matches = if matches!(assign.lhs, LValue::Signal(_)) {
+                            lhs == target
+                        } else {
+                            let target_stripped = self.strip_flattened_index_suffix(target);
+                            lhs == target_stripped
                         };
 
-                    if let Some(lhs) = lhs_base {
-                        // For comparison, also strip the target's flattened index suffix
-                        // This allows "input_fifo.mem" to match "input_fifo.mem_0_x"
-                        let target_stripped = self.strip_flattened_index_suffix(target);
-
-                        if lhs == target_stripped {
-                            // With the proper HIR→MIR fix, the RHS already has correct field references
-                            // No adaptation needed!
+                        if matches {
+                            // Found assignment for this target!
                             return Some(self.create_expression_node_for_instance(
                                 &assign.rhs,
                                 inst_prefix,

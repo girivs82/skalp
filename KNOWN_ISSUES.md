@@ -1065,3 +1065,110 @@ assign rd_data_value = ((rd_addr == 0) ? mem_0_value : ...);  // Correct MUX
 This issue existed **before** the array preservation work and is **unrelated** to Bug #30. The compiler now generates correct code for all array operations and const generic substitutions.
 
 ---
+
+## ✅ FIXED: Metal Shader Array Index Constants Scrambled (Bug #34)
+
+### Issue (FIXED)
+When generating Metal shaders for arrays of multi-field structs (e.g., `[Vec3; 8]` where Vec3 has x, y, z), the SIR generation was assigning **wrong index constants** to array slot write conditions. This caused data to be written to the wrong memory slots.
+
+### Evidence
+For `AsyncFifo<Vec3, 8>` with memory `mem: [Vec3; 8]`:
+
+**SystemVerilog (CORRECT)**:
+```systemverilog
+mem_0_x <= (((wr_ptr % 8) == 0) ? wr_data_x : mem_0_x);  // ✅ Correct: checks index == 0
+mem_0_y <= (((wr_ptr % 8) == 0) ? wr_data_y : mem_0_y);
+mem_0_z <= (((wr_ptr % 8) == 0) ? wr_data_z : mem_0_z);
+```
+
+**Metal Shader (WRONG)**:
+```metal
+// WRONG: checks index == 5 instead of == 0!
+signals->node_183_out = signals->node_181_out % signals->node_182_out;  // wr_ptr % 8
+signals->node_184_out = uint(5);  // ❌ WRONG! Should be uint(0) for slot 0
+signals->node_185_out = signals->node_183_out == signals->node_184_out;  // (wr_ptr % 8) == 5 ❌
+signals->node_187_out = signals->node_185_out ? signals->node_0_out : signals->node_186_out;
+```
+
+This means:
+- When `wr_ptr = 0`: checks `(0 % 8 == 5)` → FALSE → doesn't write to slot 0 ❌
+- When `wr_ptr = 5`: checks `(5 % 8 == 5)` → TRUE → writes to slot 0 (but should write to slot 5!) ❌
+
+### Impact
+- **CRITICAL**: All AsyncFIFO tests with multi-field structs fail (read zeros)
+- GPU simulator reads zeros instead of written data
+- Test failures:
+  - ❌ `test_vec3_fifo` - reads all zeros
+  - ❌ `test_graphics_pipeline_multi_clock_domains` - reads all zeros
+- ✅ Single-field structs work (SimpleData with 1 field passes)
+- ✅ Simple struct outputs work (test_struct_output_read passes)
+- ✅ SystemVerilog generation is correct
+
+### Root Cause (IDENTIFIED AND FIXED)
+The bug was in **MIR→SIR conversion during instance elaboration**, specifically in `find_assignment_in_branch_for_instance`. When processing child module assignments for hierarchical instances:
+
+1. After HIR→MIR expansion, each flattened element (`mem_0_x`, `mem_1_x`, etc.) has its own assignment with a unique RHS expression containing the correct index literal
+2. But `find_assignment_in_branch_for_instance` was stripping the flattened signal names to their base (e.g., `fifo.mem_0_x` → `fifo.mem`) before comparing
+3. This caused ALL targets to match the FIRST assignment in the block (the one for `mem_0_x` with constant 0)
+4. All flattened signals ended up using the same wrong expression with constant 0
+5. SystemVerilog generation was correct because it uses MIR directly, but Metal shader generation uses SIR (which had the wrong constants)
+
+### Test Case
+Created:
+- `/tmp/test_output_fifo_simple.sk` - AsyncFifo with Vec3 struct
+- `test_vec3_fifo` - Minimal test that reproduces the bug
+
+
+### Fix Applied
+Modified `find_assignment_in_branch_for_instance` in `crates/skalp-sir/src/mir_to_sir.rs` to match signal assignments EXACTLY instead of stripping flattened suffixes:
+
+**Before**:
+```rust
+let lhs_base = match &assign.lhs {
+    LValue::Signal(sig_id) => {
+        // WRONG: Strip flattened suffix
+        let full_name = format!("{}.{}", inst_prefix, signal.name);
+        self.strip_flattened_index_suffix(&full_name)  // mem_0_x → mem
+    }
+    // ...
+};
+// Compare stripped names: all "mem" signals match first assignment!
+if lhs == target_stripped { ... }
+```
+
+**After**:
+```rust
+let lhs_signal = match &assign.lhs {
+    LValue::Signal(sig_id) => {
+        // CORRECT: Use exact name, don't strip!
+        child_module.signals.iter().find(|s| s.id == *sig_id).map(
+            |signal| format!("{}.{}", inst_prefix, signal.name)
+        )
+    }
+    // ...
+};
+// For Signal assignments: exact match (fifo.mem_0_x == fifo.mem_0_x)
+if lhs == target { ... }
+```
+
+**Files Changed**:
+- `crates/skalp-sir/src/mir_to_sir.rs:4000-4058` (find_assignment_in_branch_for_instance)
+
+### Verification
+✅ `test_vec3_fifo` - now PASSES (reads correct Vec3 data)
+✅ `test_graphics_pipeline_multi_clock_domains` - now PASSES (reads correct vertex data)
+✅ Metal shader constants now correct: `uint(0), uint(1), ..., uint(7)` instead of all `uint(0)`
+✅ No test regressions - all previously passing tests still pass
+
+### Status
+✅ **FIXED** - Instance elaboration now correctly finds individual flattened signal assignments
+
+### Note
+This is a **separate bug from Bug #33**:
+- Bug #33: Module merging port ID remapping (SystemVerilog generation) - ✅ FIXED
+- Bug #34: Instance elaboration signal matching (SIR generation) - ✅ FIXED
+
+The compiler now correctly handles multi-field struct arrays in both SystemVerilog and Metal shader generation.
+
+---
+

@@ -453,6 +453,10 @@ impl<'a> MetalShaderGenerator<'a> {
         if !node.outputs.is_empty() {
             let output = &node.outputs[0].signal_id;
             let metal_type = self.get_metal_type_name(width);
+            eprintln!(
+                "🔢 Metal codegen: node {} = {}({})",
+                node.id, metal_type, value
+            );
             self.write_indented(&format!(
                 "signals->{} = {}({});\n",
                 self.sanitize_name(output),

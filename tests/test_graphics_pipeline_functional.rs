@@ -327,7 +327,10 @@ impl FifoTest {
             tb.set("read_enable", 1u8);
             let empty_retry: u8 = tb.get_as("read_empty").await;
             let val_retry: u32 = tb.get_as("read_data").await;
-            println!("      Retry read: empty={}, value=0x{:08X}", empty_retry, val_retry);
+            println!(
+                "      Retry read: empty={}, value=0x{:08X}",
+                empty_retry, val_retry
+            );
 
             if empty_retry == 0 {
                 assert_eq!(val_retry, 0xDEADBEEF, "Third value mismatch after retry");
@@ -449,7 +452,10 @@ impl FifoTest {
         // Check pipeline status before reading
         let busy: u8 = tb.get_as("geom_busy").await;
         let read_valid_pre: u8 = tb.get_as("read_valid").await;
-        println!("   🔍 Debug before read: geom_busy={}, read_valid={}", busy, read_valid_pre);
+        println!(
+            "   🔍 Debug before read: geom_busy={}, read_valid={}",
+            busy, read_valid_pre
+        );
 
         // ============================================================
         // Read processed vertices from pixel clock domain
@@ -683,4 +689,125 @@ impl SimpleCDC {
         );
         println!("✅ Simple CDC test PASSED!");
     }
+}
+#[cfg(all(test, target_os = "macos"))]
+#[tokio::test]
+async fn test_struct_output_read() {
+    use skalp_testing::testbench::Testbench;
+
+    let mut tb = Testbench::new("/tmp/test_struct_outputs.sk")
+        .await
+        .expect("Failed to create testbench");
+
+    println!("✅ Testbench created");
+
+    // Reset
+    tb.set("rst", 1u8).clock(2).await;
+    println!("✅ Reset complete");
+
+    // Read during reset (should get reset values)
+    let x_reset: u32 = tb.get_as("vertex_x").await;
+    let y_reset: u32 = tb.get_as("vertex_y").await;
+    let z_reset: u32 = tb.get_as("vertex_z").await;
+
+    println!("During reset:");
+    println!("  vertex_x = 0x{:08X} (expected 0x11111111)", x_reset);
+    println!("  vertex_y = 0x{:08X} (expected 0x22222222)", y_reset);
+    println!("  vertex_z = 0x{:08X} (expected 0x33333333)", z_reset);
+
+    // Release reset
+    tb.set("rst", 0u8).clock(2).await;
+    println!("✅ Reset released");
+
+    // Read after reset
+    let x: u32 = tb.get_as("vertex_x").await;
+    let y: u32 = tb.get_as("vertex_y").await;
+    let z: u32 = tb.get_as("vertex_z").await;
+
+    println!("After reset:");
+    println!("  vertex_x = 0x{:08X} (expected 0xAAAAAAAA)", x);
+    println!("  vertex_y = 0x{:08X} (expected 0xBBBBBBBB)", y);
+    println!("  vertex_z = 0x{:08X} (expected 0xCCCCCCCC)", z);
+
+    assert_eq!(x, 0xAAAAAAAA, "vertex_x mismatch");
+    assert_eq!(y, 0xBBBBBBBB, "vertex_y mismatch");
+    assert_eq!(z, 0xCCCCCCCC, "vertex_z mismatch");
+
+    println!("✅ All struct fields read correctly!");
+}
+#[cfg(all(test, target_os = "macos"))]
+#[tokio::test]
+async fn test_vec3_fifo() {
+    use skalp_testing::testbench::Testbench;
+
+    println!("🧪 Testing Vec3 FIFO");
+
+    let mut tb = Testbench::new("/tmp/test_output_fifo_simple.sk")
+        .await
+        .expect("Failed to create testbench");
+
+    println!("   ✅ Testbench created");
+
+    // Reset both domains
+    tb.set("write_enable", 0u8).set("read_enable", 0u8);
+    tb.set("wr_rst", 1u8).set("rd_rst", 1u8);
+    tb.clock_multi(&[("wr_clk", 2), ("rd_clk", 2)]).await;
+    tb.set("wr_rst", 0u8).set("rd_rst", 0u8);
+    tb.clock_multi(&[("wr_clk", 1), ("rd_clk", 1)]).await;
+
+    println!("   ✅ Reset complete");
+
+    // Write 3 Vec3 values
+    let test_data = [
+        (0x40000000u32, 0x40400000u32, 0x40800000u32), // (2.0, 3.0, 4.0)
+        (0x40A00000u32, 0x40C00000u32, 0x40E00000u32), // (5.0, 6.0, 7.0)
+        (0x41000000u32, 0x41100000u32, 0x41200000u32), // (8.0, 9.0, 10.0)
+    ];
+
+    println!("   📝 Writing Vec3 data...");
+    for (i, &(x, y, z)) in test_data.iter().enumerate() {
+        tb.set("write_x", x)
+            .set("write_y", y)
+            .set("write_z", z)
+            .set("write_enable", 1u8);
+        tb.clock_signal("wr_clk", 1).await;
+        println!("      Wrote Vec3 {}: ({:08X}, {:08X}, {:08X})", i, x, y, z);
+    }
+
+    tb.set("write_enable", 0u8);
+    tb.clock_signal("wr_clk", 1).await;
+
+    println!("   ✅ Data written");
+
+    // CDC synchronization
+    println!("   ⏳ CDC synchronization...");
+    tb.clock_multi(&[("wr_clk", 3), ("rd_clk", 5)]).await;
+
+    // Read back
+    println!("   📖 Reading Vec3 data...");
+
+    for (i, &expected) in test_data.iter().enumerate() {
+        let empty: u8 = tb.get_as("read_empty").await;
+        println!("      read_empty = {}", empty);
+
+        if empty != 0 {
+            println!("      ⚠️  FIFO reports empty at read {}", i);
+            break;
+        }
+
+        let x: u32 = tb.get_as("read_x").await;
+        let y: u32 = tb.get_as("read_y").await;
+        let z: u32 = tb.get_as("read_z").await;
+
+        println!("      Read Vec3 {}: ({:08X}, {:08X}, {:08X})", i, x, y, z);
+
+        assert_eq!((x, y, z), expected, "Vec3 {} mismatch", i);
+
+        tb.set("read_enable", 1u8);
+        tb.clock_signal("rd_clk", 1).await;
+    }
+
+    tb.set("read_enable", 0u8);
+
+    println!("✅ Vec3 FIFO test PASSED!");
 }
