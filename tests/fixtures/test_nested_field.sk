@@ -1,0 +1,32 @@
+struct Vec3 {
+    x: bit[32]
+    y: bit[32]
+    z: bit[32]
+}
+
+struct Vertex {
+    position: Vec3
+    color: bit[32]
+}
+
+entity NestedFieldTest {
+    in clk: clock
+    in rst: reset(active_high)
+    in input_x: bit[32]
+    out output_x: bit[32]
+}
+
+impl NestedFieldTest {
+    signal out_vertex: Vertex
+
+    // TESTING: Nested field assignment
+    on(clk.rise) {
+        if rst {
+            out_vertex.position.x <= 0
+        } else {
+            out_vertex.position.x <= input_x  // Nested field access!
+        }
+    }
+
+    output_x = out_vertex.position.x
+}

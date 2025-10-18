@@ -1,0 +1,33 @@
+// Simple array write test for sequential blocks
+// Tests that array writes in sequential logic work correctly
+
+entity SimpleArrayWrite {
+    in clk: clock
+    in rst: reset(active_high)
+    in wr_en: bit
+    in wr_addr: bit[2]
+    in wr_data: bit[32]
+    out rd_data: bit[32]
+}
+
+impl SimpleArrayWrite {
+    signal memory: [bit[32]; 4]
+
+    // Sequential write
+    on(clk.rise) {
+        if rst {
+            // Reset all memory locations to 0
+            memory[0] <= 0
+            memory[1] <= 0
+            memory[2] <= 0
+            memory[3] <= 0
+        } else {
+            if wr_en {
+                memory[wr_addr] <= wr_data
+            }
+        }
+    }
+
+    // Combinational read from address 0
+    rd_data = memory[0]
+}

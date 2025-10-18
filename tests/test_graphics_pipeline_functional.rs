@@ -695,7 +695,7 @@ impl SimpleCDC {
 async fn test_struct_output_read() {
     use skalp_testing::testbench::Testbench;
 
-    let mut tb = Testbench::new("/tmp/test_struct_outputs.sk")
+    let mut tb = Testbench::new("tests/fixtures/test_struct_outputs.sk")
         .await
         .expect("Failed to create testbench");
 
@@ -742,7 +742,7 @@ async fn test_vec3_fifo() {
 
     println!("🧪 Testing Vec3 FIFO");
 
-    let mut tb = Testbench::new("/tmp/test_output_fifo_simple.sk")
+    let mut tb = Testbench::new("tests/fixtures/test_output_fifo_simple.sk")
         .await
         .expect("Failed to create testbench");
 

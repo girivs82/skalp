@@ -1,0 +1,53 @@
+mod async_fifo;
+use async_fifo::AsyncFifo;
+
+struct Vec3 {
+    x: bit[32]
+    y: bit[32]
+    z: bit[32]
+}
+
+entity FifoMultiFieldTest {
+    in wr_clk: clock
+    in wr_rst: reset(active_high)
+    in rd_clk: clock
+    in rd_rst: reset(active_high)
+
+    in write_x: bit[32]
+    in write_y: bit[32]
+    in write_z: bit[32]
+    in write_enable: bit
+    out write_full: bit
+
+    out read_x: bit[32]
+    out read_y: bit[32]
+    out read_z: bit[32]
+    in read_enable: bit
+    out read_empty: bit
+}
+
+impl FifoMultiFieldTest {
+    signal wr_data_internal: Vec3
+    signal rd_data_internal: Vec3
+
+    wr_data_internal.x = write_x
+    wr_data_internal.y = write_y
+    wr_data_internal.z = write_z
+
+    read_x = rd_data_internal.x
+    read_y = rd_data_internal.y
+    read_z = rd_data_internal.z
+
+    let fifo = AsyncFifo<Vec3, 4> {
+        wr_clk: wr_clk,
+        wr_rst: wr_rst,
+        wr_en: write_enable,
+        wr_data: wr_data_internal,
+        wr_full: write_full,
+        rd_clk: rd_clk,
+        rd_rst: rd_rst,
+        rd_en: read_enable,
+        rd_data: rd_data_internal,
+        rd_empty: read_empty
+    }
+}

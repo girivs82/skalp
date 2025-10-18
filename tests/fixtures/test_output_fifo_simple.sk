@@ -1,0 +1,114 @@
+struct Vec3 {
+    x: bit[32]
+    y: bit[32]
+    z: bit[32]
+}
+
+entity AsyncFifo<T, const DEPTH: nat> {
+    in wr_clk: clock
+    in wr_rst: reset(active_high)
+    in wr_en: bit
+    in wr_data: T
+    out wr_full: bit
+
+    in rd_clk: clock
+    in rd_rst: reset(active_high)
+    in rd_en: bit
+    out rd_data: T
+    out rd_empty: bit
+}
+
+impl AsyncFifo<T, const DEPTH: nat> {
+    signal mem: [T; DEPTH]
+    signal wr_ptr: bit[9]
+    signal wr_ptr_gray: bit[9]
+    signal rd_ptr_gray_sync1: bit[9]
+    signal rd_ptr_gray_sync2: bit[9]
+    signal rd_ptr: bit[9]
+    signal rd_ptr_gray: bit[9]
+    signal wr_ptr_gray_sync1: bit[9]
+    signal wr_ptr_gray_sync2: bit[9]
+
+    on(wr_clk.rise) {
+        if wr_rst {
+            wr_ptr <= 0
+            wr_ptr_gray <= 0
+            rd_ptr_gray_sync1 <= 0
+            rd_ptr_gray_sync2 <= 0
+        } else {
+            rd_ptr_gray_sync1 <= rd_ptr_gray
+            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1
+            if wr_en && !wr_full {
+                mem[wr_ptr % DEPTH] <= wr_data
+                wr_ptr <= wr_ptr + 1
+                wr_ptr_gray <= (wr_ptr + 1) ^ ((wr_ptr + 1) >> 1)
+            }
+        }
+    }
+
+    wr_full = if ((wr_ptr + 1) ^ ((wr_ptr + 1) >> 1)) == rd_ptr_gray_sync2 { 1 } else { 0 }
+
+    on(rd_clk.rise) {
+        if rd_rst {
+            rd_ptr <= 0
+            rd_ptr_gray <= 0
+            wr_ptr_gray_sync1 <= 0
+            wr_ptr_gray_sync2 <= 0
+        } else {
+            wr_ptr_gray_sync1 <= wr_ptr_gray
+            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1
+            if rd_en && !rd_empty {
+                rd_ptr <= rd_ptr + 1
+                rd_ptr_gray <= (rd_ptr + 1) ^ ((rd_ptr + 1) >> 1)
+            }
+        }
+    }
+
+    rd_empty = if rd_ptr_gray == wr_ptr_gray_sync2 { 1 } else { 0 }
+    rd_data = mem[rd_ptr % DEPTH]
+}
+
+entity FifoTestMultiField {
+    in wr_clk: clock
+    in wr_rst: reset(active_high)
+    in rd_clk: clock
+    in rd_rst: reset(active_high)
+
+    in write_x: bit[32]
+    in write_y: bit[32]
+    in write_z: bit[32]
+    in write_enable: bit
+    out write_full: bit
+
+    out read_x: bit[32]
+    out read_y: bit[32]
+    out read_z: bit[32]
+    in read_enable: bit
+    out read_empty: bit
+}
+
+impl FifoTestMultiField {
+    signal wr_data_internal: Vec3
+    signal rd_data_internal: Vec3
+
+    wr_data_internal.x = write_x
+    wr_data_internal.y = write_y
+    wr_data_internal.z = write_z
+
+    read_x = rd_data_internal.x
+    read_y = rd_data_internal.y
+    read_z = rd_data_internal.z
+
+    let fifo = AsyncFifo<Vec3, 8> {
+        wr_clk: wr_clk,
+        wr_rst: wr_rst,
+        wr_en: write_enable,
+        wr_data: wr_data_internal,
+        wr_full: write_full,
+        rd_clk: rd_clk,
+        rd_rst: rd_rst,
+        rd_en: read_enable,
+        rd_data: rd_data_internal,
+        rd_empty: read_empty
+    }
+}

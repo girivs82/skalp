@@ -1281,3 +1281,67 @@ The compiler now correctly handles multi-field struct arrays in both SystemVeril
 
 ---
 
+## ⚠️ OPEN: Metal Shader Codegen for Array Element Reads (Bug #36)
+
+### Issue
+Metal shader codegen generates invalid code for constant array index reads in combinational assignments. The code attempts to shift the entire array instead of reading a single element.
+
+### Example (BROKEN):
+```skalp
+entity SimpleArrayWrite {
+    signal memory: [bit[32]; 4]
+    out rd_data: bit[32]
+}
+
+impl SimpleArrayWrite {
+    rd_data = memory[0]  // ❌ Generates invalid Metal code!
+}
+```
+
+### Generated Metal Shader (WRONG):
+```metal
+// WRONG: Trying to shift entire array instead of reading element 0
+signals->node_1_out = (signals->node_0_out >> 0) & 0x1;
+//                     ^^^^^^^^^^^^^^^^^^^^^
+//                     This is device uint[4] (entire array), not uint!
+```
+
+### Compiler Error:
+```
+error: invalid operands to binary expression ('device uint[4]' and 'int')
+    signals->node_1_out = (signals->node_0_out >> 0) & 0x1;
+                           ~~~~~~~~~~~~~~~~~~~ ^  ~
+```
+
+### Impact
+- **BLOCKS**: GPU simulation of designs with constant array index reads
+- **AFFECTS**: All array element reads in combinational logic
+- **WORKAROUND**: None for GPU simulation; works fine in SystemVerilog codegen
+
+### Root Cause
+The Metal shader codegen is treating `memory[0]` as a bit-select operation (`array >> 0`) instead of an array element read operation (`array[0]`).
+
+This appears to be in the SIR→Metal conversion, where array reads are not being properly distinguished from bit-select operations.
+
+### Files Likely Involved
+- `crates/skalp-backends/src/metal/` - Metal shader codegen
+- `crates/skalp-sir/src/mir_to_sir.rs` - SIR generation for array operations
+- Possibly `create_array_read_node()` or similar functions
+
+### Priority
+**MEDIUM** - Blocks GPU simulation testing for array-based designs, but SystemVerilog generation works correctly
+
+### Test Case
+- `tests/fixtures/test_array_write_simple.sk` - Minimal test case
+- Test is currently marked `#[ignore]` in `tests/test_gpu_simulation.rs:243`
+
+### Next Steps
+1. Investigate how `ArrayRead` nodes are converted to Metal shader code
+2. Ensure constant index reads generate `array[index]` instead of `(array >> index)`
+3. Re-enable test once fixed
+
+### Status
+⚠️ **OPEN** - Metal shader codegen needs fix for array element reads
+
+---
+

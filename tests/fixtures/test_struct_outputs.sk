@@ -1,0 +1,29 @@
+struct Vec3 {
+    x: bit[32]
+    y: bit[32]
+    z: bit[32]
+}
+
+entity StructOutputTest {
+    in clk: clock
+    in rst: reset(active_high)
+    out vertex: Vec3
+}
+
+impl StructOutputTest {
+    signal out_vertex: Vec3
+
+    on(clk.rise) {
+        if rst {
+            out_vertex.x <= 0x11111111
+            out_vertex.y <= 0x22222222
+            out_vertex.z <= 0x33333333
+        } else {
+            out_vertex.x <= 0xAAAAAAAA
+            out_vertex.y <= 0xBBBBBBBB
+            out_vertex.z <= 0xCCCCCCCC
+        }
+    }
+
+    vertex = out_vertex
+}

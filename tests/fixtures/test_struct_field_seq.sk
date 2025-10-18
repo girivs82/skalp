@@ -1,0 +1,31 @@
+struct SimpleStruct {
+    field_x: bit[8]
+    field_y: bit[8]
+}
+
+entity FieldAssignTest {
+    in clk: clock
+    in rst: reset(active_high)
+    in input_x: bit[8]
+    in input_y: bit[8]
+    out output_x: bit[8]
+    out output_y: bit[8]
+}
+
+impl FieldAssignTest {
+    signal out_data: SimpleStruct
+
+    // TESTING: Direct field assignment in sequential block
+    on(clk.rise) {
+        if rst {
+            out_data.field_x <= 0
+            out_data.field_y <= 0
+        } else {
+            out_data.field_x <= input_x
+            out_data.field_y <= input_y
+        }
+    }
+
+    output_x = out_data.field_x
+    output_y = out_data.field_y
+}
