@@ -603,43 +603,35 @@ FIFO tests still read zeros due to a different issue (Bug #25) - but clock mappi
 
 ---
 
-## ⚠️ PARTIALLY RESOLVED: AsyncFifo GPU Simulator Tests (Bug #20)
+## ✅ FULLY RESOLVED: AsyncFifo GPU Simulator Tests (Bug #20)
 
-### Issue
-AsyncFifo GPU simulator tests read zeros instead of written values.
+### Issue (RESOLVED)
+AsyncFifo GPU simulator tests were reading zeros instead of written values.
 
-### Status Update (After Fixes)
+### Status Update (All Tests Now Pass!)
 - ✅ FlipFlop nodes are created correctly (Bug #19a fixed)
 - ✅ MUX logic generates correct conditionals (Bug #19b fixed)
 - ✅ Single-field struct flattening works (Bug #21 fixed)
 - ✅ Imported implementations preserved (Bug #22 fixed)
 - ✅ Simple array write tests pass
-- ✅ `test_async_fifo_clock_domain_crossing` now PASSES (compiler fixed!)
-- ❌ `test_graphics_pipeline_multi_clock_domains` still reads zeros (implementation issue, not compiler bug)
+- ✅ `test_async_fifo_clock_domain_crossing` PASSES
+- ✅ `test_vec3_fifo` PASSES (Bug #34 fixed)
+- ✅ `test_graphics_pipeline_multi_clock_domains` PASSES (Bug #34 fixed)
 
-### Compiler Bugs: FIXED
-All compiler bugs preventing AsyncFifo from working are now fixed:
+### All Compiler Bugs: FIXED
+All compiler bugs preventing AsyncFifo from working have been fixed:
 1. Bug #19a/b - Sequential array assignments and MUX logic
 2. Bug #21 - Single-field struct flattening
 3. Bug #22 - Imported implementations preserved
+4. **Bug #34 - Instance elaboration signal matching** (final issue!)
 
-The AsyncFifo test now passes, confirming the compiler is working correctly!
+### Final Bug Was Bug #34
+The remaining test failures were caused by Bug #34 (instance elaboration signal matching). After fixing that bug, ALL AsyncFifo tests now pass:
+- Multi-field struct arrays (Vec3, SimpleVertex) work correctly
+- Graphics pipeline with CDC between clock domains works
+- All 7 graphics pipeline functional tests pass
 
-### Remaining Issue: AsyncFifo Implementation Logic
-The `test_graphics_pipeline_multi_clock_domains` test (which uses multiple AsyncFifos in a pipeline) still reads zeros. This is **NOT a compiler bug** but an issue with the AsyncFifo implementation logic itself:
-- The FIFO memory is created correctly (mem_0..7)
-- The CDC synchronizers are present (gray code, sync stages)
-- But data propagation through read/write pointer logic appears broken
-
-### Hypothesis
-Likely issues in AsyncFifo implementation (not compiler):
-1. Read/write pointer management logic
-2. Gray code conversion errors
-3. FIFO full/empty flag calculation
-4. CDC synchronization timing
-
-### Next Steps
-Investigate AsyncFifo implementation logic (in `examples/graphics_pipeline/lib/async_fifo.sk`) to fix data propagation, not compiler infrastructure.
+The compiler is now working correctly for all AsyncFifo use cases!
 
 ---
 
@@ -784,23 +776,21 @@ registers->memory = signals->node_16_out;
 
 ---
 
-## ⚠️ PRE-EXISTING: Graphics Pipeline Multi-Clock Domain Test Failure
+## ✅ RESOLVED: Graphics Pipeline Multi-Clock Domain Test Failure
 
-### Issue
-`test_graphics_pipeline_multi_clock_domains` reads all zeros instead of expected vertex data. This is a **pre-existing bug** that existed before the array preservation implementation.
+### Issue (RESOLVED)
+`test_graphics_pipeline_multi_clock_domains` was reading all zeros instead of expected vertex data.
 
-### Evidence
-Tested on commit before array changes - same test failure:
-- Writes: `(0x40000000, 0x40400000, 0x40800000), ...`
-- Reads: `(0x00000000, 0x00000000, 0x00000000), ...`
+### Root Cause
+This test failure was caused by **Bug #34** (instance elaboration signal matching), not by array preservation or CDC timing. When the bug was fixed, the test immediately passed.
 
 ### Analysis
 This test uses AsyncFifo with `[Vec3; 32]` elements (array of composite types). The array preservation implementation correctly FLATTENS this to `mem_0_x, mem_0_y, mem_0_z, ...` because Vec3 is a composite type (struct).
 
-The test failure appears to be a CDC (Clock Domain Crossing) timing issue or AsyncFifo implementation bug, NOT a compiler bug.
+The bug was in MIR→SIR conversion: `find_assignment_in_branch_for_instance` was matching all flattened signals to the first assignment, causing all array index constants to be 0.
 
 ### Status
-⚠️ **PRE-EXISTING** - Not caused by array preservation implementation. Requires separate investigation of AsyncFifo CDC logic or multi-clock domain testbench timing.
+✅ **FIXED** - Bug #34 resolved this issue. Test now passes consistently.
 
 ## ✅ FIXED: Const Generic Parameters in RHS Array Index Expressions (Bug #30)
 
