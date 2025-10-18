@@ -65,6 +65,9 @@ struct SymbolTable {
     /// User-defined types (struct, enum, union)
     user_types: HashMap<String, HirType>,
 
+    /// Types of let-bound variables (for type inference in tuple destructuring)
+    variable_types: HashMap<VariableId, HirType>,
+
     /// Current scope for nested lookups
     scopes: Vec<HashMap<String, SymbolId>>,
 }
@@ -1844,16 +1847,37 @@ impl HirBuilderContext {
         let tmp_type = if let Some(HirType::Tuple(element_types)) = tuple_type {
             HirType::Tuple(element_types.clone())
         } else {
-            // Infer tuple type from the number of variables in the pattern
-            // Create a tuple type with Nat(32) placeholders for each element
-            let element_types = vec![HirType::Nat(32); var_names.len()];
-            HirType::Tuple(element_types)
+            // Try to infer type from RHS expression
+            // If RHS is a tuple literal, we can infer from the number of elements
+            if let HirExpression::TupleLiteral(ref elements) = value {
+                // Create tuple type with placeholders matching element count
+                // Type inference will refine these later
+                let element_types = vec![HirType::Nat(32); elements.len()];
+                HirType::Tuple(element_types)
+            } else if let HirExpression::Variable(var_id) = value {
+                // If RHS is a variable, look up its type from the variable_types map
+                self.symbols
+                    .variable_types
+                    .get(&var_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        // Fallback: Create tuple type with Nat(32) placeholders
+                        let element_types = vec![HirType::Nat(32); var_names.len()];
+                        HirType::Tuple(element_types)
+                    })
+            } else {
+                // Fallback: Create tuple type with Nat(32) placeholders for each element
+                let element_types = vec![HirType::Nat(32); var_names.len()];
+                HirType::Tuple(element_types)
+            }
         };
 
         // Register temporary variable
         self.symbols.variables.insert(tmp_name.clone(), tmp_id);
         self.symbols
             .add_to_scope(&tmp_name, SymbolId::Variable(tmp_id));
+        // Register type for type inference
+        self.symbols.variable_types.insert(tmp_id, tmp_type.clone());
 
         // Create let statement for temporary: let _tuple_tmp_N = expr
         statements.push(HirStatement::Let(HirLetStatement {
@@ -1887,6 +1911,10 @@ impl HirBuilderContext {
             self.symbols.variables.insert(var_name.clone(), var_id);
             self.symbols
                 .add_to_scope(var_name, SymbolId::Variable(var_id));
+            // Register type for type inference
+            self.symbols
+                .variable_types
+                .insert(var_id, element_type.clone());
 
             // Create let statement: let var = _tuple_tmp_N.index
             statements.push(HirStatement::Let(HirLetStatement {
@@ -1989,6 +2017,8 @@ impl HirBuilderContext {
         // Register in symbol table so the variable can be resolved
         self.symbols.variables.insert(name.clone(), id);
         self.symbols.add_to_scope(&name, SymbolId::Variable(id));
+        // Register type for type inference
+        self.symbols.variable_types.insert(id, var_type.clone());
 
         Some(HirLetStatement {
             id,
@@ -2610,6 +2640,7 @@ impl HirBuilderContext {
             SyntaxKind::IfExpr => self.build_if_expr(node),
             SyntaxKind::MatchExpr => self.build_match_expr(node),
             SyntaxKind::CastExpr => self.build_cast_expr(node),
+            SyntaxKind::BlockExpr => self.build_block_expr(node),
             SyntaxKind::ParenExpr => {
                 // Unwrap parentheses - but handle parser bug where complex expressions
                 // inside parens are represented as multiple sibling BinaryExpr nodes
@@ -3631,12 +3662,12 @@ impl HirBuilderContext {
 
     /// Build if expression
     fn build_if_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Parse structure: if <condition> { <then_expr> } else { <else_expr> } or else if ...
+        // Parse structure: if <condition> { <then_block> } else { <else_block> } or else if ...
         // Due to parser bug, sub-expressions may appear as siblings.
-        // We need to filter based on tokens to find the correct expressions.
+        // We need to filter based on tokens to find the correct expressions and blocks.
 
-        // Find expressions by looking at tokens:
-        // Structure: if <cond> { <then> } else { <else> }
+        // Find expressions and blocks by looking at tokens:
+        // Structure: if <cond> { <then_block> } else { <else_block> }
 
         let mut found_if = false;
         let mut found_lbrace1 = false;
@@ -3645,8 +3676,8 @@ impl HirBuilderContext {
         let mut found_lbrace2 = false;
 
         let mut condition_expr = None;
-        let mut then_expr = None;
-        let mut else_expr = None;
+        let mut then_block = None;
+        let mut else_block = None;
 
         for element in node.children_with_tokens() {
             match element {
@@ -3659,7 +3690,16 @@ impl HirBuilderContext {
                     _ => {}
                 },
                 rowan::NodeOrToken::Node(n) => {
-                    if matches!(
+                    // Look for BlockExpr nodes for then and else blocks
+                    if n.kind() == SyntaxKind::BlockExpr {
+                        if found_lbrace1 && !found_rbrace1 && then_block.is_none() {
+                            then_block = Some(n);
+                        } else if found_else && else_block.is_none() {
+                            else_block = Some(n);
+                        }
+                    }
+                    // Look for condition expression and fallback for else if
+                    else if matches!(
                         n.kind(),
                         SyntaxKind::LiteralExpr
                             | SyntaxKind::IdentExpr
@@ -3676,29 +3716,148 @@ impl HirBuilderContext {
                         if found_if && !found_lbrace1 {
                             // Take the LAST expression before the first brace (to handle sub-expressions)
                             condition_expr = Some(n);
-                        } else if found_lbrace1 && !found_rbrace1 {
-                            // Take the LAST expression between braces
-                            then_expr = Some(n);
-                        } else if found_else {
-                            // Take the LAST expression after else (works for both { expr } and else if)
-                            else_expr = Some(n);
+                        } else if found_else && n.kind() == SyntaxKind::IfExpr {
+                            // else if chain - take the IfExpr as the else block
+                            else_block = Some(n);
                         }
                     }
                 }
             }
         }
 
-        // Now build the expressions, taking the LAST occurrence of each to handle sub-expressions
-        // (similar to the match arm fix)
+        // Build the condition expression
         let condition = self.build_expression(&condition_expr?)?;
-        let then = self.build_expression(&then_expr?)?;
-        let else_val = self.build_expression(&else_expr?)?;
+
+        // Build then block or expression
+        let then = if let Some(block_node) = then_block {
+            self.build_block_expr(&block_node)?
+        } else {
+            // Fallback: look for a direct expression (for backwards compatibility)
+            let expr_node = node.children().find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                )
+            })?;
+            self.build_expression(&expr_node)?
+        };
+
+        // Build else block or expression
+        let else_val = if let Some(block_node) = else_block {
+            if block_node.kind() == SyntaxKind::BlockExpr {
+                self.build_block_expr(&block_node)?
+            } else {
+                // else if chain
+                self.build_expression(&block_node)?
+            }
+        } else {
+            // Fallback: look for a direct expression
+            let expr_node = node
+                .children()
+                .skip_while(|n| n.kind() != SyntaxKind::ElseKw)
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                    )
+                })?;
+            self.build_expression(&expr_node)?
+        };
 
         Some(HirExpression::If(HirIfExpr {
             condition: Box::new(condition),
             then_expr: Box::new(then),
             else_expr: Box::new(else_val),
         }))
+    }
+
+    /// Build block expression with statements and a final expression
+    /// Example: { let x = 10; x + 5 } - statements followed by final expression
+    fn build_block_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        let mut statements = Vec::new();
+        let mut result_expr = None;
+
+        // Process all children of the BlockExpr node
+        for child in node.children() {
+            match child.kind() {
+                // Statements
+                SyntaxKind::LetStmt => {
+                    // Build let statement(s) - this handles tuple destructuring too
+                    let let_stmts = self.build_let_statements_from_node(&child);
+                    statements.extend(let_stmts);
+                }
+                SyntaxKind::IfStmt => {
+                    if let Some(if_stmt) = self.build_if_statement(&child) {
+                        statements.push(HirStatement::If(if_stmt));
+                    }
+                }
+                SyntaxKind::MatchStmt => {
+                    if let Some(match_stmt) = self.build_match_statement(&child) {
+                        statements.push(HirStatement::Match(match_stmt));
+                    }
+                }
+                SyntaxKind::ReturnStmt => {
+                    // Return statements - build them as generic statements
+                    if let Some(stmt) = self.build_statement(&child) {
+                        statements.push(stmt);
+                    }
+                }
+                // Expressions - the last one becomes the result
+                _ if matches!(
+                    child.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::CastExpr
+                        | SyntaxKind::TupleExpr
+                        | SyntaxKind::StructLiteral
+                        | SyntaxKind::ArrayLiteral
+                ) =>
+                {
+                    // This is an expression - it becomes the result
+                    result_expr = self.build_expression(&child);
+                }
+                _ => {
+                    // Unknown node kind - skip
+                }
+            }
+        }
+
+        // If there's no explicit result expression, use a unit/void value (literal 0)
+        let final_expr = result_expr.unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+
+        Some(HirExpression::Block {
+            statements,
+            result_expr: Box::new(final_expr),
+        })
     }
 
     /// Build match expression
@@ -5263,6 +5422,7 @@ impl SymbolTable {
             constants: HashMap::new(),
             clock_domains: HashMap::new(),
             user_types: HashMap::new(),
+            variable_types: HashMap::new(),
             scopes: vec![HashMap::new()], // Start with global scope
         }
     }
