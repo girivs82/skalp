@@ -509,6 +509,7 @@ impl<'a> ParseState<'a> {
         self.parse_type();
         self.expect(SyntaxKind::Assign);
         self.parse_expression();
+        self.expect(SyntaxKind::Semicolon);
 
         self.finish_node();
     }
@@ -5036,6 +5037,7 @@ impl ParseState<'_> {
             Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
             Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
             Some(SyntaxKind::FnKw) => self.parse_function_decl(),
+            Some(SyntaxKind::ConstKw) => self.parse_constant_decl(),
             _ => {
                 self.error_and_bump("expected item after visibility modifier");
             }
