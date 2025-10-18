@@ -391,6 +391,9 @@ pub enum HirExpression {
         false_expr: Box<HirExpression>,
     },
     StructLiteral(HirStructLiteral),
+    /// Tuple literal expression
+    /// Example: (result, valid, error_code)
+    TupleLiteral(Vec<HirExpression>),
     If(HirIfExpr),
     Match(HirMatchExpr),
     Cast(HirCastExpr),
@@ -592,6 +595,11 @@ pub enum HirType {
         element_type: Box<HirType>,
         dimension: Box<HirExpression>,
     },
+
+    /// Tuple type for multiple return values
+    /// Example: (bit[32], bit) for returning (result, valid)
+    /// Lowered to anonymous structs during MIR generation
+    Tuple(Vec<HirType>),
 }
 
 /// Patterns in HIR

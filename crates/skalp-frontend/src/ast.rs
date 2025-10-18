@@ -327,17 +327,22 @@ pub struct BlockStatement {
 /// Let statement for local variable bindings
 ///
 /// Allows defining local variables inside sequential and combinational blocks.
-/// Syntax: `let name [: type] = value`
+/// Supports tuple destructuring for multiple return values.
+///
+/// Syntax:
+/// - Single binding: `let name [: type] = value`
+/// - Tuple destructuring: `let (a, b) = func()`
 ///
 /// Example:
 /// ```skalp
 /// let next_ptr = ptr + 1
 /// let gray = next_ptr ^ (next_ptr >> 1)
+/// let (result, valid) = exec_operation(data)
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LetStatement {
-    /// Variable name
-    pub name: String,
+    /// Pattern to bind (can be identifier or tuple pattern)
+    pub pattern: Pattern,
     /// Optional type annotation
     pub var_type: Option<Type>,
     /// Initializer expression (required)
@@ -365,6 +370,9 @@ pub enum Expression {
     Index(IndexExpr),
     /// Struct literal
     StructLiteral(StructLiteralExpr),
+    /// Tuple literal (for multiple return values)
+    /// Example: (result, valid, error)
+    TupleLiteral(TupleLiteralExpr),
 }
 
 /// Literal values
@@ -478,6 +486,21 @@ pub struct StructFieldInit {
     pub value: Expression,
 }
 
+/// Tuple literal expression
+///
+/// Represents a tuple value constructed from multiple expressions.
+/// Used for returning multiple values from functions.
+///
+/// Example:
+/// ```skalp
+/// return (result, valid, error_code)
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TupleLiteralExpr {
+    /// Elements of the tuple
+    pub elements: Vec<Expression>,
+}
+
 /// Types in SKALP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Type {
@@ -501,6 +524,9 @@ pub enum Type {
     Stream(Box<Type>),
     /// Array type
     Array(Box<Type>, u32),
+    /// Tuple type (for multiple return values)
+    /// Example: (bit[32], bit) for returning (result, valid)
+    Tuple(Vec<Type>),
     /// Custom type
     Custom(String),
     /// Named type (for generics)

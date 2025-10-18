@@ -490,24 +490,28 @@ impl HirBuilderContext {
                 }
                 SyntaxKind::LetStmt => {
                     // Let bindings in impl blocks are treated as variables with combinational assignments
-                    if let Some(let_stmt) = self.build_let_statement(&child) {
-                        // Create a variable for the let binding
-                        let variable = HirVariable {
-                            id: let_stmt.id,
-                            name: let_stmt.name.clone(),
-                            var_type: let_stmt.var_type.clone(),
-                            initial_value: None,
-                        };
-                        variables.push(variable);
+                    // Handle both simple let and tuple destructuring
+                    let let_stmts = self.build_let_statements_from_node(&child);
+                    for stmt in let_stmts {
+                        if let HirStatement::Let(let_stmt) = stmt {
+                            // Create a variable for the let binding
+                            let variable = HirVariable {
+                                id: let_stmt.id,
+                                name: let_stmt.name.clone(),
+                                var_type: let_stmt.var_type.clone(),
+                                initial_value: None,
+                            };
+                            variables.push(variable);
 
-                        // Create a combinational assignment for the initialization
-                        let assignment = HirAssignment {
-                            id: self.next_assignment_id(),
-                            lhs: HirLValue::Variable(let_stmt.id),
-                            assignment_type: HirAssignmentType::Combinational,
-                            rhs: let_stmt.value,
-                        };
-                        assignments.push(assignment);
+                            // Create a combinational assignment for the initialization
+                            let assignment = HirAssignment {
+                                id: self.next_assignment_id(),
+                                lhs: HirLValue::Variable(let_stmt.id),
+                                assignment_type: HirAssignmentType::Combinational,
+                                rhs: let_stmt.value,
+                            };
+                            assignments.push(assignment);
+                        }
                     }
                 }
                 _ => {}
@@ -1082,9 +1086,9 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::LetStmt => {
-                    if let Some(let_stmt) = self.build_let_statement(&child) {
-                        statements.push(HirStatement::Let(let_stmt));
-                    }
+                    // Handle both simple let and tuple destructuring
+                    let let_stmts = self.build_let_statements_from_node(&child);
+                    statements.extend(let_stmts);
                 }
                 SyntaxKind::BlockStmt => {
                     let block_stmts = self.build_statements(&child);
@@ -1139,7 +1143,18 @@ impl HirBuilderContext {
                 .build_property_statement(node)
                 .map(HirStatement::Property),
             SyntaxKind::CoverStmt => self.build_cover_statement(node).map(HirStatement::Cover),
-            SyntaxKind::LetStmt => self.build_let_statement(node).map(HirStatement::Let),
+            SyntaxKind::LetStmt => {
+                // Handle both simple let and tuple destructuring
+                let let_stmts = self.build_let_statements_from_node(node);
+                if let_stmts.is_empty() {
+                    None
+                } else if let_stmts.len() == 1 {
+                    Some(let_stmts.into_iter().next().unwrap())
+                } else {
+                    // Tuple destructuring generates multiple statements - wrap in block
+                    Some(HirStatement::Block(let_stmts))
+                }
+            }
             SyntaxKind::ReturnStmt => {
                 // Return statement: return [expr]
                 let expr = node
@@ -1731,14 +1746,180 @@ impl HirBuilderContext {
         })
     }
 
-    /// Build let statement
+    /// Build let statement(s) from a LetStmt node, handling tuple destructuring
+    /// Returns a vector of statements (single for simple let, multiple for tuple destructuring)
+    fn build_let_statements_from_node(&mut self, node: &SyntaxNode) -> Vec<HirStatement> {
+        // Check if this is a tuple pattern
+        if let Some(pattern_node) = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::TuplePattern)
+        {
+            return self.build_tuple_destructuring(node, &pattern_node);
+        }
+
+        // Simple identifier pattern - delegate to original function
+        if let Some(let_stmt) = self.build_let_statement(node) {
+            vec![HirStatement::Let(let_stmt)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Build tuple destructuring: let (a, b, c) = expr
+    /// Expands to: let _tmp = expr; let a = _tmp.0; let b = _tmp.1; let c = _tmp.2;
+    fn build_tuple_destructuring(
+        &mut self,
+        let_node: &SyntaxNode,
+        pattern_node: &SyntaxNode,
+    ) -> Vec<HirStatement> {
+        let mut statements = Vec::new();
+
+        // Extract variable names from tuple pattern
+        let var_names: Vec<String> = pattern_node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::IdentPattern)
+            .filter_map(|n| {
+                n.children_with_tokens()
+                    .filter_map(|elem| elem.into_token())
+                    .find(|t| t.kind() == SyntaxKind::Ident)
+                    .map(|t| t.text().to_string())
+            })
+            .collect();
+
+        if var_names.is_empty() {
+            return statements;
+        }
+
+        // Extract the initializer expression
+        let expr_children: Vec<_> = let_node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::TupleExpr
+                )
+            })
+            .collect();
+
+        let value_node = expr_children
+            .iter()
+            .find(|n| n.kind() == SyntaxKind::BinaryExpr)
+            .or_else(|| {
+                expr_children
+                    .iter()
+                    .find(|n| n.kind() == SyntaxKind::UnaryExpr)
+            })
+            .or_else(|| {
+                expr_children
+                    .iter()
+                    .find(|n| n.kind() == SyntaxKind::CallExpr)
+            })
+            .or_else(|| expr_children.last());
+
+        let Some(value) = value_node.and_then(|n| self.build_expression(n)) else {
+            return statements;
+        };
+
+        // Extract optional type annotation (will be a tuple type)
+        let tuple_type = let_node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::TupleType)
+            .map(|n| self.extract_hir_type(&n));
+
+        // Create temporary variable for the tuple expression
+        let tmp_id = self.next_variable_id();
+        let tmp_name = format!("_tuple_tmp_{}", tmp_id.0);
+
+        // Infer or use explicit tuple type
+        let tmp_type = if let Some(HirType::Tuple(element_types)) = tuple_type {
+            HirType::Tuple(element_types.clone())
+        } else {
+            // Infer tuple type from the number of variables in the pattern
+            // Create a tuple type with Nat(32) placeholders for each element
+            let element_types = vec![HirType::Nat(32); var_names.len()];
+            HirType::Tuple(element_types)
+        };
+
+        // Register temporary variable
+        self.symbols.variables.insert(tmp_name.clone(), tmp_id);
+        self.symbols
+            .add_to_scope(&tmp_name, SymbolId::Variable(tmp_id));
+
+        // Create let statement for temporary: let _tuple_tmp_N = expr
+        statements.push(HirStatement::Let(HirLetStatement {
+            id: tmp_id,
+            name: tmp_name.clone(),
+            var_type: tmp_type.clone(),
+            value,
+        }));
+
+        // Create let statements for each tuple element: let a = _tuple_tmp_N.0
+        for (index, var_name) in var_names.iter().enumerate() {
+            let var_id = self.next_variable_id();
+
+            // Determine element type from tuple type if available
+            let element_type = if let HirType::Tuple(ref element_types) = tmp_type {
+                element_types
+                    .get(index)
+                    .cloned()
+                    .unwrap_or(HirType::Nat(32))
+            } else {
+                HirType::Nat(32)
+            };
+
+            // Create field access expression: _tuple_tmp_N.index
+            let field_access = HirExpression::FieldAccess {
+                base: Box::new(HirExpression::Variable(tmp_id)),
+                field: index.to_string(),
+            };
+
+            // Register variable in symbol table
+            self.symbols.variables.insert(var_name.clone(), var_id);
+            self.symbols
+                .add_to_scope(var_name, SymbolId::Variable(var_id));
+
+            // Create let statement: let var = _tuple_tmp_N.index
+            statements.push(HirStatement::Let(HirLetStatement {
+                id: var_id,
+                name: var_name.clone(),
+                var_type: element_type,
+                value: field_access,
+            }));
+        }
+
+        statements
+    }
+
+    /// Build simple let statement (single identifier pattern)
     fn build_let_statement(&mut self, node: &SyntaxNode) -> Option<HirLetStatement> {
-        // Extract variable name using children_with_tokens to access tokens
+        // Extract variable name - look for IdentPattern first, then fallback to bare Ident
         let name = node
-            .children_with_tokens()
-            .filter_map(|elem| elem.into_token())
-            .find(|t| t.kind() == SyntaxKind::Ident)
-            .map(|t| t.text().to_string())?;
+            .children()
+            .find(|n| n.kind() == SyntaxKind::IdentPattern)
+            .and_then(|pattern_node| {
+                pattern_node
+                    .children_with_tokens()
+                    .filter_map(|elem| elem.into_token())
+                    .find(|t| t.kind() == SyntaxKind::Ident)
+                    .map(|t| t.text().to_string())
+            })
+            .or_else(|| {
+                // Fallback: look for direct Ident token (legacy behavior)
+                node.children_with_tokens()
+                    .filter_map(|elem| elem.into_token())
+                    .find(|t| t.kind() == SyntaxKind::Ident)
+                    .map(|t| t.text().to_string())
+            })?;
 
         // Extract optional type annotation
         let explicit_type = node

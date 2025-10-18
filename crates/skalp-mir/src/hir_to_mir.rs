@@ -276,10 +276,11 @@ impl<'hir> HirToMir<'hir> {
                     let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
 
                     for (mir_var_id, name, hir_type) in dynamic_vars {
+                        let mir_type = self.convert_type(&hir_type);
                         let variable = Variable {
                             id: mir_var_id,
                             name,
-                            var_type: self.convert_type(&hir_type),
+                            var_type: mir_type,
                             initial: None,
                         };
                         module.variables.push(variable);
@@ -2333,6 +2334,12 @@ impl<'hir> HirToMir<'hir> {
                 // Each field value is evaluated and packed into the correct bit positions
                 self.convert_struct_literal(&struct_lit.type_name, &struct_lit.fields)
             }
+            hir::HirExpression::TupleLiteral(elements) => {
+                // Convert tuple literal to an anonymous struct
+                // Tuple (a, b, c) becomes struct { _0: typeof(a), _1: typeof(b), _2: typeof(c) }
+                // This is then packed into a bit vector like any other struct
+                self.convert_tuple_literal(elements)
+            }
         }
     }
 
@@ -2396,6 +2403,33 @@ impl<'hir> HirToMir<'hir> {
             // This is a limitation that will need proper struct support in MIR
             field_exprs.into_iter().next()
         }
+    }
+
+    /// Convert tuple literal to packed bit vector expression
+    /// Tuples are lowered to anonymous structs with fields named _0, _1, _2, etc.
+    /// The tuple elements are concatenated together into a single packed bit vector.
+    fn convert_tuple_literal(&mut self, elements: &[hir::HirExpression]) -> Option<Expression> {
+        // Convert each tuple element expression
+        let mut element_exprs = Vec::new();
+        for element in elements {
+            let element_expr = self.convert_expression(element)?;
+            element_exprs.push(element_expr);
+        }
+
+        // Handle empty tuple
+        if element_exprs.is_empty() {
+            return None;
+        }
+
+        // Single-element tuple - just return the element
+        if element_exprs.len() == 1 {
+            return Some(element_exprs.into_iter().next().unwrap());
+        }
+
+        // Multi-element tuple - concatenate all elements
+        // Elements are packed from left to right: (a, b, c) becomes {a, b, c}
+        // In bit representation: MSB is 'a', LSB is 'c'
+        Some(Expression::Concat(element_exprs))
     }
 
     /// Convert match expression to nested conditional expressions
@@ -2835,6 +2869,25 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
 
+            // Tuple types - convert to anonymous packed structs
+            hir::HirType::Tuple(element_types) => {
+                // Convert (bit[32], bit[8]) to struct __tuple_2 { _0: bit[32], _1: bit[8] }
+                let fields: Vec<StructField> = element_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| StructField {
+                        name: format!("_{}", i),
+                        field_type: self.convert_type(ty),
+                    })
+                    .collect();
+
+                DataType::Struct(Box::new(StructType {
+                    name: format!("__tuple_{}", fields.len()),
+                    fields,
+                    packed: true,
+                }))
+            }
+
             // Parametric numeric types - These will be monomorphized later
             hir::HirType::FpParametric { format } => {
                 // TODO: Evaluate format expression to get concrete FloatFormat
@@ -3066,8 +3119,16 @@ impl<'hir> HirToMir<'hir> {
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<Expression> {
+        // Map numeric field names (tuple indices) to struct field names
+        // e.g., "0" -> "_0", "1" -> "_1", "2" -> "_2"
+        let normalized_field_name = if field_name.chars().all(|c| c.is_ascii_digit()) {
+            format!("_{}", field_name)
+        } else {
+            field_name.to_string()
+        };
+
         // Build the complete field path from nested accesses
-        let mut field_path = vec![field_name.to_string()];
+        let mut field_path = vec![normalized_field_name.clone()];
         let mut current_base = base;
 
         // Walk up the chain to find the root signal/port/variable
@@ -3077,7 +3138,13 @@ impl<'hir> HirToMir<'hir> {
                     base: inner_base,
                     field: inner_field,
                 } => {
-                    field_path.insert(0, inner_field.clone());
+                    // Normalize inner field names too (for nested tuple access)
+                    let normalized_inner = if inner_field.chars().all(|c| c.is_ascii_digit()) {
+                        format!("_{}", inner_field)
+                    } else {
+                        inner_field.clone()
+                    };
+                    field_path.insert(0, normalized_inner);
                     current_base = inner_base.as_ref();
                 }
                 hir::HirExpression::Signal(sig_id) => {
@@ -3096,7 +3163,8 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(signal_id) = self.signal_map.get(sig_id) {
                         // Fall back to bit range approach
                         let base_lval = LValue::Signal(*signal_id);
-                        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
+                        let (high_bit, low_bit) =
+                            self.get_field_bit_range(base, &normalized_field_name)?;
                         let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
                         let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
                         return Some(Expression::Ref(LValue::RangeSelect {
@@ -3121,7 +3189,8 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(port_id_mir) = self.port_map.get(port_id) {
                         // Fall back to bit range approach
                         let base_lval = LValue::Port(*port_id_mir);
-                        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
+                        let (high_bit, low_bit) =
+                            self.get_field_bit_range(base, &normalized_field_name)?;
                         let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
                         let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
                         return Some(Expression::Ref(LValue::RangeSelect {
@@ -3136,7 +3205,8 @@ impl<'hir> HirToMir<'hir> {
                     // Variables don't get flattened the same way, use bit range approach
                     if let Some(var_id_mir) = self.variable_map.get(var_id) {
                         let base_lval = LValue::Variable(*var_id_mir);
-                        let (high_bit, low_bit) = self.get_field_bit_range(base, field_name)?;
+                        let (high_bit, low_bit) =
+                            self.get_field_bit_range(base, &normalized_field_name)?;
                         let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
                         let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
                         return Some(Expression::Ref(LValue::RangeSelect {
@@ -3232,8 +3302,29 @@ impl<'hir> HirToMir<'hir> {
                 for impl_block in &hir.implementations {
                     for signal in &impl_block.signals {
                         if signal.id == *id {
-                            if let hir::HirType::Struct(ref struct_type) = &signal.signal_type {
-                                return Some(struct_type);
+                            match &signal.signal_type {
+                                hir::HirType::Struct(ref struct_type) => {
+                                    return Some(struct_type);
+                                }
+                                hir::HirType::Tuple(element_types) => {
+                                    // Convert tuple to anonymous struct for field access
+                                    let fields: Vec<hir::HirStructField> = element_types
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, ty)| hir::HirStructField {
+                                            name: format!("_{}", i),
+                                            field_type: ty.clone(),
+                                        })
+                                        .collect();
+
+                                    let temp_struct = Box::leak(Box::new(hir::HirStructType {
+                                        name: format!("__tuple_{}", fields.len()),
+                                        fields,
+                                        packed: true,
+                                    }));
+                                    return Some(temp_struct);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -3244,8 +3335,29 @@ impl<'hir> HirToMir<'hir> {
                     for port in &entity.ports {
                         // Compare based on the numeric ID (this is a heuristic)
                         if port.id.0 == id.0 {
-                            if let hir::HirType::Struct(ref struct_type) = &port.port_type {
-                                return Some(struct_type);
+                            match &port.port_type {
+                                hir::HirType::Struct(ref struct_type) => {
+                                    return Some(struct_type);
+                                }
+                                hir::HirType::Tuple(element_types) => {
+                                    // Convert tuple to anonymous struct for field access
+                                    let fields: Vec<hir::HirStructField> = element_types
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, ty)| hir::HirStructField {
+                                            name: format!("_{}", i),
+                                            field_type: ty.clone(),
+                                        })
+                                        .collect();
+
+                                    let temp_struct = Box::leak(Box::new(hir::HirStructType {
+                                        name: format!("__tuple_{}", fields.len()),
+                                        fields,
+                                        packed: true,
+                                    }));
+                                    return Some(temp_struct);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -3253,12 +3365,62 @@ impl<'hir> HirToMir<'hir> {
             }
             // Note: Port access will be added when we understand how ports are referenced
             hir::HirExpression::Variable(id) => {
-                // Find the variable in implementations
+                // First check dynamic_variables (for let-bound variables)
+                if let Some((_mir_id, _name, var_type)) = self.dynamic_variables.get(id) {
+                    match var_type {
+                        hir::HirType::Struct(ref struct_type) => {
+                            return Some(struct_type);
+                        }
+                        hir::HirType::Tuple(element_types) => {
+                            // Convert tuple to anonymous struct for field access
+                            let fields: Vec<hir::HirStructField> = element_types
+                                .iter()
+                                .enumerate()
+                                .map(|(i, ty)| hir::HirStructField {
+                                    name: format!("_{}", i),
+                                    field_type: ty.clone(),
+                                })
+                                .collect();
+
+                            let temp_struct = Box::leak(Box::new(hir::HirStructType {
+                                name: format!("__tuple_{}", fields.len()),
+                                fields,
+                                packed: true,
+                            }));
+                            return Some(temp_struct);
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Otherwise check HIR impl block variables
                 for impl_block in &hir.implementations {
                     for variable in &impl_block.variables {
                         if variable.id == *id {
-                            if let hir::HirType::Struct(ref struct_type) = &variable.var_type {
-                                return Some(struct_type);
+                            // Check both Struct and Tuple types
+                            match &variable.var_type {
+                                hir::HirType::Struct(ref struct_type) => {
+                                    return Some(struct_type);
+                                }
+                                hir::HirType::Tuple(element_types) => {
+                                    // Convert tuple to anonymous struct for field access
+                                    let fields: Vec<hir::HirStructField> = element_types
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, ty)| hir::HirStructField {
+                                            name: format!("_{}", i),
+                                            field_type: ty.clone(),
+                                        })
+                                        .collect();
+
+                                    let temp_struct = Box::leak(Box::new(hir::HirStructType {
+                                        name: format!("__tuple_{}", fields.len()),
+                                        fields,
+                                        packed: true,
+                                    }));
+                                    return Some(temp_struct);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -3358,6 +3520,13 @@ impl<'hir> HirToMir<'hir> {
                 let elem_width = self.get_hir_type_width(element_type);
                 let dim = self.try_eval_const_expr(dimension).unwrap_or(3) as usize;
                 elem_width * dim
+            }
+            hir::HirType::Tuple(element_types) => {
+                // Tuple width is the sum of all element widths (packed representation)
+                element_types
+                    .iter()
+                    .map(|ty| self.get_hir_type_width(ty))
+                    .sum()
             }
         }
     }

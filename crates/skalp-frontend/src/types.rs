@@ -54,6 +54,11 @@ pub enum Type {
     /// Enum type
     Enum(EnumType),
 
+    /// Tuple type - ordered collection of heterogeneous types
+    /// Example: (bit[32], bit, bit[16]) for function returning multiple values
+    /// Internally lowered to anonymous structs during HIR building
+    Tuple(Vec<Type>),
+
     /// Protocol type
     Protocol(String),
 
@@ -288,6 +293,7 @@ impl Type {
                 size: *size,
             },
             Type::Stream(t) => Type::Stream(Box::new(t.apply_subst(subst))),
+            Type::Tuple(types) => Type::Tuple(types.iter().map(|t| t.apply_subst(subst)).collect()),
             _ => self.clone(),
         }
     }
@@ -315,6 +321,9 @@ impl Type {
                     size: s2,
                 },
             ) => s1 == s2 && e1.can_unify(e2),
+            (Type::Tuple(t1), Type::Tuple(t2)) => {
+                t1.len() == t2.len() && t1.iter().zip(t2.iter()).all(|(a, b)| a.can_unify(b))
+            }
             _ => self == other,
         }
     }
@@ -574,6 +583,19 @@ impl TypeInference {
                 self.unify(e1, e2)
             }
 
+            (Type::Tuple(t1), Type::Tuple(t2)) => {
+                if t1.len() != t2.len() {
+                    return Err(TypeError::TupleSizeMismatch {
+                        expected: t1.len(),
+                        found: t2.len(),
+                    });
+                }
+                for (a, b) in t1.iter().zip(t2.iter()) {
+                    self.unify(a, b)?;
+                }
+                Ok(())
+            }
+
             _ if t1 == t2 => Ok(()),
 
             _ => Err(TypeError::TypeMismatch {
@@ -654,6 +676,9 @@ pub enum TypeError {
     /// Array size mismatch
     ArraySizeMismatch { expected: u32, found: u32 },
 
+    /// Tuple size mismatch
+    TupleSizeMismatch { expected: usize, found: usize },
+
     /// Type is not numeric
     NotNumeric(Box<Type>),
 
@@ -702,6 +727,16 @@ impl fmt::Display for Type {
             }
             Type::Struct(s) => write!(f, "{}", s.name),
             Type::Enum(e) => write!(f, "{}", e.name),
+            Type::Tuple(types) => {
+                write!(f, "(")?;
+                for (i, ty) in types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", ty)?;
+                }
+                write!(f, ")")
+            }
             Type::Protocol(p) => write!(f, "protocol {}", p),
             Type::Entity(e) => write!(f, "entity {}", e.name),
             Type::TypeParam(p) => write!(f, "{}", p),
@@ -743,6 +778,13 @@ impl fmt::Display for TypeError {
                 write!(
                     f,
                     "Array size mismatch: expected {}, found {}",
+                    expected, found
+                )
+            }
+            TypeError::TupleSizeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "Tuple size mismatch: expected {} elements, found {}",
                     expected, found
                 )
             }

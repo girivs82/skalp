@@ -848,15 +848,16 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse let statement
-    /// Syntax: let name [: type] = value [;]
+    /// Syntax: let pattern [: type] = value [;]
+    /// Supports: let x = expr, let (a, b) = expr
     fn parse_let_statement(&mut self) {
         self.start_node(SyntaxKind::LetStmt);
 
         // 'let' keyword
         self.expect(SyntaxKind::LetKw);
 
-        // Variable name
-        self.expect(SyntaxKind::Ident);
+        // Pattern (identifier or tuple destructuring)
+        self.parse_pattern();
 
         // Optional type annotation: : type
         if self.at(SyntaxKind::Colon) {
@@ -4051,11 +4052,17 @@ impl<'a> ParseState<'a> {
         loop {
             match self.current_kind() {
                 Some(SyntaxKind::Dot) => {
-                    // Field access
+                    // Field access (can be identifier for struct fields or numeric literal for tuple fields)
                     self.finish_node(); // finish IdentExpr
                     self.start_node(SyntaxKind::FieldExpr);
                     self.bump(); // consume dot
-                    self.expect(SyntaxKind::Ident);
+
+                    // Accept either identifier (struct field) or numeric literal (tuple field: .0, .1, .2)
+                    if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::IntLiteral) {
+                        self.bump(); // consume field name or index
+                    } else {
+                        self.error("expected field name or tuple index after '.'");
+                    }
                 }
                 Some(SyntaxKind::LBracket) => {
                     // Array/bit indexing
