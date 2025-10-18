@@ -1,5 +1,94 @@
 # Known Issues and Limitations
 
+## ✅ FIXED: Public Constants Not Supported (Bug #42)
+
+### Issue (FIXED)
+The parser did not support the `pub` visibility modifier for constant declarations, preventing library modules from exporting constants.
+
+### What Was Broken ❌
+```skalp
+pub const FU_ADD_8: bit[6] = 0b000000;  // ❌ Parsing error!
+```
+
+Error: `expected item after visibility modifier`
+
+### Root Cause
+The `parse_item_with_visibility()` function handled visibility for modules, entities, traits, types, structs, enums, and functions, but **not constants**.
+
+**File**: `crates/skalp-frontend/src/parse.rs` lines 5031-5043
+
+The match statement included:
+- ✅ `ModKw`, `EntityKw`, `TraitKw`, `TypeKw`, `StructKw`, `EnumKw`, `FnKw`
+- ❌ Missing: `ConstKw`
+
+### Fix Applied
+Added `ConstKw` case to `parse_item_with_visibility()`:
+
+```rust
+Some(SyntaxKind::ConstKw) => self.parse_constant_decl(),
+```
+
+### Verification
+- Minimal test: `pub const TEST_VAL: bit[6] = 0b000000;` ✅ Compiles
+- CLE func_units modules now parse successfully
+
+---
+
+## ✅ FIXED: Missing Semicolon in Constant Declarations (Bug #41)
+
+### Issue (FIXED)
+The parser expected constant declarations WITHOUT semicolons, but all existing SKALP code uses semicolons.
+
+### What Was Broken ❌
+```skalp
+const FOO: bit[6] = 0;  // ❌ Parser expected no semicolon, but code had one
+```
+
+Error: `expected top-level item at pos 37` (right after the semicolon)
+
+### Evidence
+All existing SKALP constants in examples have semicolons:
+```bash
+$ rg "^const .+:.+=" examples/
+examples/graphics_pipeline/examples/simple_pipeline.sk:28:const PIPELINE_DEPTH: nat = 3;
+examples/graphics_pipeline/examples/simple_pipeline.sk:29:const FIFO_DEPTH: nat = 16;
+...
+```
+
+### Root Cause
+The `parse_constant_decl()` function didn't expect a semicolon:
+
+**File**: `crates/skalp-frontend/src/parse.rs` lines 503-514
+
+```rust
+fn parse_constant_decl(&mut self) {
+    self.start_node(SyntaxKind::ConstantDecl);
+
+    self.expect(SyntaxKind::ConstKw);
+    self.expect(SyntaxKind::Ident);
+    self.expect(SyntaxKind::Colon);
+    self.parse_type();
+    self.expect(SyntaxKind::Assign);
+    self.parse_expression();
+    // Missing: self.expect(SyntaxKind::Semicolon);
+
+    self.finish_node();
+}
+```
+
+### Fix Applied
+Added semicolon expectation to `parse_constant_decl()`:
+
+```rust
+self.expect(SyntaxKind::Semicolon);
+```
+
+### Verification
+- Existing SKALP code patterns now parse correctly
+- CLE code constants parse successfully
+
+---
+
 ## ✅ FIXED: Blocks Not Supported in Match Expression Arms (Bug #40)
 
 ### Issue (FIXED)
