@@ -1314,7 +1314,16 @@ impl HirBuilderContext {
             })
             .collect();
 
+        eprintln!(
+            "🔍 build_assignment: Found {} expression nodes",
+            exprs.len()
+        );
+        for (i, expr) in exprs.iter().enumerate() {
+            eprintln!("   [{}]: {:?}", i, expr.kind());
+        }
+
         if exprs.len() < 2 {
+            eprintln!("   ❌ Not enough expressions, returning None");
             return None;
         }
 
@@ -1322,8 +1331,14 @@ impl HirBuilderContext {
         // Parser splits this into: IdentExpr("memory"), IndexExpr("[index]"), IdentExpr("value")
         // Also handle field access: pos.x <= value
         // Parser splits this into: IdentExpr("pos"), FieldExpr(".x"), IdentExpr("value")
+
+        // Track where RHS starts (will be updated by LHS parsing)
+        let mut rhs_start_idx = 1;
+
         let lhs = if exprs.len() == 3 && exprs[1].kind() == SyntaxKind::IndexExpr {
             // Combine base and index/range to form indexed lvalue
+            rhs_start_idx = 2; // RHS starts after IndexExpr
+
             let base = self.build_lvalue(&exprs[0])?;
             let index_node = &exprs[1];
 
@@ -1373,33 +1388,61 @@ impl HirBuilderContext {
 
                 HirLValue::Index(Box::new(base), index_expr)
             }
-        } else if exprs.len() == 3 && exprs[1].kind() == SyntaxKind::FieldExpr {
-            // Field access on LHS: pos.x <= value
-            // exprs[0] is the base (pos), exprs[1] is the field access (.x), exprs[2] is the value
-            let base = self.build_lvalue(&exprs[0])?;
-            let field_node = &exprs[1];
+        } else if exprs.len() >= 3 && exprs[1].kind() == SyntaxKind::FieldExpr {
+            // Field access on LHS: pos.x <= value or nested: out_vertex.position.x <= value
+            // Parser creates: [IdentExpr(base), FieldExpr(.field1), FieldExpr(.field2), ..., RHS]
+            // We need to build nested FieldAccess LValues
 
-            // Extract the field name from the FieldExpr
-            let field_name = field_node
-                .children_with_tokens()
-                .filter_map(|e| e.into_token())
-                .filter(|t| t.kind() == SyntaxKind::Ident)
-                .last()
-                .map(|t| t.text().to_string())?;
+            // Start with the base
+            let mut current_lval = self.build_lvalue(&exprs[0])?;
+            eprintln!("   Built base LValue from exprs[0]");
 
-            HirLValue::FieldAccess {
-                base: Box::new(base),
-                field: field_name,
+            // Build nested field access for each FieldExpr until we hit the RHS
+            for (i, expr) in exprs.iter().enumerate().skip(1) {
+                if expr.kind() != SyntaxKind::FieldExpr {
+                    // We've hit the RHS, stop building LHS
+                    rhs_start_idx = i;
+                    eprintln!("   Stopping at index {} (RHS)", i);
+                    break;
+                }
+
+                // Extract the field name from this FieldExpr
+                let field_name = expr
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| t.kind() == SyntaxKind::Ident)
+                    .last()
+                    .map(|t| t.text().to_string())?;
+
+                eprintln!("   Adding field: {}", field_name);
+
+                // Build nested FieldAccess
+                current_lval = HirLValue::FieldAccess {
+                    base: Box::new(current_lval),
+                    field: field_name,
+                };
+
+                rhs_start_idx = i + 1; // RHS starts after this FieldExpr (will be updated if we find more)
             }
+
+            eprintln!("   LHS complete, RHS starts at index {}", rhs_start_idx);
+            current_lval
         } else {
             self.build_lvalue(&exprs[0])?
         };
 
         // Handle RHS - if there are multiple expressions, we need to combine them
-        let rhs = if exprs.len() == 2 {
-            // Simple case: LHS op RHS
-            self.build_expression(&exprs[1])?
-        } else if exprs.len() == 3 {
+        eprintln!("   Building RHS starting from index {}", rhs_start_idx);
+
+        let rhs = if rhs_start_idx >= exprs.len() {
+            eprintln!("   ❌ RHS start index out of bounds, returning None");
+            return None;
+        } else if rhs_start_idx == exprs.len() - 1 {
+            // Simple case: single RHS expression
+            self.build_expression(&exprs[rhs_start_idx])?
+        } else if exprs.len() == 3 && rhs_start_idx == 1 {
+            // Special case for old 3-expression patterns (not nested field access)
+            // This preserves existing behavior for simple cases
             let second_expr = &exprs[1];
             let third_expr = &exprs[2];
 
@@ -2304,7 +2347,7 @@ impl HirBuilderContext {
                 }
             }
             SyntaxKind::FieldExpr => {
-                // Handle field access like pos.x
+                // Handle field access like pos.x or nested like out_vertex.position.x
                 // Get all identifier tokens
                 let tokens: Vec<_> = node
                     .children_with_tokens()
@@ -2316,12 +2359,14 @@ impl HirBuilderContext {
                     return None;
                 }
 
-                // First token is the base (e.g., "pos"), last token is the field (e.g., "x")
-                let base_name = tokens.first().map(|t| t.text().to_string())?;
-                let field_name = tokens.last().map(|t| t.text().to_string())?;
+                // Build nested field access from left to right
+                // For "out_vertex.position.x": tokens = [out_vertex, position, x]
+                // Result: FieldAccess { base: FieldAccess { base: Signal(out_vertex), field: "position" }, field: "x" }
+
+                let base_name = tokens[0].text().to_string();
 
                 // Look up the base as a signal/variable/port
-                let base_lval = if let Some(symbol) = self.symbols.lookup(&base_name) {
+                let mut current_lval = if let Some(symbol) = self.symbols.lookup(&base_name) {
                     match symbol {
                         SymbolId::Signal(id) => HirLValue::Signal(*id),
                         SymbolId::Variable(id) => HirLValue::Variable(*id),
@@ -2332,11 +2377,16 @@ impl HirBuilderContext {
                     return None;
                 };
 
-                // Create FieldAccess LValue - bit range calculation will happen during HIR->MIR conversion
-                Some(HirLValue::FieldAccess {
-                    base: Box::new(base_lval),
-                    field: field_name,
-                })
+                // Build nested field accesses for each remaining field
+                for token in tokens.iter().skip(1) {
+                    let field_name = token.text().to_string();
+                    current_lval = HirLValue::FieldAccess {
+                        base: Box::new(current_lval),
+                        field: field_name,
+                    };
+                }
+
+                Some(current_lval)
             }
             _ => None,
         }

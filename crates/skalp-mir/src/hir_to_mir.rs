@@ -318,8 +318,15 @@ impl<'hir> HirToMir<'hir> {
         // Determine process kind and sensitivity
         let (kind, sensitivity) = self.analyze_event_block(block);
 
+        eprintln!(
+            "🔍 convert_event_block: Converting {} HIR statements",
+            block.statements.len()
+        );
+
         // Convert body
         let body = self.convert_statements(&block.statements);
+
+        eprintln!("   Resulted in {} MIR statements", body.statements.len());
 
         Process {
             id,
@@ -415,7 +422,9 @@ impl<'hir> HirToMir<'hir> {
     fn convert_statement(&mut self, stmt: &hir::HirStatement) -> Option<Statement> {
         match stmt {
             hir::HirStatement::Assignment(assign) => {
+                eprintln!("🔍 convert_statement: Processing HIR assignment");
                 let assigns = self.convert_assignment_expanded(assign);
+                eprintln!("   Resulted in {} MIR assignments", assigns.len());
                 match assigns.len() {
                     0 => None,
                     1 => Some(Statement::Assignment(assigns.into_iter().next().unwrap())),
@@ -613,6 +622,17 @@ impl<'hir> HirToMir<'hir> {
             return assignments;
         }
 
+        // Try to expand field access assignments (simple and nested)
+        // This handles: out_data.field_x <= value and out_vertex.position.x <= value
+        // Must come BEFORE struct expansion to catch specific field assignments
+        if let Some(assignments) = self.try_expand_field_assignment(assign) {
+            eprintln!(
+                "🔧 EXPANDED FIELD ACCESS ASSIGNMENT into {} assignments",
+                assignments.len()
+            );
+            return assignments;
+        }
+
         // Try to expand struct-to-struct assignments
         if let Some(assignments) = self.try_expand_struct_assignment(assign) {
             return assignments;
@@ -772,6 +792,101 @@ impl<'hir> HirToMir<'hir> {
         }
 
         Some(assignments)
+    }
+
+    /// Extract the root signal ID and field path from a field access LValue
+    ///
+    /// Example: For `out_vertex.position.x`, returns (SignalId for out_vertex, ["position", "x"])
+    fn extract_field_access_path(
+        &self,
+        lval: &hir::HirLValue,
+    ) -> Option<(hir::SignalId, Vec<String>)> {
+        let mut field_path = Vec::new();
+        let mut current = lval;
+
+        // Walk up the field access chain to build the complete path
+        loop {
+            match current {
+                hir::HirLValue::FieldAccess { base, field } => {
+                    // Insert at front to maintain left-to-right order
+                    field_path.insert(0, field.clone());
+                    current = base.as_ref();
+                }
+                hir::HirLValue::Signal(sig_id) => {
+                    return Some((*sig_id, field_path));
+                }
+                _ => {
+                    // Not a simple signal-based field access
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Try to expand a field access assignment into a single assignment to the flattened signal
+    ///
+    /// This handles assignments like:
+    /// - Simple: `out_data.field_x <= input_value`
+    /// - Nested: `out_vertex.position.x <= input_value`
+    ///
+    /// The field access chain is resolved to find the corresponding flattened signal,
+    /// and a single assignment is generated.
+    ///
+    /// This is the fix for "Struct Field Assignments in Sequential Blocks" - the last
+    /// remaining known issue in the compiler.
+    fn try_expand_field_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<Assignment>> {
+        // Only handle FieldAccess LValues
+        if !matches!(&assign.lhs, hir::HirLValue::FieldAccess { .. }) {
+            return None;
+        }
+
+        eprintln!("🔍 try_expand_field_assignment: Processing field access LHS");
+
+        // Extract root signal and field path
+        let (root_sig_id, field_path) = self.extract_field_access_path(&assign.lhs)?;
+
+        eprintln!(
+            "   Root signal: SignalId({:?}), field path: {:?}",
+            root_sig_id.0, field_path
+        );
+
+        // Look up the flattened signals for this root signal
+        let flattened = self.flattened_signals.get(&root_sig_id)?;
+
+        eprintln!("   Searching {} flattened fields", flattened.len());
+
+        // Find the flattened field matching this field path
+        for flat_field in flattened {
+            if flat_field.field_path == field_path {
+                eprintln!(
+                    "   ✅ MATCH! Resolved to flattened signal ID {}",
+                    flat_field.id
+                );
+
+                // Determine assignment kind
+                let kind = match assign.assignment_type {
+                    hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
+                    hir::HirAssignmentType::Blocking => AssignmentKind::Blocking,
+                    hir::HirAssignmentType::Combinational => AssignmentKind::Blocking,
+                };
+
+                // Create assignment to the flattened signal
+                let lhs_lval = LValue::Signal(SignalId(flat_field.id));
+                let rhs_expr = self.convert_expression(&assign.rhs)?;
+
+                return Some(vec![Assignment {
+                    lhs: lhs_lval,
+                    rhs: rhs_expr,
+                    kind,
+                }]);
+            }
+        }
+
+        eprintln!("   ❌ No matching flattened field found");
+        None // Field path not found in flattened signals
     }
 
     /// Try to expand an array index assignment into multiple conditional assignments
@@ -1550,11 +1665,24 @@ impl<'hir> HirToMir<'hir> {
     /// Convert HIR if statement to MIR
     fn convert_if_statement(&mut self, if_stmt: &hir::HirIfStatement) -> Option<IfStatement> {
         let condition = self.convert_expression(&if_stmt.condition)?;
+        eprintln!(
+            "🔍 convert_if_statement: Then branch has {} HIR statements",
+            if_stmt.then_statements.len()
+        );
         let then_block = self.convert_statements(&if_stmt.then_statements);
-        let else_block = if_stmt
-            .else_statements
-            .as_ref()
-            .map(|stmts| self.convert_statements(stmts));
+        eprintln!(
+            "   Then block resulted in {} MIR statements",
+            then_block.statements.len()
+        );
+        let else_block = if_stmt.else_statements.as_ref().map(|stmts| {
+            eprintln!("   Else branch has {} HIR statements", stmts.len());
+            let block = self.convert_statements(stmts);
+            eprintln!(
+                "   Else block resulted in {} MIR statements",
+                block.statements.len()
+            );
+            block
+        });
 
         Some(IfStatement {
             condition,
