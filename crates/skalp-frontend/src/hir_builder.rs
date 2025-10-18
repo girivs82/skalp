@@ -1406,11 +1406,11 @@ impl HirBuilderContext {
                     break;
                 }
 
-                // Extract the field name from this FieldExpr
+                // Extract the field name from this FieldExpr (identifier or numeric literal for tuples)
                 let field_name = expr
                     .children_with_tokens()
                     .filter_map(|e| e.into_token())
-                    .filter(|t| t.kind() == SyntaxKind::Ident)
+                    .filter(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
                     .last()
                     .map(|t| t.text().to_string())?;
 
@@ -1751,6 +1751,7 @@ impl HirBuilderContext {
                         | SyntaxKind::NatType
                         | SyntaxKind::CustomType
                         | SyntaxKind::ArrayType
+                        | SyntaxKind::TupleType
                 )
             })
             .map(|n| self.extract_hir_type(&n));
@@ -1775,6 +1776,7 @@ impl HirBuilderContext {
                         | SyntaxKind::ParenExpr
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
+                        | SyntaxKind::TupleExpr
                 )
             })
             .collect();
@@ -2416,6 +2418,7 @@ impl HirBuilderContext {
             SyntaxKind::CallExpr => self.build_call_expr(node),
             SyntaxKind::StructLiteral => self.build_struct_literal(node),
             SyntaxKind::ArrayLiteral => self.build_array_literal(node),
+            SyntaxKind::TupleExpr => self.build_tuple_expr(node),
             SyntaxKind::ConcatExpr => self.build_concat_expr(node),
             SyntaxKind::TernaryExpr => self.build_ternary_expr(node),
             SyntaxKind::FieldExpr => self.build_field_expr(node),
@@ -2462,6 +2465,7 @@ impl HirBuilderContext {
                                     | SyntaxKind::FieldExpr
                                     | SyntaxKind::IndexExpr
                                     | SyntaxKind::ArrayLiteral
+                                    | SyntaxKind::TupleExpr
                                     | SyntaxKind::PathExpr
                                     | SyntaxKind::ParenExpr
                                     | SyntaxKind::IfExpr
@@ -2693,6 +2697,139 @@ impl HirBuilderContext {
         }
 
         None
+    }
+
+    /// Build tuple literal expression: (elem1, elem2, ...)
+    ///
+    /// Handles parser quirk where binary expressions are flattened.
+    /// For example: (input_val + 5, input_val[7:0] + 1) becomes:
+    ///   TupleExpr
+    ///     IdentExpr(input_val)
+    ///     BinaryExpr(+ 5)
+    ///     Comma
+    ///     IdentExpr(input_val)
+    ///     IndexExpr([7:0])
+    ///     BinaryExpr(+ 1)
+    ///
+    /// We split by comma delimiters and reconstruct each element.
+    fn build_tuple_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Split children into groups by comma tokens
+        let mut element_groups: Vec<Vec<SyntaxNode>> = Vec::new();
+        let mut current_group: Vec<SyntaxNode> = Vec::new();
+
+        for child_or_token in node.children_with_tokens() {
+            match child_or_token {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Comma => {
+                    // Comma delimits elements
+                    if !current_group.is_empty() {
+                        element_groups.push(current_group);
+                        current_group = Vec::new();
+                    }
+                }
+                rowan::NodeOrToken::Node(n) => {
+                    // Only collect expression nodes, not parens
+                    if matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                            | SyntaxKind::StructLiteral
+                            | SyntaxKind::ArrayLiteral
+                            | SyntaxKind::TupleExpr
+                            | SyntaxKind::ConcatExpr
+                            | SyntaxKind::CastExpr
+                    ) {
+                        current_group.push(n);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Add the last group
+        if !current_group.is_empty() {
+            element_groups.push(current_group);
+        }
+
+        // Build each element from its group
+        let elements: Vec<HirExpression> = element_groups
+            .into_iter()
+            .filter_map(|group| self.build_tuple_element(group))
+            .collect();
+
+        if elements.is_empty() {
+            None
+        } else {
+            Some(HirExpression::TupleLiteral(elements))
+        }
+    }
+
+    /// Build a single tuple element from a group of nodes (handles parser bug for binary expressions)
+    fn build_tuple_element(&mut self, nodes: Vec<SyntaxNode>) -> Option<HirExpression> {
+        if nodes.is_empty() {
+            return None;
+        }
+
+        // If there's only one node, just build it normally
+        if nodes.len() == 1 {
+            return self.build_expression(&nodes[0]);
+        }
+
+        // Multiple nodes - need to reconstruct the expression
+        // Common patterns:
+        // 1. [IdentExpr, BinaryExpr] -> binary expression with IdentExpr as left operand
+        // 2. [IdentExpr, IndexExpr, BinaryExpr] -> binary expression with IndexExpr as left operand
+
+        // First, handle IdentExpr + IndexExpr pairs (convert to proper IndexExpr)
+        let mut processed_nodes = Vec::new();
+        let mut i = 0;
+        while i < nodes.len() {
+            if i + 1 < nodes.len()
+                && matches!(
+                    nodes[i].kind(),
+                    SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
+                )
+                && nodes[i + 1].kind() == SyntaxKind::IndexExpr
+            {
+                // Build the IndexExpr which will incorporate the IdentExpr
+                if let Some(expr) = self.build_expression(&nodes[i + 1]) {
+                    processed_nodes.push(expr);
+                }
+                i += 2; // Skip both nodes
+            } else {
+                // Build the node normally
+                if let Some(expr) = self.build_expression(&nodes[i]) {
+                    processed_nodes.push(expr);
+                }
+                i += 1;
+            }
+        }
+
+        // Now, if we have [expr, BinaryExpr], reconstruct the binary expression
+        // The BinaryExpr node contains the operator and right operand
+        if processed_nodes.len() == 2 {
+            // Check if the second is a binary expression
+            if let HirExpression::Binary(bin_expr) = &processed_nodes[1] {
+                // The first expression is the left operand
+                // Replace the binary expression's left operand
+                return Some(HirExpression::Binary(HirBinaryExpr {
+                    left: Box::new(processed_nodes[0].clone()),
+                    op: bin_expr.op.clone(),
+                    right: bin_expr.right.clone(),
+                }));
+            }
+        }
+
+        // If we couldn't reconstruct, return the first expression
+        processed_nodes.into_iter().next()
     }
 
     /// Build concatenation expression: {a, b, c}
@@ -3161,12 +3298,16 @@ impl HirBuilderContext {
         let base_expr = self.build_expression(&children[0]);
         let base = Box::new(base_expr?);
 
-        // Find the field name (identifier after dot)
+        // Find the field name (identifier for struct fields, or numeric literal for tuple indices)
         let field_name = node
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
-            .find(|t| t.kind() == SyntaxKind::Ident)
-            .map(|t| t.text().to_string());
+            .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
+            .map(|t| {
+                // For tuple indices, convert numeric literal to string (e.g., "0", "1", "2")
+                // For struct fields, just use the identifier as-is
+                t.text().to_string()
+            });
         let field_name = field_name?;
 
         Some(HirExpression::FieldAccess {
@@ -3184,11 +3325,11 @@ impl HirBuilderContext {
         // Build the base expression from the base node
         let base = Box::new(self.build_expression(base_node)?);
 
-        // Extract the field name from the field node
+        // Extract the field name from the field node (identifier or numeric literal for tuples)
         let field_name = field_node
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
-            .find(|t| t.kind() == SyntaxKind::Ident)
+            .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
             .map(|t| t.text().to_string())?;
 
         Some(HirExpression::FieldAccess {
@@ -4233,6 +4374,23 @@ impl HirBuilderContext {
                     // Inline union: union { field1: Type1, field2: Type2 }
                     return self.build_inline_union_type(&child);
                 }
+                SyntaxKind::TupleType => {
+                    // Tuple type: (Type1, Type2, ...)
+                    // Extract all element types from children
+                    // Extract all element types from TypeAnnotation children
+                    let element_types: Vec<_> = child
+                        .children()
+                        .filter_map(|c| {
+                            // Process TypeAnnotation children to get the actual types
+                            if c.kind() == SyntaxKind::TypeAnnotation {
+                                Some(self.extract_hir_type(&c))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    return HirType::Tuple(element_types);
+                }
                 _ => {}
             }
         }
@@ -4257,6 +4415,20 @@ impl HirBuilderContext {
                     } else {
                         return HirType::Stream(Box::new(HirType::Bit(8)));
                     }
+                }
+                SyntaxKind::TupleType => {
+                    // Tuple type: (Type1, Type2, ...)
+                    let element_types = child
+                        .children()
+                        .filter_map(|c| {
+                            if c.kind() == SyntaxKind::TypeExpr {
+                                Some(self.extract_hir_type(&c))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    return HirType::Tuple(element_types);
                 }
                 _ => {}
             }
