@@ -31,6 +31,18 @@ impl ModuleResolver {
     pub fn new(root_dir: PathBuf) -> Self {
         let mut search_paths = vec![root_dir.clone()];
 
+        // Check for sibling lib/ directory (common pattern: src/ and lib/)
+        if let Some(parent) = root_dir.parent() {
+            let lib_dir = parent.join("lib");
+            if lib_dir.exists() && lib_dir.is_dir() {
+                eprintln!(
+                    "[MODULE_RESOLVER] Found sibling lib directory: {:?}",
+                    lib_dir
+                );
+                search_paths.push(lib_dir);
+            }
+        }
+
         // Try to read skalp.toml to get src_dirs configuration
         let manifest_path = root_dir.join("skalp.toml");
         if manifest_path.exists() {
