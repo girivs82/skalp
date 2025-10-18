@@ -1564,11 +1564,13 @@ impl HirBuilderContext {
         for current_node in rhs_exprs.iter().skip(1) {
             match current_node.kind() {
                 SyntaxKind::FieldExpr => {
-                    // Combine result with field access
+                    // Combine result with field access (handles both named fields and tuple numeric fields)
                     let field_name = current_node
                         .children_with_tokens()
                         .filter_map(|elem| elem.into_token())
-                        .find(|t| t.kind() == SyntaxKind::Ident)
+                        .find(|t| {
+                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                        })
                         .map(|t| t.text().to_string())?;
 
                     result = HirExpression::FieldAccess {
