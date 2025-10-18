@@ -1292,22 +1292,30 @@ impl<'a> ParseState<'a> {
             self.bump(); // consume arrow
         }
 
-        // Parse arm body - must be an expression
+        // Parse arm body - can be a block expression or a simple expression
         // Save position for error recovery
         let pos_before = self.current;
-        self.parse_expression();
 
-        // Error recovery: if we didn't consume any tokens, skip one to make progress
-        // But don't skip if we're at a token that might be valid syntax
-        if pos_before == self.current
-            && !self.at(SyntaxKind::Comma)
-            && !self.at(SyntaxKind::RBrace)
-            && !self.at(SyntaxKind::Arrow)
-            && !self.at(SyntaxKind::FatArrow)
-            && !self.is_at_end()
-        {
-            self.error("failed to parse match arm expression");
-            self.bump(); // consume one token to avoid infinite loop
+        // Check if this is a block expression
+        if self.at(SyntaxKind::LBrace) {
+            self.bump(); // consume '{'
+            self.parse_block_expression();
+            self.expect(SyntaxKind::RBrace);
+        } else {
+            self.parse_expression();
+
+            // Error recovery: if we didn't consume any tokens, skip one to make progress
+            // But don't skip if we're at a token that might be valid syntax
+            if pos_before == self.current
+                && !self.at(SyntaxKind::Comma)
+                && !self.at(SyntaxKind::RBrace)
+                && !self.at(SyntaxKind::Arrow)
+                && !self.at(SyntaxKind::FatArrow)
+                && !self.is_at_end()
+            {
+                self.error("failed to parse match arm expression");
+                self.bump(); // consume one token to avoid infinite loop
+            }
         }
 
         // Optional comma

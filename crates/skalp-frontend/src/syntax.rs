@@ -358,6 +358,7 @@ pub enum SyntaxKind {
     TernaryExpr,
     TupleExpr,
     RangeExpr,
+    BlockExpr,
     ClosureExpr,
     ClosureParamList,
     ClosureParam,

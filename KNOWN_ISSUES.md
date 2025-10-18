@@ -1,5 +1,140 @@
 # Known Issues and Limitations
 
+## ✅ FIXED: Blocks Not Supported in Match Expression Arms (Bug #40)
+
+### Issue (FIXED)
+Match **expressions** (not statements) did not support block bodies in arms, causing parsing errors when trying to use blocks with let statements for tuple destructuring or complex expressions.
+
+### What Worked ✅
+```skalp
+// Match STATEMENTS supported blocks
+on(clk.rise) {
+    match val {
+        0 => { reg_result <= 0; },  // ✅ Block in statement
+        _ => {
+            let (a, b) = tuple;
+            reg_result <= a;
+        }
+    }
+}
+```
+
+### What Was Broken ❌
+```skalp
+// Match EXPRESSIONS did NOT support blocks
+result = match val {
+    0 => 0,
+    _ => {  // ❌ Parsing error!
+        let (a, b) = tuple;
+        a
+    }
+}
+```
+
+### Evidence
+Compiling CLE code at `/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main.sk` failed with:
+```
+Parsing failed with 282 errors:
+  expected '}' at pos 9446
+  Expected pattern at pos 9446
+  Expected '->' or '=>' after pattern at pos 9446
+  ...
+```
+
+The error occurred at line 245:
+```skalp
+_ => {
+    let (x, y, z) = vec3_add_op(
+        pipe2_data1, pipe2_data2, pipe2_data3,
+        0, 0, 0
+    );
+    x  // Return first component
+}
+```
+
+### Root Cause
+The parser handled blocks differently in match statements vs match expressions:
+- **Match statements**: `parse_match_arm_statement()` explicitly called `parse_block_statement()` for blocks (lines 1208-1209)
+- **Match expressions**: `parse_match_arm_expression()` only called `parse_expression()` (line 1298)
+
+When `parse_expression()` encountered `{`, it treated it as a **concatenation expression** (for hardware like `{a, b, c}` in Verilog) instead of a **block expression**, causing parsing to fail.
+
+**File**: `crates/skalp-frontend/src/parse.rs`
+- Line 3907-3908: `LBrace` → `parse_concat_expression()` (not `parse_block_expression()`)
+- Line 1298: Match expression arms only tried `parse_expression()`, which doesn't handle blocks
+
+### Fix Applied
+Modified `parse_match_arm_expression()` to explicitly check for blocks before falling back to regular expression parsing:
+
+**Before** (line 1295-1298):
+```rust
+// Parse arm body - must be an expression
+let pos_before = self.current;
+self.parse_expression();
+```
+
+**After** (lines 1299-1319):
+```rust
+// Parse arm body - can be a block expression or a simple expression
+let pos_before = self.current;
+
+// Check if this is a block expression
+if self.at(SyntaxKind::LBrace) {
+    self.bump(); // consume '{'
+    self.parse_block_expression();
+    self.expect(SyntaxKind::RBrace);
+} else {
+    self.parse_expression();
+    // ... error recovery ...
+}
+```
+
+### Test Cases
+
+**Minimal Test** (`/tmp/test_match_tuple_destruct.sk`):
+```skalp
+entity MatchTupleTest {
+    in val: bit[32]
+    out result: bit[32]
+}
+
+impl MatchTupleTest {
+    result = match val {
+        0 => 0,
+        _ => {
+            let (a, b) = (val, val[7:0]);
+            a
+        }
+    }
+}
+```
+
+**Before fix**: 26 parsing errors
+**After fix**: ✅ Compiles successfully
+
+### Verification
+✅ Minimal test case compiles successfully
+✅ CLE code now parses without errors (was 282 errors, now 0 parsing errors)
+✅ All 76 frontend tests still pass
+✅ Match statements with blocks still work
+✅ Match expressions with simple expressions still work
+✅ Match expressions with blocks now work
+
+### Files Changed
+- `crates/skalp-frontend/src/parse.rs:1299-1319` (parse_match_arm_expression: add block support)
+
+### Status
+✅ **FIXED** - Match expression arms now support both simple expressions and blocks with let statements
+
+### Note
+This fix enables the Karythra CLE code to parse correctly. The parsing phase now succeeds, though module resolution still fails due to missing dependency files (separate issue, not a parser bug).
+
+### Related Issues
+- Bug #39: Tuple destructuring type inference (FIXED - works with this parser fix)
+- Bug #37: Parser infinite loop in blocks (FIXED - error recovery prevents hangs)
+
+---
+
 ## ✅ FIXED: Parser Infinite Loop in Block and Match Expression Parsing (Bug #37)
 
 ### Issue (FIXED in commit TBD)

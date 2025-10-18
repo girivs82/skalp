@@ -1,0 +1,17 @@
+// Test if expression with let statement inside
+entity TestIfExprLet {
+    in cond: bit,
+    in data1: bit[32],
+    in data2: bit[8],
+    out result: bit[32]
+}
+
+impl TestIfExprLet {
+    // Test 1: If expression with let statement in block
+    result = if cond {
+        let temp: bit[32] = data1 + 10;
+        temp
+    } else {
+        0
+    }
+}

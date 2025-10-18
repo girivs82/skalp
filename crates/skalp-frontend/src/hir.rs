@@ -397,6 +397,12 @@ pub enum HirExpression {
     If(HirIfExpr),
     Match(HirMatchExpr),
     Cast(HirCastExpr),
+    /// Block expression with statements and a final expression value
+    /// Example: { let x = 10; x + 5 } evaluates to 15
+    Block {
+        statements: Vec<HirStatement>,
+        result_expr: Box<HirExpression>,
+    },
 }
 
 /// Type cast expression in HIR

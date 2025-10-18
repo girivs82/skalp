@@ -1,0 +1,45 @@
+// Complete tuple test
+entity TupleTest {
+    in clk: clock,
+    in rst: reset,
+    in input_val: bit[32],
+    out result1: bit[32],
+    out result2: bit[8],
+    out result3: bit
+}
+
+impl TupleTest {
+    signal reg1: bit[32] = 0
+    signal reg2: bit[8] = 0
+    signal reg3: bit = 0
+
+    on(clk.rise) {
+        if (rst) {
+            reg1 <= 0;
+            reg2 <= 0;
+            reg3 <= 0;
+        } else {
+            // Test 1: Simple tuple literal
+            let tuple1: (bit[32], bit[8]) = (42, 7);
+
+            // Test 2: Tuple with expressions
+            let tuple2: (bit[32], bit[8]) = (input_val + 10, input_val[7:0]);
+
+            // Test 3: Tuple with complex expressions
+            let tuple3: (bit[32], bit[8], bit) = (
+                input_val * 2,
+                input_val[15:8] + 1,
+                input_val[0:0]
+            );
+
+            // Access tuple elements
+            reg1 <= tuple2.0 + tuple3.0;
+            reg2 <= tuple2.1 + tuple3.1;
+            reg3 <= tuple3.2;
+        }
+    }
+
+    result1 = reg1
+    result2 = reg2
+    result3 = reg3
+}

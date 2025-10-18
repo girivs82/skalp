@@ -1,0 +1,14 @@
+// Test match expression as value
+entity TestMatchExpr {
+    in sel: bit[3],
+    in data: bit[8],
+    out result: bit[8]
+}
+
+impl TestMatchExpr {
+    result = match sel {
+        0b001 => data,
+        0b010 => data + 1,
+        _ => 0
+    }
+}

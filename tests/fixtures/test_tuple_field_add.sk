@@ -1,0 +1,23 @@
+// Test tuple field access in binary expressions
+entity TupleFieldAddTest {
+    in clk: clock,
+    in rst: reset,
+    in input_val: bit[32],
+    out result: bit[32]
+}
+
+impl TupleFieldAddTest {
+    signal reg_result: bit[32] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            reg_result <= 0;
+        } else {
+            let tuple1: (bit[32], bit[8]) = (input_val + 10, input_val[7:0]);
+            let tuple2: (bit[32], bit[8]) = (input_val + 20, input_val[7:0] + 1);
+            reg_result <= tuple1.0 + tuple2.0;
+        }
+    }
+
+    result = reg_result
+}

@@ -2340,6 +2340,19 @@ impl<'hir> HirToMir<'hir> {
                 // This is then packed into a bit vector like any other struct
                 self.convert_tuple_literal(elements)
             }
+            hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } => {
+                // Convert block expression: { stmt1; stmt2; result_expr }
+                // 1. Process all statements in the block (they get added to current statement list)
+                // 2. Return the result expression
+                for stmt in statements {
+                    self.convert_statement(stmt);
+                }
+                // Convert and return the final expression
+                self.convert_expression(result_expr)
+            }
         }
     }
 

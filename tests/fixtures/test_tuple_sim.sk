@@ -1,0 +1,34 @@
+// Test tuple simulation
+entity TupleSim {
+    in clk: clock,
+    in rst: reset,
+    in input_val: bit[32],
+    out result_a: bit[32],
+    out result_b: bit[8]
+}
+
+impl TupleSim {
+    fn process(x: bit[32]) -> (bit[32], bit[8]) {
+        let upper = x + 10;
+        let lower = x[7:0];
+        return (upper, lower);
+    }
+
+    signal reg_a: bit[32] = 0
+    signal reg_b: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            reg_a <= 0;
+            reg_b <= 0;
+        } else {
+            // Test tuple literal
+            let tuple_val: (bit[32], bit[8]) = (input_val + 5, input_val[7:0] + 1);
+            reg_a <= tuple_val.0;
+            reg_b <= tuple_val.1;
+        }
+    }
+
+    result_a = reg_a
+    result_b = reg_b
+}
