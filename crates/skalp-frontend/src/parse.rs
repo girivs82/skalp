@@ -885,9 +885,9 @@ impl<'a> ParseState<'a> {
         // Condition expression (without parens for expression form)
         self.parse_expression();
 
-        // Then block
+        // Then block (can be a block expression with statements)
         self.expect(SyntaxKind::LBrace);
-        self.parse_expression();
+        self.parse_block_expression();
         self.expect(SyntaxKind::RBrace);
 
         // Else block (required for expressions to have a value)
@@ -898,8 +898,60 @@ impl<'a> ParseState<'a> {
             self.parse_if_expression();
         } else {
             self.expect(SyntaxKind::LBrace);
-            self.parse_expression();
+            self.parse_block_expression();
             self.expect(SyntaxKind::RBrace);
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse block expression: { stmt1; stmt2; final_expr }
+    /// A block expression contains zero or more statements followed by an expression
+    fn parse_block_expression(&mut self) {
+        self.start_node(SyntaxKind::BlockExpr);
+
+        // Parse statements and expressions until we hit the closing brace
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            // Check if this looks like a statement (starts with a statement keyword)
+            match self.current_kind() {
+                Some(SyntaxKind::LetKw) => {
+                    self.parse_let_statement();
+                }
+                Some(SyntaxKind::ReturnKw) => {
+                    self.parse_return_statement();
+                }
+                _ => {
+                    // Try to parse as expression
+                    // If the expression is followed by a semicolon, it's an expression statement
+                    // Otherwise, it's the final expression
+
+                    // Save current position to detect if we're making progress
+                    let pos_before = self.current;
+                    self.parse_expression();
+                    let pos_after = self.current;
+
+                    // Error recovery: if we didn't consume any tokens, skip one and continue
+                    if pos_before == pos_after {
+                        self.error("failed to parse expression in block");
+                        self.bump(); // consume one token to make progress
+                        continue;
+                    }
+
+                    // Check if there's a semicolon (expression statement) or not (final expression)
+                    if self.at(SyntaxKind::Semicolon) {
+                        self.bump(); // consume semicolon for expression statement
+                    } else {
+                        // This is the final expression - stop parsing
+                        break;
+                    }
+                }
+            }
         }
 
         self.finish_node();
@@ -1158,8 +1210,16 @@ impl<'a> ParseState<'a> {
         } else {
             // Parse a single statement (assignment, if, match, etc.)
             // We need to check what kind of statement this is
+            // Save position for error recovery
+            let pos_before = self.current;
+
             match self.current_kind() {
-                Some(SyntaxKind::Ident) => {
+                Some(SyntaxKind::Ident)
+                | Some(SyntaxKind::OutputKw)
+                | Some(SyntaxKind::InputKw)
+                | Some(SyntaxKind::InoutKw)
+                | Some(SyntaxKind::SignalKw)
+                | Some(SyntaxKind::VarKw) => {
                     // Could be assignment or expression
                     // Look ahead to see if there's an assignment operator
                     let next = self.peek_kind(1);
@@ -1186,6 +1246,19 @@ impl<'a> ParseState<'a> {
                     // Default to expression
                     self.parse_expression();
                 }
+            }
+
+            // Error recovery: if we didn't consume any tokens, skip one to make progress
+            // But don't skip if we're at a token that might be valid syntax
+            if pos_before == self.current
+                && !self.at(SyntaxKind::Comma)
+                && !self.at(SyntaxKind::RBrace)
+                && !self.at(SyntaxKind::Arrow)
+                && !self.at(SyntaxKind::FatArrow)
+                && !self.is_at_end()
+            {
+                self.error("failed to parse match arm body");
+                self.bump(); // consume one token to avoid infinite loop
             }
         }
 
@@ -1220,7 +1293,22 @@ impl<'a> ParseState<'a> {
         }
 
         // Parse arm body - must be an expression
+        // Save position for error recovery
+        let pos_before = self.current;
         self.parse_expression();
+
+        // Error recovery: if we didn't consume any tokens, skip one to make progress
+        // But don't skip if we're at a token that might be valid syntax
+        if pos_before == self.current
+            && !self.at(SyntaxKind::Comma)
+            && !self.at(SyntaxKind::RBrace)
+            && !self.at(SyntaxKind::Arrow)
+            && !self.at(SyntaxKind::FatArrow)
+            && !self.is_at_end()
+        {
+            self.error("failed to parse match arm expression");
+            self.bump(); // consume one token to avoid infinite loop
+        }
 
         // Optional comma
         if self.at(SyntaxKind::Comma) {

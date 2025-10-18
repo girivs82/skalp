@@ -1,5 +1,111 @@
 # Known Issues and Limitations
 
+## ✅ FIXED: Parser Infinite Loop in Block and Match Expression Parsing (Bug #37)
+
+### Issue (FIXED in commit TBD)
+Parser entered infinite loops when `parse_expression()` failed to consume tokens in block expressions or match arm bodies, causing test timeouts and hangs.
+
+### Evidence
+Test `test_match_with_guards` was hanging indefinitely (timeout after 60+ seconds), preventing test suite from completing.
+
+### Root Cause
+Three locations in the parser could enter infinite loops when expression parsing failed without consuming tokens:
+
+1. **Block expressions** (`parse_block_expression()` lines 902-958):
+   - Loop: `while !self.at(SyntaxKind::RBrace)`
+   - Calls `parse_expression()` for final expression or expression statements
+   - If `parse_expression()` fails and doesn't consume tokens, loop continues forever
+
+2. **Match arm statements** (`parse_match_arm_statement()` lines 1186-1250):
+   - Calls `parse_expression()` or `parse_assignment_stmt()` for arm body
+   - If parsing fails without consuming tokens, returns to parent loop
+   - Parent loop in `parse_match_statement()` calls `parse_match_arm_statement()` again
+   - Infinite loop: parse arm → fail → return → parse same arm again
+
+3. **Match arm expressions** (`parse_match_arm_expression()` lines 1253-1283):
+   - Similar issue with expression-based match arms
+
+### Example (WAS HANGING):
+```skalp
+entity GuardedMatch {
+    in state_val: nat[2]
+    in enable: bool
+    out output: nat[4]
+}
+
+impl GuardedMatch {
+    on(clk.rise) {
+        match state_val {
+            0 if enable => output <= 5,  // Parser hung here
+            _ => output <= 0,
+        }
+    }
+}
+```
+
+### Fix Applied
+Added error recovery to all three functions to detect when no progress is made and consume one token to break the loop:
+
+**parse_block_expression** (lines 934-954):
+```rust
+// Save current position to detect if we're making progress
+let pos_before = self.current;
+self.parse_expression();
+let pos_after = self.current;
+
+// Error recovery: if we didn't consume any tokens, skip one and continue
+if pos_before == pos_after {
+    self.error("failed to parse expression in block");
+    self.bump(); // consume one token to make progress
+    continue;
+}
+```
+
+**parse_match_arm_statement** (lines 1214-1257):
+```rust
+// Save position for error recovery
+let pos_before = self.current;
+
+match self.current_kind() {
+    // ... parse statement ...
+}
+
+// Error recovery: if we didn't consume any tokens, skip one to make progress
+// But don't skip if we're at a token that might be valid syntax
+if pos_before == self.current
+    && !self.at(SyntaxKind::Comma)
+    && !self.at(SyntaxKind::RBrace)
+    && !self.at(SyntaxKind::Arrow)
+    && !self.at(SyntaxKind::FatArrow)
+    && !self.is_at_end()
+{
+    self.error("failed to parse match arm body");
+    self.bump(); // consume one token to avoid infinite loop
+}
+```
+
+**parse_match_arm_expression** (lines 1291-1306):
+Similar error recovery added for expression-based match arms.
+
+### Verification
+✅ `test_match_with_guards` now completes instantly (0.00s) instead of hanging
+✅ Other match tests still pass (`test_state_machine_with_match`, `test_simple_match_with_literals`)
+✅ Block expressions with if statements work correctly
+✅ No regressions in existing tests
+
+### Files Changed
+- `crates/skalp-frontend/src/parse.rs:934-954` (parse_block_expression error recovery)
+- `crates/skalp-frontend/src/parse.rs:1214-1257` (parse_match_arm_statement error recovery)
+- `crates/skalp-frontend/src/parse.rs:1291-1306` (parse_match_arm_expression error recovery)
+
+### Status
+✅ **FIXED** - Parser no longer hangs on expression parsing failures
+
+### Note
+This bug fix uncovered a separate parsing issue with match guards + direct output port assignments, which was then also fixed (see "Match Guards with Direct Output Port Assignments" below).
+
+---
+
 ## ✅ FIXED: Array Index Expression Parsing (Bug #26 and #27)
 
 ### Issues (FIXED in commits TBD)
@@ -1372,6 +1478,108 @@ signals->node_1_out = signals->node_0_out[0];
 
 ---
 
+
+---
+
+## ✅ FIXED: Match Guards with Direct Output Port Assignments (Bug #38)
+
+### Issue (FIXED in commit TBD)
+Match guards with direct assignments to output ports failed to parse due to port keywords (`output`, `input`, etc.) not being recognized as valid lvalues in match arm bodies.
+
+### What Works ✅
+```skalp
+entity StateMachine {
+    in ready: bool
+    out state_out: nat[2]
+}
+
+impl StateMachine {
+    signal next_state: nat[2] = 0  // ✅ Signal, not output
+
+    on(clk.rise) {
+        match current_state {
+            0 => next_state <= 1,
+            1 if ready => next_state <= 2,  // ✅ Guard with signal assignment
+            _ => next_state <= 0,
+        }
+    }
+
+    state_out = next_state  // Output reads from signal
+}
+```
+
+### What Now Works ✅
+```skalp
+entity GuardedMatch {
+    out output: nat[4]  // Direct output port - NOW WORKS!
+}
+
+impl GuardedMatch {
+    on(clk.rise) {
+        match state_val {
+            0 if enable => output <= 5,  // ✅ Now works correctly!
+            _ => output <= 0,
+        }
+    }
+}
+```
+
+### Root Cause (IDENTIFIED AND FIXED)
+The parser's `parse_match_arm_statement()` function only recognized `SyntaxKind::Ident` as a valid lvalue, but port keywords like "output", "input", "signal", etc. are lexed as keyword tokens (e.g., `OutputKw`, `InputKw`) rather than identifiers.
+
+When the parser encountered `output <= 5` in a match arm, it saw:
+1. Token: `OutputKw` (keyword, not identifier)
+2. Parser's match arm only handled `Ident`
+3. Fell through to default case without consuming tokens
+4. Combined with Bug #37 (parser infinite loop), this caused the parser to hang
+
+### Fix Applied
+Extended `parse_match_arm_statement()` in `crates/skalp-frontend/src/parse.rs` (lines 1216-1223) to recognize port keywords as valid lvalues:
+
+**Before**:
+```rust
+match self.current_kind() {
+    Some(SyntaxKind::Ident) => {
+        // Parse assignment or expression
+        ...
+    }
+    ...
+}
+```
+
+**After**:
+```rust
+match self.current_kind() {
+    Some(SyntaxKind::Ident)
+    | Some(SyntaxKind::OutputKw)
+    | Some(SyntaxKind::InputKw)
+    | Some(SyntaxKind::InoutKw)
+    | Some(SyntaxKind::SignalKw)
+    | Some(SyntaxKind::VarKw) => {
+        // Parse assignment or expression
+        ...
+    }
+    ...
+}
+```
+
+### Verification
+✅ `test_match_with_guards` - now PASSES (0.00s)
+✅ `test_state_machine_with_match` - still PASSES (uses signals)
+✅ `test_simple_match_with_literals` - still PASSES (no guards)
+✅ All test files compile successfully:
+  - `/tmp/test_unique_guards.sk`
+  - `/tmp/test_guard_second_arm.sk`
+✅ No test regressions
+
+### Files Changed
+- `crates/skalp-frontend/src/parse.rs:1216-1223` (parse_match_arm_statement: add port keyword patterns)
+
+### Status
+✅ **FIXED** - Port keywords can now be used as lvalues in match arm bodies
+
+### Note
+This bug was discovered after fixing Bug #37 (parser infinite loop). The infinite loop prevented the test from completing, hiding this underlying parsing issue. Once the infinite loop was fixed, the parsing errors became visible and were then addressed.
 
 ---
 

@@ -1,0 +1,30 @@
+entity StateMachine {
+    in clk: clock
+    in rst: reset
+    in ready: bool
+    out state_out: nat[2]
+}
+
+impl StateMachine {
+    signal current_state: nat[2] = 0
+    signal next_state: nat[2] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            current_state <= 0
+        } else {
+            current_state <= next_state
+        }
+
+        // Use match expression with guards and literal patterns inside event block
+        match current_state {
+            0 => next_state <= 1,
+            1 if ready => next_state <= 2,
+            1 => next_state <= 1,
+            2 => next_state <= 0,
+            _ => next_state <= 0,
+        }
+    }
+
+    state_out = current_state
+}

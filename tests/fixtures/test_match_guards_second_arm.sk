@@ -1,0 +1,16 @@
+entity GuardSecondArm {
+    in clk: clock
+    in state_val: nat[2]
+    in enable: bool
+    out output: nat[4]
+}
+
+impl GuardSecondArm {
+    on(clk.rise) {
+        match state_val {
+            0 => output <= 1,
+            1 if enable => output <= 6,
+            _ => output <= 0,
+        }
+    }
+}
