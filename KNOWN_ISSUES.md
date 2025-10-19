@@ -1,5 +1,42 @@
 # Known Issues and Limitations
 
+## ❌ CRITICAL BUG: Function Calls Silently Generate Broken Hardware
+
+### Status
+**ACTIVE BUG** - Function calls compile but produce **completely broken hardware**
+
+### Severity
+**CRITICAL** - Silent failure, no error or warning
+
+### Problem
+When functions are called in combinational or sequential logic, the compiler:
+1. ✅ Parses the function definition correctly
+2. ✅ Parses the function call correctly
+3. ❌ **Silently drops the assignment** during HIR→MIR conversion
+4. ❌ Generates hardware with **missing logic**
+
+**Evidence**: `tests/fixtures/functions/simple_add.sk` generates a module with NO assignment to the `result` output.
+
+### Root Cause
+`crates/skalp-mir/src/hir_to_mir.rs:1887` - Function calls return `None`, silently dropping assignments.
+
+### Workaround
+**Option 1**: Inline manually - `result = a + b` instead of `result = add(a, b)`
+**Option 2**: Use entity instantiation for reusable logic
+
+### Solution
+Function inlining implementation - See `docs/FUNCTION_INLINING_INVESTIGATION.md` for detailed plan.
+
+**Tracking**:
+- Investigation: `docs/FUNCTION_INLINING_INVESTIGATION.md`
+- Test suite: `tests/test_function_inlining.rs`
+- Test fixtures: `tests/fixtures/functions/*.sk`
+
+### Priority
+**CRITICAL** - Silent data corruption bug blocking code reuse and library development.
+
+---
+
 ## ⚠️ LIMITATION: Testbench Language Features Not Implemented
 
 ### Status

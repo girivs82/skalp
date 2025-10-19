@@ -1,0 +1,15 @@
+// Phase 2 Test: Simple function with no local variables
+
+fn add(a: bit[8], b: bit[8]) -> bit[8] {
+    return a + b
+}
+
+entity SimpleFunctionTest {
+    in x: bit[8]
+    in y: bit[8]
+    out result: bit[8]
+}
+
+impl SimpleFunctionTest {
+    result = add(x, y)
+}
