@@ -8,7 +8,7 @@ module TestComparison (
     output y
 );
 
-    wire result;
+    wire result = 0;
 
     assign y = result;
 

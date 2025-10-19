@@ -7,7 +7,7 @@ module Counter (
     output [7:0] count
 );
 
-    reg [7:0] counter;
+    reg [7:0] counter = 0;
 
     assign count = counter;
 

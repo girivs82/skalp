@@ -12,7 +12,27 @@ use std::collections::HashMap;
 const MAX_RECURSION_DEPTH: usize = 100;
 
 /// List of builtin/intrinsic functions that don't require symbol resolution
-const BUILTIN_FUNCTIONS: &[&str] = &["clog2", "pow2", "min", "max", "abs"];
+const BUILTIN_FUNCTIONS: &[&str] = &[
+    // Logarithmic & Exponential
+    "clog2",
+    "pow2",
+    "pow",
+    // Bit Manipulation
+    "popcount",
+    "clz",
+    "ctz",
+    "reverse_bits",
+    "is_power_of_2",
+    // Arithmetic
+    "min",
+    "max",
+    "abs",
+    "gcd",
+    "lcm",
+    // Gray Code
+    "gray_encode",
+    "gray_decode",
+];
 
 /// HIR builder context
 pub struct HirBuilderContext {
@@ -1332,16 +1352,7 @@ impl HirBuilderContext {
             })
             .collect();
 
-        eprintln!(
-            "🔍 build_assignment: Found {} expression nodes",
-            exprs.len()
-        );
-        for (i, expr) in exprs.iter().enumerate() {
-            eprintln!("   [{}]: {:?}", i, expr.kind());
-        }
-
         if exprs.len() < 2 {
-            eprintln!("   ❌ Not enough expressions, returning None");
             return None;
         }
 
@@ -1413,14 +1424,12 @@ impl HirBuilderContext {
 
             // Start with the base
             let mut current_lval = self.build_lvalue(&exprs[0])?;
-            eprintln!("   Built base LValue from exprs[0]");
 
             // Build nested field access for each FieldExpr until we hit the RHS
             for (i, expr) in exprs.iter().enumerate().skip(1) {
                 if expr.kind() != SyntaxKind::FieldExpr {
                     // We've hit the RHS, stop building LHS
                     rhs_start_idx = i;
-                    eprintln!("   Stopping at index {} (RHS)", i);
                     break;
                 }
 
@@ -1432,8 +1441,6 @@ impl HirBuilderContext {
                     .last()
                     .map(|t| t.text().to_string())?;
 
-                eprintln!("   Adding field: {}", field_name);
-
                 // Build nested FieldAccess
                 current_lval = HirLValue::FieldAccess {
                     base: Box::new(current_lval),
@@ -1443,17 +1450,13 @@ impl HirBuilderContext {
                 rhs_start_idx = i + 1; // RHS starts after this FieldExpr (will be updated if we find more)
             }
 
-            eprintln!("   LHS complete, RHS starts at index {}", rhs_start_idx);
             current_lval
         } else {
             self.build_lvalue(&exprs[0])?
         };
 
         // Handle RHS - if there are multiple expressions, we need to combine them
-        eprintln!("   Building RHS starting from index {}", rhs_start_idx);
-
         let rhs = if rhs_start_idx >= exprs.len() {
-            eprintln!("   ❌ RHS start index out of bounds, returning None");
             return None;
         } else if rhs_start_idx == exprs.len() - 1 {
             // Simple case: single RHS expression
@@ -3350,7 +3353,6 @@ impl HirBuilderContext {
                         } else {
                             // Unexpected: operand after we already have a result?
                             // This shouldn't happen in well-formed expressions
-                            eprintln!("WARNING: Unexpected operand after result in ParenExpr");
                         }
                     }
                 }
@@ -4073,11 +4075,6 @@ impl HirBuilderContext {
     /// Build index expression
     fn build_index_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         let children: Vec<_> = node.children().collect();
-        eprintln!("🔍 build_index_expr: {} children", children.len());
-        for (i, child) in children.iter().enumerate() {
-            eprintln!("  Child[{}]: {:?}", i, child.kind());
-        }
-
         // Determine if this is a range by checking for colon token
         let has_colon = node
             .children_with_tokens()
@@ -4441,15 +4438,8 @@ impl HirBuilderContext {
                     constraints.io_standard = Some(value_text.trim_matches('"').to_string());
                 }
                 "slew" => {
-                    // Debug: see what children we have
-                    for child in pair.children() {
-                        eprintln!("  child kind: {:?}", child.kind());
-                    }
-                    eprintln!("  value_kind: {:?}", value_kind);
-
                     // Look for SlewRate child node or direct keyword
                     if let Some(slew_node) = pair.first_child_of_kind(SyntaxKind::SlewRate) {
-                        eprintln!("  Found SlewRate node");
                         if slew_node.first_token_of_kind(SyntaxKind::FastKw).is_some() {
                             constraints.slew_rate = Some(SlewRate::Fast);
                         } else if slew_node.first_token_of_kind(SyntaxKind::SlowKw).is_some() {
@@ -4461,11 +4451,9 @@ impl HirBuilderContext {
                             constraints.slew_rate = Some(SlewRate::Medium);
                         }
                     } else {
-                        eprintln!("  No SlewRate node, trying direct keyword");
                         // Try direct keyword
                         match value_kind {
                             Some(SyntaxKind::FastKw) => {
-                                eprintln!("  Found FastKw!");
                                 constraints.slew_rate = Some(SlewRate::Fast);
                             }
                             Some(SyntaxKind::SlowKw) => {
@@ -4474,9 +4462,7 @@ impl HirBuilderContext {
                             Some(SyntaxKind::MediumKw) => {
                                 constraints.slew_rate = Some(SlewRate::Medium)
                             }
-                            _ => {
-                                eprintln!("  No matching keyword");
-                            }
+                            _ => {}
                         }
                     }
                 }
@@ -5053,17 +5039,22 @@ impl HirBuilderContext {
 
     /// Find initial value expression
     fn find_initial_value_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Look for expression after '='
+        // Look for expression after '=' in the node's children_with_tokens
         let mut found_assign = false;
-        for child in node.children() {
+
+        // Iterate through all children and tokens
+        for elem in node.children_with_tokens() {
             if found_assign {
-                return self.build_expression(&child);
+                // We've found the '=' token, now look for the expression node
+                if let Some(child_node) = elem.as_node() {
+                    return self.build_expression(child_node);
+                }
             }
-            if child
-                .children_with_tokens()
-                .any(|e| e.kind() == SyntaxKind::Assign)
-            {
-                found_assign = true;
+            // Check if this element is the '=' token
+            if let Some(token) = elem.as_token() {
+                if token.kind() == SyntaxKind::Assign {
+                    found_assign = true;
+                }
             }
         }
         None

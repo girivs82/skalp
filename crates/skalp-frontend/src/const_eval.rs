@@ -2,7 +2,9 @@
 //!
 //! Evaluates compile-time constant expressions for monomorphization
 
-use crate::hir::{HirBinaryOp, HirExpression, HirFunction, HirLiteral, HirStatement, HirUnaryOp};
+use crate::hir::{
+    ConstantId, HirBinaryOp, HirExpression, HirFunction, HirLiteral, HirStatement, HirUnaryOp,
+};
 use std::collections::HashMap;
 
 /// Const expression evaluation result
@@ -113,6 +115,8 @@ pub struct ConstEvaluator {
     builtin_fns: HashMap<String, BuiltinConstFn>,
     /// User-defined const functions
     user_fns: HashMap<String, HirFunction>,
+    /// Constant definitions (ID -> value expression)
+    constants: HashMap<ConstantId, HirExpression>,
     /// Recursion depth (for preventing infinite recursion)
     recursion_depth: usize,
 }
@@ -146,19 +150,46 @@ impl ConstEvaluator {
         let mut builtin_fns: HashMap<String, BuiltinConstFn> = HashMap::new();
 
         // Register built-in functions
+        // Logarithmic & Exponential
         builtin_fns.insert("clog2".to_string(), builtin_clog2 as BuiltinConstFn);
+        builtin_fns.insert("pow2".to_string(), builtin_pow2 as BuiltinConstFn);
+        builtin_fns.insert("pow".to_string(), builtin_pow as BuiltinConstFn);
+
+        // Bit Manipulation
+        builtin_fns.insert("popcount".to_string(), builtin_popcount as BuiltinConstFn);
+        builtin_fns.insert("clz".to_string(), builtin_clz as BuiltinConstFn);
+        builtin_fns.insert("ctz".to_string(), builtin_ctz as BuiltinConstFn);
+        builtin_fns.insert(
+            "reverse_bits".to_string(),
+            builtin_reverse_bits as BuiltinConstFn,
+        );
         builtin_fns.insert(
             "is_power_of_2".to_string(),
             builtin_is_power_of_2 as BuiltinConstFn,
         );
+
+        // Arithmetic
         builtin_fns.insert("max".to_string(), builtin_max as BuiltinConstFn);
         builtin_fns.insert("min".to_string(), builtin_min as BuiltinConstFn);
         builtin_fns.insert("abs".to_string(), builtin_abs as BuiltinConstFn);
+        builtin_fns.insert("gcd".to_string(), builtin_gcd as BuiltinConstFn);
+        builtin_fns.insert("lcm".to_string(), builtin_lcm as BuiltinConstFn);
+
+        // Gray Code
+        builtin_fns.insert(
+            "gray_encode".to_string(),
+            builtin_gray_encode as BuiltinConstFn,
+        );
+        builtin_fns.insert(
+            "gray_decode".to_string(),
+            builtin_gray_decode as BuiltinConstFn,
+        );
 
         Self {
             const_bindings: HashMap::new(),
             builtin_fns,
             user_fns: HashMap::new(),
+            constants: HashMap::new(),
             recursion_depth: 0,
         }
     }
@@ -192,6 +223,19 @@ impl ConstEvaluator {
         }
     }
 
+    /// Register a constant definition
+    pub fn register_constant(&mut self, id: ConstantId, value_expr: HirExpression) {
+        self.constants.insert(id, value_expr);
+    }
+
+    /// Register multiple constant definitions
+    pub fn register_constants(&mut self, consts: &[crate::hir::HirConstant]) {
+        for const_decl in consts {
+            self.constants
+                .insert(const_decl.id, const_decl.value.clone());
+        }
+    }
+
     /// Evaluate a const expression
     pub fn eval(&mut self, expr: &HirExpression) -> Result<ConstValue, EvalError> {
         // Check recursion depth
@@ -209,6 +253,19 @@ impl ConstEvaluator {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| EvalError::UndefinedSymbol(name.clone())),
+
+            // Constant reference - look up constant value and recursively evaluate
+            HirExpression::Constant(id) => {
+                if let Some(value_expr) = self.constants.get(id).cloned() {
+                    // Recursively evaluate the constant's value expression
+                    self.eval(&value_expr)
+                } else {
+                    Err(EvalError::UndefinedSymbol(format!(
+                        "Constant ID {:?} not found",
+                        id
+                    )))
+                }
+            }
 
             // Binary operations
             HirExpression::Binary(bin) => self.eval_binary(bin),
@@ -673,6 +730,282 @@ fn builtin_abs(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
             "abs requires numeric argument".to_string(),
         )),
     }
+}
+
+/// Power of 2: compute 2^x
+fn builtin_pow2(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    let exp = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("pow2 requires natural number argument".to_string())
+    })?;
+
+    if exp >= usize::BITS as usize {
+        return Err(EvalError::TypeMismatch(format!(
+            "pow2 exponent {} is too large (max {})",
+            exp,
+            usize::BITS - 1
+        )));
+    }
+
+    Ok(ConstValue::Nat(1usize << exp))
+}
+
+/// General power: compute base^exp
+fn builtin_pow(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 2,
+            got: args.len(),
+        });
+    }
+
+    let base = args[0]
+        .as_nat()
+        .ok_or_else(|| EvalError::TypeMismatch("pow requires natural number base".to_string()))?;
+
+    let exp = args[1].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("pow requires natural number exponent".to_string())
+    })?;
+
+    // Use checked_pow to detect overflow
+    match base.checked_pow(exp as u32) {
+        Some(result) => Ok(ConstValue::Nat(result)),
+        None => Err(EvalError::TypeMismatch(format!(
+            "pow overflow: {}^{}",
+            base, exp
+        ))),
+    }
+}
+
+/// Population count: count number of 1 bits
+fn builtin_popcount(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    let n = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("popcount requires natural number argument".to_string())
+    })?;
+
+    Ok(ConstValue::Nat(n.count_ones() as usize))
+}
+
+/// Count leading zeros
+fn builtin_clz(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 2,
+            got: args.len(),
+        });
+    }
+
+    let n = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("clz requires natural number argument".to_string())
+    })?;
+
+    let width = args[1]
+        .as_nat()
+        .ok_or_else(|| EvalError::TypeMismatch("clz requires width argument".to_string()))?;
+
+    if width > usize::BITS as usize {
+        return Err(EvalError::TypeMismatch(format!(
+            "clz width {} exceeds maximum {}",
+            width,
+            usize::BITS
+        )));
+    }
+
+    // Count leading zeros within the specified width
+    let leading_zeros = if n == 0 {
+        width
+    } else {
+        let total_clz = n.leading_zeros() as usize;
+        let bits_used = usize::BITS as usize;
+        if total_clz >= bits_used - width {
+            width - (bits_used - total_clz)
+        } else {
+            0
+        }
+    };
+
+    Ok(ConstValue::Nat(leading_zeros))
+}
+
+/// Count trailing zeros
+fn builtin_ctz(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    let n = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("ctz requires natural number argument".to_string())
+    })?;
+
+    let trailing_zeros = if n == 0 {
+        usize::BITS as usize
+    } else {
+        n.trailing_zeros() as usize
+    };
+
+    Ok(ConstValue::Nat(trailing_zeros))
+}
+
+/// Reverse bits within a specified width
+fn builtin_reverse_bits(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 2,
+            got: args.len(),
+        });
+    }
+
+    let n = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("reverse_bits requires natural number argument".to_string())
+    })?;
+
+    let width = args[1].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("reverse_bits requires width argument".to_string())
+    })?;
+
+    if width > usize::BITS as usize {
+        return Err(EvalError::TypeMismatch(format!(
+            "reverse_bits width {} exceeds maximum {}",
+            width,
+            usize::BITS
+        )));
+    }
+
+    // Reverse bits algorithmically
+    let mut result = 0usize;
+    let mut temp = n;
+    for _ in 0..width {
+        result = (result << 1) | (temp & 1);
+        temp >>= 1;
+    }
+
+    Ok(ConstValue::Nat(result))
+}
+
+/// Greatest common divisor (Euclidean algorithm)
+fn builtin_gcd(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 2,
+            got: args.len(),
+        });
+    }
+
+    let mut a = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("gcd requires natural number arguments".to_string())
+    })?;
+
+    let mut b = args[1].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("gcd requires natural number arguments".to_string())
+    })?;
+
+    // Euclidean algorithm
+    while b != 0 {
+        let temp = b;
+        b = a % b;
+        a = temp;
+    }
+
+    Ok(ConstValue::Nat(a))
+}
+
+/// Least common multiple
+fn builtin_lcm(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 2,
+            got: args.len(),
+        });
+    }
+
+    let a = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("lcm requires natural number arguments".to_string())
+    })?;
+
+    let b = args[1].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("lcm requires natural number arguments".to_string())
+    })?;
+
+    if a == 0 || b == 0 {
+        return Ok(ConstValue::Nat(0));
+    }
+
+    // LCM = (a * b) / GCD(a, b)
+    // Compute GCD inline to avoid recursion
+    let mut gcd_a = a;
+    let mut gcd_b = b;
+    while gcd_b != 0 {
+        let temp = gcd_b;
+        gcd_b = gcd_a % gcd_b;
+        gcd_a = temp;
+    }
+    let gcd = gcd_a;
+
+    // Use checked arithmetic to detect overflow
+    match (a / gcd).checked_mul(b) {
+        Some(result) => Ok(ConstValue::Nat(result)),
+        None => Err(EvalError::TypeMismatch(format!(
+            "lcm overflow: lcm({}, {})",
+            a, b
+        ))),
+    }
+}
+
+/// Gray code encoding
+fn builtin_gray_encode(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    let n = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("gray_encode requires natural number argument".to_string())
+    })?;
+
+    // Gray code: G = B XOR (B >> 1)
+    Ok(ConstValue::Nat(n ^ (n >> 1)))
+}
+
+/// Gray code decoding
+fn builtin_gray_decode(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    let gray = args[0].as_nat().ok_or_else(|| {
+        EvalError::TypeMismatch("gray_decode requires natural number argument".to_string())
+    })?;
+
+    // Decode gray code by XORing with itself shifted right repeatedly
+    let mut binary = gray;
+    let mut shift = 1;
+    while shift < usize::BITS as usize {
+        binary ^= gray >> shift;
+        shift <<= 1;
+    }
+
+    Ok(ConstValue::Nat(binary))
 }
 
 impl Default for ConstEvaluator {

@@ -13,6 +13,8 @@ pub struct MonomorphizationEngine<'hir> {
     evaluator: ConstEvaluator,
     /// Reference to HIR for type resolution
     hir: Option<&'hir Hir>,
+    /// Current implementation constants (set during specialization)
+    current_constants: Vec<crate::hir::HirConstant>,
 }
 
 impl<'hir> MonomorphizationEngine<'hir> {
@@ -21,32 +23,48 @@ impl<'hir> MonomorphizationEngine<'hir> {
         Self {
             evaluator: ConstEvaluator::new(),
             hir: None,
+            current_constants: Vec::new(),
         }
     }
 
     /// Monomorphize the entire HIR
+    ///
+    /// Uses iterative monomorphization to handle nested generics:
+    /// - A generic entity may instantiate another generic entity with substituted parameters
+    /// - We repeatedly collect instantiations and specialize until reaching a fixed point
+    ///
+    /// Example:
+    /// ```text
+    /// entity Decoder<const SIZE: nat> { ... }
+    /// entity Wrapper<const SIZE: nat> {
+    ///     let decoder = Decoder<SIZE>  // Nested generic instantiation
+    /// }
+    /// entity Top {
+    ///     let wrapper = Wrapper<256>   // Triggers Wrapper<256> AND Decoder<256>
+    /// }
+    /// ```
     pub fn monomorphize(&mut self, hir: &'hir Hir) -> Hir {
         // Store HIR reference for type resolution
         self.hir = Some(hir);
         use crate::monomorphization::InstantiationCollector;
 
-        // Step 1: Collect all generic instantiations
-        let collector = InstantiationCollector::new(hir);
-        let instantiations_set = collector.collect(hir);
+        // Track all instantiations across all iterations
+        let mut all_instantiations = std::collections::HashSet::new();
 
-        // If no generic instantiations found, return unchanged
-        if instantiations_set.is_empty() {
-            return hir.clone();
+        // Build initial entity and implementation maps
+        let mut entity_map = HashMap::new();
+        let mut impl_map = HashMap::new();
+
+        for entity in &hir.entities {
+            entity_map.insert(entity.id, entity.clone());
         }
 
-        // CRITICAL FIX: Convert HashSet to sorted Vec for deterministic ordering
-        // This ensures that specialized entities get consistent EntityIds across runs
-        let mut instantiations: Vec<Instantiation> = instantiations_set.into_iter().collect();
-        instantiations.sort_by_key(|a| a.mangled_name());
+        for impl_block in &hir.implementations {
+            impl_map.insert(impl_block.entity, impl_block.clone());
+        }
 
-        // Step 2: Find next available entity ID and port ID
+        // Track next available IDs
         let mut next_entity_id = hir.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1;
-
         let mut next_port_id: u32 = hir
             .entities
             .iter()
@@ -56,60 +74,136 @@ impl<'hir> MonomorphizationEngine<'hir> {
             .unwrap_or(0)
             + 1;
 
-        // Step 3: Generate specialized entities and implementations
-        let mut specialized_entities = Vec::new();
-        let mut specialized_implementations = Vec::new();
-        let mut entity_map = HashMap::new(); // Map from entity ID to entity
-        let mut impl_map = HashMap::new(); // Map from entity ID to implementation
-        let mut specialization_map = HashMap::new(); // Map from instantiation to specialized entity ID
+        // Accumulators for all specialized entities and implementations
+        let mut all_specialized_entities = Vec::new();
+        let mut all_specialized_implementations = Vec::new();
+        let mut specialization_map = HashMap::new(); // Instantiation -> specialized entity ID
 
-        for entity in &hir.entities {
-            entity_map.insert(entity.id, entity);
-        }
+        // ITERATIVE MONOMORPHIZATION: Repeat until no new instantiations found
+        // This handles nested generics where specializing one entity reveals new instantiations
+        loop {
+            // Build temporary HIR with entities and implementations discovered so far
+            let current_entities: Vec<HirEntity> = hir
+                .entities
+                .iter()
+                .cloned()
+                .chain(all_specialized_entities.iter().cloned())
+                .collect();
 
-        for impl_block in &hir.implementations {
-            impl_map.insert(impl_block.entity, impl_block);
-        }
+            let current_implementations: Vec<HirImplementation> = hir
+                .implementations
+                .iter()
+                .cloned()
+                .chain(all_specialized_implementations.iter().cloned())
+                .collect();
 
-        for instantiation in &instantiations {
-            if let Some(entity) = entity_map.get(&instantiation.entity_id) {
-                // Generate unique entity ID for specialized version
-                let specialized_id = crate::hir::EntityId(next_entity_id);
-                next_entity_id += 1;
+            let current_hir = Hir {
+                name: hir.name.clone(),
+                entities: current_entities.clone(),
+                implementations: current_implementations.clone(),
+                protocols: hir.protocols.clone(),
+                intents: hir.intents.clone(),
+                requirements: hir.requirements.clone(),
+                trait_definitions: hir.trait_definitions.clone(),
+                trait_implementations: hir.trait_implementations.clone(),
+                type_aliases: hir.type_aliases.clone(),
+                user_defined_types: hir.user_defined_types.clone(),
+                global_constraints: hir.global_constraints.clone(),
+                modules: hir.modules.clone(),
+                imports: hir.imports.clone(),
+                functions: hir.functions.clone(),
+            };
 
-                let (specialized_entity, port_id_map) = self.specialize_entity(
-                    entity,
-                    instantiation,
-                    specialized_id,
-                    &mut next_port_id,
-                );
+            // Collect instantiations from current state
+            let collector = InstantiationCollector::new(&current_hir);
+            let new_instantiations_set = collector.collect(&current_hir);
 
-                // Record the mapping from instantiation to specialized entity
-                specialization_map.insert(instantiation.clone(), specialized_id);
+            // Find truly new instantiations (not seen before)
+            let new_instantiations: Vec<Instantiation> = new_instantiations_set
+                .into_iter()
+                .filter(|inst| !all_instantiations.contains(inst))
+                .collect();
 
-                // If there's an implementation for this entity, specialize it too
-                if let Some(impl_block) = impl_map.get(&instantiation.entity_id) {
-                    let specialized_impl = self.specialize_implementation(
-                        impl_block,
-                        &specialized_entity,
+            // If no new instantiations, we've reached a fixed point
+            if new_instantiations.is_empty() {
+                break;
+            }
+
+            // Add new instantiations to the set of all seen instantiations
+            for inst in &new_instantiations {
+                all_instantiations.insert(inst.clone());
+            }
+
+            // Specialize each new instantiation
+            for instantiation in &new_instantiations {
+                // Get entity from either original or specialized entities
+                let entity = entity_map.get(&instantiation.entity_id).or_else(|| {
+                    all_specialized_entities
+                        .iter()
+                        .find(|e| e.id == instantiation.entity_id)
+                });
+
+                if let Some(entity) = entity {
+                    // Generate unique entity ID for specialized version
+                    let specialized_id = crate::hir::EntityId(next_entity_id);
+                    next_entity_id += 1;
+
+                    let (specialized_entity, port_id_map) = self.specialize_entity(
+                        entity,
                         instantiation,
-                        &port_id_map,
+                        specialized_id,
+                        &mut next_port_id,
                     );
-                    specialized_implementations.push(specialized_impl);
-                }
 
-                specialized_entities.push(specialized_entity);
+                    // Record the mapping from instantiation to specialized entity
+                    specialization_map.insert(instantiation.clone(), specialized_id);
+
+                    // If there's an implementation for this entity, specialize it too
+                    let impl_block = impl_map.get(&instantiation.entity_id).or_else(|| {
+                        all_specialized_implementations
+                            .iter()
+                            .find(|i| i.entity == instantiation.entity_id)
+                    });
+
+                    if let Some(impl_block) = impl_block {
+                        let specialized_impl = self.specialize_implementation(
+                            impl_block,
+                            &specialized_entity,
+                            instantiation,
+                            &port_id_map,
+                        );
+                        all_specialized_implementations.push(specialized_impl);
+                    }
+
+                    all_specialized_entities.push(specialized_entity);
+                }
             }
         }
 
-        // Step 4: Update instance references in all implementations to point to specialized entities
+        // If no instantiations found at all, return unchanged
+        if all_instantiations.is_empty() {
+            return hir.clone();
+        }
+
+        // Convert to sorted vec for deterministic ordering
+        let mut instantiations: Vec<Instantiation> = all_instantiations.into_iter().collect();
+        instantiations.sort_by_key(|a| a.mangled_name());
+
+        // Update instance references in all implementations to point to specialized entities
         let mut new_implementations = hir.implementations.clone();
-        new_implementations.extend(specialized_implementations);
+        new_implementations.extend(all_specialized_implementations.clone());
+
+        // Build combined entity map including specialized entities
+        let mut all_entities_map = entity_map.clone();
+        for entity in &all_specialized_entities {
+            all_entities_map.insert(entity.id, entity.clone());
+        }
 
         for impl_block in &mut new_implementations {
             for instance in &mut impl_block.instances {
                 // Check if this instance uses a generic entity
-                if let Some(entity) = entity_map.get(&instance.entity) {
+                // Look in both original and specialized entities
+                if let Some(entity) = all_entities_map.get(&instance.entity) {
                     if !entity.generics.is_empty() && !instance.generic_args.is_empty() {
                         // This is a generic instantiation - find the specialized entity
                         if let Some(instantiation) =
@@ -127,34 +221,17 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
         }
 
-        // Step 5: Build new HIR, filtering out fully-specialized generic entities
-        // Collect IDs of entities that were specialized
-        let specialized_entity_ids: std::collections::HashSet<_> =
-            instantiations.iter().map(|inst| inst.entity_id).collect();
-
-        // Keep only non-generic entities and generic entities that weren't specialized
-        let mut new_entities: Vec<HirEntity> = hir
-            .entities
-            .iter()
-            .filter(|entity| {
-                // Keep if entity has no generics (it's concrete)
-                entity.generics.is_empty()
-                    // OR keep if it's generic but wasn't specialized
-                    || !specialized_entity_ids.contains(&entity.id)
-            })
-            .cloned()
-            .collect();
+        // Build new HIR - keep ALL entities (including generic templates) for HIR→MIR conversion
+        // Generic templates will be filtered out during SystemVerilog codegen
+        // This ensures entity_map in HIR→MIR has entries for all entity IDs referenced by instances
+        let mut new_entities: Vec<HirEntity> = hir.entities.clone();
 
         // Add specialized entities
-        new_entities.extend(specialized_entities);
+        new_entities.extend(all_specialized_entities);
 
-        // Filter implementations to remove those for removed entities
-        let entity_ids_in_output: std::collections::HashSet<_> =
-            new_entities.iter().map(|e| e.id).collect();
-        let new_implementations: Vec<HirImplementation> = new_implementations
-            .into_iter()
-            .filter(|impl_block| entity_ids_in_output.contains(&impl_block.entity))
-            .collect();
+        // Keep all implementations (including those for generic templates)
+        // They will be filtered during codegen
+        let new_implementations: Vec<HirImplementation> = new_implementations;
 
         Hir {
             name: hir.name.clone(),
@@ -226,13 +303,16 @@ impl<'hir> MonomorphizationEngine<'hir> {
 
     /// Specialize a generic implementation with concrete type/const arguments
     pub fn specialize_implementation(
-        &self,
+        &mut self,
         impl_block: &HirImplementation,
         specialized_entity: &HirEntity,
         instantiation: &Instantiation,
         port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> HirImplementation {
         use crate::hir::{HirAssignment, HirSignal, HirVariable};
+
+        // Store constants for this implementation (they'll be used by evaluators in substitute_* methods)
+        self.current_constants = impl_block.constants.clone();
 
         // Specialize signals - substitute types
         let specialized_signals = impl_block
@@ -312,6 +392,22 @@ impl<'hir> MonomorphizationEngine<'hir> {
             })
             .collect();
 
+        // Specialize instances - substitute generic arguments
+        let specialized_instances = impl_block
+            .instances
+            .iter()
+            .map(|instance| {
+                let mut new_instance = instance.clone();
+                // Substitute const parameters in generic arguments
+                new_instance.generic_args = instance
+                    .generic_args
+                    .iter()
+                    .map(|arg| self.substitute_expr(arg, &instantiation.const_args))
+                    .collect();
+                new_instance
+            })
+            .collect();
+
         // Create specialized implementation
         HirImplementation {
             entity: specialized_entity.id,
@@ -321,7 +417,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             functions: impl_block.functions.clone(), // TODO: specialize functions if needed
             event_blocks: specialized_event_blocks,
             assignments: specialized_assignments,
-            instances: impl_block.instances.clone(), // TODO: update instance references
+            instances: specialized_instances,
             covergroups: impl_block.covergroups.clone(),
             formal_blocks: impl_block.formal_blocks.clone(),
         }
@@ -410,6 +506,13 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
     }
 
+    /// Create a const evaluator with current constants registered
+    fn create_evaluator_with_constants(&self) -> ConstEvaluator {
+        let mut eval = ConstEvaluator::new();
+        eval.register_constants(&self.current_constants);
+        eval
+    }
+
     /// Resolve a custom type to its actual definition
     fn resolve_custom_type(&self, ty: &HirType) -> HirType {
         match ty {
@@ -468,7 +571,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             // Parametric types: evaluate to concrete types
             HirType::FpParametric { format } => {
                 // Evaluate format expression to get concrete bit width
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
                 if let Ok(value) = eval.eval(format) {
@@ -488,7 +591,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 frac,
                 signed,
             } => {
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
                 if let (Ok(w), Ok(_f), Ok(_s)) =
@@ -505,7 +608,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
 
             HirType::IntParametric { width, signed } => {
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
                 if let (Ok(w), Ok(_s)) = (eval.eval(width), eval.eval(signed)) {
@@ -524,7 +627,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 dimension,
             } => {
                 let elem_substituted = self.substitute_type(element_type, instantiation);
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
                 if let Ok(dim_val) = eval.eval(dimension) {
@@ -565,7 +668,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             | HirType::LogicExpr(expr)
             | HirType::IntExpr(expr)
             | HirType::NatExpr(expr) => {
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
                 // Substitute expr first
@@ -591,7 +694,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             // ArrayExpr - array with expression-based size
             HirType::ArrayExpr(elem_type, size_expr) => {
                 let elem_substituted = self.substitute_type(elem_type, instantiation);
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
                 let subst_expr = self.substitute_expr(size_expr, &instantiation.const_args);
@@ -647,7 +750,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 let right = self.substitute_expr(&bin.right, const_args);
 
                 // Try to evaluate at compile time
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(const_args.clone());
 
                 let new_bin = crate::hir::HirBinaryExpr {
@@ -671,7 +774,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 let else_expr = self.substitute_expr(&if_expr.else_expr, const_args);
 
                 // Try to evaluate condition
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(const_args.clone());
 
                 if let Ok(cond_val) = eval.eval(&cond) {
@@ -694,7 +797,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 let base_subst = self.substitute_expr(base, const_args);
 
                 // Try to evaluate field access
-                let mut eval = ConstEvaluator::new();
+                let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(const_args.clone());
 
                 let field_expr = HirExpression::FieldAccess {
@@ -767,7 +870,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 // Check if condition references intent
                 if self.is_intent_condition(&if_expr.condition, intent) {
                     // Evaluate condition with intent values
-                    let mut eval = ConstEvaluator::new();
+                    let mut eval = self.create_evaluator_with_constants();
 
                     // Bind intent fields
                     for (field_name, field_value) in &intent.fields {

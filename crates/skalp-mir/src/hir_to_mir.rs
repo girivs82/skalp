@@ -5,7 +5,7 @@
 
 use crate::mir::*;
 use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
-use skalp_frontend::const_eval::ConstEvaluator;
+use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
 
@@ -190,10 +190,6 @@ impl<'hir> HirToMir<'hir> {
                     // Add signals - flatten structs/vectors into individual signals
                     for hir_signal in &impl_block.signals {
                         let signal_type = self.convert_type(&hir_signal.signal_type);
-                        eprintln!(
-                            "🔍 HIR→MIR: Flattening signal '{}': HIR type = {:?}, MIR type = {:?}",
-                            hir_signal.name, hir_signal.signal_type, signal_type
-                        );
                         let initial = hir_signal
                             .initial_value
                             .as_ref()
@@ -206,8 +202,6 @@ impl<'hir> HirToMir<'hir> {
                             initial,
                             clock_domain,
                         );
-                        eprintln!("   → Flattened into {} signals", flattened_signals.len());
-
                         // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
                         // Even single-field structs need mapping because field name != signal name
                         // (e.g., signal "data: SimpleData" → flattened signal "data_value")
@@ -234,17 +228,8 @@ impl<'hir> HirToMir<'hir> {
                             module.signals.push(signal);
                         }
                     }
-                    eprintln!(
-                        "✅ Module '{}' (ID={:?}) now has {} total signals",
-                        module.name,
-                        module.id,
-                        module.signals.len()
-                    );
                     if module.name.contains("AsyncFifo_8") {
-                        eprintln!("🔍 AsyncFifo_8 signals:");
-                        for sig in &module.signals {
-                            eprintln!("      - {}: {:?}", sig.name, sig.signal_type);
-                        }
+                        for sig in &module.signals {}
                     }
 
                     // Add variables
@@ -319,15 +304,8 @@ impl<'hir> HirToMir<'hir> {
         // Determine process kind and sensitivity
         let (kind, sensitivity) = self.analyze_event_block(block);
 
-        eprintln!(
-            "🔍 convert_event_block: Converting {} HIR statements",
-            block.statements.len()
-        );
-
         // Convert body
         let body = self.convert_statements(&block.statements);
-
-        eprintln!("   Resulted in {} MIR statements", body.statements.len());
 
         Process {
             id,
@@ -423,9 +401,7 @@ impl<'hir> HirToMir<'hir> {
     fn convert_statement(&mut self, stmt: &hir::HirStatement) -> Option<Statement> {
         match stmt {
             hir::HirStatement::Assignment(assign) => {
-                eprintln!("🔍 convert_statement: Processing HIR assignment");
                 let assigns = self.convert_assignment_expanded(assign);
-                eprintln!("   Resulted in {} MIR assignments", assigns.len());
                 match assigns.len() {
                     0 => None,
                     1 => Some(Statement::Assignment(assigns.into_iter().next().unwrap())),
@@ -616,10 +592,6 @@ impl<'hir> HirToMir<'hir> {
         // This handles cases like: mem[index] <= data
         // Must come BEFORE struct expansion to catch array-of-struct assignments
         if let Some(assignments) = self.try_expand_array_index_assignment(assign) {
-            eprintln!(
-                "🔧 EXPANDED ARRAY INDEX ASSIGNMENT into {} assignments",
-                assignments.len()
-            );
             return assignments;
         }
 
@@ -627,10 +599,6 @@ impl<'hir> HirToMir<'hir> {
         // This handles: out_data.field_x <= value and out_vertex.position.x <= value
         // Must come BEFORE struct expansion to catch specific field assignments
         if let Some(assignments) = self.try_expand_field_assignment(assign) {
-            eprintln!(
-                "🔧 EXPANDED FIELD ACCESS ASSIGNMENT into {} assignments",
-                assignments.len()
-            );
             return assignments;
         }
 
@@ -844,29 +812,15 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
-        eprintln!("🔍 try_expand_field_assignment: Processing field access LHS");
-
         // Extract root signal and field path
         let (root_sig_id, field_path) = self.extract_field_access_path(&assign.lhs)?;
-
-        eprintln!(
-            "   Root signal: SignalId({:?}), field path: {:?}",
-            root_sig_id.0, field_path
-        );
 
         // Look up the flattened signals for this root signal
         let flattened = self.flattened_signals.get(&root_sig_id)?;
 
-        eprintln!("   Searching {} flattened fields", flattened.len());
-
         // Find the flattened field matching this field path
         for flat_field in flattened {
             if flat_field.field_path == field_path {
-                eprintln!(
-                    "   ✅ MATCH! Resolved to flattened signal ID {}",
-                    flat_field.id
-                );
-
                 // Determine assignment kind
                 let kind = match assign.assignment_type {
                     hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
@@ -886,7 +840,6 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        eprintln!("   ❌ No matching flattened field found");
         None // Field path not found in flattened signals
     }
 
@@ -904,8 +857,6 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<Vec<Assignment>> {
-        eprintln!("🔍 try_expand_array_index_assignment: Checking assignment");
-
         // Get assignment kind
         let kind = match assign.assignment_type {
             hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
@@ -916,35 +867,28 @@ impl<'hir> HirToMir<'hir> {
         // Check if LHS is an array index: signal[index] or port[index]
         let (base_hir_lval, index_expr, is_signal) = match &assign.lhs {
             hir::HirLValue::Index(base, index) => {
-                eprintln!("   ✅ LHS is Index");
                 // Check if base is a flattened signal or port
                 match base.as_ref() {
                     hir::HirLValue::Signal(sig_id) => {
                         if self.flattened_signals.contains_key(sig_id) {
-                            eprintln!("   ✅ Base is flattened signal");
                             (sig_id.0, index, true)
                         } else {
-                            eprintln!("   ❌ Base signal not flattened");
                             return None;
                         }
                     }
                     hir::HirLValue::Port(port_id) => {
                         if self.flattened_ports.contains_key(port_id) {
-                            eprintln!("   ✅ Base is flattened port");
                             (port_id.0, index, false)
                         } else {
-                            eprintln!("   ❌ Base port not flattened");
                             return None;
                         }
                     }
                     _ => {
-                        eprintln!("   ❌ Base is not simple signal/port");
                         return None;
                     }
                 }
             }
             _ => {
-                eprintln!("   ❌ LHS is not Index");
                 return None;
             }
         };
@@ -959,11 +903,6 @@ impl<'hir> HirToMir<'hir> {
                 .get(&hir::PortId(base_hir_lval))?
                 .clone()
         };
-
-        eprintln!(
-            "   📊 Found {} flattened fields for base",
-            base_fields.len()
-        );
 
         // Convert the index expression to MIR
         let mir_index = self.convert_expression(index_expr)?;
@@ -988,10 +927,7 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        eprintln!("   📊 Found {} array indices", array_indices.keys().len());
-
         if array_indices.is_empty() {
-            eprintln!("   ❌ No array indices found - not an array of composites");
             return None;
         }
 
@@ -1000,8 +936,6 @@ impl<'hir> HirToMir<'hir> {
 
         for (idx_str, fields_at_index) in array_indices {
             let array_index: usize = idx_str.parse().ok()?;
-            eprintln!("   🔧 Generating assignments for index {}", array_index);
-
             // Create condition: index == array_index
             let index_literal = Expression::Literal(Value::Integer(array_index as i64));
             let condition = Expression::Binary {
@@ -1012,8 +946,6 @@ impl<'hir> HirToMir<'hir> {
 
             // For each field at this index (e.g., x, y, z for a struct element)
             for field_info in &fields_at_index {
-                eprintln!("      - Field: {:?}", field_info.field_path);
-
                 // Build LHS: mem_N_field
                 let lhs_lval = if is_signal {
                     LValue::Signal(SignalId(field_info.id))
@@ -1043,7 +975,6 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        eprintln!("   ✅ Generated {} total assignments", assignments.len());
         Some(assignments)
     }
 
@@ -1517,14 +1448,7 @@ impl<'hir> HirToMir<'hir> {
         // CRITICAL FIX for Bug #10: Expand struct/array connections into flattened field connections
         let mut connections = std::collections::HashMap::new();
 
-        eprintln!(
-            "🔍 convert_instance: Processing {} connections for instance {}",
-            instance.connections.len(),
-            instance.name
-        );
         for conn in &instance.connections {
-            eprintln!("   Connection: {} → {:?}", conn.port, conn.expr);
-
             // Check if this port is flattened (struct or array type)
             // If so, we need to create multiple connections for each flattened field
 
@@ -1538,9 +1462,6 @@ impl<'hir> HirToMir<'hir> {
 
             // Find the port in the entity
             let port_opt = entity.ports.iter().find(|p| p.name == conn.port);
-            if port_opt.is_none() {
-                eprintln!("   ⚠️  Port '{}' not found in entity!", conn.port);
-            }
 
             // Check if the RHS expression is a reference to a flattened signal/port
             let expanded_connections = if let Some(port) = port_opt {
@@ -1552,10 +1473,6 @@ impl<'hir> HirToMir<'hir> {
 
                 if needs_expansion {
                     // Try to expand the connection
-                    eprintln!(
-                        "🔧 EXPANDING INSTANCE CONNECTION: {} (type={:?})",
-                        conn.port, port.port_type
-                    );
                     self.expand_instance_connection(&conn.port, &conn.expr)?
                 } else {
                     // Simple connection
@@ -1594,28 +1511,15 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Signal(id) => (id.0, true),
             hir::HirExpression::Port(id) => (id.0, false),
             _ => {
-                eprintln!(
-                    "   ❌ RHS is not a simple Signal/Port expression: {:?}",
-                    rhs_expr
-                );
                 return None; // Complex expression, can't expand
             }
         };
 
         // Get flattened fields for the RHS signal/port
-        eprintln!(
-            "   Looking for flattened fields: {}({})",
-            if is_signal { "Signal" } else { "Port" },
-            base_hir_id
-        );
         let rhs_fields = if is_signal {
             match self.flattened_signals.get(&hir::SignalId(base_hir_id)) {
                 Some(fields) => fields.clone(),
                 None => {
-                    eprintln!(
-                        "   ❌ Signal ID {} not found in flattened_signals",
-                        base_hir_id
-                    );
                     return None;
                 }
             }
@@ -1623,13 +1527,10 @@ impl<'hir> HirToMir<'hir> {
             match self.flattened_ports.get(&hir::PortId(base_hir_id)) {
                 Some(fields) => fields.clone(),
                 None => {
-                    eprintln!("   ❌ Port ID {} not found in flattened_ports", base_hir_id);
                     return None;
                 }
             }
         };
-
-        eprintln!("   ✅ RHS has {} flattened fields", rhs_fields.len());
 
         // Create connections for each flattened field
         let mut connections = Vec::new();
@@ -1649,10 +1550,6 @@ impl<'hir> HirToMir<'hir> {
                 Expression::Ref(LValue::Port(PortId(rhs_field.id)))
             };
 
-            eprintln!(
-                "      {} → signal/port ID {}",
-                port_field_name, rhs_field.id
-            );
             connections.push((port_field_name, rhs_field_expr));
         }
 
@@ -1662,24 +1559,11 @@ impl<'hir> HirToMir<'hir> {
     /// Convert HIR if statement to MIR
     fn convert_if_statement(&mut self, if_stmt: &hir::HirIfStatement) -> Option<IfStatement> {
         let condition = self.convert_expression(&if_stmt.condition)?;
-        eprintln!(
-            "🔍 convert_if_statement: Then branch has {} HIR statements",
-            if_stmt.then_statements.len()
-        );
         let then_block = self.convert_statements(&if_stmt.then_statements);
-        eprintln!(
-            "   Then block resulted in {} MIR statements",
-            then_block.statements.len()
-        );
-        let else_block = if_stmt.else_statements.as_ref().map(|stmts| {
-            eprintln!("   Else branch has {} HIR statements", stmts.len());
-            let block = self.convert_statements(stmts);
-            eprintln!(
-                "   Else block resulted in {} MIR statements",
-                block.statements.len()
-            );
-            block
-        });
+        let else_block = if_stmt
+            .else_statements
+            .as_ref()
+            .map(|stmts| self.convert_statements(stmts));
 
         Some(IfStatement {
             condition,
@@ -1927,13 +1811,26 @@ impl<'hir> HirToMir<'hir> {
                 .get(id)
                 .map(|&id| Expression::Ref(LValue::Variable(id))),
             hir::HirExpression::Constant(id) => {
-                // Look up the constant value in HIR
+                // Look up and evaluate the constant value in HIR
                 if let Some(hir) = self.hir {
+                    // Create evaluator and register all constants from all implementations
+                    let mut evaluator = ConstEvaluator::new();
+                    for implementation in &hir.implementations {
+                        evaluator.register_constants(&implementation.constants);
+                    }
+
+                    // Find the constant and evaluate it
                     for implementation in &hir.implementations {
                         for constant in &implementation.constants {
                             if constant.id == *id {
-                                // Recursively convert the constant's value expression
-                                return self.convert_expression(&constant.value);
+                                // Evaluate the constant's value expression to a concrete value
+                                if let Ok(const_value) = evaluator.eval(&constant.value) {
+                                    // Convert ConstValue to MIR literal expression
+                                    return Some(self.const_value_to_mir_expression(&const_value));
+                                } else {
+                                    // If evaluation fails, try recursive conversion as fallback
+                                    return self.convert_expression(&constant.value);
+                                }
                             }
                         }
                     }
@@ -2575,6 +2472,21 @@ impl<'hir> HirToMir<'hir> {
                     width: bits.len(),
                     value,
                 })
+            }
+        }
+    }
+
+    /// Convert const value to MIR expression
+    fn const_value_to_mir_expression(&self, const_value: &ConstValue) -> Expression {
+        match const_value {
+            ConstValue::Nat(n) => Expression::Literal(Value::Integer(*n as i64)),
+            ConstValue::Int(i) => Expression::Literal(Value::Integer(*i)),
+            ConstValue::Bool(b) => Expression::Literal(Value::Integer(if *b { 1 } else { 0 })),
+            ConstValue::Float(f) => Expression::Literal(Value::Float(*f)),
+            ConstValue::String(s) => Expression::Literal(Value::String(s.clone())),
+            // For complex types that don't have direct MIR equivalents, return 0 as fallback
+            ConstValue::FloatFormat(_) | ConstValue::Struct(_) => {
+                Expression::Literal(Value::Integer(0))
             }
         }
     }

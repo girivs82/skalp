@@ -22,12 +22,63 @@ pub fn generate_systemverilog_from_mir(mir: &Mir, lir: &LirDesign) -> Result<Str
     sv.push_str(&format!("// Design: {}\n", mir.name));
     sv.push('\n');
 
-    // Generate each module
+    // Generate each module, skipping ONLY generic templates that have concrete instantiations
+    // Strategy:
+    // 1. Modules with generic/expression-based types (unresolved) are always skipped (not valid SystemVerilog)
+    // 2. Modules with parameters but concrete types can be emitted as parameterized SystemVerilog modules
+    // 3. Concrete modules (no parameters, all types resolved) are always emitted
     for (mir_module, lir_module) in mir.modules.iter().zip(lir.modules.iter()) {
+        // Skip modules with unresolved/generic types - these cannot be converted to SystemVerilog
+        if has_generic_types(mir_module) {
+            continue;
+        }
+
+        // Emit all modules with concrete types (even if they have parameters)
+        // SystemVerilog supports parameterized modules
         sv.push_str(&generate_module(mir_module, lir_module, mir)?);
     }
 
     Ok(sv)
+}
+
+/// Check if a module has any generic/expression-based types in its ports
+/// Generic types include NatExpr, BitExpr, IntExpr, LogicExpr which contain unresolved expressions
+fn has_generic_types(module: &Module) -> bool {
+    module
+        .ports
+        .iter()
+        .any(|port| is_generic_type(&port.port_type))
+}
+
+/// Check if a data type is generic (contains unresolved expressions)
+fn is_generic_type(data_type: &DataType) -> bool {
+    match data_type {
+        // Expression-based types are generic
+        DataType::NatExpr { .. }
+        | DataType::BitExpr { .. }
+        | DataType::IntExpr { .. }
+        | DataType::LogicExpr { .. } => true,
+        // Parameter-based types are also generic
+        DataType::NatParam { .. }
+        | DataType::BitParam { .. }
+        | DataType::IntParam { .. }
+        | DataType::LogicParam { .. } => true,
+        // Recursively check composite types
+        DataType::Array(element_type, _) => is_generic_type(element_type),
+        DataType::Struct(struct_type) => struct_type
+            .fields
+            .iter()
+            .any(|field| is_generic_type(&field.field_type)),
+        DataType::Union(union_type) => union_type
+            .fields
+            .iter()
+            .any(|field| is_generic_type(&field.field_type)),
+        DataType::Vec2(element_type)
+        | DataType::Vec3(element_type)
+        | DataType::Vec4(element_type) => is_generic_type(element_type),
+        // All other types are concrete
+        _ => false,
+    }
 }
 
 /// Generate a single SystemVerilog module
