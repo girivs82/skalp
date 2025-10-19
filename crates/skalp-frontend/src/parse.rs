@@ -3701,7 +3701,23 @@ impl<'a> ParseState<'a> {
             self.parse_unary_expr(); // right-associative
             self.finish_node();
         } else {
-            self.parse_primary_expression();
+            self.parse_cast_expr();
+        }
+    }
+
+    /// Parse cast expression (expr as Type)
+    /// Cast has higher precedence than binary operators but lower than postfix operations
+    fn parse_cast_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
+        self.parse_primary_expression();
+
+        // Check for 'as' keyword to create a cast expression
+        if self.at(SyntaxKind::AsKw) {
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::CastExpr as u16));
+            self.bump(); // consume 'as'
+            self.parse_type();
+            self.builder.finish_node();
         }
     }
 
