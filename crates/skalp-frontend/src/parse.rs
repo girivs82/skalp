@@ -414,10 +414,28 @@ impl<'a> ParseState<'a> {
                 if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
                     self.bump();
                 }
+            } else if self.at(SyntaxKind::SignalKw) {
+                // Allow signal declarations in entity body (for testbenches)
+                self.parse_signal_decl();
+
+                // Consume optional separator (comma or semicolon)
+                if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
+                    self.bump();
+                }
+            } else if self.at(SyntaxKind::LetKw) {
+                // Allow instance declarations in entity body (for DUT instantiation)
+                self.parse_instance_decl();
+
+                // Consume optional separator (comma or semicolon)
+                if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
+                    self.bump();
+                }
             } else if self.at(SyntaxKind::RBrace) {
                 break;
             } else {
-                self.error_and_bump("expected port declaration");
+                self.error_and_bump(
+                    "expected port declaration, signal declaration, or let binding",
+                );
             }
         }
 
