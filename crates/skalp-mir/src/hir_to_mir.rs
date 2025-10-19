@@ -1346,10 +1346,6 @@ impl<'hir> HirToMir<'hir> {
         // This handles cases like: rd_data = mem[index]
         // This is the RHS counterpart to Bug #8 (array index writes)
         if let Some(assigns) = self.try_expand_array_index_read_assignment(assign) {
-            eprintln!(
-                "🔧 EXPANDED ARRAY INDEX READ into {} continuous assignments",
-                assigns.len()
-            );
             return assigns;
         }
 
@@ -2635,6 +2631,16 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::FieldAccess { base, field } => {
                 // Infer from base expression and field
                 let base_type = self.infer_hir_type(base)?;
+
+                // BUG FIX #46: Handle Custom("vec2/3/4") which should be Vec2/3/4(Float32)
+                // This is needed because Bug #45 causes HIR to store vec2<fp32> as Custom("vec2")
+                if let hir::HirType::Custom(type_name) = &base_type {
+                    if type_name.starts_with("vec") && matches!(field.as_str(), "x" | "y" | "z" | "w") {
+                        // Vec components are Float32 by default (matching convert_type workaround)
+                        return Some(hir::HirType::Float32);
+                    }
+                }
+
                 // For vector types, return element type
                 match base_type {
                     hir::HirType::Vec2(element_type)
@@ -2810,6 +2816,24 @@ impl<'hir> HirToMir<'hir> {
                 DataType::Array(Box::new(self.convert_type(inner_type)), *size as usize)
             }
             hir::HirType::Custom(name) => {
+                // BUG FIX #45: HIR builder stores vec2<fp32> as Custom("vec2") instead of Vec2(Float32)
+                // Recognize built-in vector types before looking up user types
+                if name.starts_with("vec") {
+                    // Parse "vec2", "vec3", "vec4"
+                    // TODO: This loses element type information (e.g., <fp32>)
+                    // For now, default to fp32 which is the most common case
+                    if let Some(dim_char) = name.chars().nth(3) {
+                        if let Some(dimension) = dim_char.to_digit(10) {
+                            match dimension {
+                                2 => return DataType::Vec2(Box::new(DataType::Float32)),
+                                3 => return DataType::Vec3(Box::new(DataType::Float32)),
+                                4 => return DataType::Vec4(Box::new(DataType::Float32)),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
                 // Resolve custom types by looking them up in HIR
                 if let Some(hir) = self.hir {
                     // First check user-defined types (structs, enums, unions)
@@ -3233,9 +3257,9 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
                     // Not flattened - use mapped port ID (or fall back to bit range)
-                    if let Some(port_id_mir) = self.port_map.get(port_id) {
+                    if let Some(&port_id_mir) = self.port_map.get(port_id) {
                         // Fall back to bit range approach
-                        let base_lval = LValue::Port(*port_id_mir);
+                        let base_lval = LValue::Port(port_id_mir);
                         let (high_bit, low_bit) =
                             self.get_field_bit_range(base, &normalized_field_name)?;
                         let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
@@ -3280,6 +3304,34 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<(usize, usize)> {
         // First, check if this is a vector type
         if let Some(base_type) = self.infer_hir_type(base) {
+            // Handle Custom types that might be vec2/vec3/vec4
+            // BUG FIX #44: HIR stores vec2<fp32> as Custom("vec2") instead of Vec2(Float32)
+            if let hir::HirType::Custom(type_name) = &base_type {
+                // Parse custom type names like "vec2", "vec3", "vec4"
+                if type_name.starts_with("vec") {
+                    // Extract the dimension (2, 3, or 4)
+                    if let Some(dim_char) = type_name.chars().nth(3) {
+                        if let Some(dimension) = dim_char.to_digit(10) {
+                            // Default to fp32 element width (32 bits) for custom vec types
+                            // TODO: Parse element type from full type string if available
+                            let elem_width = 32;
+                            match (dimension, field_name) {
+                                (2, "x") => return Some((elem_width - 1, 0)),
+                                (2, "y") => return Some((2 * elem_width - 1, elem_width)),
+                                (3, "x") => return Some((elem_width - 1, 0)),
+                                (3, "y") => return Some((2 * elem_width - 1, elem_width)),
+                                (3, "z") => return Some((3 * elem_width - 1, 2 * elem_width)),
+                                (4, "x") => return Some((elem_width - 1, 0)),
+                                (4, "y") => return Some((2 * elem_width - 1, elem_width)),
+                                (4, "z") => return Some((3 * elem_width - 1, 2 * elem_width)),
+                                (4, "w") => return Some((4 * elem_width - 1, 3 * elem_width)),
+                                _ => return None,
+                            }
+                        }
+                    }
+                }
+            }
+
             match base_type {
                 hir::HirType::Vec2(ref element_type) => {
                     let elem_width = self.get_hir_type_width(element_type);

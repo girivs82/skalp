@@ -54,13 +54,13 @@ mod vec_arithmetic_tests {
 
         let mut sim = setup_simulator(source, true).await;
 
+        // vec2 ports are flattened to individual components: a_x, a_y, b_x, b_y
         // a = [1.0, 2.0], b = [3.0, 4.0]
         // Expected: x_sum = 1.0 + 3.0 = 4.0, y_sum = 2.0 + 4.0 = 6.0
-        let a: u64 = 0x40000000_3F800000; // [1.0, 2.0] in little-endian
-        let b: u64 = 0x40800000_40400000; // [3.0, 4.0]
-
-        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_x", (1.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_y", (2.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_x", (3.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_y", (4.0f32).to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         // Check x_sum = 4.0
@@ -92,12 +92,12 @@ mod vec_arithmetic_tests {
 
         let mut sim = setup_simulator(source, false).await;
 
+        // vec2 ports are flattened to individual components: a_x, a_y, b_x, b_y
         // a = [1.0, 2.0], b = [3.0, 4.0]
-        let a: u64 = 0x40000000_3F800000;
-        let b: u64 = 0x40800000_40400000;
-
-        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_x", (1.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_y", (2.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_x", (3.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_y", (4.0f32).to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         // Check x_sum = 4.0
@@ -135,20 +135,15 @@ mod vec_arithmetic_tests {
 
         let mut sim = setup_simulator(source, true).await;
 
+        // vec3 ports are flattened to individual components: a_x, a_y, a_z, b_x, b_y, b_z
         // a = [2.0, 3.0, 4.0], b = [5.0, 6.0, 7.0]
         // Expected: [10.0, 18.0, 28.0]
-        let mut a_bytes = Vec::new();
-        a_bytes.extend_from_slice(&(2.0f32).to_le_bytes());
-        a_bytes.extend_from_slice(&(3.0f32).to_le_bytes());
-        a_bytes.extend_from_slice(&(4.0f32).to_le_bytes());
-
-        let mut b_bytes = Vec::new();
-        b_bytes.extend_from_slice(&(5.0f32).to_le_bytes());
-        b_bytes.extend_from_slice(&(6.0f32).to_le_bytes());
-        b_bytes.extend_from_slice(&(7.0f32).to_le_bytes());
-
-        sim.set_input("a", a_bytes).await.unwrap();
-        sim.set_input("b", b_bytes).await.unwrap();
+        sim.set_input("a_x", (2.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_y", (3.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_z", (4.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_x", (5.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_y", (6.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_z", (7.0f32).to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         // Check x: 2.0 * 5.0 = 10.0
@@ -187,18 +182,13 @@ mod vec_arithmetic_tests {
 
         let mut sim = setup_simulator(source, false).await;
 
-        let mut a_bytes = Vec::new();
-        a_bytes.extend_from_slice(&(2.0f32).to_le_bytes());
-        a_bytes.extend_from_slice(&(3.0f32).to_le_bytes());
-        a_bytes.extend_from_slice(&(4.0f32).to_le_bytes());
-
-        let mut b_bytes = Vec::new();
-        b_bytes.extend_from_slice(&(5.0f32).to_le_bytes());
-        b_bytes.extend_from_slice(&(6.0f32).to_le_bytes());
-        b_bytes.extend_from_slice(&(7.0f32).to_le_bytes());
-
-        sim.set_input("a", a_bytes).await.unwrap();
-        sim.set_input("b", b_bytes).await.unwrap();
+        // vec3 ports are flattened to individual components: a_x, a_y, a_z, b_x, b_y, b_z
+        sim.set_input("a_x", (2.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_y", (3.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a_z", (4.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_x", (5.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_y", (6.0f32).to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("b_z", (7.0f32).to_le_bytes().to_vec()).await.unwrap();
         sim.step_simulation().await.unwrap();
 
         let x_bytes = sim.get_output("x_prod").await.unwrap();

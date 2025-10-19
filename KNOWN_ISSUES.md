@@ -1,5 +1,218 @@
 # Known Issues and Limitations
 
+## ❌ ACTIVE: Generic Traits with Self::Output in Parameters Fail to Parse (Bug #43)
+
+### Issue
+Parser fails when a generic trait has methods with `Self` or `Self::Output` in parameter types.
+
+### What's Broken ❌
+```skalp
+trait Test<T> {
+    type Output;
+    fn method(&self, input: Self::Output) -> T;  // ❌ Parser error!
+}
+```
+
+Error: `expected identifier at pos X` where X is the position of the parameter name.
+
+### What Works ✅
+```skalp
+// Non-generic trait - works fine
+trait Test {
+    type Output;
+    fn method(&self, input: Self::Output) -> nat[8];  // ✅ OK
+}
+
+// Generic trait with Self::Output in RETURN type - works fine
+trait Test<T> {
+    type Output;
+    fn method(&self, data: T) -> Self::Output;  // ✅ OK
+}
+```
+
+### Investigation Summary
+- **Root cause**: Unknown - likely related to parser state after parsing generic parameters `<T>`
+- **Attempted fix**: Resetting `partial_shr` state after `parse_generic_params()` - did not resolve
+- **Location**: `crates/skalp-frontend/src/parse.rs` - interaction between `parse_generic_params()` and subsequent method parameter parsing
+- **Affected code**: Any generic trait using `Self`/`Self::Output` in method parameters
+- **Test case**: `tests/test_traits.rs::test_complex_trait_with_generics` (currently ignored)
+
+### Minimal Reproduction
+```skalp
+trait Test<T> {
+    type Output;
+    fn test(&self, x: Self::Output);
+}
+```
+
+---
+
+## ✅ FIXED: Integer Operations Used for Float32 Vector Components (Bug #46)
+
+### Issue (FIXED)
+Type inference failed for vector component field access (e.g., `vec2.x`), causing MIR→SIR to emit integer operations (`Add`, `Mul`) instead of floating-point operations (`FAdd`, `FMul`) for Float32 vector arithmetic.
+
+### What Was Broken ❌
+```skalp
+entity Vec2Add {
+    in a: vec2<fp32>
+    in b: vec2<fp32>
+    out sum: fp32
+}
+
+impl Vec2Add {
+    sum = a.x + b.x  // ❌ Generated integer Add instead of floating-point FAdd!
+}
+```
+
+**Symptom**: CPU simulator returned 0.0 for all floating-point vector operations, while GPU tests passed (GPU doesn't distinguish int/fp operations).
+
+**SIR Output (incorrect)**:
+```
+Node 2: BinaryOp(Add), inputs=["node_0_out", "node_1_out"]  # Should be FAdd!
+```
+
+### Root Cause
+The `infer_hir_type()` function in `hir_to_mir.rs` couldn't infer types for field access on `Custom("vec2")` types (see Bug #45). When type inference returned `None`, `convert_binary_op()` defaulted to integer operations.
+
+**File**: `crates/skalp-mir/src/hir_to_mir.rs` lines 2631-2663
+
+**The problem**: `infer_hir_type()` for `FieldAccess` had no handling for `Custom("vec2/3/4")` types:
+
+```rust
+hir::HirExpression::FieldAccess { base, field } => {
+    let base_type = self.infer_hir_type(base)?;
+
+    // Only handled Vec2/Vec3/Vec4 and Struct types
+    // No handling for Custom("vec2") -> returned None!
+    match base_type {
+        hir::HirType::Vec2(element_type) => Some(*element_type),
+        hir::HirType::Struct(ref struct_type) => { /* ... */ },
+        _ => None,  // ❌ Custom("vec2") fell through here!
+    }
+}
+```
+
+### Fix Applied
+Added special handling for `Custom("vec2/3/4")` types before the main match (lines 2635-2642):
+
+```rust
+hir::HirExpression::FieldAccess { base, field } => {
+    let base_type = self.infer_hir_type(base)?;
+
+    // BUG FIX #46: Handle Custom("vec2/3/4") which should be Vec2/3/4(Float32)
+    // This is needed because Bug #45 causes HIR to store vec2<fp32> as Custom("vec2")
+    if let hir::HirType::Custom(type_name) = &base_type {
+        if type_name.starts_with("vec") && matches!(field.as_str(), "x" | "y" | "z" | "w") {
+            // Vec components are Float32 by default (matching convert_type workaround)
+            return Some(hir::HirType::Float32);
+        }
+    }
+
+    // Continue with regular Vec2/Vec3/Vec4 and Struct handling...
+}
+```
+
+### Verification
+All 4 vec arithmetic tests now pass:
+- ✅ `test_vec2_component_addition_cpu`
+- ✅ `test_vec2_component_addition_gpu`
+- ✅ `test_vec3_component_multiply_cpu`
+- ✅ `test_vec3_component_multiply_gpu`
+
+**SIR Output (correct)**:
+```
+Node 2: BinaryOp(FAdd), inputs=["node_0_out", "node_1_out"]  ✅
+```
+
+**Metal Shader (correct)**:
+```metal
+float node_2_out = node_0_out + node_1_out;  // Float arithmetic ✅
+```
+
+---
+
+## ✅ FIXED: HIR Stores vec2<fp32> as Custom("vec2") (Bug #45)
+
+### Issue (FIXED)
+HIR builder incorrectly represents `vec2<fp32>` as `Custom("vec2")` instead of `Vec2(Float32)`, causing MIR type conversion to fail and generate 1-bit ports instead of proper 64-bit vec2 ports.
+
+### What Was Broken ❌
+```skalp
+entity Vec2Add {
+    in a: vec2<fp32>  // ❌ HIR stored as Custom("vec2"), not Vec2(Float32)
+    out sum: fp32
+}
+```
+
+**Impact Chain**:
+1. HIR: `vec2<fp32>` → `Custom("vec2")` (wrong!)
+2. MIR `convert_type()`: `Custom("vec2")` → lookup failed → fallback to `Bit(1)` (wrong!)
+3. SIR: Generated 1-bit ports instead of 64-bit Float32×2 ports
+4. Tests: Failed with "Input a not found" (ports were flattened to `a_x`, `a_y`)
+
+### Root Cause
+The HIR builder (frontend) stores vector types as custom type names instead of proper `Vec2/Vec3/Vec4` types, losing element type information.
+
+This is likely a frontend issue that needs fixing, but we added a workaround in MIR to handle it.
+
+### Workaround Applied
+Added special handling in `convert_type()` to recognize "vec2/3/4" strings before looking up user-defined types.
+
+**File**: `crates/skalp-mir/src/hir_to_mir.rs` lines 2808-2849
+
+```rust
+hir::HirType::Custom(name) => {
+    // BUG FIX #45: HIR builder stores vec2<fp32> as Custom("vec2") instead of Vec2(Float32)
+    // Recognize built-in vector types before looking up user types
+    if name.starts_with("vec") {
+        // Parse "vec2", "vec3", "vec4"
+        // TODO: This loses element type information (e.g., <fp32>)
+        // For now, default to fp32 which is the most common case
+        if let Some(dim_char) = name.chars().nth(3) {
+            if let Some(dimension) = dim_char.to_digit(10) {
+                match dimension {
+                    2 => return DataType::Vec2(Box::new(DataType::Float32)),
+                    3 => return DataType::Vec3(Box::new(DataType::Float32)),
+                    4 => return DataType::Vec4(Box::new(DataType::Float32)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Resolve custom types by looking them up in HIR
+    if let Some(hir) = self.hir {
+        for user_type in &hir.user_defined_types {
+            if user_type.name == *name {
+                return self.convert_type(&user_type.type_def);
+            }
+        }
+        for type_alias in &hir.type_aliases {
+            if type_alias.name == *name {
+                return self.convert_type(&type_alias.target_type);
+            }
+        }
+    }
+
+    // Fallback to Bit(1)
+    DataType::Bit(1)
+}
+```
+
+### Limitation
+**⚠️ This workaround assumes `fp32` element type**. It loses element type information from the original syntax (e.g., `vec2<fp64>` would still become `Vec2(Float32)`).
+
+**Proper fix**: The HIR builder should be updated to generate `Vec2(Float32)` instead of `Custom("vec2")` in the first place.
+
+### Verification
+After this fix:
+- ✅ Vec2/Vec3/Vec4 ports correctly flatten to individual Float32 components (`a_x`, `a_y`, etc.)
+- ✅ Port widths are correct (32 bits per component instead of 1 bit)
+- ✅ Tests updated to use flattened port names
+
+---
+
 ## ✅ FIXED: Public Constants Not Supported (Bug #42)
 
 ### Issue (FIXED)

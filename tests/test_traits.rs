@@ -105,7 +105,7 @@ mod trait_tests {
     }
 
     #[test]
-    #[ignore = "Pre-existing issue: Generic trait with Self::Output parsing fails - not caused by recent changes"]
+    #[ignore = "Known bug: Parsing fails for methods with Self/Self::Output in parameters when trait has generic parameters"]
     fn test_complex_trait_with_generics() {
         let source = r#"
         trait Serializable<T> {
