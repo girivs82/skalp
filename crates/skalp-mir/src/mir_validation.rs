@@ -147,6 +147,10 @@ fn format_type(data_type: &DataType) -> String {
         DataType::LogicParam { .. } => "logic[N]".to_string(),
         DataType::IntParam { .. } => "int[N]".to_string(),
         DataType::NatParam { .. } => "nat[N]".to_string(),
+        DataType::BitExpr { .. } => "bit[expr]".to_string(),
+        DataType::LogicExpr { .. } => "logic[expr]".to_string(),
+        DataType::IntExpr { .. } => "int[expr]".to_string(),
+        DataType::NatExpr { .. } => "nat[expr]".to_string(),
     }
 }
 

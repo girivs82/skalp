@@ -3001,7 +3001,11 @@ impl<'a> MirToSirConverter<'a> {
             DataType::BitParam { default, .. }
             | DataType::LogicParam { default, .. }
             | DataType::IntParam { default, .. }
-            | DataType::NatParam { default, .. } => SirType::Bits(*default),
+            | DataType::NatParam { default, .. }
+            | DataType::BitExpr { default, .. }
+            | DataType::LogicExpr { default, .. }
+            | DataType::IntExpr { default, .. }
+            | DataType::NatExpr { default, .. } => SirType::Bits(*default),
             // Struct, Enum, Union are not yet supported for simulation
             // They should be decomposed at a higher level
             DataType::Struct(_) | DataType::Enum(_) | DataType::Union(_) => {

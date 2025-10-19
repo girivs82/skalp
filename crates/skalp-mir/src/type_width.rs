@@ -59,7 +59,11 @@ pub fn get_type_width(data_type: &DataType) -> usize {
         DataType::BitParam { default, .. }
         | DataType::LogicParam { default, .. }
         | DataType::IntParam { default, .. }
-        | DataType::NatParam { default, .. } => *default,
+        | DataType::NatParam { default, .. }
+        | DataType::BitExpr { default, .. }
+        | DataType::LogicExpr { default, .. }
+        | DataType::IntExpr { default, .. }
+        | DataType::NatExpr { default, .. } => *default,
 
         // Vector types - these should be flattened, but we can calculate width
         DataType::Vec2(element_type) => get_type_width(element_type) * 2,
@@ -209,6 +213,10 @@ pub fn is_scalar_type(data_type: &DataType) -> bool {
             | DataType::LogicParam { .. }
             | DataType::IntParam { .. }
             | DataType::NatParam { .. }
+            | DataType::BitExpr { .. }
+            | DataType::LogicExpr { .. }
+            | DataType::IntExpr { .. }
+            | DataType::NatExpr { .. }
     )
 }
 

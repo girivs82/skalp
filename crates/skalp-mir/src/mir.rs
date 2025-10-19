@@ -211,14 +211,34 @@ pub enum DataType {
     Union(Box<UnionType>),
     /// Array type
     Array(Box<DataType>, usize),
-    /// Bit vector with parametric width
+    /// Bit vector with parametric width (simple parameter name)
     BitParam { param: String, default: usize },
-    /// Logic vector with parametric width
+    /// Logic vector with parametric width (simple parameter name)
     LogicParam { param: String, default: usize },
-    /// Signed integer with parametric width
+    /// Signed integer with parametric width (simple parameter name)
     IntParam { param: String, default: usize },
-    /// Unsigned natural with parametric width
+    /// Unsigned natural with parametric width (simple parameter name)
     NatParam { param: String, default: usize },
+    /// Bit vector with expression-based width (e.g., clog2(SIZE))
+    BitExpr {
+        expr: Box<Expression>,
+        default: usize,
+    },
+    /// Logic vector with expression-based width
+    LogicExpr {
+        expr: Box<Expression>,
+        default: usize,
+    },
+    /// Signed integer with expression-based width
+    IntExpr {
+        expr: Box<Expression>,
+        default: usize,
+    },
+    /// Unsigned natural with expression-based width
+    NatExpr {
+        expr: Box<Expression>,
+        default: usize,
+    },
     /// IEEE 754 half precision (16-bit)
     Float16,
     /// IEEE 754 single precision (32-bit)
@@ -353,7 +373,7 @@ pub enum AssignmentKind {
 }
 
 /// Left-hand value (assignable)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LValue {
     /// Port reference
     Port(PortId),
@@ -377,7 +397,7 @@ pub enum LValue {
 }
 
 /// Expression (right-hand side)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Expression {
     /// Literal value
     Literal(Value),

@@ -798,13 +798,26 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
             }
         }
         skalp_mir::DataType::Bool => String::new(), // Boolean is single bit
-        // Parametric types use parameter expression
+        // Parametric types use parameter name
         skalp_mir::DataType::BitParam { param, default }
         | skalp_mir::DataType::LogicParam { param, default }
         | skalp_mir::DataType::IntParam { param, default }
         | skalp_mir::DataType::NatParam { param, default } => {
             if *default > 1 {
                 format!("[{}-1:0] ", param)
+            } else {
+                String::new()
+            }
+        }
+        // Expression-based parametric types - convert MIR expression to SystemVerilog
+        skalp_mir::DataType::BitExpr { expr, default }
+        | skalp_mir::DataType::LogicExpr { expr, default }
+        | skalp_mir::DataType::IntExpr { expr, default }
+        | skalp_mir::DataType::NatExpr { expr, default } => {
+            if *default > 1 {
+                // Convert MIR expression to SystemVerilog string
+                let expr_str = convert_mir_expr_to_sv(expr);
+                format!("[{}-1:0] ", expr_str)
             } else {
                 String::new()
             }
@@ -1667,10 +1680,63 @@ fn generate_typedefs_for_datatype(
 /// Get the SystemVerilog type name for a DataType (for typedef generation)
 fn get_systemverilog_type(data_type: &DataType) -> &'static str {
     match data_type {
-        DataType::Bit(_) | DataType::BitParam { .. } => "bit",
-        DataType::Logic(_) | DataType::LogicParam { .. } => "logic",
-        DataType::Int(_) | DataType::IntParam { .. } => "int",
-        DataType::Nat(_) | DataType::NatParam { .. } => "logic", // Use logic for unsigned naturals
-        _ => "logic",                                            // Default to logic for other types
+        DataType::Bit(_) | DataType::BitParam { .. } | DataType::BitExpr { .. } => "bit",
+        DataType::Logic(_) | DataType::LogicParam { .. } | DataType::LogicExpr { .. } => "logic",
+        DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. } => "int",
+        DataType::Nat(_) | DataType::NatParam { .. } | DataType::NatExpr { .. } => "logic", // Use logic for unsigned naturals
+        _ => "logic", // Default to logic for other types
+    }
+}
+
+/// Convert a MIR expression to a SystemVerilog expression string
+/// This is specifically for const expressions used in type positions (like clog2(SIZE))
+fn convert_mir_expr_to_sv(expr: &skalp_mir::Expression) -> String {
+    match expr {
+        skalp_mir::Expression::Literal(val) => format_value(val),
+        skalp_mir::Expression::Binary { op, left, right } => {
+            format!(
+                "({}{}{})",
+                convert_mir_expr_to_sv(left),
+                format_binary_op(op),
+                convert_mir_expr_to_sv(right)
+            )
+        }
+        skalp_mir::Expression::FunctionCall { name, args } => {
+            // Handle built-in functions that map to SystemVerilog functions
+            match name.as_str() {
+                "clog2" => {
+                    // clog2(x) → $clog2(x)
+                    if args.len() == 1 {
+                        format!("$clog2({})", convert_mir_expr_to_sv(&args[0]))
+                    } else {
+                        "$clog2(0)".to_string() // Fallback for invalid args
+                    }
+                }
+                "pow2" => {
+                    // pow2(x) → (1 << x)
+                    if args.len() == 1 {
+                        format!("(1 << {})", convert_mir_expr_to_sv(&args[0]))
+                    } else {
+                        "1".to_string() // Fallback
+                    }
+                }
+                _ => {
+                    // Generic parameter reference (stored as FunctionCall with no args)
+                    // or unknown function
+                    if args.is_empty() {
+                        // This is a parameter reference like SIZE
+                        name.clone()
+                    } else {
+                        // Unknown function - try to emit as-is
+                        let arg_strs: Vec<_> = args.iter().map(convert_mir_expr_to_sv).collect();
+                        format!("{}({})", name, arg_strs.join(", "))
+                    }
+                }
+            }
+        }
+        _ => {
+            // For other expression types (like Ref, Conditional, etc.), use the general formatter
+            format_expression(expr)
+        }
     }
 }

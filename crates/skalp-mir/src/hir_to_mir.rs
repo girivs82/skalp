@@ -895,7 +895,7 @@ impl<'hir> HirToMir<'hir> {
     /// This handles assignments like: `mem[index] <= data` where `mem` is a flattened array
     ///
     /// For each flattened element, generates:
-    /// ```
+    /// ```text
     /// mem_N_field <= (index == N) ? data_field : mem_N_field
     /// ```
     ///
@@ -2901,34 +2901,36 @@ impl<'hir> HirToMir<'hir> {
             },
             // Expression-based types - need const evaluation
             hir::HirType::BitExpr(expr) => {
-                // TODO: Evaluate const expression to get concrete width
-                // For now, try to extract literal or fallback to parameter
+                // Try to evaluate const expression to get concrete width
                 match self.try_eval_const_expr(expr) {
                     Some(val) => DataType::Bit(val as usize),
-                    None => DataType::BitParam {
-                        param: "expr".to_string(),
-                        default: 8,
-                    },
+                    None => {
+                        // Can't evaluate - convert to MIR expression for codegen
+                        DataType::BitExpr {
+                            expr: Box::new(self.convert_const_expr_to_mir(expr)),
+                            default: 8,
+                        }
+                    }
                 }
             }
             hir::HirType::LogicExpr(expr) => match self.try_eval_const_expr(expr) {
                 Some(val) => DataType::Logic(val as usize),
-                None => DataType::LogicParam {
-                    param: "expr".to_string(),
+                None => DataType::LogicExpr {
+                    expr: Box::new(self.convert_const_expr_to_mir(expr)),
                     default: 8,
                 },
             },
             hir::HirType::IntExpr(expr) => match self.try_eval_const_expr(expr) {
                 Some(val) => DataType::Int(val as usize),
-                None => DataType::IntParam {
-                    param: "expr".to_string(),
+                None => DataType::IntExpr {
+                    expr: Box::new(self.convert_const_expr_to_mir(expr)),
                     default: 32,
                 },
             },
             hir::HirType::NatExpr(expr) => match self.try_eval_const_expr(expr) {
                 Some(val) => DataType::Nat(val as usize),
-                None => DataType::NatParam {
-                    param: "expr".to_string(),
+                None => DataType::NatExpr {
+                    expr: Box::new(self.convert_const_expr_to_mir(expr)),
                     default: 32,
                 },
             },
@@ -3091,6 +3093,59 @@ impl<'hir> HirToMir<'hir> {
                 None
             }
             _ => None, // Can't evaluate variables, constants, etc. without context
+        }
+    }
+
+    /// Convert a HIR expression to a MIR expression for use in type positions
+    /// This is specifically for const expressions in types (like clog2(SIZE) in nat[clog2(SIZE)])
+    #[allow(clippy::only_used_in_recursion)]
+    fn convert_const_expr_to_mir(&self, expr: &hir::HirExpression) -> Expression {
+        match expr {
+            hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) => {
+                Expression::Literal(Value::Integer(*val as i64))
+            }
+            hir::HirExpression::Binary(bin_expr) => {
+                let left = Box::new(self.convert_const_expr_to_mir(&bin_expr.left));
+                let right = Box::new(self.convert_const_expr_to_mir(&bin_expr.right));
+                let op = match bin_expr.op {
+                    hir::HirBinaryOp::Add => BinaryOp::Add,
+                    hir::HirBinaryOp::Sub => BinaryOp::Sub,
+                    hir::HirBinaryOp::Mul => BinaryOp::Mul,
+                    hir::HirBinaryOp::Div => BinaryOp::Div,
+                    hir::HirBinaryOp::Mod => BinaryOp::Mod,
+                    _ => {
+                        // For unsupported operators, fall back to a literal 0
+                        return Expression::Literal(Value::Integer(0));
+                    }
+                };
+                Expression::Binary { op, left, right }
+            }
+            hir::HirExpression::Call(call_expr) => {
+                // Convert function call (like clog2(SIZE))
+                let args = call_expr
+                    .args
+                    .iter()
+                    .map(|arg| self.convert_const_expr_to_mir(arg))
+                    .collect();
+                Expression::FunctionCall {
+                    name: call_expr.function.clone(),
+                    args,
+                }
+            }
+            hir::HirExpression::GenericParam(param_name) => {
+                // Reference to a generic parameter (like SIZE)
+                // We can't resolve this yet, so we keep it as a function call-like reference
+                // The codegen will handle emitting the parameter name
+                Expression::FunctionCall {
+                    name: param_name.clone(),
+                    args: vec![],
+                }
+            }
+            _ => {
+                // For other expression types, fall back to literal 0
+                // This shouldn't normally happen for const type expressions
+                Expression::Literal(Value::Integer(0))
+            }
         }
     }
 

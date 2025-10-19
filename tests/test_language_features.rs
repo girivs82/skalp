@@ -326,7 +326,6 @@ impl<const WIDTH: nat> Counter<WIDTH> {
 }
 
 #[test]
-#[ignore] // clog2 in type position not implemented yet
 fn test_const_expression_in_type() {
     let source = r#"
 entity AddressDecoder<const SIZE: nat> {

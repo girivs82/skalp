@@ -1,5 +1,108 @@
 # Known Issues and Limitations
 
+## ✅ FIXED: Const Expressions in Type Positions Generate Incorrect SystemVerilog (Bug #47)
+
+### Issue (FIXED 2025-01-19)
+When const expressions like `clog2(SIZE)` were used in type positions (e.g., port widths), the compiler generated incorrect SystemVerilog code:
+1. The expression was emitted as the literal text "expr" instead of being evaluated
+2. Const generic parameters were replaced with 0 in generated code
+
+### What's Broken ❌
+```skalp
+entity AddressDecoder<const SIZE: nat> {
+    in addr: nat[clog2(SIZE)]
+    out valid: bit
+}
+
+impl<const SIZE: nat> AddressDecoder<SIZE> {
+    valid = (addr < SIZE) as bit
+}
+```
+
+**Expected SystemVerilog:**
+```systemverilog
+module AddressDecoder #(
+    parameter SIZE
+) (
+    input [$clog2(SIZE)-1:0] addr,
+    output valid
+);
+    assign valid = (addr < SIZE);
+endmodule
+```
+
+**Actual Generated Code (WRONG):**
+```systemverilog
+module AddressDecoder #(
+    parameter SIZE
+) (
+    input [expr-1:0] addr,     // ❌ Should be [$clog2(SIZE)-1:0]
+    output valid
+);
+    assign valid = (addr < 0);  // ❌ SIZE replaced with 0!
+endmodule
+```
+
+### Test Case
+`tests/test_language_features.rs::test_const_expression_in_type` is currently ignored with comment "clog2 in type position not implemented yet"
+
+### Reproduction
+```bash
+# Create test file
+cat > /tmp/test_clog2_type.sk << 'EOF'
+entity AddressDecoder<const SIZE: nat> {
+    in addr: nat[clog2(SIZE)]
+    out valid: bit
+}
+
+impl<const SIZE: nat> AddressDecoder<SIZE> {
+    valid = (addr < SIZE) as bit
+}
+EOF
+
+# Build (succeeds but generates wrong code)
+./target/release/skalp build -s /tmp/test_clog2_type.sk -o /tmp/test_out
+
+# Check output - will show "expr" and 0 instead of proper expressions
+cat /tmp/test_out/design.sv
+```
+
+### Root Cause
+The issue was in `crates/skalp-mir/src/hir_to_mir.rs` (lines 2903-2936). When const expressions in type positions couldn't be evaluated at compile time, the code used a fallback string `"expr"` instead of preserving the expression structure.
+
+### Solution
+Three-part fix maintaining single source of truth for SystemVerilog generation:
+
+1. **Added expression-based MIR types** (`crates/skalp-mir/src/mir.rs`):
+   - Added `BitExpr`, `LogicExpr`, `IntExpr`, `NatExpr` variants to `DataType` enum
+   - Each contains `expr: Box<Expression>` to preserve expression structure
+   - Added `PartialEq` and `Eq` derives to `Expression` and `LValue` enums
+
+2. **Preserved expressions during HIR→MIR** (`crates/skalp-mir/src/hir_to_mir.rs`):
+   - Added `convert_const_expr_to_mir()` function (lines 3097-3147)
+   - Converts HIR expressions to MIR expressions while preserving structure
+   - Handles `clog2()`, `pow2()`, arithmetic, and generic parameter references
+
+3. **Generated correct SystemVerilog** (`crates/skalp-codegen/src/systemverilog.rs`):
+   - Added `convert_mir_expr_to_sv()` function (lines 1691-1742)
+   - Translates MIR expressions to SystemVerilog: `clog2(x)` → `$clog2(x)`, `pow2(x)` → `(1 << x)`
+   - Updated `get_width_spec()` to use new function (lines 812-824)
+
+4. **Updated dependent modules**:
+   - `crates/skalp-sir/src/mir_to_sir.rs`: Added pattern match for new variants (line 3005-3008)
+   - `crates/skalp-mir/src/type_width.rs`: Added width calculation support
+   - `crates/skalp-mir/src/mir_validation.rs`: Added validation for new types
+
+### Verification
+- Test `tests/test_language_features.rs::test_const_expression_in_type` now passes
+- Generated SystemVerilog correctly shows `[$clog2(SIZE)-1:0]` instead of `[expr-1:0]`
+- Generic parameters properly preserved in expressions
+
+### Related Tests
+- `tests/test_language_features.rs::test_const_expression_in_type` (now enabled)
+
+---
+
 ## ✅ FIXED: Keywords as Parameter Names Caused Parse Failures (Bug #43)
 
 ### Issue (FIXED 2025-01-19)
