@@ -3,45 +3,66 @@
 ## ❌ ACTIVE: Generic Traits with Self::Output in Parameters Fail to Parse (Bug #43)
 
 ### Issue
-Parser fails when a generic trait has methods with `Self` or `Self::Output` in parameter types.
+Parser fails when a generic trait has methods with `Self::Output` (or any type path with `::`) in parameter types **when followed by a return type**. After parsing such a parameter type, the parser enters a corrupted state where it cannot recognize subsequent tokens like `->`.
 
 ### What's Broken ❌
 ```skalp
 trait Test<T> {
     type Output;
-    fn method(&self, input: Self::Output) -> T;  // ❌ Parser error!
+    fn method(&self, input: Self::Output) -> T;  // ❌ Parser error at `->`!
 }
 ```
 
-Error: `expected identifier at pos X` where X is the position of the parameter name.
+Error: `expected trait item at pos X` where X is at the `->` token after the parameter list.
 
 ### What Works ✅
 ```skalp
-// Non-generic trait - works fine
+// Non-generic trait with Self::Output in parameters - works fine!
 trait Test {
     type Output;
     fn method(&self, input: Self::Output) -> nat[8];  // ✅ OK
 }
 
-// Generic trait with Self::Output in RETURN type - works fine
+// Generic trait with Self::Output in RETURN type only - works fine!
 trait Test<T> {
     type Output;
     fn method(&self, data: T) -> Self::Output;  // ✅ OK
 }
+
+// Generic trait with Self::Output in parameters BUT no return type - works!
+trait Test<T> {
+    type Output;
+    fn method(&self, x: Self::Output);  // ✅ OK
+}
 ```
 
-### Investigation Summary
-- **Root cause**: Unknown - likely related to parser state after parsing generic parameters `<T>`
-- **Attempted fix**: Resetting `partial_shr` state after `parse_generic_params()` - did not resolve
-- **Location**: `crates/skalp-frontend/src/parse.rs` - interaction between `parse_generic_params()` and subsequent method parameter parsing
-- **Affected code**: Any generic trait using `Self`/`Self::Output` in method parameters
-- **Test case**: `tests/test_traits.rs::test_complex_trait_with_generics` (currently ignored)
+### Investigation Summary (2025-01-19)
+Detailed investigation revealed:
+
+**Trigger condition**: Generic trait (`trait Foo<T>`) + method with type path containing `::` in PARAMETER + followed by return type `-> RetType`.
+
+**Parser state corruption**: After parsing `Self::Output` in a method parameter, the parser fails to recognize the `->` arrow token for return types.
+
+**Key findings**:
+1. ✅ Non-generic traits with `Self::Output` in parameters: WORKS
+2. ✅ Generic traits with `Self::Output` in return type: WORKS
+3. ✅ Generic traits with `Self::Output` in parameters without return type: WORKS
+4. ❌ Generic traits with `Self::Output` in parameters WITH return type: FAILS
+
+**Suspected root cause**: When parsing type paths with `::` inside method parameters of generic traits, something in the angle bracket handling (`<T>`, `>` in `Output>`) interacts badly with the `::` tokenization or leaves `partial_shr` or similar parser state corrupted.
+
+**Location**: `crates/skalp-frontend/src/parse.rs`
+- `parse_trait_def()` line 2469: calls `parse_generic_params()`
+- `parse_trait_method()` line 2631: calls `parse_parameter_list()`
+- `parse_type()` line 3095: handles `Self::Type` syntax (lines 3207-3218)
+
+**Test case**: `tests/test_traits.rs::test_complex_trait_with_generics` (currently ignored)
 
 ### Minimal Reproduction
 ```skalp
 trait Test<T> {
     type Output;
-    fn test(&self, x: Self::Output);
+    fn test(&self, x: Self::Output) -> T;  // Fails at `->`
 }
 ```
 
