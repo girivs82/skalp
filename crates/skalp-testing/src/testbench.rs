@@ -73,24 +73,66 @@ impl Testbench {
 
         // Find the top-level module: the module that is NOT instantiated by any other module
         // Collect all module IDs that are instantiated
+        eprintln!("🔍 DEBUG: Total modules in MIR: {}", mir.modules.len());
+        for module in &mir.modules {
+            eprintln!(
+                "  - Module '{}' (ID={:?}): {} ports, {} instances",
+                module.name,
+                module.id,
+                module.ports.len(),
+                module.instances.len()
+            );
+        }
+
         let mut instantiated_modules = std::collections::HashSet::new();
         for module in &mir.modules {
             for instance in &module.instances {
                 instantiated_modules.insert(instance.module);
+                eprintln!(
+                    "  - Module '{}' instantiates module ID {:?}",
+                    module.name, instance.module
+                );
             }
         }
 
         // Find the module that is not instantiated (the top-level)
-        let top_module = mir
+        // IMPORTANT: When multiple modules are uninstantiated (e.g., generic templates
+        // and their specializations), prefer the module that HAS instances (is a parent),
+        // since that's more likely to be the actual top-level testbench/design.
+        let uninstantiated: Vec<_> = mir
             .modules
             .iter()
-            .find(|m| !instantiated_modules.contains(&m.id))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Could not find top-level module (no module is uninstantiated). \
-                     This might indicate a circular dependency or all modules are instantiated."
-                )
-            })?;
+            .filter(|m| {
+                let is_uninstantiated = !instantiated_modules.contains(&m.id);
+                eprintln!(
+                    "  - Module '{}' (ID={:?}): is_uninstantiated={}, has_instances={}",
+                    m.name,
+                    m.id,
+                    is_uninstantiated,
+                    !m.instances.is_empty()
+                );
+                is_uninstantiated
+            })
+            .collect();
+
+        if uninstantiated.is_empty() {
+            anyhow::bail!(
+                "Could not find top-level module (no module is uninstantiated). \
+                 This might indicate a circular dependency or all modules are instantiated."
+            );
+        }
+
+        // Prefer modules with instances (parent modules) over leaf modules
+        let top_module = uninstantiated
+            .iter()
+            .max_by_key(|m| m.instances.len())
+            .unwrap();
+
+        eprintln!(
+            "✅ Selected top module: '{}' ({} instances)",
+            top_module.name,
+            top_module.instances.len()
+        );
 
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
 

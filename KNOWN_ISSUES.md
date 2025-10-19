@@ -1,32 +1,5 @@
 # Known Issues and Limitations
 
-## ❌ CURRENT FAILURES: GPU Simulator Tests (2025-01-20)
-
-### Failing Tests
-Two macOS GPU simulator tests are currently failing:
-
-1. **`test_vec3_fifo`** - Error: "Input read_enable not found"
-   - Location: `tests/test_graphics_pipeline_functional.rs:740`
-   - Marked with `#[cfg(all(test, target_os = "macos"))]`
-   - macOS-only GPU/Metal test
-
-2. **`test_graphics_pipeline_multi_clock_domains`** - Error: "Input read_enable not found"
-   - Location: `tests/test_graphics_pipeline_functional.rs:349`
-   - GPU/Metal test
-
-### Status
-- These failures are **pre-existing** - last 5 CI runs have failed (commits ae588b5, 7816ca0, 7df2e5d, af52093, 5e1bb8f)
-- The failures appear to be GPU simulator execution issues, not compiler bugs
-- According to KNOWN_ISSUES.md history, these tests were previously passing (Bug #34 fixed), suggesting they may be flaky or recently broken
-- **Parser fix commit 66727f8 is unrelated to these failures** - parser changes only affect entity body syntax, not GPU simulation
-
-### Next Steps
-- Investigate GPU simulator input port mapping
-- Check if AsyncFifo implementation has changed
-- Determine if tests are flaky or if there's a regression in simulator
-
----
-
 ## ✅ FIXED: Const Expressions in Type Positions Generate Incorrect SystemVerilog (Bug #47)
 
 ### Issue (FIXED 2025-01-19)
