@@ -1,5 +1,130 @@
 # Known Issues and Limitations
 
+## ⚠️ LIMITATION: Testbench Language Features Not Implemented
+
+### Status
+**DESIGN DECISION** - SKALP uses a two-language approach for verification
+
+### Overview
+SKALP does **NOT** support SystemVerilog-style testbench constructs (`initial`, `always`, time delays, system tasks) within `.sk` files. Instead, testbenches are written in **Rust** using the `Testbench` API.
+
+### What Files Like `tb_fifo.sk` Are
+Files like `examples/graphics_pipeline/verif/testbenches/tb_fifo.sk` are **aspirational documentation** showing what a future testbench language *could* look like. They are **NOT** compatible with the current parser and will produce 500+ parsing errors.
+
+### Current Approach (Fully Supported)
+
+**✅ Hardware Design** - Write in SKALP (`.sk` files):
+```skalp
+entity Counter {
+    in clk: clock
+    in rst: reset(active_high)
+    in enable: bit
+    out count: bit[8]
+}
+
+impl Counter {
+    signal count_reg: bit[8]
+
+    on(clk.rise) {
+        if rst {
+            count_reg <= 0
+        } else if enable {
+            count_reg <= count_reg + 1
+        }
+    }
+
+    count = count_reg
+}
+```
+
+**✅ Testbench** - Write in Rust using Testbench API:
+```rust
+#[tokio::test]
+async fn test_counter() {
+    let mut tb = Testbench::new("examples/counter.sk").await?;
+
+    // Reset
+    tb.set("rst", 1u8).set("enable", 0u8);
+    tb.clock(2).await;
+    tb.expect("count", 0u8).await;
+
+    // Count
+    tb.set("rst", 0u8).set("enable", 1u8);
+    tb.clock(5).await;
+    tb.expect("count", 5u8).await;
+}
+```
+
+### Not Supported (SystemVerilog Testbench Features)
+- ❌ `initial` blocks in SKALP files
+- ❌ `always` blocks for stimulus generation
+- ❌ Time delays (`#10ns`, `#5`)
+- ❌ Event control (`@(posedge clk)`, `@(negedge rst)`)
+- ❌ System tasks (`$display`, `$finish`, `$monitor`)
+- ❌ System functions (`$random`, `$time`, `$urandom`)
+- ❌ Fork/join concurrency
+- ❌ Coverage groups (`covergroup`, `coverpoint`)
+- ❌ Behavioral loops in hardware context (`while`, `for` in `initial`)
+- ❌ Mutable variables (`let mut`) in hardware context
+
+### Why This Approach?
+
+1. **Clean separation** - Synthesizable hardware stays clean, no mixing with test code
+2. **Type safety** - Rust's type system catches errors at compile time
+3. **Ecosystem** - Access to Rust's testing libraries (proptest, quickcheck, etc.)
+4. **Simplicity** - No need to implement a complete behavioral simulation language
+5. **Performance** - GPU-accelerated simulation via Metal (macOS)
+
+### Working Example
+See **`examples/testbench_guide/`** for a complete working example:
+- `examples/testbench_guide/README.md` - Complete guide
+- `examples/testbench_guide/counter.sk` - Hardware design
+- `tests/test_counter_example.rs` - Testbench examples
+
+Run with:
+```bash
+cargo test --test test_counter_example --all-features
+```
+
+### What IS Supported
+
+**SKALP Language (Synthesizable)**:
+- ✅ Entity declarations with ports
+- ✅ Signal declarations (in `impl` blocks only)
+- ✅ Sequential logic (`on(clk.rise)`)
+- ✅ Combinational logic
+- ✅ If/else statements
+- ✅ Match expressions
+- ✅ Structs, arrays, generics
+- ✅ Module instantiation
+- ✅ String type for documentation (non-synthesizable, omitted from SV)
+
+**Testbench API (Rust)**:
+- ✅ Type-safe signal values
+- ✅ Single and multi-clock domain testing
+- ✅ Chainable builder pattern
+- ✅ Async/await
+- ✅ GPU-accelerated simulation (macOS)
+- ✅ Waveform capture (VCD)
+
+### Future Enhancements (Not Planned)
+Adding full testbench language support would require:
+1. Complete behavioral simulation semantics
+2. Time-based event scheduling
+3. Non-synthesizable control flow
+4. System task/function library
+5. Coverage language
+
+This is a **significant undertaking** that duplicates Rust's capabilities. The current two-language approach is more maintainable and leverages existing tooling.
+
+### Related Files
+- `crates/skalp-testing/src/testbench.rs` - Testbench API implementation
+- `tests/test_graphics_pipeline_functional.rs` - Advanced CDC examples
+- `examples/string_testbench_showcase.sk` - String type usage
+- `examples/testbench_guide/` - Complete working example
+
+---
+
 ## ✅ FIXED: Const Expressions in Type Positions Generate Incorrect SystemVerilog (Bug #47)
 
 ### Issue (FIXED 2025-01-19)

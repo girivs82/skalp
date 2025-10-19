@@ -1,0 +1,38 @@
+// Simple 8-bit counter with enable and reset
+//
+// This example demonstrates a basic sequential circuit that can be
+// tested using the SKALP testbench API.
+//
+// Features:
+// - Synchronous reset (active high)
+// - Enable signal to control counting
+// - 8-bit counter with automatic wraparound
+
+entity Counter {
+    in clk: clock
+    in rst: reset(active_high)
+    in enable: bit
+    out count: bit[8]
+
+    // String signals for documentation (non-synthesizable)
+    signal design_purpose: string
+    signal test_coverage: string
+}
+
+impl Counter {
+    signal count_reg: bit[8]
+
+    on(clk.rise) {
+        if rst {
+            count_reg <= 0
+        } else if enable {
+            count_reg <= count_reg + 1
+        }
+    }
+
+    count = count_reg
+
+    // Documentation metadata
+    design_purpose = "8-bit counter with synchronous enable"
+    test_coverage = "Reset, enable, overflow, disable"
+}
