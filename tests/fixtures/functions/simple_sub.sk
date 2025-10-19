@@ -1,0 +1,16 @@
+// Phase 2 Test: Simple function with subtraction
+
+fn sub(a: bit[8], b: bit[8]) -> bit[8] {
+    return a - b
+}
+
+entity SimpleSubTest {
+    in clk: clock
+    in x: bit[8]
+    in y: bit[8]
+    out result: bit[8]
+}
+
+impl SimpleSubTest {
+    result = sub(x, y)
+}

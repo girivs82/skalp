@@ -1180,8 +1180,15 @@ impl HirBuilderContext {
             }
             SyntaxKind::ReturnStmt => {
                 // Return statement: return [expr]
-                let expr = node
-                    .children()
+                // NOTE: Reverse children to get the LAST expression child, not the first.
+                // The parser sometimes creates both simple (IdentExpr) and complex (BinaryExpr) nodes,
+                // and we want the most complete expression.
+                let children: Vec<_> = node.children().collect();
+
+                // Find the last expression child (in case there are multiple)
+                let expr_node = children
+                    .iter()
+                    .rev() // IMPORTANT: Reverse to get the last match, not the first
                     .find(|n| {
                         matches!(
                             n.kind(),
@@ -1198,8 +1205,9 @@ impl HirBuilderContext {
                                 | SyntaxKind::CallExpr
                                 | SyntaxKind::ArrayLiteral
                         )
-                    })
-                    .and_then(|n| self.build_expression(&n));
+                    });
+
+                let expr = expr_node.and_then(|n| self.build_expression(n));
                 Some(HirStatement::Return(expr))
             }
             SyntaxKind::ExprStmt => {
@@ -2792,14 +2800,13 @@ impl HirBuilderContext {
 
     /// Build function call expression
     fn build_call_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Get function name - try direct Ident token first, then IdentExpr child,
+        // Get function name - try direct Ident token first,
         // then check for preceding sibling IdentExpr (postfix call syntax)
+        //
+        // NOTE: Do NOT use first_child_of_kind(IdentExpr) as the function name!
+        // All IdentExpr children inside CallExpr are arguments, not the function name.
         let function = if let Some(ident_token) = node.first_token_of_kind(SyntaxKind::Ident) {
             ident_token.text().to_string()
-        } else if let Some(ident_expr) = node.first_child_of_kind(SyntaxKind::IdentExpr) {
-            ident_expr
-                .first_token_of_kind(SyntaxKind::Ident)
-                .map(|t| t.text().to_string())?
         } else if let Some(parent) = node.parent() {
             // Postfix call: IdentExpr and CallExpr are siblings
             // Look for preceding IdentExpr sibling
@@ -2825,18 +2832,11 @@ impl HirBuilderContext {
             return None;
         };
 
-        // Parse arguments - skip the first child if it's the function name (IdentExpr)
+        // Parse arguments - ALL children are arguments (function name is not in children)
         let mut args = Vec::new();
-        let mut skip_first = node
-            .first_child()
-            .is_some_and(|c| c.kind() == SyntaxKind::IdentExpr);
 
         for child in node.children() {
-            if skip_first {
-                skip_first = false;
-                continue; // Skip the IdentExpr that contains the function name
-            }
-            // All remaining children are expression arguments
+            // All children are expression arguments
             if let Some(expr) = self.build_expression(&child) {
                 args.push(expr);
             }

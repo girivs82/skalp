@@ -5,6 +5,7 @@ fn add(a: bit[8], b: bit[8]) -> bit[8] {
 }
 
 entity SimpleFunctionTest {
+    in clk: clock
     in x: bit[8]
     in y: bit[8]
     out result: bit[8]

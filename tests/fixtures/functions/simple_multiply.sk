@@ -1,0 +1,15 @@
+// Phase 2 Test: Simple function with multiplication
+
+fn multiply(a: bit[8], b: bit[8]) -> bit[8] {
+    return a * b
+}
+
+entity SimpleMultiplyTest {
+    in x: bit[8]
+    in y: bit[8]
+    out result: bit[8]
+}
+
+impl SimpleMultiplyTest {
+    result = multiply(x, y)
+}

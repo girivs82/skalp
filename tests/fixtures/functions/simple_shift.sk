@@ -1,0 +1,15 @@
+// Phase 2 Test: Simple function with shift operation
+
+fn shift_left(a: bit[8], b: bit[8]) -> bit[8] {
+    return a << b
+}
+
+entity SimpleShiftTest {
+    in x: bit[8]
+    in y: bit[8]
+    out result: bit[8]
+}
+
+impl SimpleShiftTest {
+    result = shift_left(x, y)
+}

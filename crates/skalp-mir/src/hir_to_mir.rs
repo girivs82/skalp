@@ -1884,9 +1884,9 @@ impl<'hir> HirToMir<'hir> {
                 let op = self.convert_unary_op(&unary.op);
                 Some(Expression::Unary { op, operand })
             }
-            hir::HirExpression::Call(_call) => {
-                // TODO: Handle function calls
-                None
+            hir::HirExpression::Call(call) => {
+                // Phase 2: Inline simple function calls
+                self.inline_function_call(call)
             }
             hir::HirExpression::Index(base, index) => {
                 // BUG #27 FIX: Check if this is a constant index into a flattened array
@@ -2489,6 +2489,204 @@ impl<'hir> HirToMir<'hir> {
                 Expression::Literal(Value::Integer(0))
             }
         }
+    }
+
+    /// Find a function by name in the current implementation or top-level functions
+    fn find_function(&self, function_name: &str) -> Option<&hir::HirFunction> {
+        let hir = self.hir?;
+
+        // First, try to find in current implementation's functions
+        if let Some(entity_id) = self.current_entity_id {
+            if let Some(impl_block) = hir
+                .implementations
+                .iter()
+                .find(|impl_b| impl_b.entity == entity_id)
+            {
+                for func in &impl_block.functions {
+                    if func.name == function_name {
+                        return Some(func);
+                    }
+                }
+            }
+        }
+
+        // Second, try top-level functions
+        hir.functions.iter().find(|func| func.name == function_name)
+    }
+
+    /// Extract return expression from a function body
+    /// For Phase 2, we only support functions with a single return statement
+    fn extract_return_expression<'a>(
+        &self,
+        body: &'a [hir::HirStatement],
+    ) -> Option<&'a hir::HirExpression> {
+        // For now, we only support simple functions with a single return statement
+        if body.len() != 1 {
+            eprintln!(
+                "Function inlining: only functions with single return statement supported (found {} statements)",
+                body.len()
+            );
+            return None;
+        }
+
+        match &body[0] {
+            hir::HirStatement::Return(Some(expr)) => Some(expr),
+            _ => {
+                eprintln!("Function inlining: expected return statement, found other statement");
+                None
+            }
+        }
+    }
+
+    /// Substitute parameters in an expression with argument expressions
+    /// This creates a parameter -> argument mapping and replaces all parameter references
+    fn substitute_expression(
+        &mut self,
+        expr: &hir::HirExpression,
+        param_map: &HashMap<String, &hir::HirExpression>,
+    ) -> Option<hir::HirExpression> {
+        match expr {
+            // GenericParam - function parameters are parsed as generic params
+            // Check if this matches a function parameter and substitute
+            hir::HirExpression::GenericParam(name) => {
+                if let Some(arg_expr) = param_map.get(name) {
+                    // Clone the argument expression
+                    Some((*arg_expr).clone())
+                } else {
+                    // Not a function parameter, keep as-is
+                    Some(expr.clone())
+                }
+            }
+
+            // Parameter reference - replace with argument expression
+            hir::HirExpression::Variable(var_id) => {
+                // Look up the variable name in HIR
+                let _hir = self.hir?;
+
+                // Check if this variable is actually a function parameter
+                // We need to find its name first
+                let var_name = self.find_variable_name(*var_id)?;
+
+                if let Some(arg_expr) = param_map.get(&var_name) {
+                    // Clone the argument expression
+                    Some((*arg_expr).clone())
+                } else {
+                    // Not a parameter, keep as-is
+                    Some(expr.clone())
+                }
+            }
+
+            // Binary expression - substitute both sides
+            hir::HirExpression::Binary(binary) => {
+                let left = Box::new(self.substitute_expression(&binary.left, param_map)?);
+                let right = Box::new(self.substitute_expression(&binary.right, param_map)?);
+                Some(hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    left,
+                    op: binary.op.clone(),
+                    right,
+                }))
+            }
+
+            // Unary expression - substitute operand
+            hir::HirExpression::Unary(unary) => {
+                let operand = Box::new(self.substitute_expression(&unary.operand, param_map)?);
+                Some(hir::HirExpression::Unary(hir::HirUnaryExpr {
+                    op: unary.op.clone(),
+                    operand,
+                }))
+            }
+
+            // If expression - substitute all parts
+            hir::HirExpression::If(if_expr) => {
+                let condition =
+                    Box::new(self.substitute_expression(&if_expr.condition, param_map)?);
+                let then_expr =
+                    Box::new(self.substitute_expression(&if_expr.then_expr, param_map)?);
+                let else_expr =
+                    Box::new(self.substitute_expression(&if_expr.else_expr, param_map)?);
+                Some(hir::HirExpression::If(hir::HirIfExpr {
+                    condition,
+                    then_expr,
+                    else_expr,
+                }))
+            }
+
+            // For other expressions that don't contain parameters, clone as-is
+            hir::HirExpression::Literal(_)
+            | hir::HirExpression::Signal(_)
+            | hir::HirExpression::Port(_)
+            | hir::HirExpression::Constant(_) => Some(expr.clone()),
+
+            // Recursively handle other expression types as needed
+            _ => {
+                // For unhandled cases, clone as-is (may need expansion for full support)
+                Some(expr.clone())
+            }
+        }
+    }
+
+    /// Find a variable name by ID (helper for parameter substitution)
+    fn find_variable_name(&self, var_id: hir::VariableId) -> Option<String> {
+        let hir = self.hir?;
+
+        // Check current implementation's variables
+        if let Some(entity_id) = self.current_entity_id {
+            if let Some(impl_block) = hir
+                .implementations
+                .iter()
+                .find(|impl_b| impl_b.entity == entity_id)
+            {
+                for var in &impl_block.variables {
+                    if var.id == var_id {
+                        return Some(var.name.clone());
+                    }
+                }
+            }
+        }
+
+        // Check dynamic variables (from let bindings)
+        if let Some((_, name, _)) = self.dynamic_variables.get(&var_id) {
+            return Some(name.clone());
+        }
+
+        None
+    }
+
+    /// Inline a function call (Phase 2: simple functions only)
+    fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
+        // Step 1: Find the function and clone its body to avoid borrow checker issues
+        let func = self.find_function(&call.function)?;
+
+        // Clone the data we need before doing mutable operations
+        let params = func.params.clone();
+        let body = func.body.clone();
+
+        // Step 2: Check arity
+        if params.len() != call.args.len() {
+            eprintln!(
+                "Function {}: expected {} arguments, got {}",
+                call.function,
+                params.len(),
+                call.args.len()
+            );
+            return None;
+        }
+
+        // Step 3: Extract return expression
+        let return_expr = self.extract_return_expression(&body)?;
+        let return_expr_cloned = return_expr.clone();
+
+        // Step 4: Build parameter substitution map
+        let mut param_map = HashMap::new();
+        for (param, arg) in params.iter().zip(&call.args) {
+            param_map.insert(param.name.clone(), arg);
+        }
+
+        // Step 5: Substitute parameters in return expression
+        let substituted_expr = self.substitute_expression(&return_expr_cloned, &param_map)?;
+
+        // Step 6: Convert the substituted HIR expression to MIR
+        self.convert_expression(&substituted_expr)
     }
 
     /// Helper to convert expression to lvalue (for index/range operations)

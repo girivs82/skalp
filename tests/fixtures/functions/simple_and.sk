@@ -1,0 +1,16 @@
+// Phase 2 Test: Simple function with bitwise AND
+
+fn and(a: bit[8], b: bit[8]) -> bit[8] {
+    return a & b
+}
+
+entity SimpleAndTest {
+    in clk: clock
+    in x: bit[8]
+    in y: bit[8]
+    out result: bit[8]
+}
+
+impl SimpleAndTest {
+    result = and(x, y)
+}
