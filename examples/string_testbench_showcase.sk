@@ -1,0 +1,60 @@
+// Testbench Example: String Type Usage for Test Documentation
+//
+// This example demonstrates how to use the String type for testbench
+// metadata and documentation. String signals are non-synthesizable and
+// serve as compile-time annotations.
+//
+// **Key Points:**
+// 1. String type is parsed and validated by the compiler
+// 2. String signals are omitted from generated SystemVerilog
+// 3. Useful for documenting test intent and expected behavior
+// 4. Alternative to SystemVerilog $display for simulators that don't support it
+
+entity SimpleALUTestbench {
+    in clk: clock
+    in rst: reset(active_high)
+
+    in a: bit[8]
+    in b: bit[8]
+    in op: bit[2]
+
+    out result: bit[8]
+
+    // String signals for test documentation
+    // These describe the test cases but don't synthesize
+    signal test_name: string
+    signal operation_desc: string
+}
+
+impl SimpleALUTestbench {
+    signal alu_result: bit[8]
+
+    // Simple ALU logic
+    on(clk.rise) {
+        if rst {
+            alu_result <= 0
+        } else {
+            if op == 0 {
+                // ADD
+                alu_result <= a + b
+            } else if op == 1 {
+                // SUB
+                alu_result <= a - b
+            } else if op == 2 {
+                // AND
+                alu_result <= a & b
+            } else {
+                // OR
+                alu_result <= a | b
+            }
+        }
+    }
+
+    result = alu_result
+
+    // String metadata (compile-time documentation only)
+    // In a future enhancement, these could be used by the test framework
+    // to generate test reports or provide better error messages
+    test_name = "ALU Operation Test"
+    operation_desc = "Tests basic arithmetic and logical operations"
+}
