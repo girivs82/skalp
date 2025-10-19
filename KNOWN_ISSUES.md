@@ -1,68 +1,54 @@
 # Known Issues and Limitations
 
-## ❌ ACTIVE: Generic Traits with Self::Output in Parameters Fail to Parse (Bug #43)
+## ✅ FIXED: Keywords as Parameter Names Caused Parse Failures (Bug #43)
 
-### Issue
-Parser fails when a generic trait has methods with `Self::Output` (or any type path with `::`) in parameter types **when followed by a return type**. After parsing such a parameter type, the parser enters a corrupted state where it cannot recognize subsequent tokens like `->`.
+### Issue (FIXED 2025-01-19)
+Parser failed when parameter names used keywords like `input`, `output`, `signal`, etc. The lexer correctly tokenized these as keywords, but the parser didn't allow keywords to be used as identifiers in unambiguous contexts like parameter names.
 
-### What's Broken ❌
+### What Was Broken ❌
 ```skalp
 trait Test<T> {
     type Output;
-    fn method(&self, input: Self::Output) -> T;  // ❌ Parser error at `->`!
+    fn method(&self, input: Self::Output) -> T;  // ❌ "input" tokenized as keyword!
+    fn other(&self, output: T) -> Self::Output;   // ❌ "output" tokenized as keyword!
 }
 ```
 
-Error: `expected trait item at pos X` where X is at the `->` token after the parameter list.
+Error: `expected identifier at pos X` because the parser saw a keyword token instead of an identifier token.
 
-### What Works ✅
+### Root Cause
+The lexer defined both `in` and `input` (and `out` and `output`, etc.) as separate keyword tokens. When a parameter was named `input`, the lexer correctly tokenized it as the `InputKw` keyword token. However, the parser's `parse_parameter()` function used `expect(SyntaxKind::Ident)` which rejected keyword tokens, even though keywords are valid identifiers in this context.
+
+### Investigation Trail
+Initial investigation suspected:
+- Parser state corruption related to `partial_shr` flag for `>>` handling
+- Interaction between generic params `<T>` and `Self::Output` with `::`
+
+**Actual discovery** (through systematic parameter name testing):
+- Parameter names starting with keywords failed: `input`, `output`, `signal`, `in`, `out`
+- Other names worked fine: `x`, `data`, `inp`, `outx`
+- The issue was **keyword-as-identifier** handling, not parser state
+
+### Solution
+Added context-sensitive keyword handling in `crates/skalp-frontend/src/parse.rs`:
+
+1. **`bump_as_ident()`** (line 4508): Consumes current token as an identifier, even if it's a keyword
+2. **`at_ident_or_keyword()`** (line 4520): Returns true for actual identifiers or allowed keywords
+3. **`expect_ident_or_keyword()`** (line 4538): Expects identifier, allowing certain keywords
+
+Updated `parse_parameter()` (line 4393) to use `expect_ident_or_keyword()` instead of `expect(SyntaxKind::Ident)`.
+
+Allowed keywords: `InKw`, `InputKw`, `OutKw`, `OutputKw`, `InoutKw`, `SignalKw`
+
+### Test case
+`tests/test_traits.rs::test_complex_trait_with_generics` now passes (was previously ignored)
+
+### Example Now Working
 ```skalp
-// Non-generic trait with Self::Output in parameters - works fine!
-trait Test {
+trait Serializable<T> {
     type Output;
-    fn method(&self, input: Self::Output) -> nat[8];  // ✅ OK
-}
-
-// Generic trait with Self::Output in RETURN type only - works fine!
-trait Test<T> {
-    type Output;
-    fn method(&self, data: T) -> Self::Output;  // ✅ OK
-}
-
-// Generic trait with Self::Output in parameters BUT no return type - works!
-trait Test<T> {
-    type Output;
-    fn method(&self, x: Self::Output);  // ✅ OK
-}
-```
-
-### Investigation Summary (2025-01-19)
-Detailed investigation revealed:
-
-**Trigger condition**: Generic trait (`trait Foo<T>`) + method with type path containing `::` in PARAMETER + followed by return type `-> RetType`.
-
-**Parser state corruption**: After parsing `Self::Output` in a method parameter, the parser fails to recognize the `->` arrow token for return types.
-
-**Key findings**:
-1. ✅ Non-generic traits with `Self::Output` in parameters: WORKS
-2. ✅ Generic traits with `Self::Output` in return type: WORKS
-3. ✅ Generic traits with `Self::Output` in parameters without return type: WORKS
-4. ❌ Generic traits with `Self::Output` in parameters WITH return type: FAILS
-
-**Suspected root cause**: When parsing type paths with `::` inside method parameters of generic traits, something in the angle bracket handling (`<T>`, `>` in `Output>`) interacts badly with the `::` tokenization or leaves `partial_shr` or similar parser state corrupted.
-
-**Location**: `crates/skalp-frontend/src/parse.rs`
-- `parse_trait_def()` line 2469: calls `parse_generic_params()`
-- `parse_trait_method()` line 2631: calls `parse_parameter_list()`
-- `parse_type()` line 3095: handles `Self::Type` syntax (lines 3207-3218)
-
-**Test case**: `tests/test_traits.rs::test_complex_trait_with_generics` (currently ignored)
-
-### Minimal Reproduction
-```skalp
-trait Test<T> {
-    type Output;
-    fn test(&self, x: Self::Output) -> T;  // Fails at `->`
+    fn serialize(&self, data: T) -> Self::Output;
+    fn deserialize(&self, input: Self::Output) -> T;  // ✅ Works!
 }
 ```
 

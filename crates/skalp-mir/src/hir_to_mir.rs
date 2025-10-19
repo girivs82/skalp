@@ -2635,7 +2635,9 @@ impl<'hir> HirToMir<'hir> {
                 // BUG FIX #46: Handle Custom("vec2/3/4") which should be Vec2/3/4(Float32)
                 // This is needed because Bug #45 causes HIR to store vec2<fp32> as Custom("vec2")
                 if let hir::HirType::Custom(type_name) = &base_type {
-                    if type_name.starts_with("vec") && matches!(field.as_str(), "x" | "y" | "z" | "w") {
+                    if type_name.starts_with("vec")
+                        && matches!(field.as_str(), "x" | "y" | "z" | "w")
+                    {
                         // Vec components are Float32 by default (matching convert_type workaround)
                         return Some(hir::HirType::Float32);
                     }

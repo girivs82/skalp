@@ -187,7 +187,9 @@
       "Bash(env SKALP_DUMP_MIR=1 /Users/girivs/src/hw/hls/target/debug/skalp build:*)",
       "Bash(/tmp/debug_tokens)",
       "Read(//Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/**)",
-      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/release/skalp build:*)"
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Read(//Users/girivs/src/hw/karythra/rtl/skalp/cle/**)",
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/debug/skalp build:*)"
     ],
     "deny": [],
     "ask": []

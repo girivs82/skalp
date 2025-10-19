@@ -4389,8 +4389,8 @@ impl<'a> ParseState<'a> {
             return;
         }
 
-        // Parameter name
-        self.expect(SyntaxKind::Ident);
+        // Parameter name - allow keywords as identifiers
+        self.expect_ident_or_keyword();
 
         // Colon and type
         self.expect(SyntaxKind::Colon);
@@ -4502,6 +4502,45 @@ impl<'a> ParseState<'a> {
             let text = &self.source[token.span.clone()];
             self.builder.token(rowan::SyntaxKind(kind as u16), text);
             self.current += 1;
+        }
+    }
+
+    /// Consume current token as an identifier, even if it's a keyword
+    /// This allows keywords to be used as identifiers in unambiguous contexts
+    fn bump_as_ident(&mut self) {
+        if let Some(token) = self.current_token() {
+            let text = &self.source[token.span.clone()];
+            // Always emit as Ident, regardless of the actual token kind
+            self.builder
+                .token(rowan::SyntaxKind(SyntaxKind::Ident as u16), text);
+            self.current += 1;
+        }
+    }
+
+    /// Check if current token can be used as an identifier
+    /// Returns true for actual identifiers or keywords that can serve as identifiers
+    fn at_ident_or_keyword(&self) -> bool {
+        match self.current_kind() {
+            Some(SyntaxKind::Ident) => true,
+            // Allow these keywords to be used as identifiers
+            Some(
+                SyntaxKind::InKw
+                | SyntaxKind::InputKw
+                | SyntaxKind::OutKw
+                | SyntaxKind::OutputKw
+                | SyntaxKind::InoutKw
+                | SyntaxKind::SignalKw,
+            ) => true,
+            _ => false,
+        }
+    }
+
+    /// Expect an identifier, allowing certain keywords to be used as identifiers
+    fn expect_ident_or_keyword(&mut self) {
+        if self.at_ident_or_keyword() {
+            self.bump_as_ident();
+        } else {
+            self.expect(SyntaxKind::Ident);
         }
     }
 
