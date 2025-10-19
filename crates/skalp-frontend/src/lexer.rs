@@ -40,11 +40,13 @@ pub enum Token {
     #[token("assign")]
     AssignKw,
 
-    // Type System (14) - Updated to include numeric and floating-point types
+    // Type System (15) - Updated to include numeric, floating-point, and string types
     #[token("bit")]
     Bit,
     #[token("bool")]
     Bool,
+    #[token("string")]
+    String,
     #[token("nat")]
     Nat,
     #[token("int")]

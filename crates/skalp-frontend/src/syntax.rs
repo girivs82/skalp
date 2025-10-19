@@ -25,9 +25,10 @@ pub enum SyntaxKind {
     ElseKw,
     AssignKw,
 
-    // Type System (13) - Updated to include numeric and floating-point types
+    // Type System (14) - Updated to include numeric, floating-point, and string types
     BitKw,
     BoolKw,
+    StringKw,
     NatKw,
     IntKw,
     LogicKw,
@@ -365,6 +366,7 @@ pub enum SyntaxKind {
     TypeAnnotation,
     BitType,
     BoolType,
+    StringType,
     LogicType,
     IntType,
     NatType,
@@ -468,8 +470,8 @@ impl SyntaxKind {
             // Core Hardware Description (14)
             EntityKw | ImplKw | SignalKw | VarKw | ConstKw
                 | InKw | InputKw | OutKw | OutputKw | InoutKw | PortKw | OnKw | IfKw | ElseKw | AssignKw
-            // Type System (14)
-            | BitKw | BoolKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | StructKw | EnumKw | UnionKw
+            // Type System (15)
+            | BitKw | BoolKw | StringKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | StructKw | EnumKw | UnionKw
             // Boolean Literals (2)
             | TrueKw | FalseKw
             // Traits and Generics (5)
@@ -565,9 +567,10 @@ impl SyntaxKind {
             ElseKw => "'else'",
             AssignKw => "'assign'",
 
-            // Type System (14)
+            // Type System (15)
             BitKw => "'bit'",
             BoolKw => "'bool'",
+            StringKw => "'string'",
             NatKw => "'nat'",
             IntKw => "'int'",
             LogicKw => "'logic'",
@@ -802,9 +805,10 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Else => ElseKw,
             Token::AssignKw => AssignKw,
 
-            // Type System (14) - Updated to include numeric types, bool, and floating-point
+            // Type System (15) - Updated to include numeric types, bool, string, and floating-point
             Token::Bit => BitKw,
             Token::Bool => BoolKw,
+            Token::String => StringKw,
             Token::Nat => NatKw,
             Token::Int => IntKw,
             Token::Logic => LogicKw,

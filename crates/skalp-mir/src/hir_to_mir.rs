@@ -2702,6 +2702,9 @@ impl<'hir> HirToMir<'hir> {
         match hir_type {
             hir::HirType::Bit(width) => DataType::Bit(*width as usize),
             hir::HirType::Bool => DataType::Bool,
+            hir::HirType::String => {
+                panic!("String type is not synthesizable and cannot be used in hardware modules. String types are only supported in testbench contexts.");
+            }
             hir::HirType::Logic(width) => DataType::Logic(*width as usize),
             hir::HirType::Int(width) => DataType::Int(*width as usize),
             hir::HirType::Nat(width) => DataType::Nat(*width as usize),
@@ -3505,6 +3508,9 @@ impl<'hir> HirToMir<'hir> {
         match hir_type {
             hir::HirType::Bit(width) => *width as usize,
             hir::HirType::Bool => 1, // Boolean is represented as 1 bit in hardware
+            hir::HirType::String => {
+                panic!("String type is not synthesizable and cannot be used in hardware modules. String types are only supported in testbench contexts.");
+            }
             hir::HirType::Logic(width) => *width as usize,
             hir::HirType::Int(width) => *width as usize,
             hir::HirType::Nat(width) => *width as usize,

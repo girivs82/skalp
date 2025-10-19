@@ -3128,6 +3128,12 @@ impl<'a> ParseState<'a> {
                 // Bool type has no width specifier
                 self.finish_node();
             }
+            Some(SyntaxKind::StringKw) => {
+                self.start_node(SyntaxKind::StringType);
+                self.bump();
+                // String type has no width specifier
+                self.finish_node();
+            }
             Some(SyntaxKind::NatKw) => {
                 self.start_node(SyntaxKind::NatType);
                 self.bump();
