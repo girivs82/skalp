@@ -292,6 +292,31 @@ impl HirBuilderContext {
                         });
                     }
                 }
+                SyntaxKind::ConstantDecl => {
+                    if let Some(constant) = self.build_constant(&child) {
+                        // Store constant in HIR for later use
+                        // Top-level constants are added to a special "global" implementation
+                        // For now, we'll create a default impl if none exists
+                        if hir.implementations.is_empty() {
+                            hir.implementations.push(HirImplementation {
+                                entity: EntityId(0), // Dummy entity ID for global scope
+                                signals: Vec::new(),
+                                variables: Vec::new(),
+                                constants: Vec::new(),
+                                functions: Vec::new(),
+                                event_blocks: Vec::new(),
+                                assignments: Vec::new(),
+                                instances: Vec::new(),
+                                covergroups: Vec::new(),
+                                formal_blocks: Vec::new(),
+                            });
+                        }
+                        // Add constant to the first implementation (global scope)
+                        if let Some(impl_block) = hir.implementations.first_mut() {
+                            impl_block.constants.push(constant);
+                        }
+                    }
+                }
                 SyntaxKind::FunctionDecl => {
                     if let Some(function) = self.build_function(&child) {
                         // Store function in HIR for later use
@@ -837,12 +862,26 @@ impl HirBuilderContext {
             })
             .map(|n| self.extract_hir_type(&n));
 
+        // CRITICAL FIX (Bug #32): Push a new scope for function parameters
+        // This ensures parameters don't leak into the outer scope
+        self.symbols.enter_scope();
+
+        // Register function parameters in the local scope
+        // BEFORE building the function body, so parameter references in the body can be resolved
+        for param in &params {
+            self.symbols
+                .add_to_scope(&param.name, SymbolId::GenericParam(param.name.clone()));
+        }
+
         // Build function body (statements from block)
         let body = if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
             self.build_statements(&block)
         } else {
             Vec::new()
         };
+
+        // Pop the function parameter scope
+        self.symbols.exit_scope();
 
         // Register function in symbol table
         self.symbols.add_to_scope(&name, SymbolId::Function(id));
@@ -1204,6 +1243,7 @@ impl HirBuilderContext {
                                 | SyntaxKind::MatchExpr
                                 | SyntaxKind::CallExpr
                                 | SyntaxKind::ArrayLiteral
+                                | SyntaxKind::TupleExpr // CRITICAL FIX: Support tuple returns
                         )
                     });
 
@@ -1356,6 +1396,7 @@ impl HirBuilderContext {
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::CallExpr
                         | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::TupleExpr // CRITICAL FIX: Support tuple literal assignments
                 )
             })
             .collect();
@@ -2419,14 +2460,31 @@ impl HirBuilderContext {
                     // Path pattern: Enum::Variant
                     Some(HirPattern::Path(idents[0].clone(), idents[1].clone()))
                 } else if idents.len() == 1 {
-                    // Variable pattern
-                    Some(HirPattern::Variable(idents[0].clone()))
+                    // Single identifier - check if it's a constant
+                    let name = &idents[0];
+
+                    // BUG #33 FIX: Check if this identifier refers to a constant
+                    // If yes, mark it as a constant pattern using Path("__CONST__", name)
+                    // This will be resolved to the constant's value during MIR conversion
+                    if let Some(SymbolId::Constant(_)) = self.symbols.lookup(name) {
+                        // Found a constant - use special Path pattern to mark it
+                        Some(HirPattern::Path("__CONST__".to_string(), name.clone()))
+                    } else {
+                        // Not a constant - treat as variable binding
+                        Some(HirPattern::Variable(name.clone()))
+                    }
                 } else {
                     // Fallback to first identifier
                     let name = node
                         .first_token_of_kind(SyntaxKind::Ident)
                         .map(|t| t.text().to_string())?;
-                    Some(HirPattern::Variable(name))
+
+                    // BUG #33 FIX: Check if it's a constant
+                    if let Some(SymbolId::Constant(_)) = self.symbols.lookup(&name) {
+                        Some(HirPattern::Path("__CONST__".to_string(), name))
+                    } else {
+                        Some(HirPattern::Variable(name))
+                    }
                 }
             }
             SyntaxKind::WildcardPattern => Some(HirPattern::Wildcard),
@@ -2758,15 +2816,8 @@ impl HirBuilderContext {
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
-        // Check if this is a builtin function - don't resolve as symbol
-        if BUILTIN_FUNCTIONS.contains(&name.as_str()) {
-            // Builtin functions should only appear in call expressions
-            // If we see them as plain identifiers, something is wrong with the parse tree
-            // Return None to indicate this should be handled differently
-            return None;
-        }
-
-        // Look up symbol
+        // Look up symbol FIRST - user-defined symbols (ports, signals, variables) take
+        // precedence over builtin functions. This allows users to name ports "min", "max", etc.
         if let Some(symbol) = self.symbols.lookup(&name) {
             match symbol {
                 SymbolId::Port(id) => {
@@ -2791,6 +2842,14 @@ impl HirBuilderContext {
                 _ => None,
             }
         } else {
+            // Symbol not found in table - check if it's a builtin function
+            if BUILTIN_FUNCTIONS.contains(&name.as_str()) {
+                // Builtin functions should only appear in call expressions
+                // If we see them as plain identifiers, something is wrong with the parse tree
+                // Return None to indicate this should be handled differently
+                return None;
+            }
+
             // Treat unresolved identifiers as generic parameters or function parameters
             // This allows const function parameters to be referenced in function bodies
             // They will be bound during const evaluation

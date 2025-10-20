@@ -167,9 +167,21 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     // But use implementations from the rebuilt HIR (which now have correct instances)
     let mut final_hir = hir.clone();
 
-    // CRITICAL FIX (Bug #22): Don't overwrite ALL implementations!
+    // CRITICAL FIX (Bug #22 & #34): Don't overwrite ALL implementations!
     // The merged HIR includes implementations from imported modules (like AsyncFifo).
+    // It also includes imported constants in the global implementation block (EntityId(0)).
     // Only replace implementations for entities that were rebuilt (main file entities).
+    // But preserve imported constants in the global implementation block.
+
+    // Save the imported constants from the global implementation block before modifying
+    let mut imported_constants = Vec::new();
+    if let Some(global_impl) = final_hir
+        .implementations
+        .iter()
+        .find(|i| i.entity == hir::EntityId(0))
+    {
+        imported_constants = global_impl.constants.clone();
+    }
 
     // Find which entity IDs have implementations in the rebuilt HIR
     let rebuilt_entity_ids: std::collections::HashSet<_> = rebuilt_hir
@@ -187,6 +199,42 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     final_hir
         .implementations
         .extend(rebuilt_hir.implementations);
+
+    // BUG #34 FIX: Restore imported constants to the global implementation block
+    if !imported_constants.is_empty() {
+        // Find or create the global implementation block
+        if let Some(global_impl) = final_hir
+            .implementations
+            .iter_mut()
+            .find(|i| i.entity == hir::EntityId(0))
+        {
+            // Merge imported constants with any constants from the rebuilt HIR
+            // Add imported constants that aren't already present
+            for imported_const in imported_constants {
+                if !global_impl
+                    .constants
+                    .iter()
+                    .any(|c| c.name == imported_const.name)
+                {
+                    global_impl.constants.push(imported_const);
+                }
+            }
+        } else {
+            // No global implementation block exists - create one with the imported constants
+            final_hir.implementations.push(hir::HirImplementation {
+                entity: hir::EntityId(0),
+                signals: Vec::new(),
+                variables: Vec::new(),
+                constants: imported_constants,
+                functions: Vec::new(),
+                event_blocks: Vec::new(),
+                assignments: Vec::new(),
+                instances: Vec::new(),
+                covergroups: Vec::new(),
+                formal_blocks: Vec::new(),
+            });
+        }
+    }
 
     Ok(final_hir)
 }
@@ -529,6 +577,33 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         return Ok(());
     }
 
+    // BUG #34 FIX: Try to find the symbol in constants (from implementation blocks)
+    for impl_block in &source.implementations {
+        if let Some(constant) = impl_block.constants.iter().find(|c| c.name == symbol_name) {
+            // Add the constant to the target's global implementation block
+            // Create one if it doesn't exist
+            if target.implementations.is_empty() {
+                target.implementations.push(hir::HirImplementation {
+                    entity: hir::EntityId(0), // Dummy entity ID for global scope
+                    signals: Vec::new(),
+                    variables: Vec::new(),
+                    constants: Vec::new(),
+                    functions: Vec::new(),
+                    event_blocks: Vec::new(),
+                    assignments: Vec::new(),
+                    instances: Vec::new(),
+                    covergroups: Vec::new(),
+                    formal_blocks: Vec::new(),
+                });
+            }
+            // Add constant to the first implementation (global scope)
+            if let Some(impl_block) = target.implementations.first_mut() {
+                impl_block.constants.push(constant.clone());
+            }
+            return Ok(());
+        }
+    }
+
     // Symbol not found - this might be okay if it's a type or other symbol
     // For now, we don't error
     Ok(())
@@ -651,6 +726,35 @@ fn merge_symbol_with_rename(
         return Ok(());
     }
 
+    // BUG #34 FIX: Try to find the symbol in constants (from implementation blocks)
+    for impl_block in &source.implementations {
+        if let Some(constant) = impl_block.constants.iter().find(|c| c.name == symbol_name) {
+            // Add the constant to the target's global implementation block with the renamed alias
+            // Create one if it doesn't exist
+            if target.implementations.is_empty() {
+                target.implementations.push(hir::HirImplementation {
+                    entity: hir::EntityId(0), // Dummy entity ID for global scope
+                    signals: Vec::new(),
+                    variables: Vec::new(),
+                    constants: Vec::new(),
+                    functions: Vec::new(),
+                    event_blocks: Vec::new(),
+                    assignments: Vec::new(),
+                    instances: Vec::new(),
+                    covergroups: Vec::new(),
+                    formal_blocks: Vec::new(),
+                });
+            }
+            // Add renamed constant to the first implementation (global scope)
+            if let Some(impl_block) = target.implementations.first_mut() {
+                let mut renamed_constant = constant.clone();
+                renamed_constant.name = alias.to_string();
+                impl_block.constants.push(renamed_constant);
+            }
+            return Ok(());
+        }
+    }
+
     Ok(())
 }
 
@@ -731,6 +835,36 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     for user_type in &source.user_defined_types {
         if user_type.visibility == HirVisibility::Public {
             target.user_defined_types.push(user_type.clone());
+        }
+    }
+
+    // BUG #34 FIX: Merge all public constants (from implementation blocks)
+    // Note: Constants don't currently have a visibility field in HIR, but we only merge
+    // constants from the "global" implementation block (EntityId(0)) which are effectively public
+    for impl_block in &source.implementations {
+        // Only merge constants from the global scope (entity ID 0)
+        if impl_block.entity == hir::EntityId(0) {
+            for constant in &impl_block.constants {
+                // Create global implementation block if it doesn't exist
+                if target.implementations.is_empty() {
+                    target.implementations.push(hir::HirImplementation {
+                        entity: hir::EntityId(0),
+                        signals: Vec::new(),
+                        variables: Vec::new(),
+                        constants: Vec::new(),
+                        functions: Vec::new(),
+                        event_blocks: Vec::new(),
+                        assignments: Vec::new(),
+                        instances: Vec::new(),
+                        covergroups: Vec::new(),
+                        formal_blocks: Vec::new(),
+                    });
+                }
+                // Add constant to the first implementation (global scope)
+                if let Some(impl_block) = target.implementations.first_mut() {
+                    impl_block.constants.push(constant.clone());
+                }
+            }
         }
     }
 
