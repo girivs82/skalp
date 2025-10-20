@@ -3572,42 +3572,54 @@ impl<'a> ParseState<'a> {
 
     /// Parse logical OR expression (||)
     fn parse_logical_or_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_logical_and_expr();
 
         while self.at(SyntaxKind::PipePipe) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume ||
             self.parse_logical_and_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            // Take a new checkpoint for the next iteration (for left-associativity)
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse logical AND expression (&&)
     fn parse_logical_and_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_equality_expr();
 
         while self.at(SyntaxKind::AmpAmp) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume &&
             self.parse_equality_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            // Take a new checkpoint for the next iteration (for left-associativity)
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse equality expression (== !=)
     fn parse_equality_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_relational_expr();
 
         while self.at(SyntaxKind::Eq) || self.at(SyntaxKind::Neq) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume == or !=
             self.parse_relational_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse relational expression (< > <= >=)
     fn parse_relational_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_bitwise_or_expr();
 
         while matches!(
@@ -3628,85 +3640,105 @@ impl<'a> ParseState<'a> {
             // comparison parsing. The real fix is in parse_identifier_expression
             // which handles this case when the identifier is initially parsed.
 
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume relational operator
             self.parse_bitwise_or_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse bitwise OR expression (|)
     fn parse_bitwise_or_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_bitwise_xor_expr();
 
         while self.at(SyntaxKind::Pipe) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume |
             self.parse_bitwise_xor_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse bitwise XOR expression (^)
     fn parse_bitwise_xor_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_bitwise_and_expr();
 
         while self.at(SyntaxKind::Caret) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume ^
             self.parse_bitwise_and_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse bitwise AND expression (&)
     fn parse_bitwise_and_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_shift_expr();
 
         while self.at(SyntaxKind::Amp) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume &
             self.parse_shift_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse shift expression (<< >>)
     fn parse_shift_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_additive_expr();
 
         while self.at(SyntaxKind::Shl) || self.at(SyntaxKind::Shr) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume << or >>
             self.parse_additive_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse additive expression (+ -)
     fn parse_additive_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_multiplicative_expr();
 
         while self.at(SyntaxKind::Plus) || self.at(SyntaxKind::Minus) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume + or -
             self.parse_multiplicative_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 
     /// Parse multiplicative expression (* / %)
     fn parse_multiplicative_expr(&mut self) {
+        let mut checkpoint = self.builder.checkpoint();
         self.parse_unary_expr();
 
         while matches!(
             self.current_kind(),
             Some(SyntaxKind::Star) | Some(SyntaxKind::Slash) | Some(SyntaxKind::Percent)
         ) {
-            self.start_node(SyntaxKind::BinaryExpr);
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume *, /, or %
             self.parse_unary_expr();
-            self.finish_node();
+            self.builder.finish_node();
+            checkpoint = self.builder.checkpoint();
         }
     }
 

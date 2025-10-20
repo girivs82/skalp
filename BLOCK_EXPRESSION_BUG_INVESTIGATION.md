@@ -1,8 +1,10 @@
 # Block Expression Bug Investigation
 
 **Date**: 2025-10-21
-**Status**: IN PROGRESS - Root cause partially identified
-**Files Modified**: `crates/skalp-mir/src/hir_to_mir.rs`
+**Status**: RESOLVED - Parser bug fixed with checkpoints
+**Files Modified**:
+- `crates/skalp-frontend/src/parse.rs` (fix applied)
+- `crates/skalp-mir/src/hir_to_mir.rs` (recursive collection improvements retained)
 
 ## Summary
 
@@ -275,4 +277,44 @@ The parser grammar needs to be fixed to correctly build binary expression trees 
 
 Minimal reproducible: `/tmp/test_three_lets.sk`  
 Real-world: `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l0_l1.sk` lines 45-55 (SRA operation)
+
+
+## FINAL RESOLUTION - 2025-10-21
+
+### Fix Applied
+**Location**: `crates/skalp-frontend/src/parse.rs` lines 3573-3742
+
+All binary operator parsing functions were updated to use Rowan checkpoints for proper AST construction. The bug was that `start_node` was called AFTER parsing the left operand, which meant the left operand was added as a sibling to the parent node instead of being wrapped inside the BinaryExpr.
+
+**Solution Pattern**:
+```rust
+fn parse_logical_and_expr(&mut self) {
+    let mut checkpoint = self.builder.checkpoint();  // Mark position BEFORE left operand
+    self.parse_equality_expr();  // Parse left operand
+    
+    while self.at(SyntaxKind::AmpAmp) {
+        // Use checkpoint to retroactively wrap the left operand
+        self.builder.start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
+        self.bump(); // consume &&
+        self.parse_equality_expr();  // Parse right operand
+        self.builder.finish_node();
+        // Take new checkpoint for left-associativity
+        checkpoint = self.builder.checkpoint();
+    }
+}
+```
+
+### Verification
+1. **Minimal test case** (`/tmp/test_three_lets.sk`):
+   - Before: `((z && (z > 0)) ? ...)` (lost `x` variable)
+   - After: `((x && (z > 0)) ? ...)` ✅
+
+2. **Karythra CLE SRA operation** (func_units_l0_l1.sk:45-55):
+   - Before: `((shift_amt && (shift_amt > 0)) ? ...)` (lost `sign` variable)
+   - After: `((sign && (shift_amt > 0)) ? ...)` ✅
+
+3. **All binary operators**: Fixed for ||, &&, ==, !=, <, >, <=, >=, |, ^, &, <<, >>, +, -, *, /, %
+
+### Retained Improvements
+The recursive let binding collection functions added to `hir_to_mir.rs` during investigation (lines 3511-3570) were retained as useful improvements to the codebase.
 

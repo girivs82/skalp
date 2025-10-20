@@ -1,10 +1,10 @@
-## ⚠️ Bug #34 - Parser Incorrectly Splits Compound Boolean Expressions in If Conditions
+## ✅ FIXED: Bug #34 - Parser Incorrectly Splits Compound Boolean Expressions in If Conditions
 
 ### Status
-**OPEN** (2025-10-21) - Root cause identified, requires parser fix
+**FIXED** (2025-10-21) - Parser now uses checkpoints for proper binary expression tree construction
 
-### Problem Summary
-The **parser** incorrectly creates the AST for `if` expression conditions containing compound boolean operators (`&&`, `||`). Instead of creating a single binary expression tree, it creates multiple sibling expression nodes.
+### Problem Summary (RESOLVED)
+The **parser** incorrectly created the AST for `if` expression conditions containing compound boolean operators (`&&`, `||`). Instead of creating a single binary expression tree, it created multiple sibling expression nodes.
 
 **Example**: `if x && z > 0 { ... }`
 
@@ -73,13 +73,32 @@ Full investigation documented in `BLOCK_EXPRESSION_BUG_INVESTIGATION.md`
 [HIR] build_if_expr: found potential condition node kind=BinaryExpr
 ```
 
-### Workaround
-None currently. A proper parser grammar fix is required.
+### Fix Applied
+**Location**: `crates/skalp-frontend/src/parse.rs` lines 3573-3742
 
-An HIR builder workaround was attempted (`hir_builder.rs` lines 3841-3882) but was incomplete and reverted.
+All binary operator parsing functions now use Rowan checkpoints to properly construct nested binary expression trees:
+- `parse_logical_or_expr` (||)
+- `parse_logical_and_expr` (&&)
+- `parse_equality_expr` (==, !=)
+- `parse_relational_expr` (<, >, <=, >=)
+- `parse_bitwise_or_expr` (|)
+- `parse_bitwise_xor_expr` (^)
+- `parse_bitwise_and_expr` (&)
+- `parse_shift_expr` (<<, >>)
+- `parse_additive_expr` (+, -)
+- `parse_multiplicative_expr` (*, /, %)
 
-### Required Fix
-The parser grammar needs to be modified to correctly build binary expression trees for logical operators in `if` conditions. This requires understanding the parser framework being used and fixing the expression parsing rules.
+Each function now:
+1. Takes a checkpoint before parsing the left operand
+2. Uses `builder.start_node_at(checkpoint, ...)` to retroactively wrap the left operand
+3. Takes a new checkpoint after each iteration for left-associativity
+
+This ensures the left operand is properly included in the binary expression node.
+
+### Verification
+- ✅ Minimal test case `/tmp/test_three_lets.sk` now generates correct `((x && (z > 0)) ? ...)`
+- ✅ Karythra CLE SRA operation now correctly uses both `sign` and `shift_amt` variables
+- ✅ All binary operators (+, -, *, /, &&, ||, etc.) now work correctly
 
 ---
 
