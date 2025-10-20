@@ -4115,6 +4115,7 @@ impl HirBuilderContext {
                                 | SyntaxKind::ArrayLiteral
                                 | SyntaxKind::IfExpr
                                 | SyntaxKind::MatchExpr
+                                | SyntaxKind::BlockExpr // FIX: Support block expressions in match arms
                         )
                     })
                     .cloned()
