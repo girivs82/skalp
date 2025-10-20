@@ -1337,10 +1337,8 @@ impl<'hir> HirToMir<'hir> {
 
         // Fall back to single assignment
         if let Some(single) = self.convert_continuous_assignment(assign) {
-            eprintln!("[DEBUG] Single assignment succeeded");
             vec![single]
         } else {
-            eprintln!("[DEBUG] Single assignment returned None!");
             vec![]
         }
     }
@@ -1354,13 +1352,11 @@ impl<'hir> HirToMir<'hir> {
             assign.assignment_type,
             hir::HirAssignmentType::Combinational
         ) {
-            eprintln!("[DEBUG] Assignment is not combinational");
             return None;
         }
 
         let lhs = self.convert_lvalue(&assign.lhs);
         if lhs.is_none() {
-            eprintln!("[DEBUG] convert_lvalue returned None");
             return None;
         }
 
@@ -1874,10 +1870,13 @@ impl<'hir> HirToMir<'hir> {
                     None
                 }
             }
-            hir::HirExpression::Variable(id) => self
-                .variable_map
-                .get(id)
-                .map(|&id| Expression::Ref(LValue::Variable(id))),
+            hir::HirExpression::Variable(id) => {
+                if let Some(&mir_id) = self.variable_map.get(id) {
+                    Some(Expression::Ref(LValue::Variable(mir_id)))
+                } else {
+                    None
+                }
+            }
             hir::HirExpression::Constant(id) => {
                 // Look up and evaluate the constant value in HIR
                 if let Some(hir) = self.hir {
@@ -2279,7 +2278,6 @@ impl<'hir> HirToMir<'hir> {
                 // MIR represents this as: condition ? then_expr : else_expr
                 let cond = self.convert_expression(&if_expr.condition);
                 if cond.is_none() {
-                    eprintln!("[DEBUG] If expression: condition conversion failed");
                     return None;
                 }
 
@@ -2372,9 +2370,7 @@ impl<'hir> HirToMir<'hir> {
                 for stmt in statements {
                     if let Some(mir_stmt) = self.convert_statement(stmt) {
                         self.pending_statements.push(mir_stmt);
-                        eprintln!("[DEBUG] Block: converted statement, pushed to pending");
                     } else {
-                        eprintln!("[DEBUG] Block: statement conversion returned None");
                     }
                 }
                 // Convert and return the final expression
@@ -2511,9 +2507,7 @@ impl<'hir> HirToMir<'hir> {
         match_value: &hir::HirExpression,
         arms: &[hir::HirMatchArmExpr],
     ) -> Option<Expression> {
-        eprintln!("[DEBUG] convert_match_to_conditionals: {} arms", arms.len());
         if arms.is_empty() {
-            eprintln!("[DEBUG] Match: arms is empty");
             return None;
         }
 
@@ -2521,7 +2515,6 @@ impl<'hir> HirToMir<'hir> {
         // when we create N comparisons against it
         let match_value_expr = self.convert_expression(match_value);
         if match_value_expr.is_none() {
-            eprintln!("[DEBUG] Match: match_value conversion failed");
             return None;
         }
         let match_value_expr = match_value_expr?;
@@ -2530,7 +2523,6 @@ impl<'hir> HirToMir<'hir> {
         // Start with the last arm as the default (usually wildcard)
         let last_expr = self.convert_expression(&arms.last()?.expr);
         if last_expr.is_none() {
-            eprintln!("[DEBUG] Match: last arm expr conversion failed");
             return None;
         }
         let mut result = last_expr?;
@@ -2544,7 +2536,6 @@ impl<'hir> HirToMir<'hir> {
             );
             let condition = match &arm.pattern {
                 hir::HirPattern::Literal(lit) => {
-                    eprintln!("[DEBUG] Match: literal pattern");
                     // Compare match_value with literal
                     // Clone the pre-converted match value instead of re-converting
                     let left = Box::new(match_value_expr.clone());
@@ -2556,7 +2547,6 @@ impl<'hir> HirToMir<'hir> {
                     })
                 }
                 hir::HirPattern::Wildcard => {
-                    eprintln!("[DEBUG] Match: wildcard pattern");
                     // Wildcard always matches - shouldn't appear except as last arm
                     // Skip it
                     None
@@ -2600,7 +2590,6 @@ impl<'hir> HirToMir<'hir> {
                 _ => {
                     // For other patterns, we'll need more complex logic
                     // For now, skip them
-                    eprintln!("[DEBUG] Match: unsupported pattern type");
                     None
                 }
             };
@@ -2726,7 +2715,10 @@ impl<'hir> HirToMir<'hir> {
         self.transform_early_returns_recursive(body)
     }
 
-    fn transform_early_returns_recursive(&self, body: Vec<hir::HirStatement>) -> Vec<hir::HirStatement> {
+    fn transform_early_returns_recursive(
+        &self,
+        body: Vec<hir::HirStatement>,
+    ) -> Vec<hir::HirStatement> {
         if body.is_empty() {
             return body;
         }
@@ -2748,10 +2740,12 @@ impl<'hir> HirToMir<'hir> {
                             // No statements after, keep as-is but recursively transform branches
                             hir::HirStatement::If(hir::HirIfStatement {
                                 condition: if_stmt.condition.clone(),
-                                then_statements: self.transform_early_returns_recursive(if_stmt.then_statements.clone()),
-                                else_statements: if_stmt.else_statements.as_ref().map(|stmts|
-                                    self.transform_early_returns_recursive(stmts.clone())
+                                then_statements: self.transform_early_returns_recursive(
+                                    if_stmt.then_statements.clone(),
                                 ),
+                                else_statements: if_stmt.else_statements.as_ref().map(|stmts| {
+                                    self.transform_early_returns_recursive(stmts.clone())
+                                }),
                             })
                         } else {
                             // Move remaining statements into else-branch
@@ -2759,7 +2753,9 @@ impl<'hir> HirToMir<'hir> {
 
                             hir::HirStatement::If(hir::HirIfStatement {
                                 condition: if_stmt.condition.clone(),
-                                then_statements: self.transform_early_returns_recursive(if_stmt.then_statements.clone()),
+                                then_statements: self.transform_early_returns_recursive(
+                                    if_stmt.then_statements.clone(),
+                                ),
                                 else_statements: Some(else_body),
                             })
                         };
@@ -2772,30 +2768,28 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // No early returns found, recursively transform nested structures
-        body.into_iter().map(|stmt| match stmt {
-            hir::HirStatement::If(if_stmt) => {
-                hir::HirStatement::If(hir::HirIfStatement {
+        body.into_iter()
+            .map(|stmt| match stmt {
+                hir::HirStatement::If(if_stmt) => hir::HirStatement::If(hir::HirIfStatement {
                     condition: if_stmt.condition,
-                    then_statements: self.transform_early_returns_recursive(if_stmt.then_statements),
-                    else_statements: if_stmt.else_statements.map(|stmts|
-                        self.transform_early_returns_recursive(stmts)
-                    ),
-                })
-            },
-            hir::HirStatement::Block(stmts) => {
-                hir::HirStatement::Block(self.transform_early_returns_recursive(stmts))
-            },
-            // TODO: Handle Match statements with early returns
-            other => other,
-        }).collect()
+                    then_statements: self
+                        .transform_early_returns_recursive(if_stmt.then_statements),
+                    else_statements: if_stmt
+                        .else_statements
+                        .map(|stmts| self.transform_early_returns_recursive(stmts)),
+                }),
+                hir::HirStatement::Block(stmts) => {
+                    hir::HirStatement::Block(self.transform_early_returns_recursive(stmts))
+                }
+                // TODO: Handle Match statements with early returns
+                other => other,
+            })
+            .collect()
     }
 
     /// Convert a statement-based function body (possibly with if-returns) into an expression
     /// This handles the case where early returns have been transformed into nested if-else
-    fn convert_body_to_expression(
-        &self,
-        body: &[hir::HirStatement],
-    ) -> Option<hir::HirExpression> {
+    fn convert_body_to_expression(&self, body: &[hir::HirStatement]) -> Option<hir::HirExpression> {
         if body.is_empty() {
             eprintln!("convert_body_to_expression: empty body");
             return None;
@@ -2822,9 +2816,7 @@ impl<'hir> HirToMir<'hir> {
             [hir::HirStatement::Return(Some(expr))] => Some(expr.clone()),
 
             // If statement (possibly with returns in branches)
-            [hir::HirStatement::If(if_stmt)] => {
-                self.convert_if_stmt_to_expr(if_stmt)
-            }
+            [hir::HirStatement::If(if_stmt)] => self.convert_if_stmt_to_expr(if_stmt),
 
             // Other cases not yet supported
             _ => {
@@ -2843,10 +2835,7 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert an if-statement (with returns in branches) to an if-expression
-    fn convert_if_stmt_to_expr(
-        &self,
-        if_stmt: &hir::HirIfStatement,
-    ) -> Option<hir::HirExpression> {
+    fn convert_if_stmt_to_expr(&self, if_stmt: &hir::HirIfStatement) -> Option<hir::HirExpression> {
         // Recursively convert then-branch
         let then_expr = self.convert_body_to_expression(&if_stmt.then_statements)?;
 
@@ -3025,10 +3014,8 @@ impl<'hir> HirToMir<'hir> {
 
             // Variable reference - replace with mapped expression
             hir::HirExpression::Variable(var_id) => {
-                eprintln!("[DEBUG] Variable: processing var_id={:?}", var_id);
                 // Look up variable name using the provided map (for function-local variables)
                 if let Some(var_name) = var_id_to_name.get(var_id) {
-                    eprintln!("[DEBUG] Variable: var_id maps to name '{}'", var_name);
                     if let Some(arg_expr) = param_map.get(var_name) {
                         // Found in substitution map, replace with expression
                         eprintln!(
@@ -3043,9 +3030,7 @@ impl<'hir> HirToMir<'hir> {
                             );
                         }
                         let cloned = (*arg_expr).clone();
-                        if let hir::HirExpression::Match(m) = &cloned {
-                            eprintln!("[DEBUG] Variable: cloned Match has {} arms", m.arms.len());
-                        }
+                        if let hir::HirExpression::Match(m) = &cloned {}
                         return Some(cloned);
                     } else {
                         eprintln!(
@@ -3055,12 +3040,10 @@ impl<'hir> HirToMir<'hir> {
                         );
                     }
                 } else {
-                    eprintln!("[DEBUG] Variable: var_id not in var_id_to_name map");
                 }
 
                 // Fall back to global variable lookup
                 if let Some(var_name) = self.find_variable_name(*var_id) {
-                    eprintln!("[DEBUG] Variable (global): found name '{}'", var_name);
                     if let Some(arg_expr) = param_map.get(&var_name) {
                         eprintln!(
                             "[DEBUG] Variable substitution (global): var_name={}, expr type: {:?}",
@@ -3088,26 +3071,31 @@ impl<'hir> HirToMir<'hir> {
                         );
                     }
                 } else {
-                    eprintln!("[DEBUG] Variable (global): find_variable_name returned None");
                 }
 
                 // Not in substitution map, keep as-is
-                eprintln!("[DEBUG] Variable: keeping as-is (not in substitution map)");
                 Some(expr.clone())
             }
 
             // Binary expression - substitute both sides
             hir::HirExpression::Binary(binary) => {
+                if let hir::HirExpression::Variable(left_id) = &*binary.left {}
+                if let hir::HirExpression::Variable(right_id) = &*binary.right {}
+
                 let left = Box::new(self.substitute_expression_with_var_map(
                     &binary.left,
                     param_map,
                     var_id_to_name,
                 )?);
+                if let hir::HirExpression::Variable(left_id) = &*left {}
+
                 let right = Box::new(self.substitute_expression_with_var_map(
                     &binary.right,
                     param_map,
                     var_id_to_name,
                 )?);
+                if let hir::HirExpression::Variable(right_id) = &*right {}
+
                 Some(hir::HirExpression::Binary(hir::HirBinaryExpr {
                     left,
                     op: binary.op.clone(),
@@ -3130,11 +3118,20 @@ impl<'hir> HirToMir<'hir> {
 
             // If expression - substitute all parts
             hir::HirExpression::If(if_expr) => {
+                if let hir::HirExpression::Binary(bin) = &*if_expr.condition {
+                    if let hir::HirExpression::Variable(left_id) = &*bin.left {}
+                }
+
                 let condition = Box::new(self.substitute_expression_with_var_map(
                     &if_expr.condition,
                     param_map,
                     var_id_to_name,
                 )?);
+
+                if let hir::HirExpression::Binary(bin) = &*condition {
+                    if let hir::HirExpression::Variable(left_id) = &*bin.left {}
+                }
+
                 let then_expr = Box::new(self.substitute_expression_with_var_map(
                     &if_expr.then_expr,
                     param_map,
@@ -3165,7 +3162,6 @@ impl<'hir> HirToMir<'hir> {
                     param_map,
                     var_id_to_name,
                 )?);
-                eprintln!("[DEBUG] Match: successfully substituted match value expression");
 
                 // Substitute in each arm
                 let mut arms = Vec::new();
@@ -3176,24 +3172,19 @@ impl<'hir> HirToMir<'hir> {
                     );
 
                     let guard = if let Some(guard_expr) = &arm.guard {
-                        eprintln!("[DEBUG] Match arm {}: has guard, substituting...", i);
                         let result = self.substitute_expression_with_var_map(
                             guard_expr,
                             param_map,
                             var_id_to_name,
                         );
                         if result.is_none() {
-                            eprintln!("[DEBUG] Match arm {}: guard substitution FAILED", i);
                             return None;
                         }
-                        eprintln!("[DEBUG] Match arm {}: guard substitution succeeded", i);
                         Some(result?)
                     } else {
-                        eprintln!("[DEBUG] Match arm {}: no guard", i);
                         None
                     };
 
-                    eprintln!("[DEBUG] Match arm {}: substituting arm expression...", i);
                     let arm_expr_result = self.substitute_expression_with_var_map(
                         &arm.expr,
                         param_map,
@@ -3219,7 +3210,6 @@ impl<'hir> HirToMir<'hir> {
                         guard,
                         expr: arm_expr,
                     });
-                    eprintln!("[DEBUG] Match arm {}: pushed to arms vector", i);
                 }
 
                 eprintln!(
@@ -3269,7 +3259,6 @@ impl<'hir> HirToMir<'hir> {
                             ));
                         }
                         _ => {
-                            eprintln!("[DEBUG] Block: cloning non-let statement {}", i);
                             substituted_statements.push(stmt.clone());
                         }
                     }
@@ -3315,7 +3304,6 @@ impl<'hir> HirToMir<'hir> {
                     }
                     substituted_elements.push(substituted);
                 }
-                eprintln!("[DEBUG] TupleLiteral: all elements substituted successfully");
                 Some(hir::HirExpression::TupleLiteral(substituted_elements))
             }
 
@@ -3340,7 +3328,6 @@ impl<'hir> HirToMir<'hir> {
                     param_map,
                     var_id_to_name,
                 )?);
-                eprintln!("[DEBUG] Range: successfully substituted all parts");
                 Some(hir::HirExpression::Range(
                     substituted_base,
                     substituted_high,
@@ -3364,7 +3351,6 @@ impl<'hir> HirToMir<'hir> {
                     param_map,
                     var_id_to_name,
                 )?);
-                eprintln!("[DEBUG] Index: successfully substituted both parts");
                 Some(hir::HirExpression::Index(
                     substituted_base,
                     substituted_index,
@@ -3380,7 +3366,6 @@ impl<'hir> HirToMir<'hir> {
                 );
                 let mut substituted_args = Vec::new();
                 for (i, arg) in call.args.iter().enumerate() {
-                    eprintln!("[DEBUG] Call: substituting arg {}", i);
                     let substituted_arg =
                         self.substitute_expression_with_var_map(arg, param_map, var_id_to_name)?;
                     substituted_args.push(substituted_arg);
@@ -3507,6 +3492,68 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Inline a function call (Phases 2-5: simple functions, let bindings, control flow, recursion check)
+    /// Recursively collect all let binding variable IDs and names from statements and expressions
+    fn collect_let_bindings(
+        &self,
+        stmts: &[hir::HirStatement],
+        map: &mut HashMap<hir::VariableId, String>,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                hir::HirStatement::Let(let_stmt) => {
+                    map.insert(let_stmt.id, let_stmt.name.clone());
+                    // Recursively collect from the let's value expression
+                    self.collect_let_bindings_from_expr(&let_stmt.value, map);
+                }
+                hir::HirStatement::Return(Some(expr)) => {
+                    self.collect_let_bindings_from_expr(expr, map);
+                }
+                hir::HirStatement::If(if_stmt) => {
+                    self.collect_let_bindings(&if_stmt.then_statements, map);
+                    if let Some(else_stmts) = &if_stmt.else_statements {
+                        self.collect_let_bindings(else_stmts, map);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Recursively collect let bindings from an expression
+    fn collect_let_bindings_from_expr(
+        &self,
+        expr: &hir::HirExpression,
+        map: &mut HashMap<hir::VariableId, String>,
+    ) {
+        match expr {
+            hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } => {
+                self.collect_let_bindings(statements, map);
+                self.collect_let_bindings_from_expr(result_expr, map);
+            }
+            hir::HirExpression::Match(match_expr) => {
+                for arm in &match_expr.arms {
+                    self.collect_let_bindings_from_expr(&arm.expr, map);
+                }
+            }
+            hir::HirExpression::If(if_expr) => {
+                self.collect_let_bindings_from_expr(&if_expr.condition, map);
+                self.collect_let_bindings_from_expr(&if_expr.then_expr, map);
+                self.collect_let_bindings_from_expr(&if_expr.else_expr, map);
+            }
+            hir::HirExpression::Binary(bin_expr) => {
+                self.collect_let_bindings_from_expr(&bin_expr.left, map);
+                self.collect_let_bindings_from_expr(&bin_expr.right, map);
+            }
+            hir::HirExpression::Unary(un_expr) => {
+                self.collect_let_bindings_from_expr(&un_expr.operand, map);
+            }
+            _ => {}
+        }
+    }
+
     fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
         eprintln!(
             "[DEBUG] inline_function_call: {} with {} args",
@@ -3527,9 +3574,7 @@ impl<'hir> HirToMir<'hir> {
         let body = func.body.clone();
 
         // Transform early returns into nested if-else before processing
-        eprintln!("[DEBUG] inline_function_call: transforming early returns");
         let body = self.transform_early_returns(body);
-        eprintln!("[DEBUG] inline_function_call: early return transformation complete");
 
         // Phase 5: Check for direct recursion
         if self.contains_recursive_call(&body, &call.function) {
@@ -3561,28 +3606,21 @@ impl<'hir> HirToMir<'hir> {
             substitution_map.len()
         );
 
-        // Step 4: Build var_id -> name mapping from let statements
+        // Step 4: Build var_id -> name mapping from ALL let statements (including nested ones)
         // This allows us to look up variable names during substitution
         let mut var_id_to_name = HashMap::new();
-        for stmt in &body {
-            if let hir::HirStatement::Let(let_stmt) = stmt {
-                var_id_to_name.insert(let_stmt.id, let_stmt.name.clone());
-            }
-        }
+        self.collect_let_bindings(&body, &mut var_id_to_name);
         eprintln!(
-            "[DEBUG] inline_function_call: built var_id map with {} entries",
+            "[DEBUG] inline_function_call: built var_id map with {} entries (recursive)",
             var_id_to_name.len()
         );
 
         // Step 5: Convert statement-based body to expression (handles early returns)
-        eprintln!("[DEBUG] inline_function_call: converting body to expression");
         let body_expr = self.convert_body_to_expression(&body);
         if body_expr.is_none() {
-            eprintln!("[DEBUG] inline_function_call: FAILED to convert body to expression");
             return None;
         }
         let body_expr = body_expr.unwrap();
-        eprintln!("[DEBUG] inline_function_call: body converted to expression, substituting");
 
         // Step 6: Substitute parameters in the entire expression (including nested let bindings)
         let substituted_expr = self.substitute_expression_with_var_map(
@@ -3595,7 +3633,6 @@ impl<'hir> HirToMir<'hir> {
         );
 
         if substituted_expr.is_none() {
-            eprintln!("[DEBUG] inline_function_call: FAILED to substitute expression");
             return None;
         }
         let substituted_expr = substituted_expr.unwrap();
@@ -3610,7 +3647,6 @@ impl<'hir> HirToMir<'hir> {
                 "[DEBUG] inline_function_call: FAILED to convert substituted expression to MIR"
             );
         } else {
-            eprintln!("[DEBUG] inline_function_call: SUCCESS!");
         }
         result
     }

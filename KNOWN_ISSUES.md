@@ -1,3 +1,88 @@
+## ⚠️ Bug #34 - Parser Incorrectly Splits Compound Boolean Expressions in If Conditions
+
+### Status
+**OPEN** (2025-10-21) - Root cause identified, requires parser fix
+
+### Problem Summary
+The **parser** incorrectly creates the AST for `if` expression conditions containing compound boolean operators (`&&`, `||`). Instead of creating a single binary expression tree, it creates multiple sibling expression nodes.
+
+**Example**: `if x && z > 0 { ... }`
+
+**Current (WRONG)**:
+```
+IfExpr
+  ├─ IdentExpr(x)          ← separate sibling node  
+  ├─ BinaryExpr(z > 0)     ← separate sibling node
+  └─ BlockExpr { ... }
+```
+
+**Expected (CORRECT)**:
+```
+IfExpr
+  ├─ BinaryExpr(&&)
+  │  ├─ IdentExpr(x)
+  │  └─ BinaryExpr(>)
+  │     ├─ IdentExpr(z)
+  │     └─ Literal(0)
+  └─ BlockExpr { ... }
+```
+
+### Impact
+- Affects any `if` expression with compound boolean conditions using `&&` or `||`
+- **Real-world failure**: Karythra CLE operations (SRA, LTU, GEU) return incorrect values
+- Especially noticeable in match arm block expressions with multiple let bindings
+
+### Root Cause
+**Location**: `crates/skalp-frontend/src/parser.rs` (parser grammar)
+
+The parser's expression parsing logic for `if` statements doesn't properly handle precedence/associativity of logical operators, resulting in fragmented AST nodes.
+
+### Reproduction
+**Minimal test case**: `/tmp/test_three_lets.sk`
+```skalp
+let x = a[7];
+let z = b[4:0];
+if x && z > 0 {  // x gets lost, becomes just "z > 0"
+    ...
+}
+```
+
+**Real-world case**: `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l0_l1.sk` lines 45-55:
+```skalp
+9 => {  // SRA operation
+    let sign = a[31];
+    let shift_amt = b[4:0];
+    if sign && shift_amt > 0 {  // sign gets lost!
+        ...
+    }
+}
+```
+
+### Investigation
+Full investigation documented in `BLOCK_EXPRESSION_BUG_INVESTIGATION.md`
+
+**Key findings**:
+1. ✅ Not an HIR builder issue
+2. ✅ Not an MIR converter issue  
+3. ✅ Not a symbol table issue
+4. ✅ **ROOT CAUSE**: Parser AST construction bug
+
+**Evidence**: HIR builder debug logs show two separate expression children where there should be one:
+```
+[HIR] build_if_expr: found potential condition node kind=IdentExpr
+[HIR] build_if_expr: found potential condition node kind=BinaryExpr
+```
+
+### Workaround
+None currently. A proper parser grammar fix is required.
+
+An HIR builder workaround was attempted (`hir_builder.rs` lines 3841-3882) but was incomplete and reverted.
+
+### Required Fix
+The parser grammar needs to be modified to correctly build binary expression trees for logical operators in `if` conditions. This requires understanding the parser framework being used and fixing the expression parsing rules.
+
+---
+
 # Known Issues and Limitations
 
 ## ✅ FIXED: Bug #33 - Constant Variable Patterns Treated as Bindings
