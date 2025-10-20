@@ -1,0 +1,20 @@
+// Phase 4 Test: Function with match expression
+
+fn decode(op: bit[8]) -> bit[8] {
+    return match op {
+        0 => 0x00,
+        1 => 0x11,
+        2 => 0x22,
+        _ => 0xFF,
+    };
+}
+
+entity MatchExprTest {
+    in clk: clock
+    in op: bit[8]
+    out result: bit[8]
+}
+
+impl MatchExprTest {
+    result = decode(op)
+}

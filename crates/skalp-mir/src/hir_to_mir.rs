@@ -2713,6 +2713,174 @@ impl<'hir> HirToMir<'hir> {
         hir.functions.iter().find(|func| func.name == function_name)
     }
 
+    /// Transform early returns into nested if-else expressions
+    ///
+    /// Converts:
+    ///   if cond { return val1; }
+    ///   stmt2;
+    ///   return val2;
+    ///
+    /// Into:
+    ///   if cond { return val1; } else { stmt2; return val2; }
+    fn transform_early_returns(&self, body: Vec<hir::HirStatement>) -> Vec<hir::HirStatement> {
+        self.transform_early_returns_recursive(body)
+    }
+
+    fn transform_early_returns_recursive(&self, body: Vec<hir::HirStatement>) -> Vec<hir::HirStatement> {
+        if body.is_empty() {
+            return body;
+        }
+
+        // Find the first statement that's an If with a return in then-branch
+        for (i, stmt) in body.iter().enumerate() {
+            if let hir::HirStatement::If(if_stmt) = stmt {
+                // Check if then-branch ends with a return
+                if let Some(last) = if_stmt.then_statements.last() {
+                    if matches!(last, hir::HirStatement::Return(_)) {
+                        // Found early return pattern!
+                        // Collect all statements before this if
+                        let mut result = body[..i].to_vec();
+
+                        // Transform this if statement
+                        let remaining_stmts = body[i + 1..].to_vec();
+
+                        let new_if = if remaining_stmts.is_empty() {
+                            // No statements after, keep as-is but recursively transform branches
+                            hir::HirStatement::If(hir::HirIfStatement {
+                                condition: if_stmt.condition.clone(),
+                                then_statements: self.transform_early_returns_recursive(if_stmt.then_statements.clone()),
+                                else_statements: if_stmt.else_statements.as_ref().map(|stmts|
+                                    self.transform_early_returns_recursive(stmts.clone())
+                                ),
+                            })
+                        } else {
+                            // Move remaining statements into else-branch
+                            let else_body = self.transform_early_returns_recursive(remaining_stmts);
+
+                            hir::HirStatement::If(hir::HirIfStatement {
+                                condition: if_stmt.condition.clone(),
+                                then_statements: self.transform_early_returns_recursive(if_stmt.then_statements.clone()),
+                                else_statements: Some(else_body),
+                            })
+                        };
+
+                        result.push(new_if);
+                        return result;
+                    }
+                }
+            }
+        }
+
+        // No early returns found, recursively transform nested structures
+        body.into_iter().map(|stmt| match stmt {
+            hir::HirStatement::If(if_stmt) => {
+                hir::HirStatement::If(hir::HirIfStatement {
+                    condition: if_stmt.condition,
+                    then_statements: self.transform_early_returns_recursive(if_stmt.then_statements),
+                    else_statements: if_stmt.else_statements.map(|stmts|
+                        self.transform_early_returns_recursive(stmts)
+                    ),
+                })
+            },
+            hir::HirStatement::Block(stmts) => {
+                hir::HirStatement::Block(self.transform_early_returns_recursive(stmts))
+            },
+            // TODO: Handle Match statements with early returns
+            other => other,
+        }).collect()
+    }
+
+    /// Convert a statement-based function body (possibly with if-returns) into an expression
+    /// This handles the case where early returns have been transformed into nested if-else
+    fn convert_body_to_expression(
+        &self,
+        body: &[hir::HirStatement],
+    ) -> Option<hir::HirExpression> {
+        if body.is_empty() {
+            eprintln!("convert_body_to_expression: empty body");
+            return None;
+        }
+
+        // Collect all let bindings
+        let mut let_bindings = Vec::new();
+        let mut remaining_stmts = body;
+
+        // Extract leading let statements
+        while let Some(hir::HirStatement::Let(let_stmt)) = remaining_stmts.first() {
+            let_bindings.push(let_stmt.clone());
+            remaining_stmts = &remaining_stmts[1..];
+        }
+
+        if remaining_stmts.is_empty() {
+            eprintln!("convert_body_to_expression: no statements after let bindings");
+            return None;
+        }
+
+        // Convert the remaining statements to an expression
+        let body_expr = match remaining_stmts {
+            // Single return statement
+            [hir::HirStatement::Return(Some(expr))] => Some(expr.clone()),
+
+            // If statement (possibly with returns in branches)
+            [hir::HirStatement::If(if_stmt)] => {
+                self.convert_if_stmt_to_expr(if_stmt)
+            }
+
+            // Other cases not yet supported
+            _ => {
+                eprintln!("convert_body_to_expression: unsupported statement pattern");
+                eprintln!("  Remaining statements: {:?}", remaining_stmts.len());
+                None
+            }
+        }?;
+
+        // Wrap with let bindings if any
+        if let_bindings.is_empty() {
+            Some(body_expr)
+        } else {
+            Some(self.build_let_expression(let_bindings, body_expr))
+        }
+    }
+
+    /// Convert an if-statement (with returns in branches) to an if-expression
+    fn convert_if_stmt_to_expr(
+        &self,
+        if_stmt: &hir::HirIfStatement,
+    ) -> Option<hir::HirExpression> {
+        // Recursively convert then-branch
+        let then_expr = self.convert_body_to_expression(&if_stmt.then_statements)?;
+
+        // Recursively convert else-branch
+        let else_expr = if let Some(else_stmts) = &if_stmt.else_statements {
+            self.convert_body_to_expression(else_stmts)?
+        } else {
+            eprintln!("convert_if_stmt_to_expr: if-statement missing else branch");
+            return None;
+        };
+
+        Some(hir::HirExpression::If(hir::HirIfExpr {
+            condition: Box::new(if_stmt.condition.clone()),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        }))
+    }
+
+    /// Build a let expression from a list of let bindings and a body expression
+    /// Uses Block expression syntax since HIR doesn't have a Let variant in HirExpression
+    fn build_let_expression(
+        &self,
+        bindings: Vec<hir::HirLetStatement>,
+        body: hir::HirExpression,
+    ) -> hir::HirExpression {
+        // Build a block expression with the let statements and result expression
+        let statements = bindings.into_iter().map(hir::HirStatement::Let).collect();
+
+        hir::HirExpression::Block {
+            statements,
+            result_expr: Box::new(body),
+        }
+    }
+
     /// Extract return expression from a function body
     /// Phase 2: Simple functions with single return
     /// Phase 3: Functions with let bindings + return
@@ -3358,6 +3526,11 @@ impl<'hir> HirToMir<'hir> {
         let params = func.params.clone();
         let body = func.body.clone();
 
+        // Transform early returns into nested if-else before processing
+        eprintln!("[DEBUG] inline_function_call: transforming early returns");
+        let body = self.transform_early_returns(body);
+        eprintln!("[DEBUG] inline_function_call: early return transformation complete");
+
         // Phase 5: Check for direct recursion
         if self.contains_recursive_call(&body, &call.function) {
             eprintln!(
@@ -3401,64 +3574,19 @@ impl<'hir> HirToMir<'hir> {
             var_id_to_name.len()
         );
 
-        // Step 5: Process let bindings (Phase 3)
-        // For each let statement, substitute params/vars in RHS, then add binding to map
-        for (i, stmt) in body[..body.len().saturating_sub(1)].iter().enumerate() {
-            // Process all statements except the last (which should be return)
-            match stmt {
-                hir::HirStatement::Let(let_stmt) => {
-                    eprintln!(
-                        "[DEBUG] inline_function_call: processing let stmt {} ({})",
-                        i, let_stmt.name
-                    );
-                    // Substitute parameters and previous let bindings in the value
-                    let substituted_value = self.substitute_expression_with_var_map(
-                        &let_stmt.value,
-                        &substitution_map
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v))
-                            .collect(),
-                        &var_id_to_name,
-                    );
-
-                    if substituted_value.is_none() {
-                        eprintln!(
-                            "[DEBUG] inline_function_call: FAILED to substitute let stmt {} ({})",
-                            i, let_stmt.name
-                        );
-                        return None;
-                    }
-
-                    eprintln!(
-                        "[DEBUG] inline_function_call: successfully substituted let stmt {}",
-                        let_stmt.name
-                    );
-
-                    // Add this binding to the substitution map
-                    substitution_map.insert(let_stmt.name.clone(), substituted_value.unwrap());
-                }
-                _ => {
-                    eprintln!(
-                        "Function inlining: unsupported statement type before return (only let bindings supported)"
-                    );
-                    return None;
-                }
-            }
-        }
-
-        eprintln!("[DEBUG] inline_function_call: processed all let stmts, extracting return");
-
-        // Step 6: Extract and substitute return expression
-        let return_expr = self.extract_return_expression(&body);
-        if return_expr.is_none() {
-            eprintln!("[DEBUG] inline_function_call: FAILED to extract return expression");
+        // Step 5: Convert statement-based body to expression (handles early returns)
+        eprintln!("[DEBUG] inline_function_call: converting body to expression");
+        let body_expr = self.convert_body_to_expression(&body);
+        if body_expr.is_none() {
+            eprintln!("[DEBUG] inline_function_call: FAILED to convert body to expression");
             return None;
         }
-        let return_expr = return_expr.unwrap();
-        eprintln!("[DEBUG] inline_function_call: extracted return, substituting");
+        let body_expr = body_expr.unwrap();
+        eprintln!("[DEBUG] inline_function_call: body converted to expression, substituting");
 
+        // Step 6: Substitute parameters in the entire expression (including nested let bindings)
         let substituted_expr = self.substitute_expression_with_var_map(
-            return_expr,
+            &body_expr,
             &substitution_map
                 .iter()
                 .map(|(k, v)| (k.clone(), v))
@@ -3467,7 +3595,7 @@ impl<'hir> HirToMir<'hir> {
         );
 
         if substituted_expr.is_none() {
-            eprintln!("[DEBUG] inline_function_call: FAILED to substitute return expression");
+            eprintln!("[DEBUG] inline_function_call: FAILED to substitute expression");
             return None;
         }
         let substituted_expr = substituted_expr.unwrap();

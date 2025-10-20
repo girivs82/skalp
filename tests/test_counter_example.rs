@@ -2,7 +2,6 @@
 ///
 /// This shows how to test hardware designs using Rust with the Testbench API
 /// from skalp-testing. See examples/testbench_guide/README.md for full guide.
-
 use skalp_testing::testbench::*;
 
 #[tokio::test]

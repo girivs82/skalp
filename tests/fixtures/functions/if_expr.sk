@@ -1,0 +1,16 @@
+// Phase 4 Test: Function with if expression
+
+fn max(a: bit[8], b: bit[8]) -> bit[8] {
+    return if a > b { a } else { b };
+}
+
+entity IfExprTest {
+    in clk: clock
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[8]
+}
+
+impl IfExprTest {
+    result = max(a, b)
+}

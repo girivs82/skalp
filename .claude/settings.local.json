@@ -189,7 +189,16 @@
       "Read(//Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/**)",
       "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/release/skalp build:*)",
       "Read(//Users/girivs/src/hw/karythra/rtl/skalp/cle/**)",
-      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/debug/skalp build:*)"
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/debug/skalp build:*)",
+      "Bash(SKALP_DUMP_MIR=1 ./target/release/skalp build:*)",
+      "Bash(RUST_LOG=skalp_frontend::const_eval=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Bash(if [ -f crates/skalp-mir/src/hir_to_mir.rs.bak ])",
+      "Bash(then mv crates/skalp-mir/src/hir_to_mir.rs.bak crates/skalp-mir/src/hir_to_mir.rs)",
+      "Bash(else echo \"No backup found\")",
+      "Bash(fi)",
+      "Bash(SKALP_DUMP_MIR=1 /Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Read(//Users/girivs/src/hw/karythra/**)",
+      "Bash(RUST_LOG=debug SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib ./target/debug/skalp:*)"
     ],
     "deny": [],
     "ask": []

@@ -1,0 +1,17 @@
+// Phase 3 Test: Function with single let binding
+
+fn add_double(a: bit[8], b: bit[8]) -> bit[8] {
+    let sum: bit[8] = a + b;
+    return sum * 2;
+}
+
+entity LetSingleTest {
+    in clk: clock
+    in x: bit[8]
+    in y: bit[8]
+    out result: bit[8]
+}
+
+impl LetSingleTest {
+    result = add_double(x, y)
+}

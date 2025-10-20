@@ -1,0 +1,20 @@
+// Phase 3 Test: Function with dependent (chained) let bindings
+
+fn chain(a: bit[8], b: bit[8], c: bit[8]) -> bit[8] {
+    let x: bit[8] = a + b;
+    let y: bit[8] = x * c;
+    let z: bit[8] = y + a;
+    return z;
+}
+
+entity LetChainTest {
+    in clk: clock
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out result: bit[8]
+}
+
+impl LetChainTest {
+    result = chain(a, b, c)
+}

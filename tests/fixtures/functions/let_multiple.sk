@@ -1,0 +1,19 @@
+// Phase 3 Test: Function with multiple independent let bindings
+
+fn complex(a: bit[8], b: bit[8], c: bit[8]) -> bit[8] {
+    let sum: bit[8] = a + b;
+    let prod: bit[8] = sum * c;
+    return prod;
+}
+
+entity LetMultipleTest {
+    in clk: clock
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out result: bit[8]
+}
+
+impl LetMultipleTest {
+    result = complex(a, b, c)
+}
