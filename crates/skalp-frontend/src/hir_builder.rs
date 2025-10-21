@@ -1865,6 +1865,7 @@ impl HirBuilderContext {
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::TupleExpr
+                        | SyntaxKind::CastExpr  // CRITICAL FIX (Bug #38): Support cast expressions in tuple destructuring
                 )
             })
             .collect();
@@ -2043,6 +2044,7 @@ impl HirBuilderContext {
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::TupleExpr
+                        | SyntaxKind::CastExpr  // CRITICAL FIX (Bug #38): Support cast expressions in let bindings
                 )
             })
             .collect();

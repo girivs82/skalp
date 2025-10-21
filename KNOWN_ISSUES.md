@@ -3408,3 +3408,134 @@ Confirmed this failure exists **before** Bug #37 fix - this is a pre-existing is
 - Does not block Karythra CLE development
 - Should be investigated separately
 
+
+---
+
+## ✅ FIXED: Bug #38 - Let Bindings with Type Casts in Inlined Functions Generate Zero
+
+### Status
+**FIXED** (2025-10-22) - HIR builder now recognizes CastExpr in let statement RHS
+
+### Problem Summary
+When a function containing a let binding with a type cast is inlined, the casted value is not propagated correctly to the code generation stage, resulting in `0` being generated instead of the actual value.
+
+### Minimal Reproduction
+
+**Test Case Pattern Matrix:**
+
+| Pattern | Result | Output |
+|---------|--------|--------|
+| `return 42` | ✅ Works | `assign result = 42;` |
+| `return 42 as bit[32]` | ✅ Works | `assign result = 42;` |
+| `let x = 42; return x` | ✅ Works | `logic [5:0] x; assign x = 42; assign result = x;` |
+| `let x = 42 as bit[32]; return x` | ❌ FAILS | `assign result = 0;` |
+
+**Failing Test Case:** `/tmp/test_let_with_cast.sk`
+```skalp
+pub fn with_let_and_cast() -> bit[32] {
+    let x = 42 as bit[32];  // Cast in let binding
+    return x
+}
+
+entity TestLetWithCast {
+    out result: bit[32]
+}
+
+impl TestLetWithCast {
+    result = with_let_and_cast()  // Inlines successfully but generates 0
+}
+```
+
+**Generated Output (WRONG):**
+```systemverilog
+module TestLetWithCast (
+    output [31:0] result
+);
+    assign result = 0;  // Should be 42!
+endmodule
+```
+
+**Expected Output:**
+```systemverilog
+module TestLetWithCast (
+    output [31:0] result
+);
+    logic [31:0] x;
+    assign x = 42;
+    assign result = x;
+endmodule
+```
+
+### Impact
+**CRITICAL** - This is the actual blocker for L2-L5 operations, not method calls!
+
+- ❌ All fp16 operations use pattern: `let a_fp16 = a[15:0] as fp16;`
+- ❌ All fp32 operations use pattern: `let a_fp32 = a as fp32;`
+- ❌ Affects 25 of 43 Karythra CLE function units
+- ⚠️ Method calls are a separate issue, but this cast issue happens first
+
+**Real-world example from fp16_sqrt:**
+```skalp
+pub fn fp16_sqrt(a: bit[32]) -> bit[32] {
+    let a_fp16 = a[15:0] as fp16;      // ← This pattern FAILS
+    let result_fp16 = a_fp16.sqrt();   // ← Method call issue is secondary
+    return {16'b0, result_fp16 as bit[16]}
+}
+```
+
+### Root Cause (RESOLVED)
+**Location:** `crates/skalp-frontend/src/hir_builder.rs` lines 1871, 2049
+
+The HIR builder's let statement parser (`build_let_statement` and `build_tuple_destructuring`) filtered expression types to find the RHS value, but was missing `SyntaxKind::CastExpr` from the filter list.
+
+When `let x = 42 as bit[32]` was parsed:
+1. ✅ Parser created: `LetStmt` containing `CastExpr(42, bit[32])`
+2. ❌ HIR builder filtered expressions, excluding `CastExpr`
+3. ❌ `expr_children` was empty, causing `value_node` to be None
+4. ❌ The `?` operator at line 2063 returned None, silently dropping the entire let statement
+5. ❌ Function body contained only `Return(x)`, where `x` had no binding
+6. ❌ Unresolved variable `x` defaulted to 0 in code generation
+
+**Key insight:** The bug was NOT in the MIR/SIR pipeline as initially suspected - it was in the HIR builder silently dropping let statements with cast expressions!
+
+### Fix Applied
+**Location:** `crates/skalp-frontend/src/hir_builder.rs` lines 1871, 2049
+
+Added `SyntaxKind::CastExpr` to the expression filter lists in both `build_let_statement` and `build_tuple_destructuring`:
+
+```rust
+// Line 1871 (tuple destructuring):
+| SyntaxKind::CastExpr  // CRITICAL FIX (Bug #38)
+
+// Line 2049 (simple let):
+| SyntaxKind::CastExpr  // CRITICAL FIX (Bug #38)
+```
+
+This allows the HIR builder to recognize and preserve cast expressions in let statement RHS positions.
+
+### Verification
+✅ Test case `/tmp/test_let_with_cast.sk` now generates correct output:
+```systemverilog
+logic [31:0] x;
+assign x = 42;
+assign result = x;
+```
+
+✅ Previously generated (WRONG): `assign result = 0;`
+✅ Now generates (CORRECT): `assign result = x;` where `x = 42`
+
+### Related Issues
+- **Bug #37**: Fixed - ConcatExpr in return statements now works
+- **L2-L5 Bug #1**: Method calls - still needs investigation, but this bug happens first
+- **L2-L5 Bug #2**: Bit concatenation - fixed by Bug #37
+
+### Test Cases Created
+- `/tmp/test_direct_return.sk` - ✅ Works
+- `/tmp/test_with_cast_no_let.sk` - ✅ Works
+- `/tmp/test_with_let_no_cast.sk` - ✅ Works
+- `/tmp/test_let_with_cast.sk` - ❌ FAILS (Bug #38)
+- `/tmp/test_fp16_sqrt_pattern.sk` - ❌ FAILS (Bug #38 + method calls)
+
+### Priority
+**CRITICAL** - This is the primary blocker for completing 25 of 43 Karythra CLE operations.
+
