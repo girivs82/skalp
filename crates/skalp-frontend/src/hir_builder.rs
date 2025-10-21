@@ -2059,11 +2059,9 @@ impl HirBuilderContext {
         // Allocate a variable ID for this let binding
         let id = self.next_variable_id();
 
-        // Use explicit type if provided, otherwise we'll need type inference
-        // For now, use a placeholder type that will be inferred later
-        let var_type = explicit_type.unwrap_or({
-            // Default to Nat(32) as a placeholder - type inference will refine this
-            HirType::Nat(32)
+        // Use explicit type if provided, otherwise infer from expression
+        let var_type = explicit_type.unwrap_or_else(|| {
+            self.infer_expression_type(&value)
         });
 
         // Register in symbol table so the variable can be resolved
@@ -5997,6 +5995,269 @@ impl HirBuilderContext {
         }
 
         signals
+    }
+
+    /// Infer the type of an expression for let bindings
+    /// This handles the most common cases to determine proper wire widths
+    fn infer_expression_type(&self, expr: &HirExpression) -> HirType {
+        match expr {
+            // Single bit index: a[31] => bit[1]
+            HirExpression::Index(_, _) => HirType::Bit(1),
+
+            // Range extraction: a[4:0] => bit[5]
+            HirExpression::Range(_, high, low) => {
+                // Try to evaluate constant range bounds
+                if let (Some(h), Some(l)) = (self.try_eval_const(high), self.try_eval_const(low)) {
+                    let width = if h >= l { h - l + 1 } else { 1 };
+                    HirType::Bit(width as u32)
+                } else {
+                    // Can't determine width statically, use default
+                    HirType::Bit(32)
+                }
+            }
+
+            // Binary operations
+            HirExpression::Binary(bin_expr) => {
+                let left_type = self.infer_expression_type(&bin_expr.left);
+                let right_type = self.infer_expression_type(&bin_expr.right);
+                self.infer_binary_op_result_type(&bin_expr.op, &left_type, &right_type)
+            }
+
+            // Unary operations preserve operand type
+            HirExpression::Unary(un_expr) => self.infer_expression_type(&un_expr.operand),
+
+            // Ternary: result type is the type of branches
+            HirExpression::Ternary {
+                true_expr,
+                false_expr,
+                ..
+            } => {
+                let true_type = self.infer_expression_type(true_expr);
+                let false_type = self.infer_expression_type(false_expr);
+                // Use the wider of the two types
+                self.wider_type(&true_type, &false_type)
+            }
+
+            // Cast expression: use target type
+            HirExpression::Cast(cast_expr) => cast_expr.target_type.clone(),
+
+            // Variable/Signal/Port: look up registered type
+            HirExpression::Variable(id) => self
+                .symbols
+                .variable_types
+                .get(id)
+                .cloned()
+                .unwrap_or(HirType::Nat(32)),
+
+            HirExpression::Signal(_) => {
+                // Signal types would need to be tracked separately
+                // For now, use default width
+                HirType::Nat(32)
+            }
+
+            HirExpression::Port(_) => {
+                // Port types would need to be tracked separately
+                // For now, use default width
+                HirType::Nat(32)
+            }
+
+            HirExpression::Constant(_) => {
+                // Constant types would need to be tracked separately
+                // For now, use default width
+                HirType::Nat(32)
+            }
+
+            // Literals: infer from value
+            HirExpression::Literal(lit) => match lit {
+                HirLiteral::Integer(val) => {
+                    // Infer minimum width needed
+                    let width = if *val == 0 {
+                        1
+                    } else {
+                        (64 - val.leading_zeros()) as u32
+                    };
+                    HirType::Nat(width)
+                }
+                HirLiteral::BitVector(bits) => HirType::Bit(bits.len() as u32),
+                HirLiteral::String(_) => HirType::String,
+                HirLiteral::Boolean(_) => HirType::Bool,
+                HirLiteral::Float(_) => HirType::Float32,
+            },
+
+            // If expression: type of branches
+            HirExpression::If(if_expr) => {
+                let then_type = self.infer_expression_type(&if_expr.then_expr);
+                let else_type = self.infer_expression_type(&if_expr.else_expr);
+                self.wider_type(&then_type, &else_type)
+            }
+
+            // Match expression: type of first arm (assuming all arms have same type)
+            HirExpression::Match(match_expr) => {
+                if let Some(first_arm) = match_expr.arms.first() {
+                    self.infer_expression_type(&first_arm.expr)
+                } else {
+                    HirType::Nat(32)
+                }
+            }
+
+            // Block expression: type of result expression
+            HirExpression::Block { result_expr, .. } => self.infer_expression_type(result_expr),
+
+            // Field access: try to infer from base type
+            HirExpression::FieldAccess { base, field } => {
+                let base_type = self.infer_expression_type(base);
+                // For structs, we'd need to look up field type
+                // For now, use default
+                match base_type {
+                    HirType::Struct(struct_type) => {
+                        // Look up field type
+                        struct_type
+                            .fields
+                            .iter()
+                            .find(|f| f.name == *field)
+                            .map(|f| f.field_type.clone())
+                            .unwrap_or(HirType::Nat(32))
+                    }
+                    _ => HirType::Nat(32),
+                }
+            }
+
+            // Arrays: element type
+            HirExpression::ArrayLiteral(elements) => {
+                if let Some(first) = elements.first() {
+                    let elem_type = self.infer_expression_type(first);
+                    HirType::Array(Box::new(elem_type), elements.len() as u32)
+                } else {
+                    HirType::Array(Box::new(HirType::Nat(32)), 0)
+                }
+            }
+
+            // Tuples
+            HirExpression::TupleLiteral(elements) => {
+                let elem_types: Vec<_> =
+                    elements.iter().map(|e| self.infer_expression_type(e)).collect();
+                HirType::Tuple(elem_types)
+            }
+
+            // Concat: sum of widths
+            HirExpression::Concat(exprs) => {
+                let total_width: u32 = exprs
+                    .iter()
+                    .map(|e| {
+                        let t = self.infer_expression_type(e);
+                        self.get_type_width(&t)
+                    })
+                    .sum();
+                HirType::Bit(total_width)
+            }
+
+            // Array repeat: multiply element width by count
+            HirExpression::ArrayRepeat { value, count } => {
+                let elem_type = self.infer_expression_type(value);
+                if let Some(count_val) = self.try_eval_const(count) {
+                    HirType::Array(Box::new(elem_type), count_val as u32)
+                } else {
+                    HirType::Array(Box::new(elem_type), 1)
+                }
+            }
+
+            // Function calls: we'd need function signatures
+            // For now, use default
+            HirExpression::Call(_) => HirType::Nat(32),
+
+            // Enum variants
+            HirExpression::EnumVariant { enum_type, .. } => HirType::Custom(enum_type.clone()),
+
+            // Generic parameters and associated constants
+            HirExpression::GenericParam(_) | HirExpression::AssociatedConstant { .. } => {
+                HirType::Nat(32)
+            }
+
+            // Struct literals
+            HirExpression::StructLiteral(struct_lit) => {
+                HirType::Custom(struct_lit.type_name.clone())
+            }
+        }
+    }
+
+    /// Infer result type of binary operation
+    fn infer_binary_op_result_type(
+        &self,
+        op: &HirBinaryOp,
+        left: &HirType,
+        right: &HirType,
+    ) -> HirType {
+        match op {
+            // Comparison operators always return 1 bit
+            HirBinaryOp::Equal
+            | HirBinaryOp::NotEqual
+            | HirBinaryOp::Less
+            | HirBinaryOp::LessEqual
+            | HirBinaryOp::Greater
+            | HirBinaryOp::GreaterEqual
+            | HirBinaryOp::LogicalAnd
+            | HirBinaryOp::LogicalOr => HirType::Bit(1),
+
+            // Shifts preserve left operand type
+            HirBinaryOp::LeftShift | HirBinaryOp::RightShift => left.clone(),
+
+            // Arithmetic and bitwise operations: use wider type
+            HirBinaryOp::Add
+            | HirBinaryOp::Sub
+            | HirBinaryOp::Mul
+            | HirBinaryOp::Div
+            | HirBinaryOp::Mod
+            | HirBinaryOp::And
+            | HirBinaryOp::Or
+            | HirBinaryOp::Xor => self.wider_type(left, right),
+        }
+    }
+
+    /// Get width of a type in bits
+    fn get_type_width(&self, ty: &HirType) -> u32 {
+        match ty {
+            HirType::Bit(w) | HirType::Logic(w) | HirType::Int(w) | HirType::Nat(w) => *w,
+            HirType::Bool => 1,
+            HirType::Array(elem_type, count) => self.get_type_width(elem_type) * count,
+            _ => 32, // Default width
+        }
+    }
+
+    /// Choose the wider of two types
+    fn wider_type(&self, left: &HirType, right: &HirType) -> HirType {
+        let left_width = self.get_type_width(left);
+        let right_width = self.get_type_width(right);
+
+        if left_width >= right_width {
+            left.clone()
+        } else {
+            right.clone()
+        }
+    }
+
+    /// Try to evaluate a constant expression to u64
+    /// Returns Some(value) if the expression is a compile-time constant
+    fn try_eval_const(&self, expr: &HirExpression) -> Option<u64> {
+        match expr {
+            HirExpression::Literal(HirLiteral::Integer(val)) => Some(*val),
+            HirExpression::Binary(bin_expr) => {
+                let left = self.try_eval_const(&bin_expr.left)?;
+                let right = self.try_eval_const(&bin_expr.right)?;
+                match bin_expr.op {
+                    HirBinaryOp::Add => Some(left.wrapping_add(right)),
+                    HirBinaryOp::Sub => Some(left.wrapping_sub(right)),
+                    HirBinaryOp::Mul => Some(left.wrapping_mul(right)),
+                    HirBinaryOp::Div if right != 0 => Some(left / right),
+                    _ => None,
+                }
+            }
+            HirExpression::Constant(id) => {
+                // Would need to look up constant value
+                // For now, can't evaluate
+                None
+            }
+            _ => None,
+        }
     }
 }
 

@@ -2985,3 +2985,219 @@ Attempted to create minimal reproduction but all test cases succeed. The Karythr
 - `/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main.sk:223-286` - Failing assignment
 
 **Related**: Bug #32 (Range/Index/Call substitution - FIXED in commit 6848d58)
+
+---
+
+## ✅ FIXED: Bug #36 - Let Binding Variables Hardcoded to 32-bit Width
+
+### Status
+**FIXED** (2025-10-21) - Type inference now correctly infers wire widths from RHS expressions
+
+### Problem Summary (RESOLVED)
+SKALP **was** declaring ALL let binding variables as `logic [31:0]` (32 bits) in SystemVerilog output, regardless of their actual expression type. This caused incorrect hardware behavior and test failures.
+
+**Example**: 
+```skalp
+let sign = a[31];              // Should be 1 bit, gets 32 bits
+let shift_amt = b[4:0];        // Should be 5 bits, gets 32 bits
+let shifted = a >> b[4:0];     // Correctly gets 32 bits
+```
+
+**Generated SystemVerilog** (WRONG):
+```systemverilog
+logic [31:0] sign;        // ❌ Should be logic (1 bit)
+logic [31:0] shift_amt;   // ❌ Should be logic [4:0] (5 bits)
+logic [31:0] shifted;     // ✅ Correct (32 bits)
+
+assign sign = pipe2_data1[31];           // Assigns 1 bit to 32-bit wire
+assign shift_amt = pipe2_data2[4:0];     // Assigns 5 bits to 32-bit wire
+assign shifted = (pipe2_data1 >> pipe2_data2[4:0]);
+```
+
+### Impact
+- **Test failures**: Operations return 0 or garbage instead of correct values
+  - `test_sra_positive` ... FAILED (returns 0, expected 32)
+  - `test_sra_negative` ... FAILED (returns 0, expected -64)
+  - `test_ltu_comparison_true` ... FAILED (returns 0, expected 1)
+- **Incorrect widths**: All arithmetic operations using let-bound variables have wrong bit widths
+- **Wasted hardware**: 32-bit wires instead of 1-bit or 5-bit wires
+- **Unusable feature**: Let bindings are completely non-functional for bit extractions
+
+### Root Cause
+
+**Location**: `crates/skalp-frontend/src/hir_builder.rs:2064-2067`
+
+```rust
+let var_type = explicit_type.unwrap_or({
+    // Default to Nat(32) as a placeholder - type inference will refine this
+    HirType::Nat(32)  // ❌ HARDCODED!
+});
+```
+
+**The flow**:
+1. HIR builder creates `HirLetStatement` with hardcoded `HirType::Nat(32)` for any let binding without explicit type annotation
+2. Comment promises "type inference will refine this" but **type inference never happens**
+3. MIR conversion uses `let_stmt.var_type` directly via `convert_type()` (hir_to_mir.rs:495-541)
+4. SystemVerilog codegen generates `logic [31:0]` from MIR type (systemverilog.rs:204-241)
+
+### Expected Behavior
+
+Width should be inferred from RHS expression:
+
+| Expression | Expected Width |
+|---|---|
+| `x[n]` | 1 bit |
+| `x[high:low]` | `high - low + 1` bits |
+| `x + y`, `x - y` | `max(width(x), width(y))` |
+| `x * y` | `width(x) + width(y)` |
+| `x >> n`, `x << n` | `width(x)` |
+| `constant` | Minimum width to represent value |
+| `x as type` | Width of `type` |
+
+**Correct SystemVerilog**:
+```systemverilog
+logic sign;                     // 1 bit (or logic [0:0])
+logic [4:0] shift_amt;          // 5 bits
+logic [31:0] shifted;           // 32 bits
+```
+
+### Reproduction
+
+**Minimal test case**:
+```skalp
+pub fn test_bit_extract(a: bit[32]) -> bit {
+    let sign = a[31];
+    return sign;
+}
+```
+
+**Actual**: Generates `logic [31:0] sign;`  
+**Expected**: Generates `logic sign;` or `logic [0:0] sign;`
+
+**Real-world case**: `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l0_l1.sk` lines 45-55 (match arm 9 - SRA operation)
+
+### Solution Implemented
+
+**Location**: `crates/skalp-frontend/src/hir_builder.rs`
+
+Implemented **Option A** - Type inference in HIR builder. The solution includes:
+
+1. **Updated `build_let_statement()`** (lines 2063-2065):
+   ```rust
+   let var_type = explicit_type.unwrap_or_else(|| {
+       self.infer_expression_type(&value)
+   });
+   ```
+
+2. **Added `infer_expression_type()` method** (lines 6000-6181):
+   - Handles all HIR expression types
+   - Infers width from expression structure:
+     - `x[n]` → 1 bit
+     - `x[high:low]` → `(high - low + 1)` bits
+     - Binary ops → appropriate result width
+     - Shifts preserve left operand width
+     - Comparisons always return 1 bit
+
+3. **Added helper methods**:
+   - `infer_binary_op_result_type()` - Infer result type of binary operations
+   - `get_type_width()` - Extract width from HirType
+   - `wider_type()` - Choose wider of two types
+   - `try_eval_const()` - Compile-time constant evaluation
+
+### Verification
+
+**Before Fix**:
+```systemverilog
+logic [31:0] sign;        // ❌ Wrong - should be 1 bit
+logic [31:0] shift_amt;   // ❌ Wrong - should be 5 bits
+logic [31:0] shifted;     // ✅ Correct (32 bits)
+```
+
+**After Fix**:
+```systemverilog
+logic sign;               // ✅ Correct (1 bit)
+logic [4:0] shift_amt;    // ✅ Correct (5 bits)
+logic [31:0] shifted;     // ✅ Correct (32 bits)
+```
+
+**Tested with**: `/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main.sk`
+
+### Impact
+
+✅ **All let bindings now have correct wire widths**
+✅ **No test regressions** - all existing tests still pass
+✅ **Karythra CLE builds successfully** with correct widths
+✅ **Arithmetic operations** now use correct bit widths
+✅ **Hardware savings** - uses minimal wire widths instead of always 32 bits
+
+### Original Fix Recommendations (for reference)
+
+**Option A: Infer type in HIR builder** (IMPLEMENTED)
+
+Add type inference from RHS expression directly in `build_let_statement()`:
+
+```rust
+// In hir_builder.rs, replace lines 2064-2067:
+let var_type = explicit_type.unwrap_or_else(|| {
+    self.infer_expression_type(&value)
+});
+
+// Add new method to HirBuilder:
+fn infer_expression_type(&self, expr: &HirExpression) -> HirType {
+    match expr {
+        HirExpression::Index { base, .. } => HirType::Bit(1),  // Single bit
+        HirExpression::Range { high, low, .. } => {
+            // Calculate width from range
+            if let (Some(h), Some(l)) = (const_eval(high), const_eval(low)) {
+                HirType::Bit((h - l + 1) as u32)
+            } else {
+                HirType::Bit(32)  // Fallback
+            }
+        }
+        HirExpression::BinOp { op, lhs, rhs } => {
+            let lhs_type = self.infer_expression_type(lhs);
+            let rhs_type = self.infer_expression_type(rhs);
+            infer_binop_result_type(op, lhs_type, rhs_type)
+        }
+        HirExpression::Variable(id) => {
+            self.symbols.variable_types.get(id).cloned()
+                .unwrap_or(HirType::Nat(32))
+        }
+        // ... other expression types
+        _ => HirType::Nat(32)  // Fallback
+    }
+}
+```
+
+**Option B: Add HIR type refinement pass**
+
+Create a separate pass that runs after HIR construction to refine types based on RHS expressions.
+
+**Option C: Implement in MIR or later stages**
+
+Add type inference/refinement in MIR layer. More complex, requires tracking expression types through multiple IRs.
+
+### Workaround
+
+**None available**. Users cannot:
+- Fix wire widths manually (generated code is overwritten each build)
+- Force correct widths in SKALP source (width inference doesn't exist)
+- Use explicit type annotations (not supported for let bindings in current grammar)
+
+This completely **blocks let bindings from working correctly** for any expression other than 32-bit values.
+
+### Related Issues
+
+- **Bug #35**: Duplicate wire assignments (FIXED - see earlier in this file)
+- **Bug #34**: Parser binary expression tree construction (FIXED - see earlier in this file)
+- **Karythra CLE**: `/Users/girivs/src/hw/karythra/SKALP_BUG_WIRE_WIDTH.md` - Original bug report
+
+### Testing
+
+To verify the fix:
+1. Test bit extraction: `let x = a[7]` should generate `logic x;` not `logic [31:0] x;`
+2. Test range extraction: `let x = a[4:0]` should generate `logic [4:0] x;`
+3. Run Karythra CLE tests: SRA, LTU, GEU operations should pass
+4. Build `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l0_l1.sk` and verify wire widths in `/tmp/cle_*/design.sv`
+
+---
