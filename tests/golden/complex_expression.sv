@@ -8,6 +8,4 @@ module ComplexExpr (
     output overflow
 );
 
-    assign overflow = (((~a[31] & ~b[31]) & c[31]) | ((a[31] & b[31]) & ~c[31]));
-
 endmodule

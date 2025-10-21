@@ -11,7 +11,7 @@ use skalp_mir::{
     Assignment, AssignmentKind, DataType, EdgeType, EnumType, Mir, Module, Process, ProcessKind,
     Statement, StructType,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Generate SystemVerilog from MIR and LIR
 pub fn generate_systemverilog_from_mir(mir: &Mir, lir: &LirDesign) -> Result<String> {
@@ -201,14 +201,31 @@ fn generate_module(
         sv.push('\n');
     }
 
-    // Generate internal variable declarations
+    // Generate internal variable declarations with collision detection
+    // Track which names have been declared to detect collisions
+    let mut declared_variable_names: HashMap<String, skalp_mir::VariableId> = HashMap::new();
+    let mut variable_unique_names: HashMap<skalp_mir::VariableId, String> = HashMap::new();
+
     for variable in &mir_module.variables {
         let (element_width, array_dim) = get_type_dimensions(&variable.var_type);
+
+        // Check if this variable name has already been declared
+        let unique_name = if declared_variable_names.contains_key(&variable.name) {
+            // Collision detected - use unique name with variable ID suffix
+            format!("{}_{}", variable.name, variable.id.0)
+        } else {
+            // First occurrence - use original name and track it
+            declared_variable_names.insert(variable.name.clone(), variable.id);
+            variable.name.clone()
+        };
+
+        // Store the unique name mapping for use in variable references
+        variable_unique_names.insert(variable.id, unique_name.clone());
 
         // Variables are always logic (combinational variables in processes)
         sv.push_str(&format!(
             "    logic {}{}{}",
-            element_width, variable.name, array_dim
+            element_width, unique_name, array_dim
         ));
 
         // Add initial value if present
@@ -224,10 +241,20 @@ fn generate_module(
     }
 
     // Generate continuous assignments - expand struct assignments
+    // Track assigned targets to avoid duplicates from match arm let bindings
+    let mut assigned_targets: HashSet<String> = HashSet::new();
     let mut assignment_count = 0;
+
     for assign in &mir_module.assignments {
         let expanded = expand_struct_assignment(&assign.lhs, &assign.rhs, mir_module);
         for (lhs_str, rhs_str) in expanded {
+            // Check if this target has already been assigned
+            if assigned_targets.contains(&lhs_str) {
+                // Skip duplicate assignment (from duplicate let bindings in match arms)
+                continue;
+            }
+
+            assigned_targets.insert(lhs_str.clone());
             sv.push_str(&format!("    assign {} = {};\n", lhs_str, rhs_str));
             assignment_count += 1;
         }
@@ -598,13 +625,48 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
                 .unwrap_or_else(|| format!("signal_{}", id.0))
         }
         skalp_mir::LValue::Variable(id) => {
-            // Find the variable name by ID
-            module
+            // Find the variable by ID
+            let variable = module
                 .variables
                 .iter()
-                .find(|v| v.id == *id)
-                .map(|v| v.name.clone())
-                .unwrap_or_else(|| format!("var_{}", id.0))
+                .find(|v| v.id == *id);
+
+            if let Some(var) = variable {
+                // Check if this variable is the first one with this name
+                // The first occurrence keeps the original name, subsequent ones get suffixed
+                let first_with_name = module
+                    .variables
+                    .iter()
+                    .find(|v| v.name == var.name);
+
+                if let Some(first_var) = first_with_name {
+                    if first_var.id == *id {
+                        // This is the first variable with this name - use original name
+                        var.name.clone()
+                    } else {
+                        // This is not the first - check if there are multiple with same name
+                        let same_name_count = module
+                            .variables
+                            .iter()
+                            .filter(|v| v.name == var.name)
+                            .count();
+
+                        if same_name_count > 1 {
+                            // Name collision exists - use unique name with ID suffix
+                            format!("{}_{}", var.name, id.0)
+                        } else {
+                            // No collision (shouldn't happen, but handle it)
+                            var.name.clone()
+                        }
+                    }
+                } else {
+                    // Shouldn't happen, but fallback to original name
+                    var.name.clone()
+                }
+            } else {
+                // Variable not found - use fallback
+                format!("var_{}", id.0)
+            }
         }
         skalp_mir::LValue::Port(id) => {
             // Find the port name by ID
