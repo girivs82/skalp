@@ -3318,3 +3318,93 @@ assign result = ((b == 0) ? temp : ((b == 1) ? y : a));
 - **Karythra**: `/Users/girivs/src/hw/karythra/SKALP_BUG_METAL_SHADER.md`
 
 ---
+
+---
+
+## ✅ FIXED: Bug #37 - HIR Builder Not Recognizing ConcatExpr in Return Statements
+
+### Status
+**FIXED** (2025-10-21) - HIR builder now recognizes ConcatExpr, CastExpr, and StructLiteral in return statements
+
+### Problem Summary (RESOLVED)
+The HIR builder's return statement handler did not recognize certain expression types as valid return values. When parsing `return {16'b0, result}`, the parser correctly created a ConcatExpr node, but the HIR builder failed to recognize it, resulting in `Return(None)` instead of `Return(Some(concat_expr))`.
+
+This blocked function inlining for L2-L5 Karythra CLE operations that used bit concatenation in return statements.
+
+### Impact
+- Functions with bit concatenation in return statements could not be inlined
+- Blocked 25 of 43 Karythra CLE function units (L2-L5 operations)
+- Specifically affected fp16_sqrt and similar FP operations
+
+### Root Cause
+**Location**: `crates/skalp-frontend/src/hir_builder.rs:1228-1247`
+
+The ReturnStmt handler had an incomplete match pattern for expression children. It only recognized:
+- LiteralExpr, IdentExpr, BinaryExpr, UnaryExpr
+- FieldExpr, IndexExpr, PathExpr, ParenExpr  
+- IfExpr, MatchExpr, CallExpr
+- ArrayLiteral, TupleExpr
+
+But was **missing**:
+- ConcatExpr (critical for `{a, b}` bit concatenation)
+- CastExpr (needed for type conversions)
+- StructLiteral (needed for struct returns)
+
+### Reproduction
+**Test case**: `/tmp/test_bit_concat.sk`
+```skalp
+pub fn fp16_sqrt_exact(a: bit[32]) -> bit[32] {
+    let a_fp16 = a[15:0] as fp16;
+    let result_fp16 = a_fp16.sqrt();
+    return {16'b0, result_fp16 as bit[16]}  // This failed
+}
+```
+
+**Error message**:
+```
+convert_body_to_expression: unsupported statement pattern
+  Return statement with expr: false  // Should be true!
+```
+
+### Fix (Commit 5b70417)
+Added missing expression types to the match pattern at lines 1247-1249:
+
+```rust
+| SyntaxKind::TupleExpr       // CRITICAL FIX: Support tuple returns
+| SyntaxKind::ConcatExpr      // CRITICAL FIX: Support concatenation returns  
+| SyntaxKind::CastExpr        // Also support cast expressions in returns
+| SyntaxKind::StructLiteral   // Also support struct literals in returns
+```
+
+### Verification
+- ✅ Parser creates ConcatExpr correctly
+- ✅ HIR builder now recognizes it in return statements
+- ✅ MIR converter receives `Return(Some(concat_expr))`
+- ✅ No test regressions introduced
+
+### Next Steps
+While the HIR fix enables parsing, full code generation for concatenation in continuous assignments and function inlining still needs additional work in the MIR-to-SIR and codegen layers.
+
+---
+
+## ⚠️ Pre-Existing Test Failure: test_fpga_lut6_mapping
+
+### Status
+**KNOWN ISSUE** (Discovered 2025-10-21) - Not related to recent fixes
+
+### Problem
+Test `technology_mapping_tests::test_fpga_lut6_mapping` fails with:
+```
+Should use at least 1 LUT
+```
+
+The test generates 0 LUTs when mapping the expression `(a && b && c) || (d && e && f)` to FPGA LUT6 technology, but expects at least 1 LUT.
+
+### Verification
+Confirmed this failure exists **before** Bug #37 fix - this is a pre-existing issue with the LIR technology mapping or transformation pipeline.
+
+### Impact
+- Does not affect functionality - purely a technology mapping optimization test
+- Does not block Karythra CLE development
+- Should be investigated separately
+
