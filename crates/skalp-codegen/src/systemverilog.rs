@@ -626,18 +626,12 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
         }
         skalp_mir::LValue::Variable(id) => {
             // Find the variable by ID
-            let variable = module
-                .variables
-                .iter()
-                .find(|v| v.id == *id);
+            let variable = module.variables.iter().find(|v| v.id == *id);
 
             if let Some(var) = variable {
                 // Check if this variable is the first one with this name
                 // The first occurrence keeps the original name, subsequent ones get suffixed
-                let first_with_name = module
-                    .variables
-                    .iter()
-                    .find(|v| v.name == var.name);
+                let first_with_name = module.variables.iter().find(|v| v.name == var.name);
 
                 if let Some(first_var) = first_with_name {
                     if first_var.id == *id {

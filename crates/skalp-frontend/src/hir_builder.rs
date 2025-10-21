@@ -1244,6 +1244,9 @@ impl HirBuilderContext {
                                 | SyntaxKind::CallExpr
                                 | SyntaxKind::ArrayLiteral
                                 | SyntaxKind::TupleExpr // CRITICAL FIX: Support tuple returns
+                                | SyntaxKind::ConcatExpr // CRITICAL FIX: Support concatenation returns
+                                | SyntaxKind::CastExpr // Also support cast expressions in returns
+                                | SyntaxKind::StructLiteral // Also support struct literals in returns
                         )
                     });
 
@@ -2060,9 +2063,7 @@ impl HirBuilderContext {
         let id = self.next_variable_id();
 
         // Use explicit type if provided, otherwise infer from expression
-        let var_type = explicit_type.unwrap_or_else(|| {
-            self.infer_expression_type(&value)
-        });
+        let var_type = explicit_type.unwrap_or_else(|| self.infer_expression_type(&value));
 
         // Register in symbol table so the variable can be resolved
         self.symbols.variables.insert(name.clone(), id);
@@ -6134,8 +6135,10 @@ impl HirBuilderContext {
 
             // Tuples
             HirExpression::TupleLiteral(elements) => {
-                let elem_types: Vec<_> =
-                    elements.iter().map(|e| self.infer_expression_type(e)).collect();
+                let elem_types: Vec<_> = elements
+                    .iter()
+                    .map(|e| self.infer_expression_type(e))
+                    .collect();
                 HirType::Tuple(elem_types)
             }
 

@@ -2822,6 +2822,18 @@ impl<'hir> HirToMir<'hir> {
             _ => {
                 eprintln!("convert_body_to_expression: unsupported statement pattern");
                 eprintln!("  Remaining statements: {:?}", remaining_stmts.len());
+                if !remaining_stmts.is_empty() {
+                    eprintln!(
+                        "  First statement type: {:?}",
+                        std::mem::discriminant(&remaining_stmts[0])
+                    );
+                    match &remaining_stmts[0] {
+                        hir::HirStatement::Return(opt) => {
+                            eprintln!("    Return statement with expr: {}", opt.is_some());
+                        }
+                        other => eprintln!("    Statement variant: {:?}", other),
+                    }
+                }
                 None
             }
         }?;
