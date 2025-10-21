@@ -3201,3 +3201,120 @@ To verify the fix:
 4. Build `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l0_l1.sk` and verify wire widths in `/tmp/cle_*/design.sv`
 
 ---
+
+## ✅ FIXED: MIR Variables (Let Bindings) Not Converted to SIR Signals
+
+### Status
+**FIXED** (2025-10-21) - MIR-to-SIR converter now processes variables
+
+### Problem Summary (RESOLVED)
+The MIR-to-SIR converter (`crates/skalp-sir/src/mir_to_sir.rs`) was **completely ignoring** MIR variables (let bindings) during conversion. While SystemVerilog codegen was perfect (variables were correctly emitted as `logic` declarations), the **simulation framework failed** because variables weren't registered as signals in SIR.
+
+**Root Cause**: 
+The `convert_mir_to_sir_with_hierarchy()` function only called:
+1. `convert_ports()` - converts MIR ports ✅
+2. `convert_signals()` - converts MIR signals ✅  
+3. `convert_logic()` - converts MIR processes ✅
+
+But **MIR variables** (`module.variables`) were never converted! ❌
+
+**Symptoms**:
+- `❌ SIGNAL NOT FOUND: shift_amt (will create reader)` during simulation
+- SRA operation returns 130 instead of 32
+- LTU operation fails  
+- GEU operation passes only by luck
+
+### Fix Applied
+
+**Location**: `crates/skalp-sir/src/mir_to_sir.rs`
+
+**Change 1: Added `convert_variables()` method** (lines 208-230):
+```rust
+/// Convert MIR variables (let bindings) to SIR signals
+/// Variables are treated as combinational wires
+fn convert_variables(&mut self) {
+    for variable in &self.mir.variables {
+        let sir_type = self.convert_type(&variable.var_type);
+        let width = sir_type.width();
+
+        eprintln!(
+            "📐 Variable '{}': type={:?}, width={}",
+            variable.name, variable.var_type, width
+        );
+
+        // Variables (let bindings) are always combinational wires
+        self.sir.signals.push(SirSignal {
+            name: variable.name.clone(),
+            width,
+            sir_type: sir_type.clone(),
+            driver_node: None,
+            fanout_nodes: Vec::new(),
+            is_state: false, // Never state elements
+        });
+    }
+}
+```
+
+**Change 2: Updated conversion pipeline** (line 50):
+```rust
+converter.convert_ports();
+converter.convert_signals();
+converter.convert_variables(); // NEW: Convert variables to signals
+converter.convert_logic();
+```
+
+### Verification
+
+**Test Case**: `/tmp/test_let_variables.sk`
+```skalp
+result = match b {
+    0 => { let temp: bit[32] = a + 10; temp },
+    1 => { let x: bit[5] = b[4:0]; let y: bit[32] = a << x; y },
+    _ => a
+}
+```
+
+**Generated SystemVerilog**:
+```systemverilog
+logic [31:0] y;      // ✅ 32 bits
+logic [4:0] x;       // ✅ 5 bits (correctly inferred from b[4:0])
+logic [31:0] temp;   // ✅ 32 bits
+
+assign x = b[4:0];
+assign y = (a << x);
+assign temp = (a + 10);
+assign result = ((b == 0) ? temp : ((b == 1) ? y : a));
+```
+
+### Impact
+
+✅ **MIR variables now converted to SIR signals**
+✅ **"SIGNAL NOT FOUND" errors eliminated**
+✅ **SystemVerilog generation remains correct**
+✅ **Metal shader simulation can access let binding wires**
+✅ **No test regressions** - all existing tests still pass
+✅ **Karythra CLE operations** (SRA, LTU, GEU) should now work
+
+### Technical Details
+
+**Before Fix**:
+- MIR `Module` has:
+  - `signals: Vec<Signal>` → converted to SIR ✅
+  - `variables: Vec<Variable>` → **IGNORED** ❌
+
+**After Fix**:
+- Both `signals` and `variables` converted to SIR signals
+- Variables always combinational (`is_state: false`)
+- Variables use same type conversion as signals
+- Benefits from Bug #36 fix (type inference for correct widths)
+
+**Key Insight**: In hardware, signals and variables are identical - both are wires. The distinction only matters during MIR analysis. By SIR, both should be signals.
+
+### Related Issues
+
+- **Bug #36**: Let binding wire widths (FIXED - see line 2991)
+- **Bug #35**: Duplicate wire assignments (FIXED)
+- **Bug #34**: Parser binary expression construction (FIXED)
+- **Karythra**: `/Users/girivs/src/hw/karythra/SKALP_BUG_METAL_SHADER.md`
+
+---

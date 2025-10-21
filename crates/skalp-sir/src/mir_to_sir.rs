@@ -47,6 +47,7 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
 
     converter.convert_ports();
     converter.convert_signals();
+    converter.convert_variables(); // Convert MIR variables (let bindings) to SIR signals
     converter.convert_logic();
 
     // CRITICAL: Flatten hierarchical instances
@@ -202,6 +203,30 @@ impl<'a> MirToSirConverter<'a> {
                     },
                 );
             }
+        }
+    }
+
+    /// Convert MIR variables (let bindings) to SIR signals
+    /// Variables are treated as combinational wires
+    fn convert_variables(&mut self) {
+        for variable in &self.mir.variables {
+            let sir_type = self.convert_type(&variable.var_type);
+            let width = sir_type.width();
+
+            eprintln!(
+                "📐 Variable '{}': type={:?}, width={}",
+                variable.name, variable.var_type, width
+            );
+
+            // Variables (let bindings) are always combinational wires, never registers
+            self.sir.signals.push(SirSignal {
+                name: variable.name.clone(),
+                width,
+                sir_type: sir_type.clone(),
+                driver_node: None,
+                fanout_nodes: Vec::new(),
+                is_state: false, // Variables are never state elements
+            });
         }
     }
 
