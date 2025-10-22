@@ -2877,11 +2877,42 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert the remaining statements to an expression
         let body_expr = match remaining_stmts {
-            // Single return statement
+            // Single return statement with expression
             [hir::HirStatement::Return(Some(expr))] => Some(expr.clone()),
+
+            // Single return statement without expression (void return or implicit unit)
+            // In hardware context, this shouldn't happen for non-void functions
+            [hir::HirStatement::Return(None)] => {
+                eprintln!("Warning: Return statement with no expression in function body");
+                eprintln!("  This may indicate an issue with HIR building");
+                None
+            }
 
             // If statement (possibly with returns in branches)
             [hir::HirStatement::If(if_stmt)] => self.convert_if_stmt_to_expr(if_stmt),
+
+            // Match expression as final statement - convert to HIR match expression
+            [hir::HirStatement::Match(match_stmt)] => {
+                self.convert_match_stmt_to_expr(match_stmt)
+            }
+
+            // Multiple statements - need to convert to block expression
+            // This happens when function has statements followed by return
+            stmts if stmts.len() > 1 => {
+                // Check if last statement is a return
+                if let Some(hir::HirStatement::Return(Some(return_expr))) = stmts.last() {
+                    // Build block with all statements except the last, then use return expr as result
+                    let block_stmts: Vec<_> = stmts[..stmts.len() - 1].to_vec();
+                    Some(hir::HirExpression::Block {
+                        statements: block_stmts,
+                        result_expr: Box::new(return_expr.clone()),
+                    })
+                } else {
+                    eprintln!("convert_body_to_expression: multiple statements without final return");
+                    eprintln!("  Statements: {:?}", stmts.len());
+                    None
+                }
+            }
 
             // Other cases not yet supported
             _ => {
@@ -2928,6 +2959,34 @@ impl<'hir> HirToMir<'hir> {
             condition: Box::new(if_stmt.condition.clone()),
             then_expr: Box::new(then_expr),
             else_expr: Box::new(else_expr),
+        }))
+    }
+
+    /// Convert a match-statement to a match-expression
+    fn convert_match_stmt_to_expr(
+        &self,
+        match_stmt: &hir::HirMatchStatement,
+    ) -> Option<hir::HirExpression> {
+        // Convert each arm from statement form to expression form
+        let arms: Option<Vec<_>> = match_stmt
+            .arms
+            .iter()
+            .map(|arm| {
+                // Convert arm's statements to an expression
+                let expr = self.convert_body_to_expression(&arm.statements)?;
+                Some(hir::HirMatchArmExpr {
+                    pattern: arm.pattern.clone(),
+                    guard: arm.guard.clone(),
+                    expr,
+                })
+            })
+            .collect();
+
+        let arms = arms?;
+
+        Some(hir::HirExpression::Match(hir::HirMatchExpr {
+            expr: Box::new(match_stmt.expr.clone()),
+            arms,
         }))
     }
 
