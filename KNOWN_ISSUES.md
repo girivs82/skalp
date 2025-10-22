@@ -3890,10 +3890,10 @@ This allows variables with cast expressions to be properly registered until the 
 
 ---
 
-## 🔴 CRITICAL: Bug #43 - Parser Creates Malformed Cast Expression AST
+## ✅ FIXED: Bug #43 - Parser Creates Malformed Cast Expression AST
 
 ### Status
-**CRITICAL** (Discovered 2025-10-22) - Root cause of Bug #42, workaround added
+**FIXED** (2025-01-23) - Parser bug fixed by removing duplicate cast handling
 
 ### Problem Summary
 The **parser** creates incorrect AST structure for cast expressions. Instead of making the source expression a CHILD of CastExpr, it creates them as SIBLINGS.
@@ -3946,12 +3946,21 @@ HIR builder detects malformed CastExpr nodes and manually constructs proper stru
 
 This allows cast expressions to work correctly in let bindings until parser is fixed.
 
-### Fix Required
-The parser needs to be fixed to:
-1. Create proper parent-child relationship in cast expression AST
-2. Make source expression a CHILD of CastExpr node
-3. Ensure both source expression and TypeAnnotation are children, not siblings
-4. Likely requires checkpoint usage similar to Bug #34 fix
+### Fix Applied (2025-01-23)
+**Location**: `crates/skalp-frontend/src/parse.rs:4302-4309`
+
+The parser bug was fixed by removing duplicate cast expression handling in the postfix expression loop. The issue was:
+
+1. **Correct implementation**: Lines 3770-3776 use checkpoints to properly wrap the parsed expression in a CastExpr node
+2. **Incorrect implementation**: Lines 4307-4316 attempted to handle casts as postfix operations, creating malformed AST
+
+**Fix**: Removed the incorrect postfix cast handling (lines 4307-4316), allowing the correct checkpoint-based implementation to work properly. Cast expressions now parse correctly with the source expression as a child of CastExpr.
+
+### Additional Fixes for Function Inlining
+**Location**: `crates/skalp-mir/src/hir_to_mir.rs`
+
+1. **Cast expression substitution** (lines 3538-3549): Added support for Cast expressions in `substitute_expression_with_var_map()` to preserve casts during function inlining
+2. **Type inference for inlined variables** (lines 3891-3907): Modified `infer_hir_type()` to check `dynamic_variables` for Variable expressions, enabling FP method detection after function inlining
 
 ### Related Bugs
 - Bug #42 - Let binding registration failure (caused by this, workaround applied)
@@ -3959,3 +3968,121 @@ The parser needs to be fixed to:
 - Bug #34 - Compound boolean expressions (similar parser AST issue, fixed)
 
 ---
+
+---
+
+## ✅ FIXED: Bug #44 - Nested function inlining fails with FP operations in let bindings
+
+**Status**: **FIXED** (2025-01-23) - Fixed by Bug #42/43 parser fix and FP method detection improvements
+
+**Discovered**: 2025-01-22
+
+**Description**: When a function containing FP operations in let bindings is called from within a match expression in another function, the nested inlining fails completely, producing circular assignments in the generated SystemVerilog.
+
+**Test Case**: `/tmp/test_nested_fp_inline.sk`
+
+**Example**:
+```skalp
+pub fn fp32_add_inner(a: bit[32], b: bit[32]) -> bit[32] {
+    let a_fp32 = a as fp32;
+    let b_fp32 = b as fp32;
+    let result_fp32 = a_fp32.add(b_fp32);  // FP method call in let binding
+    return result_fp32 as bit[32]
+}
+
+pub fn exec_fp_ops(opcode: nat[2], a: bit[32], b: bit[32]) -> bit[32] {
+    let result = match opcode {
+        0 => fp32_add_inner(a, b),  // Nested call fails to inline!
+        _ => 0
+    };
+    return result
+}
+```
+
+**Generated Output** (WRONG):
+```systemverilog
+logic [31:0] result;
+assign result = result;  // Circular assignment!
+```
+
+**Debug Output**:
+```
+[DEBUG] inline_function_call: fp32_add_inner with 2 args
+Warning: Return statement with no expression in function body
+  This may indicate an issue with HIR building
+[DEBUG] Match: FAILED to convert arm expression
+```
+
+**Root Cause**: When `convert_body_to_expression()` processes a function with FP method calls in let bindings during nested inlining, the return statement loses its expression, causing conversion to fail.
+
+**Impact**: **CRITICAL** - Blocks all Karythra CLE L2-L5 function units (25 FP/vector/crypto operations)
+
+**Affected Code**:
+- `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l2.sk` - 10 FP operations
+- `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l3.sk` - 6 vector operations  
+- `/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib/func_units_l4_l5.sk` - 7 graphics/crypto operations
+- `/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main.sk` - Main CLE implementation
+
+**Location**: `crates/skalp-mir/src/hir_to_mir.rs:2879-2935` (`convert_body_to_expression()`)
+
+**Workaround**: None currently known. Requires fix in HIR-to-MIR conversion logic.
+
+**Related Bugs**: May be related to Bug #42 and Bug #43 (cast expression issues in let bindings)
+
+
+---
+
+## CRITICAL UPDATE to Bug #44 (2025-01-22)
+
+**Root Cause Identified**: Bug #44 is actually a manifestation of Bug #42/43!
+
+### The Real Issue
+
+The HIR builder **drops cast expressions from return statements**, causing `Return(None)` instead of `Return(Some(cast_expr))`.
+
+**Evidence**:
+```
+# With cast in return:
+pub fn fp32_add(a: bit[32], b: bit[32]) -> bit[32] {
+    let a_fp32 = a as fp32;
+    let b_fp32 = b as fp32;
+    let result_fp32 = a_fp32.add(b_fp32);
+    return result_fp32 as bit[32]  // ← Cast expression DROPPED!
+}
+# Debug: [CONVERT_BODY] Stmt 0: Return(None)
+
+# With cast in separate let:
+pub fn fp32_add(a: bit[32], b: bit[32]) -> bit[32] {
+    let a_fp32 = a as fp32;
+    let b_fp32 = b as fp32;
+    let result_fp32 = a_fp32.add(b_fp32);
+    let result_bit = result_fp32 as bit[32];  // ← Cast in let statement
+    return result_bit  // ← No cast, works!
+}
+# Debug: [CONVERT_BODY] Stmt 0: Return(Some(expr))
+```
+
+### Workaround
+
+Move cast expressions from return statements into separate let bindings:
+
+```skalp
+// BROKEN:
+return result_fp32 as bit[32]
+
+// WORKAROUND:
+let result_bit = result_fp32 as bit[32];
+return result_bit
+```
+
+### Impact
+
+This affects ALL functions that return cast expressions, not just FP functions. The issue was discovered while implementing FP support because FP functions commonly return `fp_value as bit[N]`.
+
+### Related Issues
+
+- Bug #42: Let bindings with cast expressions not being registered
+- Bug #43: Parser creates malformed cast expression AST
+
+These are all part of the same underlying issue with cast expression handling in the HIR builder.
+

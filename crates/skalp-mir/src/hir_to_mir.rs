@@ -1959,68 +1959,90 @@ impl<'hir> HirToMir<'hir> {
                 // Check if this is a built-in FP method call (e.g., a_fp32.add(b_fp32))
                 // FP methods are transformed to method(receiver, args) by HIR builder
                 // So args[0] is the receiver for FP methods
+                // Try to detect FP method calls by checking if any argument has an FP type
+                // This handles cases where after function inlining, the receiver variable
+                // doesn't exist in HIR's variable list, causing type inference to fail
+                let mut is_fp_method = false;
                 if !call.args.is_empty() {
+                    // First try the receiver (args[0])
                     if let Some(receiver_type) = self.infer_hir_type(&call.args[0]) {
                         if self.is_float_type(&receiver_type) {
-                            // This is a method call on a float type
-                            // Map FP methods to MIR operations
-                            match call.function.as_str() {
-                                // Binary FP operations
-                                "add" if call.args.len() == 2 => {
-                                    let left = Box::new(self.convert_expression(&call.args[0])?);
-                                    let right = Box::new(self.convert_expression(&call.args[1])?);
-                                    return Some(Expression::Binary {
-                                        op: BinaryOp::FAdd,
-                                        left,
-                                        right,
-                                    });
-                                }
-                                "sub" if call.args.len() == 2 => {
-                                    let left = Box::new(self.convert_expression(&call.args[0])?);
-                                    let right = Box::new(self.convert_expression(&call.args[1])?);
-                                    return Some(Expression::Binary {
-                                        op: BinaryOp::FSub,
-                                        left,
-                                        right,
-                                    });
-                                }
-                                "mul" if call.args.len() == 2 => {
-                                    let left = Box::new(self.convert_expression(&call.args[0])?);
-                                    let right = Box::new(self.convert_expression(&call.args[1])?);
-                                    return Some(Expression::Binary {
-                                        op: BinaryOp::FMul,
-                                        left,
-                                        right,
-                                    });
-                                }
-                                "div" if call.args.len() == 2 => {
-                                    let left = Box::new(self.convert_expression(&call.args[0])?);
-                                    let right = Box::new(self.convert_expression(&call.args[1])?);
-                                    return Some(Expression::Binary {
-                                        op: BinaryOp::FDiv,
-                                        left,
-                                        right,
-                                    });
-                                }
-                                // Unary FP operations (via function calls)
-                                "sqrt" if call.args.len() == 1 => {
-                                    let arg = self.convert_expression(&call.args[0])?;
-                                    return Some(Expression::FunctionCall {
-                                        name: "sqrt".to_string(),
-                                        args: vec![arg],
-                                    });
-                                }
-                                "abs" if call.args.len() == 1 => {
-                                    let arg = self.convert_expression(&call.args[0])?;
-                                    return Some(Expression::FunctionCall {
-                                        name: "fabs".to_string(),
-                                        args: vec![arg],
-                                    });
-                                }
-                                _ => {
-                                    // Unknown FP method - fall through to regular inlining
+                            is_fp_method = true;
+                        }
+                    }
+
+                    // If receiver type inference failed, try other arguments
+                    // This handles inlined function bodies where variables aren't in HIR
+                    if !is_fp_method {
+                        for arg in call.args.iter() {
+                            if let Some(arg_type) = self.infer_hir_type(arg) {
+                                if self.is_float_type(&arg_type) {
+                                    is_fp_method = true;
+                                    break;
                                 }
                             }
+                        }
+                    }
+                }
+
+                if is_fp_method {
+                    // This is a method call on a float type
+                    // Map FP methods to MIR operations
+                    match call.function.as_str() {
+                        // Binary FP operations
+                        "add" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FAdd,
+                                left,
+                                right,
+                            });
+                        }
+                        "sub" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FSub,
+                                left,
+                                right,
+                            });
+                        }
+                        "mul" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FMul,
+                                left,
+                                right,
+                            });
+                        }
+                        "div" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FDiv,
+                                left,
+                                right,
+                            });
+                        }
+                        // Unary FP operations (via function calls)
+                        "sqrt" if call.args.len() == 1 => {
+                            let arg = self.convert_expression(&call.args[0])?;
+                            return Some(Expression::FunctionCall {
+                                name: "sqrt".to_string(),
+                                args: vec![arg],
+                            });
+                        }
+                        "abs" if call.args.len() == 1 => {
+                            let arg = self.convert_expression(&call.args[0])?;
+                            return Some(Expression::FunctionCall {
+                                name: "fabs".to_string(),
+                                args: vec![arg],
+                            });
+                        }
+                        _ => {
+                            // Unknown FP method - fall through to regular inlining
                         }
                     }
                 }
@@ -2395,10 +2417,6 @@ impl<'hir> HirToMir<'hir> {
                 //   - Integer width changes (truncation/extension)
                 //   - Signed/unsigned conversions
                 //   - Fixed-point/floating-point conversions
-                eprintln!(
-                    "[CAST_DEBUG] Cast inner expr type: {:?}",
-                    std::mem::discriminant(&*cast_expr.expr)
-                );
                 self.convert_expression(&cast_expr.expr)
             }
             hir::HirExpression::StructLiteral(struct_lit) => {
@@ -2871,7 +2889,6 @@ impl<'hir> HirToMir<'hir> {
         }
 
         if remaining_stmts.is_empty() {
-            eprintln!("convert_body_to_expression: no statements after let bindings");
             return None;
         }
 
@@ -2892,9 +2909,7 @@ impl<'hir> HirToMir<'hir> {
             [hir::HirStatement::If(if_stmt)] => self.convert_if_stmt_to_expr(if_stmt),
 
             // Match expression as final statement - convert to HIR match expression
-            [hir::HirStatement::Match(match_stmt)] => {
-                self.convert_match_stmt_to_expr(match_stmt)
-            }
+            [hir::HirStatement::Match(match_stmt)] => self.convert_match_stmt_to_expr(match_stmt),
 
             // Multiple statements - need to convert to block expression
             // This happens when function has statements followed by return
@@ -2908,7 +2923,9 @@ impl<'hir> HirToMir<'hir> {
                         result_expr: Box::new(return_expr.clone()),
                     })
                 } else {
-                    eprintln!("convert_body_to_expression: multiple statements without final return");
+                    eprintln!(
+                        "convert_body_to_expression: multiple statements without final return"
+                    );
                     eprintln!("  Statements: {:?}", stmts.len());
                     None
                 }
@@ -3501,15 +3518,11 @@ impl<'hir> HirToMir<'hir> {
                     call.args.len()
                 );
                 let mut substituted_args = Vec::new();
-                for (i, arg) in call.args.iter().enumerate() {
+                for arg in call.args.iter() {
                     let substituted_arg =
                         self.substitute_expression_with_var_map(arg, param_map, var_id_to_name)?;
                     substituted_args.push(substituted_arg);
                 }
-                eprintln!(
-                    "[DEBUG] Call: successfully substituted all {} args",
-                    substituted_args.len()
-                );
                 Some(hir::HirExpression::Call(hir::HirCallExpr {
                     function: call.function.clone(),
                     args: substituted_args,
@@ -3521,6 +3534,19 @@ impl<'hir> HirToMir<'hir> {
             | hir::HirExpression::Signal(_)
             | hir::HirExpression::Port(_)
             | hir::HirExpression::Constant(_) => Some(expr.clone()),
+
+            // Cast expression - substitute the inner expression
+            hir::HirExpression::Cast(cast) => {
+                let substituted_expr = Box::new(self.substitute_expression_with_var_map(
+                    &cast.expr,
+                    param_map,
+                    var_id_to_name,
+                )?);
+                Some(hir::HirExpression::Cast(hir::HirCastExpr {
+                    expr: substituted_expr,
+                    target_type: cast.target_type.clone(),
+                }))
+            }
 
             // Recursively handle other expression types as needed
             _ => {
@@ -3827,10 +3853,22 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::Variable(var_id) => {
                 // Look up variable in current entity's implementation
-                let entity_id = self.current_entity_id?;
-                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
-                let var = impl_block.variables.iter().find(|v| v.id == *var_id)?;
-                Some(var.var_type.clone())
+                if let Some(entity_id) = self.current_entity_id {
+                    if let Some(impl_block) =
+                        hir.implementations.iter().find(|i| i.entity == entity_id)
+                    {
+                        if let Some(var) = impl_block.variables.iter().find(|v| v.id == *var_id) {
+                            return Some(var.var_type.clone());
+                        }
+                    }
+                }
+
+                // Fall back to dynamic_variables (for let-bound variables from inlined functions)
+                if let Some((_, _, var_type)) = self.dynamic_variables.get(var_id) {
+                    return Some(var_type.clone());
+                }
+
+                None
             }
             hir::HirExpression::GenericParam(name) => {
                 // WORKAROUND for Bug #42/43: Parser creates malformed cast expression AST,

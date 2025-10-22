@@ -4304,15 +4304,8 @@ impl<'a> ParseState<'a> {
                     // This is not a postfix operation, so break from the loop
                     break;
                 }
-                Some(SyntaxKind::AsKw) => {
-                    // Type cast
-                    self.finish_node(); // finish current expression
-                    self.start_node(SyntaxKind::CastExpr);
-                    self.bump(); // consume 'as'
-                    self.parse_type();
-                    // Note: parse_type calls finish_node internally for TypeAnnotation
-                    // but we still need to finish the CastExpr
-                }
+                // Note: Cast expressions (as Type) are handled in parse_unary_expr() using checkpoints,
+                // not as postfix operations. Break here if we see 'as' keyword.
                 _ => break,
             }
         }
