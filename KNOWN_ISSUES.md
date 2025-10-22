@@ -1,3 +1,85 @@
+## ✅ FIXED: Bug #45 - Variable Name Collisions in Match Expression Arms
+
+### Status
+**FIXED** (2025-10-23) - Match arms now have isolated variable scopes with unique prefixes
+
+### Problem Summary (RESOLVED)
+When match expressions with block expressions (containing let statements) were converted to MIR, variables from different match arms would collide because they all shared the same `pending_statements` buffer. This caused variables with the same name from different arms to overwrite each other.
+
+**Example**: Match expression in Karythra CLE `exec_l2`
+```skalp
+let result = match opcode {
+    18 => fp16_add(a, b),   // Creates variables: a_fp16, b_fp16, result_fp16
+    19 => fp16_mul(a, b),   // Creates same variables: a_fp16, b_fp16, result_fp16
+    ...
+};
+```
+
+**Problem**: All arms created variables with the same names, causing collisions.
+
+### Impact
+- Variables from one match arm would be incorrectly referenced by other match arms
+- Example: L2 opcode 18 (FP16_ADD) would return `shift_amt` from L0-L1 opcode 9 (SRA)
+- Caused incorrect results for Karythra CLE L2 FP operations
+
+### Root Cause
+**Location**: `crates/skalp-mir/src/hir_to_mir.rs:2588` - `convert_match_to_conditionals()`
+
+When converting match expressions to ternary operators, all match arms shared the same `pending_statements` buffer. Variables created within block expressions in each arm were added to this shared buffer without any scoping mechanism to distinguish them.
+
+### Fix Applied
+**Location**: `crates/skalp-mir/src/hir_to_mir.rs`
+
+Added a match arm scoping mechanism:
+
+1. **Added `match_arm_prefix` field** (line 74):
+   ```rust
+   match_arm_prefix: Option<String>,
+   ```
+
+2. **Modified variable creation** (lines 524-530):
+   ```rust
+   let var_name = if let Some(ref prefix) = self.match_arm_prefix {
+       format!("{}_{}", prefix, let_stmt.name)
+   } else {
+       let_stmt.name.clone()
+   };
+   ```
+
+3. **Set prefix for each match arm** (lines 2622-2629, 2724-2731):
+   ```rust
+   let arm_prefix = format!("match_{}", arm_idx);
+   self.match_arm_prefix = Some(arm_prefix);
+   let arm_expr = self.convert_expression(&arm.expr);
+   self.match_arm_prefix = None;
+   ```
+
+### Verification
+- ✅ Variables now have unique prefixes: `match_0_a_fp16`, `match_1_a_fp16`, etc.
+- ✅ No more variable collisions between match arms
+- ✅ Karythra CLE L2 operations now generate correct variable assignments
+- ✅ All SKALP tests pass (26 MIR tests, 14 golden file tests)
+
+### Generated Output
+**Before Fix**:
+```systemverilog
+logic [15:0] a_fp16;          // Collision!
+logic [15:0] b_fp16;          // Collision!
+logic [15:0] result_fp16;     // Collision!
+```
+
+**After Fix**:
+```systemverilog
+logic [31:0] match_5_a_fp32;
+logic [31:0] match_5_b_fp32;
+logic [31:0] match_5_result_fp32;
+logic [31:0] match_6_a_fp32;
+logic [31:0] match_6_b_fp32;
+logic [31:0] match_6_result_fp32;
+```
+
+---
+
 ## ✅ FIXED: Bug #34 - Parser Incorrectly Splits Compound Boolean Expressions in If Conditions
 
 ### Status

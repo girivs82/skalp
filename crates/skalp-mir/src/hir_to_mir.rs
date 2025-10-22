@@ -68,6 +68,10 @@ pub struct HirToMir<'hir> {
     /// Pending statements from block expressions
     /// These need to be emitted before the current assignment/statement
     pending_statements: Vec<Statement>,
+    /// Variable name prefix for match arm scoping
+    /// When set, all variables created in this context will be prefixed
+    /// to avoid name collisions between match arms
+    match_arm_prefix: Option<String>,
 }
 
 impl<'hir> HirToMir<'hir> {
@@ -95,6 +99,7 @@ impl<'hir> HirToMir<'hir> {
             dynamic_variables: HashMap::new(),
             type_flattener: TypeFlattener::new(0), // Will be re-initialized per use
             pending_statements: Vec::new(),
+            match_arm_prefix: None,
         }
     }
 
@@ -516,10 +521,18 @@ impl<'hir> HirToMir<'hir> {
                         // Create a new MIR variable on the fly for event block let bindings
                         let new_id = self.next_variable_id();
 
+                        // Apply match arm prefix if we're in a match arm context
+                        // This prevents variable name collisions between different match arms
+                        let var_name = if let Some(ref prefix) = self.match_arm_prefix {
+                            format!("{}_{}", prefix, let_stmt.name)
+                        } else {
+                            let_stmt.name.clone()
+                        };
+
                         // Track this dynamically created variable so we can add it to the module later
                         self.dynamic_variables.insert(
                             let_stmt.id,
-                            (new_id, let_stmt.name.clone(), let_stmt.var_type.clone()),
+                            (new_id, var_name, let_stmt.var_type.clone()),
                         );
 
                         new_id
@@ -2604,14 +2617,24 @@ impl<'hir> HirToMir<'hir> {
 
         // Build nested conditionals from right to left
         // Start with the last arm as the default (usually wildcard)
+
+        // Set match arm prefix for the last arm to isolate its variables
+        let last_arm_idx = arms.len() - 1;
+        let last_arm_prefix = format!("match_{}", last_arm_idx);
+        self.match_arm_prefix = Some(last_arm_prefix);
+
         let last_expr = self.convert_expression(&arms.last()?.expr);
+
+        // Clear the prefix after processing
+        self.match_arm_prefix = None;
+
         if last_expr.is_none() {
             return None;
         }
         let mut result = last_expr?;
 
         // Work backwards through the arms (excluding the last one which is the default)
-        for arm in arms[..arms.len() - 1].iter().rev() {
+        for (arm_idx, arm) in arms[..arms.len() - 1].iter().enumerate().rev() {
             // Build condition: match_value == pattern
             eprintln!(
                 "[DEBUG] Match: processing arm with pattern {:?}",
@@ -2697,7 +2720,16 @@ impl<'hir> HirToMir<'hir> {
             };
 
             // Build conditional: (condition) ? arm_expr : rest
+
+            // Set match arm prefix to isolate this arm's variables
+            let arm_prefix = format!("match_{}", arm_idx);
+            self.match_arm_prefix = Some(arm_prefix);
+
             let arm_expr = self.convert_expression(&arm.expr);
+
+            // Clear the prefix after processing this arm
+            self.match_arm_prefix = None;
+
             if arm_expr.is_none() {
                 eprintln!(
                     "[DEBUG] Match: FAILED to convert arm expression, type: {:?}",
