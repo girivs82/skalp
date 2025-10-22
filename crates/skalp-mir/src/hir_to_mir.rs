@@ -1845,6 +1845,10 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR expression to MIR
     fn convert_expression(&mut self, expr: &hir::HirExpression) -> Option<Expression> {
+        eprintln!(
+            "[EXPR_DEBUG] convert_expression called with: {:?}",
+            std::mem::discriminant(expr)
+        );
         match expr {
             hir::HirExpression::Literal(lit) => self.convert_literal(lit).map(Expression::Literal),
             hir::HirExpression::Signal(id) => {
@@ -1952,20 +1956,77 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::Unary { op, operand })
             }
             hir::HirExpression::Call(call) => {
-                // Phase 2: Inline simple function calls
-                eprintln!(
-                    "[DEBUG] Call expression: function={}, args={}",
-                    call.function,
-                    call.args.len()
-                );
-                let result = self.inline_function_call(call);
-                if result.is_none() {
-                    eprintln!(
-                        "[DEBUG] Call: inline_function_call returned None for {}",
-                        call.function
-                    );
+                // Check if this is a built-in FP method call (e.g., a_fp32.add(b_fp32))
+                // FP methods are transformed to method(receiver, args) by HIR builder
+                // So args[0] is the receiver for FP methods
+                if !call.args.is_empty() {
+                    if let Some(receiver_type) = self.infer_hir_type(&call.args[0]) {
+                        if self.is_float_type(&receiver_type) {
+                            // This is a method call on a float type
+                            // Map FP methods to MIR operations
+                            match call.function.as_str() {
+                                // Binary FP operations
+                                "add" if call.args.len() == 2 => {
+                                    let left = Box::new(self.convert_expression(&call.args[0])?);
+                                    let right = Box::new(self.convert_expression(&call.args[1])?);
+                                    return Some(Expression::Binary {
+                                        op: BinaryOp::FAdd,
+                                        left,
+                                        right,
+                                    });
+                                }
+                                "sub" if call.args.len() == 2 => {
+                                    let left = Box::new(self.convert_expression(&call.args[0])?);
+                                    let right = Box::new(self.convert_expression(&call.args[1])?);
+                                    return Some(Expression::Binary {
+                                        op: BinaryOp::FSub,
+                                        left,
+                                        right,
+                                    });
+                                }
+                                "mul" if call.args.len() == 2 => {
+                                    let left = Box::new(self.convert_expression(&call.args[0])?);
+                                    let right = Box::new(self.convert_expression(&call.args[1])?);
+                                    return Some(Expression::Binary {
+                                        op: BinaryOp::FMul,
+                                        left,
+                                        right,
+                                    });
+                                }
+                                "div" if call.args.len() == 2 => {
+                                    let left = Box::new(self.convert_expression(&call.args[0])?);
+                                    let right = Box::new(self.convert_expression(&call.args[1])?);
+                                    return Some(Expression::Binary {
+                                        op: BinaryOp::FDiv,
+                                        left,
+                                        right,
+                                    });
+                                }
+                                // Unary FP operations (via function calls)
+                                "sqrt" if call.args.len() == 1 => {
+                                    let arg = self.convert_expression(&call.args[0])?;
+                                    return Some(Expression::FunctionCall {
+                                        name: "sqrt".to_string(),
+                                        args: vec![arg],
+                                    });
+                                }
+                                "abs" if call.args.len() == 1 => {
+                                    let arg = self.convert_expression(&call.args[0])?;
+                                    return Some(Expression::FunctionCall {
+                                        name: "fabs".to_string(),
+                                        args: vec![arg],
+                                    });
+                                }
+                                _ => {
+                                    // Unknown FP method - fall through to regular inlining
+                                }
+                            }
+                        }
+                    }
                 }
-                result
+
+                // Not an FP method - inline the function call
+                self.inline_function_call(call)
             }
             hir::HirExpression::Index(base, index) => {
                 // BUG #27 FIX: Check if this is a constant index into a flattened array
@@ -2334,6 +2395,10 @@ impl<'hir> HirToMir<'hir> {
                 //   - Integer width changes (truncation/extension)
                 //   - Signed/unsigned conversions
                 //   - Fixed-point/floating-point conversions
+                eprintln!(
+                    "[CAST_DEBUG] Cast inner expr type: {:?}",
+                    std::mem::discriminant(&*cast_expr.expr)
+                );
                 self.convert_expression(&cast_expr.expr)
             }
             hir::HirExpression::StructLiteral(struct_lit) => {
@@ -3708,6 +3773,17 @@ impl<'hir> HirToMir<'hir> {
                 let var = impl_block.variables.iter().find(|v| v.id == *var_id)?;
                 Some(var.var_type.clone())
             }
+            hir::HirExpression::GenericParam(name) => {
+                // WORKAROUND for Bug #42/43: Parser creates malformed cast expression AST,
+                // causing some variable references to appear as GenericParam instead of Variable
+                // Try to resolve the name to a variable (should not be needed after parser fix)
+                let entity_id = self.current_entity_id?;
+                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
+                if let Some(var) = impl_block.variables.iter().find(|v| v.name == *name) {
+                    return Some(var.var_type.clone());
+                }
+                None
+            }
             hir::HirExpression::Binary(binary) => {
                 // For binary expressions, infer from operands
                 self.infer_hir_type(&binary.left)
@@ -3754,6 +3830,10 @@ impl<'hir> HirToMir<'hir> {
                     hir::HirType::Array(elem_type, _) => Some(*elem_type),
                     _ => Some(hir::HirType::Bit(1)), // Bit select
                 }
+            }
+            hir::HirExpression::Cast(cast) => {
+                // Cast expression: return the target type
+                Some(cast.target_type.clone())
             }
             _ => None,
         }

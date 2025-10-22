@@ -3539,3 +3539,423 @@ assign result = x;
 ### Priority
 **CRITICAL** - This is the primary blocker for completing 25 of 43 Karythra CLE operations.
 
+
+---
+
+## SESSION UPDATE: Method Call Syntax Implementation (2025-10-22)
+
+### ✅ Method Call Syntax Support (IMPLEMENTED)
+**Status:** Implemented and tested
+**Implementation:** crates/skalp-frontend/src/hir_builder.rs:2860-2935
+
+**Description:**
+SKALP now supports method call syntax `receiver.method(args)`, which is transformed to `method(receiver, args)` during HIR building.
+
+**Parser Structure:**
+The SKALP parser (Rowan-based) creates a flat sibling structure for method calls:
+```
+Statement
+  IdentExpr(receiver)  ← sibling
+  FieldExpr           ← sibling (marker with method name in tokens)
+  CallExpr(args)      ← sibling (marker)
+```
+
+**Implementation:**
+The `build_call_expr` function now:
+1. Detects when a `CallExpr` has a preceding `FieldExpr` sibling
+2. Extracts the method name from `FieldExpr` tokens (last identifier)
+3. Finds the receiver expression (sibling before `FieldExpr`)
+4. Transforms `receiver.method(args)` → `method(receiver, args)` in HIR
+
+**Test Verification:**
+```skalp
+pub fn double(x: bit[32]) -> bit[32] { return x + x }
+pub fn test() -> bit[32] {
+    let x = 21;
+    let result = x.double();  // Method call syntax works!
+    return result
+}
+```
+
+Generated: `assign result = (x + x);` ✅
+
+**Karythra CLE Test:**
+The CLE compiles successfully with method call support. Compilation completed without syntax errors.
+
+---
+
+### ⚠️ CURRENT BLOCKER: Missing FP16/FP32 Types
+
+**Problem:**
+SKALP's type system does not include floating point types. Method call syntax works, but FP operations can't execute because the types don't exist.
+
+**Current Type System:** (crates/skalp-frontend/src/types.rs:14-44)
+- ✅ Bit(Width), Logic(Width), Int(Width), Nat(Width)
+- ✅ Fixed { integer_bits, fractional_bits }
+- ❌ **NO fp16 or fp32 types**
+
+**Impact on Karythra CLE:**
+- L0-L1 operations (0-17): ✅ Working (18 units)
+- L2 FP16/FP32 (18-27): ❌ Blocked (10 units)
+- L3-L5 operations (32-37): ❌ Blocked (15 units)
+- **Total: 25/43 function units blocked (58%)**
+
+**Generated CLE Output Analysis:**
+File: /tmp/cle_test_method_support/design.sv:94
+```systemverilog
+assign fu_result = (((pipe2_func < 18) ? 1 : 0) ? 
+    /* L0-L1: working */ ... :
+    ((((pipe2_func >= 18) && (pipe2_func < 28)) ? 1 : 0) ? 
+        shifted :  // ❌ L2 stubbed (should be FP ops)
+        ((((pipe2_func >= 32) && (pipe2_func < 38)) ? 1 : 0) ? 
+            0 : 0)));  // ❌ L3-L5 stubbed
+```
+
+**Required Work:**
+1. Add `Fp16` and `Fp32` variants to `Type` enum
+2. Implement FP operations in MIR (add, mul, div, sqrt, etc.)
+3. Generate SystemVerilog for FP operations (IEEE 754 or IP cores)
+4. Update type checker for FP type handling
+
+**Recommendation:**
+Implement FP types as built-in compiler types (like Bit/Int), not traits. FP operations are fundamental hardware primitives that map directly to FPGA IP cores.
+
+---
+
+### Progress Summary:
+- ✅ Bug #38 fixed (let bindings with type casts)
+- ✅ Method call syntax implemented
+- ✅ Karythra CLE compiles successfully
+- ⚠️ Next blocker identified: FP types needed
+
+**Blocker Hierarchy:**
+1. ~~Bug #38~~ → FIXED
+2. ~~Method call syntax~~ → IMPLEMENTED
+3. **FP16/FP32 types** → CURRENT BLOCKER
+
+
+---
+
+## SESSION UPDATE (CORRECTED): FP Method Operations Not Implemented
+
+### ⚠️ ACTUAL BLOCKER: FP Method Operations (`.add()`, `.mul()`, etc.)
+
+**Status:** BLOCKING L2-L5 operations
+
+**What Works:**
+- ✅ fp16/fp32/fp64 types exist (lexer, parser, HIR, MIR)
+- ✅ Method call syntax works (`receiver.method(args)` transforms correctly)
+- ✅ FP operations defined in MIR (`FAdd`, `FMul`, `FDiv`, `FEqual`, etc.)
+- ✅ FP types convert correctly: HIR `Float32` → MIR `DataType::Float32`
+
+**What's Missing:**
+❌ **FP method calls are not converted to FP operations**
+
+When the compiler sees:
+```skalp
+let c = a_fp32.add(b_fp32);  // Method call
+```
+
+**Current behavior**: Function inlining fails, returns `None`, generates empty/stubbed module
+
+**Expected behavior**: Should convert to:
+```rust
+Expression::Binary {
+    op: BinaryOp::FAdd,
+    left: a_fp32,
+    right: b_fp32
+}
+```
+
+**Test case demonstrates the issue:**
+```skalp
+pub fn test_fp_add() -> bit[32] {
+    let a = 3.14 as fp32;
+    let b = 2.71 as fp32;
+    let c = a.add(b);  // ❌ Not converted to FAdd!
+    return c as bit[32]
+}
+```
+
+Generated output: **Empty module!**
+
+**Root Cause:**
+The HIR → MIR transformation (likely in `inline_function_call` or `convert_call`) doesn't recognize that `.add()` on FP types should map to `FAdd` binary operation.
+
+**Required Fix:**
+In `crates/skalp-mir/src/hir_to_mir.rs`, add FP method detection:
+
+```rust
+// When converting method calls on FP types:
+if self.is_float_type(&receiver_type) {
+    match method_name.as_str() {
+        "add" => return Binary { op: FAdd, left: receiver, right: args[0] },
+        "mul" => return Binary { op: FMul, left: receiver, right: args[0] },
+        "div" => return Binary { op: FDiv, left: receiver, right: args[0] },
+        "sub" => return Binary { op: FSub, left: receiver, right: args[0] },
+        "sqrt" => return FunctionCall { name: "sqrt", args: [receiver] },
+        // etc.
+        _ => // error: unknown FP method
+    }
+}
+```
+
+**Impact:**
+- This single missing feature blocks all 25 L2-L5 Karythra CLE operations
+- FP types and infrastructure exist but are unusable
+- Method call syntax works but FP-specific methods don't
+
+**Next Action:**
+Implement FP method-to-operation mapping in HIR→MIR transform.
+
+
+## ✅ PARTIALLY FIXED: Bug #39 - Cast to FP Types Created Bit(8) Instead of Float32
+
+### Status
+**PARTIALLY FIXED** (2025-10-22) - HIR type building now handles fp16/fp32/fp64
+
+### Problem Summary
+When casting to FP types (e.g., `3.14 as fp32`), the HIR builder created variables with type `Bit(8)` instead of `Float32`.
+
+**Root Cause**: `build_hir_type()` in `hir_builder.rs` lines 4877-4910 didn't handle `Fp16Type`, `Fp32Type`, `Fp64Type` syntax nodes, falling through to default `Bit(8)`.
+
+### Fix Applied (hir_builder.rs:4885-4887)
+```rust
+SyntaxKind::Fp16Type => return HirType::Float16,
+SyntaxKind::Fp32Type => return HirType::Float32,
+SyntaxKind::Fp64Type => return HirType::Float64,
+```
+
+### Impact
+- Variables created with FP casts now have correct Float32/Float16/Float64 types
+- Enables FP method detection in MIR (depends on correct type info)
+
+---
+
+## 🔴 OPEN: Bug #40 - Parser Drops Method Calls Inside Parentheses
+
+### Status
+**OPEN** (Discovered 2025-10-22)
+
+### Problem Summary
+The parser drops method calls when they appear inside parentheses.
+
+**Example**:
+- `(a_fp.add(b_fp))` → Parser only sees `a_fp`, the `.add(b_fp)` is dropped
+- `a_fp.add(b_fp)` → Works correctly (without parentheses)
+
+### Workaround
+Don't use parentheses around method calls.
+
+### Reproduction
+Test file: `/tmp/test_fp_with_stubs.sk`
+
+### Impact
+- Method calls must be written without outer parentheses
+- Kar ythra CLE L2 operations don't use parentheses, so this doesn't block them
+
+---
+
+## 🔴 OPEN: Bug #41 - FP Method Calls Fail Type Inference During HIR→MIR Conversion
+
+### Status
+**OPEN** (Discovered 2025-10-22) - Partial progress made
+
+### Problem Summary
+FP method calls like `a_fp32.add(b_fp32)` cannot infer the receiver type during HIR→MIR conversion, preventing FP method-to-operation mapping from working.
+
+**Symptoms**:
+1. `infer_hir_type()` returns `None` for method call arguments
+2. FP detection code never triggers
+3. Method call falls through to function inlining (which fails or produces wrong code)
+
+### Investigation Findings
+
+**FP Method-to-Operation Mapping Implemented** (`hir_to_mir.rs:1954-2038`):
+- Detects method calls on FP types
+- Maps `add/sub/mul/div` to `FAdd/FSub/FMul/FDiv`
+- **BUT**: Type inference fails, so mapping never executes
+
+**Type Inference Issues**:
+1. Added `Cast` case to `infer_hir_type` (`hir_to_mir.rs:3835-3839`)
+2. Debug shows call args are `Discriminant(5)` (GenericParam?), not Variable(3)
+3. No TYPE_DEBUG output for variable lookups
+
+**What Works**:
+- `/tmp/test_fp_no_paren.sk` with literals (3.14 as fp32) ✅ Generates FAdd as `+`
+- Karythra CLE compiles ✅ But L2 ops return wrong values
+
+**What Doesn't Work**:
+- `/tmp/test_l2_with_stub.sk` with input operands ❌ Empty or wrong output
+- `/tmp/test_l2_standalone.sk` ❌ Function inlining breaks
+
+### Files Modified
+- `hir_to_mir.rs:1954-2038` - FP method detection
+- `hir_to_mir.rs:3779-3786` - Variable type lookup (with TYPE_DEBUG)
+- `hir_to_mir.rs:3835-3839` - Cast expression type inference
+- `hir_builder.rs:4885-4887` - FP type handling (Bug #39 fix)
+
+### Next Steps
+1. Understand why call args show as Discriminant(5) instead of Variable(3)
+2. Fix `infer_hir_type` to properly handle method call arguments
+3. Test with Karythra CLE L2 operations
+
+### Test Cases
+- `/tmp/test_fp_no_paren.sk` - Works (literals + stub)
+- `/tmp/test_l2_with_stub.sk` - Fails (inputs + stub)
+- `/tmp/test_l2_direct.sk` - Fails (direct inline)
+- `/tmp/test_l2_standalone.sk` - Fails (function wrapper)
+
+---
+
+## ✅ FIXED: Bug #42 - HIR Builder Doesn't Register Let Bindings with Casts
+
+### Status
+**FIXED** (2025-10-22) - Parser bug (Bug #43) workaround added to HIR builder
+
+### Problem Summary (RESOLVED)
+The HIR builder failed to register `let` bindings with cast expressions in entity impl blocks. Only let bindings WITHOUT casts were registered.
+
+**Example**:
+```skalp
+impl TestL2WithStub {
+    let a_fp32 = operand_a as fp32;    // NOT registered (has cast)
+    let b_fp32 = operand_b as fp32;    // NOT registered (has cast)
+    let result_fp32 = a_fp32.add(b_fp32); // REGISTERED (no cast)
+    result = result_fp32 as bit[32]
+}
+```
+
+**Debug output (before fix)**:
+```
+[TYPE_DEBUG] Available variables in impl block: ["result_fp32"]
+```
+
+### Root Cause Discovery
+Investigation revealed this was NOT an HIR builder registration bug, but a **parser bug** (Bug #43):
+
+1. The parser creates incorrect AST for cast expressions
+2. For `let x = a as T`, parser creates siblings instead of parent-child:
+   ```
+   LetStmt
+     ├─ IdentExpr(a)    ← sibling
+     └─ CastExpr        ← sibling
+         └─ TypeAnnotation(T)
+   ```
+3. Should be:
+   ```
+   LetStmt
+     └─ CastExpr
+         ├─ IdentExpr(a)
+         └─ TypeAnnotation(T)
+   ```
+4. HIR builder's `build_cast_expr()` expects expression as child, not sibling
+5. Building cast expression fails → `build_let_statement()` returns None
+6. Variable never gets registered in symbol table
+
+### Impact
+- Let bindings with casts fail to register as variables
+- Creates **GenericParam** references instead of **Variable** references
+- GenericParam nodes cannot be type-resolved (only have string names)
+- Breaks type inference for FP method calls (Bug #41)
+- `a_fp32.add(b_fp32)` shows `GenericParam("a_fp32")` instead of `Variable(id)`
+
+### Consequences
+1. FP method-to-operation mapping cannot work
+2. Type inference fails for method call receivers
+3. Function inlining gets wrong parameter types
+4. Generated code is incorrect or empty
+
+### Fix Applied
+**Location**: `crates/skalp-frontend/src/hir_builder.rs:2085-2149` (build_let_statement function)
+
+Added workaround for parser bug in `build_let_statement()`:
+- Detect when CastExpr has no child expression (only TypeAnnotation)
+- Find source expression in sibling nodes (expression before CastExpr)
+- Manually construct proper cast expression structure
+- Continue with normal variable registration
+
+This allows variables with cast expressions to be properly registered until the parser is fixed.
+
+### Verification
+- ✅ All 3 variables now registered: `["a_fp32", "b_fp32", "result_fp32"]`
+- ✅ FP method calls work: `a_fp32.add(b_fp32)` → `(a_fp32 + b_fp32)`
+- ✅ Generated SystemVerilog correct with all variables and operations
+
+### Related Bugs
+- Bug #43 - Parser creates malformed cast expression AST (root cause)
+- Bug #41 - FP method call type inference failure (fixed by this)
+- Bug #39 - FP type preservation (fixed, unrelated)
+- Bug #40 - Parser drops method calls in parentheses (unrelated)
+
+---
+
+## 🔴 CRITICAL: Bug #43 - Parser Creates Malformed Cast Expression AST
+
+### Status
+**CRITICAL** (Discovered 2025-10-22) - Root cause of Bug #42, workaround added
+
+### Problem Summary
+The **parser** creates incorrect AST structure for cast expressions. Instead of making the source expression a CHILD of CastExpr, it creates them as SIBLINGS.
+
+**Example**: `let x = a as fp32`
+
+**Current (WRONG)**:
+```
+LetStmt
+  ├─ IdentExpr(a)          ← sibling
+  └─ CastExpr              ← sibling
+      └─ TypeAnnotation(fp32)
+```
+
+**Expected (CORRECT)**:
+```
+LetStmt
+  └─ CastExpr
+      ├─ IdentExpr(a)      ← child
+      └─ TypeAnnotation(fp32)
+```
+
+### Impact
+- Affects all cast expressions in let bindings
+- HIR builder cannot construct cast expressions properly
+- Let bindings with casts fail to register as variables
+- Critical for FP operations which require casts between bit[N] and fpN types
+
+### Root Cause
+**Location**: `crates/skalp-frontend/src/parser.rs` (cast expression parsing)
+
+The parser's cast expression parsing doesn't properly nest the source expression as a child of the CastExpr node. The `as` operator parsing creates both the source expression and CastExpr as separate siblings instead of establishing a parent-child relationship.
+
+### Reproduction
+Any let binding with a cast expression:
+```skalp
+let a_fp32 = operand_a as fp32;   // Parser bug triggers
+let x = (y + 1) as bit[16];        // Parser bug triggers
+let z = 42 as fp64;                // Parser bug triggers
+```
+
+### Workaround Applied
+**Location**: `crates/skalp-frontend/src/hir_builder.rs:2085-2149`
+
+HIR builder detects malformed CastExpr nodes and manually constructs proper structure:
+1. Check if CastExpr has no child expression (only TypeAnnotation)
+2. Find source expression in sibling list (expression before CastExpr)
+3. Build source expression and extract target type
+4. Manually create HirExpression::Cast with correct structure
+
+This allows cast expressions to work correctly in let bindings until parser is fixed.
+
+### Fix Required
+The parser needs to be fixed to:
+1. Create proper parent-child relationship in cast expression AST
+2. Make source expression a CHILD of CastExpr node
+3. Ensure both source expression and TypeAnnotation are children, not siblings
+4. Likely requires checkpoint usage similar to Bug #34 fix
+
+### Related Bugs
+- Bug #42 - Let binding registration failure (caused by this, workaround applied)
+- Bug #41 - FP method call type inference (caused by Bug #42)
+- Bug #34 - Compound boolean expressions (similar parser AST issue, fixed)
+
+---

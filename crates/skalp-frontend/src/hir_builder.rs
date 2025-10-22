@@ -549,6 +549,9 @@ impl HirBuilderContext {
                                 var_type: let_stmt.var_type.clone(),
                                 initial_value: None,
                             };
+
+                            // Variables are registered in symbol table by build_let_statement()
+                            // (this happens inside build_let_statements_from_node)
                             variables.push(variable);
 
                             // Create a combinational assignment for the initialization
@@ -1865,7 +1868,7 @@ impl HirBuilderContext {
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::TupleExpr
-                        | SyntaxKind::CastExpr  // CRITICAL FIX (Bug #38): Support cast expressions in tuple destructuring
+                        | SyntaxKind::CastExpr // CRITICAL FIX (Bug #38): Support cast expressions in tuple destructuring
                 )
             })
             .collect();
@@ -2044,7 +2047,7 @@ impl HirBuilderContext {
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::TupleExpr
-                        | SyntaxKind::CastExpr  // CRITICAL FIX (Bug #38): Support cast expressions in let bindings
+                        | SyntaxKind::CastExpr // CRITICAL FIX (Bug #38): Support cast expressions in let bindings
                 )
             })
             .collect();
@@ -2059,7 +2062,73 @@ impl HirBuilderContext {
             })
             .or_else(|| expr_children.last());
 
-        let value = value_node.and_then(|n| self.build_expression(n))?;
+        // WORKAROUND for parser bug: When the value_node is a CastExpr, the parser may have
+        // created the source expression as a SIBLING instead of a child of CastExpr.
+        // For example: "let x = a as fp32" creates: LetStmt { IdentExpr(a), CastExpr(fp32) }
+        // instead of: LetStmt { CastExpr { IdentExpr(a), TypeAnnotation(fp32) } }
+        // If we detect this pattern, manually build the cast expression.
+        let value = if let Some(vn) = value_node {
+            if vn.kind() == SyntaxKind::CastExpr && expr_children.len() >= 2 {
+                // Check if CastExpr has no child expression (only TypeAnnotation)
+                let has_expr_child = vn.children().any(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::ParenExpr
+                    )
+                });
+
+                if !has_expr_child {
+                    // Parser Bug #43: CastExpr has no child expression, source is a sibling
+                    // Find the expression that should be inside the cast (the one before CastExpr)
+                    let cast_expr_pos = expr_children
+                        .iter()
+                        .position(|n| n.kind() == SyntaxKind::CastExpr);
+                    if let Some(pos) = cast_expr_pos {
+                        if pos > 0 {
+                            let source_expr_node = &expr_children[pos - 1];
+
+                            // Build the source expression
+                            if let Some(source_expr) = self.build_expression(source_expr_node) {
+                                // Extract target type from CastExpr
+                                if let Some(target_type) = vn
+                                    .children()
+                                    .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
+                                    .map(|n| self.build_hir_type(&n))
+                                {
+                                    // Manually construct cast with correct structure
+                                    Some(HirExpression::Cast(HirCastExpr {
+                                        expr: Box::new(source_expr),
+                                        target_type,
+                                    }))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    self.build_expression(vn)
+                }
+            } else {
+                self.build_expression(vn)
+            }
+        } else {
+            None
+        }?;
 
         // Allocate a variable ID for this let binding
         let id = self.next_variable_id();
@@ -2680,6 +2749,10 @@ impl HirBuilderContext {
     /// Build expression
     #[allow(clippy::comparison_chain)]
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        eprintln!(
+            "[HIR_BUILD_EXPR] Building expression, node kind: {:?}",
+            node.kind()
+        );
         // Check recursion depth to prevent infinite loops
         if self.recursion_depth >= MAX_RECURSION_DEPTH {
             self.errors.push(HirError {
@@ -2860,6 +2933,84 @@ impl HirBuilderContext {
 
     /// Build function call expression
     fn build_call_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        eprintln!("[HIR_BUILD_CALL] Building call expression");
+        // Check if this is a method call: CallExpr preceded by a FieldExpr sibling
+        // The parser creates FieldExpr and CallExpr as SIBLINGS, not parent-child:
+        //   Statement
+        //     FieldExpr(receiver, method_name)  ← sibling
+        //     CallExpr(args)                    ← sibling
+        //
+        // We transform receiver.method(args) to: method(receiver, args)
+        if let Some(parent) = node.parent() {
+            eprintln!("[HIR_BUILD_CALL] Has parent");
+
+            let siblings: Vec<_> = parent.children().collect();
+            let call_pos = siblings.iter().position(|n| n == node)?;
+
+            if call_pos > 0 {
+                if let Some(prev_sibling) = siblings.get(call_pos - 1) {
+                    if prev_sibling.kind() == SyntaxKind::FieldExpr {
+                        // This is a method call!
+                        let field_expr = prev_sibling;
+
+                        // Extract method name from FieldExpr (last Ident token after the dot)
+                        let method_name_result = field_expr
+                            .children_with_tokens()
+                            .filter_map(|elem| elem.into_token())
+                            .filter(|t| t.kind() == SyntaxKind::Ident)
+                            .last() // Method name is the last identifier
+                            .map(|t| t.text().to_string());
+
+                        let method_name = method_name_result?;
+
+                        // Build receiver expression - it's the sibling BEFORE the FieldExpr
+                        // In the parse tree: IdentExpr(x), FieldExpr, CallExpr are all siblings
+                        // We need to find the expression sibling that comes before FieldExpr
+                        let field_expr_pos = siblings.iter().position(|n| n == field_expr)?;
+
+                        // Find the receiver (expression node before FieldExpr)
+                        let receiver_node_result = siblings[..field_expr_pos]
+                            .iter()
+                            .rev() // Search backwards from FieldExpr
+                            .find(|n| {
+                                matches!(
+                                    n.kind(),
+                                    SyntaxKind::IdentExpr
+                                        | SyntaxKind::CallExpr
+                                        | SyntaxKind::FieldExpr
+                                        | SyntaxKind::IndexExpr
+                                        | SyntaxKind::LiteralExpr
+                                        | SyntaxKind::CastExpr
+                                        | SyntaxKind::ParenExpr
+                                        | SyntaxKind::BinaryExpr
+                                        | SyntaxKind::UnaryExpr
+                                )
+                            });
+
+                        let receiver_node = receiver_node_result?;
+
+                        let receiver_result = self.build_expression(&receiver_node);
+                        let receiver = receiver_result?;
+
+                        // Parse arguments from CallExpr children
+                        let mut args = vec![receiver]; // Receiver is the first argument
+
+                        for child in node.children() {
+                            if let Some(expr) = self.build_expression(&child) {
+                                args.push(expr);
+                            }
+                        }
+
+                        return Some(HirExpression::Call(HirCallExpr {
+                            function: method_name,
+                            args,
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Regular function call (not a method call)
         // Get function name - try direct Ident token first,
         // then check for preceding sibling IdentExpr (postfix call syntax)
         //
@@ -4801,6 +4952,10 @@ impl HirBuilderContext {
                 SyntaxKind::BitType => return self.build_bit_type(&child),
                 SyntaxKind::ClockType => return self.build_clock_type(&child),
                 SyntaxKind::ResetType => return self.build_reset_type(&child),
+                // FP types (Bug #39 fix)
+                SyntaxKind::Fp16Type => return HirType::Float16,
+                SyntaxKind::Fp32Type => return HirType::Float32,
+                SyntaxKind::Fp64Type => return HirType::Float64,
                 SyntaxKind::StreamType => {
                     // Stream<T> type
                     if let Some(inner_type_node) = child.children().next() {
