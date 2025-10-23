@@ -3842,6 +3842,14 @@ impl<'hir> HirToMir<'hir> {
             );
         } else {
         }
+
+        // Step 8: Clean up function-local variables from variable_map to prevent scope leakage
+        // Function-local variables should not persist across different function inlining contexts.
+        // Without this cleanup, variables from one match arm can incorrectly be reused in another arm.
+        for var_id in var_id_to_name.keys() {
+            self.variable_map.remove(var_id);
+        }
+
         result
     }
 

@@ -1,3 +1,62 @@
+## ✅ FIXED: Bug #46 - Function-Local Variables Leaking Across Inlining Contexts
+
+### Status
+**FIXED** (2025-10-23) - Function-local variables are now properly scoped and cleaned up after inlining
+
+### Problem Summary (RESOLVED)
+When functions were inlined multiple times within different match arms, their local variables would persist in `variable_map` across inlining boundaries. This caused later inlinings to reuse variables from earlier inlinings, even when they should have been isolated with different match arm prefixes.
+
+**Example**: Match expression in Karythra CLE `exec_l2`
+```skalp
+let result = match opcode {
+    FU_FP16_ADD  => fp16_add(a, b),   // Arm 0 - Should create match_0_a_fp16, match_0_b_fp16
+    FU_FP16_MUL  => fp16_mul(a, b),   // Arm 1 - Should create match_1_a_fp16, match_1_b_fp16
+    FU_FP16_DIV  => fp16_div(a, b),   // Arm 3 - Creates match_3_a_fp16, match_3_b_fp16 ✓
+    ...
+};
+```
+
+**Problem**: Arms 0 and 1 would reuse variables created in later arms (processed in reverse order), resulting in missing `match_0_*` and `match_1_*` variables.
+
+### Impact
+- Function-local variables from one inlining context would be incorrectly reused in another
+- Match arm 0 (FP16_ADD) and arm 1 (FP16_MUL) did not create their own prefixed variables
+- Caused incorrect variable scoping and potential logic errors
+
+### Root Cause
+**Location**: `crates/skalp-mir/src/hir_to_mir.rs` - `inline_function_call()`
+
+When inlining functions, HIR Variable IDs from the function's let statements are mapped to MIR Variable IDs in `variable_map`. This mapping persisted across different function inlining calls. When the same function was inlined multiple times (e.g., in different match arms), the second inlining would find its variable IDs already mapped and reuse them, bypassing the match arm prefix mechanism.
+
+**Sequence**:
+1. Match arms processed in reverse order (9, 8, ..., 1, 0)
+2. fp16_add inlined in arm 3: `variable_map[VariableId(0)] = match_3_a_fp16`
+3. fp16_add inlined in arm 0: `VariableId(0)` already in map → reuses `match_3_a_fp16` instead of creating `match_0_a_fp16`
+
+### Fix Applied
+**Location**: `crates/skalp-mir/src/hir_to_mir.rs:3873-3878`
+
+Added cleanup of function-local variables from `variable_map` after function inlining completes:
+
+```rust
+// Step 8: Clean up function-local variables from variable_map to prevent scope leakage
+// Function-local variables should not persist across different function inlining contexts.
+// Without this cleanup, variables from one match arm can incorrectly be reused in another arm.
+for var_id in var_id_to_name.keys() {
+    self.variable_map.remove(var_id);
+}
+```
+
+This ensures each function inlining gets a fresh variable scope, allowing the match arm prefix mechanism (from Bug #45 fix) to work correctly.
+
+### Verification
+After fix:
+- All match arms now create their own prefixed variables: `match_0_a_fp16`, `match_1_a_fp16`, `match_2_a_fp16`, etc.
+- No variable reuse across different function inlining contexts
+- Karythra CLE L2 operations compile with correct variable scoping
+
+---
+
 ## ✅ FIXED: Bug #45 - Variable Name Collisions in Match Expression Arms
 
 ### Status
