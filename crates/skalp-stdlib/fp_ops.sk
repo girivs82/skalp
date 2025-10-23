@@ -1,0 +1,34 @@
+// Built-in floating-point operations
+// These are stubs that get converted to hardware FP ops during MIR generation
+
+// FP32 binary operations
+pub fn add(a: fp32, b: fp32) -> fp32 {
+    // Stub - converted to FAdd in MIR
+    return a
+}
+
+pub fn sub(a: fp32, b: fp32) -> fp32 {
+    // Stub - converted to FSub in MIR
+    return a
+}
+
+pub fn mul(a: fp32, b: fp32) -> fp32 {
+    // Stub - converted to FMul in MIR
+    return a
+}
+
+pub fn div(a: fp32, b: fp32) -> fp32 {
+    // Stub - converted to FDiv in MIR
+    return a
+}
+
+// FP32 unary operations
+pub fn sqrt(a: fp32) -> fp32 {
+    // Stub - converted to sqrt function call in MIR
+    return a
+}
+
+pub fn abs(a: fp32) -> fp32 {
+    // Stub - converted to fabs function call in MIR
+    return a
+}

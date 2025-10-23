@@ -301,7 +301,7 @@ impl<'hir> HirToMir<'hir> {
                                 let mir_type = self.convert_type(&hir_type);
                                 let variable = Variable {
                                     id: mir_var_id,
-                                    name,
+                                    name: name.clone(),
                                     var_type: mir_type,
                                     initial: None,
                                 };
@@ -504,9 +504,37 @@ impl<'hir> HirToMir<'hir> {
                 // Check if the variable is already registered (e.g., from impl block level)
                 // If not, create it dynamically (for let bindings inside event blocks)
                 let var_id = if let Some(&id) = self.variable_map.get(&let_stmt.id) {
-                    // Already registered
-                    id
+                    // Check if we're in a match arm context and the existing variable
+                    // doesn't have the correct prefix - this can happen when a variable
+                    // from an outer scope (like _tuple_tmp_0) has the same HIR VariableId
+                    // as a function-local variable in an inlined function
+                    let should_create_new = if let Some(ref prefix) = self.match_arm_prefix {
+                        // Check if the existing variable has the wrong prefix
+                        if let Some((_, existing_name, _)) =
+                            self.dynamic_variables.get(&let_stmt.id)
+                        {
+                            !existing_name.starts_with(prefix)
+                        } else {
+                            // Not in dynamic_variables, might be a module-level variable
+                            // Create new to be safe
+                            true
+                        }
+                    } else {
+                        false
+                    };
+
+                    if should_create_new {
+                        // Don't reuse the existing variable, fall through to create a new one
+                        VariableId(u32::MAX) // Sentinel value that won't match any existing variable
+                    } else {
+                        // Already registered with correct scope
+                        id
+                    }
                 } else {
+                    VariableId(u32::MAX) // Sentinel value to trigger new variable creation
+                };
+
+                let var_id = if var_id == VariableId(u32::MAX) {
                     // Check if we already have a dynamic variable with this name
                     // If so, reuse its ID to avoid duplicate declarations
                     let existing_var = self
@@ -532,7 +560,7 @@ impl<'hir> HirToMir<'hir> {
                         // Track this dynamically created variable so we can add it to the module later
                         self.dynamic_variables.insert(
                             let_stmt.id,
-                            (new_id, var_name, let_stmt.var_type.clone()),
+                            (new_id, var_name.clone(), let_stmt.var_type.clone()),
                         );
 
                         new_id
@@ -542,6 +570,9 @@ impl<'hir> HirToMir<'hir> {
                     self.variable_map.insert(let_stmt.id, new_id);
 
                     new_id
+                } else {
+                    // Variable already exists with correct scope, use it
+                    var_id
                 };
 
                 let lhs = LValue::Variable(var_id);
