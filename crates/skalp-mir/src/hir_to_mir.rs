@@ -290,6 +290,39 @@ impl<'hir> HirToMir<'hir> {
                         // Convert the assignment (may generate pending statements from block expressions)
                         let assigns = self.convert_continuous_assignment_expanded(hir_assign);
 
+                        // BUGFIX: First, scan pending_statements for any variables that need to be declared
+                        // These come from let bindings in block expressions that don't go through
+                        // the dynamic_variables mechanism (e.g., when functions are inlined)
+                        for pending_stmt in &self.pending_statements {
+                            if let Statement::Assignment(assign) = pending_stmt {
+                                if let LValue::Variable(var_id) = &assign.lhs {
+                                    // Check if this variable is already in the module
+                                    if !module.variables.iter().any(|v| v.id == *var_id) {
+                                        // Find the variable name by looking up the MIR variable ID
+                                        // in the reverse mapping
+                                        let var_name = self.variable_map.iter()
+                                            .find(|(_, &mir_id)| mir_id == *var_id)
+                                            .and_then(|(hir_id, _)| {
+                                                // Try to find the variable name from the HIR
+                                                self.find_variable_name(*hir_id)
+                                            })
+                                            .unwrap_or_else(|| format!("var_{}", var_id.0));
+
+                                        // Infer the type from the RHS expression
+                                        let var_type = self.infer_expression_type(&assign.rhs);
+
+                                        let variable = Variable {
+                                            id: *var_id,
+                                            name: var_name.clone(),
+                                            var_type,
+                                            initial: None,
+                                        };
+                                        module.variables.push(variable);
+                                    }
+                                }
+                            }
+                        }
+
                         // Add any new dynamic variables that were created during conversion
                         // This ensures variables from let bindings in block expressions are declared
                         // before we try to assign to them
@@ -4317,6 +4350,54 @@ impl<'hir> HirToMir<'hir> {
                     None => DataType::Vec3(Box::new(inner)), // Fallback
                 }
             }
+        }
+    }
+
+    /// Infer the MIR DataType of a MIR Expression
+    /// This is used for variables created from pending statements where we don't have HIR type info
+    fn infer_expression_type(&self, expr: &Expression) -> DataType {
+        match expr {
+            Expression::Literal(value) => match value {
+                Value::Integer(_) => DataType::Int(32),
+                Value::Float(_) => DataType::Float32,
+                Value::BitVector { width, .. } => DataType::Bit(*width),
+                Value::String(_) => DataType::Nat(32), // Fallback
+                Value::HighZ => DataType::Logic(1),
+                Value::Unknown => DataType::Logic(1), // Unknown value
+            },
+            Expression::Ref(lval) => {
+                // Look up the signal/port/variable type
+                match lval {
+                    LValue::Signal(sig_id) => {
+                        // TODO: Look up signal type from mir.signals
+                        // For now, default to 32-bit natural
+                        DataType::Nat(32)
+                    }
+                    LValue::Port(port_id) => {
+                        // TODO: Look up port type
+                        DataType::Nat(32)
+                    }
+                    LValue::Variable(var_id) => {
+                        // TODO: Look up variable type
+                        DataType::Nat(32)
+                    }
+                    LValue::BitSelect { .. } => DataType::Bit(1),
+                    LValue::RangeSelect { high, low, .. } => {
+                        // Width is (high - low + 1) - but these are expressions, so estimate
+                        DataType::Nat(32)
+                    }
+                    LValue::Concat(_) => DataType::Nat(32),
+                }
+            }
+            Expression::Binary { .. } => DataType::Nat(32), // Most binary ops return 32-bit
+            Expression::Unary { .. } => DataType::Nat(32),
+            Expression::Conditional { then_expr, .. } => {
+                // Infer from then branch
+                self.infer_expression_type(then_expr)
+            }
+            Expression::FunctionCall { .. } => DataType::Nat(32), // Default for function calls
+            Expression::Concat(_) => DataType::Nat(32),
+            Expression::Replicate { .. } => DataType::Nat(32),
         }
     }
 
