@@ -2095,25 +2095,19 @@ impl HirBuilderContext {
                         if pos > 0 {
                             let source_expr_node = &expr_children[pos - 1];
 
-                            // Build the source expression
-                            if let Some(source_expr) = self.build_expression(source_expr_node) {
-                                // Extract target type from CastExpr
-                                if let Some(target_type) = vn
-                                    .children()
-                                    .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
-                                    .map(|n| self.build_hir_type(&n))
-                                {
-                                    // Manually construct cast with correct structure
-                                    Some(HirExpression::Cast(HirCastExpr {
-                                        expr: Box::new(source_expr),
-                                        target_type,
-                                    }))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
+                            // Build the source expression and extract target type
+                            self.build_expression(source_expr_node)
+                                .and_then(|source_expr| {
+                                    vn.children()
+                                        .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
+                                        .map(|n| self.build_hir_type(&n))
+                                        .map(|target_type| {
+                                            HirExpression::Cast(HirCastExpr {
+                                                expr: Box::new(source_expr),
+                                                target_type,
+                                            })
+                                        })
+                                })
                         } else {
                             None
                         }
@@ -2989,7 +2983,7 @@ impl HirBuilderContext {
 
                         let receiver_node = receiver_node_result?;
 
-                        let receiver_result = self.build_expression(&receiver_node);
+                        let receiver_result = self.build_expression(receiver_node);
                         let receiver = receiver_result?;
 
                         // Parse arguments from CallExpr children
@@ -6232,7 +6226,7 @@ impl HirBuilderContext {
                     let width = if *val == 0 {
                         1
                     } else {
-                        (64 - val.leading_zeros()) as u32
+                        64 - val.leading_zeros()
                     };
                     HirType::Nat(width)
                 }
@@ -6374,6 +6368,7 @@ impl HirBuilderContext {
     }
 
     /// Get width of a type in bits
+    #[allow(clippy::only_used_in_recursion)]
     fn get_type_width(&self, ty: &HirType) -> u32 {
         match ty {
             HirType::Bit(w) | HirType::Logic(w) | HirType::Int(w) | HirType::Nat(w) => *w,
@@ -6397,6 +6392,7 @@ impl HirBuilderContext {
 
     /// Try to evaluate a constant expression to u64
     /// Returns Some(value) if the expression is a compile-time constant
+    #[allow(clippy::only_used_in_recursion)]
     fn try_eval_const(&self, expr: &HirExpression) -> Option<u64> {
         match expr {
             HirExpression::Literal(HirLiteral::Integer(val)) => Some(*val),

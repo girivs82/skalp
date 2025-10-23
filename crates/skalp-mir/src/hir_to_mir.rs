@@ -1399,10 +1399,7 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
-        let lhs = self.convert_lvalue(&assign.lhs);
-        if lhs.is_none() {
-            return None;
-        }
+        let lhs = self.convert_lvalue(&assign.lhs)?;
 
         let rhs = self.convert_expression(&assign.rhs);
         if rhs.is_none() {
@@ -1412,11 +1409,9 @@ impl<'hir> HirToMir<'hir> {
             );
             return None;
         }
+        let rhs = rhs?;
 
-        Some(ContinuousAssign {
-            lhs: lhs?,
-            rhs: rhs?,
-        })
+        Some(ContinuousAssign { lhs, rhs })
     }
 
     /// Try to expand a struct continuous assignment into multiple field assignments
@@ -2403,10 +2398,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::If(if_expr) => {
                 // Convert if-expression to a conditional (ternary) expression in MIR
                 // MIR represents this as: condition ? then_expr : else_expr
-                let cond = self.convert_expression(&if_expr.condition);
-                if cond.is_none() {
-                    return None;
-                }
+                let cond = self.convert_expression(&if_expr.condition)?;
 
                 let then_expr = self.convert_expression(&if_expr.then_expr);
                 if then_expr.is_none() {
@@ -2416,6 +2408,7 @@ impl<'hir> HirToMir<'hir> {
                     );
                     return None;
                 }
+                let then_expr = then_expr?;
 
                 let else_expr = self.convert_expression(&if_expr.else_expr);
                 if else_expr.is_none() {
@@ -2425,10 +2418,11 @@ impl<'hir> HirToMir<'hir> {
                     );
                     return None;
                 }
+                let else_expr = else_expr?;
 
-                let cond = Box::new(cond?);
-                let then_expr = Box::new(then_expr?);
-                let else_expr = Box::new(else_expr?);
+                let cond = Box::new(cond);
+                let then_expr = Box::new(then_expr);
+                let else_expr = Box::new(else_expr);
 
                 Some(Expression::Conditional {
                     cond,
@@ -2497,7 +2491,6 @@ impl<'hir> HirToMir<'hir> {
                 for stmt in statements {
                     if let Some(mir_stmt) = self.convert_statement(stmt) {
                         self.pending_statements.push(mir_stmt);
-                    } else {
                     }
                 }
                 // Convert and return the final expression
@@ -2640,11 +2633,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert the match value expression ONCE to avoid exponential blowup
         // when we create N comparisons against it
-        let match_value_expr = self.convert_expression(match_value);
-        if match_value_expr.is_none() {
-            return None;
-        }
-        let match_value_expr = match_value_expr?;
+        let match_value_expr = self.convert_expression(match_value)?;
 
         // Build nested conditionals from right to left
         // Start with the last arm as the default (usually wildcard)
@@ -2659,9 +2648,6 @@ impl<'hir> HirToMir<'hir> {
         // Clear the prefix after processing
         self.match_arm_prefix = None;
 
-        if last_expr.is_none() {
-            return None;
-        }
         let mut result = last_expr?;
 
         // Work backwards through the arms (excluding the last one which is the default)
@@ -2861,6 +2847,7 @@ impl<'hir> HirToMir<'hir> {
         self.transform_early_returns_recursive(body)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn transform_early_returns_recursive(
         &self,
         body: Vec<hir::HirStatement>,
@@ -3255,7 +3242,6 @@ impl<'hir> HirToMir<'hir> {
                             param_map.keys().collect::<Vec<_>>()
                         );
                     }
-                } else {
                 }
 
                 // Fall back to global variable lookup
@@ -3286,7 +3272,6 @@ impl<'hir> HirToMir<'hir> {
                             var_name
                         );
                     }
-                } else {
                 }
 
                 // Not in substitution map, keep as-is
@@ -3388,15 +3373,11 @@ impl<'hir> HirToMir<'hir> {
                     );
 
                     let guard = if let Some(guard_expr) = &arm.guard {
-                        let result = self.substitute_expression_with_var_map(
+                        self.substitute_expression_with_var_map(
                             guard_expr,
                             param_map,
                             var_id_to_name,
-                        );
-                        if result.is_none() {
-                            return None;
-                        }
-                        Some(result?)
+                        )
                     } else {
                         None
                     };
@@ -3414,7 +3395,6 @@ impl<'hir> HirToMir<'hir> {
                         );
                         return None;
                     }
-
                     let arm_expr = arm_expr_result?;
                     eprintln!(
                         "[DEBUG] Match arm {}: arm expression substitution succeeded",
@@ -3841,11 +3821,7 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Step 5: Convert statement-based body to expression (handles early returns)
-        let body_expr = self.convert_body_to_expression(&body);
-        if body_expr.is_none() {
-            return None;
-        }
-        let body_expr = body_expr.unwrap();
+        let body_expr = self.convert_body_to_expression(&body)?;
 
         // Step 6: Substitute parameters in the entire expression (including nested let bindings)
         let substituted_expr = self.substitute_expression_with_var_map(
@@ -3855,12 +3831,7 @@ impl<'hir> HirToMir<'hir> {
                 .map(|(k, v)| (k.clone(), v))
                 .collect(),
             &var_id_to_name,
-        );
-
-        if substituted_expr.is_none() {
-            return None;
-        }
-        let substituted_expr = substituted_expr.unwrap();
+        )?;
         eprintln!(
             "[DEBUG] inline_function_call: successfully substituted return, converting to MIR"
         );
@@ -3871,7 +3842,6 @@ impl<'hir> HirToMir<'hir> {
             eprintln!(
                 "[DEBUG] inline_function_call: FAILED to convert substituted expression to MIR"
             );
-        } else {
         }
 
         // Step 8: Clean up function-local variables from variable_map to prevent scope leakage
