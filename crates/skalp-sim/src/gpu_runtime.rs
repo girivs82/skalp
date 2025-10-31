@@ -185,9 +185,14 @@ impl GpuRuntime {
 
     fn get_metal_type_size(&self, width: usize) -> usize {
         match width {
-            1..=32 => 4,  // uint (32-bit)
-            33..=64 => 8, // uint2 (64-bit)
-            _ => 16,      // uint4 (128-bit)
+            1..=32 => 4,     // uint (32-bit)
+            33..=64 => 8,    // uint2 (64-bit)
+            65..=128 => 16,  // uint4 (128-bit)
+            129..=256 => 32, // uint[8] (256-bit array)
+            _ => panic!(
+                "Unsupported bit width {} for Metal type size (max 256 bits)",
+                width
+            ),
         }
     }
 

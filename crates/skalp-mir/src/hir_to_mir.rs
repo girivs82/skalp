@@ -2125,12 +2125,12 @@ impl<'hir> HirToMir<'hir> {
                                 right,
                             });
                         }
-                        // Unary FP operations (via function calls)
+                        // Unary FP operations
                         "sqrt" if call.args.len() == 1 => {
-                            let arg = self.convert_expression(&call.args[0])?;
-                            return Some(Expression::FunctionCall {
-                                name: "sqrt".to_string(),
-                                args: vec![arg],
+                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            return Some(Expression::Unary {
+                                op: UnaryOp::FSqrt,
+                                operand,
                             });
                         }
                         "abs" if call.args.len() == 1 => {
@@ -2146,7 +2146,22 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
-                // Not an FP method - inline the function call
+                // Check for standalone sqrt() function call (not a method)
+                // This handles: sqrt(value) as a compiler intrinsic
+                if call.function == "sqrt" && call.args.len() == 1 {
+                    // Check if argument has FP type
+                    if let Some(arg_type) = self.infer_hir_type(&call.args[0]) {
+                        if self.is_float_type(&arg_type) {
+                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            return Some(Expression::Unary {
+                                op: UnaryOp::FSqrt,
+                                operand,
+                            });
+                        }
+                    }
+                }
+
+                // Not an FP method or intrinsic - inline the function call
                 self.inline_function_call(call)
             }
             hir::HirExpression::Index(base, index) => {

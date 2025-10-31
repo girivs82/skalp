@@ -429,6 +429,11 @@ pub enum Expression {
     },
     /// Function call
     FunctionCall { name: String, args: Vec<Expression> },
+    /// Type cast (bitwise reinterpretation for FP/bit conversions)
+    Cast {
+        expr: Box<Expression>,
+        target_type: DataType,
+    },
 }
 
 /// Literal value
@@ -510,6 +515,10 @@ pub enum UnaryOp {
     BitwiseNot,
     Negate,
     Reduce(ReduceOp),
+    /// Floating-point square root (compiler intrinsic)
+    /// Equivalent to SIR's FSqrt operation
+    /// Example: result = sqrt(value) where value is fp16/fp32
+    FSqrt,
 }
 
 /// Reduction operators

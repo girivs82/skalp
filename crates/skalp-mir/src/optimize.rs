@@ -70,6 +70,9 @@ impl DeadCodeElimination {
                     self.mark_used_in_expression(arg);
                 }
             }
+            Expression::Cast { expr, .. } => {
+                self.mark_used_in_expression(expr);
+            }
             _ => {}
         }
     }
@@ -331,6 +334,10 @@ impl ConstantFolding {
                 for expr in exprs {
                     self.fold_expression(expr);
                 }
+            }
+            Expression::Cast { expr, .. } => {
+                // Fold the inner expression, but preserve the cast
+                self.fold_expression(expr);
             }
             _ => {}
         }

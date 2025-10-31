@@ -612,6 +612,7 @@ impl TypeFlattener {
             Expression::Concat(_) => "concat".to_string(),
             Expression::Replicate { .. } => "replicate".to_string(),
             Expression::FunctionCall { name, .. } => name.clone(),
+            Expression::Cast { expr, .. } => Self::get_expression_base_name(expr),
         }
     }
 }

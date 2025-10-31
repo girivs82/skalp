@@ -229,6 +229,149 @@ mod gpu_simulation_tests {
 
         assert!(testbench.all_tests_passed(), "Some tests failed");
     }
+
+    #[tokio::test]
+    async fn test_256bit_operations_gpu() {
+        // Read simple 256-bit adder design
+        let source = fs::read_to_string("/tmp/test_256bit_ops.sk")
+            .expect("Failed to read test_256bit_ops.sk");
+
+        // Parse and build HIR
+        let hir = parse_and_build_hir(&source).expect("Failed to parse 256-bit test design");
+
+        // Compile to MIR
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::Basic);
+
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile HIR to MIR");
+
+        // Convert to SIR
+        assert!(
+            !mir.modules.is_empty(),
+            "MIR should have at least one module"
+        );
+        let sir = convert_mir_to_sir(&mir.modules[0]);
+
+        // Create simulation config for GPU
+        let config = SimulationConfig {
+            use_gpu: true,
+            max_cycles: 20,
+            timeout_ms: 5000,
+            capture_waveforms: true,
+            parallel_threads: 1,
+        };
+
+        // Create simulator
+        let mut simulator = Simulator::new(config)
+            .await
+            .expect("Failed to create GPU simulator");
+
+        // Load the module
+        simulator
+            .load_module(&sir)
+            .await
+            .expect("Failed to load SIR module");
+
+        // Test: 256-bit addition
+        // a = 0x0000...0005 (5 in lower 32 bits)
+        // b = 0x0000...0003 (3 in lower 32 bits)
+        // Expected sum = 0x0000...0008 (8 in lower 32 bits)
+        let mut a_bytes = vec![0u8; 32];
+        a_bytes[0] = 5; // Little-endian
+
+        let mut b_bytes = vec![0u8; 32];
+        b_bytes[0] = 3;
+
+        // Set initial inputs
+        simulator
+            .set_input("rst", vec![1])
+            .await
+            .expect("Failed to set reset");
+        simulator
+            .set_input("clk", vec![0])
+            .await
+            .expect("Failed to set clock");
+        simulator
+            .set_input("a", a_bytes.clone())
+            .await
+            .expect("Failed to set input a");
+        simulator
+            .set_input("b", b_bytes.clone())
+            .await
+            .expect("Failed to set input b");
+
+        // Reset cycle
+        simulator
+            .step_simulation()
+            .await
+            .expect("Failed to step simulation");
+
+        // Release reset
+        simulator
+            .set_input("rst", vec![0])
+            .await
+            .expect("Failed to clear reset");
+
+        // Clock edge
+        simulator
+            .set_input("clk", vec![1])
+            .await
+            .expect("Failed to set clock high");
+
+        simulator
+            .step_simulation()
+            .await
+            .expect("Failed to step simulation");
+
+        // Check combinational sum output
+        let sum_output = simulator
+            .get_output("sum")
+            .await
+            .expect("Failed to get sum output");
+
+        println!(
+            "Sum output (first 8 bytes): {:?}",
+            &sum_output[..8.min(sum_output.len())]
+        );
+
+        // Verify sum is 8 (5 + 3)
+        assert_eq!(
+            sum_output[0], 8,
+            "256-bit addition failed: expected 8, got {}",
+            sum_output[0]
+        );
+
+        // Clock low
+        simulator
+            .set_input("clk", vec![0])
+            .await
+            .expect("Failed to set clock low");
+
+        simulator
+            .step_simulation()
+            .await
+            .expect("Failed to step simulation");
+
+        // Check latched output
+        let sum_latched = simulator
+            .get_output("sum_latched")
+            .await
+            .expect("Failed to get sum_latched output");
+
+        println!(
+            "Sum latched (first 8 bytes): {:?}",
+            &sum_latched[..8.min(sum_latched.len())]
+        );
+
+        assert_eq!(
+            sum_latched[0], 8,
+            "256-bit latched addition failed: expected 8, got {}",
+            sum_latched[0]
+        );
+
+        println!("✅ GPU 256-bit operations test PASSED!");
+    }
 }
 #[cfg(test)]
 mod test_array_write {

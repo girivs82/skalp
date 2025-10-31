@@ -246,6 +246,10 @@ fn generate_module(
     let mut assignment_count = 0;
 
     for assign in &mir_module.assignments {
+        eprintln!(
+            "[CODEGEN_DEBUG] Assignment RHS type: {:?}",
+            std::mem::discriminant(&assign.rhs)
+        );
         let expanded = expand_struct_assignment(&assign.lhs, &assign.rhs, mir_module);
         for (lhs_str, rhs_str) in expanded {
             // Check if this target has already been assigned
@@ -255,6 +259,10 @@ fn generate_module(
             }
 
             assigned_targets.insert(lhs_str.clone());
+            eprintln!(
+                "[CODEGEN_DEBUG] Generating assignment: {} = {}",
+                lhs_str, rhs_str
+            );
             sv.push_str(&format!("    assign {} = {};\n", lhs_str, rhs_str));
             assignment_count += 1;
         }
@@ -735,11 +743,19 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
             )
         }
         skalp_mir::Expression::Unary { op, operand } => {
-            format!(
-                "{}{}",
-                format_unary_op(op),
-                format_expression_with_context(operand, module)
-            )
+            // Special handling for FSqrt - it's a function call in SystemVerilog
+            if matches!(op, skalp_mir::UnaryOp::FSqrt) {
+                format!(
+                    "$sqrt({})",
+                    format_expression_with_context(operand, module)
+                )
+            } else {
+                format!(
+                    "{}{}",
+                    format_unary_op(op),
+                    format_expression_with_context(operand, module)
+                )
+            }
         }
         skalp_mir::Expression::Conditional {
             cond,
@@ -773,6 +789,10 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                 .map(|a| format_expression_with_context(a, module))
                 .collect();
             format!("{}({})", name, arg_strs.join(", "))
+        }
+        skalp_mir::Expression::Cast { expr, .. } => {
+            // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
+            format_expression_with_context(expr, module)
         }
     }
 }
@@ -819,6 +839,10 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
         skalp_mir::Expression::FunctionCall { name, args } => {
             let arg_strs: Vec<_> = args.iter().map(format_expression).collect();
             format!("{}({})", name, arg_strs.join(", "))
+        }
+        skalp_mir::Expression::Cast { expr, .. } => {
+            // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
+            format_expression(expr)
         }
     }
 }
@@ -888,6 +912,8 @@ fn format_unary_op(op: &skalp_mir::UnaryOp) -> &'static str {
             skalp_mir::ReduceOp::Nor => "~|",
             skalp_mir::ReduceOp::Xnor => "~^",
         },
+        // FSqrt is handled specially in format_expression_with_context as $sqrt()
+        skalp_mir::UnaryOp::FSqrt => "$sqrt",
     }
 }
 

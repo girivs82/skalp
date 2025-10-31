@@ -442,6 +442,10 @@ impl CdcAnalyzer {
                     domains.extend(self.get_expression_clock_domains(arg));
                 }
             }
+            Expression::Cast { expr, .. } => {
+                // Cast is a no-op, propagate domains from inner expression
+                domains.extend(self.get_expression_clock_domains(expr));
+            }
         }
 
         domains
