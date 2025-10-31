@@ -184,9 +184,51 @@ impl<'a> MetalShaderGenerator<'a> {
         // Sort nodes in dependency order
         let sorted_nodes = self.topological_sort_nodes(sir, &cone.nodes);
 
+        eprintln!("🔍 Cone {} has {} nodes", index, sorted_nodes.len());
+
+        // WORKAROUND: Include ALL combinational nodes, not just those in the cone
+        // This ensures Concat nodes (which may not be properly traced) are generated
+        let all_comb_ids: std::collections::HashSet<usize> =
+            sir.combinational_nodes.iter().map(|n| n.id).collect();
+        let cone_ids: std::collections::HashSet<usize> = sorted_nodes.iter().copied().collect();
+        let missing_ids: Vec<usize> = all_comb_ids.difference(&cone_ids).copied().collect();
+
+        if !missing_ids.is_empty() && index == 0 {
+            eprintln!(
+                "⚠️  {} combinational nodes NOT in any cone (will add to cone 0)",
+                missing_ids.len()
+            );
+            for &id in &missing_ids {
+                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == id) {
+                    if matches!(node.kind, SirNodeKind::Concat) {
+                        eprintln!("    - Concat node {}", id);
+                    }
+                }
+            }
+        }
+
+        // Process cone nodes
         for node_id in sorted_nodes {
             if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
+                if matches!(node.kind, SirNodeKind::Concat) {
+                    eprintln!("  ✅ Processing Concat node {} (in cone)", node_id);
+                }
                 self.generate_node_computation_v2(sir, node);
+            }
+        }
+
+        // WORKAROUND: In cone 0, also process nodes that weren't in any cone
+        if index == 0 {
+            for node_id in missing_ids {
+                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
+                    if matches!(node.kind, SirNodeKind::Concat) {
+                        eprintln!(
+                            "  ✅ Processing Concat node {} (MISSING from cones)",
+                            node_id
+                        );
+                    }
+                    self.generate_node_computation_v2(sir, node);
+                }
             }
         }
 
@@ -195,14 +237,39 @@ impl<'a> MetalShaderGenerator<'a> {
         if index == total_cones - 1 {
             // Assign outputs based on their drivers
             for output in &sir.outputs {
+                let output_width = self.get_signal_width_from_sir(sir, &output.name);
+                let is_wide = output_width > 128;
+
                 // Check if this output is a state element (sequential output)
                 if sir.state_elements.contains_key(&output.name) {
                     // Output is driven by a register - read from register buffer
-                    self.write_indented(&format!(
-                        "signals->{} = registers->{};\n",
-                        self.sanitize_name(&output.name),
-                        self.sanitize_name(&output.name)
-                    ));
+                    if is_wide {
+                        // Wide bit type - use element-wise copy
+                        let array_size = output_width.div_ceil(32);
+                        self.write_indented(&format!(
+                            "// Element-wise copy for {}-bit output from register (uint[{}])\n",
+                            output_width, array_size
+                        ));
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) {{\n",
+                            array_size
+                        ));
+                        self.indent += 1;
+                        self.write_indented(&format!(
+                            "signals->{}[i] = registers->{}[i];\n",
+                            self.sanitize_name(&output.name),
+                            self.sanitize_name(&output.name)
+                        ));
+                        self.indent -= 1;
+                        self.write_indented("}\n");
+                    } else {
+                        // Scalar - direct assignment
+                        self.write_indented(&format!(
+                            "signals->{} = registers->{};\n",
+                            self.sanitize_name(&output.name),
+                            self.sanitize_name(&output.name)
+                        ));
+                    }
                     eprintln!(
                         "🔗 OUTPUT (STATE): {} = registers->{}",
                         output.name, output.name
@@ -216,11 +283,49 @@ impl<'a> MetalShaderGenerator<'a> {
                             for comb_node in &sir.combinational_nodes {
                                 if comb_node.id == driver_node_id {
                                     if let Some(node_output) = comb_node.outputs.first() {
-                                        self.write_indented(&format!(
-                                            "signals->{} = signals->{};\n",
-                                            self.sanitize_name(&output.name),
-                                            self.sanitize_name(&node_output.signal_id)
-                                        ));
+                                        // Check BOTH output width AND source width
+                                        let source_width = self
+                                            .get_signal_width_from_sir(sir, &node_output.signal_id);
+                                        let both_wide = output_width > 128 && source_width > 128;
+
+                                        if both_wide {
+                                            // Both are wide bit types - use element-wise copy
+                                            let array_size = output_width.div_ceil(32);
+                                            self.write_indented(&format!(
+                                                "// Element-wise copy for {}-bit output from {}-bit source (uint[{}])\n",
+                                                output_width, source_width, array_size
+                                            ));
+                                            self.write_indented(&format!(
+                                                "for (uint i = 0; i < {}; i++) {{\n",
+                                                array_size
+                                            ));
+                                            self.indent += 1;
+                                            self.write_indented(&format!(
+                                                "signals->{}[i] = signals->{}[i];\n",
+                                                self.sanitize_name(&output.name),
+                                                self.sanitize_name(&node_output.signal_id)
+                                            ));
+                                            self.indent -= 1;
+                                            self.write_indented("}\n");
+                                        } else if source_width > 128 && output_width <= 128 {
+                                            // Source is wide but destination is scalar - extract first element
+                                            self.write_indented(&format!(
+                                                "// Wide to scalar: extract element 0 from {}-bit source to {}-bit output\n",
+                                                source_width, output_width
+                                            ));
+                                            self.write_indented(&format!(
+                                                "signals->{} = signals->{}[0];\n",
+                                                self.sanitize_name(&output.name),
+                                                self.sanitize_name(&node_output.signal_id)
+                                            ));
+                                        } else {
+                                            // Both scalar - direct assignment
+                                            self.write_indented(&format!(
+                                                "signals->{} = signals->{};\n",
+                                                self.sanitize_name(&output.name),
+                                                self.sanitize_name(&node_output.signal_id)
+                                            ));
+                                        }
                                         eprintln!(
                                             "🔗 OUTPUT (COMB): {} = signals->{}",
                                             output.name, node_output.signal_id
@@ -267,12 +372,15 @@ impl<'a> MetalShaderGenerator<'a> {
             // Check if this is an array - arrays don't need old value capture
             let state_sir_type = self.get_signal_sir_type(sir, state_name);
             let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+            // Also skip wide bit types (>128 bits) as they're represented as arrays
+            let is_wide = state_elem.width > 128;
 
-            if !is_array {
-                let state_type = self.get_metal_type_name(state_elem.width);
+            if !is_array && !is_wide {
+                // Only scalar types (<=128 bits) can use direct initialization
+                let (base_type, _) = self.get_metal_type_for_wide_bits(state_elem.width);
                 self.write_indented(&format!(
                     "{} old_{} = registers->{};\n",
-                    state_type, sanitized, sanitized
+                    base_type, sanitized, sanitized
                 ));
             }
         }
@@ -320,50 +428,7 @@ impl<'a> MetalShaderGenerator<'a> {
         self.indent -= 1;
         writeln!(self.output, "}}\n").unwrap();
     }
-    #[allow(dead_code)]
-    #[allow(dead_code)]
-    fn generate_node_computation(&mut self, node: &SirNode) {
-        match &node.kind {
-            SirNodeKind::BinaryOp(op) => {
-                self.generate_binary_op(node, op);
-            }
-            SirNodeKind::UnaryOp(op) => {
-                self.generate_unary_op(node, op);
-            }
-            SirNodeKind::Constant { value, width } => {
-                self.generate_constant(node, *value, *width);
-            }
-            SirNodeKind::Mux => {
-                self.generate_mux(node);
-            }
-            SirNodeKind::Slice { start, end } => {
-                // Note: This function needs SIR access for proper slice generation
-                // For now, generate a placeholder that reads from signals
-                let input = &node.inputs[0].signal_id;
-                let output = &node.outputs[0].signal_id;
-                let (high, low) = if *start >= *end {
-                    (*start, *end)
-                } else {
-                    (*end, *start)
-                };
-                let shift = low;
-                let mask = (1u64 << (high - low + 1)) - 1;
-                self.write_indented(&format!(
-                    "signals->{} = (signals->{} >> {}) & 0x{:X};\n",
-                    self.sanitize_name(output),
-                    self.sanitize_name(input),
-                    shift,
-                    mask
-                ));
-            }
-            SirNodeKind::SignalRef { signal } => {
-                self.generate_signal_ref(node, signal);
-            }
-            _ => {}
-        }
-    }
-
-    fn generate_binary_op(&mut self, node: &SirNode, op: &BinaryOperation) {
+    fn generate_binary_op(&mut self, sir: &SirModule, node: &SirNode, op: &BinaryOperation) {
         if node.inputs.len() >= 2 && !node.outputs.is_empty() {
             let left = &node.inputs[0].signal_id;
             let right = &node.inputs[1].signal_id;
@@ -400,17 +465,75 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::FGte => ">=",
             };
 
-            self.write_indented(&format!(
-                "signals->{} = signals->{} {} signals->{};\n",
-                self.sanitize_name(output),
-                self.sanitize_name(left),
-                op_str,
-                self.sanitize_name(right)
-            ));
+            // Check if we need element-wise operations for wide bit types (> 128 bits)
+            // Get the output signal width from the SIR module
+            let output_width = self.get_signal_width_from_sir(sir, output);
+
+            if output_width > 128 {
+                // Wide bit type - use element-wise operations
+                let array_size = output_width.div_ceil(32); // Ceil division
+                self.write_indented(&format!(
+                    "// Element-wise {} for {}-bit operands (uint[{}])\n",
+                    op_str, output_width, array_size
+                ));
+                self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
+                self.indent += 1;
+                self.write_indented(&format!(
+                    "signals->{}[i] = signals->{}[i] {} signals->{}[i];\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(left),
+                    op_str,
+                    self.sanitize_name(right)
+                ));
+                self.indent -= 1;
+                self.write_indented("}\n");
+            } else {
+                // Scalar operation - direct assignment
+                // Check if this is a floating-point operation
+                let is_fp_op = matches!(
+                    op,
+                    BinaryOperation::FAdd
+                        | BinaryOperation::FSub
+                        | BinaryOperation::FMul
+                        | BinaryOperation::FDiv
+                        | BinaryOperation::FMod
+                        | BinaryOperation::FEq
+                        | BinaryOperation::FNeq
+                        | BinaryOperation::FLt
+                        | BinaryOperation::FLte
+                        | BinaryOperation::FGt
+                        | BinaryOperation::FGte
+                );
+
+                if is_fp_op {
+                    // For FP operations, cast to float, operate, cast back to bits
+                    // Determine float type based on width
+                    let float_type = if output_width == 16 { "half" } else { "float" };
+
+                    self.write_indented(&format!(
+                        "signals->{} = as_type<uint>(as_type<{}>( signals->{}) {} as_type<{}>(signals->{}));\n",
+                        self.sanitize_name(output),
+                        float_type,
+                        self.sanitize_name(left),
+                        op_str,
+                        float_type,
+                        self.sanitize_name(right)
+                    ));
+                } else {
+                    // Regular integer operation
+                    self.write_indented(&format!(
+                        "signals->{} = signals->{} {} signals->{};\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(left),
+                        op_str,
+                        self.sanitize_name(right)
+                    ));
+                }
+            }
         }
     }
 
-    fn generate_unary_op(&mut self, node: &SirNode, op: &UnaryOperation) {
+    fn generate_unary_op(&mut self, sir: &SirModule, node: &SirNode, op: &UnaryOperation) {
         if !node.inputs.is_empty() && !node.outputs.is_empty() {
             let input = &node.inputs[0].signal_id;
             let output = &node.outputs[0].signal_id;
@@ -430,56 +553,199 @@ impl<'a> MetalShaderGenerator<'a> {
             // Check if this is a function call (abs, sqrt) or a prefix operator (-, ~)
             let is_function = matches!(op, UnaryOperation::FAbs | UnaryOperation::FSqrt);
 
-            if is_function {
+            // Check if we need element-wise operations for wide bit types (> 128 bits)
+            let output_width = self.get_signal_width_from_sir(sir, output);
+
+            if output_width > 128 {
+                // Wide bit type - use element-wise operations
+                let array_size = output_width.div_ceil(32); // Ceil division
                 self.write_indented(&format!(
-                    "signals->{} = {}(signals->{});\n",
-                    self.sanitize_name(output),
-                    op_str,
-                    self.sanitize_name(input)
+                    "// Element-wise {} for {}-bit operand (uint[{}])\n",
+                    if is_function { op_str } else { "unary op" },
+                    output_width,
+                    array_size
                 ));
+                self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
+                self.indent += 1;
+                if is_function {
+                    self.write_indented(&format!(
+                        "signals->{}[i] = {}(signals->{}[i]);\n",
+                        self.sanitize_name(output),
+                        op_str,
+                        self.sanitize_name(input)
+                    ));
+                } else {
+                    self.write_indented(&format!(
+                        "signals->{}[i] = {}signals->{}[i];\n",
+                        self.sanitize_name(output),
+                        op_str,
+                        self.sanitize_name(input)
+                    ));
+                }
+                self.indent -= 1;
+                self.write_indented("}\n");
                 return;
             }
 
-            self.write_indented(&format!(
-                "signals->{} = {}signals->{};\n",
-                self.sanitize_name(output),
-                op_str,
-                self.sanitize_name(input)
-            ));
+            // Scalar operations
+            // Check if this is a floating-point operation
+            let is_fp_op = matches!(
+                op,
+                UnaryOperation::FNeg | UnaryOperation::FAbs | UnaryOperation::FSqrt
+            );
+
+            if is_fp_op {
+                // For FP operations, cast to float, operate, cast back to bits
+                let float_type = if output_width == 16 { "half" } else { "float" };
+
+                if is_function {
+                    self.write_indented(&format!(
+                        "signals->{} = as_type<uint>({}(as_type<{}>(signals->{})));\n",
+                        self.sanitize_name(output),
+                        op_str,
+                        float_type,
+                        self.sanitize_name(input)
+                    ));
+                } else {
+                    self.write_indented(&format!(
+                        "signals->{} = as_type<uint>({}as_type<{}>(signals->{}));\n",
+                        self.sanitize_name(output),
+                        op_str,
+                        float_type,
+                        self.sanitize_name(input)
+                    ));
+                }
+            } else {
+                // Regular integer operation
+                if is_function {
+                    self.write_indented(&format!(
+                        "signals->{} = {}(signals->{});\n",
+                        self.sanitize_name(output),
+                        op_str,
+                        self.sanitize_name(input)
+                    ));
+                } else {
+                    self.write_indented(&format!(
+                        "signals->{} = {}signals->{};\n",
+                        self.sanitize_name(output),
+                        op_str,
+                        self.sanitize_name(input)
+                    ));
+                }
+            }
         }
     }
 
     fn generate_constant(&mut self, node: &SirNode, value: u64, width: usize) {
         if !node.outputs.is_empty() {
             let output = &node.outputs[0].signal_id;
-            let metal_type = self.get_metal_type_name(width);
-            eprintln!(
-                "🔢 Metal codegen: node {} = {}({})",
-                node.id, metal_type, value
-            );
-            self.write_indented(&format!(
-                "signals->{} = {}({});\n",
-                self.sanitize_name(output),
-                metal_type,
-                value
-            ));
+            let (base_type, array_size) = self.get_metal_type_for_wide_bits(width);
+
+            if let Some(size) = array_size {
+                // For arrays, initialize element by element
+                eprintln!(
+                    "🔢 Metal codegen: node {} = {}[{}] with value {}",
+                    node.id, base_type, size, value
+                );
+                self.write_indented(&format!(
+                    "{}[{}] temp_const_{} = {{",
+                    base_type,
+                    size,
+                    self.sanitize_name(output)
+                ));
+                for i in 0..size {
+                    if i > 0 {
+                        write!(self.output, ", ").unwrap();
+                    }
+                    // Extract the appropriate 32 bits from the value
+                    let elem_val = if width <= 64 {
+                        if i == 0 {
+                            value as u32
+                        } else {
+                            0
+                        }
+                    } else {
+                        0 // For 256-bit, value is typically 0
+                    };
+                    write!(self.output, "{}", elem_val).unwrap();
+                }
+                writeln!(self.output, "}};").unwrap();
+                self.write_indented(&format!(
+                    "signals->{} = temp_const_{};\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(output)
+                ));
+            } else {
+                eprintln!(
+                    "🔢 Metal codegen: node {} = {}({})",
+                    node.id, base_type, value
+                );
+                self.write_indented(&format!(
+                    "signals->{} = {}({});\n",
+                    self.sanitize_name(output),
+                    base_type,
+                    value
+                ));
+            }
         }
     }
 
-    fn generate_mux(&mut self, node: &SirNode) {
+    fn generate_mux(&mut self, sir: &SirModule, node: &SirNode) {
         if node.inputs.len() >= 3 && !node.outputs.is_empty() {
             let sel = &node.inputs[0].signal_id;
             let true_val = &node.inputs[1].signal_id;
             let false_val = &node.inputs[2].signal_id;
             let output = &node.outputs[0].signal_id;
 
-            self.write_indented(&format!(
-                "signals->{} = signals->{} ? signals->{} : signals->{};\n",
-                self.sanitize_name(output),
-                self.sanitize_name(sel),
-                self.sanitize_name(true_val),
-                self.sanitize_name(false_val)
-            ));
+            // Check if we need element-wise mux for wide bit types (> 128 bits)
+            let output_width = self.get_signal_width_from_sir(sir, output);
+            let true_val_width = self.get_signal_width_from_sir(sir, true_val);
+            let false_val_width = self.get_signal_width_from_sir(sir, false_val);
+
+            if output_width > 128 {
+                // Wide bit type - use element-wise mux
+                let array_size = output_width.div_ceil(32); // Ceil division
+                self.write_indented(&format!(
+                    "// Element-wise mux for {}-bit operands (uint[{}])\n",
+                    output_width, array_size
+                ));
+                self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
+                self.indent += 1;
+
+                // Handle cases where one operand might be a scalar and needs broadcasting
+                let true_access = if true_val_width > 128 {
+                    format!("signals->{}[i]", self.sanitize_name(true_val))
+                } else {
+                    // Scalar - broadcast to all elements (only element 0 gets the value, rest get 0)
+                    format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(true_val))
+                };
+
+                let false_access = if false_val_width > 128 {
+                    format!("signals->{}[i]", self.sanitize_name(false_val))
+                } else {
+                    // Scalar - broadcast to all elements (only element 0 gets the value, rest get 0)
+                    format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(false_val))
+                };
+
+                self.write_indented(&format!(
+                    "signals->{}[i] = signals->{} ? {} : {};\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(sel),
+                    true_access,
+                    false_access
+                ));
+                self.indent -= 1;
+                self.write_indented("}\n");
+            } else {
+                // Scalar mux - direct assignment
+                self.write_indented(&format!(
+                    "signals->{} = signals->{} ? signals->{} : signals->{};\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(sel),
+                    self.sanitize_name(true_val),
+                    self.sanitize_name(false_val)
+                ));
+            }
         }
     }
 
@@ -505,11 +771,10 @@ impl<'a> MetalShaderGenerator<'a> {
             let shift = low;
 
             // Get the input signal's type to determine if it's an array, vector, or bit vector
-            let input_signal = sir.signals.iter().find(|s| s.name == *input);
-            let input_type = input_signal.map(|s| &s.sir_type);
+            let input_type = self.get_signal_sir_type(sir, input);
 
             // BUG #36 FIX: Check if this is an array type - if so, this is an array element read, not a bit slice
-            if let Some(SirType::Array(elem_type, _size)) = input_type {
+            if let Some(SirType::Array(elem_type, _size)) = &input_type {
                 // This is a constant index array read disguised as a slice
                 // The slice is trying to extract one element from the array
                 // For arrays, the "shift" is actually the array index
@@ -576,11 +841,11 @@ impl<'a> MetalShaderGenerator<'a> {
             };
 
             // Check if this is a vector component access
-            if let Some(input_type) = input_type {
-                if input_type.is_vector() {
+            if let Some(ref input_type_val) = input_type {
+                if input_type_val.is_vector() {
                     // For vectors, use component accessors (.x, .y, .z, .w)
                     // Determine which component based on the slice range
-                    let elem_width = input_type.elem_type().map(|t| t.width()).unwrap_or(32);
+                    let elem_width = input_type_val.elem_type().map(|t| t.width()).unwrap_or(32);
                     let component_index = low / elem_width;
                     let component = match component_index {
                         0 => "x",
@@ -605,7 +870,67 @@ impl<'a> MetalShaderGenerator<'a> {
                 }
             }
 
-            // For non-vector types, use bit shifts and masks
+            // For non-vector types, check if it's a wide Bits type requiring element access
+            if let Some(SirType::Bits(input_width)) = input_type {
+                if input_width > 128 {
+                    // Wide Bits type stored as array - need element access
+                    let element_idx = shift / 32; // Which array element
+                    let bit_offset = shift % 32; // Bit offset within that element
+                    let mask = (1u64 << width) - 1;
+
+                    self.write_indented(&format!(
+                        "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
+                        self.sanitize_name(output),
+                        input_ref,
+                        element_idx,
+                        bit_offset,
+                        mask
+                    ));
+                    return;
+                } else if input_width > 64 {
+                    // uint4 type (65-128 bits) - use component access
+                    let component_index = shift / 32;
+                    let component = match component_index {
+                        0 => "x",
+                        1 => "y",
+                        2 => "z",
+                        3 => "w",
+                        _ => "x",
+                    };
+
+                    eprintln!(
+                        "   🎯 SLICE from uint4: {} -> .{} (width={}, shift={})",
+                        input, component, input_width, shift
+                    );
+
+                    self.write_indented(&format!(
+                        "signals->{} = {}.{};\n",
+                        self.sanitize_name(output),
+                        input_ref,
+                        component
+                    ));
+                    return;
+                } else if input_width > 32 {
+                    // uint2 type (33-64 bits) - use component access
+                    let component_index = shift / 32;
+                    let component = if component_index == 0 { "x" } else { "y" };
+
+                    eprintln!(
+                        "   🎯 SLICE from uint2: {} -> .{} (width={}, shift={})",
+                        input, component, input_width, shift
+                    );
+
+                    self.write_indented(&format!(
+                        "signals->{} = {}.{};\n",
+                        self.sanitize_name(output),
+                        input_ref,
+                        component
+                    ));
+                    return;
+                }
+            }
+
+            // For scalar types (<= 32 bits), use bit shifts and masks
             let mask = (1u64 << width) - 1;
             self.write_indented(&format!(
                 "signals->{} = ({} >> {}) & 0x{:X};\n",
@@ -648,7 +973,12 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 if array_width > 32 {
                     // Multi-word packed array
-                    let array_type = self.get_metal_type_name(array_width).to_string();
+                    let (base_type, array_size) = self.get_metal_type_for_wide_bits(array_width);
+                    let array_type = if let Some(size) = array_size {
+                        format!("{}[{}]", base_type, size)
+                    } else {
+                        base_type
+                    };
                     self.write_indented(&format!(
                         "{} array_val_{} = signals->{};\n",
                         array_type,
@@ -725,7 +1055,12 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Fallback for packed bit vectors (legacy)
                 let elem_width = 8;
                 let array_width = self.get_signal_width_from_sir(sir, old_array_name);
-                let array_type_name = self.get_metal_type_name(array_width).to_string();
+                let (base_type, array_size) = self.get_metal_type_for_wide_bits(array_width);
+                let array_type_name = if let Some(size) = array_size {
+                    format!("{}[{}]", base_type, size)
+                } else {
+                    base_type
+                };
 
                 if array_width > 32 {
                     // Multi-word packed array
@@ -789,9 +1124,30 @@ impl<'a> MetalShaderGenerator<'a> {
     }
 
     fn get_signal_width_from_sir(&self, sir: &SirModule, signal_name: &str) -> usize {
-        // Check signals
+        // Check signals - prefer sir_type over width field
         if let Some(sig) = sir.signals.iter().find(|s| s.name == signal_name) {
+            match &sig.sir_type {
+                SirType::Bits(w) => return *w,
+                SirType::Array(elem_type, size) => {
+                    if let SirType::Bits(elem_w) = **elem_type {
+                        return elem_w * size;
+                    }
+                }
+                _ => {}
+            }
             return sig.width;
+        }
+        // Check inputs
+        if let Some(input) = sir.inputs.iter().find(|i| i.name == signal_name) {
+            if let SirType::Bits(w) = input.sir_type {
+                return w;
+            }
+        }
+        // Check outputs
+        if let Some(output) = sir.outputs.iter().find(|o| o.name == signal_name) {
+            if let SirType::Bits(w) = output.sir_type {
+                return w;
+            }
         }
         // Check state elements
         if let Some(state) = sir.state_elements.get(signal_name) {
@@ -801,6 +1157,7 @@ impl<'a> MetalShaderGenerator<'a> {
         32
     }
 
+    #[allow(dead_code)]
     fn generate_signal_ref(&mut self, node: &SirNode, signal: &str) {
         if !node.outputs.is_empty() && !node.inputs.is_empty() {
             let output = &node.outputs[0].signal_id;
@@ -814,12 +1171,179 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
+    fn generate_concat(&mut self, sir: &SirModule, node: &SirNode) {
+        eprintln!("🔧 CONCAT: node {}, {} inputs", node.id, node.inputs.len());
+        if node.outputs.is_empty() {
+            return;
+        }
+
+        let output = &node.outputs[0].signal_id;
+        let output_width = self.get_signal_width_from_sir(sir, output);
+        eprintln!("   output='{}', width={} bits", output, output_width);
+
+        // Get input widths
+        let mut input_widths = Vec::new();
+        for input in &node.inputs {
+            let width = self.get_signal_width_from_sir(sir, &input.signal_id);
+            eprintln!("   input='{}', width={} bits", input.signal_id, width);
+            input_widths.push((input.signal_id.clone(), width));
+        }
+
+        // BUG FIX #48: Metal concat expressions must use output width, not element count
+        // For wide output types (>128 bits), ALWAYS generate uint[N] array concat
+        // This fixes the issue where {0, var_2} was being treated as uint2 instead of uint[8]
+        if output_width > 128 {
+            let array_size = output_width.div_ceil(32);
+            self.write_indented(&format!(
+                "// Concat: pack inputs into {}-bit output (uint[{}])\n",
+                output_width, array_size
+            ));
+
+            // Initialize output array to zeros first
+            self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
+            self.indent += 1;
+            self.write_indented(&format!(
+                "signals->{}[i] = 0;\n",
+                self.sanitize_name(output)
+            ));
+            self.indent -= 1;
+            self.write_indented("}\n");
+
+            // Concatenation packs from MSB to LSB
+            // Inputs are ordered: [high_bits, ..., low_bits]
+            // We need to pack them into array elements
+            let mut bit_offset = 0;
+            for (input_name, width) in input_widths.iter().rev() {
+                let element_idx = bit_offset / 32;
+                let bit_in_element = bit_offset % 32;
+
+                if *width <= 32 && bit_in_element == 0 {
+                    // Simple case: scalar input aligned to element boundary
+                    self.write_indented(&format!(
+                        "signals->{}[{}] = signals->{};\n",
+                        self.sanitize_name(output),
+                        element_idx,
+                        self.sanitize_name(input_name)
+                    ));
+                } else if *width <= 32 {
+                    // Scalar input not aligned - need bit manipulation
+                    self.write_indented(&format!(
+                        "signals->{}[{}] |= (signals->{} << {});\n",
+                        self.sanitize_name(output),
+                        element_idx,
+                        self.sanitize_name(input_name),
+                        bit_in_element
+                    ));
+                } else {
+                    // Wide input - copy element by element
+                    let input_array_size = width.div_ceil(32);
+                    for i in 0..input_array_size {
+                        let dest_elem = (bit_offset + i * 32) / 32;
+                        self.write_indented(&format!(
+                            "signals->{}[{}] = signals->{}[{}];\n",
+                            self.sanitize_name(output),
+                            dest_elem,
+                            self.sanitize_name(input_name),
+                            i
+                        ));
+                    }
+                }
+
+                bit_offset += width;
+            }
+        } else if output_width > 64 {
+            // Output is 65-128 bits -> uint4
+            // Construct uint4 from 32-bit components
+            self.write_indented(&format!(
+                "// Concat: pack inputs into {}-bit output (uint4)\n",
+                output_width
+            ));
+
+            let mut components = vec!["0".to_string(); 4];
+            let mut bit_offset = 0;
+
+            for (input_name, width) in input_widths.iter().rev() {
+                let component_idx = bit_offset / 32;
+                if component_idx < 4 {
+                    components[component_idx] =
+                        format!("signals->{}", self.sanitize_name(input_name));
+                }
+                bit_offset += width;
+            }
+
+            self.write_indented(&format!(
+                "signals->{} = uint4({}, {}, {}, {});\n",
+                self.sanitize_name(output),
+                components[0],
+                components[1],
+                components[2],
+                components[3]
+            ));
+        } else if output_width > 32 {
+            // Output is 33-64 bits -> uint2
+            // Construct uint2 from 32-bit components
+            self.write_indented(&format!(
+                "// Concat: pack inputs into {}-bit output (uint2)\n",
+                output_width
+            ));
+
+            let mut components = vec!["0".to_string(); 2];
+            let mut bit_offset = 0;
+
+            for (input_name, width) in input_widths.iter().rev() {
+                let component_idx = bit_offset / 32;
+                if component_idx < 2 {
+                    components[component_idx] =
+                        format!("signals->{}", self.sanitize_name(input_name));
+                }
+                bit_offset += width;
+            }
+
+            self.write_indented(&format!(
+                "signals->{} = uint2({}, {});\n",
+                self.sanitize_name(output),
+                components[0],
+                components[1]
+            ));
+        } else {
+            // Output is 1-32 bits -> uint
+            // Use bit shifts (safe because all fits in 32 bits)
+            let mut shift = 0;
+            let mut concat_expr = String::new();
+            for (input_name, width) in input_widths.iter().rev() {
+                if !concat_expr.is_empty() {
+                    concat_expr.push_str(" | ");
+                }
+                if shift > 0 {
+                    concat_expr.push_str(&format!(
+                        "(signals->{} << {})",
+                        self.sanitize_name(input_name),
+                        shift
+                    ));
+                } else {
+                    concat_expr.push_str(&format!("signals->{}", self.sanitize_name(input_name)));
+                }
+                shift += width;
+            }
+
+            self.write_indented(&format!(
+                "signals->{} = {};\n",
+                self.sanitize_name(output),
+                concat_expr
+            ));
+        }
+    }
+
     fn generate_node_computation_v2(&mut self, sir: &SirModule, node: &SirNode) {
+        if matches!(node.kind, SirNodeKind::Concat) {
+            eprintln!("🔧 MATCH CONCAT: node {}", node.id);
+        }
         match &node.kind {
-            SirNodeKind::BinaryOp(op) => self.generate_binary_op(node, op),
-            SirNodeKind::UnaryOp(op) => self.generate_unary_op(node, op),
+            SirNodeKind::BinaryOp(op) => self.generate_binary_op(sir, node, op),
+            SirNodeKind::UnaryOp(op) => self.generate_unary_op(sir, node, op),
             SirNodeKind::Constant { value, width } => self.generate_constant(node, *value, *width),
-            SirNodeKind::Mux => self.generate_mux(node),
+            SirNodeKind::Mux => self.generate_mux(sir, node),
+            SirNodeKind::Concat => self.generate_concat(sir, node),
             SirNodeKind::Slice { start, end } => self.generate_slice(sir, node, *start, *end),
             SirNodeKind::SignalRef { signal } => {
                 // Check if it's reading from inputs or registers
@@ -831,9 +1355,20 @@ impl<'a> MetalShaderGenerator<'a> {
                         return;
                     }
 
-                    // Check if source is an array type - if so, need element-wise copy
+                    // Check if source is an array type OR wide Bits type - both need element-wise copy
                     let source_type = self.get_signal_sir_type(sir, signal);
                     let is_array = matches!(source_type, Some(SirType::Array(_, _)));
+
+                    // Check if source is a wide Bits type (>128 bits)
+                    let source_width = self.get_signal_width_from_sir(sir, signal);
+                    let output_width = self.get_signal_width_from_sir(sir, output);
+                    let is_wide_bits = source_width > 128 && output_width > 128;
+
+                    // Debug: log widths for problematic signals
+                    if output.contains("node") || output.contains("fu_result") {
+                        eprintln!("🔍 SignalRef: {} <- {} | source_width={}, output_width={}, is_wide_bits={}",
+                                  output, signal, source_width, output_width, is_wide_bits);
+                    }
 
                     if is_array {
                         // Get array size for loop
@@ -859,25 +1394,85 @@ impl<'a> MetalShaderGenerator<'a> {
                             self.indent -= 1;
                             self.write_indented("}\n");
                         }
-                    } else {
-                        // Non-array types use direct assignment
-                        if sir.inputs.iter().any(|i| i.name == *signal) {
-                            self.write_indented(&format!(
-                                "signals->{} = inputs->{};\n",
-                                self.sanitize_name(output),
-                                self.sanitize_name(signal)
-                            ));
+                    } else if is_wide_bits {
+                        // Wide Bits type (>128 bits) - use element-wise copy
+                        let array_size = output_width.div_ceil(32); // Ceil division
+                        let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
+                            format!("inputs->{}", self.sanitize_name(signal))
                         } else if sir.state_elements.contains_key(signal) {
-                            self.write_indented(&format!(
-                                "signals->{} = registers->{};\n",
-                                self.sanitize_name(output),
-                                self.sanitize_name(signal)
-                            ));
+                            format!("registers->{}", self.sanitize_name(signal))
+                        } else {
+                            format!("signals->{}", self.sanitize_name(signal))
+                        };
+
+                        self.write_indented(&format!(
+                            "// Element-wise copy for {}-bit signal (uint[{}])\n",
+                            output_width, array_size
+                        ));
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) {{\n",
+                            array_size
+                        ));
+                        self.indent += 1;
+                        self.write_indented(&format!(
+                            "signals->{}[i] = {}[i];\n",
+                            self.sanitize_name(output),
+                            source_location
+                        ));
+                        self.indent -= 1;
+                        self.write_indented("}\n");
+                    } else {
+                        // Scalar/vector types - check for mixed width assignments
+                        let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
+                            format!("inputs->{}", self.sanitize_name(signal))
+                        } else if sir.state_elements.contains_key(signal) {
+                            format!("registers->{}", self.sanitize_name(signal))
                         } else if sir.signals.iter().any(|s| s.name == *signal) {
+                            format!("signals->{}", self.sanitize_name(signal))
+                        } else {
+                            return; // Unknown signal source
+                        };
+
+                        // Check for vector-to-scalar conversion (uint2/uint4 -> uint)
+                        if source_width > 32 && output_width <= 32 {
+                            // Source is uint2 or uint4, destination is uint - extract first component
+                            eprintln!(
+                                "   🎯 Vector->Scalar: {} ({} bits) -> {} ({} bits), extracting .x",
+                                signal, source_width, output, output_width
+                            );
                             self.write_indented(&format!(
-                                "signals->{} = signals->{};\n",
+                                "signals->{} = {}.x;\n",
                                 self.sanitize_name(output),
-                                self.sanitize_name(signal)
+                                source_location
+                            ));
+                        } else if source_width <= 32 && output_width > 32 && output_width <= 64 {
+                            // Source is uint, destination is uint2 - construct vector
+                            eprintln!(
+                                "   🎯 Scalar->uint2: {} ({} bits) -> {} ({} bits)",
+                                signal, source_width, output, output_width
+                            );
+                            self.write_indented(&format!(
+                                "signals->{} = uint2({}, 0);\n",
+                                self.sanitize_name(output),
+                                source_location
+                            ));
+                        } else if source_width <= 32 && output_width > 64 && output_width <= 128 {
+                            // Source is uint, destination is uint4 - construct vector
+                            eprintln!(
+                                "   🎯 Scalar->uint4: {} ({} bits) -> {} ({} bits)",
+                                signal, source_width, output, output_width
+                            );
+                            self.write_indented(&format!(
+                                "signals->{} = uint4({}, 0, 0, 0);\n",
+                                self.sanitize_name(output),
+                                source_location
+                            ));
+                        } else {
+                            // Same type - direct assignment
+                            self.write_indented(&format!(
+                                "signals->{} = {};\n",
+                                self.sanitize_name(output),
+                                source_location
                             ));
                         }
                     }
@@ -893,11 +1488,102 @@ impl<'a> MetalShaderGenerator<'a> {
         if node.outputs.len() > 1 {
             let first_output = &node.outputs[0].signal_id;
             for additional_output in &node.outputs[1..] {
-                self.write_indented(&format!(
-                    "signals->{} = signals->{};\n",
-                    self.sanitize_name(&additional_output.signal_id),
-                    self.sanitize_name(first_output)
-                ));
+                // Check if we need element-wise copy for wide bit types
+                // IMPORTANT: Check BOTH source and destination widths
+                let output_width =
+                    self.get_signal_width_from_sir(sir, &additional_output.signal_id);
+                let source_width = self.get_signal_width_from_sir(sir, first_output);
+                let both_wide = output_width > 128 && source_width > 128;
+
+                if both_wide {
+                    // Both are wide bit types - use element-wise copy
+                    let array_size = output_width.div_ceil(32);
+                    self.write_indented(&format!(
+                        "// Element-wise copy for {}-bit additional output from {}-bit source (uint[{}])\n",
+                        output_width, source_width, array_size
+                    ));
+                    self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
+                    self.indent += 1;
+                    self.write_indented(&format!(
+                        "signals->{}[i] = signals->{}[i];\n",
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                    self.indent -= 1;
+                    self.write_indented("}\n");
+                } else if output_width > 128 && source_width <= 128 {
+                    // Destination is wide but source is scalar - assign to first element, zero rest
+                    let array_size = output_width.div_ceil(32);
+                    self.write_indented(&format!(
+                        "// Scalar to wide: assign {}-bit source to element 0 of {}-bit output (uint[{}])\n",
+                        source_width, output_width, array_size
+                    ));
+                    self.write_indented(&format!(
+                        "signals->{}[0] = signals->{};\n",
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                    // Zero out remaining elements
+                    self.write_indented(&format!("for (uint i = 1; i < {}; i++) {{\n", array_size));
+                    self.indent += 1;
+                    self.write_indented(&format!(
+                        "signals->{}[i] = 0;\n",
+                        self.sanitize_name(&additional_output.signal_id)
+                    ));
+                    self.indent -= 1;
+                    self.write_indented("}\n");
+                } else if source_width > 128 && output_width <= 128 {
+                    // Source is wide but destination is scalar - extract first element
+                    self.write_indented(&format!(
+                        "// Wide to scalar: extract element 0 from {}-bit source to {}-bit output\n",
+                        source_width, output_width
+                    ));
+                    self.write_indented(&format!(
+                        "signals->{} = signals->{}[0];\n",
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                } else if source_width > 32 && output_width <= 32 {
+                    // Source is uint2/uint4, destination is uint - extract first component
+                    eprintln!(
+                        "   🎯 Additional output vector->scalar: {} ({} bits) -> {} ({} bits)",
+                        first_output, source_width, additional_output.signal_id, output_width
+                    );
+                    self.write_indented(&format!(
+                        "signals->{} = signals->{}.x;\n",
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                } else if source_width <= 32 && output_width > 32 && output_width <= 64 {
+                    // Source is uint, destination is uint2 - construct vector
+                    eprintln!(
+                        "   🎯 Additional output scalar->uint2: {} ({} bits) -> {} ({} bits)",
+                        first_output, source_width, additional_output.signal_id, output_width
+                    );
+                    self.write_indented(&format!(
+                        "signals->{} = uint2(signals->{}, 0);\n",
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                } else if source_width <= 32 && output_width > 64 && output_width <= 128 {
+                    // Source is uint, destination is uint4 - construct vector
+                    eprintln!(
+                        "   🎯 Additional output scalar->uint4: {} ({} bits) -> {} ({} bits)",
+                        first_output, source_width, additional_output.signal_id, output_width
+                    );
+                    self.write_indented(&format!(
+                        "signals->{} = uint4(signals->{}, 0, 0, 0);\n",
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                } else {
+                    // Same type - direct assignment
+                    self.write_indented(&format!(
+                        "signals->{} = signals->{};\n",
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                }
             }
         }
     }
@@ -953,9 +1639,13 @@ impl<'a> MetalShaderGenerator<'a> {
                     );
 
                     if let Some(state_elem) = sir.state_elements.get(&output.signal_id) {
-                        // Check if this is an array type
+                        // Check if this is an array type OR wide bit type (>128 bits)
                         let output_type = self.get_signal_sir_type(sir, &output.signal_id);
                         let is_array = matches!(output_type, Some(SirType::Array(_, _)));
+                        // Check data signal width to see if we're assigning from a wide signal
+                        let data_signal_width = self.get_signal_width_from_sir(sir, data_signal);
+                        let register_is_wide = state_elem.width > 128;
+                        let data_is_wide = data_signal_width > 128;
 
                         if is_array {
                             // Element-wise copy for arrays
@@ -973,8 +1663,37 @@ impl<'a> MetalShaderGenerator<'a> {
                                 self.indent -= 1;
                                 self.write_indented("}\n");
                             }
+                        } else if register_is_wide {
+                            // Wide register (>128 bits) - use element-wise copy
+                            let array_size = state_elem.width.div_ceil(32);
+                            self.write_indented(&format!(
+                                "// Element-wise copy for {}-bit register (uint[{}])\n",
+                                state_elem.width, array_size
+                            ));
+                            self.write_indented(&format!(
+                                "for (uint i = 0; i < {}; i++) {{\n",
+                                array_size
+                            ));
+                            self.indent += 1;
+                            if data_is_wide {
+                                self.write_indented(&format!(
+                                    "registers->{}[i] = signals->{}[i];\n",
+                                    self.sanitize_name(&output.signal_id),
+                                    self.sanitize_name(data_signal)
+                                ));
+                            } else {
+                                // Data is scalar, only assign to element 0
+                                self.write_indented(&format!(
+                                    "registers->{}[i] = (i == 0) ? signals->{} : 0;\n",
+                                    self.sanitize_name(&output.signal_id),
+                                    self.sanitize_name(data_signal)
+                                ));
+                            }
+                            self.indent -= 1;
+                            self.write_indented("}\n");
                         } else {
-                            // Truncate to the register's declared width with a bit mask
+                            // Register is narrow (≤128 bits)
+                            // Extract LSBs if data is wide, otherwise use scalar assignment with mask
                             let width = state_elem.width;
                             let mask = if width < 32 {
                                 format!("0x{:X}", (1u64 << width) - 1)
@@ -982,10 +1701,18 @@ impl<'a> MetalShaderGenerator<'a> {
                                 "0xFFFFFFFF".to_string()
                             };
 
+                            let data_expr = if data_is_wide {
+                                // Extract element[0] from wide data signal
+                                format!("signals->{}[0]", self.sanitize_name(data_signal))
+                            } else {
+                                // Scalar data signal
+                                format!("signals->{}", self.sanitize_name(data_signal))
+                            };
+
                             let assignment = format!(
-                                "registers->{} = signals->{} & {};\n",
+                                "registers->{} = {} & {};\n",
                                 self.sanitize_name(&output.signal_id),
-                                self.sanitize_name(data_signal),
+                                data_expr,
                                 mask
                             );
                             eprintln!(
@@ -1077,11 +1804,28 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn get_metal_type_name(&self, width: usize) -> &str {
         match width {
             1..=32 => "uint",
             33..=64 => "uint2",
-            _ => "uint4",
+            65..=128 => "uint4",
+            _ => panic!("Unsupported bit width {} for Metal codegen (max 128 bits). Use arrays for wider types.", width),
+        }
+    }
+
+    /// Get Metal type representation for wide bit types (> 128 bits)
+    /// Returns (base_type, array_size) for array representation
+    fn get_metal_type_for_wide_bits(&self, width: usize) -> (String, Option<usize>) {
+        match width {
+            1..=32 => ("uint".to_string(), None),
+            33..=64 => ("uint2".to_string(), None),
+            65..=128 => ("uint4".to_string(), None),
+            129..=256 => ("uint".to_string(), Some(8)), // uint[8] for 256 bits
+            _ => panic!(
+                "Unsupported bit width {} for Metal codegen (max 256 bits)",
+                width
+            ),
         }
     }
 
@@ -1090,7 +1834,14 @@ impl<'a> MetalShaderGenerator<'a> {
     /// Non-arrays return ("type", "")
     fn get_metal_type_parts(&self, sir_type: &SirType) -> (String, String) {
         match sir_type {
-            SirType::Bits(w) => (self.get_metal_type_name(*w).to_string(), String::new()),
+            SirType::Bits(w) => {
+                let (base_type, array_size) = self.get_metal_type_for_wide_bits(*w);
+                if let Some(size) = array_size {
+                    (base_type, format!("[{}]", size))
+                } else {
+                    (base_type, String::new())
+                }
+            }
             SirType::Float16 => ("half".to_string(), String::new()),
             SirType::Float32 => ("float".to_string(), String::new()),
             SirType::Float64 => ("double".to_string(), String::new()),
@@ -1126,6 +1877,10 @@ impl<'a> MetalShaderGenerator<'a> {
         // Check outputs
         if let Some(output) = sir.outputs.iter().find(|o| o.name == signal_name) {
             return Some(output.sir_type.clone());
+        }
+        // Check state elements (registers)
+        if let Some(state_elem) = sir.state_elements.get(signal_name) {
+            return Some(SirType::Bits(state_elem.width));
         }
         None
     }
