@@ -400,9 +400,10 @@ impl<'a> MirToSirConverter<'a> {
             "📡 CONTINUOUS ASSIGNMENTS: Processing {} assignments",
             self.mir.assignments.len()
         );
+        println!("🔍 Processing {} continuous assignments", self.mir.assignments.len());
         for assign in &self.mir.assignments {
             let target = self.lvalue_to_string(&assign.lhs);
-            eprintln!("   📡 CONTINUOUS: {} <= expression", target);
+            println!("   📡 CONTINUOUS ASSIGN: {} <= expression", target);
             self.convert_continuous_assign(&target, &assign.rhs);
         }
 
@@ -1578,10 +1579,8 @@ impl<'a> MirToSirConverter<'a> {
                     }
 
                     let target = self.lvalue_to_string(&assign.lhs);
-                    // Skip output ports that should only have continuous assignments
-                    if !self.is_output_port(&target) {
-                        targets.insert(target);
-                    }
+                    // Include all assignment targets (output ports can be driven by sequential logic)
+                    targets.insert(target);
                 }
                 Statement::If(nested_if) => {
                     // Recurse into nested if statements
@@ -1830,6 +1829,11 @@ impl<'a> MirToSirConverter<'a> {
             Expression::FunctionCall { .. } => {
                 // Fall back to original implementation for function calls
                 self.create_expression_node(expr)
+            }
+            Expression::Cast { expr, .. } => {
+                // Cast is a no-op for hardware generation (bitwise reinterpretation)
+                // Just process the inner expression
+                self.create_expression_with_local_context(expr, local_context)
             }
         }
     }
@@ -2084,7 +2088,10 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_continuous_assign(&mut self, target: &str, value: &Expression) {
-        let node_id = self.create_expression_node(value);
+        // Get target signal width to propagate to expression tree
+        let target_width = self.get_signal_width(target);
+        println!("🚀 CONVERT_CONTINUOUS_ASSIGN: target='{}', width={}", target, target_width);
+        let node_id = self.create_expression_node_with_width(value, Some(target_width));
         self.connect_node_to_signal(node_id, target);
     }
 
@@ -2143,6 +2150,11 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_expression_node(&mut self, expr: &Expression) -> usize {
+        // Call with no width hint
+        self.create_expression_node_with_width(expr, None)
+    }
+
+    fn create_expression_node_with_width(&mut self, expr: &Expression, target_width: Option<usize>) -> usize {
         match expr {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
@@ -2160,10 +2172,11 @@ impl<'a> MirToSirConverter<'a> {
                 then_expr,
                 else_expr,
             } => {
-                eprintln!("⚠️ CONDITIONAL EXPRESSION WITHOUT CONTEXT!");
+                eprintln!("⚠️ CONDITIONAL: target_width={:?}", target_width);
                 let cond_node = self.create_expression_node(cond);
-                let then_node = self.create_expression_node(then_expr);
-                let else_node = self.create_expression_node(else_expr);
+                // Propagate width hint to both branches
+                let then_node = self.create_expression_node_with_width(then_expr, target_width);
+                let else_node = self.create_expression_node_with_width(else_expr, target_width);
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             Expression::Concat(parts) => {
@@ -2171,7 +2184,13 @@ impl<'a> MirToSirConverter<'a> {
                     .iter()
                     .map(|p| self.create_expression_node(p))
                     .collect();
-                self.create_concat_node(part_nodes)
+                // Pass target width to concat node creation
+                self.create_concat_node_with_width(part_nodes, target_width)
+            }
+            Expression::Cast { expr, .. } => {
+                // Cast is a no-op for hardware generation (bitwise reinterpretation)
+                // Just process the inner expression
+                self.create_expression_node_with_width(expr, target_width)
             }
             _ => {
                 // For unsupported expressions, create a zero constant
@@ -2450,16 +2469,37 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_concat_node(&mut self, parts: Vec<usize>) -> usize {
+        self.create_concat_node_with_width(parts, None)
+    }
+
+    fn create_concat_node_with_width(&mut self, parts: Vec<usize>, target_width: Option<usize>) -> usize {
         let node_id = self.next_node_id();
 
         let part_signals: Vec<SignalRef> =
             parts.iter().map(|&p| self.node_to_signal_ref(p)).collect();
 
         // Calculate total width as sum of input widths
-        let width = part_signals
+        let sum_width: usize = part_signals
             .iter()
             .map(|s| self.get_signal_width(&s.signal_id))
             .sum();
+
+        // BUG FIX #49: Use target width if provided and different from sum
+        // This handles cases like {0, var_2} where 0 should be 224 bits to make total 256
+        let width = if let Some(target) = target_width {
+            if target != sum_width {
+                eprintln!(
+                    "🔧 CONCAT WIDTH FIX: node_{} sum={} → target={} (diff={})",
+                    node_id,
+                    sum_width,
+                    target,
+                    target as i64 - sum_width as i64
+                );
+            }
+            target
+        } else {
+            sum_width
+        };
 
         // Create output signal for this node - concatenation always produces bits
         let output_signal_name = format!("node_{}_out", node_id);
@@ -2805,6 +2845,14 @@ impl<'a> MirToSirConverter<'a> {
         eprintln!("🔗 CONNECT: Node {} -> Signal '{}'", node_id, signal_name);
         // Update signal to have this node as driver
         if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
+            if let Some(existing_driver) = signal.driver_node {
+                eprintln!(
+                    "   ⚠️  WARNING: Signal '{}' already driven by node {} (NOT overwriting with node {})",
+                    signal_name, existing_driver, node_id
+                );
+                // Don't overwrite - keep the first driver
+                return;
+            }
             signal.driver_node = Some(node_id);
             eprintln!(
                 "   ✅ Signal '{}' now driven by node {}",
@@ -2836,10 +2884,19 @@ impl<'a> MirToSirConverter<'a> {
                     signal_name
                 );
             } else {
-                node.outputs.push(SignalRef {
-                    signal_id: signal_name.to_string(),
-                    bit_range: None,
-                });
+                // Check if this signal is already an output of this node to prevent duplicates
+                if !node.outputs.iter().any(|o| o.signal_id == signal_name) {
+                    node.outputs.push(SignalRef {
+                        signal_id: signal_name.to_string(),
+                        bit_range: None,
+                    });
+                    eprintln!("   ✅ Added '{}' to node {} outputs", signal_name, node_id);
+                } else {
+                    eprintln!(
+                        "   ⚠️  Signal '{}' already in node {} outputs (skipping duplicate)",
+                        signal_name, node_id
+                    );
+                }
             }
         }
     }
