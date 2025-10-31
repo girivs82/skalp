@@ -2481,7 +2481,14 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::If(if_expr) => {
                 // Convert if-expression to a conditional (ternary) expression in MIR
                 // MIR represents this as: condition ? then_expr : else_expr
+                //
+                // BUG FIX #50: Isolate dynamic variable scopes between branches
+                // Each branch can create variables with the same names (e.g., result_32)
+                // We must prevent variable name collisions between branches
                 let cond = self.convert_expression(&if_expr.condition)?;
+
+                // Save current dynamic_variables state before then-branch
+                let saved_dynamic_vars = self.dynamic_variables.clone();
 
                 let then_expr = self.convert_expression(&if_expr.then_expr);
                 if then_expr.is_none() {
@@ -2492,6 +2499,9 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 let then_expr = then_expr?;
+
+                // Restore dynamic_variables before else-branch to prevent variable leakage
+                self.dynamic_variables = saved_dynamic_vars;
 
                 let else_expr = self.convert_expression(&if_expr.else_expr);
                 if else_expr.is_none() {
