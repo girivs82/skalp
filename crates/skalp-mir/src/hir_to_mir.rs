@@ -283,7 +283,17 @@ impl<'hir> HirToMir<'hir> {
                     self.dynamic_variables.clear();
 
                     // Convert continuous assignments (may expand to multiple for structs)
-                    for hir_assign in &impl_block.assignments {
+                    eprintln!(
+                        "[DEBUG] Processing {} assignments from impl block",
+                        impl_block.assignments.len()
+                    );
+                    for (idx, hir_assign) in impl_block.assignments.iter().enumerate() {
+                        eprintln!(
+                            "[DEBUG] Assignment {}: LHS={:?}, RHS={:?}",
+                            idx,
+                            std::mem::discriminant(&hir_assign.lhs),
+                            std::mem::discriminant(&hir_assign.rhs)
+                        );
                         // Clear any pending statements from previous assignments
                         self.pending_statements.clear();
 
@@ -300,7 +310,9 @@ impl<'hir> HirToMir<'hir> {
                                     if !module.variables.iter().any(|v| v.id == *var_id) {
                                         // Find the variable name by looking up the MIR variable ID
                                         // in the reverse mapping
-                                        let var_name = self.variable_map.iter()
+                                        let var_name = self
+                                            .variable_map
+                                            .iter()
                                             .find(|(_, &mir_id)| mir_id == *var_id)
                                             .and_then(|(hir_id, _)| {
                                                 // Try to find the variable name from the HIR
@@ -591,6 +603,10 @@ impl<'hir> HirToMir<'hir> {
                         };
 
                         // Track this dynamically created variable so we can add it to the module later
+                        eprintln!(
+                            "[DEBUG] Creating dynamic variable: name={}, type={:?}",
+                            var_name, let_stmt.var_type
+                        );
                         self.dynamic_variables.insert(
                             let_stmt.id,
                             (new_id, var_name.clone(), let_stmt.var_type.clone()),
@@ -1395,6 +1411,10 @@ impl<'hir> HirToMir<'hir> {
         // This handles cases like: rd_data = mem[index]
         // This is the RHS counterpart to Bug #8 (array index writes)
         if let Some(assigns) = self.try_expand_array_index_read_assignment(assign) {
+            eprintln!(
+                "[DEBUG] Array index read expansion returned Some with {} assigns",
+                assigns.len()
+            );
             return assigns;
         }
 
@@ -1949,7 +1969,14 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Variable(id) => {
                 if let Some(&mir_id) = self.variable_map.get(id) {
                     Some(Expression::Ref(LValue::Variable(mir_id)))
+                } else if let Some((mir_id, _, _)) = self.dynamic_variables.get(id) {
+                    // Check dynamic_variables for let bindings from inlined functions
+                    Some(Expression::Ref(LValue::Variable(*mir_id)))
                 } else {
+                    eprintln!(
+                        "[DEBUG] Variable not found in variable_map or dynamic_variables: {:?}",
+                        id
+                    );
                     None
                 }
             }
@@ -2392,24 +2419,47 @@ impl<'hir> HirToMir<'hir> {
                 // Bit concatenation: {a, b, c}
                 // In hardware, concatenation combines multiple bit vectors into a single wider vector
                 // The first element becomes the most significant bits
-                //
-                // For now, we'll use binary operations to combine the values
-                // TODO: Add proper concatenation operator in MIR
+
+                eprintln!(
+                    "[DEBUG] Converting Concat with {} elements",
+                    expressions.len()
+                );
+                for (i, expr) in expressions.iter().enumerate() {
+                    eprintln!(
+                        "[DEBUG] Concat element {}: {:?}",
+                        i,
+                        std::mem::discriminant(expr)
+                    );
+                }
 
                 if expressions.is_empty() {
                     return Some(Expression::Literal(Value::Integer(0)));
                 }
 
                 if expressions.len() == 1 {
+                    eprintln!("[DEBUG] Concat has only 1 element, unwrapping");
                     return self.convert_expression(&expressions[0]);
                 }
 
-                // For multiple expressions, chain them together with shifts and ORs
-                // {a, b, c} becomes (a << (width_b + width_c)) | (b << width_c) | c
-                // For now, return the first expression as a placeholder
-                // This will need proper bit width calculation and concatenation support
-                // TODO: Implement proper concatenation with bit width tracking
-                self.convert_expression(&expressions[0])
+                // Convert all concat elements to MIR expressions
+                let mut mir_exprs = Vec::new();
+                for expr in expressions {
+                    if let Some(mir_expr) = self.convert_expression(expr) {
+                        mir_exprs.push(mir_expr);
+                    } else {
+                        eprintln!(
+                            "[DEBUG] Concat: failed to convert element, type: {:?}",
+                            std::mem::discriminant(expr)
+                        );
+                        return None;
+                    }
+                }
+
+                eprintln!(
+                    "[DEBUG] Concat successfully converted with {} MIR elements",
+                    mir_exprs.len()
+                );
+                Some(Expression::Concat(mir_exprs))
             }
             hir::HirExpression::Ternary {
                 condition,
@@ -2482,13 +2532,15 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::Cast(cast_expr) => {
                 // Convert type cast expression
-                // For now, just convert the inner expression
-                // Type checking and proper conversion will be handled during codegen
-                // TODO: Add explicit type conversion operations in MIR when needed for:
-                //   - Integer width changes (truncation/extension)
-                //   - Signed/unsigned conversions
-                //   - Fixed-point/floating-point conversions
-                self.convert_expression(&cast_expr.expr)
+                // Preserve the cast in MIR so codegen knows the intended type
+                // For FP/bit reinterpretation casts, this is a no-op in hardware
+                // but critical for type tracking
+                let inner_expr = self.convert_expression(&cast_expr.expr)?;
+                let target_type = self.convert_type(&cast_expr.target_type);
+                Some(Expression::Cast {
+                    expr: Box::new(inner_expr),
+                    target_type,
+                })
             }
             hir::HirExpression::StructLiteral(struct_lit) => {
                 // Convert struct literal to packed bit vector
@@ -2532,6 +2584,11 @@ impl<'hir> HirToMir<'hir> {
                     eprintln!(
                         "[DEBUG] Block expression: result_expr conversion failed, type: {:?}",
                         std::mem::discriminant(&**result_expr)
+                    );
+                } else {
+                    eprintln!(
+                        "[DEBUG] Block expression: result_expr converted to MIR type: {:?}",
+                        std::mem::discriminant(result.as_ref().unwrap())
                     );
                 }
                 result
@@ -2957,8 +3014,16 @@ impl<'hir> HirToMir<'hir> {
     /// This handles the case where early returns have been transformed into nested if-else
     fn convert_body_to_expression(&self, body: &[hir::HirStatement]) -> Option<hir::HirExpression> {
         if body.is_empty() {
-            eprintln!("convert_body_to_expression: empty body");
+            eprintln!("[DEBUG] convert_body_to_expression: empty body");
             return None;
+        }
+
+        eprintln!(
+            "[DEBUG] convert_body_to_expression: {} statements",
+            body.len()
+        );
+        for (i, stmt) in body.iter().enumerate() {
+            eprintln!("[DEBUG]   stmt[{}]: {:?}", i, std::mem::discriminant(stmt));
         }
 
         // Collect all let bindings
@@ -2971,7 +3036,43 @@ impl<'hir> HirToMir<'hir> {
             remaining_stmts = &remaining_stmts[1..];
         }
 
+        eprintln!(
+            "[DEBUG] convert_body_to_expression: {} let bindings, {} remaining stmts",
+            let_bindings.len(),
+            remaining_stmts.len()
+        );
+
         if remaining_stmts.is_empty() {
+            // All statements are let bindings - check for implicit return
+            // If the last let binding's value is an expression without semicolon,
+            // treat it as an implicit return
+            if let Some(last_let) = let_bindings.last() {
+                eprintln!(
+                    "[DEBUG] convert_body_to_expression: treating last let '{}' as implicit return",
+                    last_let.name
+                );
+                // Take all but the last let binding for the block,
+                // and use the last let's value as the return expression
+                let block_stmts: Vec<_> = let_bindings
+                    .iter()
+                    .take(let_bindings.len() - 1)
+                    .map(|let_stmt| hir::HirStatement::Let(let_stmt.clone()))
+                    .collect();
+
+                if block_stmts.is_empty() {
+                    // Only one let binding - return its value directly
+                    return Some(last_let.value.clone());
+                } else {
+                    // Multiple let bindings - wrap in block
+                    return Some(hir::HirExpression::Block {
+                        statements: block_stmts,
+                        result_expr: Box::new(last_let.value.clone()),
+                    });
+                }
+            }
+            eprintln!(
+                "[DEBUG] convert_body_to_expression: no remaining statements and no let bindings!"
+            );
             return None;
         }
 
@@ -3235,6 +3336,10 @@ impl<'hir> HirToMir<'hir> {
         param_map: &HashMap<String, &hir::HirExpression>,
         var_id_to_name: &HashMap<hir::VariableId, String>,
     ) -> Option<hir::HirExpression> {
+        eprintln!(
+            "[DEBUG] substitute_expression_with_var_map: expr type: {:?}",
+            std::mem::discriminant(expr)
+        );
         match expr {
             // GenericParam - function parameters are parsed as generic params
             // Check if this matches a function parameter and substitute
@@ -3613,15 +3718,42 @@ impl<'hir> HirToMir<'hir> {
 
             // Cast expression - substitute the inner expression
             hir::HirExpression::Cast(cast) => {
+                eprintln!(
+                    "[DEBUG] Cast substitution: inner expr type: {:?}, target type: {:?}",
+                    std::mem::discriminant(&*cast.expr),
+                    cast.target_type
+                );
                 let substituted_expr = Box::new(self.substitute_expression_with_var_map(
                     &cast.expr,
                     param_map,
                     var_id_to_name,
                 )?);
+                eprintln!("[DEBUG] Cast substitution: successfully substituted inner expr");
                 Some(hir::HirExpression::Cast(hir::HirCastExpr {
                     expr: substituted_expr,
                     target_type: cast.target_type.clone(),
                 }))
+            }
+
+            // Concat expression - substitute all elements
+            hir::HirExpression::Concat(elements) => {
+                eprintln!("[DEBUG] Concat substitution: {} elements", elements.len());
+                let mut substituted_elements = Vec::new();
+                for (i, elem) in elements.iter().enumerate() {
+                    eprintln!(
+                        "[DEBUG] Concat: substituting element {}, type: {:?}",
+                        i,
+                        std::mem::discriminant(elem)
+                    );
+                    let substituted =
+                        self.substitute_expression_with_var_map(elem, param_map, var_id_to_name)?;
+                    substituted_elements.push(substituted);
+                }
+                eprintln!(
+                    "[DEBUG] Concat substitution: successfully substituted all {} elements",
+                    substituted_elements.len()
+                );
+                Some(hir::HirExpression::Concat(substituted_elements))
             }
 
             // Recursively handle other expression types as needed
@@ -4021,8 +4153,18 @@ impl<'hir> HirToMir<'hir> {
     fn convert_binary_op(&self, op: &hir::HirBinaryOp, left_expr: &hir::HirExpression) -> BinaryOp {
         // Infer type from left operand to determine if we need FP operators
         let is_fp = if let Some(ty) = self.infer_hir_type(left_expr) {
+            eprintln!(
+                "[DEBUG] convert_binary_op: op={:?}, left_expr type={:?}, is_fp={}",
+                op,
+                ty,
+                self.is_float_type(&ty)
+            );
             self.is_float_type(&ty)
         } else {
+            eprintln!(
+                "[DEBUG] convert_binary_op: op={:?}, left_expr type=None, is_fp=false",
+                op
+            );
             false
         };
 
@@ -4355,6 +4497,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Infer the MIR DataType of a MIR Expression
     /// This is used for variables created from pending statements where we don't have HIR type info
+    #[allow(clippy::only_used_in_recursion)]
     fn infer_expression_type(&self, expr: &Expression) -> DataType {
         match expr {
             Expression::Literal(value) => match value {
@@ -4398,6 +4541,7 @@ impl<'hir> HirToMir<'hir> {
             Expression::FunctionCall { .. } => DataType::Nat(32), // Default for function calls
             Expression::Concat(_) => DataType::Nat(32),
             Expression::Replicate { .. } => DataType::Nat(32),
+            Expression::Cast { target_type, .. } => target_type.clone(),
         }
     }
 

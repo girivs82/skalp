@@ -530,10 +530,14 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::AssignmentStmt => {
+                    eprintln!("[HIR_IMPL_DEBUG] Processing AssignmentStmt");
                     if let Some(assignment) =
                         self.build_assignment(&child, HirAssignmentType::Combinational)
                     {
+                        eprintln!("[HIR_IMPL_DEBUG] Assignment built successfully, pushing to assignments vector");
                         assignments.push(assignment);
+                    } else {
+                        eprintln!("[HIR_IMPL_DEBUG] build_assignment returned None!");
                     }
                 }
                 SyntaxKind::LetStmt => {
@@ -1403,11 +1407,22 @@ impl HirBuilderContext {
                         | SyntaxKind::CallExpr
                         | SyntaxKind::ArrayLiteral
                         | SyntaxKind::TupleExpr // CRITICAL FIX: Support tuple literal assignments
+                        | SyntaxKind::CastExpr // BUG FIX: Support cast expressions in assignments (e.g., y = x as fp32)
+                        | SyntaxKind::ConcatExpr // BUG FIX: Support concat expressions in assignments (e.g., result = {high, low})
                 )
             })
             .collect();
 
+        eprintln!(
+            "[HIR_ASSIGN_DEBUG] build_assignment found {} expressions",
+            exprs.len()
+        );
+        for (i, expr) in exprs.iter().enumerate() {
+            eprintln!("  [{}] {:?}", i, expr.kind());
+        }
+
         if exprs.len() < 2 {
+            eprintln!("[HIR_ASSIGN_DEBUG] Not enough expressions, returning None");
             return None;
         }
 
@@ -1507,14 +1522,29 @@ impl HirBuilderContext {
 
             current_lval
         } else {
-            self.build_lvalue(&exprs[0])?
+            eprintln!("[HIR_ASSIGN_DEBUG] Building LHS from exprs[0]");
+            let lhs_result = self.build_lvalue(&exprs[0]);
+            if lhs_result.is_none() {
+                eprintln!("[HIR_ASSIGN_DEBUG] build_lvalue returned None!");
+            }
+            lhs_result?
         };
+
+        eprintln!(
+            "[HIR_ASSIGN_DEBUG] LHS built successfully, rhs_start_idx={}",
+            rhs_start_idx
+        );
 
         // Handle RHS - if there are multiple expressions, we need to combine them
         let rhs = if rhs_start_idx >= exprs.len() {
+            eprintln!("[HIR_ASSIGN_DEBUG] rhs_start_idx >= exprs.len(), returning None");
             return None;
         } else if rhs_start_idx == exprs.len() - 1 {
             // Simple case: single RHS expression
+            eprintln!(
+                "[HIR_ASSIGN_DEBUG] Building single RHS from exprs[{}]",
+                rhs_start_idx
+            );
             self.build_expression(&exprs[rhs_start_idx])?
         } else if exprs.len() == 3 && rhs_start_idx == 1 {
             // Special case for old 3-expression patterns (not nested field access)
@@ -2835,6 +2865,13 @@ impl HirBuilderContext {
     /// Build literal expression
     fn build_literal_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         if let Some(token) = node.first_child_or_token() {
+            eprintln!(
+                "[HIR_LITERAL_DEBUG] build_literal_expr: token.kind() = {:?}",
+                token.kind()
+            );
+            if let Some(t) = token.as_token() {
+                eprintln!("[HIR_LITERAL_DEBUG] token text = '{}'", t.text());
+            }
             match token.kind() {
                 SyntaxKind::IntLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
@@ -3282,6 +3319,12 @@ impl HirBuilderContext {
 
     /// Build concatenation expression: {a, b, c}
     fn build_concat_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        eprintln!("[HIR_CONCAT_DEBUG] build_concat_expr called");
+        eprintln!("[HIR_CONCAT_DEBUG] Node children:");
+        for child in node.children() {
+            eprintln!("  - {:?}", child.kind());
+        }
+
         // Collect all expression children
         let expressions: Vec<HirExpression> = node
             .children()
@@ -3308,9 +3351,18 @@ impl HirBuilderContext {
             .filter_map(|n| self.build_expression(&n))
             .collect();
 
+        eprintln!(
+            "[HIR_CONCAT_DEBUG] Found {} expressions in concat",
+            expressions.len()
+        );
         if expressions.is_empty() {
+            eprintln!("[HIR_CONCAT_DEBUG] No expressions found, returning None");
             None
         } else {
+            eprintln!(
+                "[HIR_CONCAT_DEBUG] Returning Concat with {} elements",
+                expressions.len()
+            );
             Some(HirExpression::Concat(expressions))
         }
     }
@@ -3949,6 +4001,7 @@ impl HirBuilderContext {
                             | SyntaxKind::ParenExpr
                             | SyntaxKind::IfExpr
                             | SyntaxKind::MatchExpr
+                            | SyntaxKind::ConcatExpr
                     ) {
                         if found_if && !found_lbrace1 {
                             // Take the LAST expression before the first brace (to handle sub-expressions)
@@ -3984,6 +4037,7 @@ impl HirBuilderContext {
                         | SyntaxKind::ParenExpr
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
+                        | SyntaxKind::ConcatExpr
                 )
             })?;
             self.build_expression(&expr_node)?
@@ -4016,6 +4070,7 @@ impl HirBuilderContext {
                             | SyntaxKind::ParenExpr
                             | SyntaxKind::IfExpr
                             | SyntaxKind::MatchExpr
+                            | SyntaxKind::ConcatExpr
                     )
                 })?;
             self.build_expression(&expr_node)?
@@ -4077,6 +4132,7 @@ impl HirBuilderContext {
                         | SyntaxKind::TupleExpr
                         | SyntaxKind::StructLiteral
                         | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::ConcatExpr
                 ) =>
                 {
                     // This is an expression - it becomes the result
@@ -4118,6 +4174,7 @@ impl HirBuilderContext {
                         | SyntaxKind::ParenExpr
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
+                        | SyntaxKind::ConcatExpr
                 )
             })
             .and_then(|n| self.build_expression(&n))?;
@@ -4220,6 +4277,7 @@ impl HirBuilderContext {
                                 | SyntaxKind::ArrayLiteral
                                 | SyntaxKind::IfExpr
                                 | SyntaxKind::MatchExpr
+                                | SyntaxKind::ConcatExpr
                         )
                     })
                     .and_then(|n| self.build_expression(&n))
@@ -4262,6 +4320,7 @@ impl HirBuilderContext {
                                 | SyntaxKind::IfExpr
                                 | SyntaxKind::MatchExpr
                                 | SyntaxKind::BlockExpr // FIX: Support block expressions in match arms
+                                | SyntaxKind::ConcatExpr // FIX: Support concat expressions in match arms
                         )
                     })
                     .cloned()
