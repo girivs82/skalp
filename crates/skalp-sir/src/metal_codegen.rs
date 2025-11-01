@@ -507,12 +507,19 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 if is_fp_op {
                     // For FP operations, cast to float, operate, cast back to bits
-                    // Determine float type based on width
-                    let float_type = if output_width == 16 { "half" } else { "float" };
+                    // BUG FIX #51: Use correct bit type for FP16 (ushort) vs FP32 (uint)
+                    // FP16: half (16-bit float) <-> ushort (16-bit int)
+                    // FP32: float (32-bit float) <-> uint (32-bit int)
+                    let (float_type, bit_type) = if output_width == 16 {
+                        ("half", "ushort")
+                    } else {
+                        ("float", "uint")
+                    };
 
                     self.write_indented(&format!(
-                        "signals->{} = as_type<uint>(as_type<{}>( signals->{}) {} as_type<{}>(signals->{}));\n",
+                        "signals->{} = as_type<{}>(as_type<{}>( signals->{}) {} as_type<{}>(signals->{}));\n",
                         self.sanitize_name(output),
+                        bit_type,  // Use ushort for FP16, uint for FP32
                         float_type,
                         self.sanitize_name(left),
                         op_str,
@@ -595,21 +602,29 @@ impl<'a> MetalShaderGenerator<'a> {
             );
 
             if is_fp_op {
-                // For FP operations, cast to float, operate, cast back to bits
-                let float_type = if output_width == 16 { "half" } else { "float" };
+                // BUG FIX #51: Use correct bit type for FP16 (ushort) vs FP32 (uint)
+                // FP16: half (16-bit float) <-> ushort (16-bit int)
+                // FP32: float (32-bit float) <-> uint (32-bit int)
+                let (float_type, bit_type) = if output_width == 16 {
+                    ("half", "ushort")
+                } else {
+                    ("float", "uint")
+                };
 
                 if is_function {
                     self.write_indented(&format!(
-                        "signals->{} = as_type<uint>({}(as_type<{}>(signals->{})));\n",
+                        "signals->{} = as_type<{}>({}(as_type<{}>(signals->{})));\n",
                         self.sanitize_name(output),
+                        bit_type,  // Use ushort for FP16, uint for FP32
                         op_str,
                         float_type,
                         self.sanitize_name(input)
                     ));
                 } else {
                     self.write_indented(&format!(
-                        "signals->{} = as_type<uint>({}as_type<{}>(signals->{}));\n",
+                        "signals->{} = as_type<{}>({}as_type<{}>(signals->{}));\n",
                         self.sanitize_name(output),
+                        bit_type,  // Use ushort for FP16, uint for FP32
                         op_str,
                         float_type,
                         self.sanitize_name(input)
