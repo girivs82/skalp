@@ -37,7 +37,10 @@
       "Bash(rustc:*)",
       "Bash(git push)",
       "Bash(env SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib RUST_LOG=skalp_mir=trace /Users/girivs/src/hw/hls/target/release/skalp build:*)",
-      "Bash(env SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/debug/skalp build:*)"
+      "Bash(env SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/debug/skalp build:*)",
+      "Bash(SKALP_DUMP_MIR=1 SKALP_STDLIB_PATH=./crates/skalp-stdlib ./target/release/skalp build:*)",
+      "Bash(SKALP_DUMP_HIR=1 SKALP_STDLIB_PATH=./crates/skalp-stdlib ./target/release/skalp build:*)",
+      "Bash(RUST_LOG=skalp_frontend=debug SKALP_STDLIB_PATH=./crates/skalp-stdlib ./target/release/skalp build:*)"
     ],
     "deny": [],
     "ask": []

@@ -3666,32 +3666,62 @@ impl HirBuilderContext {
         // WORKAROUND FOR PARSER BUG: Due to how the parser implements Pratt parsing,
         // the left operand of a binary expression may be a SIBLING of the BinaryExpr node
         // instead of a child. If we only have 1 child, look for the left operand in the parent.
-        if expr_children.len() == 1 {
-            if let Some(parent) = node.parent() {
-                // Find the previous sibling expression node
-                let siblings: Vec<_> = parent.children().collect();
-                if let Some(pos) = siblings.iter().position(|n| n == node) {
-                    if pos > 0 {
-                        // Check if the previous sibling is an expression
-                        let prev = &siblings[pos - 1];
-                        if matches!(
-                            prev.kind(),
-                            SyntaxKind::LiteralExpr
-                                | SyntaxKind::IdentExpr
-                                | SyntaxKind::BinaryExpr
-                                | SyntaxKind::UnaryExpr
-                                | SyntaxKind::FieldExpr
-                                | SyntaxKind::IndexExpr
-                                | SyntaxKind::PathExpr
-                                | SyntaxKind::ParenExpr
-                                | SyntaxKind::IfExpr
-                                | SyntaxKind::MatchExpr
-                                | SyntaxKind::CallExpr
-                                | SyntaxKind::ArrayLiteral
-                        ) {
-                            // Insert the previous sibling as the left operand
-                            expr_children.insert(0, prev.clone());
-                        }
+        // BUG FIX #66: Also check for NEXT siblings which represent chained operations!
+        if let Some(parent) = node.parent() {
+            let siblings: Vec<_> = parent.children().collect();
+
+            // Find our position in siblings
+            if let Some(pos) = siblings.iter().position(|n| n == node) {
+                // Check for previous sibling (left operand for this expression)
+                if expr_children.len() == 1 && pos > 0 {
+                    let prev = &siblings[pos - 1];
+                    if matches!(
+                        prev.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::ArrayLiteral
+                    ) {
+                        // Insert the previous sibling as the left operand
+                        expr_children.insert(0, prev.clone());
+                    }
+                }
+
+                // BUG FIX #66: Check for next siblings (chained operations like "+ c")
+                // If there are more BinaryExpr siblings after us, they represent chained operations
+                for next_pos in (pos + 1)..siblings.len() {
+                    let next = &siblings[next_pos];
+                    if next.kind() == SyntaxKind::BinaryExpr {
+                        // This is a chained operation!
+                        expr_children.push(next.clone());
+                    } else if matches!(
+                        next.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::ArrayLiteral
+                    ) {
+                        // Also could be a regular operand
+                        // But break at non-expression nodes
+                        break;
+                    } else {
+                        // Stop at non-expression nodes
+                        break;
                     }
                 }
             }
@@ -3701,6 +3731,82 @@ impl HirBuilderContext {
             return None;
         }
 
+        // BUG FIX #66: Handle chained operations (a + b + c)
+        // If we have more than 2 children, the first is the left operand and subsequent
+        // children are nested BinaryExprs that need to be combined left-associatively
+        if expr_children.len() > 2 {
+            // Build left-associative chain: ((a op b) op c) op d ...
+            let mut result = self.build_expression(&expr_children[0])?;
+
+            for child in &expr_children[1..] {
+                // Each subsequent child should be a BinaryExpr with operator + right operand
+                // or just a regular expression (fallback)
+                if child.kind() == SyntaxKind::BinaryExpr {
+                    // Extract operator from this BinaryExpr
+                    let op_token = child
+                        .children_with_tokens()
+                        .filter_map(|e| e.into_token())
+                        .find(|t| t.kind().is_operator());
+
+                    if let Some(op_tok) = op_token {
+                        let op = self.token_to_binary_op(op_tok.kind())?;
+
+                        // Extract right operand from this BinaryExpr's children
+                        let binary_expr_children: Vec<_> = child
+                            .children()
+                            .filter(|n| {
+                                matches!(
+                                    n.kind(),
+                                    SyntaxKind::LiteralExpr
+                                        | SyntaxKind::IdentExpr
+                                        | SyntaxKind::BinaryExpr
+                                        | SyntaxKind::UnaryExpr
+                                        | SyntaxKind::FieldExpr
+                                        | SyntaxKind::IndexExpr
+                                        | SyntaxKind::PathExpr
+                                        | SyntaxKind::ParenExpr
+                                        | SyntaxKind::IfExpr
+                                        | SyntaxKind::MatchExpr
+                                        | SyntaxKind::CallExpr
+                                        | SyntaxKind::CastExpr
+                                        | SyntaxKind::ArrayLiteral
+                                )
+                            })
+                            .collect();
+
+                        if let Some(right_node) = binary_expr_children.first() {
+                            let right = Box::new(self.build_expression(right_node)?);
+                            result = HirExpression::Binary(HirBinaryExpr {
+                                left: Box::new(result),
+                                op,
+                                right,
+                            });
+                        }
+                    }
+                } else {
+                    // Fallback: treat as a regular operand with the previous operator
+                    // This shouldn't happen in well-formed ASTs but handle it gracefully
+                    let tokens: Vec<_> = node
+                        .children_with_tokens()
+                        .filter_map(|elem| elem.into_token())
+                        .collect();
+
+                    if let Some(op_tok) = tokens.iter().find(|t| t.kind().is_operator()) {
+                        let op = self.token_to_binary_op(op_tok.kind())?;
+                        let right = Box::new(self.build_expression(child)?);
+                        result = HirExpression::Binary(HirBinaryExpr {
+                            left: Box::new(result),
+                            op,
+                            right,
+                        });
+                    }
+                }
+            }
+
+            return Some(result);
+        }
+
+        // Standard case: exactly 2 children
         let left = Box::new(self.build_expression(&expr_children[0])?);
         let right = Box::new(self.build_expression(&expr_children[1])?);
 

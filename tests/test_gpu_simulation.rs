@@ -372,6 +372,212 @@ mod gpu_simulation_tests {
 
         println!("✅ GPU 256-bit operations test PASSED!");
     }
+
+    #[tokio::test]
+    async fn test_bug_66_chained_fp32_addition() {
+        // Bug #66: Chained FP32 addition returns wrong values
+        // Pattern: (a + b) + c only computes first two terms
+        // Expected: a + b + c = all three terms
+        let source = r#"
+        entity TestChainedAddition {
+            in clk: clock
+            in rst: reset
+            in a: bit[32]
+            in b: bit[32]
+            in c: bit[32]
+            out result_broken: bit[32]
+            out result_working: bit[32]
+        }
+
+        impl TestChainedAddition {
+            signal result_broken_reg: bit[32]
+            signal result_working_reg: bit[32]
+
+            let a_fp = a as fp32;
+            let b_fp = b as fp32;
+            let c_fp = c as fp32;
+
+            // BROKEN: Chained addition
+            signal broken: bit[32]
+            let broken_fp = a_fp + b_fp + c_fp;
+            broken = broken_fp as bit[32]
+
+            // WORKING: Separate statements
+            signal working: bit[32]
+            let sum_ab = a_fp + b_fp;
+            let working_fp = sum_ab + c_fp;
+            working = working_fp as bit[32]
+
+            result_broken = result_broken_reg
+            result_working = result_working_reg
+
+            on(clk.rise) {
+                if rst {
+                    result_broken_reg <= 0
+                    result_working_reg <= 0
+                } else {
+                    result_broken_reg <= broken
+                    result_working_reg <= working
+                }
+            }
+        }
+        "#;
+
+        println!("\n=== Bug #66: Chained FP32 Addition Test ===");
+
+        // Parse and build HIR
+        let hir = parse_and_build_hir(source)
+            .expect("Failed to parse chained addition test design");
+
+        // Compile to MIR
+        let compiler = MirCompiler::new()
+            .with_optimization_level(OptimizationLevel::None)
+            .with_verbose(false);
+
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile HIR to MIR");
+
+        // Convert to SIR
+        let sir = convert_mir_to_sir(&mir.modules[0]);
+
+        // Create simulation config for GPU
+        let config = SimulationConfig {
+            use_gpu: true,
+            max_cycles: 10,
+            timeout_ms: 5000,
+            capture_waveforms: false,
+            parallel_threads: 1,
+        };
+
+        // Create simulator
+        let mut simulator = Simulator::new(config)
+            .await
+            .expect("Failed to create GPU simulator");
+
+        // Load the module
+        simulator
+            .load_module(&sir)
+            .await
+            .expect("Failed to load SIR module");
+
+        // Test values: a=4.0, b=10.0, c=18.0
+        // Expected: 4.0 + 10.0 + 18.0 = 32.0
+        // Bug behavior: 4.0 + 10.0 = 14.0 (drops third term)
+        let a: f32 = 4.0;
+        let b: f32 = 10.0;
+        let c: f32 = 18.0;
+        let expected: f32 = 32.0;
+
+        println!("\nTest inputs:");
+        println!("  a = {} (0x{:08X})", a, a.to_bits());
+        println!("  b = {} (0x{:08X})", b, b.to_bits());
+        println!("  c = {} (0x{:08X})", c, c.to_bits());
+        println!("\nExpected:");
+        println!(
+            "  result_broken = {} (if fixed) or 14.0 (if bug present)",
+            expected
+        );
+        println!("  result_working = {} (should always work)", expected);
+
+        // Initial state with reset
+        simulator
+            .set_input("clk", vec![0])
+            .await
+            .unwrap();
+        simulator
+            .set_input("rst", vec![1])
+            .await
+            .unwrap();
+        simulator
+            .set_input("a", a.to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        simulator
+            .set_input("b", b.to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        simulator
+            .set_input("c", c.to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        simulator.step_simulation().await.unwrap();
+
+        // Clock rise with reset
+        simulator
+            .set_input("clk", vec![1])
+            .await
+            .unwrap();
+        simulator.step_simulation().await.unwrap();
+
+        // Clock fall, release reset
+        simulator
+            .set_input("clk", vec![0])
+            .await
+            .unwrap();
+        simulator
+            .set_input("rst", vec![0])
+            .await
+            .unwrap();
+        simulator.step_simulation().await.unwrap();
+
+        // Clock rise - compute happens
+        simulator
+            .set_input("clk", vec![1])
+            .await
+            .unwrap();
+        simulator.step_simulation().await.unwrap();
+
+        // Read results
+        let result_broken_bytes = simulator.get_output("result_broken").await.unwrap();
+        let result_working_bytes = simulator.get_output("result_working").await.unwrap();
+
+        let result_broken = f32::from_le_bytes([
+            result_broken_bytes[0],
+            result_broken_bytes[1],
+            result_broken_bytes[2],
+            result_broken_bytes[3],
+        ]);
+
+        let result_working = f32::from_le_bytes([
+            result_working_bytes[0],
+            result_working_bytes[1],
+            result_working_bytes[2],
+            result_working_bytes[3],
+        ]);
+
+        println!("\n=== Simulation Results ===");
+        println!(
+            "  result_broken = {} (0x{:08X})",
+            result_broken,
+            result_broken.to_bits()
+        );
+        println!(
+            "  result_working = {} (0x{:08X})",
+            result_working,
+            result_working.to_bits()
+        );
+
+        // Check results - Bug #66 should now be FIXED
+        println!("\n=== Results ===");
+        println!("  result_broken = {} (expected 32.0)", result_broken);
+        println!("  result_working = {} (expected 32.0)", result_working);
+
+        // Both should now work correctly
+        assert!(
+            (result_broken - 32.0).abs() < 0.01,
+            "Bug #66 FIX: Chained addition should produce 32.0, got {}",
+            result_broken
+        );
+
+        assert!(
+            (result_working - 32.0).abs() < 0.01,
+            "Workaround should produce 32.0, got {}",
+            result_working
+        );
+
+        println!("\n✅ Bug #66 FIXED: Chained FP32 addition now works correctly!");
+    }
 }
 #[cfg(test)]
 mod test_array_write {
