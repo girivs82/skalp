@@ -99,7 +99,8 @@ impl<'a> MetalShaderGenerator<'a> {
         for output in &sir.outputs {
             let sanitized_name = self.sanitize_name(&output.name);
             if added_names.insert(sanitized_name.clone()) {
-                let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(&output.sir_type);
+                let (base_type, array_suffix) =
+                    self.get_metal_type_parts_for_struct(&output.sir_type);
                 self.write_indented(&format!(
                     "{} {}{};\n",
                     base_type, sanitized_name, array_suffix
@@ -118,7 +119,8 @@ impl<'a> MetalShaderGenerator<'a> {
                 && !input_names.contains(&signal.name)
                 && added_names.insert(sanitized_name.clone())
             {
-                let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(&signal.sir_type);
+                let (base_type, array_suffix) =
+                    self.get_metal_type_parts_for_struct(&signal.sir_type);
                 self.write_indented(&format!(
                     "{} {}{};\n",
                     base_type, sanitized_name, array_suffix
@@ -649,23 +651,66 @@ impl<'a> MetalShaderGenerator<'a> {
                     _ => ("float", "uint"),
                 };
 
+                // BUG FIX #64: Check input and output signal types to determine conversions needed
+                let input_type = self.get_signal_type_from_sir(sir, input);
+                let output_type = self.get_signal_type_from_sir(sir, output);
+
+                let needs_input_conversion = !matches!(
+                    input_type,
+                    Some(SirType::Float16) | Some(SirType::Float32) | Some(SirType::Float64)
+                );
+                let needs_output_conversion = !matches!(
+                    output_type,
+                    Some(SirType::Float16) | Some(SirType::Float32) | Some(SirType::Float64)
+                );
+
                 if is_function {
+                    let input_expr = if needs_input_conversion {
+                        format!(
+                            "as_type<{}>(signals->{})",
+                            float_type,
+                            self.sanitize_name(input)
+                        )
+                    } else {
+                        format!("signals->{}", self.sanitize_name(input))
+                    };
+
+                    let op_expr = format!("{}({})", op_str, input_expr);
+
+                    let output_expr = if needs_output_conversion {
+                        format!("as_type<{}>({})", bit_type, op_expr)
+                    } else {
+                        op_expr
+                    };
+
                     self.write_indented(&format!(
-                        "signals->{} = as_type<{}>({}(as_type<{}>(signals->{})));\n",
+                        "signals->{} = {};\n",
                         self.sanitize_name(output),
-                        bit_type,
-                        op_str,
-                        float_type,
-                        self.sanitize_name(input)
+                        output_expr
                     ));
                 } else {
+                    let input_expr = if needs_input_conversion {
+                        format!(
+                            "as_type<{}>(signals->{})",
+                            float_type,
+                            self.sanitize_name(input)
+                        )
+                    } else {
+                        format!("signals->{}", self.sanitize_name(input))
+                    };
+
+                    let op_expr = format!("{}{}", op_str, input_expr);
+
+                    let output_expr = if needs_output_conversion {
+                        format!("as_type<{}>({})", bit_type, op_expr)
+                    } else {
+                        op_expr
+                    };
+
                     self.write_indented(&format!(
-                        "signals->{} = as_type<{}>({}as_type<{}>(signals->{}));\n",
+                        "signals->{} = {};\n",
                         self.sanitize_name(output),
-                        bit_type,
-                        op_str,
-                        float_type,
-                        self.sanitize_name(input)
+                        output_expr
                     ));
                 }
             } else {
@@ -1408,11 +1453,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 }
                 let input_ref = self.format_signal_for_bitwise_op(sir, input_name);
                 if shift > 0 {
-                    concat_expr.push_str(&format!(
-                        "({} << {})",
-                        input_ref,
-                        shift
-                    ));
+                    concat_expr.push_str(&format!("({} << {})", input_ref, shift));
                 } else {
                     concat_expr.push_str(&input_ref);
                 }
@@ -2028,7 +2069,11 @@ impl<'a> MetalShaderGenerator<'a> {
         self.get_metal_type_parts_impl(sir_type, true)
     }
 
-    fn get_metal_type_parts_impl(&self, sir_type: &SirType, force_4byte_align: bool) -> (String, String) {
+    fn get_metal_type_parts_impl(
+        &self,
+        sir_type: &SirType,
+        force_4byte_align: bool,
+    ) -> (String, String) {
         match sir_type {
             SirType::Bits(w) => {
                 // BUG FIX #60: Use uint for all bit types ≤32 bits in struct definitions

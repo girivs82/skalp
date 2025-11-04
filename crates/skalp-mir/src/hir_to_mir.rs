@@ -1998,15 +1998,23 @@ impl<'hir> HirToMir<'hir> {
                     Some(Expression::Ref(LValue::Variable(mir_id)))
                 } else if let Some((mir_id, name, _)) = self.dynamic_variables.get(id) {
                     // Check dynamic_variables for let bindings from inlined functions
-                    eprintln!("[DEBUG] Variable lookup: Found '{}' in dynamic_variables -> {:?}", name, mir_id);
+                    eprintln!(
+                        "[DEBUG] Variable lookup: Found '{}' in dynamic_variables -> {:?}",
+                        name, mir_id
+                    );
                     Some(Expression::Ref(LValue::Variable(*mir_id)))
                 } else {
                     eprintln!(
                         "[DEBUG] Variable not found in variable_map or dynamic_variables: HIR ID {:?}",
                         id
                     );
-                    eprintln!("[DEBUG]   Current dynamic_variables: {:?}",
-                        self.dynamic_variables.iter().map(|(_, (_, name, _))| name).collect::<Vec<_>>());
+                    eprintln!(
+                        "[DEBUG]   Current dynamic_variables: {:?}",
+                        self.dynamic_variables
+                            .iter()
+                            .map(|(_, (_, name, _))| name)
+                            .collect::<Vec<_>>()
+                    );
                     None
                 }
             }
@@ -2659,13 +2667,30 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 // Convert and return the final expression
-                eprintln!("[DEBUG] Block expression: About to convert result_expr, type: {:?}", std::mem::discriminant(&**result_expr));
-                eprintln!("[DEBUG] Block expression: Current dynamic_variables: {:?}",
-                    self.dynamic_variables.iter().map(|(_, (_, name, _))| name.as_str()).collect::<Vec<_>>());
+                eprintln!(
+                    "[DEBUG] Block expression: About to convert result_expr, type: {:?}",
+                    std::mem::discriminant(&**result_expr)
+                );
+                eprintln!(
+                    "[DEBUG] Block expression: Current dynamic_variables: {:?}",
+                    self.dynamic_variables
+                        .iter()
+                        .map(|(_, (_, name, _))| name.as_str())
+                        .collect::<Vec<_>>()
+                );
                 if let hir::HirExpression::Variable(var_id) = &**result_expr {
-                    eprintln!("[DEBUG] Block expression: result_expr is Variable({:?})", var_id);
-                    eprintln!("[DEBUG] Block expression: variable_map contains: {:?}", self.variable_map.contains_key(var_id));
-                    eprintln!("[DEBUG] Block expression: dynamic_variables contains: {:?}", self.dynamic_variables.contains_key(var_id));
+                    eprintln!(
+                        "[DEBUG] Block expression: result_expr is Variable({:?})",
+                        var_id
+                    );
+                    eprintln!(
+                        "[DEBUG] Block expression: variable_map contains: {:?}",
+                        self.variable_map.contains_key(var_id)
+                    );
+                    eprintln!(
+                        "[DEBUG] Block expression: dynamic_variables contains: {:?}",
+                        self.dynamic_variables.contains_key(var_id)
+                    );
                     if let Some((mir_id, name, _)) = self.dynamic_variables.get(var_id) {
                         eprintln!("[DEBUG] Block expression: Found in dynamic_variables as {} (MIR ID {:?})", name, mir_id);
                     }
@@ -2704,12 +2729,11 @@ impl<'hir> HirToMir<'hir> {
                 "vec2" => 2,
                 "vec3" => 3,
                 "vec4" => 4,
-                _ => unreachable!()
+                _ => unreachable!(),
             };
 
             let mut field_exprs = Vec::new();
-            for i in 0..num_fields {
-                let field_name = field_order[i];
+            for &field_name in field_order.iter().take(num_fields) {
                 let field_init = fields.iter().find(|f| f.name == field_name)?;
                 let field_expr = self.convert_expression(&field_init.value)?;
                 field_exprs.push(field_expr);
