@@ -2552,43 +2552,22 @@ impl<'hir> HirToMir<'hir> {
                 }
                 let then_expr = then_expr?;
 
-                // BUG FIX #61: Collect variables that were added to pending_statements in then-branch
-                // These variables need to be preserved because they're emitted globally
-                let mut pending_vars_from_then = std::collections::HashMap::new();
-                eprintln!("[DEBUG] If-expr: Checking then-branch for pending variables. Pending count: {} -> {}",
-                          saved_pending_count, self.pending_statements.len());
-                for (hir_id, (mir_id, name, hir_type)) in &self.dynamic_variables {
-                    if !saved_dynamic_vars.contains_key(hir_id) {
-                        // This is a new variable created in the then-branch
-                        // Check if it was added to pending_statements
-                        let var_in_pending = self.pending_statements[saved_pending_count..]
-                            .iter()
-                            .any(|stmt| {
-                                if let Statement::Assignment(assign) = stmt {
-                                    if let LValue::Variable(vid) = &assign.lhs {
-                                        vid == mir_id
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            });
-                        eprintln!("[DEBUG] If-expr: Variable {} (MIR {:?}): in_pending={}", name, mir_id, var_in_pending);
-                        if var_in_pending {
-                            pending_vars_from_then.insert(*hir_id, (*mir_id, name.clone(), hir_type.clone()));
-                        }
-                    }
-                }
-                eprintln!("[DEBUG] If-expr: Preserving {} variables from then-branch", pending_vars_from_then.len());
                 eprintln!("[DEBUG] If-expr: then_expr = {:?}", then_expr);
 
-                // Restore dynamic_variables before else-branch to prevent variable leakage
-                // But keep variables that were added to pending_statements
+                // BUG FIX #63: Restore dynamic_variables before else-branch
+                // We must completely restore to prevent variable name collisions when
+                // functions inlined in different branches create variables with the same name.
+                //
+                // Example bug case:
+                //   if cond { exec_l0_l1(...) } else { exec_l2(...) }
+                // Both functions create a variable named "result_32". If we preserve variables
+                // from the then-branch, the else-branch will reuse the same MIR variable ID,
+                // causing incorrect codegen (both branches use the same variable).
+                //
+                // The original Bug #61 fix tried to preserve variables for block expressions,
+                // but this breaks function inlining. The correct fix is to completely isolate
+                // branch scopes and let each branch create its own variables.
                 self.dynamic_variables = saved_dynamic_vars.clone();
-                self.dynamic_variables.extend(pending_vars_from_then);
-
-                let saved_pending_count_else = self.pending_statements.len();
 
                 let else_expr = self.convert_expression(&if_expr.else_expr);
                 if else_expr.is_none() {
@@ -2600,31 +2579,9 @@ impl<'hir> HirToMir<'hir> {
                 }
                 let else_expr = else_expr?;
 
-                // BUG FIX #61: Also preserve variables from else-branch that were added to pending_statements
-                for (hir_id, (mir_id, name, hir_type)) in self.dynamic_variables.clone() {
-                    if !saved_dynamic_vars.contains_key(&hir_id) {
-                        let var_in_pending = self.pending_statements[saved_pending_count_else..]
-                            .iter()
-                            .any(|stmt| {
-                                if let Statement::Assignment(assign) = stmt {
-                                    if let LValue::Variable(vid) = &assign.lhs {
-                                        vid == &mir_id
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            });
-                        if var_in_pending {
-                            // Keep this variable - it will be emitted globally
-                            // (already in dynamic_variables, no need to add)
-                        } else {
-                            // Remove branch-local variables that weren't hoisted
-                            self.dynamic_variables.remove(&hir_id);
-                        }
-                    }
-                }
+                // BUG FIX #63: After both branches are processed, restore to the original state
+                // This ensures that variables created in either branch don't leak out
+                self.dynamic_variables = saved_dynamic_vars;
 
                 let cond = Box::new(cond);
                 let then_expr = Box::new(then_expr);
