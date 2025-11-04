@@ -453,18 +453,18 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Gte => ">=",
                 BinaryOperation::Shl => "<<",
                 BinaryOperation::Shr => ">>",
-                // Floating-point operations - all precisions use same operators
-                BinaryOperation::FAdd16 | BinaryOperation::FAdd32 | BinaryOperation::FAdd64 => "+",
-                BinaryOperation::FSub16 | BinaryOperation::FSub32 | BinaryOperation::FSub64 => "-",
-                BinaryOperation::FMul16 | BinaryOperation::FMul32 | BinaryOperation::FMul64 => "*",
-                BinaryOperation::FDiv16 | BinaryOperation::FDiv32 | BinaryOperation::FDiv64 => "/",
-                BinaryOperation::FMod16 | BinaryOperation::FMod32 | BinaryOperation::FMod64 => "%",
-                BinaryOperation::FEq16 | BinaryOperation::FEq32 | BinaryOperation::FEq64 => "==",
-                BinaryOperation::FNeq16 | BinaryOperation::FNeq32 | BinaryOperation::FNeq64 => "!=",
-                BinaryOperation::FLt16 | BinaryOperation::FLt32 | BinaryOperation::FLt64 => "<",
-                BinaryOperation::FLte16 | BinaryOperation::FLte32 | BinaryOperation::FLte64 => "<=",
-                BinaryOperation::FGt16 | BinaryOperation::FGt32 | BinaryOperation::FGt64 => ">",
-                BinaryOperation::FGte16 | BinaryOperation::FGte32 | BinaryOperation::FGte64 => ">=",
+                // Floating-point operations
+                BinaryOperation::FAdd => "+",
+                BinaryOperation::FSub => "-",
+                BinaryOperation::FMul => "*",
+                BinaryOperation::FDiv => "/",
+                BinaryOperation::FMod => "%",
+                BinaryOperation::FEq => "==",
+                BinaryOperation::FNeq => "!=",
+                BinaryOperation::FLt => "<",
+                BinaryOperation::FLte => "<=",
+                BinaryOperation::FGt => ">",
+                BinaryOperation::FGte => ">=",
             };
 
             // Check if we need element-wise operations for wide bit types (> 128 bits)
@@ -497,7 +497,15 @@ impl<'a> MetalShaderGenerator<'a> {
                 if is_fp_op {
                     // BUG FIX #54: Handle both Float-typed and Bits-typed signals correctly
                     // Check input and output signal types to generate correct Metal code
-                    let fp_precision = op.fp_precision().unwrap_or(32);
+                    // Determine precision from input signal width
+                    let left_width = self.get_signal_width_from_sir(sir, left);
+                    let fp_precision = if left_width == 16 {
+                        16
+                    } else if left_width == 64 {
+                        64
+                    } else {
+                        32
+                    };
 
                     let (float_type, bit_type) = match fp_precision {
                         16 => ("half", "ushort"),
@@ -584,24 +592,14 @@ impl<'a> MetalShaderGenerator<'a> {
                 UnaryOperation::RedAnd => "&",
                 UnaryOperation::RedOr => "|",
                 UnaryOperation::RedXor => "^",
-                // Floating-point operations - all precisions use same operators/functions
-                UnaryOperation::FNeg16 | UnaryOperation::FNeg32 | UnaryOperation::FNeg64 => "-",
-                UnaryOperation::FAbs16 | UnaryOperation::FAbs32 | UnaryOperation::FAbs64 => "abs",
-                UnaryOperation::FSqrt16 | UnaryOperation::FSqrt32 | UnaryOperation::FSqrt64 => {
-                    "sqrt"
-                }
+                // Floating-point operations
+                UnaryOperation::FNeg => "-",
+                UnaryOperation::FAbs => "abs",
+                UnaryOperation::FSqrt => "sqrt"
             };
 
             // Check if this is a function call (abs, sqrt) or a prefix operator (-, ~)
-            let is_function = matches!(
-                op,
-                UnaryOperation::FAbs16
-                    | UnaryOperation::FAbs32
-                    | UnaryOperation::FAbs64
-                    | UnaryOperation::FSqrt16
-                    | UnaryOperation::FSqrt32
-                    | UnaryOperation::FSqrt64
-            );
+            let is_function = matches!(op, UnaryOperation::FAbs | UnaryOperation::FSqrt);
 
             // Check if we need element-wise operations for wide bit types (> 128 bits)
             let output_width = self.get_signal_width_from_sir(sir, output);
@@ -642,8 +640,15 @@ impl<'a> MetalShaderGenerator<'a> {
             let is_fp_op = op.is_float_op();
 
             if is_fp_op {
-                // PROPER FIX: Use precision from operation
-                let fp_precision = op.fp_precision().unwrap_or(32);
+                // Determine precision from input signal width
+                let input_width = self.get_signal_width_from_sir(sir, input);
+                let fp_precision = if input_width == 16 {
+                    16
+                } else if input_width == 64 {
+                    64
+                } else {
+                    32
+                };
 
                 let (float_type, bit_type) = match fp_precision {
                     16 => ("half", "ushort"),
