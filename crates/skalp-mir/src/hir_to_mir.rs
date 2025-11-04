@@ -270,7 +270,12 @@ impl<'hir> HirToMir<'hir> {
                     let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
 
                     for (mir_var_id, name, hir_type) in dynamic_vars {
+                        eprintln!(
+                            "[DEBUG] Adding dynamic variable: name={}, hir_type={:?}",
+                            name, hir_type
+                        );
                         let mir_type = self.convert_type(&hir_type);
+                        eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
                         let variable = Variable {
                             id: mir_var_id,
                             name,
@@ -303,25 +308,45 @@ impl<'hir> HirToMir<'hir> {
                         // BUGFIX: First, scan pending_statements for any variables that need to be declared
                         // These come from let bindings in block expressions that don't go through
                         // the dynamic_variables mechanism (e.g., when functions are inlined)
-                        for pending_stmt in &self.pending_statements {
+
+                        // BUG FIX #56: Clone snapshots to avoid borrow checker issues
+                        let dyn_vars_snapshot: HashMap<_, _> = self.dynamic_variables.clone();
+                        let pending_stmts_snapshot = self.pending_statements.clone();
+
+                        for pending_stmt in &pending_stmts_snapshot {
                             if let Statement::Assignment(assign) = pending_stmt {
                                 if let LValue::Variable(var_id) = &assign.lhs {
                                     // Check if this variable is already in the module
                                     if !module.variables.iter().any(|v| v.id == *var_id) {
-                                        // Find the variable name by looking up the MIR variable ID
-                                        // in the reverse mapping
-                                        let var_name = self
-                                            .variable_map
-                                            .iter()
-                                            .find(|(_, &mir_id)| mir_id == *var_id)
-                                            .and_then(|(hir_id, _)| {
-                                                // Try to find the variable name from the HIR
-                                                self.find_variable_name(*hir_id)
-                                            })
-                                            .unwrap_or_else(|| format!("var_{}", var_id.0));
+                                        // BUG FIX #56: Look up type from dynamic_variables instead of inferring from RHS
+                                        // This preserves Float types that were declared in let statements
+                                        let dyn_var_info = dyn_vars_snapshot
+                                            .values()
+                                            .find(|(id, _, _)| id == var_id)
+                                            .cloned();
 
-                                        // Infer the type from the RHS expression
-                                        let var_type = self.infer_expression_type(&assign.rhs);
+                                        let (var_name, var_type) =
+                                            if let Some((_, name, hir_type)) = dyn_var_info {
+                                                // Found in dynamic_variables - use its declared type
+                                                let mir_type = self.convert_type(&hir_type);
+                                                (name, mir_type)
+                                            } else {
+                                                // Not in dynamic_variables - fall back to name lookup and type inference
+                                                let var_name = self
+                                                    .variable_map
+                                                    .iter()
+                                                    .find(|(_, &mir_id)| mir_id == *var_id)
+                                                    .and_then(|(hir_id, _)| {
+                                                        // Try to find the variable name from the HIR
+                                                        self.find_variable_name(*hir_id)
+                                                    })
+                                                    .unwrap_or_else(|| format!("var_{}", var_id.0));
+
+                                                // Infer the type from the RHS expression
+                                                let var_type =
+                                                    self.infer_expression_type(&assign.rhs);
+                                                (var_name, var_type)
+                                            };
 
                                         let variable = Variable {
                                             id: *var_id,
@@ -343,7 +368,9 @@ impl<'hir> HirToMir<'hir> {
                         for (mir_var_id, name, hir_type) in dynamic_vars {
                             // Check if this variable is already in the module
                             if !module.variables.iter().any(|v| v.id == mir_var_id) {
+                                eprintln!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
                                 let mir_type = self.convert_type(&hir_type);
+                                eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
                                 let variable = Variable {
                                     id: mir_var_id,
                                     name: name.clone(),
@@ -1969,14 +1996,17 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Variable(id) => {
                 if let Some(&mir_id) = self.variable_map.get(id) {
                     Some(Expression::Ref(LValue::Variable(mir_id)))
-                } else if let Some((mir_id, _, _)) = self.dynamic_variables.get(id) {
+                } else if let Some((mir_id, name, _)) = self.dynamic_variables.get(id) {
                     // Check dynamic_variables for let bindings from inlined functions
+                    eprintln!("[DEBUG] Variable lookup: Found '{}' in dynamic_variables -> {:?}", name, mir_id);
                     Some(Expression::Ref(LValue::Variable(*mir_id)))
                 } else {
                     eprintln!(
-                        "[DEBUG] Variable not found in variable_map or dynamic_variables: {:?}",
+                        "[DEBUG] Variable not found in variable_map or dynamic_variables: HIR ID {:?}",
                         id
                     );
+                    eprintln!("[DEBUG]   Current dynamic_variables: {:?}",
+                        self.dynamic_variables.iter().map(|(_, (_, name, _))| name).collect::<Vec<_>>());
                     None
                 }
             }
@@ -2500,10 +2530,17 @@ impl<'hir> HirToMir<'hir> {
                 // BUG FIX #50: Isolate dynamic variable scopes between branches
                 // Each branch can create variables with the same names (e.g., result_32)
                 // We must prevent variable name collisions between branches
+                //
+                // BUG FIX #61: Preserve variables that were hoisted to pending_statements
+                // When block expressions in branches contain let bindings, those bindings
+                // are added to pending_statements (to be emitted as global assignments).
+                // We must preserve these variables across branch isolation so that the
+                // result expression can reference them.
                 let cond = self.convert_expression(&if_expr.condition)?;
 
-                // Save current dynamic_variables state before then-branch
+                // Save current dynamic_variables state and pending_statements count
                 let saved_dynamic_vars = self.dynamic_variables.clone();
+                let saved_pending_count = self.pending_statements.len();
 
                 let then_expr = self.convert_expression(&if_expr.then_expr);
                 if then_expr.is_none() {
@@ -2515,8 +2552,43 @@ impl<'hir> HirToMir<'hir> {
                 }
                 let then_expr = then_expr?;
 
+                // BUG FIX #61: Collect variables that were added to pending_statements in then-branch
+                // These variables need to be preserved because they're emitted globally
+                let mut pending_vars_from_then = std::collections::HashMap::new();
+                eprintln!("[DEBUG] If-expr: Checking then-branch for pending variables. Pending count: {} -> {}",
+                          saved_pending_count, self.pending_statements.len());
+                for (hir_id, (mir_id, name, hir_type)) in &self.dynamic_variables {
+                    if !saved_dynamic_vars.contains_key(hir_id) {
+                        // This is a new variable created in the then-branch
+                        // Check if it was added to pending_statements
+                        let var_in_pending = self.pending_statements[saved_pending_count..]
+                            .iter()
+                            .any(|stmt| {
+                                if let Statement::Assignment(assign) = stmt {
+                                    if let LValue::Variable(vid) = &assign.lhs {
+                                        vid == mir_id
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            });
+                        eprintln!("[DEBUG] If-expr: Variable {} (MIR {:?}): in_pending={}", name, mir_id, var_in_pending);
+                        if var_in_pending {
+                            pending_vars_from_then.insert(*hir_id, (*mir_id, name.clone(), hir_type.clone()));
+                        }
+                    }
+                }
+                eprintln!("[DEBUG] If-expr: Preserving {} variables from then-branch", pending_vars_from_then.len());
+                eprintln!("[DEBUG] If-expr: then_expr = {:?}", then_expr);
+
                 // Restore dynamic_variables before else-branch to prevent variable leakage
-                self.dynamic_variables = saved_dynamic_vars;
+                // But keep variables that were added to pending_statements
+                self.dynamic_variables = saved_dynamic_vars.clone();
+                self.dynamic_variables.extend(pending_vars_from_then);
+
+                let saved_pending_count_else = self.pending_statements.len();
 
                 let else_expr = self.convert_expression(&if_expr.else_expr);
                 if else_expr.is_none() {
@@ -2527,6 +2599,32 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 let else_expr = else_expr?;
+
+                // BUG FIX #61: Also preserve variables from else-branch that were added to pending_statements
+                for (hir_id, (mir_id, name, hir_type)) in self.dynamic_variables.clone() {
+                    if !saved_dynamic_vars.contains_key(&hir_id) {
+                        let var_in_pending = self.pending_statements[saved_pending_count_else..]
+                            .iter()
+                            .any(|stmt| {
+                                if let Statement::Assignment(assign) = stmt {
+                                    if let LValue::Variable(vid) = &assign.lhs {
+                                        vid == &mir_id
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            });
+                        if var_in_pending {
+                            // Keep this variable - it will be emitted globally
+                            // (already in dynamic_variables, no need to add)
+                        } else {
+                            // Remove branch-local variables that weren't hoisted
+                            self.dynamic_variables.remove(&hir_id);
+                        }
+                    }
+                }
 
                 let cond = Box::new(cond);
                 let then_expr = Box::new(then_expr);
@@ -2604,6 +2702,17 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 // Convert and return the final expression
+                eprintln!("[DEBUG] Block expression: About to convert result_expr, type: {:?}", std::mem::discriminant(&**result_expr));
+                eprintln!("[DEBUG] Block expression: Current dynamic_variables: {:?}",
+                    self.dynamic_variables.iter().map(|(_, (_, name, _))| name.as_str()).collect::<Vec<_>>());
+                if let hir::HirExpression::Variable(var_id) = &**result_expr {
+                    eprintln!("[DEBUG] Block expression: result_expr is Variable({:?})", var_id);
+                    eprintln!("[DEBUG] Block expression: variable_map contains: {:?}", self.variable_map.contains_key(var_id));
+                    eprintln!("[DEBUG] Block expression: dynamic_variables contains: {:?}", self.dynamic_variables.contains_key(var_id));
+                    if let Some((mir_id, name, _)) = self.dynamic_variables.get(var_id) {
+                        eprintln!("[DEBUG] Block expression: Found in dynamic_variables as {} (MIR ID {:?})", name, mir_id);
+                    }
+                }
                 let result = self.convert_expression(result_expr);
                 if result.is_none() {
                     eprintln!(
@@ -2627,6 +2736,32 @@ impl<'hir> HirToMir<'hir> {
         type_name: &str,
         fields: &[hir::HirStructFieldInit],
     ) -> Option<Expression> {
+        // Handle built-in vector types (vec2, vec3, vec4) specially
+        // These use struct literal syntax: vec3 { x: a, y: b, z: c }
+        // But they're built-in types, not user-defined structs
+        if type_name == "vec2" || type_name == "vec3" || type_name == "vec4" {
+            // For vec2/vec3/vec4, concatenate fields in order: { x, y, z }
+            // Standard field order: x, y, z, w
+            let field_order = ["x", "y", "z", "w"];
+            let num_fields = match type_name {
+                "vec2" => 2,
+                "vec3" => 3,
+                "vec4" => 4,
+                _ => unreachable!()
+            };
+
+            let mut field_exprs = Vec::new();
+            for i in 0..num_fields {
+                let field_name = field_order[i];
+                let field_init = fields.iter().find(|f| f.name == field_name)?;
+                let field_expr = self.convert_expression(&field_init.value)?;
+                field_exprs.push(field_expr);
+            }
+
+            // Concatenate all fields: { x, y, z } becomes {x, y, z}
+            return Some(Expression::Concat(field_exprs));
+        }
+
         // Find the struct type definition to get field layout
         let hir = self.hir?;
         let mut struct_type: Option<&hir::HirStructType> = None;
@@ -4196,8 +4331,10 @@ impl<'hir> HirToMir<'hir> {
         match op {
             hir::HirBinaryOp::Add => {
                 if is_fp {
+                    eprintln!("[DEBUG] convert_binary_op: Returning BinaryOp::FAdd");
                     BinaryOp::FAdd
                 } else {
+                    eprintln!("[DEBUG] convert_binary_op: Returning BinaryOp::Add");
                     BinaryOp::Add
                 }
             }

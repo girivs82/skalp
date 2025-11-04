@@ -45,7 +45,7 @@ impl<'a> MetalShaderGenerator<'a> {
         writeln!(self.output, "struct Inputs {{").unwrap();
         self.indent += 1;
         for input in &sir.inputs {
-            let (base_type, array_suffix) = self.get_metal_type_parts(&input.sir_type);
+            let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(&input.sir_type);
             self.write_indented(&format!(
                 "{} {}{};\n",
                 base_type,
@@ -72,7 +72,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 .find(|s| &s.name == *name)
                 .map(|s| &s.sir_type)
                 .unwrap_or(&default_type);
-            let (base_type, array_suffix) = self.get_metal_type_parts(sir_type);
+            let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(sir_type);
             eprintln!(
                 "🔧 REGISTER[{}]: {} (type={} {})",
                 i, name, base_type, array_suffix
@@ -99,7 +99,7 @@ impl<'a> MetalShaderGenerator<'a> {
         for output in &sir.outputs {
             let sanitized_name = self.sanitize_name(&output.name);
             if added_names.insert(sanitized_name.clone()) {
-                let (base_type, array_suffix) = self.get_metal_type_parts(&output.sir_type);
+                let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(&output.sir_type);
                 self.write_indented(&format!(
                     "{} {}{};\n",
                     base_type, sanitized_name, array_suffix
@@ -118,7 +118,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 && !input_names.contains(&signal.name)
                 && added_names.insert(sanitized_name.clone())
             {
-                let (base_type, array_suffix) = self.get_metal_type_parts(&signal.sir_type);
+                let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(&signal.sir_type);
                 self.write_indented(&format!(
                     "{} {}{};\n",
                     base_type, sanitized_name, array_suffix
@@ -451,18 +451,18 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Gte => ">=",
                 BinaryOperation::Shl => "<<",
                 BinaryOperation::Shr => ">>",
-                // Floating-point operations
-                BinaryOperation::FAdd => "+",
-                BinaryOperation::FSub => "-",
-                BinaryOperation::FMul => "*",
-                BinaryOperation::FDiv => "/",
-                BinaryOperation::FMod => "%",
-                BinaryOperation::FEq => "==",
-                BinaryOperation::FNeq => "!=",
-                BinaryOperation::FLt => "<",
-                BinaryOperation::FLte => "<=",
-                BinaryOperation::FGt => ">",
-                BinaryOperation::FGte => ">=",
+                // Floating-point operations - all precisions use same operators
+                BinaryOperation::FAdd16 | BinaryOperation::FAdd32 | BinaryOperation::FAdd64 => "+",
+                BinaryOperation::FSub16 | BinaryOperation::FSub32 | BinaryOperation::FSub64 => "-",
+                BinaryOperation::FMul16 | BinaryOperation::FMul32 | BinaryOperation::FMul64 => "*",
+                BinaryOperation::FDiv16 | BinaryOperation::FDiv32 | BinaryOperation::FDiv64 => "/",
+                BinaryOperation::FMod16 | BinaryOperation::FMod32 | BinaryOperation::FMod64 => "%",
+                BinaryOperation::FEq16 | BinaryOperation::FEq32 | BinaryOperation::FEq64 => "==",
+                BinaryOperation::FNeq16 | BinaryOperation::FNeq32 | BinaryOperation::FNeq64 => "!=",
+                BinaryOperation::FLt16 | BinaryOperation::FLt32 | BinaryOperation::FLt64 => "<",
+                BinaryOperation::FLte16 | BinaryOperation::FLte32 | BinaryOperation::FLte64 => "<=",
+                BinaryOperation::FGt16 | BinaryOperation::FGt32 | BinaryOperation::FGt64 => ">",
+                BinaryOperation::FGte16 | BinaryOperation::FGte32 | BinaryOperation::FGte64 => ">=",
             };
 
             // Check if we need element-wise operations for wide bit types (> 128 bits)
@@ -490,44 +490,75 @@ impl<'a> MetalShaderGenerator<'a> {
             } else {
                 // Scalar operation - direct assignment
                 // Check if this is a floating-point operation
-                let is_fp_op = matches!(
-                    op,
-                    BinaryOperation::FAdd
-                        | BinaryOperation::FSub
-                        | BinaryOperation::FMul
-                        | BinaryOperation::FDiv
-                        | BinaryOperation::FMod
-                        | BinaryOperation::FEq
-                        | BinaryOperation::FNeq
-                        | BinaryOperation::FLt
-                        | BinaryOperation::FLte
-                        | BinaryOperation::FGt
-                        | BinaryOperation::FGte
-                );
+                let is_fp_op = op.is_float_op();
 
                 if is_fp_op {
-                    // For FP operations, cast to float, operate, cast back to bits
-                    // BUG FIX #51: Use correct bit type for FP16 (ushort) vs FP32 (uint)
-                    // FP16: half (16-bit float) <-> ushort (16-bit int)
-                    // FP32: float (32-bit float) <-> uint (32-bit int)
-                    let (float_type, bit_type) = if output_width == 16 {
-                        ("half", "ushort")
+                    // BUG FIX #54: Handle both Float-typed and Bits-typed signals correctly
+                    // Check input and output signal types to generate correct Metal code
+                    let fp_precision = op.fp_precision().unwrap_or(32);
+
+                    let (float_type, bit_type) = match fp_precision {
+                        16 => ("half", "ushort"),
+                        64 => ("double", "ulong"),
+                        _ => ("float", "uint"),
+                    };
+
+                    // Check signal types
+                    let left_sir_type = self.get_signal_sir_type(sir, left);
+                    let right_sir_type = self.get_signal_sir_type(sir, right);
+                    let output_sir_type = self.get_signal_sir_type(sir, output);
+
+                    let left_is_float = left_sir_type
+                        .as_ref()
+                        .map(|t| t.is_float())
+                        .unwrap_or(false);
+                    let right_is_float = right_sir_type
+                        .as_ref()
+                        .map(|t| t.is_float())
+                        .unwrap_or(false);
+                    let output_is_float = output_sir_type
+                        .as_ref()
+                        .map(|t| t.is_float())
+                        .unwrap_or(false);
+
+                    // Convert inputs to float type if they're stored as bits
+                    let left_expr = if left_is_float {
+                        format!("signals->{}", self.sanitize_name(left))
                     } else {
-                        ("float", "uint")
+                        format!(
+                            "as_type<{}>(signals->{})",
+                            float_type,
+                            self.sanitize_name(left)
+                        )
+                    };
+
+                    let right_expr = if right_is_float {
+                        format!("signals->{}", self.sanitize_name(right))
+                    } else {
+                        format!(
+                            "as_type<{}>(signals->{})",
+                            float_type,
+                            self.sanitize_name(right)
+                        )
+                    };
+
+                    // Perform the FP operation
+                    let op_expr = format!("{} {} {}", left_expr, op_str, right_expr);
+
+                    // Convert output to bits if output signal is Bits-typed
+                    let result_expr = if output_is_float {
+                        op_expr
+                    } else {
+                        format!("as_type<{}>({})", bit_type, op_expr)
                     };
 
                     self.write_indented(&format!(
-                        "signals->{} = as_type<{}>(as_type<{}>( signals->{}) {} as_type<{}>(signals->{}));\n",
+                        "signals->{} = {};\n",
                         self.sanitize_name(output),
-                        bit_type,  // Use ushort for FP16, uint for FP32
-                        float_type,
-                        self.sanitize_name(left),
-                        op_str,
-                        float_type,
-                        self.sanitize_name(right)
+                        result_expr
                     ));
                 } else {
-                    // Regular integer operation
+                    // Regular integer operation - signals are always Bits now
                     self.write_indented(&format!(
                         "signals->{} = signals->{} {} signals->{};\n",
                         self.sanitize_name(output),
@@ -551,14 +582,24 @@ impl<'a> MetalShaderGenerator<'a> {
                 UnaryOperation::RedAnd => "&",
                 UnaryOperation::RedOr => "|",
                 UnaryOperation::RedXor => "^",
-                // Floating-point operations use Metal math functions
-                UnaryOperation::FNeg => "-",
-                UnaryOperation::FAbs => "abs",
-                UnaryOperation::FSqrt => "sqrt",
+                // Floating-point operations - all precisions use same operators/functions
+                UnaryOperation::FNeg16 | UnaryOperation::FNeg32 | UnaryOperation::FNeg64 => "-",
+                UnaryOperation::FAbs16 | UnaryOperation::FAbs32 | UnaryOperation::FAbs64 => "abs",
+                UnaryOperation::FSqrt16 | UnaryOperation::FSqrt32 | UnaryOperation::FSqrt64 => {
+                    "sqrt"
+                }
             };
 
             // Check if this is a function call (abs, sqrt) or a prefix operator (-, ~)
-            let is_function = matches!(op, UnaryOperation::FAbs | UnaryOperation::FSqrt);
+            let is_function = matches!(
+                op,
+                UnaryOperation::FAbs16
+                    | UnaryOperation::FAbs32
+                    | UnaryOperation::FAbs64
+                    | UnaryOperation::FSqrt16
+                    | UnaryOperation::FSqrt32
+                    | UnaryOperation::FSqrt64
+            );
 
             // Check if we need element-wise operations for wide bit types (> 128 bits)
             let output_width = self.get_signal_width_from_sir(sir, output);
@@ -596,26 +637,23 @@ impl<'a> MetalShaderGenerator<'a> {
 
             // Scalar operations
             // Check if this is a floating-point operation
-            let is_fp_op = matches!(
-                op,
-                UnaryOperation::FNeg | UnaryOperation::FAbs | UnaryOperation::FSqrt
-            );
+            let is_fp_op = op.is_float_op();
 
             if is_fp_op {
-                // BUG FIX #51: Use correct bit type for FP16 (ushort) vs FP32 (uint)
-                // FP16: half (16-bit float) <-> ushort (16-bit int)
-                // FP32: float (32-bit float) <-> uint (32-bit int)
-                let (float_type, bit_type) = if output_width == 16 {
-                    ("half", "ushort")
-                } else {
-                    ("float", "uint")
+                // PROPER FIX: Use precision from operation
+                let fp_precision = op.fp_precision().unwrap_or(32);
+
+                let (float_type, bit_type) = match fp_precision {
+                    16 => ("half", "ushort"),
+                    64 => ("double", "ulong"),
+                    _ => ("float", "uint"),
                 };
 
                 if is_function {
                     self.write_indented(&format!(
                         "signals->{} = as_type<{}>({}(as_type<{}>(signals->{})));\n",
                         self.sanitize_name(output),
-                        bit_type,  // Use ushort for FP16, uint for FP32
+                        bit_type,
                         op_str,
                         float_type,
                         self.sanitize_name(input)
@@ -624,7 +662,7 @@ impl<'a> MetalShaderGenerator<'a> {
                     self.write_indented(&format!(
                         "signals->{} = as_type<{}>({}as_type<{}>(signals->{}));\n",
                         self.sanitize_name(output),
-                        bit_type,  // Use ushort for FP16, uint for FP32
+                        bit_type,
                         op_str,
                         float_type,
                         self.sanitize_name(input)
@@ -1139,30 +1177,21 @@ impl<'a> MetalShaderGenerator<'a> {
     }
 
     fn get_signal_width_from_sir(&self, sir: &SirModule, signal_name: &str) -> usize {
-        // Check signals - prefer sir_type over width field
+        // BUG FIX #52: Use SirType::width() method to handle all types correctly
+        // Previously only handled Bits explicitly, causing Float16/Float32 to fall back
+        // to sig.width field which might not be correctly set
+
+        // Check signals - use sir_type.width() for all types
         if let Some(sig) = sir.signals.iter().find(|s| s.name == signal_name) {
-            match &sig.sir_type {
-                SirType::Bits(w) => return *w,
-                SirType::Array(elem_type, size) => {
-                    if let SirType::Bits(elem_w) = **elem_type {
-                        return elem_w * size;
-                    }
-                }
-                _ => {}
-            }
-            return sig.width;
+            return sig.sir_type.width();
         }
         // Check inputs
         if let Some(input) = sir.inputs.iter().find(|i| i.name == signal_name) {
-            if let SirType::Bits(w) = input.sir_type {
-                return w;
-            }
+            return input.sir_type.width();
         }
         // Check outputs
         if let Some(output) = sir.outputs.iter().find(|o| o.name == signal_name) {
-            if let SirType::Bits(w) = output.sir_type {
-                return w;
-            }
+            return output.sir_type.width();
         }
         // Check state elements
         if let Some(state) = sir.state_elements.get(signal_name) {
@@ -1170,6 +1199,49 @@ impl<'a> MetalShaderGenerator<'a> {
         }
         // Default
         32
+    }
+
+    /// Get the SirType for a signal
+    /// BUG FIX #52: Helper to get signal type for proper Float handling
+    #[allow(dead_code)]
+    fn get_signal_type_from_sir(&self, sir: &SirModule, signal_name: &str) -> Option<SirType> {
+        // Check signals
+        if let Some(sig) = sir.signals.iter().find(|s| s.name == signal_name) {
+            return Some(sig.sir_type.clone());
+        }
+        // Check inputs
+        if let Some(input) = sir.inputs.iter().find(|i| i.name == signal_name) {
+            return Some(input.sir_type.clone());
+        }
+        // Check outputs
+        if let Some(output) = sir.outputs.iter().find(|o| o.name == signal_name) {
+            return Some(output.sir_type.clone());
+        }
+        None
+    }
+
+    /// Format a signal reference with appropriate type casting for Metal
+    /// BUG FIX #52: Auto-cast Float types to bits when used in bitwise operations
+    /// BUG FIX #61: Used in concat to prevent float bitwise operation errors
+    fn format_signal_for_bitwise_op(&self, sir: &SirModule, signal_name: &str) -> String {
+        let sanitized = self.sanitize_name(signal_name);
+
+        // Check if this signal has a Float type
+        if let Some(sir_type) = self.get_signal_type_from_sir(sir, signal_name) {
+            if sir_type.is_float() {
+                // Float signals need to be cast to their bit representation for bitwise ops
+                let bit_type = match sir_type {
+                    SirType::Float16 => "ushort",
+                    SirType::Float32 => "uint",
+                    SirType::Float64 => "ulong",
+                    _ => return format!("signals->{}", sanitized),
+                };
+                return format!("as_type<{}>(signals->{})", bit_type, sanitized);
+            }
+        }
+
+        // Non-float signals can be used directly
+        format!("signals->{}", sanitized)
     }
 
     #[allow(dead_code)]
@@ -1234,19 +1306,23 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 if *width <= 32 && bit_in_element == 0 {
                     // Simple case: scalar input aligned to element boundary
+                    // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
+                    let input_ref = self.format_signal_for_bitwise_op(sir, input_name);
                     self.write_indented(&format!(
-                        "signals->{}[{}] = signals->{};\n",
+                        "signals->{}[{}] = {};\n",
                         self.sanitize_name(output),
                         element_idx,
-                        self.sanitize_name(input_name)
+                        input_ref
                     ));
                 } else if *width <= 32 {
                     // Scalar input not aligned - need bit manipulation
+                    // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
+                    let input_ref = self.format_signal_for_bitwise_op(sir, input_name);
                     self.write_indented(&format!(
-                        "signals->{}[{}] |= (signals->{} << {});\n",
+                        "signals->{}[{}] |= ({} << {});\n",
                         self.sanitize_name(output),
                         element_idx,
-                        self.sanitize_name(input_name),
+                        input_ref,
                         bit_in_element
                     ));
                 } else {
@@ -1280,8 +1356,8 @@ impl<'a> MetalShaderGenerator<'a> {
             for (input_name, width) in input_widths.iter().rev() {
                 let component_idx = bit_offset / 32;
                 if component_idx < 4 {
-                    components[component_idx] =
-                        format!("signals->{}", self.sanitize_name(input_name));
+                    // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
+                    components[component_idx] = self.format_signal_for_bitwise_op(sir, input_name);
                 }
                 bit_offset += width;
             }
@@ -1308,8 +1384,8 @@ impl<'a> MetalShaderGenerator<'a> {
             for (input_name, width) in input_widths.iter().rev() {
                 let component_idx = bit_offset / 32;
                 if component_idx < 2 {
-                    components[component_idx] =
-                        format!("signals->{}", self.sanitize_name(input_name));
+                    // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
+                    components[component_idx] = self.format_signal_for_bitwise_op(sir, input_name);
                 }
                 bit_offset += width;
             }
@@ -1323,20 +1399,22 @@ impl<'a> MetalShaderGenerator<'a> {
         } else {
             // Output is 1-32 bits -> uint
             // Use bit shifts (safe because all fits in 32 bits)
+            // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
             let mut shift = 0;
             let mut concat_expr = String::new();
             for (input_name, width) in input_widths.iter().rev() {
                 if !concat_expr.is_empty() {
                     concat_expr.push_str(" | ");
                 }
+                let input_ref = self.format_signal_for_bitwise_op(sir, input_name);
                 if shift > 0 {
                     concat_expr.push_str(&format!(
-                        "(signals->{} << {})",
-                        self.sanitize_name(input_name),
+                        "({} << {})",
+                        input_ref,
                         shift
                     ));
                 } else {
-                    concat_expr.push_str(&format!("signals->{}", self.sanitize_name(input_name)));
+                    concat_expr.push_str(&input_ref);
                 }
                 shift += width;
             }
@@ -1483,12 +1561,102 @@ impl<'a> MetalShaderGenerator<'a> {
                                 source_location
                             ));
                         } else {
-                            // Same type - direct assignment
-                            self.write_indented(&format!(
-                                "signals->{} = {};\n",
-                                self.sanitize_name(output),
-                                source_location
-                            ));
+                            // BUG FIX #58: Check if source and dest have different types/widths requiring reinterpretation
+                            let source_type = self.get_signal_sir_type(sir, signal);
+                            let dest_type = self.get_signal_sir_type(sir, output);
+
+                            // Check if source or destination is a float type
+                            let source_is_float =
+                                source_type.as_ref().is_some_and(|st| st.is_float());
+                            let dest_is_float = dest_type.as_ref().is_some_and(|dt| dt.is_float());
+
+                            // Check if we need type reinterpretation
+                            let needs_reinterpretation = if let (Some(ref _src), Some(ref _dst)) =
+                                (source_type, &dest_type)
+                            {
+                                // Need reinterpretation if types differ (Float <-> Bits conversion)
+                                source_is_float != dest_is_float
+                            } else {
+                                false
+                            };
+
+                            if needs_reinterpretation {
+                                // Get destination Metal type
+                                let dest_type_name = if let Some(dt) = &dest_type {
+                                    let (base, _) = self.get_metal_type_parts(dt);
+                                    base
+                                } else {
+                                    "uint".to_string()
+                                };
+
+                                // BUG FIX #59: Check width matching for as_type<> validity
+                                // Metal's as_type<> requires EXACT size match
+                                use std::cmp::Ordering;
+                                match source_width.cmp(&output_width) {
+                                    Ordering::Equal => {
+                                        // Same width, can use as_type<> directly
+                                        eprintln!(
+                                            "   🔄 Type reinterpretation: {} -> {} (as_type<{}>)",
+                                            signal, output, dest_type_name
+                                        );
+                                        self.write_indented(&format!(
+                                            "signals->{} = as_type<{}>({});\n",
+                                            self.sanitize_name(output),
+                                            dest_type_name,
+                                            source_location
+                                        ));
+                                    }
+                                    Ordering::Greater => {
+                                        // Source wider: extract lower bits first, then reinterpret
+                                        // e.g., uint(32) -> half(16): as_type<half>((ushort)source)
+                                        let intermediate_type = match output_width {
+                                            16 => "ushort",
+                                            32 => "uint",
+                                            64 => "ulong",
+                                            _ => "uint",
+                                        };
+                                        eprintln!(
+                                            "   🔄 Narrow+Reinterpret: {} ({} bits) -> {} ({} bits): as_type<{}>(({}){}) ",
+                                            signal, source_width, output, output_width, dest_type_name, intermediate_type, source_location
+                                        );
+                                        self.write_indented(&format!(
+                                            "signals->{} = as_type<{}>(({}){}); \n",
+                                            self.sanitize_name(output),
+                                            dest_type_name,
+                                            intermediate_type,
+                                            source_location
+                                        ));
+                                    }
+                                    Ordering::Less => {
+                                        // Source narrower: widen source first, then reinterpret
+                                        // e.g., uchar(8) -> float(32): as_type<float>((uint)source)
+                                        let intermediate_type = match output_width {
+                                            16 => "ushort",
+                                            32 => "uint",
+                                            64 => "ulong",
+                                            _ => "uint",
+                                        };
+                                        eprintln!(
+                                            "   🔄 Widen+Reinterpret: {} ({} bits) -> {} ({} bits): as_type<{}>(({}){}) ",
+                                            signal, source_width, output, output_width, dest_type_name, intermediate_type, source_location
+                                        );
+                                        self.write_indented(&format!(
+                                            "signals->{} = as_type<{}>(({}){}); \n",
+                                            self.sanitize_name(output),
+                                            dest_type_name,
+                                            intermediate_type,
+                                            source_location
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // Same type - direct assignment
+                                self.write_indented(&format!(
+                                    "signals->{} = {};\n",
+                                    self.sanitize_name(output),
+                                    source_location
+                                ));
+                            }
                         }
                     }
                 }
@@ -1832,8 +2000,12 @@ impl<'a> MetalShaderGenerator<'a> {
     /// Get Metal type representation for wide bit types (> 128 bits)
     /// Returns (base_type, array_size) for array representation
     fn get_metal_type_for_wide_bits(&self, width: usize) -> (String, Option<usize>) {
+        // BUG FIX #57: Use appropriate Metal types for different bit widths
+        // This ensures Bits(16) maps to ushort, not uint
         match width {
-            1..=32 => ("uint".to_string(), None),
+            1..=8 => ("uchar".to_string(), None),
+            9..=16 => ("ushort".to_string(), None),
+            17..=32 => ("uint".to_string(), None),
             33..=64 => ("uint2".to_string(), None),
             65..=128 => ("uint4".to_string(), None),
             129..=256 => ("uint".to_string(), Some(8)), // uint[8] for 256 bits
@@ -1848,9 +2020,25 @@ impl<'a> MetalShaderGenerator<'a> {
     /// For example: Array(Bits(32), 16) returns ("uint", "[16]")
     /// Non-arrays return ("type", "")
     fn get_metal_type_parts(&self, sir_type: &SirType) -> (String, String) {
+        self.get_metal_type_parts_impl(sir_type, false)
+    }
+
+    /// Get Metal type with option to force 4-byte alignment for struct fields
+    fn get_metal_type_parts_for_struct(&self, sir_type: &SirType) -> (String, String) {
+        self.get_metal_type_parts_impl(sir_type, true)
+    }
+
+    fn get_metal_type_parts_impl(&self, sir_type: &SirType, force_4byte_align: bool) -> (String, String) {
         match sir_type {
             SirType::Bits(w) => {
-                let (base_type, array_size) = self.get_metal_type_for_wide_bits(*w);
+                // BUG FIX #60: Use uint for all bit types ≤32 bits in struct definitions
+                // to ensure 4-byte alignment and avoid struct padding mismatches between
+                // Metal shader and CPU runtime
+                let (base_type, array_size) = if force_4byte_align && *w <= 32 {
+                    ("uint".to_string(), None)
+                } else {
+                    self.get_metal_type_for_wide_bits(*w)
+                };
                 if let Some(size) = array_size {
                     (base_type, format!("[{}]", size))
                 } else {

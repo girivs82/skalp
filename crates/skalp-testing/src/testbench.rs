@@ -252,12 +252,48 @@ impl Testbench {
         self
     }
 
+    /// Apply pending inputs and step the simulation once (for combinational logic)
+    ///
+    /// This is useful for purely combinational designs or when you need to
+    /// evaluate combinational logic without clock edges.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// tb.set("a", 5u32).set("b", 3u32);
+    /// tb.step().await;
+    /// let result: u32 = tb.get_as("sum").await;
+    /// ```
+    pub async fn step(&mut self) -> &mut Self {
+        // Apply all pending inputs
+        for (signal, value) in self.pending_inputs.drain() {
+            self.sim.set_input(&signal, value).await.unwrap();
+        }
+
+        // Step the simulation once
+        self.sim.step_simulation().await.unwrap();
+
+        self
+    }
+
     /// Get the current value of an output signal
+    ///
+    /// NOTE: This automatically applies pending inputs and steps the simulation
+    /// if there are any pending inputs. This ensures combinational logic is
+    /// evaluated correctly.
     pub async fn get(&mut self, signal: &str) -> Vec<u8> {
+        // If there are pending inputs, apply them and step
+        if !self.pending_inputs.is_empty() {
+            self.step().await;
+        }
+
         self.sim.get_output(signal).await.unwrap()
     }
 
     /// Get the current value as a specific type
+    ///
+    /// NOTE: This automatically applies pending inputs and steps the simulation
+    /// if there are any pending inputs. This ensures combinational logic is
+    /// evaluated correctly.
     pub async fn get_as<T: FromSignalValue>(&mut self, signal: &str) -> T {
         let bytes = self.get(signal).await;
         T::from_bytes(&bytes)
