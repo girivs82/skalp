@@ -1946,7 +1946,8 @@ impl HirBuilderContext {
                 HirType::Tuple(element_types)
             } else if let HirExpression::Variable(var_id) = value {
                 // If RHS is a variable, look up its type from the variable_types map
-                let var_type = self.symbols
+                let var_type = self
+                    .symbols
                     .variable_types
                     .get(&var_id)
                     .cloned()
@@ -1955,7 +1956,10 @@ impl HirBuilderContext {
                         let element_types = vec![HirType::Nat(32); var_names.len()];
                         HirType::Tuple(element_types)
                     });
-                eprintln!("🔍 TUPLE TYPE INFERENCE: Variable({}) -> {:?}", var_id.0, var_type);
+                eprintln!(
+                    "🔍 TUPLE TYPE INFERENCE: Variable({}) -> {:?}",
+                    var_id.0, var_type
+                );
                 var_type
             } else {
                 // Fallback: Create tuple type with Nat(32) placeholders for each element
@@ -3707,8 +3711,7 @@ impl HirBuilderContext {
 
                 // BUG FIX #66: Check for next siblings (chained operations like "+ c")
                 // If there are more BinaryExpr siblings after us, they represent chained operations
-                for next_pos in (pos + 1)..siblings.len() {
-                    let next = &siblings[next_pos];
+                for next in siblings.iter().skip(pos + 1) {
                     if next.kind() == SyntaxKind::BinaryExpr {
                         // This is a chained operation!
                         expr_children.push(next.clone());

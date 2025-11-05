@@ -120,16 +120,26 @@ impl<'a> MetalShaderGenerator<'a> {
                 && added_names.insert(sanitized_name.clone())
             {
                 // DEBUG: Log signal width for tuple-related signals
-                if signal.name.contains("tuple") || signal.name.contains("rx") || signal.name.contains("ry") || signal.name.contains("rz") {
-                    eprintln!("🔍 METAL STRUCT: signal='{}', width={}, sir_type={:?}",
-                        signal.name, signal.width, signal.sir_type);
+                if signal.name.contains("tuple")
+                    || signal.name.contains("rx")
+                    || signal.name.contains("ry")
+                    || signal.name.contains("rz")
+                {
+                    eprintln!(
+                        "🔍 METAL STRUCT: signal='{}', width={}, sir_type={:?}",
+                        signal.name, signal.width, signal.sir_type
+                    );
                 }
 
                 let (base_type, array_suffix) =
                     self.get_metal_type_parts_for_struct(&signal.sir_type);
 
                 // DEBUG: Log Metal type chosen
-                if signal.name.contains("tuple") || signal.name.contains("rx") || signal.name.contains("ry") || signal.name.contains("rz") {
+                if signal.name.contains("tuple")
+                    || signal.name.contains("rx")
+                    || signal.name.contains("ry")
+                    || signal.name.contains("rz")
+                {
                     eprintln!("  → Metal type: {}{}", base_type, array_suffix);
                 }
 
@@ -332,7 +342,10 @@ impl<'a> MetalShaderGenerator<'a> {
                                                 self.sanitize_name(&output.name),
                                                 self.sanitize_name(&node_output.signal_id)
                                             ));
-                                        } else if output_width > 128 && source_width > 32 && source_width <= 128 {
+                                        } else if output_width > 128
+                                            && source_width > 32
+                                            && source_width <= 128
+                                        {
                                             // BUG FIX #65: Vector-to-array conversion for output signals
                                             // Source is uint2 or uint4 (33-128 bits), destination is uint[N] array (>128 bits)
                                             let array_size = output_width.div_ceil(32);
@@ -345,6 +358,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
                                             // Unpack vector components into array elements
                                             let component_names = ["x", "y", "z", "w"];
+                                            #[allow(clippy::needless_range_loop)]
                                             for i in 0..vector_components.min(4) {
                                                 self.write_indented(&format!(
                                                     "signals->{}[{}] = signals->{}.{};\n",
@@ -386,7 +400,10 @@ impl<'a> MetalShaderGenerator<'a> {
                                                 self.sanitize_name(&node_output.signal_id)
                                             ));
                                             // Zero out remaining elements
-                                            self.write_indented(&format!("for (uint i = 1; i < {}; i++) {{\n", array_size));
+                                            self.write_indented(&format!(
+                                                "for (uint i = 1; i < {}; i++) {{\n",
+                                                array_size
+                                            ));
                                             self.indent += 1;
                                             self.write_indented(&format!(
                                                 "signals->{}[i] = 0;\n",
@@ -397,12 +414,18 @@ impl<'a> MetalShaderGenerator<'a> {
                                         } else {
                                             // Both scalar - check for type reinterpretation
                                             // BUG FIX #62: Check if source and dest have different types (float <-> bits)
-                                            let source_type = self.get_signal_sir_type(sir, &node_output.signal_id);
-                                            let dest_type = self.get_signal_sir_type(sir, &output.name);
+                                            let source_type = self
+                                                .get_signal_sir_type(sir, &node_output.signal_id);
+                                            let dest_type =
+                                                self.get_signal_sir_type(sir, &output.name);
 
-                                            let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
-                                            let dest_is_float = dest_type.as_ref().is_some_and(|dt| dt.is_float());
-                                            let needs_reinterpretation = source_is_float != dest_is_float;
+                                            let source_is_float = source_type
+                                                .as_ref()
+                                                .is_some_and(|st| st.is_float());
+                                            let dest_is_float =
+                                                dest_type.as_ref().is_some_and(|dt| dt.is_float());
+                                            let needs_reinterpretation =
+                                                source_is_float != dest_is_float;
 
                                             if needs_reinterpretation {
                                                 // Need to reinterpret bits when converting between float and non-float
@@ -704,7 +727,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Floating-point operations
                 UnaryOperation::FNeg => "-",
                 UnaryOperation::FAbs => "abs",
-                UnaryOperation::FSqrt => "sqrt"
+                UnaryOperation::FSqrt => "sqrt",
             };
 
             // Check if this is a function call (abs, sqrt) or a prefix operator (-, ~)
@@ -1007,13 +1030,21 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 // Format operands with reinterpretation if needed
                 let true_expr = if true_is_float != output_is_float {
-                    format!("as_type<{}>(signals->{})", output_metal_type, self.sanitize_name(true_val))
+                    format!(
+                        "as_type<{}>(signals->{})",
+                        output_metal_type,
+                        self.sanitize_name(true_val)
+                    )
                 } else {
                     format!("signals->{}", self.sanitize_name(true_val))
                 };
 
                 let false_expr = if false_is_float != output_is_float {
-                    format!("as_type<{}>(signals->{})", output_metal_type, self.sanitize_name(false_val))
+                    format!(
+                        "as_type<{}>(signals->{})",
+                        output_metal_type,
+                        self.sanitize_name(false_val)
+                    )
                 } else {
                     format!("signals->{}", self.sanitize_name(false_val))
                 };
@@ -1661,7 +1692,9 @@ impl<'a> MetalShaderGenerator<'a> {
         match &node.kind {
             SirNodeKind::BinaryOp(op) => self.generate_binary_op(sir, node, op),
             SirNodeKind::UnaryOp(op) => self.generate_unary_op(sir, node, op),
-            SirNodeKind::Constant { value, width } => self.generate_constant(sir, node, *value, *width),
+            SirNodeKind::Constant { value, width } => {
+                self.generate_constant(sir, node, *value, *width)
+            }
             SirNodeKind::Mux => self.generate_mux(sir, node),
             SirNodeKind::Concat => self.generate_concat(sir, node),
             SirNodeKind::Slice { start, end } => self.generate_slice(sir, node, *start, *end),
@@ -1685,7 +1718,10 @@ impl<'a> MetalShaderGenerator<'a> {
                     let is_wide_bits = source_width > 128 && output_width > 128;
 
                     // Debug: log widths for problematic signals
-                    if output.contains("node") || output.contains("fu_result") || output.contains("computed") {
+                    if output.contains("node")
+                        || output.contains("fu_result")
+                        || output.contains("computed")
+                    {
                         eprintln!("🔍 SignalRef: {} <- {} | source_width={}, output_width={}, is_array={}, is_wide_bits={}",
                                   output, signal, source_width, output_width, is_array, is_wide_bits);
                     }
@@ -1768,6 +1804,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
                         // Unpack vector components into array elements
                         let component_names = ["x", "y", "z", "w"];
+                        #[allow(clippy::needless_range_loop)]
                         for i in 0..vector_components.min(4) {
                             self.write_indented(&format!(
                                 "signals->{}[{}] = {}.{};\n",
@@ -2002,6 +2039,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
                     // Unpack vector components into array elements
                     let component_names = ["x", "y", "z", "w"];
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..vector_components.min(4) {
                         self.write_indented(&format!(
                             "signals->{}[{}] = signals->{}.{};\n",
@@ -2247,6 +2285,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
                                 // Unpack vector components
                                 let component_names = ["x", "y", "z", "w"];
+                                #[allow(clippy::needless_range_loop)]
                                 for i in 0..vector_components.min(4) {
                                     self.write_indented(&format!(
                                         "registers->{}[{}] = signals->{}.{};\n",
