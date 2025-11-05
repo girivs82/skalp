@@ -214,8 +214,8 @@ impl<'a> MirToSirConverter<'a> {
             let width = sir_type.width();
 
             eprintln!(
-                "📐 Variable '{}': type={:?}, width={}",
-                variable.name, variable.var_type, width
+                "📐 Variable '{}': mir_type={:?}, sir_type={:?}, width={}",
+                variable.name, variable.var_type, sir_type, width
             );
 
             // Variables (let bindings) are always combinational wires, never registers
@@ -2180,10 +2180,15 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             Expression::Concat(parts) => {
+                eprintln!("🔍 Converting Concat expression with {} parts", parts.len());
+                for (i, part) in parts.iter().enumerate() {
+                    eprintln!("  Part {}: {:?}", i, part);
+                }
                 let part_nodes: Vec<usize> = parts
                     .iter()
                     .map(|p| self.create_expression_node(p))
                     .collect();
+                eprintln!("  → Created {} SIR nodes for concat", part_nodes.len());
                 // Pass target width to concat node creation
                 self.create_concat_node_with_width(part_nodes, target_width)
             }
@@ -2203,6 +2208,13 @@ impl<'a> MirToSirConverter<'a> {
         let (val, width) = match value {
             Value::Integer(i) => (*i as u64, 32),
             Value::BitVector { width, value } => (*value, *width),
+            // BUG FIX: Handle float literals by converting to IEEE 754 bit representation
+            Value::Float(f) => {
+                // Convert f64 to IEEE 754 bits - we'll use f32 for now (32-bit floats)
+                let f32_val = *f as f32;
+                let bits = f32_val.to_bits();
+                (bits as u64, 32)
+            }
             _ => (0, 1),
         };
         self.create_constant_node(val, width)
@@ -2324,12 +2336,31 @@ impl<'a> MirToSirConverter<'a> {
         let left_type = self.get_signal_type(&left_signal.signal_id);
         let right_type = self.get_signal_type(&right_signal.signal_id);
 
+        // BUG DEBUG #65: Log signal names being looked up
+        if bin_op.is_float_op() {
+            eprintln!(
+                "  🔍 Looking up types: left='{}', right='{}'",
+                left_signal.signal_id, right_signal.signal_id
+            );
+        }
+
         let sir_type = if bin_op.is_float_op() {
-            // FP operations preserve input type (use left if both are same width)
+            // BUG FIX #65: FP operations ALWAYS return float types
+            // Use the float type from inputs, or infer from width
             if left_type.is_float() {
                 left_type.clone()
-            } else {
+            } else if right_type.is_float() {
                 right_type.clone()
+            } else {
+                // Neither input is float type (they're Bits), but this is an FP operation
+                // Infer float type from width: 16 -> Float16, 32 -> Float32, 64 -> Float64
+                let width = left_type.width().max(right_type.width());
+                match width {
+                    16 => SirType::Float16,
+                    32 => SirType::Float32,
+                    64 => SirType::Float64,
+                    _ => SirType::Float32, // Default to Float32
+                }
             }
         } else if matches!(
             bin_op,
@@ -2355,6 +2386,21 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         let width = sir_type.width();
+
+        // BUG DEBUG #65: Check if FP operations have correct output width
+        if bin_op.is_float_op() {
+            eprintln!(
+                "🔧 BUG #65 DEBUG: FP BinaryOp node_{} ({:?}): left_type={:?} (width={}), right_type={:?} (width={}), output_type={:?} (width={})",
+                node_id,
+                bin_op,
+                left_type,
+                left_type.width(),
+                right_type,
+                right_type.width(),
+                sir_type,
+                width
+            );
+        }
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -2479,10 +2525,18 @@ impl<'a> MirToSirConverter<'a> {
             parts.iter().map(|&p| self.node_to_signal_ref(p)).collect();
 
         // Calculate total width as sum of input widths
+        eprintln!("🔍 CONCAT DEBUG node_{}: {} parts", node_id, part_signals.len());
+        for (i, s) in part_signals.iter().enumerate() {
+            let width = self.get_signal_width(&s.signal_id);
+            eprintln!("  Part {}: signal='{}', width={}", i, s.signal_id, width);
+        }
+
         let sum_width: usize = part_signals
             .iter()
             .map(|s| self.get_signal_width(&s.signal_id))
             .sum();
+
+        eprintln!("  Sum width: {}", sum_width);
 
         // BUG FIX #49: Use target width if provided and different from sum
         // This handles cases like {0, var_2} where 0 should be 224 bits to make total 256
@@ -3089,11 +3143,29 @@ impl<'a> MirToSirConverter<'a> {
             | DataType::LogicExpr { default, .. }
             | DataType::IntExpr { default, .. }
             | DataType::NatExpr { default, .. } => SirType::Bits(*default),
-            // Struct, Enum, Union are not yet supported for simulation
-            // They should be decomposed at a higher level
-            DataType::Struct(_) | DataType::Enum(_) | DataType::Union(_) => {
+            // BUG FIX #65: Struct types (including tuples) need proper width calculation
+            // Calculate total width by summing all field widths
+            DataType::Struct(struct_type) => {
+                let total_width: usize = struct_type
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let field_sir_type = self.convert_type(&f.field_type);
+                        field_sir_type.width()
+                    })
+                    .sum();
+
                 eprintln!(
-                    "Warning: Struct/Enum/Union types not yet supported in SIR, treating as 1-bit"
+                    "🔧 BUG FIX #65: Converting struct '{}' with {} fields to Bits({})",
+                    struct_type.name, struct_type.fields.len(), total_width
+                );
+
+                SirType::Bits(total_width)
+            }
+            // Enum, Union are not yet supported for simulation
+            DataType::Enum(_) | DataType::Union(_) => {
+                eprintln!(
+                    "Warning: Enum/Union types not yet supported in SIR, treating as 1-bit"
                 );
                 SirType::Bits(1)
             }
