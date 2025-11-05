@@ -332,6 +332,68 @@ impl<'a> MetalShaderGenerator<'a> {
                                                 self.sanitize_name(&output.name),
                                                 self.sanitize_name(&node_output.signal_id)
                                             ));
+                                        } else if output_width > 128 && source_width > 32 && source_width <= 128 {
+                                            // BUG FIX #65: Vector-to-array conversion for output signals
+                                            // Source is uint2 or uint4 (33-128 bits), destination is uint[N] array (>128 bits)
+                                            let array_size = output_width.div_ceil(32);
+                                            let vector_components = source_width.div_ceil(32);
+
+                                            self.write_indented(&format!(
+                                                "// BUG FIX #65: Unpack {}-bit vector ({} components) into {}-bit array (uint[{}])\n",
+                                                source_width, vector_components, output_width, array_size
+                                            ));
+
+                                            // Unpack vector components into array elements
+                                            let component_names = ["x", "y", "z", "w"];
+                                            for i in 0..vector_components.min(4) {
+                                                self.write_indented(&format!(
+                                                    "signals->{}[{}] = signals->{}.{};\n",
+                                                    self.sanitize_name(&output.name),
+                                                    i,
+                                                    self.sanitize_name(&node_output.signal_id),
+                                                    component_names[i]
+                                                ));
+                                            }
+
+                                            // Zero out remaining array elements if output is wider than source
+                                            if array_size > vector_components {
+                                                self.write_indented(&format!(
+                                                    "// Zero-pad remaining {} elements\n",
+                                                    array_size - vector_components
+                                                ));
+                                                self.write_indented(&format!(
+                                                    "for (uint i = {}; i < {}; i++) {{\n",
+                                                    vector_components, array_size
+                                                ));
+                                                self.indent += 1;
+                                                self.write_indented(&format!(
+                                                    "signals->{}[i] = 0;\n",
+                                                    self.sanitize_name(&output.name)
+                                                ));
+                                                self.indent -= 1;
+                                                self.write_indented("}\n");
+                                            }
+                                        } else if output_width > 128 && source_width <= 32 {
+                                            // Scalar to wide: source is scalar (≤32 bits), destination is array (>128 bits)
+                                            let array_size = output_width.div_ceil(32);
+                                            self.write_indented(&format!(
+                                                "// Scalar to wide: assign {}-bit source to element 0 of {}-bit output (uint[{}])\n",
+                                                source_width, output_width, array_size
+                                            ));
+                                            self.write_indented(&format!(
+                                                "signals->{}[0] = signals->{};\n",
+                                                self.sanitize_name(&output.name),
+                                                self.sanitize_name(&node_output.signal_id)
+                                            ));
+                                            // Zero out remaining elements
+                                            self.write_indented(&format!("for (uint i = 1; i < {}; i++) {{\n", array_size));
+                                            self.indent += 1;
+                                            self.write_indented(&format!(
+                                                "signals->{}[i] = 0;\n",
+                                                self.sanitize_name(&output.name)
+                                            ));
+                                            self.indent -= 1;
+                                            self.write_indented("}\n");
                                         } else {
                                             // Both scalar - check for type reinterpretation
                                             // BUG FIX #62: Check if source and dest have different types (float <-> bits)
