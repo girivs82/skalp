@@ -1942,10 +1942,11 @@ impl HirBuilderContext {
                 // Create tuple type with placeholders matching element count
                 // Type inference will refine these later
                 let element_types = vec![HirType::Nat(32); elements.len()];
+                eprintln!("🔍 TUPLE TYPE INFERENCE: TupleLiteral with {} elements -> Nat(32) placeholders", elements.len());
                 HirType::Tuple(element_types)
             } else if let HirExpression::Variable(var_id) = value {
                 // If RHS is a variable, look up its type from the variable_types map
-                self.symbols
+                let var_type = self.symbols
                     .variable_types
                     .get(&var_id)
                     .cloned()
@@ -1953,10 +1954,13 @@ impl HirBuilderContext {
                         // Fallback: Create tuple type with Nat(32) placeholders
                         let element_types = vec![HirType::Nat(32); var_names.len()];
                         HirType::Tuple(element_types)
-                    })
+                    });
+                eprintln!("🔍 TUPLE TYPE INFERENCE: Variable({}) -> {:?}", var_id.0, var_type);
+                var_type
             } else {
                 // Fallback: Create tuple type with Nat(32) placeholders for each element
                 let element_types = vec![HirType::Nat(32); var_names.len()];
+                eprintln!("🔍 TUPLE TYPE INFERENCE: Fallback (expr discriminant {:?}) -> Nat(32) placeholders", std::mem::discriminant(&value));
                 HirType::Tuple(element_types)
             }
         };
@@ -1989,6 +1993,12 @@ impl HirBuilderContext {
             } else {
                 HirType::Nat(32)
             };
+
+            // DEBUG: Log element type assignment for tuple destructuring
+            eprintln!(
+                "🔍 TUPLE DESTRUCTURE: var='{}', index={}, element_type={:?}, tuple_type={:?}",
+                var_name, index, element_type, tmp_type
+            );
 
             // Create field access expression: _tuple_tmp_N.index
             let field_access = HirExpression::FieldAccess {
