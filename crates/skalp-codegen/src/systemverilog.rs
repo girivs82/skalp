@@ -745,10 +745,7 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
         skalp_mir::Expression::Unary { op, operand } => {
             // Special handling for FSqrt - it's a function call in SystemVerilog
             if matches!(op, skalp_mir::UnaryOp::FSqrt) {
-                format!(
-                    "$sqrt({})",
-                    format_expression_with_context(operand, module)
-                )
+                format!("$sqrt({})", format_expression_with_context(operand, module))
             } else {
                 format!(
                     "{}{}",

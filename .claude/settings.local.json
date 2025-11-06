@@ -40,7 +40,20 @@
       "Bash(env SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib /Users/girivs/src/hw/hls/target/debug/skalp build:*)",
       "Bash(SKALP_DUMP_MIR=1 SKALP_STDLIB_PATH=./crates/skalp-stdlib ./target/release/skalp build:*)",
       "Bash(SKALP_DUMP_HIR=1 SKALP_STDLIB_PATH=./crates/skalp-stdlib ./target/release/skalp build:*)",
-      "Bash(RUST_LOG=skalp_frontend=debug SKALP_STDLIB_PATH=./crates/skalp-stdlib ./target/release/skalp build:*)"
+      "Bash(RUST_LOG=skalp_frontend=debug SKALP_STDLIB_PATH=./crates/skalp-stdlib ./target/release/skalp build:*)",
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib RUST_LOG=skalp_mir=debug ./target/release/skalp build:*)",
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib RUST_LOG=skalp_mir=trace ./target/release/skalp build:*)",
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib RUST_LOG=skalp_sir=trace ./target/release/skalp build:*)",
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib RUST_LOG=skalp_sir=debug /Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Bash(RUST_LOG=trace cargo test:*)",
+      "WebSearch",
+      "Bash(if [ -f /tmp/karythra_mir_full.log ])",
+      "Bash(then wc -l /tmp/karythra_mir_full.log)",
+      "Bash(else echo \"Still waiting...\")",
+      "Bash(fi)",
+      "Bash(else echo \"Still compiling...\")",
+      "Bash(./target/release/deps/test_bug67_metal-7e30345def156bba:*)",
+      "Bash(/Users/girivs/src/hw/hls/target/release/deps/test_bug67_metal-7e30345def156bba)"
     ],
     "deny": [],
     "ask": []

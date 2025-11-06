@@ -606,6 +606,10 @@ impl<'hir> HirToMir<'hir> {
                     VariableId(u32::MAX) // Sentinel value to trigger new variable creation
                 };
 
+                // BUG FIX #67: Convert RHS expression FIRST (before registering variable)
+                // This ensures function inlining happens before we try to infer the variable type
+                let rhs = self.convert_expression(&let_stmt.value)?;
+
                 let var_id = if var_id == VariableId(u32::MAX) {
                     // Check if we already have a dynamic variable with this name
                     // If so, reuse its ID to avoid duplicate declarations
@@ -629,14 +633,41 @@ impl<'hir> HirToMir<'hir> {
                             let_stmt.name.clone()
                         };
 
+                        // BUG FIX #67: Infer type from the CONVERTED expression (after inlining)
+                        // instead of using the HIR placeholder type
+                        let inferred_type = self.infer_expression_type(&rhs);
+                        let hir_placeholder_type = &let_stmt.var_type;
+
+                        // Use inferred type if it's more specific than the HIR placeholder
+                        // The HIR placeholder is often Nat(32) for unknown types
+                        let final_type = if matches!(hir_placeholder_type, hir::HirType::Nat(32))
+                            && !matches!(inferred_type, DataType::Nat(32)) {
+                            eprintln!(
+                                "[BUG #67 FIX] Variable '{}': Using inferred type {:?} instead of HIR placeholder {:?}",
+                                var_name, inferred_type, hir_placeholder_type
+                            );
+                            inferred_type
+                        } else {
+                            // Use the HIR type if it's more specific
+                            let converted_hir_type = self.convert_type(hir_placeholder_type);
+                            eprintln!(
+                                "[BUG #67 FIX] Variable '{}': Using HIR type {:?} (inferred was {:?})",
+                                var_name, converted_hir_type, inferred_type
+                            );
+                            converted_hir_type
+                        };
+
+                        // Convert back to HIR type for storage in dynamic_variables
+                        let final_hir_type = self.convert_mir_to_hir_type(&final_type);
+
                         // Track this dynamically created variable so we can add it to the module later
                         eprintln!(
                             "[DEBUG] Creating dynamic variable: name={}, type={:?}",
-                            var_name, let_stmt.var_type
+                            var_name, final_hir_type
                         );
                         self.dynamic_variables.insert(
                             let_stmt.id,
-                            (new_id, var_name.clone(), let_stmt.var_type.clone()),
+                            (new_id, var_name.clone(), final_hir_type),
                         );
 
                         new_id
@@ -652,7 +683,6 @@ impl<'hir> HirToMir<'hir> {
                 };
 
                 let lhs = LValue::Variable(var_id);
-                let rhs = self.convert_expression(&let_stmt.value)?;
                 Some(Statement::Assignment(Assignment {
                     lhs,
                     rhs,
@@ -4911,6 +4941,52 @@ impl<'hir> HirToMir<'hir> {
             name: hir_union.name.clone(),
             fields,
             packed: hir_union.packed,
+        }
+    }
+
+    /// Convert MIR DataType back to HIR HirType
+    /// BUG FIX #67: Needed to store inferred types in dynamic_variables
+    fn convert_mir_to_hir_type(&self, mir_type: &DataType) -> hir::HirType {
+        match mir_type {
+            DataType::Bit(width) => hir::HirType::Bit(*width as u32),
+            DataType::Bool => hir::HirType::Bool,
+            DataType::Logic(width) => hir::HirType::Logic(*width as u32),
+            DataType::Int(width) => hir::HirType::Int(*width as u32),
+            DataType::Nat(width) => hir::HirType::Nat(*width as u32),
+            DataType::Clock { .. } => hir::HirType::Clock(None),
+            DataType::Reset { .. } => hir::HirType::Reset {
+                polarity: hir::HirResetPolarity::ActiveHigh,
+                clock_domain: None,
+            },
+            DataType::Event => hir::HirType::Event,
+            DataType::Array(inner, size) => {
+                hir::HirType::Array(Box::new(self.convert_mir_to_hir_type(inner)), *size as u32)
+            }
+            DataType::Float16 => hir::HirType::Float16,
+            DataType::Float32 => hir::HirType::Float32,
+            DataType::Float64 => hir::HirType::Float64,
+            DataType::Vec2(element) => {
+                hir::HirType::Vec2(Box::new(self.convert_mir_to_hir_type(element)))
+            }
+            DataType::Vec3(element) => {
+                hir::HirType::Vec3(Box::new(self.convert_mir_to_hir_type(element)))
+            }
+            DataType::Vec4(element) => {
+                hir::HirType::Vec4(Box::new(self.convert_mir_to_hir_type(element)))
+            }
+            // Parametric types - use default values
+            DataType::BitParam { default, .. } => hir::HirType::Bit(*default as u32),
+            DataType::LogicParam { default, .. } => hir::HirType::Logic(*default as u32),
+            DataType::IntParam { default, .. } => hir::HirType::Int(*default as u32),
+            DataType::NatParam { default, .. } => hir::HirType::Nat(*default as u32),
+            DataType::BitExpr { default, .. } => hir::HirType::Bit(*default as u32),
+            DataType::LogicExpr { default, .. } => hir::HirType::Logic(*default as u32),
+            DataType::IntExpr { default, .. } => hir::HirType::Int(*default as u32),
+            DataType::NatExpr { default, .. } => hir::HirType::Nat(*default as u32),
+            // For complex types, default to Nat(32) as a fallback
+            DataType::Struct(_) => hir::HirType::Nat(32),
+            DataType::Enum(_) => hir::HirType::Nat(32),
+            DataType::Union(_) => hir::HirType::Nat(32),
         }
     }
 

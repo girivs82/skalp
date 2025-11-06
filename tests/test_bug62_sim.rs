@@ -9,12 +9,13 @@ mod test_bug62_direct {
     #[tokio::test]
     async fn test_bug62_with_simulator() {
         // Read test design
-        let source = fs::read_to_string("/Users/girivs/src/hw/karythra/reproducer_tests/test_match_fp_bug.sk")
-            .expect("Failed to read test file");
+        let source = fs::read_to_string(
+            "/Users/girivs/src/hw/karythra/reproducer_tests/test_match_fp_bug.sk",
+        )
+        .expect("Failed to read test file");
 
         // Parse and build HIR
-        let hir = parse_and_build_hir(&source)
-            .expect("Failed to parse design");
+        let hir = parse_and_build_hir(&source).expect("Failed to parse design");
 
         // Compile to MIR
         let compiler = MirCompiler::new()
@@ -54,16 +55,35 @@ mod test_bug62_direct {
         let expected: f32 = 4.0;
 
         simulator.set_input("opcode", vec![23]).await.unwrap();
-        simulator.set_input("a", a.to_bits().to_le_bytes().to_vec()).await.unwrap();
-        simulator.set_input("b", b.to_bits().to_le_bytes().to_vec()).await.unwrap();
+        simulator
+            .set_input("a", a.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        simulator
+            .set_input("b", b.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
 
         simulator.step_simulation().await.unwrap();
 
         let result_bytes: Vec<u8> = simulator.get_output("result").await.unwrap();
-        let result_bits = u32::from_le_bytes([result_bytes[0], result_bytes[1], result_bytes[2], result_bytes[3]]);
+        let result_bits = u32::from_le_bytes([
+            result_bytes[0],
+            result_bytes[1],
+            result_bytes[2],
+            result_bytes[3],
+        ]);
         let result = f32::from_bits(result_bits);
 
-        println!("✅ Bug #62 test with Simulator: {} + {} = {} (expected {})", a, b, result, expected);
-        assert!((result - expected).abs() < 0.0001, "Bug #62: Expected {}, got {}", expected, result);
+        println!(
+            "✅ Bug #62 test with Simulator: {} + {} = {} (expected {})",
+            a, b, result, expected
+        );
+        assert!(
+            (result - expected).abs() < 0.0001,
+            "Bug #62: Expected {}, got {}",
+            expected,
+            result
+        );
     }
 }

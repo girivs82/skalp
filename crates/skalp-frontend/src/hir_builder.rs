@@ -88,6 +88,10 @@ struct SymbolTable {
     /// Types of let-bound variables (for type inference in tuple destructuring)
     variable_types: HashMap<VariableId, HirType>,
 
+    /// Function return types (for type inference of function call expressions)
+    /// BUG FIX #67: Track function return types to properly infer tuple types
+    function_return_types: HashMap<String, HirType>,
+
     /// Current scope for nested lookups
     scopes: Vec<HashMap<String, SymbolId>>,
 }
@@ -892,6 +896,18 @@ impl HirBuilderContext {
 
         // Register function in symbol table
         self.symbols.add_to_scope(&name, SymbolId::Function(id));
+
+        // BUG FIX #67: Register function return type for type inference of function calls
+        // This allows tuple destructuring to correctly infer element types from function call results
+        if let Some(ref ret_type) = return_type {
+            eprintln!(
+                "\u{1f527} BUG #67 FIX: Registering return type for function '{}': {:?}",
+                name, ret_type
+            );
+            self.symbols
+                .function_return_types
+                .insert(name.clone(), ret_type.clone());
+        }
 
         Some(HirFunction {
             id,
@@ -5810,6 +5826,7 @@ impl SymbolTable {
             clock_domains: HashMap::new(),
             user_types: HashMap::new(),
             variable_types: HashMap::new(),
+            function_return_types: HashMap::new(), // BUG FIX #67
             scopes: vec![HashMap::new()], // Start with global scope
         }
     }
@@ -6493,9 +6510,23 @@ impl HirBuilderContext {
                 }
             }
 
-            // Function calls: we'd need function signatures
-            // For now, use default
-            HirExpression::Call(_) => HirType::Nat(32),
+            // Function calls: Look up return type from function signature
+            // BUG FIX #67: Use actual function return types instead of default Nat(32)
+            HirExpression::Call(call) => {
+                if let Some(return_type) = self.symbols.function_return_types.get(&call.function) {
+                    eprintln!(
+                        "\u{1f50d} BUG #67 FIX: Function '{}' return type found: {:?}",
+                        call.function, return_type
+                    );
+                    return_type.clone()
+                } else {
+                    eprintln!(
+                        "WARNING BUG #67: Function '{}' return type not found, defaulting to Nat(32)",
+                        call.function
+                    );
+                    HirType::Nat(32)
+                }
+            }
 
             // Enum variants
             HirExpression::EnumVariant { enum_type, .. } => HirType::Custom(enum_type.clone()),

@@ -9,12 +9,10 @@ mod test_match_fp {
     #[tokio::test]
     async fn test_match_fp_addition() {
         // Read test design
-        let source = fs::read_to_string("/tmp/test_match_fp.sk")
-            .expect("Failed to read test file");
+        let source = fs::read_to_string("/tmp/test_match_fp.sk").expect("Failed to read test file");
 
         // Parse and build HIR
-        let hir = parse_and_build_hir(&source)
-            .expect("Failed to parse design");
+        let hir = parse_and_build_hir(&source).expect("Failed to parse design");
 
         // Compile to MIR
         let compiler = MirCompiler::new()
@@ -54,16 +52,30 @@ mod test_match_fp {
         let expected: f32 = 3.0;
 
         simulator.set_input("sel", vec![0]).await.unwrap();
-        simulator.set_input("a", a.to_bits().to_le_bytes().to_vec()).await.unwrap();
-        simulator.set_input("b", b.to_bits().to_le_bytes().to_vec()).await.unwrap();
+        simulator
+            .set_input("a", a.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        simulator
+            .set_input("b", b.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
 
         simulator.step_simulation().await.unwrap();
 
         let result_bytes: Vec<u8> = simulator.get_output("result").await.unwrap();
-        let result_bits = u32::from_le_bytes([result_bytes[0], result_bytes[1], result_bytes[2], result_bytes[3]]);
+        let result_bits = u32::from_le_bytes([
+            result_bytes[0],
+            result_bytes[1],
+            result_bytes[2],
+            result_bytes[3],
+        ]);
         let result = f32::from_bits(result_bits);
 
-        println!("✅ Match FP addition: {} + {} = {} (expected {})", a, b, result, expected);
+        println!(
+            "✅ Match FP addition: {} + {} = {} (expected {})",
+            a, b, result, expected
+        );
         assert!((result - expected).abs() < 0.0001, "FP addition mismatch");
     }
 }

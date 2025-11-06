@@ -175,8 +175,8 @@ impl<'a> MirToSirConverter<'a> {
             let width = sir_type.width();
 
             eprintln!(
-                "📏 Signal '{}': type={:?}, width={}",
-                signal.name, signal.signal_type, width
+                "📏 Signal '{}': MIR type={:?}, SIR type={:?}, width={}",
+                signal.name, signal.signal_type, sir_type, width
             );
 
             // Determine if this is a register by checking if it's assigned in sequential blocks
@@ -400,7 +400,10 @@ impl<'a> MirToSirConverter<'a> {
             "📡 CONTINUOUS ASSIGNMENTS: Processing {} assignments",
             self.mir.assignments.len()
         );
-        println!("🔍 Processing {} continuous assignments", self.mir.assignments.len());
+        println!(
+            "🔍 Processing {} continuous assignments",
+            self.mir.assignments.len()
+        );
         for assign in &self.mir.assignments {
             let target = self.lvalue_to_string(&assign.lhs);
             println!("   📡 CONTINUOUS ASSIGN: {} <= expression", target);
@@ -2090,7 +2093,10 @@ impl<'a> MirToSirConverter<'a> {
     fn convert_continuous_assign(&mut self, target: &str, value: &Expression) {
         // Get target signal width to propagate to expression tree
         let target_width = self.get_signal_width(target);
-        println!("🚀 CONVERT_CONTINUOUS_ASSIGN: target='{}', width={}", target, target_width);
+        println!(
+            "🚀 CONVERT_CONTINUOUS_ASSIGN: target='{}', width={}",
+            target, target_width
+        );
         let node_id = self.create_expression_node_with_width(value, Some(target_width));
         self.connect_node_to_signal(node_id, target);
     }
@@ -2154,7 +2160,11 @@ impl<'a> MirToSirConverter<'a> {
         self.create_expression_node_with_width(expr, None)
     }
 
-    fn create_expression_node_with_width(&mut self, expr: &Expression, target_width: Option<usize>) -> usize {
+    fn create_expression_node_with_width(
+        &mut self,
+        expr: &Expression,
+        target_width: Option<usize>,
+    ) -> usize {
         match expr {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
@@ -2518,14 +2528,22 @@ impl<'a> MirToSirConverter<'a> {
         self.create_concat_node_with_width(parts, None)
     }
 
-    fn create_concat_node_with_width(&mut self, parts: Vec<usize>, target_width: Option<usize>) -> usize {
+    fn create_concat_node_with_width(
+        &mut self,
+        parts: Vec<usize>,
+        target_width: Option<usize>,
+    ) -> usize {
         let node_id = self.next_node_id();
 
         let part_signals: Vec<SignalRef> =
             parts.iter().map(|&p| self.node_to_signal_ref(p)).collect();
 
         // Calculate total width as sum of input widths
-        eprintln!("🔍 CONCAT DEBUG node_{}: {} parts", node_id, part_signals.len());
+        eprintln!(
+            "🔍 CONCAT DEBUG node_{}: {} parts",
+            node_id,
+            part_signals.len()
+        );
         for (i, s) in part_signals.iter().enumerate() {
             let width = self.get_signal_width(&s.signal_id);
             eprintln!("  Part {}: signal='{}', width={}", i, s.signal_id, width);
@@ -3115,7 +3133,7 @@ impl<'a> MirToSirConverter<'a> {
             BitwiseNot => UnaryOperation::Not,
             Negate => UnaryOperation::Neg,
             Reduce(_) => UnaryOperation::Not, // Map reduction to NOT for now
-            FSqrt => UnaryOperation::FSqrt, // FP square root intrinsic
+            FSqrt => UnaryOperation::FSqrt,   // FP square root intrinsic
         }
     }
 
@@ -3157,16 +3175,16 @@ impl<'a> MirToSirConverter<'a> {
 
                 eprintln!(
                     "🔧 BUG FIX #65: Converting struct '{}' with {} fields to Bits({})",
-                    struct_type.name, struct_type.fields.len(), total_width
+                    struct_type.name,
+                    struct_type.fields.len(),
+                    total_width
                 );
 
                 SirType::Bits(total_width)
             }
             // Enum, Union are not yet supported for simulation
             DataType::Enum(_) | DataType::Union(_) => {
-                eprintln!(
-                    "Warning: Enum/Union types not yet supported in SIR, treating as 1-bit"
-                );
+                eprintln!("Warning: Enum/Union types not yet supported in SIR, treating as 1-bit");
                 SirType::Bits(1)
             }
         }
