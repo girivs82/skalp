@@ -615,17 +615,32 @@ impl<'hir> HirToMir<'hir> {
                 // 2. Complex RHS that references the let variable (regression case): Register variable first
                 //    Example: let rx = match opcode { 32 => { let (rx, ...) = ...; {0, rz, ry, rx} }, _ => 0 }
                 //
-                // Heuristic: If RHS is a simple direct function call, convert first.
+                // Heuristic: If RHS is a simple direct function call OR if we're extracting from
+                // a tuple (which comes from a function call), convert first.
                 // Otherwise, register variable first to allow RHS to reference it.
+
                 let is_simple_function_call = matches!(let_stmt.value, hir::HirExpression::Call(_));
 
-                let (rhs, needs_type_inference) = if is_simple_function_call {
-                    // Simple function call: convert first for Bug #67 fix
-                    eprintln!("[BUG #67] Simple function call detected, converting RHS first for '{}' ", let_stmt.name);
+                // Check if this is tuple element extraction from a function call
+                // Pattern: let rx = <tuple_tmp>.0 where <tuple_tmp> was from a function call
+                let is_tuple_element_extraction = matches!(
+                    &let_stmt.value,
+                    hir::HirExpression::FieldAccess { base, field }
+                    if field.chars().all(|c| c.is_ascii_digit()) // Numeric field like "0", "1", "2"
+                );
+
+                // Check if this is a cast expression
+                // Pattern: let ax_fp = ax as fp32
+                // Bug #67: Cast expressions should convert first to get proper type from the cast
+                let is_cast_expression = matches!(let_stmt.value, hir::HirExpression::Cast(_));
+
+                let should_convert_first = is_simple_function_call || is_tuple_element_extraction || is_cast_expression;
+
+                let (rhs, needs_type_inference) = if should_convert_first {
+                    // Simple function call, tuple element extraction, or cast: convert first for Bug #67 fix
                     (self.convert_expression(&let_stmt.value)?, true)
                 } else {
                     // Complex expression: will convert after variable registration
-                    eprintln!("[BUG #67] Complex RHS detected, deferring conversion for '{}'", let_stmt.name);
                     (Expression::Literal(Value::Integer(0)), false) // Placeholder, will be replaced
                 };
 
@@ -717,7 +732,6 @@ impl<'hir> HirToMir<'hir> {
                     rhs
                 } else {
                     // Convert now that variable is registered and available
-                    eprintln!("[BUG #67] Converting deferred RHS for '{}'", let_stmt.name);
                     self.convert_expression(&let_stmt.value)?
                 };
 
