@@ -606,9 +606,28 @@ impl<'hir> HirToMir<'hir> {
                     VariableId(u32::MAX) // Sentinel value to trigger new variable creation
                 };
 
-                // BUG FIX #67: Convert RHS expression FIRST (before registering variable)
-                // This ensures function inlining happens before we try to infer the variable type
-                let rhs = self.convert_expression(&let_stmt.value)?;
+                // BUG FIX #67 with REGRESSION FIX: Context-aware RHS conversion
+                //
+                // We need to handle two cases:
+                // 1. Simple function call RHS (Bug #67 case): Convert RHS first to get correct types
+                //    Example: let (rx, ry, rz) = vec3_add(...)
+                //
+                // 2. Complex RHS that references the let variable (regression case): Register variable first
+                //    Example: let rx = match opcode { 32 => { let (rx, ...) = ...; {0, rz, ry, rx} }, _ => 0 }
+                //
+                // Heuristic: If RHS is a simple direct function call, convert first.
+                // Otherwise, register variable first to allow RHS to reference it.
+                let is_simple_function_call = matches!(let_stmt.value, hir::HirExpression::Call(_));
+
+                let (rhs, needs_type_inference) = if is_simple_function_call {
+                    // Simple function call: convert first for Bug #67 fix
+                    eprintln!("[BUG #67] Simple function call detected, converting RHS first for '{}' ", let_stmt.name);
+                    (self.convert_expression(&let_stmt.value)?, true)
+                } else {
+                    // Complex expression: will convert after variable registration
+                    eprintln!("[BUG #67] Complex RHS detected, deferring conversion for '{}'", let_stmt.name);
+                    (Expression::Literal(Value::Integer(0)), false) // Placeholder, will be replaced
+                };
 
                 let var_id = if var_id == VariableId(u32::MAX) {
                     // Check if we already have a dynamic variable with this name
@@ -634,31 +653,41 @@ impl<'hir> HirToMir<'hir> {
                         };
 
                         // BUG FIX #67: Infer type from the CONVERTED expression (after inlining)
-                        // instead of using the HIR placeholder type
-                        let inferred_type = self.infer_expression_type(&rhs);
-                        let hir_placeholder_type = &let_stmt.var_type;
+                        // instead of using the HIR placeholder type - BUT ONLY for simple function calls
+                        let final_hir_type = if needs_type_inference {
+                            // Simple function call case: infer from converted expression
+                            let inferred_type = self.infer_expression_type(&rhs);
+                            let hir_placeholder_type = &let_stmt.var_type;
 
-                        // Use inferred type if it's more specific than the HIR placeholder
-                        // The HIR placeholder is often Nat(32) for unknown types
-                        let final_type = if matches!(hir_placeholder_type, hir::HirType::Nat(32))
-                            && !matches!(inferred_type, DataType::Nat(32)) {
-                            eprintln!(
-                                "[BUG #67 FIX] Variable '{}': Using inferred type {:?} instead of HIR placeholder {:?}",
-                                var_name, inferred_type, hir_placeholder_type
-                            );
-                            inferred_type
+                            // Use inferred type if it's more specific than the HIR placeholder
+                            // The HIR placeholder is often Nat(32) for unknown types
+                            let final_type = if matches!(hir_placeholder_type, hir::HirType::Nat(32))
+                                && !matches!(inferred_type, DataType::Nat(32)) {
+                                eprintln!(
+                                    "[BUG #67 FIX] Variable '{}': Using inferred type {:?} instead of HIR placeholder {:?}",
+                                    var_name, inferred_type, hir_placeholder_type
+                                );
+                                inferred_type
+                            } else {
+                                // Use the HIR type if it's more specific
+                                let converted_hir_type = self.convert_type(hir_placeholder_type);
+                                eprintln!(
+                                    "[BUG #67 FIX] Variable '{}': Using HIR type {:?} (inferred was {:?})",
+                                    var_name, converted_hir_type, inferred_type
+                                );
+                                converted_hir_type
+                            };
+
+                            // Convert back to HIR type for storage in dynamic_variables
+                            self.convert_mir_to_hir_type(&final_type)
                         } else {
-                            // Use the HIR type if it's more specific
-                            let converted_hir_type = self.convert_type(hir_placeholder_type);
+                            // Complex RHS case: use HIR placeholder, will be refined later if needed
                             eprintln!(
-                                "[BUG #67 FIX] Variable '{}': Using HIR type {:?} (inferred was {:?})",
-                                var_name, converted_hir_type, inferred_type
+                                "[BUG #67] Variable '{}': Using HIR placeholder type {:?} for complex RHS",
+                                var_name, let_stmt.var_type
                             );
-                            converted_hir_type
+                            let_stmt.var_type.clone()
                         };
-
-                        // Convert back to HIR type for storage in dynamic_variables
-                        let final_hir_type = self.convert_mir_to_hir_type(&final_type);
 
                         // Track this dynamically created variable so we can add it to the module later
                         eprintln!(
@@ -682,10 +711,20 @@ impl<'hir> HirToMir<'hir> {
                     var_id
                 };
 
+                // For complex RHS, convert it now that the variable is registered
+                let final_rhs = if needs_type_inference {
+                    // Already converted
+                    rhs
+                } else {
+                    // Convert now that variable is registered and available
+                    eprintln!("[BUG #67] Converting deferred RHS for '{}'", let_stmt.name);
+                    self.convert_expression(&let_stmt.value)?
+                };
+
                 let lhs = LValue::Variable(var_id);
                 Some(Statement::Assignment(Assignment {
                     lhs,
-                    rhs,
+                    rhs: final_rhs,
                     kind: AssignmentKind::Blocking,
                 }))
             }
