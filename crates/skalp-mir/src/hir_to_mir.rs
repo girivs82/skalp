@@ -681,29 +681,20 @@ impl<'hir> HirToMir<'hir> {
 
                             // Use inferred type if it's more specific than the HIR placeholder
                             // The HIR placeholder is often Nat(32) for unknown types
-                            let final_type = if matches!(hir_placeholder_type, hir::HirType::Nat(32))
+                            if matches!(hir_placeholder_type, hir::HirType::Nat(32))
                                 && !matches!(inferred_type, DataType::Nat(32)) {
-                                eprintln!(
-                                    "[BUG #67 FIX] Variable '{}': Using inferred type {:?} instead of HIR placeholder {:?}",
-                                    var_name, inferred_type, hir_placeholder_type
-                                );
-                                inferred_type
+                                // Use inferred type if it's more specific than the Nat(32) placeholder
+                                self.convert_mir_to_hir_type(&inferred_type)
+                            } else if matches!(hir_placeholder_type, hir::HirType::Tuple(_)) {
+                                // For tuple types, use the HIR placeholder directly
+                                // Don't convert to MIR and back - preserve the original tuple type
+                                hir_placeholder_type.clone()
                             } else {
-                                // Use the HIR type if it's more specific
+                                // For other types, convert through MIR to ensure consistency
                                 let converted_hir_type = self.convert_type(hir_placeholder_type);
-                                eprintln!(
-                                    "[BUG #67 FIX] Variable '{}': Using HIR type {:?} (inferred was {:?}), HIR placeholder was {:?}",
-                                    var_name, converted_hir_type, inferred_type, hir_placeholder_type
-                                );
-                                // BUG #65/#66 DEBUG: Log if we're setting Float16
-                                if matches!(converted_hir_type, DataType::Float16) {
-                                    eprintln!("[BUG #65/#66 FOUND IT!] Variable '{}' getting Float16 from HIR placeholder {:?}", var_name, hir_placeholder_type);
-                                }
-                                converted_hir_type
-                            };
-
-                            // Convert back to HIR type for storage in dynamic_variables
-                            self.convert_mir_to_hir_type(&final_type)
+                                // Convert back to HIR for storage
+                                self.convert_mir_to_hir_type(&converted_hir_type)
+                            }
                         } else {
                             // Complex RHS case: use HIR placeholder, will be refined later if needed
                             eprintln!(
@@ -5109,8 +5100,34 @@ impl<'hir> HirToMir<'hir> {
             DataType::LogicExpr { default, .. } => hir::HirType::Logic(*default as u32),
             DataType::IntExpr { default, .. } => hir::HirType::Int(*default as u32),
             DataType::NatExpr { default, .. } => hir::HirType::Nat(*default as u32),
-            // For complex types, default to Nat(32) as a fallback
-            DataType::Struct(_) => hir::HirType::Nat(32),
+            // For complex types, try to convert back properly
+            DataType::Struct(struct_type) => {
+                // Check if this is an anonymous tuple struct (name starts with "__tuple_")
+                if struct_type.name.starts_with("__tuple_") {
+                    // Convert back to HIR Tuple type
+                    let element_types: Vec<hir::HirType> = struct_type
+                        .fields
+                        .iter()
+                        .map(|field| self.convert_mir_to_hir_type(&field.field_type))
+                        .collect();
+                    hir::HirType::Tuple(element_types)
+                } else {
+                    // Named struct - convert to HIR struct type
+                    let fields: Vec<hir::HirStructField> = struct_type
+                        .fields
+                        .iter()
+                        .map(|field| hir::HirStructField {
+                            name: field.name.clone(),
+                            field_type: self.convert_mir_to_hir_type(&field.field_type),
+                        })
+                        .collect();
+                    hir::HirType::Struct(hir::HirStructType {
+                        name: struct_type.name.clone(),
+                        fields,
+                        packed: struct_type.packed,
+                    })
+                }
+            }
             DataType::Enum(_) => hir::HirType::Nat(32),
             DataType::Union(_) => hir::HirType::Nat(32),
         }
