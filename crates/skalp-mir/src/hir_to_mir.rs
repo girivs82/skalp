@@ -246,10 +246,13 @@ impl<'hir> HirToMir<'hir> {
                         let var_id = self.next_variable_id();
                         self.variable_map.insert(hir_var.id, var_id);
 
+                        let mir_var_type = self.convert_type(&hir_var.var_type);
+                        eprintln!("[BUG #65/#66 DEBUG] impl_block.variables: name={}, hir_type={:?}, mir_type={:?}",
+                            hir_var.name, hir_var.var_type, mir_var_type);
                         let variable = Variable {
                             id: var_id,
                             name: hir_var.name.clone(),
-                            var_type: self.convert_type(&hir_var.var_type),
+                            var_type: mir_var_type,
                             initial: hir_var
                                 .initial_value
                                 .as_ref()
@@ -329,6 +332,8 @@ impl<'hir> HirToMir<'hir> {
                                             if let Some((_, name, hir_type)) = dyn_var_info {
                                                 // Found in dynamic_variables - use its declared type
                                                 let mir_type = self.convert_type(&hir_type);
+                                                eprintln!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
+                                                    var_id.0, name, hir_type, mir_type);
                                                 (name, mir_type)
                                             } else {
                                                 // Not in dynamic_variables - fall back to name lookup and type inference
@@ -344,7 +349,7 @@ impl<'hir> HirToMir<'hir> {
 
                                                 // Infer the type from the RHS expression
                                                 let var_type =
-                                                    self.infer_expression_type(&assign.rhs);
+                                                    self.infer_expression_type_with_module(&assign.rhs, &module);
                                                 (var_name, var_type)
                                             };
 
@@ -687,9 +692,13 @@ impl<'hir> HirToMir<'hir> {
                                 // Use the HIR type if it's more specific
                                 let converted_hir_type = self.convert_type(hir_placeholder_type);
                                 eprintln!(
-                                    "[BUG #67 FIX] Variable '{}': Using HIR type {:?} (inferred was {:?})",
-                                    var_name, converted_hir_type, inferred_type
+                                    "[BUG #67 FIX] Variable '{}': Using HIR type {:?} (inferred was {:?}), HIR placeholder was {:?}",
+                                    var_name, converted_hir_type, inferred_type, hir_placeholder_type
                                 );
+                                // BUG #65/#66 DEBUG: Log if we're setting Float16
+                                if matches!(converted_hir_type, DataType::Float16) {
+                                    eprintln!("[BUG #65/#66 FOUND IT!] Variable '{}' getting Float16 from HIR placeholder {:?}", var_name, hir_placeholder_type);
+                                }
                                 converted_hir_type
                             };
 
@@ -2707,7 +2716,23 @@ impl<'hir> HirToMir<'hir> {
                 // For FP/bit reinterpretation casts, this is a no-op in hardware
                 // but critical for type tracking
                 let inner_expr = self.convert_expression(&cast_expr.expr)?;
-                let target_type = self.convert_type(&cast_expr.target_type);
+                let mut target_type = self.convert_type(&cast_expr.target_type);
+
+                // BUG #65/#66 FIX: Detect and correct erroneous Float16 casts from 32-bit values
+                // If casting from a 32-bit type (Bit[32]/Nat[32]) to Float16, this is likely
+                // a bug in HIR where fp32 was inferred as fp16. Correct it to Float32.
+                if matches!(target_type, DataType::Float16) {
+                    let inner_type = self.infer_expression_type_internal(&inner_expr, None);
+                    let inner_width = match inner_type {
+                        DataType::Bit(w) | DataType::Nat(w) | DataType::Int(w) | DataType::Logic(w) => w,
+                        _ => 0,
+                    };
+                    if inner_width == 32 {
+                        eprintln!("[BUG #65/#66 FIX] Correcting Cast from {:?} (width={}) to Float16 → Float32", inner_type, inner_width);
+                        target_type = DataType::Float32;
+                    }
+                }
+
                 Some(Expression::Cast {
                     expr: Box::new(inner_expr),
                     target_type,
@@ -4722,9 +4747,23 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Infer the MIR DataType of a MIR Expression
+    /// Infer expression type with access to module for variable type lookup
+    /// This version is used when we have access to the partially-built module
+    fn infer_expression_type_with_module(&self, expr: &Expression, module: &Module) -> DataType {
+        self.infer_expression_type_internal(expr, Some(module))
+    }
+
+    /// Infer expression type without module access (fallback for legacy code)
     /// This is used for variables created from pending statements where we don't have HIR type info
     #[allow(clippy::only_used_in_recursion)]
     fn infer_expression_type(&self, expr: &Expression) -> DataType {
+        self.infer_expression_type_internal(expr, None)
+    }
+
+    /// Internal implementation of expression type inference
+    /// module_opt: Optional module for looking up variable types
+    #[allow(clippy::only_used_in_recursion)]
+    fn infer_expression_type_internal(&self, expr: &Expression, module_opt: Option<&Module>) -> DataType {
         match expr {
             Expression::Literal(value) => match value {
                 Value::Integer(_) => DataType::Int(32),
@@ -4747,8 +4786,18 @@ impl<'hir> HirToMir<'hir> {
                         DataType::Nat(32)
                     }
                     LValue::Variable(var_id) => {
-                        // TODO: Look up variable type
-                        DataType::Nat(32)
+                        // BUG #65/#66 FIX: Look up variable type from module if available
+                        if let Some(module) = module_opt {
+                            module
+                                .variables
+                                .iter()
+                                .find(|v| v.id == *var_id)
+                                .map(|v| v.var_type.clone())
+                                .unwrap_or(DataType::Nat(32))
+                        } else {
+                            // Fallback when no module available
+                            DataType::Nat(32)
+                        }
                     }
                     LValue::BitSelect { .. } => DataType::Bit(1),
                     LValue::RangeSelect { high, low, .. } => {
@@ -4758,11 +4807,35 @@ impl<'hir> HirToMir<'hir> {
                     LValue::Concat(_) => DataType::Nat(32),
                 }
             }
-            Expression::Binary { .. } => DataType::Nat(32), // Most binary ops return 32-bit
+            Expression::Binary { op, left, right } => {
+                // BUG #65/#66 FIX: For FP binary operations, infer Float32 if operands are Float types
+                // Check if this is an FP operation (Add, Sub, Mul, Div)
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv) {
+                    let left_type = self.infer_expression_type_internal(left, module_opt);
+                    let right_type = self.infer_expression_type_internal(right, module_opt);
+
+                    // If either operand is a Float type, result is Float
+                    if matches!(left_type, DataType::Float16 | DataType::Float32 | DataType::Float64)
+                        || matches!(right_type, DataType::Float16 | DataType::Float32 | DataType::Float64)
+                    {
+                        // Use the wider type
+                        match (left_type, right_type) {
+                            (DataType::Float64, _) | (_, DataType::Float64) => DataType::Float64,
+                            (DataType::Float32, _) | (_, DataType::Float32) => DataType::Float32,
+                            (DataType::Float16, DataType::Float16) => DataType::Float16,
+                            _ => DataType::Float32, // Fallback
+                        }
+                    } else {
+                        DataType::Nat(32) // Integer arithmetic
+                    }
+                } else {
+                    DataType::Nat(32) // Other binary ops
+                }
+            }
             Expression::Unary { .. } => DataType::Nat(32),
             Expression::Conditional { then_expr, .. } => {
                 // Infer from then branch
-                self.infer_expression_type(then_expr)
+                self.infer_expression_type_internal(then_expr, module_opt)
             }
             Expression::FunctionCall { .. } => DataType::Nat(32), // Default for function calls
             Expression::Concat(_) => DataType::Nat(32),

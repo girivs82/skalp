@@ -550,6 +550,11 @@ impl HirBuilderContext {
                     let let_stmts = self.build_let_statements_from_node(&child);
                     for stmt in let_stmts {
                         if let HirStatement::Let(let_stmt) = stmt {
+                            // BUG #65/#66 DEBUG: Log if creating variable with Float16 type
+                            if matches!(let_stmt.var_type, HirType::Float16) {
+                                eprintln!("[BUG #65/#66 FOUND IT IN HIR!] Creating HIR variable '{}' with Float16 type", let_stmt.name);
+                            }
+
                             // Create a variable for the let binding
                             let variable = HirVariable {
                                 id: let_stmt.id,
@@ -6583,6 +6588,10 @@ impl HirBuilderContext {
             HirType::Bit(w) | HirType::Logic(w) | HirType::Int(w) | HirType::Nat(w) => *w,
             HirType::Bool => 1,
             HirType::Array(elem_type, count) => self.get_type_width(elem_type) * count,
+            // BUG FIX #65/#66: IEEE 754 floating-point types have specific widths
+            HirType::Float16 => 16,
+            HirType::Float32 => 32,
+            HirType::Float64 => 64,
             _ => 32, // Default width
         }
     }

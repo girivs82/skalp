@@ -213,11 +213,6 @@ impl<'a> MirToSirConverter<'a> {
             let sir_type = self.convert_type(&variable.var_type);
             let width = sir_type.width();
 
-            eprintln!(
-                "📐 Variable '{}': mir_type={:?}, sir_type={:?}, width={}",
-                variable.name, variable.var_type, sir_type, width
-            );
-
             // Variables (let bindings) are always combinational wires, never registers
             self.sir.signals.push(SirSignal {
                 name: variable.name.clone(),
