@@ -328,30 +328,36 @@ impl<'hir> HirToMir<'hir> {
                                             .find(|(id, _, _)| id == var_id)
                                             .cloned();
 
-                                        let (var_name, var_type) =
-                                            if let Some((_, name, hir_type)) = dyn_var_info {
-                                                // Found in dynamic_variables - use its declared type
-                                                let mir_type = self.convert_type(&hir_type);
-                                                eprintln!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
+                                        let (var_name, var_type) = if let Some((
+                                            _,
+                                            name,
+                                            hir_type,
+                                        )) = dyn_var_info
+                                        {
+                                            // Found in dynamic_variables - use its declared type
+                                            let mir_type = self.convert_type(&hir_type);
+                                            eprintln!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
                                                     var_id.0, name, hir_type, mir_type);
-                                                (name, mir_type)
-                                            } else {
-                                                // Not in dynamic_variables - fall back to name lookup and type inference
-                                                let var_name = self
-                                                    .variable_map
-                                                    .iter()
-                                                    .find(|(_, &mir_id)| mir_id == *var_id)
-                                                    .and_then(|(hir_id, _)| {
-                                                        // Try to find the variable name from the HIR
-                                                        self.find_variable_name(*hir_id)
-                                                    })
-                                                    .unwrap_or_else(|| format!("var_{}", var_id.0));
+                                            (name, mir_type)
+                                        } else {
+                                            // Not in dynamic_variables - fall back to name lookup and type inference
+                                            let var_name = self
+                                                .variable_map
+                                                .iter()
+                                                .find(|(_, &mir_id)| mir_id == *var_id)
+                                                .and_then(|(hir_id, _)| {
+                                                    // Try to find the variable name from the HIR
+                                                    self.find_variable_name(*hir_id)
+                                                })
+                                                .unwrap_or_else(|| format!("var_{}", var_id.0));
 
-                                                // Infer the type from the RHS expression
-                                                let var_type =
-                                                    self.infer_expression_type_with_module(&assign.rhs, &module);
-                                                (var_name, var_type)
-                                            };
+                                            // Infer the type from the RHS expression
+                                            let var_type = self.infer_expression_type_with_module(
+                                                &assign.rhs,
+                                                module,
+                                            );
+                                            (var_name, var_type)
+                                        };
 
                                         let variable = Variable {
                                             id: *var_id,
@@ -639,7 +645,8 @@ impl<'hir> HirToMir<'hir> {
                 // Bug #67: Cast expressions should convert first to get proper type from the cast
                 let is_cast_expression = matches!(let_stmt.value, hir::HirExpression::Cast(_));
 
-                let should_convert_first = is_simple_function_call || is_tuple_element_extraction || is_cast_expression;
+                let should_convert_first =
+                    is_simple_function_call || is_tuple_element_extraction || is_cast_expression;
 
                 let (rhs, needs_type_inference) = if should_convert_first {
                     // Simple function call, tuple element extraction, or cast: convert first for Bug #67 fix
@@ -683,7 +690,8 @@ impl<'hir> HirToMir<'hir> {
                             // Use inferred type if it's more specific than the HIR placeholder
                             // The HIR placeholder is often Nat(32) for unknown types
                             if matches!(hir_placeholder_type, hir::HirType::Nat(32))
-                                && !matches!(inferred_type, DataType::Nat(32)) {
+                                && !matches!(inferred_type, DataType::Nat(32))
+                            {
                                 // Use inferred type if it's more specific than the Nat(32) placeholder
                                 self.convert_mir_to_hir_type(&inferred_type)
                             } else if matches!(hir_placeholder_type, hir::HirType::Tuple(_)) {
@@ -710,10 +718,8 @@ impl<'hir> HirToMir<'hir> {
                             "[DEBUG] Creating dynamic variable: name={}, type={:?}",
                             var_name, final_hir_type
                         );
-                        self.dynamic_variables.insert(
-                            let_stmt.id,
-                            (new_id, var_name.clone(), final_hir_type),
-                        );
+                        self.dynamic_variables
+                            .insert(let_stmt.id, (new_id, var_name.clone(), final_hir_type));
 
                         new_id
                     };
@@ -2646,6 +2652,10 @@ impl<'hir> HirToMir<'hir> {
 
                 eprintln!("[DEBUG] If-expr: then_expr = {:?}", then_expr);
 
+                // BUG FIX #63/#68: Capture variables created in then-branch before restoring
+                // We need to track ALL new variables from BOTH branches for nested if/else.
+                let then_branch_vars = self.dynamic_variables.clone();
+
                 // BUG FIX #63: Restore dynamic_variables before else-branch
                 // We must completely restore to prevent variable name collisions when
                 // functions inlined in different branches create variables with the same name.
@@ -2671,9 +2681,52 @@ impl<'hir> HirToMir<'hir> {
                 }
                 let else_expr = else_expr?;
 
-                // BUG FIX #63: After both branches are processed, restore to the original state
-                // This ensures that variables created in either branch don't leak out
-                self.dynamic_variables = saved_dynamic_vars;
+                // BUG FIX #63/#68: After both branches are processed, restore to the original state
+                // BUT preserve NEW variables created during branch processing from BOTH branches.
+                //
+                // In nested if/else expressions, inner branches may create variables (via function
+                // inlining with tuple destructuring) that outer expressions need to reference.
+                // We must preserve these newly created variables in dynamic_variables while still
+                // isolating branch-local variables to prevent name collisions between sibling branches.
+                //
+                // Example: 4-level nested if/else with function inlining
+                //   if a < 10 { 0 } else if a < 20 { 0 } else if a < 30 { exec(...) } else { 0 }
+                // The exec() call creates variables that must remain accessible to parent if/else expressions.
+                //
+                // The key insight: We need to merge new variables from BOTH then-branch AND else-branch,
+                // because in deeply nested if/else, the variables may be created in the then-branch
+                // and then cleared by subsequent scope restorations in nested else-branches.
+
+                let mut restored_vars = saved_dynamic_vars.clone();
+                let mut preserved_count = 0;
+
+                // Preserve new variables from then-branch
+                for (hir_var_id, (mir_var_id, name, hir_type)) in then_branch_vars.iter() {
+                    if !saved_dynamic_vars.contains_key(hir_var_id) {
+                        eprintln!("[BUG #68] Preserving variable from then-branch: HIR {:?} -> MIR {:?} ({})",
+                            hir_var_id, mir_var_id, name);
+                        restored_vars
+                            .insert(*hir_var_id, (*mir_var_id, name.clone(), hir_type.clone()));
+                        preserved_count += 1;
+                    }
+                }
+
+                // Preserve new variables from else-branch
+                for (hir_var_id, (mir_var_id, name, hir_type)) in self.dynamic_variables.iter() {
+                    if !saved_dynamic_vars.contains_key(hir_var_id)
+                        && !restored_vars.contains_key(hir_var_id)
+                    {
+                        eprintln!("[BUG #68] Preserving variable from else-branch: HIR {:?} -> MIR {:?} ({})",
+                            hir_var_id, mir_var_id, name);
+                        restored_vars
+                            .insert(*hir_var_id, (*mir_var_id, name.clone(), hir_type.clone()));
+                        preserved_count += 1;
+                    }
+                }
+
+                eprintln!("[BUG #68] If-expression restoration: saved {} vars, then-branch {} vars, else-branch {} vars, preserved {} new vars",
+                    saved_dynamic_vars.len(), then_branch_vars.len(), self.dynamic_variables.len(), preserved_count);
+                self.dynamic_variables = restored_vars;
 
                 let cond = Box::new(cond);
                 let then_expr = Box::new(then_expr);
@@ -2716,7 +2769,10 @@ impl<'hir> HirToMir<'hir> {
                 if matches!(target_type, DataType::Float16) {
                     let inner_type = self.infer_expression_type_internal(&inner_expr, None);
                     let inner_width = match inner_type {
-                        DataType::Bit(w) | DataType::Nat(w) | DataType::Int(w) | DataType::Logic(w) => w,
+                        DataType::Bit(w)
+                        | DataType::Nat(w)
+                        | DataType::Int(w)
+                        | DataType::Logic(w) => w,
                         _ => 0,
                     };
                     if inner_width == 32 {
@@ -4755,7 +4811,11 @@ impl<'hir> HirToMir<'hir> {
     /// Internal implementation of expression type inference
     /// module_opt: Optional module for looking up variable types
     #[allow(clippy::only_used_in_recursion)]
-    fn infer_expression_type_internal(&self, expr: &Expression, module_opt: Option<&Module>) -> DataType {
+    fn infer_expression_type_internal(
+        &self,
+        expr: &Expression,
+        module_opt: Option<&Module>,
+    ) -> DataType {
         match expr {
             Expression::Literal(value) => match value {
                 Value::Integer(_) => DataType::Int(32),
@@ -4802,14 +4862,28 @@ impl<'hir> HirToMir<'hir> {
             Expression::Binary { op, left, right } => {
                 // BUG #65/#66 FIX: For FP binary operations, infer Float32 if operands are Float types
                 // Check if this is an FP operation (Add, Sub, Mul, Div)
-                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv) {
+                if matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::FAdd
+                        | BinaryOp::FSub
+                        | BinaryOp::FMul
+                        | BinaryOp::FDiv
+                ) {
                     let left_type = self.infer_expression_type_internal(left, module_opt);
                     let right_type = self.infer_expression_type_internal(right, module_opt);
 
                     // If either operand is a Float type, result is Float
-                    if matches!(left_type, DataType::Float16 | DataType::Float32 | DataType::Float64)
-                        || matches!(right_type, DataType::Float16 | DataType::Float32 | DataType::Float64)
-                    {
+                    if matches!(
+                        left_type,
+                        DataType::Float16 | DataType::Float32 | DataType::Float64
+                    ) || matches!(
+                        right_type,
+                        DataType::Float16 | DataType::Float32 | DataType::Float64
+                    ) {
                         // Use the wider type
                         match (left_type, right_type) {
                             (DataType::Float64, _) | (_, DataType::Float64) => DataType::Float64,
@@ -5064,6 +5138,9 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert MIR DataType back to HIR HirType
     /// BUG FIX #67: Needed to store inferred types in dynamic_variables
+    ///
+    /// Note: &self is only used in recursive calls, which is intentional for this converter
+    #[allow(clippy::only_used_in_recursion)]
     fn convert_mir_to_hir_type(&self, mir_type: &DataType) -> hir::HirType {
         match mir_type {
             DataType::Bit(width) => hir::HirType::Bit(*width as u32),

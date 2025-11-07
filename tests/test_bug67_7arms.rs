@@ -12,12 +12,11 @@ async fn test_bug67_7arms_metal() {
     println!("\n🧪 Testing Bug #67 with 7 match arms - Does this reproduce the bug?");
 
     // Read the 7-arm MWE
-    let source = fs::read_to_string("/tmp/bug67_mwe_7arms.sk")
-        .expect("Failed to read Bug #67 7-arm MWE");
+    let source =
+        fs::read_to_string("/tmp/bug67_mwe_7arms.sk").expect("Failed to read Bug #67 7-arm MWE");
 
     // Parse and build HIR
-    let hir = parse_and_build_hir(&source)
-        .expect("Failed to parse Bug #67 7-arm MWE");
+    let hir = parse_and_build_hir(&source).expect("Failed to parse Bug #67 7-arm MWE");
 
     // Compile to MIR
     let compiler = MirCompiler::new()

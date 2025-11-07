@@ -5832,7 +5832,7 @@ impl SymbolTable {
             user_types: HashMap::new(),
             variable_types: HashMap::new(),
             function_return_types: HashMap::new(), // BUG FIX #67
-            scopes: vec![HashMap::new()], // Start with global scope
+            scopes: vec![HashMap::new()],          // Start with global scope
         }
     }
 

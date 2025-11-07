@@ -12,12 +12,11 @@ async fn test_bug67_mwe_metal() {
     println!("\n🧪 Testing Bug #67 MWE - Does it reproduce the half vs uint error?");
 
     // Read the MWE (entity-based version)
-    let source = fs::read_to_string("/tmp/bug67_mwe_entity.sk")
-        .expect("Failed to read Bug #67 MWE");
+    let source =
+        fs::read_to_string("/tmp/bug67_mwe_entity.sk").expect("Failed to read Bug #67 MWE");
 
     // Parse and build HIR
-    let hir = parse_and_build_hir(&source)
-        .expect("Failed to parse Bug #67 MWE");
+    let hir = parse_and_build_hir(&source).expect("Failed to parse Bug #67 MWE");
 
     // Compile to MIR
     let compiler = MirCompiler::new()
@@ -75,7 +74,10 @@ async fn test_bug67_mwe_metal() {
             println!("\n   This MWE successfully reproduces Bug #67! ✅");
             panic!("Bug #67 MWE: Reproduced FP16 type inference error in Metal shader generation");
         } else {
-            panic!("Unexpected error during Metal shader compilation: {}", error_msg);
+            panic!(
+                "Unexpected error during Metal shader compilation: {}",
+                error_msg
+            );
         }
     }
 

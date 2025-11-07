@@ -12,12 +12,11 @@ async fn test_bug67_nested_metal() {
     println!("\n🧪 Testing Bug #67 with nested if-else - Does calling exec_l3 from if-else trigger the bug?");
 
     // Read the nested if-else MWE
-    let source = fs::read_to_string("/tmp/bug67_mwe_nested.sk")
-        .expect("Failed to read Bug #67 nested MWE");
+    let source =
+        fs::read_to_string("/tmp/bug67_mwe_nested.sk").expect("Failed to read Bug #67 nested MWE");
 
     // Parse and build HIR
-    let hir = parse_and_build_hir(&source)
-        .expect("Failed to parse Bug #67 nested MWE");
+    let hir = parse_and_build_hir(&source).expect("Failed to parse Bug #67 nested MWE");
 
     // Compile to MIR
     let compiler = MirCompiler::new()

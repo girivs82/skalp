@@ -563,15 +563,16 @@ mod gpu_simulation_tests {
 
     #[tokio::test]
     async fn test_bug67_fp16_type_metal() {
-        println!("\n🧪 Testing Bug #67: FP16 type inference in tuple destructuring with match arms");
+        println!(
+            "\n🧪 Testing Bug #67: FP16 type inference in tuple destructuring with match arms"
+        );
 
         // Read the minimal Bug #67 test case
         let source = fs::read_to_string("/tmp/test_bug67_fp16_type.sk")
             .expect("Failed to read Bug #67 test case");
 
         // Parse and build HIR
-        let hir = parse_and_build_hir(&source)
-            .expect("Failed to parse Bug #67 design");
+        let hir = parse_and_build_hir(&source).expect("Failed to parse Bug #67 design");
 
         // Compile to MIR
         let compiler = MirCompiler::new()
@@ -619,13 +620,19 @@ mod gpu_simulation_tests {
             println!("   {}", error_msg);
 
             // Check if this is the expected FP16 type mismatch error
-            if error_msg.contains("as_type") || error_msg.contains("half") || error_msg.contains("cannot convert") {
+            if error_msg.contains("as_type")
+                || error_msg.contains("half")
+                || error_msg.contains("cannot convert")
+            {
                 println!("\n🐛 Bug #67 REPRODUCED: Metal shader has FP16 type error");
                 println!("   Expected: Variables should be uint (32-bit)");
                 println!("   Actual: Variables are half (16-bit)");
                 panic!("Bug #67: FP16 type inference error in Metal shader generation");
             } else {
-                panic!("Unexpected error during Metal shader compilation: {}", error_msg);
+                panic!(
+                    "Unexpected error during Metal shader compilation: {}",
+                    error_msg
+                );
             }
         }
 
