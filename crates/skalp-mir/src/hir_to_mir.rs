@@ -650,12 +650,21 @@ impl<'hir> HirToMir<'hir> {
                 };
 
                 let var_id = if var_id == VariableId(u32::MAX) {
+                    // Apply match arm prefix if we're in a match arm context
+                    // This prevents variable name collisions between different match arms
+                    // IMPORTANT: Do this BEFORE checking for duplicates so we check the correct name
+                    let var_name = if let Some(ref prefix) = self.match_arm_prefix {
+                        format!("{}_{}", prefix, let_stmt.name)
+                    } else {
+                        let_stmt.name.clone()
+                    };
+
                     // Check if we already have a dynamic variable with this name
                     // If so, reuse its ID to avoid duplicate declarations
                     let existing_var = self
                         .dynamic_variables
                         .values()
-                        .find(|(_, name, _)| name == &let_stmt.name);
+                        .find(|(_, name, _)| name == &var_name);
 
                     let new_id = if let Some((existing_id, _, _)) = existing_var {
                         // Reuse the existing variable ID for this name
@@ -663,14 +672,6 @@ impl<'hir> HirToMir<'hir> {
                     } else {
                         // Create a new MIR variable on the fly for event block let bindings
                         let new_id = self.next_variable_id();
-
-                        // Apply match arm prefix if we're in a match arm context
-                        // This prevents variable name collisions between different match arms
-                        let var_name = if let Some(ref prefix) = self.match_arm_prefix {
-                            format!("{}_{}", prefix, let_stmt.name)
-                        } else {
-                            let_stmt.name.clone()
-                        };
 
                         // BUG FIX #67: Infer type from the CONVERTED expression (after inlining)
                         // instead of using the HIR placeholder type - BUT ONLY for simple function calls
