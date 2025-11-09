@@ -3059,8 +3059,36 @@ impl HirBuilderContext {
 
                         let receiver_node = receiver_node_result?;
 
-                        let receiver_result = self.build_expression(receiver_node);
-                        let receiver = receiver_result?;
+                        // BUG FIX #5: Handle chained field access method calls like a.x.add(b.x)
+                        // If receiver is a FieldExpr with no children, it's just ".field" and we need
+                        // to find the base in an earlier sibling
+                        let receiver = if receiver_node.kind() == SyntaxKind::FieldExpr
+                            && receiver_node.children().count() == 0
+                        {
+                            // This is a bare FieldExpr like ".x" - need to find the base before it
+                            let receiver_field_pos = siblings.iter().position(|n| n == receiver_node)?;
+
+                            // Find the base expression before this FieldExpr
+                            let base_node = siblings[..receiver_field_pos]
+                                .iter()
+                                .rev()
+                                .find(|n| {
+                                    matches!(
+                                        n.kind(),
+                                        SyntaxKind::IdentExpr
+                                            | SyntaxKind::CallExpr
+                                            | SyntaxKind::FieldExpr
+                                            | SyntaxKind::IndexExpr
+                                            | SyntaxKind::LiteralExpr
+                                    )
+                                })?;
+
+                            // Build the field access from parts
+                            self.build_field_access_from_parts(base_node, receiver_node)?
+                        } else {
+                            // Normal receiver - build as expression
+                            self.build_expression(receiver_node)?
+                        };
 
                         // Parse arguments from CallExpr children
                         let mut args = vec![receiver]; // Receiver is the first argument
