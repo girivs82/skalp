@@ -88,6 +88,12 @@ struct SymbolTable {
     /// Types of let-bound variables (for type inference in tuple destructuring)
     variable_types: HashMap<VariableId, HirType>,
 
+    /// BUG FIX #5: Signal types for type inference
+    signal_types: HashMap<SignalId, HirType>,
+
+    /// BUG FIX #5: Port types for type inference
+    port_types: HashMap<PortId, HirType>,
+
     /// Function return types (for type inference of function call expressions)
     /// BUG FIX #67: Track function return types to properly infer tuple types
     function_return_types: HashMap<String, HirType>,
@@ -471,6 +477,7 @@ impl HirBuilderContext {
 
         // Register in symbol table
         self.symbols.ports.insert(name.clone(), id);
+        self.symbols.port_types.insert(id, port_type.clone()); // BUG FIX #5
         // Also add to general scope for lookup
         self.symbols.add_to_scope(&name, SymbolId::Port(id));
 
@@ -793,6 +800,7 @@ impl HirBuilderContext {
 
         // Register in symbol table
         self.symbols.signals.insert(name.clone(), id);
+        self.symbols.signal_types.insert(id, signal_type.clone()); // BUG FIX #5
         self.symbols.add_to_scope(&name, SymbolId::Signal(id));
 
         Some(HirSignal {
@@ -3091,11 +3099,55 @@ impl HirBuilderContext {
                         };
 
                         // Parse arguments from CallExpr children
+                        // BUG FIX #5: Arguments may be chained expressions (e.g., b.x where b is IdentExpr and .x is FieldExpr)
+                        // The parser creates these as sibling children, not nested
                         let mut args = vec![receiver]; // Receiver is the first argument
 
-                        for child in node.children() {
-                            if let Some(expr) = self.build_expression(&child) {
-                                args.push(expr);
+                        let call_children: Vec<_> = node.children().collect();
+
+                        // Group children into arguments by building chained expressions
+                        // Each argument starts with a primary expression (IdentExpr, LiteralExpr, etc.)
+                        // and may be followed by postfix operations (FieldExpr, IndexExpr)
+                        let mut i = 0;
+                        while i < call_children.len() {
+                            let child = &call_children[i];
+
+                            // Check if this is a primary expression that starts an argument
+                            if matches!(
+                                child.kind(),
+                                SyntaxKind::IdentExpr
+                                    | SyntaxKind::LiteralExpr
+                                    | SyntaxKind::BinaryExpr
+                                    | SyntaxKind::UnaryExpr
+                                    | SyntaxKind::CallExpr
+                                    | SyntaxKind::StructLiteral
+                                    | SyntaxKind::ArrayLiteral
+                                    | SyntaxKind::TupleExpr
+                                    | SyntaxKind::CastExpr
+                                    | SyntaxKind::ParenExpr
+                            ) {
+                                // Collect all following postfix operations (FieldExpr, IndexExpr)
+                                let arg_start = i;
+                                let mut arg_end = i + 1;
+                                while arg_end < call_children.len()
+                                    && matches!(
+                                        call_children[arg_end].kind(),
+                                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
+                                    )
+                                {
+                                    arg_end += 1;
+                                }
+
+                                // Build chained expression from arg_start to arg_end
+                                let arg_nodes = &call_children[arg_start..arg_end];
+                                if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes) {
+                                    args.push(arg_expr);
+                                }
+
+                                i = arg_end;
+                            } else {
+                                // Not a primary expression - skip it (might be a delimiter or other token)
+                                i += 1;
                             }
                         }
 
@@ -5863,8 +5915,10 @@ impl SymbolTable {
             clock_domains: HashMap::new(),
             user_types: HashMap::new(),
             variable_types: HashMap::new(),
+            signal_types: HashMap::new(), // BUG FIX #5
+            port_types: HashMap::new(),   // BUG FIX #5
             function_return_types: HashMap::new(), // BUG FIX #67
-            scopes: vec![HashMap::new()],          // Start with global scope
+            scopes: vec![HashMap::new()], // Start with global scope
         }
     }
 
@@ -6433,22 +6487,36 @@ impl HirBuilderContext {
                 .cloned()
                 .unwrap_or(HirType::Nat(32)),
 
-            HirExpression::Signal(_) => {
-                // Signal types would need to be tracked separately
-                // For now, use default width
-                HirType::Nat(32)
+            HirExpression::Signal(id) => {
+                // BUG FIX #5: Look up signal type from symbols
+                self.symbols
+                    .signal_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or(HirType::Nat(32))
             }
 
-            HirExpression::Port(_) => {
-                // Port types would need to be tracked separately
-                // For now, use default width
-                HirType::Nat(32)
+            HirExpression::Port(id) => {
+                // BUG FIX #5: Look up port type from symbols
+                self.symbols
+                    .port_types
+                    .get(id)
+                    .cloned()
+                    .unwrap_or(HirType::Nat(32))
             }
 
             HirExpression::Constant(_) => {
                 // Constant types would need to be tracked separately
                 // For now, use default width
                 HirType::Nat(32)
+            }
+
+            // BUG FIX #5: Handle GenericParam (function parameters)
+            HirExpression::GenericParam(name) => {
+                // Function parameters might be represented as GenericParam
+                // Look up in variable types by name
+                // This is a workaround until we have better parameter tracking
+                HirType::Nat(32) // Will be improved when we track param types properly
             }
 
             // Literals: infer from value
@@ -6565,15 +6633,7 @@ impl HirBuilderContext {
                     // FP arithmetic methods return the same type as receiver
                     "add" | "sub" | "mul" | "div" | "sqrt" | "abs" | "neg" if !call.args.is_empty() => {
                         let receiver_type = self.infer_expression_type(&call.args[0]);
-                        eprintln!(
-                            "[TYPE_INFERENCE] Method '{}' receiver type: {:?}",
-                            call.function, receiver_type
-                        );
                         if matches!(receiver_type, HirType::Float16 | HirType::Float32 | HirType::Float64) {
-                            eprintln!(
-                                "\u{1f50d} BUG #5 FIX: FP method '{}' return type inferred from receiver: {:?}",
-                                call.function, receiver_type
-                            );
                             return receiver_type;
                         }
                         // Not an FP type, fall through to normal lookup
@@ -6582,10 +6642,6 @@ impl HirBuilderContext {
                     "lt" | "gt" | "le" | "ge" | "eq" | "ne" if !call.args.is_empty() => {
                         let receiver_type = self.infer_expression_type(&call.args[0]);
                         if matches!(receiver_type, HirType::Float16 | HirType::Float32 | HirType::Float64) {
-                            eprintln!(
-                                "\u{1f50d} BUG #5 FIX: FP comparison method '{}' returns bit[1]",
-                                call.function
-                            );
                             return HirType::Bit(1);
                         }
                         // Not an FP type, fall through to normal lookup
@@ -6596,19 +6652,10 @@ impl HirBuilderContext {
                 }
 
                 // Look up in function signatures table
-                if let Some(return_type) = self.symbols.function_return_types.get(&call.function) {
-                    eprintln!(
-                        "\u{1f50d} BUG #67 FIX: Function '{}' return type found: {:?}",
-                        call.function, return_type
-                    );
-                    return_type.clone()
-                } else {
-                    eprintln!(
-                        "WARNING BUG #67: Function '{}' return type not found, defaulting to Nat(32)",
-                        call.function
-                    );
-                    HirType::Nat(32)
-                }
+                self.symbols.function_return_types
+                    .get(&call.function)
+                    .cloned()
+                    .unwrap_or(HirType::Nat(32))
             }
 
             // Enum variants
