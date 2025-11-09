@@ -2361,6 +2361,61 @@ impl<'hir> HirToMir<'hir> {
                                 args: vec![arg],
                             });
                         }
+                        // BUG FIX #4: FP comparison methods
+                        "lt" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FLess,
+                                left,
+                                right,
+                            });
+                        }
+                        "gt" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FGreater,
+                                left,
+                                right,
+                            });
+                        }
+                        "le" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FLessEqual,
+                                left,
+                                right,
+                            });
+                        }
+                        "ge" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FGreaterEqual,
+                                left,
+                                right,
+                            });
+                        }
+                        "eq" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FEqual,
+                                left,
+                                right,
+                            });
+                        }
+                        "ne" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FNotEqual,
+                                left,
+                                right,
+                            });
+                        }
                         _ => {
                             // Unknown FP method - fall through to regular inlining
                         }
