@@ -6502,6 +6502,15 @@ impl HirBuilderContext {
                             .map(|f| f.field_type.clone())
                             .unwrap_or(HirType::Nat(32))
                     }
+                    // BUG FIX #5: Handle vec2/vec3/vec4 field access
+                    HirType::Vec2(elem_type) | HirType::Vec3(elem_type) | HirType::Vec4(elem_type)
+                        if matches!(field.as_str(), "x" | "y" | "z" | "w") => *elem_type,
+                    // BUG FIX #5: Handle Custom("vec2"/"vec3"/"vec4") types (Bug #45 workaround)
+                    HirType::Custom(type_name) if type_name.starts_with("vec")
+                        && matches!(field.as_str(), "x" | "y" | "z" | "w") => {
+                        // Vec components default to Float32
+                        HirType::Float32
+                    }
                     _ => HirType::Nat(32),
                 }
             }
@@ -6550,6 +6559,43 @@ impl HirBuilderContext {
             // Function calls: Look up return type from function signature
             // BUG FIX #67: Use actual function return types instead of default Nat(32)
             HirExpression::Call(call) => {
+                // BUG FIX #5: Check if this is a built-in FP method (add, sub, mul, div, lt, gt, etc.)
+                // For these methods, infer type from the receiver (first argument)
+                match call.function.as_str() {
+                    // FP arithmetic methods return the same type as receiver
+                    "add" | "sub" | "mul" | "div" | "sqrt" | "abs" | "neg" if !call.args.is_empty() => {
+                        let receiver_type = self.infer_expression_type(&call.args[0]);
+                        eprintln!(
+                            "[TYPE_INFERENCE] Method '{}' receiver type: {:?}",
+                            call.function, receiver_type
+                        );
+                        if matches!(receiver_type, HirType::Float16 | HirType::Float32 | HirType::Float64) {
+                            eprintln!(
+                                "\u{1f50d} BUG #5 FIX: FP method '{}' return type inferred from receiver: {:?}",
+                                call.function, receiver_type
+                            );
+                            return receiver_type;
+                        }
+                        // Not an FP type, fall through to normal lookup
+                    }
+                    // FP comparison methods always return bit[1]
+                    "lt" | "gt" | "le" | "ge" | "eq" | "ne" if !call.args.is_empty() => {
+                        let receiver_type = self.infer_expression_type(&call.args[0]);
+                        if matches!(receiver_type, HirType::Float16 | HirType::Float32 | HirType::Float64) {
+                            eprintln!(
+                                "\u{1f50d} BUG #5 FIX: FP comparison method '{}' returns bit[1]",
+                                call.function
+                            );
+                            return HirType::Bit(1);
+                        }
+                        // Not an FP type, fall through to normal lookup
+                    }
+                    _ => {
+                        // Not a built-in FP method, use normal lookup
+                    }
+                }
+
+                // Look up in function signatures table
                 if let Some(return_type) = self.symbols.function_return_types.get(&call.function) {
                     eprintln!(
                         "\u{1f50d} BUG #67 FIX: Function '{}' return type found: {:?}",
