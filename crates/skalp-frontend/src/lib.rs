@@ -152,6 +152,36 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         builder.preregister_entity(entity);
     }
 
+    // Pre-register all functions with their return types (BUG FIX #67)
+    // This ensures imported function return types are available for type inference
+    eprintln!(
+        "🔍 DEBUG: Pre-registering functions from {} implementations and {} top-level functions",
+        hir.implementations.len(),
+        hir.functions.len()
+    );
+
+    // Preregister top-level functions (these come from imports like 'use foo::*')
+    for function in &hir.functions {
+        eprintln!(
+            "  Top-level function: {} (return type: {:?})",
+            function.name, function.return_type
+        );
+        builder.preregister_function(function);
+    }
+
+    // Preregister functions from implementation blocks
+    for (impl_idx, implementation) in hir.implementations.iter().enumerate() {
+        eprintln!(
+            "  Implementation {}: {} functions",
+            impl_idx,
+            implementation.functions.len()
+        );
+        for function in &implementation.functions {
+            eprintln!("    Function: {}", function.name);
+            builder.preregister_function(function);
+        }
+    }
+
     // Rebuild implementations (this will now find imported entities)
     let rebuilt_hir = builder.build(&syntax_tree).map_err(|errors| {
         anyhow::anyhow!(
@@ -604,6 +634,38 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         }
     }
 
+    // BUG #67 FIX: Try to find the symbol in functions (from implementation blocks)
+    // This is critical for importing stdlib functions with their return types
+    for impl_block in &source.implementations {
+        if let Some(function) = impl_block.functions.iter().find(|f| f.name == symbol_name) {
+            eprintln!(
+                "📦 BUG #67 FIX: Merging function '{}' with return type: {:?}",
+                function.name, function.return_type
+            );
+            // Add the function to the target's global implementation block
+            // Create one if it doesn't exist
+            if target.implementations.is_empty() {
+                target.implementations.push(hir::HirImplementation {
+                    entity: hir::EntityId(0), // Dummy entity ID for global scope
+                    signals: Vec::new(),
+                    variables: Vec::new(),
+                    constants: Vec::new(),
+                    functions: Vec::new(),
+                    event_blocks: Vec::new(),
+                    assignments: Vec::new(),
+                    instances: Vec::new(),
+                    covergroups: Vec::new(),
+                    formal_blocks: Vec::new(),
+                });
+            }
+            // Add function to the first implementation (global scope)
+            if let Some(impl_block) = target.implementations.first_mut() {
+                impl_block.functions.push(function.clone());
+            }
+            return Ok(());
+        }
+    }
+
     // Symbol not found - this might be okay if it's a type or other symbol
     // For now, we don't error
     Ok(())
@@ -863,6 +925,39 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                 // Add constant to the first implementation (global scope)
                 if let Some(impl_block) = target.implementations.first_mut() {
                     impl_block.constants.push(constant.clone());
+                }
+            }
+        }
+    }
+
+    // BUG #67 FIX: Merge all functions (from implementation blocks)
+    // This is critical for glob imports of stdlib functions with their return types
+    for impl_block in &source.implementations {
+        // Only merge functions from the global scope (entity ID 0)
+        if impl_block.entity == hir::EntityId(0) {
+            for function in &impl_block.functions {
+                eprintln!(
+                    "📦 BUG #67 FIX: Merging glob-imported function '{}' with return type: {:?}",
+                    function.name, function.return_type
+                );
+                // Create global implementation block if it doesn't exist
+                if target.implementations.is_empty() {
+                    target.implementations.push(hir::HirImplementation {
+                        entity: hir::EntityId(0),
+                        signals: Vec::new(),
+                        variables: Vec::new(),
+                        constants: Vec::new(),
+                        functions: Vec::new(),
+                        event_blocks: Vec::new(),
+                        assignments: Vec::new(),
+                        instances: Vec::new(),
+                        covergroups: Vec::new(),
+                        formal_blocks: Vec::new(),
+                    });
+                }
+                // Add function to the first implementation (global scope)
+                if let Some(impl_block) = target.implementations.first_mut() {
+                    impl_block.functions.push(function.clone());
                 }
             }
         }

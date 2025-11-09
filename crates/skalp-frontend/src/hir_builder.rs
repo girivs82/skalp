@@ -151,6 +151,20 @@ impl HirBuilderContext {
             .insert(entity.name.clone(), entity.clone());
     }
 
+    /// Pre-register function return types from merged HIR (for handling imports)
+    /// BUG FIX #67: Register imported function return types for type inference
+    pub fn preregister_function(&mut self, function: &HirFunction) {
+        if let Some(ref return_type) = function.return_type {
+            eprintln!(
+                "\u{1f4e6} BUG #67 FIX: Pre-registering imported function '{}' with return type: {:?}",
+                function.name, return_type
+            );
+            self.symbols
+                .function_return_types
+                .insert(function.name.clone(), return_type.clone());
+        }
+    }
+
     /// Build HIR from syntax tree
     pub fn build(&mut self, root: &SyntaxNode) -> Result<Hir, Vec<HirError>> {
         // Type checking is temporarily disabled during HIR building to avoid conflicts
@@ -859,23 +873,13 @@ impl HirBuilderContext {
             }
         }
 
-        // Extract optional return type
+        // Extract optional return type (BUG FIX #67: Support all type nodes including TupleType)
+        // The return type appears as a TypeAnnotation child node AFTER the ParameterList
+        // NOTE: The arrow (->) is a token, not a node, so we can't search for it in .children()
         let return_type = node
             .children()
-            .skip_while(|n| !matches!(n.kind(), SyntaxKind::Arrow))
-            .skip(1) // Skip the Arrow itself
-            .find(|n| {
-                matches!(
-                    n.kind(),
-                    SyntaxKind::TypeAnnotation
-                        | SyntaxKind::BitType
-                        | SyntaxKind::LogicType
-                        | SyntaxKind::IntType
-                        | SyntaxKind::NatType
-                        | SyntaxKind::CustomType
-                        | SyntaxKind::ArrayType
-                )
-            })
+            .skip_while(|n| n.kind() == SyntaxKind::ParameterList)
+            .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
             .map(|n| self.extract_hir_type(&n));
 
         // CRITICAL FIX (Bug #32): Push a new scope for function parameters
