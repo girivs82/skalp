@@ -4541,12 +4541,168 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// Convert an FP method call to MIR expression
+    /// This is a helper to handle FP methods when type-based detection fails
+    fn convert_fp_method_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
+        match call.function.as_str() {
+            // Binary FP operations
+            "add" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FAdd,
+                    left,
+                    right,
+                })
+            }
+            "sub" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FSub,
+                    left,
+                    right,
+                })
+            }
+            "mul" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FMul,
+                    left,
+                    right,
+                })
+            }
+            "div" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FDiv,
+                    left,
+                    right,
+                })
+            }
+            // Unary FP operations
+            "neg" if call.args.len() == 1 => {
+                // Negate is handled as unary minus (0 - x)
+                let zero = Box::new(Expression::Literal(Value::Float(0.0)));
+                let operand = Box::new(self.convert_expression(&call.args[0])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FSub,
+                    left: zero,
+                    right: operand,
+                })
+            }
+            "abs" if call.args.len() == 1 => {
+                // abs is handled as a function call to fabs
+                let arg = self.convert_expression(&call.args[0])?;
+                Some(Expression::FunctionCall {
+                    name: "fabs".to_string(),
+                    args: vec![arg],
+                })
+            }
+            "sqrt" if call.args.len() == 1 => {
+                let operand = Box::new(self.convert_expression(&call.args[0])?);
+                Some(Expression::Unary {
+                    op: UnaryOp::FSqrt,
+                    operand,
+                })
+            }
+            // Comparison FP operations
+            "lt" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FLess,
+                    left,
+                    right,
+                })
+            }
+            "gt" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FGreater,
+                    left,
+                    right,
+                })
+            }
+            "le" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FLessEqual,
+                    left,
+                    right,
+                })
+            }
+            "ge" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FGreaterEqual,
+                    left,
+                    right,
+                })
+            }
+            "eq" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FEqual,
+                    left,
+                    right,
+                })
+            }
+            "ne" if call.args.len() == 2 => {
+                let left = Box::new(self.convert_expression(&call.args[0])?);
+                let right = Box::new(self.convert_expression(&call.args[1])?);
+                Some(Expression::Binary {
+                    op: BinaryOp::FNotEqual,
+                    left,
+                    right,
+                })
+            }
+            _ => {
+                eprintln!(
+                    "[DEBUG] convert_fp_method_call: Unknown FP method '{}' with {} args",
+                    call.function,
+                    call.args.len()
+                );
+                None
+            }
+        }
+    }
+
     fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
         eprintln!(
             "[DEBUG] inline_function_call: {} with {} args",
             call.function,
             call.args.len()
         );
+
+        // BUG FIX #69: Don't attempt to inline FP built-in methods
+        // FP methods should be handled by convert_expression's FP method detection.
+        // If we reach here for an FP method, treat it as an FP operation directly.
+        // This handles cases where type inference fails during nested inlining.
+        let is_binary_fp_method = matches!(
+            call.function.as_str(),
+            "add" | "sub" | "mul" | "div" | "lt" | "gt" | "le" | "ge" | "eq" | "ne"
+        ) && call.args.len() == 2;
+
+        let is_unary_fp_method = matches!(call.function.as_str(), "neg" | "abs" | "sqrt")
+            && call.args.len() == 1;
+
+        if is_binary_fp_method || is_unary_fp_method {
+            eprintln!(
+                "[DEBUG] inline_function_call: Detected FP method '{}' with {} args, handling as FP operation",
+                call.function,
+                call.args.len()
+            );
+            // Assume this is an FP method call and convert it directly
+            // This bypasses the normal FP detection which may fail with complex expressions
+            return self.convert_fp_method_call(call);
+        }
 
         // Step 1: Find the function and clone its body to avoid borrow checker issues
         let func = self.find_function(&call.function)?;
