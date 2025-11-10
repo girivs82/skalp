@@ -1699,40 +1699,143 @@ impl HirBuilderContext {
         // Start with the first expression
         let mut result = self.build_expression(&rhs_exprs[0])?;
 
-        // Chain the remaining expressions
-        for current_node in rhs_exprs.iter().skip(1) {
+        // Chain the remaining expressions using a while loop to allow lookahead
+        // BUG FIX #71 Part 4e: Need to detect FieldExpr+CallExpr pattern (method calls)
+        let mut i = 1;
+        while i < rhs_exprs.len() {
+            let current_node = &rhs_exprs[i];
+
             match current_node.kind() {
                 SyntaxKind::FieldExpr => {
-                    // Combine result with field access (handles both named fields and tuple numeric fields)
-                    let field_name = current_node
-                        .children_with_tokens()
-                        .filter_map(|elem| elem.into_token())
-                        .find(|t| {
-                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
-                        })
-                        .map(|t| t.text().to_string())?;
+                    // Check if next node is CallExpr (method call pattern)
+                    if i + 1 < rhs_exprs.len() && rhs_exprs[i + 1].kind() == SyntaxKind::CallExpr {
+                        // This is a method call: FieldExpr(.method) + CallExpr(args)
+                        // Current result is the receiver
+                        let method_name = current_node
+                            .children_with_tokens()
+                            .filter_map(|elem| elem.into_token())
+                            .find(|t| {
+                                t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                            })
+                            .map(|t| t.text().to_string())?;
 
-                    result = HirExpression::FieldAccess {
-                        base: Box::new(result),
-                        field: field_name,
-                    };
+                        eprintln!("[HIR_CHAINED_RHS] Detected method call pattern: receiver + FieldExpr(.{}) + CallExpr", method_name);
+
+                        // Parse CallExpr arguments
+                        let call_node = &rhs_exprs[i + 1];
+                        let call_children: Vec<_> = call_node.children().collect();
+
+                        // Build arguments from CallExpr children
+                        let mut args = vec![result]; // Receiver is first argument
+
+                        let mut j = 0;
+                        while j < call_children.len() {
+                            let child = &call_children[j];
+
+                            // Skip IdentExpr if followed by CallExpr (nested function call)
+                            if child.kind() == SyntaxKind::IdentExpr
+                                && j + 1 < call_children.len()
+                                && call_children[j + 1].kind() == SyntaxKind::CallExpr
+                            {
+                                j += 1;
+                                continue;
+                            }
+
+                            // Check if this is a primary expression
+                            if matches!(
+                                child.kind(),
+                                SyntaxKind::IdentExpr
+                                    | SyntaxKind::LiteralExpr
+                                    | SyntaxKind::BinaryExpr
+                                    | SyntaxKind::UnaryExpr
+                                    | SyntaxKind::CallExpr
+                                    | SyntaxKind::StructLiteral
+                                    | SyntaxKind::ArrayLiteral
+                                    | SyntaxKind::TupleExpr
+                                    | SyntaxKind::CastExpr
+                                    | SyntaxKind::ParenExpr
+                            ) {
+                                // Collect this expression and any following postfix operations
+                                let arg_start = j;
+                                let mut arg_end = j + 1;
+                                while arg_end < call_children.len()
+                                    && matches!(
+                                        call_children[arg_end].kind(),
+                                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
+                                    )
+                                {
+                                    // Check for nested method call pattern
+                                    if call_children[arg_end].kind() == SyntaxKind::FieldExpr
+                                        && arg_end + 1 < call_children.len()
+                                        && call_children[arg_end + 1].kind() == SyntaxKind::CallExpr
+                                    {
+                                        // Include the method call in this argument
+                                        arg_end += 2; // Include both FieldExpr and CallExpr
+                                        break;
+                                    }
+                                    arg_end += 1;
+                                }
+
+                                // Build the argument expression
+                                let arg_nodes = &call_children[arg_start..arg_end];
+                                if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes) {
+                                    eprintln!("[HIR_CHAINED_RHS]   Built method call arg from {} nodes", arg_nodes.len());
+                                    args.push(arg_expr);
+                                }
+
+                                j = arg_end;
+                            } else {
+                                // Skip non-primary expressions
+                                j += 1;
+                            }
+                        }
+
+                        eprintln!("[HIR_CHAINED_RHS] Created method call '{}' with {} total args (receiver + {} explicit)", method_name, args.len(), args.len() - 1);
+
+                        result = HirExpression::Call(HirCallExpr {
+                            function: method_name,
+                            args,
+                        });
+
+                        // Skip both the FieldExpr and CallExpr
+                        i += 2;
+                    } else {
+                        // Regular field access
+                        let field_name = current_node
+                            .children_with_tokens()
+                            .filter_map(|elem| elem.into_token())
+                            .find(|t| {
+                                t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                            })
+                            .map(|t| t.text().to_string())?;
+
+                        result = HirExpression::FieldAccess {
+                            base: Box::new(result),
+                            field: field_name,
+                        };
+
+                        i += 1;
+                    }
                 }
                 SyntaxKind::IndexExpr => {
                     // Combine result with index access
                     result = self.build_index_with_base(result, current_node)?;
+                    i += 1;
                 }
                 SyntaxKind::BinaryExpr => {
                     // Combine result with binary operation
                     result = self.combine_expressions_with_binary(result, current_node)?;
+                    i += 1;
                 }
                 SyntaxKind::CallExpr => {
                     // Function call - just build it normally
                     // The parser should have created proper structure
                     result = self.build_expression(current_node)?;
+                    i += 1;
                 }
                 _ => {
                     // Unknown expression type - skip it
-                    continue;
+                    i += 1;
                 }
             }
         }
@@ -3156,11 +3259,10 @@ impl HirBuilderContext {
                                     | SyntaxKind::CastExpr
                                     | SyntaxKind::ParenExpr
                             ) {
-                                // BUG FIX #71 Part 4: Collect postfix operations (FieldExpr, IndexExpr)
-                                // BUG: CallExpr should NOT be included as postfix - it's a standalone expression!
-                                // CallExpr preceded by an IdentExpr means a function call, not a chained operation.
-                                // Example: vec_dot(a, b) creates [IdentExpr(vec_dot), CallExpr([a,b])]
-                                // We should treat CallExpr as a separate complete expression.
+                                // BUG FIX #71 Part 4e: Collect postfix operations (FieldExpr, IndexExpr)
+                                // INCLUDE FieldExpr+CallExpr pattern (nested method calls) in the argument
+                                // Example: a.x.mul(b) creates [IdentExpr(a), FieldExpr(.x), FieldExpr(.mul), CallExpr([b])]
+                                // We want nodes[0..4] as one arg (a.x.mul(b)), not nodes[0..2] (a.x)
                                 let arg_start = i;
                                 let mut arg_end = i + 1;
                                 while arg_end < call_children.len()
@@ -3169,6 +3271,17 @@ impl HirBuilderContext {
                                         SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
                                     )
                                 {
+                                    // Check if this FieldExpr is followed by a CallExpr (method call pattern)
+                                    if call_children[arg_end].kind() == SyntaxKind::FieldExpr
+                                        && arg_end + 1 < call_children.len()
+                                        && call_children[arg_end + 1].kind() == SyntaxKind::CallExpr
+                                    {
+                                        // This FieldExpr+CallExpr is a nested method call
+                                        // INCLUDE both in the argument range
+                                        eprintln!("[HIR_METHOD_CALL]   Including FieldExpr+CallExpr pattern (nested method call) in argument");
+                                        arg_end += 2; // Include both FieldExpr and CallExpr
+                                        break;
+                                    }
                                     arg_end += 1;
                                 }
 
@@ -3188,7 +3301,11 @@ impl HirBuilderContext {
 
                                 i = arg_end;
                             } else {
-                                // Not a primary expression - skip it (might be a delimiter or other token)
+                                // Not a primary expression
+                                // Skip non-primary expressions (delimiters, tokens, etc.)
+                                // Note: With Bug Fix #71 Part 4e, FieldExpr+CallExpr patterns are now
+                                // included in the primary expression's argument range, so we shouldn't
+                                // encounter them here in the non-primary branch
                                 eprintln!("[HIR_METHOD_CALL]   Skipping non-primary expression");
                                 i += 1;
                             }
