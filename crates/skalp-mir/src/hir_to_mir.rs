@@ -3895,9 +3895,18 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::GenericParam(name) => {
                 if let Some(arg_expr) = param_map.get(name) {
                     // Clone the argument expression
+                    eprintln!(
+                        "[DEBUG] GenericParam substitution: '{}' -> {:?}",
+                        name,
+                        std::mem::discriminant(&**arg_expr)
+                    );
                     Some((*arg_expr).clone())
                 } else {
                     // Not a function parameter, keep as-is
+                    eprintln!(
+                        "[DEBUG] GenericParam substitution: '{}' NOT FOUND in param_map, keeping as-is",
+                        name
+                    );
                     Some(expr.clone())
                 }
             }
@@ -4330,7 +4339,7 @@ impl<'hir> HirToMir<'hir> {
             // FieldAccess expression - substitute base expression
             hir::HirExpression::FieldAccess { base, field } => {
                 eprintln!(
-                    "[DEBUG] FieldAccess substitution: field={}, base type: {:?}",
+                    "[DEBUG] FieldAccess substitution: field={}, base type before: {:?}",
                     field,
                     std::mem::discriminant(&**base)
                 );
@@ -4339,7 +4348,10 @@ impl<'hir> HirToMir<'hir> {
                     param_map,
                     var_id_to_name,
                 )?);
-                eprintln!("[DEBUG] FieldAccess substitution: successfully substituted base");
+                eprintln!(
+                    "[DEBUG] FieldAccess substitution: successfully substituted base, type after: {:?}",
+                    std::mem::discriminant(&*substituted_base)
+                );
                 Some(hir::HirExpression::FieldAccess {
                     base: substituted_base,
                     field: field.clone(),
@@ -4716,8 +4728,32 @@ impl<'hir> HirToMir<'hir> {
         let params = func.params.clone();
         let body = func.body.clone();
 
+        eprintln!(
+            "[DEBUG] inline_function_call: original body has {} statements",
+            body.len()
+        );
+        for (i, stmt) in body.iter().enumerate() {
+            if let hir::HirStatement::Let(let_stmt) = stmt {
+                eprintln!("  [{}] Let: {}", i, let_stmt.name);
+            } else {
+                eprintln!("  [{}] {:?}", i, std::mem::discriminant(stmt));
+            }
+        }
+
         // Transform early returns into nested if-else before processing
         let body = self.transform_early_returns(body);
+
+        eprintln!(
+            "[DEBUG] inline_function_call: after transform_early_returns, body has {} statements",
+            body.len()
+        );
+        for (i, stmt) in body.iter().enumerate() {
+            if let hir::HirStatement::Let(let_stmt) = stmt {
+                eprintln!("  [{}] Let: {}", i, let_stmt.name);
+            } else {
+                eprintln!("  [{}] {:?}", i, std::mem::discriminant(stmt));
+            }
+        }
 
         // Phase 5: Check for direct recursion
         if self.contains_recursive_call(&body, &call.function) {
@@ -4748,6 +4784,14 @@ impl<'hir> HirToMir<'hir> {
             "[DEBUG] inline_function_call: built param map with {} entries",
             substitution_map.len()
         );
+        // Debug: Show what's in the param map
+        for (param_name, arg_expr) in &substitution_map {
+            eprintln!(
+                "[DEBUG] inline_function_call: param '{}' -> {:?}",
+                param_name,
+                std::mem::discriminant(arg_expr)
+            );
+        }
 
         // Step 4: Build var_id -> name mapping from ALL let statements (including nested ones)
         // This allows us to look up variable names during substitution

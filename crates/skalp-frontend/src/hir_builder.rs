@@ -2130,6 +2130,7 @@ impl HirBuilderContext {
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::TupleExpr
                         | SyntaxKind::CastExpr // CRITICAL FIX (Bug #38): Support cast expressions in let bindings
+                        | SyntaxKind::StructLiteral // BUG FIX #71: Support struct literal expressions in let bindings
                 )
             })
             .collect();
