@@ -744,8 +744,14 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
         }
         skalp_mir::Expression::Unary { op, operand } => {
             // Special handling for FSqrt - it's a function call in SystemVerilog
+            // BUG FIX #73: $sqrt() returns real type, must convert to/from bits for bit vector operands
             if matches!(op, skalp_mir::UnaryOp::FSqrt) {
-                format!("$sqrt({})", format_expression_with_context(operand, module))
+                // Wrap with conversion: bits -> shortreal -> sqrt -> bits
+                // This ensures the result is a bit vector that can be used in concat and other bit operations
+                format!(
+                    "$shortrealtobits($sqrt($bitstoshortreal({})))",
+                    format_expression_with_context(operand, module)
+                )
             } else {
                 format!(
                     "{}{}",
@@ -808,7 +814,15 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             )
         }
         skalp_mir::Expression::Unary { op, operand } => {
-            format!("{}{}", format_unary_op(op), format_expression(operand))
+            // BUG FIX #73: FSqrt must convert to/from bits
+            if matches!(op, skalp_mir::UnaryOp::FSqrt) {
+                format!(
+                    "$shortrealtobits($sqrt($bitstoshortreal({})))",
+                    format_expression(operand)
+                )
+            } else {
+                format!("{}{}", format_unary_op(op), format_expression(operand))
+            }
         }
         skalp_mir::Expression::Conditional {
             cond,
