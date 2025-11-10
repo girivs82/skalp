@@ -2145,6 +2145,13 @@ impl HirBuilderContext {
             })
             .or_else(|| expr_children.last());
 
+        // BUG #71 DEBUG: Log StructLiteral let statements
+        if let Some(vn) = value_node {
+            if vn.kind() == SyntaxKind::StructLiteral {
+                eprintln!("[HIR_LET_DEBUG] Processing let {} with StructLiteral", name);
+            }
+        }
+
         // WORKAROUND for parser bug: When the value_node is a CastExpr, the parser may have
         // created the source expression as a SIBLING instead of a child of CastExpr.
         // For example: "let x = a as fp32" creates: LetStmt { IdentExpr(a), CastExpr(fp32) }
@@ -3232,12 +3239,28 @@ impl HirBuilderContext {
 
         // Parse field initializations
         let mut fields = Vec::new();
-        for child in node.children() {
+        let all_children: Vec<_> = node.children().collect();
+        eprintln!(
+            "[HIR_STRUCT_DEBUG] StructLiteral {} has {} total children",
+            type_name,
+            all_children.len()
+        );
+        for (i, child) in all_children.iter().enumerate() {
+            eprintln!("  child[{}]: {:?}", i, child.kind());
             if child.kind() == SyntaxKind::StructFieldInit {
-                if let Some(field_init) = self.build_struct_field_init(&child) {
+                if let Some(field_init) = self.build_struct_field_init(child) {
                     fields.push(field_init);
                 }
             }
+        }
+
+        eprintln!(
+            "[HIR_STRUCT_DEBUG] build_struct_literal: type={}, {} fields",
+            type_name,
+            fields.len()
+        );
+        for (i, f) in fields.iter().enumerate() {
+            eprintln!("  [{}] field: {}", i, f.name);
         }
 
         Some(HirExpression::StructLiteral(HirStructLiteral {
@@ -3545,8 +3568,15 @@ impl HirBuilderContext {
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
+        // Debug: Show all children of this StructFieldInit
+        let all_children: Vec<_> = node.children().collect();
+        eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}' has {} children:", name, all_children.len());
+        for (i, child) in all_children.iter().enumerate() {
+            eprintln!("  child[{}]: {:?}", i, child.kind());
+        }
+
         // Find the expression child
-        let value = node
+        let expr_child = node
             .children()
             .find(|n| {
                 matches!(
@@ -3564,11 +3594,25 @@ impl HirBuilderContext {
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::StructLiteral
                         | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::CastExpr // BUG FIX #71 Part 3: Support cast expressions in struct field initializers
                 )
-            })
-            .and_then(|n| self.build_expression(&n))?;
+            });
 
-        Some(HirStructFieldInit { name, value })
+        if expr_child.is_none() {
+            eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': NO MATCHING EXPRESSION CHILD FOUND!", name);
+            return None;
+        }
+
+        eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': found expression child {:?}", name, expr_child.as_ref().unwrap().kind());
+
+        let value = self.build_expression(expr_child.as_ref().unwrap());
+        if value.is_none() {
+            eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': build_expression RETURNED NONE!", name);
+            return None;
+        }
+
+        eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': SUCCESS", name);
+        Some(HirStructFieldInit { name, value: value.unwrap() })
     }
 
     /// Build binary expression
@@ -3792,6 +3836,7 @@ impl HirBuilderContext {
         for &idx in indices_to_remove.iter().rev() {
             expr_children.remove(idx);
         }
+
 
         // WORKAROUND FOR PARSER BUG: Due to how the parser implements Pratt parsing,
         // the left operand of a binary expression may be a SIBLING of the BinaryExpr node
@@ -4029,14 +4074,89 @@ impl HirBuilderContext {
     fn build_field_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // Get base expression and field name
         let children: Vec<_> = node.children().collect();
+        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children", children.len());
+
+        // Also show children_with_tokens to see what's in this node
+        let all_elems: Vec<_> = node.children_with_tokens().collect();
+        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children_with_tokens:", all_elems.len());
+        for (i, elem) in all_elems.iter().enumerate() {
+            if let Some(token) = elem.as_token() {
+                eprintln!("  [{}] TOKEN: kind={:?}, text={}", i, token.kind(), token.text());
+            } else if let Some(child) = elem.as_node() {
+                eprintln!("  [{}] NODE: kind={:?}", i, child.kind());
+            }
+        }
+
+        // BUG FIX #71 Part 3b: Handle parser bug where FieldExpr has no children
+        // Parser creates sibling structure: [IdentExpr, FieldExpr] instead of FieldExpr(IdentExpr)
+        // Example: "a_col0.0" becomes siblings [IdentExpr(a_col0), FieldExpr(.0)]
         if children.is_empty() {
+            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: NO CHILDREN, looking for preceding sibling");
+
+            // Find the field name from tokens
+            let field_name = node
+                .children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
+                .map(|t| t.text().to_string());
+
+            if field_name.is_none() {
+                eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: NO FIELD NAME, returning None");
+                return None;
+            }
+
+            // Look for a preceding sibling that could be the base
+            if let Some(parent) = node.parent() {
+                let siblings: Vec<_> = parent.children().collect();
+                if let Some(pos) = siblings.iter().position(|n| n == node) {
+                    if pos > 0 {
+                        let prev = &siblings[pos - 1];
+                        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: found preceding sibling {:?}", prev.kind());
+
+                        // Check if the previous sibling is a valid base expression
+                        if matches!(
+                            prev.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::PathExpr
+                                | SyntaxKind::FieldExpr
+                                | SyntaxKind::IndexExpr
+                                | SyntaxKind::CallExpr
+                                | SyntaxKind::ParenExpr
+                        ) {
+                            if let Some(base_expr) = self.build_expression(prev) {
+                                eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: SUCCESS with sibling base, field='{}'", field_name.as_ref().unwrap());
+                                return Some(HirExpression::FieldAccess {
+                                    base: Box::new(base_expr),
+                                    field: field_name.unwrap(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: NO VALID PRECEDING SIBLING, returning None");
             return None;
         }
 
+        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: child[0] kind = {:?}", children[0].kind());
         let base_expr = self.build_expression(&children[0]);
-        let base = Box::new(base_expr?);
+        if base_expr.is_none() {
+            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: BASE EXPRESSION BUILD FAILED, returning None");
+            return None;
+        }
+        let base = Box::new(base_expr.unwrap());
 
         // Find the field name (identifier for struct fields, or numeric literal for tuple indices)
+        let all_tokens: Vec<_> = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .collect();
+        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} tokens total", all_tokens.len());
+        for (i, token) in all_tokens.iter().enumerate() {
+            eprintln!("  token[{}]: kind={:?}, text={}", i, token.kind(), token.text());
+        }
+
         let field_name = node
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
@@ -4046,11 +4166,16 @@ impl HirBuilderContext {
                 // For struct fields, just use the identifier as-is
                 t.text().to_string()
             });
-        let field_name = field_name?;
 
+        if field_name.is_none() {
+            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: FIELD NAME NOT FOUND, returning None");
+            return None;
+        }
+
+        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: SUCCESS, field='{}'", field_name.as_ref().unwrap());
         Some(HirExpression::FieldAccess {
             base,
-            field: field_name,
+            field: field_name.unwrap(),
         })
     }
 
