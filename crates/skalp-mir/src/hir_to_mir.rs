@@ -2794,7 +2794,14 @@ impl<'hir> HirToMir<'hir> {
                 // are added to pending_statements (to be emitted as global assignments).
                 // We must preserve these variables across branch isolation so that the
                 // result expression can reference them.
+                eprintln!("[BUG #7 DEBUG] Converting If-expression condition, type: {:?}",
+                    std::mem::discriminant(&*if_expr.condition));
+                if let hir::HirExpression::Call(call) = &*if_expr.condition {
+                    eprintln!("[BUG #7 DEBUG]   Condition is Call: function={}, args={}",
+                        call.function, call.args.len());
+                }
                 let cond = self.convert_expression(&if_expr.condition)?;
+                eprintln!("[BUG #7 DEBUG] Converted condition to MIR: {:?}", std::mem::discriminant(&cond));
 
                 // Save current dynamic_variables state and pending_statements count
                 let saved_dynamic_vars = self.dynamic_variables.clone();
@@ -3611,6 +3618,21 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert an if-statement (with returns in branches) to an if-expression
     fn convert_if_stmt_to_expr(&self, if_stmt: &hir::HirIfStatement) -> Option<hir::HirExpression> {
+        eprintln!(
+            "[BUG #7] convert_if_stmt_to_expr: condition type = {:?}",
+            std::mem::discriminant(&if_stmt.condition)
+        );
+        if let hir::HirExpression::Call(call) = &if_stmt.condition {
+            eprintln!(
+                "[BUG #7]   condition is Call: function={}, args={}",
+                call.function,
+                call.args.len()
+            );
+        }
+        if let hir::HirExpression::Variable(var_id) = &if_stmt.condition {
+            eprintln!("[BUG #7]   condition is Variable: {:?}", var_id);
+        }
+
         // Recursively convert then-branch
         let then_expr = self.convert_body_to_expression(&if_stmt.then_statements)?;
 
@@ -3622,11 +3644,16 @@ impl<'hir> HirToMir<'hir> {
             return None;
         };
 
-        Some(hir::HirExpression::If(hir::HirIfExpr {
+        let result = hir::HirExpression::If(hir::HirIfExpr {
             condition: Box::new(if_stmt.condition.clone()),
             then_expr: Box::new(then_expr),
             else_expr: Box::new(else_expr),
-        }))
+        });
+
+        eprintln!("[BUG #7] convert_if_stmt_to_expr: result condition type = {:?}",
+            std::mem::discriminant(&if_stmt.condition));
+
+        Some(result)
     }
 
     /// Convert a match-statement to a match-expression
@@ -4673,6 +4700,16 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Cast(cast) => {
                 // Cast expression: return the target type
                 Some(cast.target_type.clone())
+            }
+            hir::HirExpression::Call(call) => {
+                // BUG FIX #7: Infer type from function return type
+                // This is needed for chained method calls like vec_dot(a, b).add(c)
+                // where vec_dot returns fp32, enabling type inference for the add method
+                if let Some(func) = self.find_function(&call.function) {
+                    func.return_type.clone()
+                } else {
+                    None
+                }
             }
             _ => None,
         }

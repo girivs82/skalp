@@ -1811,9 +1811,14 @@ impl HirBuilderContext {
                     break;
                 }
                 // Capture any expression node (prefer complex over simple)
+                // BUG FIX #7: Include CallExpr and FieldExpr for method calls like a.lt(0.0)
                 let is_complex = matches!(
                     child.kind(),
-                    SyntaxKind::BinaryExpr | SyntaxKind::UnaryExpr | SyntaxKind::ParenExpr
+                    SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::CallExpr // BUG #7: Method calls like lt(), gt()
+                        | SyntaxKind::FieldExpr // BUG #7: Field access (part of chained calls)
                 );
                 let is_simple = matches!(
                     child.kind(),
@@ -3126,13 +3131,15 @@ impl HirBuilderContext {
                                     | SyntaxKind::CastExpr
                                     | SyntaxKind::ParenExpr
                             ) {
-                                // Collect all following postfix operations (FieldExpr, IndexExpr)
+                                // BUG FIX #7: Collect all following postfix operations (FieldExpr, IndexExpr, CallExpr)
+                                // CallExpr must be included to handle chained method calls like a.y.mul(b.y)
+                                // where the full expression is: IdentExpr(a), FieldExpr(.y), FieldExpr(.mul), CallExpr((b.y))
                                 let arg_start = i;
                                 let mut arg_end = i + 1;
                                 while arg_end < call_children.len()
                                     && matches!(
                                         call_children[arg_end].kind(),
-                                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
+                                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr | SyntaxKind::CallExpr
                                     )
                                 {
                                     arg_end += 1;
