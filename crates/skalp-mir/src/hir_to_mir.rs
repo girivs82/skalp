@@ -717,17 +717,10 @@ impl<'hir> HirToMir<'hir> {
 
                 // BUG FIX: Don't convert first when in match arm context during function inlining
                 // because the RHS might reference variables that haven't been created yet (circular dependency)
-                // EXCEPTION: Simple function calls CAN be converted first even in match contexts because
-                // they don't reference the variable being created (no circular dependency)
                 let in_match_context = self.match_arm_prefix.is_some();
-                let should_convert_first = if is_simple_function_call {
-                    // Bug #72: Always convert function calls first, even in match arms
-                    // Function call results don't reference the let variable, so no circular dependency
-                    true
-                } else {
-                    // For other expressions, only convert first outside match contexts
-                    (is_tuple_element_extraction || is_cast_expression) && !in_match_context
-                };
+                let should_convert_first =
+                    (is_simple_function_call || is_tuple_element_extraction || is_cast_expression)
+                        && !in_match_context; // Always register variable first in match arms
 
                 if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
                     eprintln!("[DEBUG] Let 'rw' (70): is_tuple_element_extraction={}, in_match_context={}, should_convert_first={}",
