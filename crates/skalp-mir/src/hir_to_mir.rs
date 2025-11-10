@@ -4156,9 +4156,10 @@ impl<'hir> HirToMir<'hir> {
                                 },
                             ));
                             // Add this variable to the extended param map for subsequent statements
-                            // Create a Variable expression and store it
-                            let var_expr = hir::HirExpression::Variable(let_stmt.id);
-                            local_var_exprs.push(var_expr);
+                            // BUG FIX #71 Part 2: Use the actual substituted value (e.g., StructLiteral)
+                            // instead of a Variable reference, so later references get the full value
+                            // Example: let ray_dir = vec3{x,y,z}; vec_dot(ray_dir, ...) should inline the vec3 literal
+                            local_var_exprs.push(substituted_value.clone());
                             var_names.push(let_stmt.name.clone());
                             eprintln!(
                                 "[DEBUG] Block: queued {} (id {:?}) for param_map",
@@ -4356,6 +4357,42 @@ impl<'hir> HirToMir<'hir> {
                     base: substituted_base,
                     field: field.clone(),
                 })
+            }
+
+            // StructLiteral expression - substitute field values
+            hir::HirExpression::StructLiteral(struct_lit) => {
+                eprintln!(
+                    "[DEBUG] StructLiteral substitution: type={}, {} fields BEFORE",
+                    struct_lit.type_name,
+                    struct_lit.fields.len()
+                );
+                let mut substituted_fields = Vec::new();
+                for (i, field_init) in struct_lit.fields.iter().enumerate() {
+                    eprintln!(
+                        "[DEBUG] StructLiteral field[{}]: name={}, value type={:?}",
+                        i,
+                        field_init.name,
+                        std::mem::discriminant(&field_init.value)
+                    );
+                    let substituted_value = self.substitute_expression_with_var_map(
+                        &field_init.value,
+                        param_map,
+                        var_id_to_name,
+                    )?;
+                    substituted_fields.push(hir::HirStructFieldInit {
+                        name: field_init.name.clone(),
+                        value: substituted_value,
+                    });
+                }
+                eprintln!(
+                    "[DEBUG] StructLiteral substitution: type={}, {} fields AFTER",
+                    struct_lit.type_name,
+                    substituted_fields.len()
+                );
+                Some(hir::HirExpression::StructLiteral(hir::HirStructLiteral {
+                    type_name: struct_lit.type_name.clone(),
+                    fields: substituted_fields,
+                }))
             }
 
             // Recursively handle other expression types as needed
