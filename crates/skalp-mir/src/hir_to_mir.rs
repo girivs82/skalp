@@ -34,6 +34,10 @@ pub struct HirToMir<'hir> {
     next_process_id: u32,
     /// Next clock domain ID
     next_clock_domain_id: u32,
+    /// Next match expression ID (for globally unique match arm variable prefixes)
+    /// BUG FIX #6: Prevents variable name collisions when multiple functions with
+    /// match expressions are inlined into the same entity
+    next_match_id: u32,
     /// Entity to module ID mapping
     entity_map: HashMap<hir::EntityId, ModuleId>,
     /// Port ID mapping (HIR to MIR) - now 1-to-many for flattened structs
@@ -88,6 +92,7 @@ impl<'hir> HirToMir<'hir> {
             next_variable_id: 0,
             next_process_id: 0,
             next_clock_domain_id: 0,
+            next_match_id: 0, // BUG FIX #6
             entity_map: HashMap::new(),
             port_map: HashMap::new(),
             flattened_ports: HashMap::new(),
@@ -3180,9 +3185,15 @@ impl<'hir> HirToMir<'hir> {
         // Build nested conditionals from right to left
         // Start with the last arm as the default (usually wildcard)
 
+        // BUG FIX #6: Use globally unique match ID instead of arm index to prevent
+        // variable name collisions when multiple functions with match expressions
+        // are inlined into the same entity
+        let match_id = self.next_match_id;
+        self.next_match_id += 1;
+
         // Set match arm prefix for the last arm to isolate its variables
         let last_arm_idx = arms.len() - 1;
-        let last_arm_prefix = format!("match_{}", last_arm_idx);
+        let last_arm_prefix = format!("match_{}_{}", match_id, last_arm_idx);
         self.match_arm_prefix = Some(last_arm_prefix);
 
         let last_expr = self.convert_expression(&arms.last()?.expr);
@@ -3280,8 +3291,8 @@ impl<'hir> HirToMir<'hir> {
 
             // Build conditional: (condition) ? arm_expr : rest
 
-            // Set match arm prefix to isolate this arm's variables
-            let arm_prefix = format!("match_{}", arm_idx);
+            // BUG FIX #6: Use global match ID with arm index to make prefix unique
+            let arm_prefix = format!("match_{}_{}", match_id, arm_idx);
             self.match_arm_prefix = Some(arm_prefix);
 
             let arm_expr = self.convert_expression(&arm.expr);
