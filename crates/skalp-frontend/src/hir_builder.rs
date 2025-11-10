@@ -2982,6 +2982,8 @@ impl HirBuilderContext {
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
+        eprintln!("[HIR_IDENT_DEBUG] build_ident_expr: name='{}'", name);
+
         // Look up symbol FIRST - user-defined symbols (ports, signals, variables) take
         // precedence over builtin functions. This allows users to name ports "min", "max", etc.
         if let Some(symbol) = self.symbols.lookup(&name) {
@@ -3121,9 +3123,24 @@ impl HirBuilderContext {
                         // Group children into arguments by building chained expressions
                         // Each argument starts with a primary expression (IdentExpr, LiteralExpr, etc.)
                         // and may be followed by postfix operations (FieldExpr, IndexExpr)
+                        eprintln!("[HIR_METHOD_CALL] Method '{}': parsing {} CallExpr children as arguments", method_name, call_children.len());
                         let mut i = 0;
                         while i < call_children.len() {
                             let child = &call_children[i];
+                            eprintln!("[HIR_METHOD_CALL]   child[{}]: {:?}", i, child.kind());
+
+                            // BUG FIX #71 Part 4b: Skip IdentExpr if followed by CallExpr
+                            // This pattern indicates a function call: IdentExpr(function_name) + CallExpr(args)
+                            // Example: vec_dot(a, b) creates [IdentExpr("vec_dot"), CallExpr([a,b])]
+                            // We should skip the IdentExpr and process only the CallExpr
+                            if child.kind() == SyntaxKind::IdentExpr
+                                && i + 1 < call_children.len()
+                                && call_children[i + 1].kind() == SyntaxKind::CallExpr
+                            {
+                                eprintln!("[HIR_METHOD_CALL]   Skipping IdentExpr (function name for following CallExpr)");
+                                i += 1;
+                                continue;
+                            }
 
                             // Check if this is a primary expression that starts an argument
                             if matches!(
@@ -3139,35 +3156,44 @@ impl HirBuilderContext {
                                     | SyntaxKind::CastExpr
                                     | SyntaxKind::ParenExpr
                             ) {
-                                // BUG FIX #7: Collect all following postfix operations (FieldExpr, IndexExpr, CallExpr)
-                                // CallExpr must be included to handle chained method calls like a.y.mul(b.y)
-                                // where the full expression is: IdentExpr(a), FieldExpr(.y), FieldExpr(.mul), CallExpr((b.y))
+                                // BUG FIX #71 Part 4: Collect postfix operations (FieldExpr, IndexExpr)
+                                // BUG: CallExpr should NOT be included as postfix - it's a standalone expression!
+                                // CallExpr preceded by an IdentExpr means a function call, not a chained operation.
+                                // Example: vec_dot(a, b) creates [IdentExpr(vec_dot), CallExpr([a,b])]
+                                // We should treat CallExpr as a separate complete expression.
                                 let arg_start = i;
                                 let mut arg_end = i + 1;
                                 while arg_end < call_children.len()
                                     && matches!(
                                         call_children[arg_end].kind(),
-                                        SyntaxKind::FieldExpr
-                                            | SyntaxKind::IndexExpr
-                                            | SyntaxKind::CallExpr
+                                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
                                     )
                                 {
                                     arg_end += 1;
                                 }
 
                                 // Build chained expression from arg_start to arg_end
+                                eprintln!("[HIR_METHOD_CALL]   Building arg from nodes[{}..{}]", arg_start, arg_end);
+                                for j in arg_start..arg_end {
+                                    eprintln!("[HIR_METHOD_CALL]     arg_node[{}]: {:?}", j, call_children[j].kind());
+                                }
                                 let arg_nodes = &call_children[arg_start..arg_end];
                                 if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes)
                                 {
+                                    eprintln!("[HIR_METHOD_CALL]   Successfully built arg, adding to args list");
                                     args.push(arg_expr);
+                                } else {
+                                    eprintln!("[HIR_METHOD_CALL]   WARNING: build_chained_rhs_expression returned None, argument DROPPED!");
                                 }
 
                                 i = arg_end;
                             } else {
                                 // Not a primary expression - skip it (might be a delimiter or other token)
+                                eprintln!("[HIR_METHOD_CALL]   Skipping non-primary expression");
                                 i += 1;
                             }
                         }
+                        eprintln!("[HIR_METHOD_CALL] Method '{}': created Call with {} total args (receiver + {} explicit)", method_name, args.len(), args.len() - 1);
 
                         return Some(HirExpression::Call(HirCallExpr {
                             function: method_name,

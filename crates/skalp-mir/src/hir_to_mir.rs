@@ -3093,6 +3093,14 @@ impl<'hir> HirToMir<'hir> {
         type_name: &str,
         fields: &[hir::HirStructFieldInit],
     ) -> Option<Expression> {
+        eprintln!(
+            "[DEBUG] convert_struct_literal: type={}, {} fields",
+            type_name,
+            fields.len()
+        );
+        for (i, f) in fields.iter().enumerate() {
+            eprintln!("  [{}] field: {}", i, f.name);
+        }
         // Handle built-in vector types (vec2, vec3, vec4) specially
         // These use struct literal syntax: vec3 { x: a, y: b, z: c }
         // But they're built-in types, not user-defined structs
@@ -3109,11 +3117,27 @@ impl<'hir> HirToMir<'hir> {
 
             let mut field_exprs = Vec::new();
             for &field_name in field_order.iter().take(num_fields) {
-                let field_init = fields.iter().find(|f| f.name == field_name)?;
+                eprintln!(
+                    "[DEBUG] convert_struct_literal: looking for field '{}'",
+                    field_name
+                );
+                let field_init = fields.iter().find(|f| f.name == field_name);
+                if field_init.is_none() {
+                    eprintln!(
+                        "[DEBUG] convert_struct_literal: field '{}' NOT FOUND, returning None",
+                        field_name
+                    );
+                    return None;
+                }
+                let field_init = field_init.unwrap();
                 let field_expr = self.convert_expression(&field_init.value)?;
                 field_exprs.push(field_expr);
             }
 
+            eprintln!(
+                "[DEBUG] convert_struct_literal: SUCCESS, converted {} fields",
+                field_exprs.len()
+            );
             // Concatenate all fields: { x, y, z } becomes {x, y, z}
             return Some(Expression::Concat(field_exprs));
         }
@@ -4275,16 +4299,27 @@ impl<'hir> HirToMir<'hir> {
             // Call expression - substitute arguments
             hir::HirExpression::Call(call) => {
                 eprintln!(
-                    "[DEBUG] Call substitution: function={}, args={}",
+                    "[DEBUG] Call substitution: function={}, args={} BEFORE substitution",
                     call.function,
                     call.args.len()
                 );
+                for (i, arg) in call.args.iter().enumerate() {
+                    eprintln!("  arg[{}]: type={:?}", i, std::mem::discriminant(arg));
+                }
+
                 let mut substituted_args = Vec::new();
-                for arg in call.args.iter() {
+                for (i, arg) in call.args.iter().enumerate() {
+                    eprintln!("[DEBUG] Call substitution: substituting arg[{}]", i);
                     let substituted_arg =
                         self.substitute_expression_with_var_map(arg, param_map, var_id_to_name)?;
+                    eprintln!("[DEBUG] Call substitution: arg[{}] substituted successfully, type={:?}", i, std::mem::discriminant(&substituted_arg));
                     substituted_args.push(substituted_arg);
                 }
+                eprintln!(
+                    "[DEBUG] Call substitution: function={}, {} args AFTER substitution",
+                    call.function,
+                    substituted_args.len()
+                );
                 Some(hir::HirExpression::Call(hir::HirCallExpr {
                     function: call.function.clone(),
                     args: substituted_args,
