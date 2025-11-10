@@ -5851,8 +5851,58 @@ impl<'hir> HirToMir<'hir> {
                     }
                     return None;
                 }
+                hir::HirExpression::StructLiteral(struct_lit) => {
+                    // BUG FIX #70: Handle field access on struct literals
+                    // This occurs when function parameters get substituted with struct literal expressions
+                    // Example: vec_dot(ray_dir, ray_dir) where ray_dir is vec3{x:..., y:..., z:...}
+                    //          After substitution: vec3{x:..., y:..., z:...}.x
+                    //
+                    // Extract the specific field from the struct literal and convert just that field
+                    for field_init in &struct_lit.fields {
+                        if field_init.name == field_name {
+                            return self.convert_expression(&field_init.value);
+                        }
+                    }
+                    eprintln!(
+                        "[DEBUG] FieldAccess on StructLiteral: field '{}' not found in struct '{}'",
+                        field_name, struct_lit.type_name
+                    );
+                    return None;
+                }
+                hir::HirExpression::GenericParam(param_name) => {
+                    // BUG FIX #70 Part 2: Handle field access on GenericParam (unsubstituted parameter)
+                    // This occurs when parameter substitution fails or is incomplete during function inlining
+                    // Try to look up the parameter in dynamic_variables
+                    let var_id_mir = self
+                        .dynamic_variables
+                        .values()
+                        .find(|(_, name, _)| name == param_name)
+                        .map(|(mir_id, _, _)| *mir_id);
+
+                    if let Some(var_id_mir) = var_id_mir {
+                        let base_lval = LValue::Variable(var_id_mir);
+                        let (high_bit, low_bit) =
+                            self.get_field_bit_range(current_base, &normalized_field_name)?;
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
+                            base: Box::new(base_lval),
+                            high: Box::new(high_expr),
+                            low: Box::new(low_expr),
+                        }));
+                    }
+                    eprintln!(
+                        "[DEBUG] FieldAccess on GenericParam '{}': not found in dynamic_variables",
+                        param_name
+                    );
+                    return None;
+                }
                 _ => {
                     // Complex base - can't handle
+                    eprintln!(
+                        "[DEBUG] FieldAccess on unsupported base type: {:?}",
+                        std::mem::discriminant(current_base)
+                    );
                     return None;
                 }
             }
