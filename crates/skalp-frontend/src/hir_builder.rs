@@ -3278,11 +3278,14 @@ impl HirBuilderContext {
                                     {
                                         // This FieldExpr+CallExpr is a nested method call
                                         // INCLUDE both in the argument range
+                                        // BUG FIX #71 Part 4f: Continue collecting to handle chained method calls
+                                        // Example: (4.0).mul(a).mul(c) should collect all of: Literal(4.0), FieldExpr(.mul), CallExpr([a]), FieldExpr(.mul), CallExpr([c])
                                         eprintln!("[HIR_METHOD_CALL]   Including FieldExpr+CallExpr pattern (nested method call) in argument");
                                         arg_end += 2; // Include both FieldExpr and CallExpr
-                                        break;
+                                        // Don't break - continue to collect more chained method calls
+                                    } else {
+                                        arg_end += 1;
                                     }
-                                    arg_end += 1;
                                 }
 
                                 // Build chained expression from arg_start to arg_end

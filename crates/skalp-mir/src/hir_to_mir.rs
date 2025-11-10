@@ -595,6 +595,9 @@ impl<'hir> HirToMir<'hir> {
                     "[DEBUG] convert_statement: Processing Let for '{}' (ID {:?})",
                     let_stmt.name, let_stmt.id
                 );
+                if let_stmt.name == "_tuple_tmp_66" {
+                    eprintln!("[MIR_LET_TRACE] *** Processing _tuple_tmp_66 - will trace through entire function ***");
+                }
                 // Convert let statement to assignment
                 // Let bindings are local variables that need to be treated as blocking assignments
 
@@ -734,13 +737,22 @@ impl<'hir> HirToMir<'hir> {
                             "[DEBUG] Let 'rw' (70): About to convert RHS (convert_first=true)"
                         );
                     }
+                    if let_stmt.name == "_tuple_tmp_66" {
+                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=true, converting RHS now");
+                    }
                     (self.convert_expression(&let_stmt.value)?, true)
                 } else {
                     // Complex expression: will convert after variable registration
+                    if let_stmt.name == "_tuple_tmp_66" {
+                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=false, using placeholder");
+                    }
                     (Expression::Literal(Value::Integer(0)), false) // Placeholder, will be replaced
                 };
 
                 let var_id = if var_id == VariableId(u32::MAX) {
+                    if let_stmt.name == "_tuple_tmp_66" {
+                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: var_id is u32::MAX, creating new variable");
+                    }
                     // Apply match arm prefix if we're in a match arm context
                     // This prevents variable name collisions between different match arms
                     // IMPORTANT: Do this BEFORE checking for duplicates so we check the correct name
@@ -827,20 +839,42 @@ impl<'hir> HirToMir<'hir> {
 
                     new_id
                 } else {
+                    if let_stmt.name == "_tuple_tmp_66" {
+                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: var_id exists, using {:?}", var_id);
+                    }
                     // Variable already exists with correct scope, use it
                     var_id
                 };
 
+                if let_stmt.name == "_tuple_tmp_66" {
+                    eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: About to convert final RHS, var_id={:?}", var_id);
+                }
                 // For complex RHS, convert it now that the variable is registered
+                eprintln!("[MIR_LET_FINAL] Converting final RHS for var {:?}, needs_type_inference={}", var_id, needs_type_inference);
                 let final_rhs = if needs_type_inference {
                     // Already converted
+                    eprintln!("[MIR_LET_FINAL]   Using already converted RHS");
                     rhs
                 } else {
                     // Convert now that variable is registered and available
-                    self.convert_expression(&let_stmt.value)?
+                    eprintln!("[MIR_LET_FINAL]   Converting RHS now: {:?}", let_stmt.value);
+                    if let_stmt.name == "_tuple_tmp_66" {
+                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: Calling convert_expression on RHS");
+                    }
+                    let converted = self.convert_expression(&let_stmt.value);
+                    if let_stmt.name == "_tuple_tmp_66" {
+                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned: {:?}", converted.is_some());
+                        if converted.is_none() {
+                            eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned None - returning None from convert_statement!");
+                        }
+                    }
+                    let converted = converted?;  // This will return None if conversion failed
+                    eprintln!("[MIR_LET_FINAL]   Converted RHS: {:?}", converted);
+                    converted
                 };
 
                 let lhs = LValue::Variable(var_id);
+                eprintln!("[MIR_LET_FINAL] Creating assignment: {:?} = {:?}", lhs, final_rhs);
                 Some(Statement::Assignment(Assignment {
                     lhs,
                     rhs: final_rhs,
@@ -2314,6 +2348,7 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::Unary { op, operand })
             }
             hir::HirExpression::Call(call) => {
+                eprintln!("[MIR_CALL] Converting Call expression: function='{}', args={}", call.function, call.args.len());
                 // Check if this is a built-in FP method call (e.g., a_fp32.add(b_fp32))
                 // FP methods are transformed to method(receiver, args) by HIR builder
                 // So args[0] is the receiver for FP methods
@@ -2349,8 +2384,20 @@ impl<'hir> HirToMir<'hir> {
                     match call.function.as_str() {
                         // Binary FP operations
                         "add" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            eprintln!("[MIR_CALL] Converting FP add with {} args", call.args.len());
+                            let left_result = self.convert_expression(&call.args[0]);
+                            if left_result.is_none() {
+                                eprintln!("[MIR_CALL] FP add: left argument conversion FAILED");
+                                return None;
+                            }
+                            let left = Box::new(left_result?);
+                            let right_result = self.convert_expression(&call.args[1]);
+                            if right_result.is_none() {
+                                eprintln!("[MIR_CALL] FP add: right argument conversion FAILED");
+                                return None;
+                            }
+                            let right = Box::new(right_result?);
+                            eprintln!("[MIR_CALL] FP add conversion succeeded");
                             return Some(Expression::Binary {
                                 op: BinaryOp::FAdd,
                                 left,
@@ -2476,7 +2523,14 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Not an FP method or intrinsic - inline the function call
-                self.inline_function_call(call)
+                eprintln!("[MIR_CALL] Call '{}' is not FP method/intrinsic, will inline", call.function);
+                let result = self.inline_function_call(call);
+                if result.is_none() {
+                    eprintln!("[MIR_CALL] Call '{}' inlining FAILED", call.function);
+                } else {
+                    eprintln!("[MIR_CALL] Call '{}' inlining succeeded", call.function);
+                }
+                result
             }
             hir::HirExpression::Index(base, index) => {
                 // BUG #27 FIX: Check if this is a constant index into a flattened array
@@ -4758,6 +4812,67 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// Inline a function call and return the substituted HIR expression (before MIR conversion)
+    /// This is used when we need to perform HIR-level operations on the inlined result
+    /// (e.g., field access on struct-returning functions)
+    fn inline_function_to_hir(&mut self, call: &hir::HirCallExpr) -> Option<hir::HirExpression> {
+        // Find the function
+        let func = self.find_function(&call.function)?;
+
+        // Clone the data we need
+        let params = func.params.clone();
+        let body = func.body.clone();
+
+        // Transform early returns
+        let body = self.transform_early_returns(body);
+
+        // Check for recursion
+        if self.contains_recursive_call(&body, &call.function) {
+            eprintln!(
+                "Error: Recursive function calls are not supported: function '{}'",
+                call.function
+            );
+            return None;
+        }
+
+        // Check arity
+        if params.len() != call.args.len() {
+            eprintln!(
+                "Function {}: expected {} arguments, got {}",
+                call.function,
+                params.len(),
+                call.args.len()
+            );
+            return None;
+        }
+
+        // Build parameter substitution map
+        let mut substitution_map = HashMap::new();
+        for (param, arg) in params.iter().zip(&call.args) {
+            substitution_map.insert(param.name.clone(), arg.clone());
+        }
+
+        // Build var_id to name mapping
+        let mut var_id_to_name = HashMap::new();
+        self.collect_let_bindings(&body, &mut var_id_to_name);
+
+        // Convert body to expression
+        let body_expr = self.convert_body_to_expression(&body)?;
+
+        // Substitute parameters
+        let substituted_expr = self.substitute_expression_with_var_map(
+            &body_expr,
+            &substitution_map
+                .iter()
+                .map(|(k, v)| (k.clone(), v))
+                .collect(),
+            &var_id_to_name,
+        )?;
+
+        // Return the substituted HIR expression (don't convert to MIR)
+        Some(substituted_expr)
+    }
+
     fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
         eprintln!(
             "[DEBUG] inline_function_call: {} with {} args",
@@ -4875,9 +4990,17 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Step 5: Convert statement-based body to expression (handles early returns)
-        let body_expr = self.convert_body_to_expression(&body)?;
+        eprintln!("[DEBUG] inline_function_call: About to convert_body_to_expression");
+        let body_expr = self.convert_body_to_expression(&body);
+        if body_expr.is_none() {
+            eprintln!("[DEBUG] inline_function_call: convert_body_to_expression FAILED - returning None");
+            return None;
+        }
+        let body_expr = body_expr?;
+        eprintln!("[DEBUG] inline_function_call: convert_body_to_expression succeeded");
 
         // Step 6: Substitute parameters in the entire expression (including nested let bindings)
+        eprintln!("[DEBUG] inline_function_call: About to substitute_expression_with_var_map");
         let substituted_expr = self.substitute_expression_with_var_map(
             &body_expr,
             &substitution_map
@@ -4885,16 +5008,52 @@ impl<'hir> HirToMir<'hir> {
                 .map(|(k, v)| (k.clone(), v))
                 .collect(),
             &var_id_to_name,
-        )?;
+        );
+        if substituted_expr.is_none() {
+            eprintln!("[DEBUG] inline_function_call: substitute_expression_with_var_map FAILED - returning None");
+            return None;
+        }
+        let substituted_expr = substituted_expr?;
         eprintln!(
             "[DEBUG] inline_function_call: successfully substituted return, converting to MIR"
         );
 
         // Step 7: Convert the substituted HIR expression to MIR
+        let expr_type_name = match &substituted_expr {
+            hir::HirExpression::Literal(_) => "Literal",
+            hir::HirExpression::Variable(_) => "Variable",
+            hir::HirExpression::Binary(_) => "Binary",
+            hir::HirExpression::Unary(_) => "Unary",
+            hir::HirExpression::Call(_) => "Call",
+            hir::HirExpression::Signal(_) => "Signal",
+            hir::HirExpression::Port(_) => "Port",
+            hir::HirExpression::Index(_, _) => "Index",
+            hir::HirExpression::Concat(_) => "Concat",
+            hir::HirExpression::Range(_, _, _) => "Range",
+            hir::HirExpression::If(_) => "If",
+            hir::HirExpression::Match(_) => "Match",
+            hir::HirExpression::Cast(_) => "Cast",
+            hir::HirExpression::Block { .. } => "Block",
+            hir::HirExpression::FieldAccess { .. } => "FieldAccess",
+            hir::HirExpression::ArrayLiteral { .. } => "ArrayLiteral",
+            _ => "Other",
+        };
+        eprintln!(
+            "[DEBUG] inline_function_call: '{}' substituted expression type: {}",
+            call.function,
+            expr_type_name
+        );
         let result = self.convert_expression(&substituted_expr);
         if result.is_none() {
             eprintln!(
-                "[DEBUG] inline_function_call: FAILED to convert substituted expression to MIR"
+                "[DEBUG] inline_function_call: '{}' FAILED to convert substituted expression to MIR (type: {})",
+                call.function,
+                expr_type_name
+            );
+        } else {
+            eprintln!(
+                "[DEBUG] inline_function_call: '{}' successfully converted to MIR",
+                call.function
             );
         }
 
@@ -6012,6 +6171,32 @@ impl<'hir> HirToMir<'hir> {
                         param_name
                     );
                     return None;
+                }
+                hir::HirExpression::Call(call) => {
+                    // BUG FIX #74: Handle field access on function call results
+                    // Example: vec_cross(a, b).x where vec_cross returns a struct
+                    // Strategy:
+                    // 1. Inline the function call to get its HIR body expression
+                    // 2. Create a new FieldAccess with the inlined body as base
+                    // 3. Recursively convert this new FieldAccess
+                    // This allows the StructLiteral handler to work if the function returns a struct
+
+                    eprintln!(
+                        "[DEBUG] FieldAccess on Call '{}' result, field '{}' - attempting HIR-level inline",
+                        call.function, field_name
+                    );
+
+                    // Inline the function to get HIR expression (before MIR conversion)
+                    let inlined_hir_expr = self.inline_function_to_hir(call)?;
+
+                    // Create new FieldAccess with inlined expression as base
+                    let field_access = hir::HirExpression::FieldAccess {
+                        base: Box::new(inlined_hir_expr),
+                        field: field_name.to_string(),
+                    };
+
+                    // Recursively convert - this will hit StructLiteral handler if applicable
+                    return self.convert_expression(&field_access);
                 }
                 _ => {
                     // Complex base - can't handle
