@@ -591,7 +591,10 @@ impl<'hir> HirToMir<'hir> {
                 None
             }
             hir::HirStatement::Let(let_stmt) => {
-                eprintln!("[DEBUG] convert_statement: Processing Let for '{}' (ID {:?})", let_stmt.name, let_stmt.id);
+                eprintln!(
+                    "[DEBUG] convert_statement: Processing Let for '{}' (ID {:?})",
+                    let_stmt.name, let_stmt.id
+                );
                 // Convert let statement to assignment
                 // Let bindings are local variables that need to be treated as blocking assignments
 
@@ -606,7 +609,10 @@ impl<'hir> HirToMir<'hir> {
                         VariableId(u32::MAX) // Will check variable_map next
                     }
                 } else if let Some(&id) = self.variable_map.get(&let_stmt.id) {
-                    eprintln!("[DEBUG] Let '{}' (ID {:?}): Found in variable_map as MIR ID={:?}", let_stmt.name, let_stmt.id, id);
+                    eprintln!(
+                        "[DEBUG] Let '{}' (ID {:?}): Found in variable_map as MIR ID={:?}",
+                        let_stmt.name, let_stmt.id, id
+                    );
                     // Check if we're in a match arm context and the existing variable
                     // doesn't have the correct prefix - this can happen when a variable
                     // from an outer scope (like _tuple_tmp_0) has the same HIR VariableId
@@ -623,11 +629,17 @@ impl<'hir> HirToMir<'hir> {
                         } else {
                             // Not in dynamic_variables, might be a module-level variable
                             // Create new to be safe
-                            eprintln!("[DEBUG] Let '{}': Not in dynamic_variables, will create new", let_stmt.name);
+                            eprintln!(
+                                "[DEBUG] Let '{}': Not in dynamic_variables, will create new",
+                                let_stmt.name
+                            );
                             true
                         }
                     } else {
-                        eprintln!("[DEBUG] Let '{}': No match_arm_prefix, reusing existing", let_stmt.name);
+                        eprintln!(
+                            "[DEBUG] Let '{}': No match_arm_prefix, reusing existing",
+                            let_stmt.name
+                        );
                         false
                     };
 
@@ -636,12 +648,18 @@ impl<'hir> HirToMir<'hir> {
                         // Don't reuse the existing variable, fall through to create a new one
                         VariableId(u32::MAX) // Sentinel value that won't match any existing variable
                     } else {
-                        eprintln!("[DEBUG] Let '{}': Reusing existing MIR ID={:?}", let_stmt.name, id);
+                        eprintln!(
+                            "[DEBUG] Let '{}': Reusing existing MIR ID={:?}",
+                            let_stmt.name, id
+                        );
                         // Already registered with correct scope
                         id
                     }
                 } else {
-                    eprintln!("[DEBUG] Let '{}' (ID {:?}): NOT in variable_map, will create new", let_stmt.name, let_stmt.id);
+                    eprintln!(
+                        "[DEBUG] Let '{}' (ID {:?}): NOT in variable_map, will create new",
+                        let_stmt.name, let_stmt.id
+                    );
                     VariableId(u32::MAX) // Sentinel value to trigger new variable creation
                 };
 
@@ -664,20 +682,21 @@ impl<'hir> HirToMir<'hir> {
                 // Pattern: let rx = <tuple_tmp>.0 where <tuple_tmp> was from a function call
                 // BUT: Exclude cases where the base is a Block, because Blocks may reference
                 // variables that haven't been created yet (circular dependency during inlining)
-                let (base_is_block, base_type, rhs_is_field_access, base_is_dynamic_var) = if let hir::HirExpression::FieldAccess { base, field } = &let_stmt.value {
-                    let is_block = matches!(**base, hir::HirExpression::Block { .. });
-                    let discriminant = std::mem::discriminant(&**base);
-                    // Check if base is a dynamically-created variable (from let bindings in inlined functions)
-                    let is_dynamic = if let hir::HirExpression::Variable(var_id) = &**base {
-                        self.dynamic_variables.contains_key(var_id)
+                let (base_is_block, base_type, rhs_is_field_access, base_is_dynamic_var) =
+                    if let hir::HirExpression::FieldAccess { base, field } = &let_stmt.value {
+                        let is_block = matches!(**base, hir::HirExpression::Block { .. });
+                        let discriminant = std::mem::discriminant(&**base);
+                        // Check if base is a dynamically-created variable (from let bindings in inlined functions)
+                        let is_dynamic = if let hir::HirExpression::Variable(var_id) = &**base {
+                            self.dynamic_variables.contains_key(var_id)
+                        } else {
+                            false
+                        };
+                        eprintln!("[DEBUG] Let '{}': FieldAccess.field={}, base type={:?}, base_is_dynamic={}", let_stmt.name, field, discriminant, is_dynamic);
+                        (is_block, Some(discriminant), true, is_dynamic)
                     } else {
-                        false
+                        (false, None, false, false)
                     };
-                    eprintln!("[DEBUG] Let '{}': FieldAccess.field={}, base type={:?}, base_is_dynamic={}", let_stmt.name, field, discriminant, is_dynamic);
-                    (is_block, Some(discriminant), true, is_dynamic)
-                } else {
-                    (false, None, false, false)
-                };
                 if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
                     eprintln!("[DEBUG] Let 'rw' (70): RHS type {:?}, rhs_is_field_access={}, base_is_block={}, base_type={:?}",
                         std::mem::discriminant(&let_stmt.value), rhs_is_field_access, base_is_block, base_type);
@@ -701,7 +720,7 @@ impl<'hir> HirToMir<'hir> {
                 let in_match_context = self.match_arm_prefix.is_some();
                 let should_convert_first =
                     (is_simple_function_call || is_tuple_element_extraction || is_cast_expression)
-                    && !in_match_context;  // Always register variable first in match arms
+                        && !in_match_context; // Always register variable first in match arms
 
                 if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
                     eprintln!("[DEBUG] Let 'rw' (70): is_tuple_element_extraction={}, in_match_context={}, should_convert_first={}",
@@ -711,7 +730,9 @@ impl<'hir> HirToMir<'hir> {
                 let (rhs, needs_type_inference) = if should_convert_first {
                     // Simple function call, tuple element extraction, or cast: convert first for Bug #67 fix
                     if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
-                        eprintln!("[DEBUG] Let 'rw' (70): About to convert RHS (convert_first=true)");
+                        eprintln!(
+                            "[DEBUG] Let 'rw' (70): About to convert RHS (convert_first=true)"
+                        );
                     }
                     (self.convert_expression(&let_stmt.value)?, true)
                 } else {
@@ -738,7 +759,10 @@ impl<'hir> HirToMir<'hir> {
 
                     let new_id = if let Some((existing_id, _, _)) = existing_var {
                         // Reuse the existing variable ID for this name
-                        eprintln!("[DEBUG] Reusing existing variable '{}' with MIR ID={:?}", var_name, existing_id);
+                        eprintln!(
+                            "[DEBUG] Reusing existing variable '{}' with MIR ID={:?}",
+                            var_name, existing_id
+                        );
                         *existing_id
                     } else {
                         // Create a new MIR variable on the fly for event block let bindings
@@ -2199,9 +2223,7 @@ impl<'hir> HirToMir<'hir> {
                     );
                     eprintln!(
                         "[DEBUG]   context_variable_map keys: {:?}",
-                        self.context_variable_map
-                            .keys()
-                            .collect::<Vec<_>>()
+                        self.context_variable_map.keys().collect::<Vec<_>>()
                     );
                     None
                 }
@@ -2235,6 +2257,17 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::Literal(Value::Integer(0)))
             }
             hir::HirExpression::GenericParam(param_name) => {
+                // BUG FIX #7: WORKAROUND for Bug #42/43 - Cast expressions create malformed AST
+                // causing variable references to appear as GenericParam instead of Variable.
+                // First check if this is actually a variable from a let-binding (e.g., from inlined function)
+                if let Some((mir_var_id, _, _)) = self
+                    .dynamic_variables
+                    .values()
+                    .find(|(_, var_name, _)| var_name == param_name)
+                {
+                    return Some(Expression::Ref(LValue::Variable(*mir_var_id)));
+                }
+
                 // Look up the generic parameter value in the current context
                 // Generic parameters are treated as constants after monomorphization
                 if let Some(hir) = self.hir {
@@ -2740,11 +2773,22 @@ impl<'hir> HirToMir<'hir> {
                 // Convert all concat elements to MIR expressions
                 let mut mir_exprs = Vec::new();
                 for (idx, expr) in expressions.iter().enumerate() {
-                    eprintln!("[DEBUG] Concat: converting element {} of {}, type: {:?}", idx, expressions.len(), std::mem::discriminant(expr));
+                    eprintln!(
+                        "[DEBUG] Concat: converting element {} of {}, type: {:?}",
+                        idx,
+                        expressions.len(),
+                        std::mem::discriminant(expr)
+                    );
                     if let hir::HirExpression::Variable(var_id) = expr {
                         eprintln!("[DEBUG] Concat element {} is Variable({:?})", idx, var_id);
-                        eprintln!("[DEBUG]   variable_map contains: {}", self.variable_map.contains_key(var_id));
-                        eprintln!("[DEBUG]   dynamic_variables contains: {}", self.dynamic_variables.contains_key(var_id));
+                        eprintln!(
+                            "[DEBUG]   variable_map contains: {}",
+                            self.variable_map.contains_key(var_id)
+                        );
+                        eprintln!(
+                            "[DEBUG]   dynamic_variables contains: {}",
+                            self.dynamic_variables.contains_key(var_id)
+                        );
                     }
                     if let Some(mir_expr) = self.convert_expression(expr) {
                         mir_exprs.push(mir_expr);
@@ -2794,14 +2838,22 @@ impl<'hir> HirToMir<'hir> {
                 // are added to pending_statements (to be emitted as global assignments).
                 // We must preserve these variables across branch isolation so that the
                 // result expression can reference them.
-                eprintln!("[BUG #7 DEBUG] Converting If-expression condition, type: {:?}",
-                    std::mem::discriminant(&*if_expr.condition));
+                eprintln!(
+                    "[BUG #7 DEBUG] Converting If-expression condition, type: {:?}",
+                    std::mem::discriminant(&*if_expr.condition)
+                );
                 if let hir::HirExpression::Call(call) = &*if_expr.condition {
-                    eprintln!("[BUG #7 DEBUG]   Condition is Call: function={}, args={}",
-                        call.function, call.args.len());
+                    eprintln!(
+                        "[BUG #7 DEBUG]   Condition is Call: function={}, args={}",
+                        call.function,
+                        call.args.len()
+                    );
                 }
                 let cond = self.convert_expression(&if_expr.condition)?;
-                eprintln!("[BUG #7 DEBUG] Converted condition to MIR: {:?}", std::mem::discriminant(&cond));
+                eprintln!(
+                    "[BUG #7 DEBUG] Converted condition to MIR: {:?}",
+                    std::mem::discriminant(&cond)
+                );
 
                 // Save current dynamic_variables state and pending_statements count
                 let saved_dynamic_vars = self.dynamic_variables.clone();
@@ -3650,8 +3702,10 @@ impl<'hir> HirToMir<'hir> {
             else_expr: Box::new(else_expr),
         });
 
-        eprintln!("[BUG #7] convert_if_stmt_to_expr: result condition type = {:?}",
-            std::mem::discriminant(&if_stmt.condition));
+        eprintln!(
+            "[BUG #7] convert_if_stmt_to_expr: result condition type = {:?}",
+            std::mem::discriminant(&if_stmt.condition)
+        );
 
         Some(result)
     }
@@ -4643,6 +4697,17 @@ impl<'hir> HirToMir<'hir> {
                 // WORKAROUND for Bug #42/43: Parser creates malformed cast expression AST,
                 // causing some variable references to appear as GenericParam instead of Variable
                 // Try to resolve the name to a variable (should not be needed after parser fix)
+
+                // BUG FIX #7: First check dynamic_variables (from inlined functions)
+                if let Some((_, _, var_type)) = self
+                    .dynamic_variables
+                    .values()
+                    .find(|(_, var_name, _)| var_name == name)
+                {
+                    return Some(var_type.clone());
+                }
+
+                // Then check entity implementation variables
                 let entity_id = self.current_entity_id?;
                 let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
                 if let Some(var) = impl_block.variables.iter().find(|v| v.name == *name) {
@@ -4705,6 +4770,30 @@ impl<'hir> HirToMir<'hir> {
                 // BUG FIX #7: Infer type from function return type
                 // This is needed for chained method calls like vec_dot(a, b).add(c)
                 // where vec_dot returns fp32, enabling type inference for the add method
+
+                // CRITICAL FIX: Check if this is an FP method call FIRST
+                // FP methods like mul, add, sub, div should return the same type as their receiver
+                if !call.args.is_empty() {
+                    // Check if receiver (arg[0]) is a float type
+                    if let Some(receiver_type) = self.infer_hir_type(&call.args[0]) {
+                        if self.is_float_type(&receiver_type) {
+                            // FP binary methods return the same float type as receiver
+                            if matches!(call.function.as_str(), "add" | "sub" | "mul" | "div") {
+                                return Some(receiver_type);
+                            }
+                            // FP comparison methods return bit
+                            if matches!(call.function.as_str(), "lt" | "gt" | "le" | "ge" | "eq" | "ne") {
+                                return Some(hir::HirType::Bit(1));
+                            }
+                            // FP unary methods return the same float type
+                            if matches!(call.function.as_str(), "sqrt" | "abs") {
+                                return Some(receiver_type);
+                            }
+                        }
+                    }
+                }
+
+                // Fall back to looking up regular function
                 if let Some(func) = self.find_function(&call.function) {
                     func.return_type.clone()
                 } else {
@@ -5587,7 +5676,9 @@ impl<'hir> HirToMir<'hir> {
                     .or_else(|| self.variable_map.get(var_id).copied())
                     .or_else(|| {
                         // Check dynamic_variables for let bindings from inlined functions
-                        self.dynamic_variables.get(var_id).map(|(mir_id, _, _)| *mir_id)
+                        self.dynamic_variables
+                            .get(var_id)
+                            .map(|(mir_id, _, _)| *mir_id)
                     });
 
                     if let Some(var_id_mir) = var_id_mir {

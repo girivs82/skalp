@@ -478,7 +478,7 @@ impl HirBuilderContext {
         // Register in symbol table
         self.symbols.ports.insert(name.clone(), id);
         self.symbols.port_types.insert(id, port_type.clone()); // BUG FIX #5
-        // Also add to general scope for lookup
+                                                               // Also add to general scope for lookup
         self.symbols.add_to_scope(&name, SymbolId::Port(id));
 
         Some(HirPort {
@@ -2903,6 +2903,7 @@ impl HirBuilderContext {
                                     | SyntaxKind::ParenExpr
                                     | SyntaxKind::IfExpr
                                     | SyntaxKind::MatchExpr
+                                    | SyntaxKind::CastExpr // BUG #7: Support cast expressions in parentheses
                             )
                         })
                         .and_then(|n| self.build_expression(&n))
@@ -3079,13 +3080,12 @@ impl HirBuilderContext {
                             && receiver_node.children().count() == 0
                         {
                             // This is a bare FieldExpr like ".x" - need to find the base before it
-                            let receiver_field_pos = siblings.iter().position(|n| n == receiver_node)?;
+                            let receiver_field_pos =
+                                siblings.iter().position(|n| n == receiver_node)?;
 
                             // Find the base expression before this FieldExpr
-                            let base_node = siblings[..receiver_field_pos]
-                                .iter()
-                                .rev()
-                                .find(|n| {
+                            let base_node =
+                                siblings[..receiver_field_pos].iter().rev().find(|n| {
                                     matches!(
                                         n.kind(),
                                         SyntaxKind::IdentExpr
@@ -3139,7 +3139,9 @@ impl HirBuilderContext {
                                 while arg_end < call_children.len()
                                     && matches!(
                                         call_children[arg_end].kind(),
-                                        SyntaxKind::FieldExpr | SyntaxKind::IndexExpr | SyntaxKind::CallExpr
+                                        SyntaxKind::FieldExpr
+                                            | SyntaxKind::IndexExpr
+                                            | SyntaxKind::CallExpr
                                     )
                                 {
                                     arg_end += 1;
@@ -3147,7 +3149,8 @@ impl HirBuilderContext {
 
                                 // Build chained expression from arg_start to arg_end
                                 let arg_nodes = &call_children[arg_start..arg_end];
-                                if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes) {
+                                if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes)
+                                {
                                     args.push(arg_expr);
                                 }
 
@@ -5922,10 +5925,10 @@ impl SymbolTable {
             clock_domains: HashMap::new(),
             user_types: HashMap::new(),
             variable_types: HashMap::new(),
-            signal_types: HashMap::new(), // BUG FIX #5
-            port_types: HashMap::new(),   // BUG FIX #5
+            signal_types: HashMap::new(),          // BUG FIX #5
+            port_types: HashMap::new(),            // BUG FIX #5
             function_return_types: HashMap::new(), // BUG FIX #67
-            scopes: vec![HashMap::new()], // Start with global scope
+            scopes: vec![HashMap::new()],          // Start with global scope
         }
     }
 
@@ -6578,11 +6581,18 @@ impl HirBuilderContext {
                             .unwrap_or(HirType::Nat(32))
                     }
                     // BUG FIX #5: Handle vec2/vec3/vec4 field access
-                    HirType::Vec2(elem_type) | HirType::Vec3(elem_type) | HirType::Vec4(elem_type)
-                        if matches!(field.as_str(), "x" | "y" | "z" | "w") => *elem_type,
+                    HirType::Vec2(elem_type)
+                    | HirType::Vec3(elem_type)
+                    | HirType::Vec4(elem_type)
+                        if matches!(field.as_str(), "x" | "y" | "z" | "w") =>
+                    {
+                        *elem_type
+                    }
                     // BUG FIX #5: Handle Custom("vec2"/"vec3"/"vec4") types (Bug #45 workaround)
-                    HirType::Custom(type_name) if type_name.starts_with("vec")
-                        && matches!(field.as_str(), "x" | "y" | "z" | "w") => {
+                    HirType::Custom(type_name)
+                        if type_name.starts_with("vec")
+                            && matches!(field.as_str(), "x" | "y" | "z" | "w") =>
+                    {
                         // Vec components default to Float32
                         HirType::Float32
                     }
@@ -6638,9 +6648,14 @@ impl HirBuilderContext {
                 // For these methods, infer type from the receiver (first argument)
                 match call.function.as_str() {
                     // FP arithmetic methods return the same type as receiver
-                    "add" | "sub" | "mul" | "div" | "sqrt" | "abs" | "neg" if !call.args.is_empty() => {
+                    "add" | "sub" | "mul" | "div" | "sqrt" | "abs" | "neg"
+                        if !call.args.is_empty() =>
+                    {
                         let receiver_type = self.infer_expression_type(&call.args[0]);
-                        if matches!(receiver_type, HirType::Float16 | HirType::Float32 | HirType::Float64) {
+                        if matches!(
+                            receiver_type,
+                            HirType::Float16 | HirType::Float32 | HirType::Float64
+                        ) {
                             return receiver_type;
                         }
                         // Not an FP type, fall through to normal lookup
@@ -6648,7 +6663,10 @@ impl HirBuilderContext {
                     // FP comparison methods always return bit[1]
                     "lt" | "gt" | "le" | "ge" | "eq" | "ne" if !call.args.is_empty() => {
                         let receiver_type = self.infer_expression_type(&call.args[0]);
-                        if matches!(receiver_type, HirType::Float16 | HirType::Float32 | HirType::Float64) {
+                        if matches!(
+                            receiver_type,
+                            HirType::Float16 | HirType::Float32 | HirType::Float64
+                        ) {
                             return HirType::Bit(1);
                         }
                         // Not an FP type, fall through to normal lookup
@@ -6659,7 +6677,8 @@ impl HirBuilderContext {
                 }
 
                 // Look up in function signatures table
-                self.symbols.function_return_types
+                self.symbols
+                    .function_return_types
                     .get(&call.function)
                     .cloned()
                     .unwrap_or(HirType::Nat(32))
@@ -6668,10 +6687,8 @@ impl HirBuilderContext {
             // Enum variants
             HirExpression::EnumVariant { enum_type, .. } => HirType::Custom(enum_type.clone()),
 
-            // Generic parameters and associated constants
-            HirExpression::GenericParam(_) | HirExpression::AssociatedConstant { .. } => {
-                HirType::Nat(32)
-            }
+            // Associated constants
+            HirExpression::AssociatedConstant { .. } => HirType::Nat(32),
 
             // Struct literals
             HirExpression::StructLiteral(struct_lit) => {
