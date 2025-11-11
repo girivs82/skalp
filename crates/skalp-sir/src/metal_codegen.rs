@@ -2046,26 +2046,44 @@ impl<'a> MetalShaderGenerator<'a> {
                                 source_location
                             ));
                         } else if source_width <= 32 && output_width > 32 && output_width <= 64 {
-                            // Source is uint, destination is uint2 - construct vector
+                            // Source is scalar, destination is uint2 - construct vector
+                            // Metal Backend: Check if source is float and needs cast
+                            let source_type = self.get_signal_sir_type(sir, signal);
+                            let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                            let source_expr = if source_is_float {
+                                format!("as_type<uint>({})", source_location)
+                            } else {
+                                source_location.clone()
+                            };
+
                             eprintln!(
-                                "   🎯 Scalar->uint2: {} ({} bits) -> {} ({} bits)",
-                                signal, source_width, output, output_width
+                                "   🎯 Scalar->uint2: {} ({} bits, float={}) -> {} ({} bits)",
+                                signal, source_width, source_is_float, output, output_width
                             );
                             self.write_indented(&format!(
                                 "signals->{} = uint2({}, 0);\n",
                                 self.sanitize_name(output),
-                                source_location
+                                source_expr
                             ));
                         } else if source_width <= 32 && output_width > 64 && output_width <= 128 {
-                            // Source is uint, destination is uint4 - construct vector
+                            // Source is scalar, destination is uint4 - construct vector
+                            // Metal Backend: Check if source is float and needs cast
+                            let source_type = self.get_signal_sir_type(sir, signal);
+                            let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                            let source_expr = if source_is_float {
+                                format!("as_type<uint>({})", source_location)
+                            } else {
+                                source_location.clone()
+                            };
+
                             eprintln!(
-                                "   🎯 Scalar->uint4: {} ({} bits) -> {} ({} bits)",
-                                signal, source_width, output, output_width
+                                "   🎯 Scalar->uint4: {} ({} bits, float={}) -> {} ({} bits)",
+                                signal, source_width, source_is_float, output, output_width
                             );
                             self.write_indented(&format!(
                                 "signals->{} = uint4({}, 0, 0, 0);\n",
                                 self.sanitize_name(output),
-                                source_location
+                                source_expr
                             ));
                         } else {
                             // BUG FIX #58 & Metal Backend: Check if source and dest have different Metal types requiring reinterpretation
@@ -2359,26 +2377,44 @@ impl<'a> MetalShaderGenerator<'a> {
                         self.sanitize_name(first_output)
                     ));
                 } else if source_width <= 32 && output_width > 32 && output_width <= 64 {
-                    // Source is uint, destination is uint2 - construct vector
+                    // Source is scalar, destination is uint2 - construct vector
+                    // Metal Backend: Check if source is float and needs cast
+                    let source_type = self.get_signal_sir_type(sir, first_output);
+                    let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                    let source_expr = if source_is_float {
+                        format!("as_type<uint>(signals->{})", self.sanitize_name(first_output))
+                    } else {
+                        format!("signals->{}", self.sanitize_name(first_output))
+                    };
+
                     eprintln!(
-                        "   🎯 Additional output scalar->uint2: {} ({} bits) -> {} ({} bits)",
-                        first_output, source_width, additional_output.signal_id, output_width
+                        "   🎯 Additional output scalar->uint2: {} ({} bits, float={}) -> {} ({} bits)",
+                        first_output, source_width, source_is_float, additional_output.signal_id, output_width
                     );
                     self.write_indented(&format!(
-                        "signals->{} = uint2(signals->{}, 0);\n",
+                        "signals->{} = uint2({}, 0);\n",
                         self.sanitize_name(&additional_output.signal_id),
-                        self.sanitize_name(first_output)
+                        source_expr
                     ));
                 } else if source_width <= 32 && output_width > 64 && output_width <= 128 {
-                    // Source is uint, destination is uint4 - construct vector
+                    // Source is scalar, destination is uint4 - construct vector
+                    // Metal Backend: Check if source is float and needs cast
+                    let source_type = self.get_signal_sir_type(sir, first_output);
+                    let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                    let source_expr = if source_is_float {
+                        format!("as_type<uint>(signals->{})", self.sanitize_name(first_output))
+                    } else {
+                        format!("signals->{}", self.sanitize_name(first_output))
+                    };
+
                     eprintln!(
-                        "   🎯 Additional output scalar->uint4: {} ({} bits) -> {} ({} bits)",
-                        first_output, source_width, additional_output.signal_id, output_width
+                        "   🎯 Additional output scalar->uint4: {} ({} bits, float={}) -> {} ({} bits)",
+                        first_output, source_width, source_is_float, additional_output.signal_id, output_width
                     );
                     self.write_indented(&format!(
-                        "signals->{} = uint4(signals->{}, 0, 0, 0);\n",
+                        "signals->{} = uint4({}, 0, 0, 0);\n",
                         self.sanitize_name(&additional_output.signal_id),
-                        self.sanitize_name(first_output)
+                        source_expr
                     ));
                 } else {
                     // Both scalar (≤128 bits) - check for type reinterpretation
