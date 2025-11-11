@@ -2629,12 +2629,37 @@ impl<'a> MetalShaderGenerator<'a> {
                             }
                         }
                     } else {
-                        // Same type - direct assignment
-                        self.write_indented(&format!(
-                            "signals->{} = signals->{};\n",
-                            self.sanitize_name(&additional_output.signal_id),
-                            self.sanitize_name(first_output)
-                        ));
+                        // BUG FIX #11: Check Metal type compatibility even when SIR types match
+                        // float4 and uint4 are different types in Metal!
+                        let output_type = self.get_signal_sir_type(sir, &additional_output.signal_id);
+                        let source_type = self.get_signal_sir_type(sir, first_output);
+
+                        let output_metal = output_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
+                        let source_metal = source_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
+
+                        let needs_cast = output_metal.is_some() && source_metal.is_some()
+                            && output_metal != source_metal;
+
+                        if needs_cast {
+                            eprintln!(
+                                "   🔄 Additional output Metal type mismatch: {} ({}) -> {} ({}), adding as_type cast",
+                                first_output, source_metal.as_ref().unwrap(),
+                                additional_output.signal_id, output_metal.as_ref().unwrap()
+                            );
+                            self.write_indented(&format!(
+                                "signals->{} = as_type<{}>(signals->{});\n",
+                                self.sanitize_name(&additional_output.signal_id),
+                                output_metal.unwrap(),
+                                self.sanitize_name(first_output)
+                            ));
+                        } else {
+                            // Same Metal type - direct assignment
+                            self.write_indented(&format!(
+                                "signals->{} = signals->{};\n",
+                                self.sanitize_name(&additional_output.signal_id),
+                                self.sanitize_name(first_output)
+                            ));
+                        }
                     }
                 }
             }
