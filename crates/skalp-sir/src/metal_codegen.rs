@@ -346,27 +346,52 @@ impl<'a> MetalShaderGenerator<'a> {
                                             && source_width > 32
                                             && source_width <= 128
                                         {
-                                            // BUG FIX #65: Vector-to-array conversion for output signals
-                                            // Source is uint2 or uint4 (33-128 bits), destination is uint[N] array (>128 bits)
+                                            // BUG FIX #65 & Metal Backend: Vector/Array-to-array conversion for output signals
                                             let array_size = output_width.div_ceil(32);
                                             let vector_components = source_width.div_ceil(32);
 
-                                            self.write_indented(&format!(
-                                                "// BUG FIX #65: Unpack {}-bit vector ({} components) into {}-bit array (uint[{}])\n",
-                                                source_width, vector_components, output_width, array_size
-                                            ));
+                                            // Check if source is actually a vector type
+                                            let source_sir_type = self.get_signal_sir_type(sir, &node_output.signal_id);
+                                            let source_is_vector = matches!(
+                                                source_sir_type,
+                                                Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_))
+                                            ) && (source_width == 64 || source_width == 96 || source_width == 128);
 
-                                            // Unpack vector components into array elements
-                                            let component_names = ["x", "y", "z", "w"];
-                                            #[allow(clippy::needless_range_loop)]
-                                            for i in 0..vector_components.min(4) {
+                                            if source_is_vector {
                                                 self.write_indented(&format!(
-                                                    "signals->{}[{}] = signals->{}.{};\n",
-                                                    self.sanitize_name(&output.name),
-                                                    i,
-                                                    self.sanitize_name(&node_output.signal_id),
-                                                    component_names[i]
+                                                    "// BUG FIX #65: Unpack {}-bit vector ({} components) into {}-bit array (uint[{}])\n",
+                                                    source_width, vector_components, output_width, array_size
                                                 ));
+
+                                                // Unpack vector components into array elements
+                                                let component_names = ["x", "y", "z", "w"];
+                                                #[allow(clippy::needless_range_loop)]
+                                                for i in 0..vector_components.min(4) {
+                                                    self.write_indented(&format!(
+                                                        "signals->{}[{}] = signals->{}.{};\n",
+                                                        self.sanitize_name(&output.name),
+                                                        i,
+                                                        self.sanitize_name(&node_output.signal_id),
+                                                        component_names[i]
+                                                    ));
+                                                }
+                                            } else {
+                                                // Source is an array - use array indexing
+                                                self.write_indented(&format!(
+                                                    "// Metal Backend Fix: Copy {}-bit array to {}-bit array\n",
+                                                    source_width, output_width
+                                                ));
+
+                                                let copy_elements = vector_components.min(array_size);
+                                                for i in 0..copy_elements {
+                                                    self.write_indented(&format!(
+                                                        "signals->{}[{}] = signals->{}[{}];\n",
+                                                        self.sanitize_name(&output.name),
+                                                        i,
+                                                        self.sanitize_name(&node_output.signal_id),
+                                                        i
+                                                    ));
+                                                }
                                             }
 
                                             // Zero out remaining array elements if output is wider than source
@@ -1902,9 +1927,9 @@ impl<'a> MetalShaderGenerator<'a> {
                         self.indent -= 1;
                         self.write_indented("}\n");
                     } else if source_width > 32 && source_width <= 128 && output_width > 128 {
-                        // BUG FIX #65: Vector-to-array conversion
-                        // Source is uint2 or uint4 (33-128 bits), destination is uint[N] array (>128 bits)
-                        // Need to unpack vector components into array elements
+                        // BUG FIX #65 & Metal Backend: Vector/Array-to-array conversion
+                        // Source could be uint2/uint4 (vector) OR uint[N] (array)
+                        // Need to check the actual source type to decide access pattern
                         let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
                             format!("inputs->{}", self.sanitize_name(signal))
                         } else if sir.state_elements.contains_key(signal) {
@@ -1916,27 +1941,66 @@ impl<'a> MetalShaderGenerator<'a> {
                         let array_size = output_width.div_ceil(32);
                         let vector_components = source_width.div_ceil(32);
 
-                        eprintln!(
-                            "   🎯 Vector->Array: {} ({} bits, {} components) -> {} ({} bits, uint[{}])",
-                            signal, source_width, vector_components, output, output_width, array_size
-                        );
+                        // Check if source is actually a vector type (supports .x/.y/.z/.w) or an array
+                        let source_sir_type = self.get_signal_sir_type(sir, signal);
+                        let source_is_vector = match source_sir_type {
+                            Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_)) => {
+                                // Check if Metal type would be uint2/uint4 or float2/float3/float4
+                                if source_width == 64 || source_width == 96 || source_width == 128 {
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false, // Bits type or array - use array indexing
+                        };
 
-                        self.write_indented(&format!(
-                            "// BUG FIX #65: Unpack {}-bit vector into {}-bit array\n",
-                            source_width, output_width
-                        ));
+                        if source_is_vector {
+                            eprintln!(
+                                "   🎯 Vector->Array: {} ({} bits, {} components) -> {} ({} bits, uint[{}])",
+                                signal, source_width, vector_components, output, output_width, array_size
+                            );
 
-                        // Unpack vector components into array elements
-                        let component_names = ["x", "y", "z", "w"];
-                        #[allow(clippy::needless_range_loop)]
-                        for i in 0..vector_components.min(4) {
                             self.write_indented(&format!(
-                                "signals->{}[{}] = {}.{};\n",
-                                self.sanitize_name(output),
-                                i,
-                                source_location,
-                                component_names[i]
+                                "// BUG FIX #65: Unpack {}-bit vector into {}-bit array\n",
+                                source_width, output_width
                             ));
+
+                            // Unpack vector components into array elements
+                            let component_names = ["x", "y", "z", "w"];
+                            #[allow(clippy::needless_range_loop)]
+                            for i in 0..vector_components.min(4) {
+                                self.write_indented(&format!(
+                                    "signals->{}[{}] = {}.{};\n",
+                                    self.sanitize_name(output),
+                                    i,
+                                    source_location,
+                                    component_names[i]
+                                ));
+                            }
+                        } else {
+                            // Source is an array - use array indexing
+                            eprintln!(
+                                "   🎯 Array->Array: {} ({} bits, uint[{}]) -> {} ({} bits, uint[{}])",
+                                signal, source_width, vector_components, output, output_width, array_size
+                            );
+
+                            self.write_indented(&format!(
+                                "// Metal Backend Fix: Copy {}-bit array to {}-bit array\n",
+                                source_width, output_width
+                            ));
+
+                            // Copy array elements
+                            let copy_elements = vector_components.min(array_size);
+                            for i in 0..copy_elements {
+                                self.write_indented(&format!(
+                                    "signals->{}[{}] = {}[{}];\n",
+                                    self.sanitize_name(output),
+                                    i,
+                                    source_location,
+                                    i
+                                ));
+                            }
                         }
 
                         // Zero out remaining array elements if output is wider than source
