@@ -2963,6 +2963,13 @@ impl<'a> MirToSirConverter<'a> {
                     signal.width = output_width;
                     // Also update the SirType to match the new width
                     signal.sir_type = SirType::Bits(output_width);
+
+                    // BUG FIX: Also update StateElement width if this is a state element
+                    // This fixes inconsistency where signal is updated to Bits(new_width)
+                    // but StateElement remains at old width, causing Metal type mismatches
+                    if let Some(state_elem) = self.sir.state_elements.get_mut(signal_name) {
+                        state_elem.width = output_width;
+                    }
                 }
             }
 
