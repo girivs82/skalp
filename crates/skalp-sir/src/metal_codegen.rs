@@ -2068,7 +2068,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 source_location
                             ));
                         } else {
-                            // BUG FIX #58: Check if source and dest have different types/widths requiring reinterpretation
+                            // BUG FIX #58 & Metal Backend: Check if source and dest have different Metal types requiring reinterpretation
                             let source_type = self.get_signal_sir_type(sir, signal);
                             let dest_type = self.get_signal_sir_type(sir, output);
 
@@ -2077,32 +2077,48 @@ impl<'a> MetalShaderGenerator<'a> {
                                 source_type.as_ref().is_some_and(|st| st.is_float());
                             let dest_is_float = dest_type.as_ref().is_some_and(|dt| dt.is_float());
 
-                            // Check if we need type reinterpretation
-                            let needs_reinterpretation = if let (Some(ref _src), Some(ref _dst)) =
-                                (source_type, &dest_type)
-                            {
-                                // Need reinterpretation if types differ (Float <-> Bits conversion)
-                                source_is_float != dest_is_float
+                            // Metal Backend Fix: Get actual Metal type names to detect float4 <-> uint4 mismatches
+                            let source_metal_type = if let Some(ref st) = source_type {
+                                let (base, _) = self.get_metal_type_parts(st);
+                                base
                             } else {
-                                false
+                                // Fallback for unknown types based on width
+                                match source_width {
+                                    0..=32 => "uint".to_string(),
+                                    64 => "uint2".to_string(),
+                                    96 | 128 => "uint4".to_string(),
+                                    _ => format!("uint[{}]", source_width.div_ceil(32))
+                                }
                             };
 
-                            // BUG DEBUG #62: Log type mismatch detection
-                            if source_is_float != dest_is_float {
+                            let dest_metal_type = if let Some(ref dt) = dest_type {
+                                let (base, _) = self.get_metal_type_parts(dt);
+                                base
+                            } else {
+                                // Fallback for unknown types based on width
+                                match output_width {
+                                    0..=32 => "uint".to_string(),
+                                    64 => "uint2".to_string(),
+                                    96 | 128 => "uint4".to_string(),
+                                    _ => format!("uint[{}]", output_width.div_ceil(32))
+                                }
+                            };
+
+                            // Check if we need type reinterpretation
+                            // Metal Backend: Need cast if Metal types differ (e.g., float4 vs uint4)
+                            let needs_reinterpretation = source_metal_type != dest_metal_type;
+
+                            // BUG DEBUG #62 & Metal Backend: Log type mismatch detection
+                            if source_is_float != dest_is_float || needs_reinterpretation {
                                 eprintln!(
-                                    "🔧 BUG #62: Type mismatch detected: {} (float={}) -> {} (float={}), needs_reinterpretation={}",
-                                    signal, source_is_float, output, dest_is_float, needs_reinterpretation
+                                    "🔧 Metal Backend: Type check: {} ({}:{}) -> {} ({}:{}), needs_cast={}",
+                                    signal, source_metal_type, source_is_float, output, dest_metal_type, dest_is_float, needs_reinterpretation
                                 );
                             }
 
                             if needs_reinterpretation {
-                                // Get destination Metal type
-                                let dest_type_name = if let Some(dt) = &dest_type {
-                                    let (base, _) = self.get_metal_type_parts(dt);
-                                    base
-                                } else {
-                                    "uint".to_string()
-                                };
+                                // Metal Backend: Use the Metal type we already computed
+                                let dest_type_name = dest_metal_type.clone();
 
                                 // BUG FIX #59: Check width matching for as_type<> validity
                                 // Metal's as_type<> requires EXACT size match
