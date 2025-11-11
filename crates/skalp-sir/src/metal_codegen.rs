@@ -1792,7 +1792,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 output_width
             ));
 
-            let mut components = vec!["0".to_string(); 4];
+            let mut components = vec!["0u".to_string(); 4];
             let mut bit_offset = 0;
 
             // BUG FIX #65: Don't reverse for uint4 - inputs are in tuple order (first to last)
@@ -1823,7 +1823,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 output_width
             ));
 
-            let mut components = vec!["0".to_string(); 2];
+            let mut components = vec!["0u".to_string(); 2];
             let mut bit_offset = 0;
 
             // BUG FIX #65: Don't reverse for uint2 - inputs are in tuple order
@@ -2113,7 +2113,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 signal, source_width, source_is_float, output, output_width
                             );
                             self.write_indented(&format!(
-                                "signals->{} = uint2({}, 0);\n",
+                                "signals->{} = uint2({}, 0u);\n",
                                 self.sanitize_name(output),
                                 source_expr
                             ));
@@ -2133,7 +2133,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 signal, source_width, source_is_float, output, output_width
                             );
                             self.write_indented(&format!(
-                                "signals->{} = uint4({}, 0, 0, 0);\n",
+                                "signals->{} = uint4({}, 0u, 0u, 0u);\n",
                                 self.sanitize_name(output),
                                 source_expr
                             ));
@@ -2518,7 +2518,7 @@ impl<'a> MetalShaderGenerator<'a> {
                         first_output, source_width, source_is_float, additional_output.signal_id, output_width
                     );
                     self.write_indented(&format!(
-                        "signals->{} = uint2({}, 0);\n",
+                        "signals->{} = uint2({}, 0u);\n",
                         self.sanitize_name(&additional_output.signal_id),
                         source_expr
                     ));
@@ -2538,7 +2538,7 @@ impl<'a> MetalShaderGenerator<'a> {
                         first_output, source_width, source_is_float, additional_output.signal_id, output_width
                     );
                     self.write_indented(&format!(
-                        "signals->{} = uint4({}, 0, 0, 0);\n",
+                        "signals->{} = uint4({}, 0u, 0u, 0u);\n",
                         self.sanitize_name(&additional_output.signal_id),
                         source_expr
                     ));
