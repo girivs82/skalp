@@ -63,7 +63,7 @@ impl<'a> MetalShaderGenerator<'a> {
         // Sort state elements by name for consistent ordering
         let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
-        for (i, (name, _elem)) in sorted_states.iter().enumerate() {
+        for (name, _elem) in sorted_states.iter() {
             // Look up the signal to get its type
             let default_type = SirType::Bits(_elem.width);
             let sir_type = sir
@@ -347,11 +347,16 @@ impl<'a> MetalShaderGenerator<'a> {
                                             let vector_components = source_width.div_ceil(32);
 
                                             // Check if source is actually a vector type
-                                            let source_sir_type = self.get_signal_sir_type(sir, &node_output.signal_id);
+                                            let source_sir_type = self
+                                                .get_signal_sir_type(sir, &node_output.signal_id);
                                             let source_is_vector = matches!(
                                                 source_sir_type,
-                                                Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_))
-                                            ) && (source_width == 64 || source_width == 96 || source_width == 128);
+                                                Some(SirType::Vec2(_))
+                                                    | Some(SirType::Vec3(_))
+                                                    | Some(SirType::Vec4(_))
+                                            ) && (source_width == 64
+                                                || source_width == 96
+                                                || source_width == 128);
 
                                             if source_is_vector {
                                                 self.write_indented(&format!(
@@ -378,7 +383,8 @@ impl<'a> MetalShaderGenerator<'a> {
                                                     source_width, output_width
                                                 ));
 
-                                                let copy_elements = vector_components.min(array_size);
+                                                let copy_elements =
+                                                    vector_components.min(array_size);
                                                 for i in 0..copy_elements {
                                                     self.write_indented(&format!(
                                                         "signals->{}[{}] = signals->{}[{}];\n",
@@ -663,16 +669,16 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Mod => "%",
                 BinaryOperation::And => {
                     if is_boolean_context {
-                        "&&"  // Logical AND for booleans (prevents bitwise & on float comparison results)
+                        "&&" // Logical AND for booleans (prevents bitwise & on float comparison results)
                     } else {
-                        "&"   // Bitwise AND for integers
+                        "&" // Bitwise AND for integers
                     }
                 }
                 BinaryOperation::Or => {
                     if is_boolean_context {
-                        "||"  // Logical OR for booleans
+                        "||" // Logical OR for booleans
                     } else {
-                        "|"   // Bitwise OR for integers
+                        "|" // Bitwise OR for integers
                     }
                 }
                 BinaryOperation::Xor => "^",
@@ -1199,10 +1205,18 @@ impl<'a> MetalShaderGenerator<'a> {
                 let true_expr = if true_is_float != output_is_float {
                     if true_is_float && true_width != output_width {
                         // Float to different-width integer: convert to bits first, then cast
-                        format!("({})(as_type<uint>(signals->{}))", output_metal_type, self.sanitize_name(true_val))
+                        format!(
+                            "({})(as_type<uint>(signals->{}))",
+                            output_metal_type,
+                            self.sanitize_name(true_val)
+                        )
                     } else {
                         // Same width or integer-to-float: direct as_type
-                        format!("as_type<{}>(signals->{})", output_metal_type, self.sanitize_name(true_val))
+                        format!(
+                            "as_type<{}>(signals->{})",
+                            output_metal_type,
+                            self.sanitize_name(true_val)
+                        )
                     }
                 } else {
                     format!("signals->{}", self.sanitize_name(true_val))
@@ -1211,10 +1225,18 @@ impl<'a> MetalShaderGenerator<'a> {
                 let false_expr = if false_is_float != output_is_float {
                     if false_is_float && false_width != output_width {
                         // Float to different-width integer: convert to bits first, then cast
-                        format!("({})(as_type<uint>(signals->{}))", output_metal_type, self.sanitize_name(false_val))
+                        format!(
+                            "({})(as_type<uint>(signals->{}))",
+                            output_metal_type,
+                            self.sanitize_name(false_val)
+                        )
                     } else {
                         // Same width or integer-to-float: direct as_type
-                        format!("as_type<{}>(signals->{})", output_metal_type, self.sanitize_name(false_val))
+                        format!(
+                            "as_type<{}>(signals->{})",
+                            output_metal_type,
+                            self.sanitize_name(false_val)
+                        )
                     }
                 } else {
                     format!("signals->{}", self.sanitize_name(false_val))
@@ -1333,7 +1355,8 @@ impl<'a> MetalShaderGenerator<'a> {
 
                     if is_metal_array {
                         // Metal stores this as an array - use array indexing
-                        let elem_width = input_type_val.elem_type().map(|t| t.width()).unwrap_or(32);
+                        let elem_width =
+                            input_type_val.elem_type().map(|t| t.width()).unwrap_or(32);
                         let element_idx = low / elem_width;
 
                         eprintln!(
@@ -1822,7 +1845,6 @@ impl<'a> MetalShaderGenerator<'a> {
             // SystemVerilog {a, b, c, d} = {a[127:96], b[95:64], c[63:32], d[31:0]}
             // Metal uint4(x, y, z, w) = {x[31:0], y[63:32], z[95:64], w[127:96]}
             // So {a, b, c, d} maps to uint4(d, c, b, a) - REVERSE order
-            let mut input_idx = 0;
             for (input_name, width) in input_widths.iter() {
                 let component_idx = bit_offset / 32;
                 if component_idx < 4 {
@@ -1858,7 +1880,6 @@ impl<'a> MetalShaderGenerator<'a> {
                     }
                 }
                 bit_offset += width;
-                input_idx += 1;
             }
 
             // REVERSE components: SystemVerilog MSB-first → Metal LSB-first
@@ -2081,13 +2102,11 @@ impl<'a> MetalShaderGenerator<'a> {
                         // Check if source is actually a vector type (supports .x/.y/.z/.w) or an array
                         let source_sir_type = self.get_signal_sir_type(sir, signal);
                         let source_is_vector = match source_sir_type {
-                            Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_)) => {
+                            Some(SirType::Vec2(_))
+                            | Some(SirType::Vec3(_))
+                            | Some(SirType::Vec4(_)) => {
                                 // Check if Metal type would be uint2/uint4 or float2/float3/float4
-                                if source_width == 64 || source_width == 96 || source_width == 128 {
-                                    true
-                                } else {
-                                    false
-                                }
+                                source_width == 64 || source_width == 96 || source_width == 128
                             }
                             _ => false, // Bits type or array - use array indexing
                         };
@@ -2173,7 +2192,8 @@ impl<'a> MetalShaderGenerator<'a> {
                         // Check for vector-to-scalar conversion (uint2/uint4 -> uint)
                         if source_width > 32 && output_width <= 32 {
                             // BUG FIX #10: Check if source is actually stored as a vector before using .x
-                            let (_, metal_array_size) = self.get_metal_type_for_wide_bits(source_width);
+                            let (_, metal_array_size) =
+                                self.get_metal_type_for_wide_bits(source_width);
                             let is_metal_array = metal_array_size.is_some();
 
                             if is_metal_array {
@@ -2203,7 +2223,8 @@ impl<'a> MetalShaderGenerator<'a> {
                             // Source is scalar, destination is uint2 - construct vector
                             // Metal Backend: Check if source is float and needs cast
                             let source_type = self.get_signal_sir_type(sir, signal);
-                            let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                            let source_is_float =
+                                source_type.as_ref().is_some_and(|st| st.is_float());
                             let source_expr = if source_is_float {
                                 format!("as_type<uint>({})", source_location)
                             } else {
@@ -2223,7 +2244,8 @@ impl<'a> MetalShaderGenerator<'a> {
                             // Source is scalar, destination is uint4 - construct vector
                             // Metal Backend: Check if source is float and needs cast
                             let source_type = self.get_signal_sir_type(sir, signal);
-                            let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                            let source_is_float =
+                                source_type.as_ref().is_some_and(|st| st.is_float());
                             // BUG FIX #12: uint4 constructor requires all arguments to be exactly 'unsigned int'
                             // - Floats: use as_type<uint>() for bit reinterpretation
                             // - Other types: wrap with (uint) to ensure correct type
@@ -2262,7 +2284,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                     0..=32 => "uint".to_string(),
                                     64 => "uint2".to_string(),
                                     96 | 128 => "uint4".to_string(),
-                                    _ => format!("uint[{}]", source_width.div_ceil(32))
+                                    _ => format!("uint[{}]", source_width.div_ceil(32)),
                                 }
                             };
 
@@ -2275,7 +2297,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                     0..=32 => "uint".to_string(),
                                     64 => "uint2".to_string(),
                                     96 | 128 => "uint4".to_string(),
-                                    _ => format!("uint[{}]", output_width.div_ceil(32))
+                                    _ => format!("uint[{}]", output_width.div_ceil(32)),
                                 }
                             };
 
@@ -2342,7 +2364,10 @@ impl<'a> MetalShaderGenerator<'a> {
                                                 64 => "ulong",
                                                 _ => "uint",
                                             };
-                                            format!("as_type<{}>({})", source_intermediate, source_location)
+                                            format!(
+                                                "as_type<{}>({})",
+                                                source_intermediate, source_location
+                                            )
                                         } else {
                                             source_location.clone()
                                         };
@@ -2479,7 +2504,9 @@ impl<'a> MetalShaderGenerator<'a> {
                     let source_is_vector = matches!(
                         source_sir_type,
                         Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_))
-                    ) && (source_width == 64 || source_width == 96 || source_width == 128);
+                    ) && (source_width == 64
+                        || source_width == 96
+                        || source_width == 128);
 
                     if source_is_vector {
                         eprintln!(
@@ -2613,7 +2640,10 @@ impl<'a> MetalShaderGenerator<'a> {
                     let source_type = self.get_signal_sir_type(sir, first_output);
                     let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
                     let source_expr = if source_is_float {
-                        format!("as_type<uint>(signals->{})", self.sanitize_name(first_output))
+                        format!(
+                            "as_type<uint>(signals->{})",
+                            self.sanitize_name(first_output)
+                        )
                     } else {
                         format!("signals->{}", self.sanitize_name(first_output))
                     };
@@ -2636,7 +2666,10 @@ impl<'a> MetalShaderGenerator<'a> {
                     // - Floats: use as_type<uint>() for bit reinterpretation
                     // - Other types: wrap with (uint) to ensure correct type
                     let source_expr = if source_is_float {
-                        format!("as_type<uint>(signals->{})", self.sanitize_name(first_output))
+                        format!(
+                            "as_type<uint>(signals->{})",
+                            self.sanitize_name(first_output)
+                        )
                     } else {
                         format!("(uint)(signals->{})", self.sanitize_name(first_output))
                     };
@@ -2739,13 +2772,17 @@ impl<'a> MetalShaderGenerator<'a> {
                     } else {
                         // BUG FIX #11: Check Metal type compatibility even when SIR types match
                         // float4 and uint4 are different types in Metal!
-                        let output_type = self.get_signal_sir_type(sir, &additional_output.signal_id);
+                        let output_type =
+                            self.get_signal_sir_type(sir, &additional_output.signal_id);
                         let source_type = self.get_signal_sir_type(sir, first_output);
 
-                        let output_metal = output_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
-                        let source_metal = source_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
+                        let output_metal =
+                            output_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
+                        let source_metal =
+                            source_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
 
-                        let needs_cast = output_metal.is_some() && source_metal.is_some()
+                        let needs_cast = output_metal.is_some()
+                            && source_metal.is_some()
                             && output_metal != source_metal;
 
                         if needs_cast {
@@ -2857,8 +2894,11 @@ impl<'a> MetalShaderGenerator<'a> {
                             let data_sir_type = self.get_signal_sir_type(sir, data_signal);
                             let data_is_vector = matches!(
                                 data_sir_type,
-                                Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_))
-                            ) && data_signal_width > 32 && data_signal_width <= 128;
+                                Some(SirType::Vec2(_))
+                                    | Some(SirType::Vec3(_))
+                                    | Some(SirType::Vec4(_))
+                            ) && data_signal_width > 32
+                                && data_signal_width <= 128;
 
                             if data_is_vector {
                                 // Data is float2/float3/float4 or uint2/uint4 vector, unpack into array elements

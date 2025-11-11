@@ -6317,14 +6317,15 @@ impl<'hir> HirToMir<'hir> {
         // We need to calculate offsets from MSB downward for tuple fields
 
         // First, calculate total width to determine if we need MSB-first ordering
-        let total_width: usize = fields.iter()
+        let total_width: usize = fields
+            .iter()
             .map(|(_, ty)| self.get_hir_type_width(ty))
             .sum();
 
         // Check if this is a tuple (fields named "_0", "_1", etc.)
-        let is_tuple = fields.iter().all(|(name, _)| {
-            name.starts_with('_') && name[1..].parse::<usize>().is_ok()
-        });
+        let is_tuple = fields
+            .iter()
+            .all(|(name, _)| name.starts_with('_') && name[1..].parse::<usize>().is_ok());
 
         if is_tuple {
             // For tuples: calculate offset from MSB downward
