@@ -3209,7 +3209,9 @@ impl<'a> MirToSirConverter<'a> {
                 let struct_name_lower = struct_type.name.to_lowercase();
 
                 // Check if this is a vec2/vec3/vec4 struct
-                if (struct_name_lower == "vec2" || struct_name_lower == "vector2") && struct_type.fields.len() >= 2 {
+                if (struct_name_lower == "vec2" || struct_name_lower == "vector2")
+                    && struct_type.fields.len() >= 2
+                {
                     // Get the element type from the first field (assume all fields have same type)
                     let elem_type = self.convert_type(&struct_type.fields[0].field_type);
                     eprintln!(
@@ -3217,14 +3219,18 @@ impl<'a> MirToSirConverter<'a> {
                         struct_type.name, elem_type
                     );
                     return SirType::Vec2(Box::new(elem_type));
-                } else if (struct_name_lower == "vec3" || struct_name_lower == "vector3") && struct_type.fields.len() >= 3 {
+                } else if (struct_name_lower == "vec3" || struct_name_lower == "vector3")
+                    && struct_type.fields.len() >= 3
+                {
                     let elem_type = self.convert_type(&struct_type.fields[0].field_type);
                     eprintln!(
                         "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec3({:?})",
                         struct_type.name, elem_type
                     );
                     return SirType::Vec3(Box::new(elem_type));
-                } else if (struct_name_lower == "vec4" || struct_name_lower == "vector4") && struct_type.fields.len() >= 4 {
+                } else if (struct_name_lower == "vec4" || struct_name_lower == "vector4")
+                    && struct_type.fields.len() >= 4
+                {
                     let elem_type = self.convert_type(&struct_type.fields[0].field_type);
                     eprintln!(
                         "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec4({:?})",
