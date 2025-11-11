@@ -3812,6 +3812,36 @@ impl HirBuilderContext {
             })
             .collect();
 
+        // BUG FIX #9: Filter out expressions that are immediately followed by FieldExpr
+        // When the parser creates "a.x", it makes siblings [IdentExpr(a), FieldExpr(.x)]
+        // The FieldExpr will handle the IdentExpr as its base, so we shouldn't treat
+        // the IdentExpr as a separate operand in the binary expression
+        let mut indices_to_skip = Vec::new();
+        for i in 0..expr_children.len() {
+            if i + 1 < expr_children.len() && expr_children[i + 1].kind() == SyntaxKind::FieldExpr {
+                // Check if they're adjacent siblings (not separated by other nodes)
+                if let Some(parent) = expr_children[i].parent() {
+                    if parent == expr_children[i + 1].parent().unwrap_or(parent.clone()) {
+                        let siblings: Vec<_> = parent.children().collect();
+                        if let (Some(curr_pos), Some(next_pos)) = (
+                            siblings.iter().position(|n| n == &expr_children[i]),
+                            siblings.iter().position(|n| n == &expr_children[i + 1]),
+                        ) {
+                            if next_pos == curr_pos + 1 {
+                                // They're adjacent - skip the current node
+                                indices_to_skip.push(i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove skipped indices in reverse order
+        for &idx in indices_to_skip.iter().rev() {
+            expr_children.remove(idx);
+        }
+
         // SPECIAL CASE: If we're being called on a ParenExpr with multiple BinaryExpr children,
         // we need to handle the flattened structure where each BinaryExpr only contains operator + right operand
         if node.kind() == SyntaxKind::ParenExpr {
