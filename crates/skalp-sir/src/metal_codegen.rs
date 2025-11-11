@@ -1177,23 +1177,31 @@ impl<'a> MetalShaderGenerator<'a> {
                     }
                 };
 
-                // Format operands with reinterpretation if needed
+                // BUG FIX #13: Format operands with proper type conversion
+                // When converting float to different-width integer, must convert to bits first, then widen/narrow
+                let true_width = true_type.as_ref().map(|t| t.width()).unwrap_or(32);
+                let false_width = false_type.as_ref().map(|t| t.width()).unwrap_or(32);
+
                 let true_expr = if true_is_float != output_is_float {
-                    format!(
-                        "as_type<{}>(signals->{})",
-                        output_metal_type,
-                        self.sanitize_name(true_val)
-                    )
+                    if true_is_float && true_width != output_width {
+                        // Float to different-width integer: convert to bits first, then cast
+                        format!("({})(as_type<uint>(signals->{}))", output_metal_type, self.sanitize_name(true_val))
+                    } else {
+                        // Same width or integer-to-float: direct as_type
+                        format!("as_type<{}>(signals->{})", output_metal_type, self.sanitize_name(true_val))
+                    }
                 } else {
                     format!("signals->{}", self.sanitize_name(true_val))
                 };
 
                 let false_expr = if false_is_float != output_is_float {
-                    format!(
-                        "as_type<{}>(signals->{})",
-                        output_metal_type,
-                        self.sanitize_name(false_val)
-                    )
+                    if false_is_float && false_width != output_width {
+                        // Float to different-width integer: convert to bits first, then cast
+                        format!("({})(as_type<uint>(signals->{}))", output_metal_type, self.sanitize_name(false_val))
+                    } else {
+                        // Same width or integer-to-float: direct as_type
+                        format!("as_type<{}>(signals->{})", output_metal_type, self.sanitize_name(false_val))
+                    }
                 } else {
                     format!("signals->{}", self.sanitize_name(false_val))
                 };
@@ -1668,8 +1676,9 @@ impl<'a> MetalShaderGenerator<'a> {
     fn format_signal_for_bitwise_op(&self, sir: &SirModule, signal_name: &str) -> String {
         let sanitized = self.sanitize_name(signal_name);
 
-        // Check if this signal has a Float type
-        if let Some(sir_type) = self.get_signal_type_from_sir(sir, signal_name) {
+        // Check if this signal has a Float type - use the more comprehensive lookup
+        // BUG FIX #12: Use get_signal_sir_type instead of get_signal_type_from_sir
+        if let Some(sir_type) = self.get_signal_sir_type(sir, signal_name) {
             if sir_type.is_float() {
                 // Float signals need to be cast to their bit representation for bitwise ops
                 let bit_type = match sir_type {
@@ -1682,7 +1691,7 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
-        // Non-float signals can be used directly
+        // 32-bit or smaller signals can be used directly
         format!("signals->{}", sanitized)
     }
 
@@ -1798,13 +1807,43 @@ impl<'a> MetalShaderGenerator<'a> {
             // BUG FIX #65: Don't reverse for uint4 - inputs are in tuple order (first to last)
             // uint4(a, b, c, d) maps to {.x=a, .y=b, .z=c, .w=d} which is LSB to MSB
             // Tuple (a, b, c) should map to {.x=a, .y=b, .z=c} for proper element access
+            let mut input_idx = 0;
             for (input_name, width) in input_widths.iter() {
                 let component_idx = bit_offset / 32;
                 if component_idx < 4 {
                     // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
-                    components[component_idx] = self.format_signal_for_bitwise_op(sir, input_name);
+                    let component_str = self.format_signal_for_bitwise_op(sir, input_name);
+
+                    // BUG FIX #12: uint4 constructor requires all arguments to be exactly 'unsigned int'
+                    // Handle different input widths:
+                    // - Literals (0u) and as_type<> casts: use as-is
+                    // - 32-bit or smaller non-floats: cast to (uint)
+                    // - Wider than 32 bits: extract first 32-bit component (signal.x or signal[0])
+                    // Note: format_signal_for_bitwise_op may already have done extraction for wide signals
+                    if component_str == "0u" || component_str.contains("as_type") {
+                        // Literal or already has as_type cast - use as-is
+                        components[component_idx] = component_str;
+                    } else if component_str.contains(".x") || component_str.contains("[0]") {
+                        // Already has component extraction - just cast to uint if needed
+                        components[component_idx] = format!("(uint)({})", component_str);
+                    } else if *width <= 32 {
+                        // 32-bit or smaller - cast to uint to ensure correct type
+                        components[component_idx] = format!("(uint)({})", component_str);
+                    } else {
+                        // Wider than 32 bits - it's a vector (uint2/uint4) or array in Metal
+                        // Extract the first 32-bit component
+                        let (_, metal_array_size) = self.get_metal_type_for_wide_bits(*width);
+                        if metal_array_size.is_some() {
+                            // Array storage - use array indexing
+                            components[component_idx] = format!("{}[0]", component_str);
+                        } else {
+                            // Vector storage (uint2/uint4) - use .x component
+                            components[component_idx] = format!("{}.x", component_str);
+                        }
+                    }
                 }
                 bit_offset += width;
+                input_idx += 1;
             }
 
             self.write_indented(&format!(
@@ -1831,7 +1870,26 @@ impl<'a> MetalShaderGenerator<'a> {
                 let component_idx = bit_offset / 32;
                 if component_idx < 2 {
                     // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
-                    components[component_idx] = self.format_signal_for_bitwise_op(sir, input_name);
+                    let component_str = self.format_signal_for_bitwise_op(sir, input_name);
+
+                    // BUG FIX #12: uint2 constructor requires all arguments to be exactly 'unsigned int'
+                    // Note: format_signal_for_bitwise_op may already have done extraction for wide signals
+                    if component_str == "0u" || component_str.contains("as_type") {
+                        components[component_idx] = component_str;
+                    } else if component_str.contains(".x") || component_str.contains("[0]") {
+                        // Already has component extraction - just cast to uint if needed
+                        components[component_idx] = format!("(uint)({})", component_str);
+                    } else if *width <= 32 {
+                        components[component_idx] = format!("(uint)({})", component_str);
+                    } else {
+                        // Wider than 32 bits - extract first 32-bit component
+                        let (_, metal_array_size) = self.get_metal_type_for_wide_bits(*width);
+                        if metal_array_size.is_some() {
+                            components[component_idx] = format!("{}[0]", component_str);
+                        } else {
+                            components[component_idx] = format!("{}.x", component_str);
+                        }
+                    }
                 }
                 bit_offset += width;
             }
@@ -1846,13 +1904,37 @@ impl<'a> MetalShaderGenerator<'a> {
             // Output is 1-32 bits -> uint
             // Use bit shifts (safe because all fits in 32 bits)
             // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
+            // BUG FIX #14: Extract lower 32 bits from wide inputs to avoid uint4 OR results
             let mut shift = 0;
             let mut concat_expr = String::new();
             for (input_name, width) in input_widths.iter().rev() {
+                // Skip shifts that would overflow the output width
+                // If shift >= output_width, this input won't contribute to the output
+                if shift >= output_width {
+                    shift += width;
+                    continue;
+                }
+
+                let mut input_ref = self.format_signal_for_bitwise_op(sir, input_name);
+
+                // If input is wide (>32 bits), extract lower 32 bits to avoid type mismatch
+                // Wide inputs are stored as uint2/uint4 in Metal, and OR on uint4 produces uint4
+                // which can't be assigned to uint output
+                if *width > 32 {
+                    let (_, metal_array_size) = self.get_metal_type_for_wide_bits(*width);
+                    if metal_array_size.is_some() {
+                        // Array storage - use array indexing
+                        input_ref = format!("{}[0]", input_ref);
+                    } else {
+                        // Vector storage (uint2/uint4) - use .x component
+                        input_ref = format!("{}.x", input_ref);
+                    }
+                }
+
                 if !concat_expr.is_empty() {
                     concat_expr.push_str(" | ");
                 }
-                let input_ref = self.format_signal_for_bitwise_op(sir, input_name);
+
                 if shift > 0 {
                     concat_expr.push_str(&format!("({} << {})", input_ref, shift));
                 } else {
@@ -2122,10 +2204,13 @@ impl<'a> MetalShaderGenerator<'a> {
                             // Metal Backend: Check if source is float and needs cast
                             let source_type = self.get_signal_sir_type(sir, signal);
                             let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                            // BUG FIX #12: uint4 constructor requires all arguments to be exactly 'unsigned int'
+                            // - Floats: use as_type<uint>() for bit reinterpretation
+                            // - Other types: wrap with (uint) to ensure correct type
                             let source_expr = if source_is_float {
                                 format!("as_type<uint>({})", source_location)
                             } else {
-                                source_location.clone()
+                                format!("(uint)({})", source_location)
                             };
 
                             eprintln!(
@@ -2527,10 +2612,13 @@ impl<'a> MetalShaderGenerator<'a> {
                     // Metal Backend: Check if source is float and needs cast
                     let source_type = self.get_signal_sir_type(sir, first_output);
                     let source_is_float = source_type.as_ref().is_some_and(|st| st.is_float());
+                    // BUG FIX #12: uint4 constructor requires all arguments to be exactly 'unsigned int'
+                    // - Floats: use as_type<uint>() for bit reinterpretation
+                    // - Other types: wrap with (uint) to ensure correct type
                     let source_expr = if source_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(first_output))
                     } else {
-                        format!("signals->{}", self.sanitize_name(first_output))
+                        format!("(uint)(signals->{})", self.sanitize_name(first_output))
                     };
 
                     eprintln!(
