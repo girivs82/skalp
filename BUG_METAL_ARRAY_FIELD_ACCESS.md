@@ -1,6 +1,6 @@
 # Metal Backend: Array Field Access Fix
 
-## Status: PARTIALLY FIXED (2/4 locations) ⚠️
+## Status: FIXED ✅
 
 ## Summary
 Metal backend was attempting to access `.x/.y/.z/.w` components on array types (`uint[8]`), which is invalid in Metal. This occurred when the codegen assumed that signals with widths 33-128 bits were always vector types (`uint2`/`uint4`), but they can also be arrays.
@@ -96,13 +96,35 @@ if source_is_vector {
 }
 ```
 
-## Locations Remaining (TODO)
+### 3. Line 2224-2302: Additional output vector/array-to-array conversion
+**Context**: Converting first node output to additional output arrays
 
-### 3. Line 2241: Additional output vector-to-array conversion
-Similar pattern for additional outputs from nodes
+**After:**
+```rust
+let source_is_vector = matches!(source_sir_type, Some(SirType::Vec2(_)) | ...);
+if source_is_vector {
+    // Use .x/.y/.z/.w access on vector
+    write!("signals->{}[{}] = signals->{}.{};\n", additional_output, i, first_output, component_names[i]);
+} else {
+    // Use [i] array indexing on array
+    write!("signals->{}[{}] = signals->{}[{}];\n", additional_output, i, first_output, i);
+}
+```
 
-### 4. Line 2532: (Need to investigate)
-Additional location with component_names pattern
+### 4. Line 2545-2617: Sequential vector/array-to-register array conversion
+**Context**: Storing signal data to wide register arrays in sequential logic
+
+**After:**
+```rust
+let data_is_vector = matches!(data_sir_type, Some(SirType::Vec2(_)) | ...);
+if data_is_vector {
+    // Unpack vector components to register array
+    write!("registers->{}[{}] = signals->{}.{};\n", output, i, data_signal, component_names[i]);
+} else if data_is_wide {
+    // Copy array elements to register array
+    write!("registers->{}[{}] = signals->{}[{}];\n", output, i, data_signal, i);
+}
+```
 
 ## Verification
 After fix:

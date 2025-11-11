@@ -2222,32 +2222,63 @@ impl<'a> MetalShaderGenerator<'a> {
                     self.indent -= 1;
                     self.write_indented("}\n");
                 } else if output_width > 128 && source_width > 32 && source_width <= 128 {
-                    // BUG FIX #65: Vector-to-array conversion for additional outputs
-                    // Source is uint2 or uint4, destination is uint[N] array
+                    // BUG FIX #65 & Metal Backend: Vector/Array-to-array conversion for additional outputs
                     let array_size = output_width.div_ceil(32);
                     let vector_components = source_width.div_ceil(32);
 
-                    eprintln!(
-                        "   🎯 Additional output Vector->Array: {} ({} bits, {} components) -> {} ({} bits, uint[{}])",
-                        first_output, source_width, vector_components, additional_output.signal_id, output_width, array_size
-                    );
+                    // Check if source is actually a vector type
+                    let source_sir_type = self.get_signal_sir_type(sir, first_output);
+                    let source_is_vector = matches!(
+                        source_sir_type,
+                        Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_))
+                    ) && (source_width == 64 || source_width == 96 || source_width == 128);
 
-                    self.write_indented(&format!(
-                        "// BUG FIX #65: Unpack {}-bit vector into {}-bit array (additional output)\n",
-                        source_width, output_width
-                    ));
+                    if source_is_vector {
+                        eprintln!(
+                            "   🎯 Additional output Vector->Array: {} ({} bits, {} components) -> {} ({} bits, uint[{}])",
+                            first_output, source_width, vector_components, additional_output.signal_id, output_width, array_size
+                        );
 
-                    // Unpack vector components into array elements
-                    let component_names = ["x", "y", "z", "w"];
-                    #[allow(clippy::needless_range_loop)]
-                    for i in 0..vector_components.min(4) {
                         self.write_indented(&format!(
-                            "signals->{}[{}] = signals->{}.{};\n",
-                            self.sanitize_name(&additional_output.signal_id),
-                            i,
-                            self.sanitize_name(first_output),
-                            component_names[i]
+                            "// BUG FIX #65: Unpack {}-bit vector into {}-bit array (additional output)\n",
+                            source_width, output_width
                         ));
+
+                        // Unpack vector components into array elements
+                        let component_names = ["x", "y", "z", "w"];
+                        #[allow(clippy::needless_range_loop)]
+                        for i in 0..vector_components.min(4) {
+                            self.write_indented(&format!(
+                                "signals->{}[{}] = signals->{}.{};\n",
+                                self.sanitize_name(&additional_output.signal_id),
+                                i,
+                                self.sanitize_name(first_output),
+                                component_names[i]
+                            ));
+                        }
+                    } else {
+                        // Source is an array - use array indexing
+                        eprintln!(
+                            "   🎯 Additional output Array->Array: {} ({} bits, uint[{}]) -> {} ({} bits, uint[{}])",
+                            first_output, source_width, vector_components, additional_output.signal_id, output_width, array_size
+                        );
+
+                        self.write_indented(&format!(
+                            "// Metal Backend Fix: Copy {}-bit array to {}-bit array (additional output)\n",
+                            source_width, output_width
+                        ));
+
+                        // Copy array elements
+                        let copy_elements = vector_components.min(array_size);
+                        for i in 0..copy_elements {
+                            self.write_indented(&format!(
+                                "signals->{}[{}] = signals->{}[{}];\n",
+                                self.sanitize_name(&additional_output.signal_id),
+                                i,
+                                self.sanitize_name(first_output),
+                                i
+                            ));
+                        }
                     }
 
                     // Zero out remaining array elements if output is wider than source
@@ -2511,11 +2542,15 @@ impl<'a> MetalShaderGenerator<'a> {
                             // Wide register (>128 bits) - use element-wise copy
                             let array_size = state_elem.width.div_ceil(32);
 
-                            // BUG FIX #65: Check if data is a vector (uint2/uint4)
-                            let data_is_vector = data_signal_width > 32 && data_signal_width <= 128;
+                            // BUG FIX #65 & Metal Backend: Check if data is actually a vector type
+                            let data_sir_type = self.get_signal_sir_type(sir, data_signal);
+                            let data_is_vector = matches!(
+                                data_sir_type,
+                                Some(SirType::Vec2(_)) | Some(SirType::Vec3(_)) | Some(SirType::Vec4(_))
+                            ) && data_signal_width > 32 && data_signal_width <= 128;
 
                             if data_is_vector {
-                                // Data is uint2 or uint4, unpack into array elements
+                                // Data is float2/float3/float4 or uint2/uint4 vector, unpack into array elements
                                 let vector_components = data_signal_width.div_ceil(32);
 
                                 eprintln!(
@@ -2540,12 +2575,37 @@ impl<'a> MetalShaderGenerator<'a> {
                                         component_names[i]
                                     ));
                                 }
+                            } else if data_is_wide {
+                                // Data is also a wide array - copy array elements
+                                let data_array_size = data_signal_width.div_ceil(32);
+                                let copy_elements = data_array_size.min(array_size);
 
-                                // Zero out remaining elements
-                                if array_size > vector_components {
+                                eprintln!(
+                                    "   🎯 Sequential Array->Array: {} ({} bits, uint[{}]) -> register {} ({} bits, uint[{}])",
+                                    data_signal, data_signal_width, data_array_size, output.signal_id, state_elem.width, array_size
+                                );
+
+                                self.write_indented(&format!(
+                                    "// Metal Backend Fix: Copy {}-bit array to {}-bit register array\n",
+                                    data_signal_width, state_elem.width
+                                ));
+
+                                // Copy array elements
+                                for i in 0..copy_elements {
+                                    self.write_indented(&format!(
+                                        "registers->{}[{}] = signals->{}[{}];\n",
+                                        self.sanitize_name(&output.signal_id),
+                                        i,
+                                        self.sanitize_name(data_signal),
+                                        i
+                                    ));
+                                }
+
+                                // Zero out remaining elements if register is wider than data
+                                if array_size > copy_elements {
                                     self.write_indented(&format!(
                                         "for (uint i = {}; i < {}; i++) {{\n",
-                                        vector_components, array_size
+                                        copy_elements, array_size
                                     ));
                                     self.indent += 1;
                                     self.write_indented(&format!(
