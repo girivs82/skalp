@@ -1707,25 +1707,6 @@ impl HirBuilderContext {
 
             match current_node.kind() {
                 SyntaxKind::FieldExpr => {
-                    let field_name_temp = current_node
-                        .children_with_tokens()
-                        .filter_map(|elem| elem.into_token())
-                        .find(|t| {
-                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
-                        })
-                        .map(|t| t.text().to_string());
-
-                    if let Some(ref fname) = field_name_temp {
-                        if fname == "lt" || fname == "gt" || fname == "le" || fname == "ge" {
-                            eprintln!("[HIR_CHAINED_RHS] Processing FieldExpr(.{}), i={}, rhs_exprs.len()={}", fname, i, rhs_exprs.len());
-                            if i + 1 < rhs_exprs.len() {
-                                eprintln!("[HIR_CHAINED_RHS]   Next node kind: {:?}", rhs_exprs[i + 1].kind());
-                            } else {
-                                eprintln!("[HIR_CHAINED_RHS]   No next node!");
-                            }
-                        }
-                    }
-
                     // Check if next node is CallExpr (method call pattern)
                     if i + 1 < rhs_exprs.len() && rhs_exprs[i + 1].kind() == SyntaxKind::CallExpr {
                         // This is a method call: FieldExpr(.method) + CallExpr(args)
@@ -1797,8 +1778,12 @@ impl HirBuilderContext {
 
                                 // Build the argument expression
                                 let arg_nodes = &call_children[arg_start..arg_end];
-                                if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes) {
-                                    eprintln!("[HIR_CHAINED_RHS]   Built method call arg from {} nodes", arg_nodes.len());
+                                if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes)
+                                {
+                                    eprintln!(
+                                        "[HIR_CHAINED_RHS]   Built method call arg from {} nodes",
+                                        arg_nodes.len()
+                                    );
                                     args.push(arg_expr);
                                 }
 
@@ -3301,16 +3286,24 @@ impl HirBuilderContext {
                                         // Example: (4.0).mul(a).mul(c) should collect all of: Literal(4.0), FieldExpr(.mul), CallExpr([a]), FieldExpr(.mul), CallExpr([c])
                                         eprintln!("[HIR_METHOD_CALL]   Including FieldExpr+CallExpr pattern (nested method call) in argument");
                                         arg_end += 2; // Include both FieldExpr and CallExpr
-                                        // Don't break - continue to collect more chained method calls
+                                                      // Don't break - continue to collect more chained method calls
                                     } else {
                                         arg_end += 1;
                                     }
                                 }
 
                                 // Build chained expression from arg_start to arg_end
-                                eprintln!("[HIR_METHOD_CALL]   Building arg from nodes[{}..{}]", arg_start, arg_end);
+                                eprintln!(
+                                    "[HIR_METHOD_CALL]   Building arg from nodes[{}..{}]",
+                                    arg_start, arg_end
+                                );
+                                #[allow(clippy::needless_range_loop)]
                                 for j in arg_start..arg_end {
-                                    eprintln!("[HIR_METHOD_CALL]     arg_node[{}]: {:?}", j, call_children[j].kind());
+                                    eprintln!(
+                                        "[HIR_METHOD_CALL]     arg_node[{}]: {:?}",
+                                        j,
+                                        call_children[j].kind()
+                                    );
                                 }
                                 let arg_nodes = &call_children[arg_start..arg_end];
                                 if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes)
@@ -3735,49 +3728,64 @@ impl HirBuilderContext {
 
         // Debug: Show all children of this StructFieldInit
         let all_children: Vec<_> = node.children().collect();
-        eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}' has {} children:", name, all_children.len());
+        eprintln!(
+            "[HIR_FIELD_DEBUG] StructFieldInit '{}' has {} children:",
+            name,
+            all_children.len()
+        );
         for (i, child) in all_children.iter().enumerate() {
             eprintln!("  child[{}]: {:?}", i, child.kind());
         }
 
         // Find the expression child
-        let expr_child = node
-            .children()
-            .find(|n| {
-                matches!(
-                    n.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::CallExpr
-                        | SyntaxKind::FieldExpr
-                        | SyntaxKind::IndexExpr
-                        | SyntaxKind::PathExpr
-                        | SyntaxKind::ParenExpr
-                        | SyntaxKind::IfExpr
-                        | SyntaxKind::MatchExpr
-                        | SyntaxKind::StructLiteral
-                        | SyntaxKind::ArrayLiteral
-                        | SyntaxKind::CastExpr // BUG FIX #71 Part 3: Support cast expressions in struct field initializers
-                )
-            });
+        let expr_child = node.children().find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::LiteralExpr
+                    | SyntaxKind::IdentExpr
+                    | SyntaxKind::BinaryExpr
+                    | SyntaxKind::UnaryExpr
+                    | SyntaxKind::CallExpr
+                    | SyntaxKind::FieldExpr
+                    | SyntaxKind::IndexExpr
+                    | SyntaxKind::PathExpr
+                    | SyntaxKind::ParenExpr
+                    | SyntaxKind::IfExpr
+                    | SyntaxKind::MatchExpr
+                    | SyntaxKind::StructLiteral
+                    | SyntaxKind::ArrayLiteral
+                    | SyntaxKind::CastExpr // BUG FIX #71 Part 3: Support cast expressions in struct field initializers
+            )
+        });
 
         if expr_child.is_none() {
-            eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': NO MATCHING EXPRESSION CHILD FOUND!", name);
+            eprintln!(
+                "[HIR_FIELD_DEBUG] StructFieldInit '{}': NO MATCHING EXPRESSION CHILD FOUND!",
+                name
+            );
             return None;
         }
 
-        eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': found expression child {:?}", name, expr_child.as_ref().unwrap().kind());
+        eprintln!(
+            "[HIR_FIELD_DEBUG] StructFieldInit '{}': found expression child {:?}",
+            name,
+            expr_child.as_ref().unwrap().kind()
+        );
 
         let value = self.build_expression(expr_child.as_ref().unwrap());
         if value.is_none() {
-            eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': build_expression RETURNED NONE!", name);
+            eprintln!(
+                "[HIR_FIELD_DEBUG] StructFieldInit '{}': build_expression RETURNED NONE!",
+                name
+            );
             return None;
         }
 
         eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': SUCCESS", name);
-        Some(HirStructFieldInit { name, value: value.unwrap() })
+        Some(HirStructFieldInit {
+            name,
+            value: value.unwrap(),
+        })
     }
 
     /// Build binary expression
@@ -4001,7 +4009,6 @@ impl HirBuilderContext {
         for &idx in indices_to_remove.iter().rev() {
             expr_children.remove(idx);
         }
-
 
         // WORKAROUND FOR PARSER BUG: Due to how the parser implements Pratt parsing,
         // the left operand of a binary expression may be a SIBLING of the BinaryExpr node
@@ -4237,16 +4244,48 @@ impl HirBuilderContext {
 
     /// Build field expression
     fn build_field_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // BUG FIX #75: Check if this FieldExpr is followed by a CallExpr (method call pattern)
+        // If so, return None - this FieldExpr should be consumed by the CallExpr, not built independently
+        if let Some(parent) = node.parent() {
+            let siblings: Vec<_> = parent.children().collect();
+            if let Some(pos) = siblings.iter().position(|n| n == node) {
+                if pos + 1 < siblings.len() && siblings[pos + 1].kind() == SyntaxKind::CallExpr {
+                    // Extract field name for logging
+                    let field_name = node
+                        .children_with_tokens()
+                        .filter_map(|elem| elem.into_token())
+                        .find(|t| {
+                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                        })
+                        .map(|t| t.text().to_string());
+
+                    eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: FieldExpr(.{}) followed by CallExpr - this is a method call, returning None", field_name.unwrap_or_else(|| "?".to_string()));
+                    return None;
+                }
+            }
+        }
+
         // Get base expression and field name
         let children: Vec<_> = node.children().collect();
-        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children", children.len());
+        eprintln!(
+            "[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children",
+            children.len()
+        );
 
         // Also show children_with_tokens to see what's in this node
         let all_elems: Vec<_> = node.children_with_tokens().collect();
-        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children_with_tokens:", all_elems.len());
+        eprintln!(
+            "[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children_with_tokens:",
+            all_elems.len()
+        );
         for (i, elem) in all_elems.iter().enumerate() {
             if let Some(token) = elem.as_token() {
-                eprintln!("  [{}] TOKEN: kind={:?}, text={}", i, token.kind(), token.text());
+                eprintln!(
+                    "  [{}] TOKEN: kind={:?}, text={}",
+                    i,
+                    token.kind(),
+                    token.text()
+                );
             } else if let Some(child) = elem.as_node() {
                 eprintln!("  [{}] NODE: kind={:?}", i, child.kind());
             }
@@ -4276,7 +4315,10 @@ impl HirBuilderContext {
                 if let Some(pos) = siblings.iter().position(|n| n == node) {
                     if pos > 0 {
                         let prev = &siblings[pos - 1];
-                        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: found preceding sibling {:?}", prev.kind());
+                        eprintln!(
+                            "[HIR_FIELD_EXPR_DEBUG] build_field_expr: found preceding sibling {:?}",
+                            prev.kind()
+                        );
 
                         // Check if the previous sibling is a valid base expression
                         if matches!(
@@ -4304,7 +4346,10 @@ impl HirBuilderContext {
             return None;
         }
 
-        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: child[0] kind = {:?}", children[0].kind());
+        eprintln!(
+            "[HIR_FIELD_EXPR_DEBUG] build_field_expr: child[0] kind = {:?}",
+            children[0].kind()
+        );
         let base_expr = self.build_expression(&children[0]);
         if base_expr.is_none() {
             eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: BASE EXPRESSION BUILD FAILED, returning None");
@@ -4317,9 +4362,17 @@ impl HirBuilderContext {
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
             .collect();
-        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} tokens total", all_tokens.len());
+        eprintln!(
+            "[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} tokens total",
+            all_tokens.len()
+        );
         for (i, token) in all_tokens.iter().enumerate() {
-            eprintln!("  token[{}]: kind={:?}, text={}", i, token.kind(), token.text());
+            eprintln!(
+                "  token[{}]: kind={:?}, text={}",
+                i,
+                token.kind(),
+                token.text()
+            );
         }
 
         let field_name = node
@@ -4333,11 +4386,16 @@ impl HirBuilderContext {
             });
 
         if field_name.is_none() {
-            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: FIELD NAME NOT FOUND, returning None");
+            eprintln!(
+                "[HIR_FIELD_EXPR_DEBUG] build_field_expr: FIELD NAME NOT FOUND, returning None"
+            );
             return None;
         }
 
-        eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: SUCCESS, field='{}'", field_name.as_ref().unwrap());
+        eprintln!(
+            "[HIR_FIELD_EXPR_DEBUG] build_field_expr: SUCCESS, field='{}'",
+            field_name.as_ref().unwrap()
+        );
         Some(HirExpression::FieldAccess {
             base,
             field: field_name.unwrap(),

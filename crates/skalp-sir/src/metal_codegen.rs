@@ -430,7 +430,10 @@ impl<'a> MetalShaderGenerator<'a> {
                                             if needs_reinterpretation {
                                                 // Need to reinterpret bits when converting between float and non-float
                                                 // BUG FIX: Check width matching for as_type<> validity
-                                                let source_width = self.get_signal_width_from_sir(sir, &node_output.signal_id);
+                                                let source_width = self.get_signal_width_from_sir(
+                                                    sir,
+                                                    &node_output.signal_id,
+                                                );
 
                                                 let dest_metal_type = if dest_is_float {
                                                     match output_width {
@@ -451,10 +454,16 @@ impl<'a> MetalShaderGenerator<'a> {
 
                                                 // Metal as_type<> requires exact width match
                                                 use std::cmp::Ordering;
-                                                let source_location = format!("signals->{}", self.sanitize_name(&node_output.signal_id));
+                                                let source_location = format!(
+                                                    "signals->{}",
+                                                    self.sanitize_name(&node_output.signal_id)
+                                                );
 
                                                 // Debug for specific problematic signals
-                                                if output.name.contains("_fp16") || output.name.contains("a_fp16") || output.name.contains("b_fp16") {
+                                                if output.name.contains("_fp16")
+                                                    || output.name.contains("a_fp16")
+                                                    || output.name.contains("b_fp16")
+                                                {
                                                     eprintln!("[OUTPUT ASSIGN] {} = {} | src_width={}, dst_width={}, src_float={}, dst_float={}",
                                                         output.name, node_output.signal_id, source_width, output_width, source_is_float, dest_is_float);
                                                 }
@@ -2035,9 +2044,14 @@ impl<'a> MetalShaderGenerator<'a> {
                                 // Metal's as_type<> requires EXACT size match
 
                                 // Debug for specific problematic signals
-                                if output.contains("_fp16") || output.contains("a_fp16") || output.contains("b_fp16") {
-                                    eprintln!("[NODE ASSIGN] {} = {} | src_width={}, dst_width={}",
-                                        output, signal, source_width, output_width);
+                                if output.contains("_fp16")
+                                    || output.contains("a_fp16")
+                                    || output.contains("b_fp16")
+                                {
+                                    eprintln!(
+                                        "[NODE ASSIGN] {} = {} | src_width={}, dst_width={}",
+                                        output, signal, source_width, output_width
+                                    );
                                 }
 
                                 use std::cmp::Ordering;
@@ -2296,7 +2310,8 @@ impl<'a> MetalShaderGenerator<'a> {
 
                         // Metal as_type<> requires exact width match
                         use std::cmp::Ordering;
-                        let source_location = format!("signals->{}", self.sanitize_name(first_output));
+                        let source_location =
+                            format!("signals->{}", self.sanitize_name(first_output));
                         match source_width.cmp(&output_width) {
                             Ordering::Equal => {
                                 // Same width - direct as_type<>

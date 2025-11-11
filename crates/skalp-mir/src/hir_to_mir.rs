@@ -840,17 +840,26 @@ impl<'hir> HirToMir<'hir> {
                     new_id
                 } else {
                     if let_stmt.name == "_tuple_tmp_66" {
-                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: var_id exists, using {:?}", var_id);
+                        eprintln!(
+                            "[MIR_LET_TRACE] _tuple_tmp_66: var_id exists, using {:?}",
+                            var_id
+                        );
                     }
                     // Variable already exists with correct scope, use it
                     var_id
                 };
 
                 if let_stmt.name == "_tuple_tmp_66" {
-                    eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: About to convert final RHS, var_id={:?}", var_id);
+                    eprintln!(
+                        "[MIR_LET_TRACE] _tuple_tmp_66: About to convert final RHS, var_id={:?}",
+                        var_id
+                    );
                 }
                 // For complex RHS, convert it now that the variable is registered
-                eprintln!("[MIR_LET_FINAL] Converting final RHS for var {:?}, needs_type_inference={}", var_id, needs_type_inference);
+                eprintln!(
+                    "[MIR_LET_FINAL] Converting final RHS for var {:?}, needs_type_inference={}",
+                    var_id, needs_type_inference
+                );
                 let final_rhs = if needs_type_inference {
                     // Already converted
                     eprintln!("[MIR_LET_FINAL]   Using already converted RHS");
@@ -859,22 +868,30 @@ impl<'hir> HirToMir<'hir> {
                     // Convert now that variable is registered and available
                     eprintln!("[MIR_LET_FINAL]   Converting RHS now: {:?}", let_stmt.value);
                     if let_stmt.name == "_tuple_tmp_66" {
-                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: Calling convert_expression on RHS");
+                        eprintln!(
+                            "[MIR_LET_TRACE] _tuple_tmp_66: Calling convert_expression on RHS"
+                        );
                     }
                     let converted = self.convert_expression(&let_stmt.value);
                     if let_stmt.name == "_tuple_tmp_66" {
-                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned: {:?}", converted.is_some());
+                        eprintln!(
+                            "[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned: {:?}",
+                            converted.is_some()
+                        );
                         if converted.is_none() {
                             eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned None - returning None from convert_statement!");
                         }
                     }
-                    let converted = converted?;  // This will return None if conversion failed
+                    let converted = converted?; // This will return None if conversion failed
                     eprintln!("[MIR_LET_FINAL]   Converted RHS: {:?}", converted);
                     converted
                 };
 
                 let lhs = LValue::Variable(var_id);
-                eprintln!("[MIR_LET_FINAL] Creating assignment: {:?} = {:?}", lhs, final_rhs);
+                eprintln!(
+                    "[MIR_LET_FINAL] Creating assignment: {:?} = {:?}",
+                    lhs, final_rhs
+                );
                 Some(Statement::Assignment(Assignment {
                     lhs,
                     rhs: final_rhs,
@@ -2348,7 +2365,11 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::Unary { op, operand })
             }
             hir::HirExpression::Call(call) => {
-                eprintln!("[MIR_CALL] Converting Call expression: function='{}', args={}", call.function, call.args.len());
+                eprintln!(
+                    "[MIR_CALL] Converting Call expression: function='{}', args={}",
+                    call.function,
+                    call.args.len()
+                );
                 // Check if this is a built-in FP method call (e.g., a_fp32.add(b_fp32))
                 // FP methods are transformed to method(receiver, args) by HIR builder
                 // So args[0] is the receiver for FP methods
@@ -2523,7 +2544,10 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Not an FP method or intrinsic - inline the function call
-                eprintln!("[MIR_CALL] Call '{}' is not FP method/intrinsic, will inline", call.function);
+                eprintln!(
+                    "[MIR_CALL] Call '{}' is not FP method/intrinsic, will inline",
+                    call.function
+                );
                 let result = self.inline_function_call(call);
                 if result.is_none() {
                     eprintln!("[MIR_CALL] Call '{}' inlining FAILED", call.function);
@@ -4366,7 +4390,11 @@ impl<'hir> HirToMir<'hir> {
                     eprintln!("[DEBUG] Call substitution: substituting arg[{}]", i);
                     let substituted_arg =
                         self.substitute_expression_with_var_map(arg, param_map, var_id_to_name)?;
-                    eprintln!("[DEBUG] Call substitution: arg[{}] substituted successfully, type={:?}", i, std::mem::discriminant(&substituted_arg));
+                    eprintln!(
+                        "[DEBUG] Call substitution: arg[{}] substituted successfully, type={:?}",
+                        i,
+                        std::mem::discriminant(&substituted_arg)
+                    );
                     substituted_args.push(substituted_arg);
                 }
                 eprintln!(
@@ -4889,8 +4917,8 @@ impl<'hir> HirToMir<'hir> {
             "add" | "sub" | "mul" | "div" | "lt" | "gt" | "le" | "ge" | "eq" | "ne"
         ) && call.args.len() == 2;
 
-        let is_unary_fp_method = matches!(call.function.as_str(), "neg" | "abs" | "sqrt")
-            && call.args.len() == 1;
+        let is_unary_fp_method =
+            matches!(call.function.as_str(), "neg" | "abs" | "sqrt") && call.args.len() == 1;
 
         if is_binary_fp_method || is_unary_fp_method {
             eprintln!(
@@ -4993,7 +5021,9 @@ impl<'hir> HirToMir<'hir> {
         eprintln!("[DEBUG] inline_function_call: About to convert_body_to_expression");
         let body_expr = self.convert_body_to_expression(&body);
         if body_expr.is_none() {
-            eprintln!("[DEBUG] inline_function_call: convert_body_to_expression FAILED - returning None");
+            eprintln!(
+                "[DEBUG] inline_function_call: convert_body_to_expression FAILED - returning None"
+            );
             return None;
         }
         let body_expr = body_expr?;
@@ -5040,8 +5070,7 @@ impl<'hir> HirToMir<'hir> {
         };
         eprintln!(
             "[DEBUG] inline_function_call: '{}' substituted expression type: {}",
-            call.function,
-            expr_type_name
+            call.function, expr_type_name
         );
         let result = self.convert_expression(&substituted_expr);
         if result.is_none() {
@@ -5213,7 +5242,10 @@ impl<'hir> HirToMir<'hir> {
                                 return Some(receiver_type);
                             }
                             // FP comparison methods return bit
-                            if matches!(call.function.as_str(), "lt" | "gt" | "le" | "ge" | "eq" | "ne") {
+                            if matches!(
+                                call.function.as_str(),
+                                "lt" | "gt" | "le" | "ge" | "eq" | "ne"
+                            ) {
                                 return Some(hir::HirType::Bit(1));
                             }
                             // FP unary methods return the same float type
@@ -6175,38 +6207,6 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Call(call) => {
                     // BUG FIX #74: Handle field access on function call results
                     // Example: vec_cross(a, b).x where vec_cross returns a struct
-                    // But ALSO: a.abs().lt(epsilon) where .lt is actually a method call, not field access
-                    // The issue is that .lt(epsilon) should be a Call, not FieldAccess
-
-                    eprintln!(
-                        "[DEBUG] FieldAccess on Call '{}' result, field '{}' - checking if field is actually a method",
-                        call.function, field_name
-                    );
-
-                    // BUG FIX #75: Check if this "field" is actually a method call
-                    // Common FP methods that might appear: lt, gt, le, ge, eq, ne, abs, sqrt, etc.
-                    // If it's a known method, this is likely a parsing artifact where the CallExpr
-                    // was separated from the FieldExpr during substitution
-                    let is_likely_method = matches!(
-                        field_name,
-                        "lt" | "gt" | "le" | "ge" | "eq" | "ne" | "add" | "sub" | "mul" | "div" | "abs" | "sqrt" | "neg"
-                    );
-
-                    if is_likely_method {
-                        eprintln!(
-                            "[DEBUG] Field '{}' looks like a method name - this might be a CallExpr that got separated",
-                            field_name
-                        );
-                        eprintln!("[DEBUG] Returning None to trigger failure - the original HIR should have this as a Call, not FieldAccess");
-                        return None;
-                    }
-
-                    // Not a method - proceed with field extraction from function result
-                    eprintln!(
-                        "[DEBUG] Field '{}' is not a method, attempting HIR-level inline for struct field access",
-                        field_name
-                    );
-
                     // Inline the function to get HIR expression (before MIR conversion)
                     let inlined_hir_expr = self.inline_function_to_hir(call)?;
 
