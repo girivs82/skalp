@@ -1303,7 +1303,32 @@ impl<'a> MetalShaderGenerator<'a> {
             // Check if this is a vector component access
             if let Some(ref input_type_val) = input_type {
                 if input_type_val.is_vector() {
-                    // For vectors, use component accessors (.x, .y, .z, .w)
+                    // BUG FIX #10: Before using component access, verify the Metal representation supports it
+                    // Some signals that are vectors in SIR may be stored as arrays in Metal
+                    let input_width = input_type_val.width();
+                    let (_, metal_array_size) = self.get_metal_type_for_wide_bits(input_width);
+                    let is_metal_array = metal_array_size.is_some();
+
+                    if is_metal_array {
+                        // Metal stores this as an array - use array indexing
+                        let elem_width = input_type_val.elem_type().map(|t| t.width()).unwrap_or(32);
+                        let element_idx = low / elem_width;
+
+                        eprintln!(
+                            "   🎯 VECTOR->ARRAY SLICE: {}[{}] (SIR vector but Metal array, elem_width={}, low={})",
+                            input, element_idx, elem_width, low
+                        );
+
+                        self.write_indented(&format!(
+                            "signals->{} = {}[{}];\n",
+                            self.sanitize_name(output),
+                            input_ref,
+                            element_idx
+                        ));
+                        return;
+                    }
+
+                    // For vectors stored as vectors in Metal, use component accessors (.x, .y, .z, .w)
                     // Determine which component based on the slice range
                     let elem_width = input_type_val.elem_type().map(|t| t.width()).unwrap_or(32);
                     let component_index = low / elem_width;
@@ -1332,11 +1357,21 @@ impl<'a> MetalShaderGenerator<'a> {
 
             // For non-vector types, check if it's a wide Bits type requiring element access
             if let Some(SirType::Bits(input_width)) = input_type {
-                if input_width > 128 {
+                // BUG FIX #10: Check if the Metal representation is an array before using component access
+                // Some signals are stored as uint[N] arrays in Metal, not as vector types
+                let (_, metal_array_size) = self.get_metal_type_for_wide_bits(input_width);
+                let is_metal_array = metal_array_size.is_some();
+
+                if input_width > 128 || is_metal_array {
                     // Wide Bits type stored as array - need element access
                     let element_idx = shift / 32; // Which array element
                     let bit_offset = shift % 32; // Bit offset within that element
                     let mask = (1u64 << width) - 1;
+
+                    eprintln!(
+                        "   🎯 SLICE from array: {}[{}] (width={}, shift={}, is_metal_array={})",
+                        input, element_idx, input_width, shift, is_metal_array
+                    );
 
                     self.write_indented(&format!(
                         "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
@@ -2035,16 +2070,33 @@ impl<'a> MetalShaderGenerator<'a> {
 
                         // Check for vector-to-scalar conversion (uint2/uint4 -> uint)
                         if source_width > 32 && output_width <= 32 {
-                            // Source is uint2 or uint4, destination is uint - extract first component
-                            eprintln!(
-                                "   🎯 Vector->Scalar: {} ({} bits) -> {} ({} bits), extracting .x",
-                                signal, source_width, output, output_width
-                            );
-                            self.write_indented(&format!(
-                                "signals->{} = {}.x;\n",
-                                self.sanitize_name(output),
-                                source_location
-                            ));
+                            // BUG FIX #10: Check if source is actually stored as a vector before using .x
+                            let (_, metal_array_size) = self.get_metal_type_for_wide_bits(source_width);
+                            let is_metal_array = metal_array_size.is_some();
+
+                            if is_metal_array {
+                                // Source is stored as array - use array indexing
+                                eprintln!(
+                                    "   🎯 Array->Scalar: {} ({} bits, array) -> {} ({} bits), extracting [0]",
+                                    signal, source_width, output, output_width
+                                );
+                                self.write_indented(&format!(
+                                    "signals->{} = {}[0];\n",
+                                    self.sanitize_name(output),
+                                    source_location
+                                ));
+                            } else {
+                                // Source is uint2 or uint4, destination is uint - extract first component
+                                eprintln!(
+                                    "   🎯 Vector->Scalar: {} ({} bits) -> {} ({} bits), extracting .x",
+                                    signal, source_width, output, output_width
+                                );
+                                self.write_indented(&format!(
+                                    "signals->{} = {}.x;\n",
+                                    self.sanitize_name(output),
+                                    source_location
+                                ));
+                            }
                         } else if source_width <= 32 && output_width > 32 && output_width <= 64 {
                             // Source is scalar, destination is uint2 - construct vector
                             // Metal Backend: Check if source is float and needs cast
@@ -2423,16 +2475,33 @@ impl<'a> MetalShaderGenerator<'a> {
                         self.sanitize_name(first_output)
                     ));
                 } else if source_width > 32 && output_width <= 32 {
-                    // Source is uint2/uint4, destination is uint - extract first component
-                    eprintln!(
-                        "   🎯 Additional output vector->scalar: {} ({} bits) -> {} ({} bits)",
-                        first_output, source_width, additional_output.signal_id, output_width
-                    );
-                    self.write_indented(&format!(
-                        "signals->{} = signals->{}.x;\n",
-                        self.sanitize_name(&additional_output.signal_id),
-                        self.sanitize_name(first_output)
-                    ));
+                    // BUG FIX #10: Check if source is actually stored as a vector before using .x
+                    let (_, metal_array_size) = self.get_metal_type_for_wide_bits(source_width);
+                    let is_metal_array = metal_array_size.is_some();
+
+                    if is_metal_array {
+                        // Source is stored as array - use array indexing
+                        eprintln!(
+                            "   🎯 Additional output array->scalar: {} ({} bits, array) -> {} ({} bits)",
+                            first_output, source_width, additional_output.signal_id, output_width
+                        );
+                        self.write_indented(&format!(
+                            "signals->{} = signals->{}[0];\n",
+                            self.sanitize_name(&additional_output.signal_id),
+                            self.sanitize_name(first_output)
+                        ));
+                    } else {
+                        // Source is uint2/uint4, destination is uint - extract first component
+                        eprintln!(
+                            "   🎯 Additional output vector->scalar: {} ({} bits) -> {} ({} bits)",
+                            first_output, source_width, additional_output.signal_id, output_width
+                        );
+                        self.write_indented(&format!(
+                            "signals->{} = signals->{}.x;\n",
+                            self.sanitize_name(&additional_output.signal_id),
+                            self.sanitize_name(first_output)
+                        ));
+                    }
                 } else if source_width <= 32 && output_width > 32 && output_width <= 64 {
                     // Source is scalar, destination is uint2 - construct vector
                     // Metal Backend: Check if source is float and needs cast
