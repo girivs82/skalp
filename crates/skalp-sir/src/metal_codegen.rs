@@ -2169,45 +2169,102 @@ impl<'a> MetalShaderGenerator<'a> {
                                     }
                                     Ordering::Greater => {
                                         // Source wider: extract lower bits first, then reinterpret
-                                        // e.g., uint(32) -> half(16): as_type<half>((ushort)source)
+                                        // Metal Backend: Only use as_type<> if dest is float, otherwise just cast
                                         let intermediate_type = match output_width {
+                                            8 => "uchar",
                                             16 => "ushort",
                                             32 => "uint",
                                             64 => "ulong",
                                             _ => "uint",
                                         };
-                                        eprintln!(
-                                            "   🔄 Narrow+Reinterpret: {} ({} bits) -> {} ({} bits): as_type<{}>(({}){}) ",
-                                            signal, source_width, output, output_width, dest_type_name, intermediate_type, source_location
-                                        );
-                                        self.write_indented(&format!(
-                                            "signals->{} = as_type<{}>(({}){}); \n",
-                                            self.sanitize_name(output),
-                                            dest_type_name,
-                                            intermediate_type,
-                                            source_location
-                                        ));
+
+                                        let source_expr = if source_is_float {
+                                            // Convert float to bits first, then narrow
+                                            // e.g., float(32) -> half(16): (ushort)as_type<uint>(float_source)
+                                            let source_intermediate = match source_width {
+                                                64 => "ulong",
+                                                _ => "uint",
+                                            };
+                                            format!("as_type<{}>({})", source_intermediate, source_location)
+                                        } else {
+                                            source_location.clone()
+                                        };
+
+                                        if dest_is_float {
+                                            // Destination is float - need as_type<> for bit reinterpretation
+                                            // e.g., uint(32) -> half(16): as_type<half>((ushort)source)
+                                            eprintln!(
+                                                "   🔄 Narrow+Reinterpret to float: {} ({} bits, src_float={}) -> {} ({} bits): as_type<{}>(({}){}) ",
+                                                signal, source_width, source_is_float, output, output_width, dest_type_name, intermediate_type, source_expr
+                                            );
+                                            self.write_indented(&format!(
+                                                "signals->{} = as_type<{}>(({}){}); \n",
+                                                self.sanitize_name(output),
+                                                dest_type_name,
+                                                intermediate_type,
+                                                source_expr
+                                            ));
+                                        } else {
+                                            // Destination is integer - just use C-style cast
+                                            // e.g., uint(32) -> uchar(8): (uchar)source
+                                            eprintln!(
+                                                "   🔄 Narrow to int: {} ({} bits, src_float={}) -> {} ({} bits): ({}){} ",
+                                                signal, source_width, source_is_float, output, output_width, intermediate_type, source_expr
+                                            );
+                                            self.write_indented(&format!(
+                                                "signals->{} = ({}){};\n",
+                                                self.sanitize_name(output),
+                                                intermediate_type,
+                                                source_expr
+                                            ));
+                                        }
                                     }
                                     Ordering::Less => {
                                         // Source narrower: widen source first, then reinterpret
-                                        // e.g., uchar(8) -> float(32): as_type<float>((uint)source)
+                                        // Metal Backend: Only use as_type<> if dest is float, otherwise just cast
                                         let intermediate_type = match output_width {
                                             16 => "ushort",
                                             32 => "uint",
                                             64 => "ulong",
                                             _ => "uint",
                                         };
-                                        eprintln!(
-                                            "   🔄 Widen+Reinterpret: {} ({} bits) -> {} ({} bits): as_type<{}>(({}){}) ",
-                                            signal, source_width, output, output_width, dest_type_name, intermediate_type, source_location
-                                        );
-                                        self.write_indented(&format!(
-                                            "signals->{} = as_type<{}>(({}){}); \n",
-                                            self.sanitize_name(output),
-                                            dest_type_name,
-                                            intermediate_type,
-                                            source_location
-                                        ));
+
+                                        let source_expr = if source_is_float {
+                                            // Convert float to bits first, then widen
+                                            // e.g., float(32) -> ulong(64): (ulong)as_type<uint>(float_source)
+                                            format!("as_type<uint>({})", source_location)
+                                        } else {
+                                            source_location.clone()
+                                        };
+
+                                        if dest_is_float {
+                                            // Destination is float - need as_type<> for bit reinterpretation
+                                            // e.g., uchar(8) -> float(32): as_type<float>((uint)source)
+                                            eprintln!(
+                                                "   🔄 Widen+Reinterpret to float: {} ({} bits, src_float={}) -> {} ({} bits): as_type<{}>(({}){}) ",
+                                                signal, source_width, source_is_float, output, output_width, dest_type_name, intermediate_type, source_expr
+                                            );
+                                            self.write_indented(&format!(
+                                                "signals->{} = as_type<{}>(({}){}); \n",
+                                                self.sanitize_name(output),
+                                                dest_type_name,
+                                                intermediate_type,
+                                                source_expr
+                                            ));
+                                        } else {
+                                            // Destination is integer - just use C-style cast
+                                            // e.g., uchar(8) -> uint(32): (uint)source
+                                            eprintln!(
+                                                "   🔄 Widen to int: {} ({} bits, src_float={}) -> {} ({} bits): ({}){} ",
+                                                signal, source_width, source_is_float, output, output_width, intermediate_type, source_expr
+                                            );
+                                            self.write_indented(&format!(
+                                                "signals->{} = ({}){};\n",
+                                                self.sanitize_name(output),
+                                                intermediate_type,
+                                                source_expr
+                                            ));
+                                        }
                                     }
                                 }
                             } else {
