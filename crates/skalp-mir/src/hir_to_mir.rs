@@ -6175,15 +6175,36 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Call(call) => {
                     // BUG FIX #74: Handle field access on function call results
                     // Example: vec_cross(a, b).x where vec_cross returns a struct
-                    // Strategy:
-                    // 1. Inline the function call to get its HIR body expression
-                    // 2. Create a new FieldAccess with the inlined body as base
-                    // 3. Recursively convert this new FieldAccess
-                    // This allows the StructLiteral handler to work if the function returns a struct
+                    // But ALSO: a.abs().lt(epsilon) where .lt is actually a method call, not field access
+                    // The issue is that .lt(epsilon) should be a Call, not FieldAccess
 
                     eprintln!(
-                        "[DEBUG] FieldAccess on Call '{}' result, field '{}' - attempting HIR-level inline",
+                        "[DEBUG] FieldAccess on Call '{}' result, field '{}' - checking if field is actually a method",
                         call.function, field_name
+                    );
+
+                    // BUG FIX #75: Check if this "field" is actually a method call
+                    // Common FP methods that might appear: lt, gt, le, ge, eq, ne, abs, sqrt, etc.
+                    // If it's a known method, this is likely a parsing artifact where the CallExpr
+                    // was separated from the FieldExpr during substitution
+                    let is_likely_method = matches!(
+                        field_name,
+                        "lt" | "gt" | "le" | "ge" | "eq" | "ne" | "add" | "sub" | "mul" | "div" | "abs" | "sqrt" | "neg"
+                    );
+
+                    if is_likely_method {
+                        eprintln!(
+                            "[DEBUG] Field '{}' looks like a method name - this might be a CallExpr that got separated",
+                            field_name
+                        );
+                        eprintln!("[DEBUG] Returning None to trigger failure - the original HIR should have this as a Call, not FieldAccess");
+                        return None;
+                    }
+
+                    // Not a method - proceed with field extraction from function result
+                    eprintln!(
+                        "[DEBUG] Field '{}' is not a method, attempting HIR-level inline for struct field access",
+                        field_name
                     );
 
                     // Inline the function to get HIR expression (before MIR conversion)

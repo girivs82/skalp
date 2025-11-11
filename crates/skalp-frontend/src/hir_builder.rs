@@ -1707,6 +1707,25 @@ impl HirBuilderContext {
 
             match current_node.kind() {
                 SyntaxKind::FieldExpr => {
+                    let field_name_temp = current_node
+                        .children_with_tokens()
+                        .filter_map(|elem| elem.into_token())
+                        .find(|t| {
+                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                        })
+                        .map(|t| t.text().to_string());
+
+                    if let Some(ref fname) = field_name_temp {
+                        if fname == "lt" || fname == "gt" || fname == "le" || fname == "ge" {
+                            eprintln!("[HIR_CHAINED_RHS] Processing FieldExpr(.{}), i={}, rhs_exprs.len()={}", fname, i, rhs_exprs.len());
+                            if i + 1 < rhs_exprs.len() {
+                                eprintln!("[HIR_CHAINED_RHS]   Next node kind: {:?}", rhs_exprs[i + 1].kind());
+                            } else {
+                                eprintln!("[HIR_CHAINED_RHS]   No next node!");
+                            }
+                        }
+                    }
+
                     // Check if next node is CallExpr (method call pattern)
                     if i + 1 < rhs_exprs.len() && rhs_exprs[i + 1].kind() == SyntaxKind::CallExpr {
                         // This is a method call: FieldExpr(.method) + CallExpr(args)
