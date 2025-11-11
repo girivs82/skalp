@@ -3202,9 +3202,38 @@ impl<'a> MirToSirConverter<'a> {
             | DataType::LogicExpr { default, .. }
             | DataType::IntExpr { default, .. }
             | DataType::NatExpr { default, .. } => SirType::Bits(*default),
-            // BUG FIX #65: Struct types (including tuples) need proper width calculation
-            // Calculate total width by summing all field widths
+            // BUG FIX #65 & Metal Backend Fix: Struct types need proper type preservation
             DataType::Struct(struct_type) => {
+                // BUG FIX: Metal Backend - Detect vec2/vec3/vec4 structs and preserve them as vector types
+                // instead of flattening to Bits, so Metal can generate proper float2/float3/float4 types
+                let struct_name_lower = struct_type.name.to_lowercase();
+
+                // Check if this is a vec2/vec3/vec4 struct
+                if (struct_name_lower == "vec2" || struct_name_lower == "vector2") && struct_type.fields.len() >= 2 {
+                    // Get the element type from the first field (assume all fields have same type)
+                    let elem_type = self.convert_type(&struct_type.fields[0].field_type);
+                    eprintln!(
+                        "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec2({:?})",
+                        struct_type.name, elem_type
+                    );
+                    return SirType::Vec2(Box::new(elem_type));
+                } else if (struct_name_lower == "vec3" || struct_name_lower == "vector3") && struct_type.fields.len() >= 3 {
+                    let elem_type = self.convert_type(&struct_type.fields[0].field_type);
+                    eprintln!(
+                        "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec3({:?})",
+                        struct_type.name, elem_type
+                    );
+                    return SirType::Vec3(Box::new(elem_type));
+                } else if (struct_name_lower == "vec4" || struct_name_lower == "vector4") && struct_type.fields.len() >= 4 {
+                    let elem_type = self.convert_type(&struct_type.fields[0].field_type);
+                    eprintln!(
+                        "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec4({:?})",
+                        struct_type.name, elem_type
+                    );
+                    return SirType::Vec4(Box::new(elem_type));
+                }
+
+                // BUG FIX #65: Other structs/tuples - calculate total width
                 let total_width: usize = struct_type
                     .fields
                     .iter()
