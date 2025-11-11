@@ -2910,6 +2910,38 @@ impl<'a> MirToSirConverter<'a> {
 
     fn connect_node_to_signal(&mut self, node_id: usize, signal_name: &str) {
         eprintln!("🔗 CONNECT: Node {} -> Signal '{}'", node_id, signal_name);
+
+        // BUG FIX #8: Get the node's output width BEFORE modifying the signal
+        // The node was created with the correct expression width (e.g., 96 bits for concat of 3x32-bit values)
+        // But the signal may have been declared with the wrong width (e.g., 32 bits from variable type)
+        let node_output_width = if let Some(node) = self
+            .sir
+            .combinational_nodes
+            .iter()
+            .chain(self.sir.sequential_nodes.iter())
+            .find(|n| n.id == node_id)
+        {
+            eprintln!("   🔍 Node {} has {} outputs", node_id, node.outputs.len());
+            // Get the width of the node's output signal (node_X_out)
+            if !node.outputs.is_empty() {
+                let output_signal_name = &node.outputs[0].signal_id;
+                let width = self.get_signal_width(output_signal_name);
+                eprintln!(
+                    "   🔍 Node {} output signal '{}' has width {}",
+                    node_id, output_signal_name, width
+                );
+                Some(width)
+            } else {
+                eprintln!("   ⚠️  Node {} has no outputs!", node_id);
+                None
+            }
+        } else {
+            eprintln!("   ❌ Node {} not found!", node_id);
+            None
+        };
+
+        eprintln!("   🔍 node_output_width = {:?}", node_output_width);
+
         // Update signal to have this node as driver
         if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
             if let Some(existing_driver) = signal.driver_node {
@@ -2920,6 +2952,20 @@ impl<'a> MirToSirConverter<'a> {
                 // Don't overwrite - keep the first driver
                 return;
             }
+
+            // BUG FIX #8: Update signal width to match node output width if different
+            if let Some(output_width) = node_output_width {
+                if signal.width != output_width {
+                    eprintln!(
+                        "   🔧 BUG #8 FIX: Updating signal '{}' width: {} → {} bits (node {} output)",
+                        signal_name, signal.width, output_width, node_id
+                    );
+                    signal.width = output_width;
+                    // Also update the SirType to match the new width
+                    signal.sir_type = SirType::Bits(output_width);
+                }
+            }
+
             signal.driver_node = Some(node_id);
             eprintln!(
                 "   ✅ Signal '{}' now driven by node {}",

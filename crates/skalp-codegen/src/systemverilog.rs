@@ -81,6 +81,200 @@ fn is_generic_type(data_type: &DataType) -> bool {
     }
 }
 
+/// BUG FIX #8: Compute the actual width of an expression
+/// This is needed because variables are declared with their type width (e.g., fp32 = 32 bits)
+/// but may be assigned expressions with different widths (e.g., {a, b, c} = 96 bits)
+fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -> Option<usize> {
+    match expr {
+        skalp_mir::Expression::Literal(value) => match value {
+            skalp_mir::Value::Integer(_) => Some(32),
+            skalp_mir::Value::Float(_) => Some(32), // Single-precision float
+            skalp_mir::Value::BitVector { width, .. } => Some(*width),
+            _ => None,
+        },
+        skalp_mir::Expression::Ref(lvalue) => {
+            // Get the width of the referenced LValue
+            compute_lvalue_width(lvalue, mir_module)
+        }
+        skalp_mir::Expression::Concat(exprs) => {
+            // Sum the widths of all concatenated expressions
+            let mut total_width = 0;
+            for e in exprs {
+                if let Some(w) = compute_expression_width(e, mir_module) {
+                    total_width += w;
+                } else {
+                    return None; // Can't determine width
+                }
+            }
+            Some(total_width)
+        }
+        skalp_mir::Expression::Binary { left, right, .. } => {
+            // For binary ops, use the wider of the two operands
+            let left_width = compute_expression_width(left, mir_module)?;
+            let right_width = compute_expression_width(right, mir_module)?;
+            Some(left_width.max(right_width))
+        }
+        skalp_mir::Expression::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            // Use the wider of the two branches
+            let then_width = compute_expression_width(then_expr, mir_module)?;
+            let else_width = compute_expression_width(else_expr, mir_module)?;
+            Some(then_width.max(else_width))
+        }
+        skalp_mir::Expression::Cast { target_type, .. } => {
+            // Cast specifies the target type width
+            Some(safe_get_type_width(target_type))
+        }
+        _ => None, // For other expressions, can't determine width statically
+    }
+}
+
+/// Helper to compute type width, handling struct types specially
+fn safe_get_type_width(data_type: &DataType) -> usize {
+    match data_type {
+        DataType::Struct(struct_type) => type_width::get_struct_total_width(struct_type),
+        _ => type_width::get_type_width(data_type),
+    }
+}
+
+/// Compute the width of an LValue
+fn compute_lvalue_width(lvalue: &skalp_mir::LValue, mir_module: &Module) -> Option<usize> {
+    match lvalue {
+        skalp_mir::LValue::Variable(var_id) => {
+            // Find the variable and return its type width
+            mir_module
+                .variables
+                .iter()
+                .find(|v| v.id == *var_id)
+                .map(|v| safe_get_type_width(&v.var_type))
+        }
+        skalp_mir::LValue::Signal(sig_id) => {
+            // Find the signal and return its type width
+            mir_module
+                .signals
+                .iter()
+                .find(|s| s.id == *sig_id)
+                .map(|s| safe_get_type_width(&s.signal_type))
+        }
+        skalp_mir::LValue::Port(port_id) => {
+            // Find the port and return its type width
+            mir_module
+                .ports
+                .iter()
+                .find(|p| p.id == *port_id)
+                .map(|p| safe_get_type_width(&p.port_type))
+        }
+        skalp_mir::LValue::BitSelect { .. } => Some(1), // Single bit
+        skalp_mir::LValue::RangeSelect { high, low, .. } => {
+            // For constant range selects, try to compute the width
+            // Otherwise return None for dynamic ranges
+            if let (
+                skalp_mir::Expression::Literal(skalp_mir::Value::Integer(h)),
+                skalp_mir::Expression::Literal(skalp_mir::Value::Integer(l)),
+            ) = (&**high, &**low)
+            {
+                Some((h - l + 1) as usize)
+            } else {
+                None // Dynamic range, can't determine statically
+            }
+        }
+        _ => None,
+    }
+}
+
+/// BUG FIX #8: Build a map of variable IDs to their actual widths by analyzing assignments
+/// Variables may be declared with a type width (e.g., fp32 = 32 bits) but assigned expressions
+/// with different widths (e.g., concatenation of 3 fp32 values = 96 bits)
+fn infer_variable_widths(mir_module: &Module) -> HashMap<skalp_mir::VariableId, usize> {
+    let mut width_map = HashMap::new();
+
+    // Scan continuous assignments
+    for assign in &mir_module.assignments {
+        if let skalp_mir::LValue::Variable(var_id) = &assign.lhs {
+            // Compute the width of the RHS expression
+            if let Some(width) = compute_expression_width(&assign.rhs, mir_module) {
+                // Get the variable's declared type width
+                if let Some(var) = mir_module.variables.iter().find(|v| v.id == *var_id) {
+                    let type_w = safe_get_type_width(&var.var_type);
+                    // If the expression width differs from type width, record the actual width
+                    if width != type_w {
+                        eprintln!(
+                            "🔧 BUG #8: Variable '{}' (id={}) type width={} but expression width={} - using expression width",
+                            var.name, var_id.0, type_w, width
+                        );
+                        width_map.insert(*var_id, width);
+                    }
+                }
+            }
+        }
+    }
+
+    // Scan process assignments
+    for process in &mir_module.processes {
+        scan_statements_for_variable_widths(&process.body.statements, mir_module, &mut width_map);
+    }
+
+    width_map
+}
+
+/// Recursively scan statements to find variable assignments and infer widths
+fn scan_statements_for_variable_widths(
+    statements: &[Statement],
+    mir_module: &Module,
+    width_map: &mut HashMap<skalp_mir::VariableId, usize>,
+) {
+    for stmt in statements {
+        match stmt {
+            Statement::Assignment(assign) => {
+                if let skalp_mir::LValue::Variable(var_id) = &assign.lhs {
+                    if let Some(width) = compute_expression_width(&assign.rhs, mir_module) {
+                        if let Some(var) = mir_module.variables.iter().find(|v| v.id == *var_id) {
+                            let type_w = safe_get_type_width(&var.var_type);
+                            if width != type_w {
+                                eprintln!(
+                                    "🔧 BUG #8: Variable '{}' (id={}) in process: type width={} but expression width={} - using expression width",
+                                    var.name, var_id.0, type_w, width
+                                );
+                                width_map.insert(*var_id, width);
+                            }
+                        }
+                    }
+                }
+            }
+            Statement::If(if_stmt) => {
+                scan_statements_for_variable_widths(
+                    &if_stmt.then_block.statements,
+                    mir_module,
+                    width_map,
+                );
+                if let Some(else_blk) = &if_stmt.else_block {
+                    scan_statements_for_variable_widths(
+                        &else_blk.statements,
+                        mir_module,
+                        width_map,
+                    );
+                }
+            }
+            Statement::Case(case_stmt) => {
+                for item in &case_stmt.items {
+                    scan_statements_for_variable_widths(
+                        &item.block.statements,
+                        mir_module,
+                        width_map,
+                    );
+                }
+                if let Some(def_blk) = &case_stmt.default {
+                    scan_statements_for_variable_widths(&def_blk.statements, mir_module, width_map);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Generate a single SystemVerilog module
 fn generate_module(
     mir_module: &Module,
@@ -88,6 +282,10 @@ fn generate_module(
     mir: &Mir,
 ) -> Result<String> {
     let mut sv = String::new();
+
+    // BUG FIX #8: Infer actual variable widths from their assignments
+    // Variables may be typed as fp32 (32 bits) but assigned concatenations (96+ bits)
+    let variable_width_overrides = infer_variable_widths(mir_module);
 
     // Collect all unique struct and enum types from ports and signals
     let mut struct_types: HashSet<String> = HashSet::new();
@@ -207,7 +405,21 @@ fn generate_module(
     let mut variable_unique_names: HashMap<skalp_mir::VariableId, String> = HashMap::new();
 
     for variable in &mir_module.variables {
-        let (element_width, array_dim) = get_type_dimensions(&variable.var_type);
+        // BUG FIX #8: Check if we have an inferred width override for this variable
+        // If so, use the actual expression width instead of the type width
+        let (element_width, array_dim) =
+            if let Some(&inferred_width) = variable_width_overrides.get(&variable.id) {
+                // Use the inferred width (e.g., 96 bits for concat of 3x32-bit values)
+                let width_str = if inferred_width > 1 {
+                    format!("[{}:0] ", inferred_width - 1)
+                } else {
+                    String::new()
+                };
+                (width_str, String::new()) // No array dimension for overridden widths
+            } else {
+                // Use the type-based width
+                get_type_dimensions(&variable.var_type)
+            };
 
         // Check if this variable name has already been declared
         let unique_name = if declared_variable_names.contains_key(&variable.name) {
