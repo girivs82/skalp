@@ -6311,17 +6311,47 @@ impl<'hir> HirToMir<'hir> {
             .map(|f| (f.name.clone(), f.field_type.clone()))
             .collect();
 
-        // Calculate field offset
-        let mut current_offset = 0;
-        for (field_name_in_struct, field_type) in fields {
-            let field_width = self.get_hir_type_width(&field_type);
-            if field_name_in_struct == field_name {
-                // Found the field - return its bit range
-                let high_bit = current_offset + field_width - 1;
-                let low_bit = current_offset;
-                return Some((high_bit, low_bit));
+        // BUG FIX #15/#17: Calculate field offset correctly for tuples
+        // Tuples are packed as {a, b, c} where 'a' is in MSB (highest bits)
+        // So for (bit[32], bit[32]), element 0 is at [63:32], element 1 is at [31:0]
+        // We need to calculate offsets from MSB downward for tuple fields
+
+        // First, calculate total width to determine if we need MSB-first ordering
+        let total_width: usize = fields.iter()
+            .map(|(_, ty)| self.get_hir_type_width(ty))
+            .sum();
+
+        // Check if this is a tuple (fields named "_0", "_1", etc.)
+        let is_tuple = fields.iter().all(|(name, _)| {
+            name.starts_with('_') && name[1..].parse::<usize>().is_ok()
+        });
+
+        if is_tuple {
+            // For tuples: calculate offset from MSB downward
+            let mut current_offset_from_msb = total_width;
+            for (field_name_in_struct, field_type) in fields {
+                let field_width = self.get_hir_type_width(&field_type);
+                current_offset_from_msb -= field_width;
+                if field_name_in_struct == field_name {
+                    // Found the field - bits are [current_offset_from_msb + width - 1 : current_offset_from_msb]
+                    let high_bit = current_offset_from_msb + field_width - 1;
+                    let low_bit = current_offset_from_msb;
+                    return Some((high_bit, low_bit));
+                }
             }
-            current_offset += field_width;
+        } else {
+            // For regular structs: calculate offset from LSB upward (original behavior)
+            let mut current_offset = 0;
+            for (field_name_in_struct, field_type) in fields {
+                let field_width = self.get_hir_type_width(&field_type);
+                if field_name_in_struct == field_name {
+                    // Found the field - return its bit range
+                    let high_bit = current_offset + field_width - 1;
+                    let low_bit = current_offset;
+                    return Some((high_bit, low_bit));
+                }
+                current_offset += field_width;
+            }
         }
         None // Field not found
     }

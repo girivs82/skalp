@@ -73,10 +73,6 @@ impl<'a> MetalShaderGenerator<'a> {
                 .map(|s| &s.sir_type)
                 .unwrap_or(&default_type);
             let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(sir_type);
-            eprintln!(
-                "🔧 REGISTER[{}]: {} (type={} {})",
-                i, name, base_type, array_suffix
-            );
             self.write_indented(&format!(
                 "{} {}{};\n",
                 base_type,
@@ -653,14 +649,32 @@ impl<'a> MetalShaderGenerator<'a> {
             let right = &node.inputs[1].signal_id;
             let output = &node.outputs[0].signal_id;
 
+            // BUG FIX #16: For And/Or operations on boolean (1-bit) values, use logical operators
+            // Check if both inputs are 1-bit (boolean) to determine if we need logical vs bitwise ops
+            let left_width = self.get_signal_width_from_sir(sir, left);
+            let right_width = self.get_signal_width_from_sir(sir, right);
+            let is_boolean_context = left_width == 1 && right_width == 1;
+
             let op_str = match op {
                 BinaryOperation::Add => "+",
                 BinaryOperation::Sub => "-",
                 BinaryOperation::Mul => "*",
                 BinaryOperation::Div => "/",
                 BinaryOperation::Mod => "%",
-                BinaryOperation::And => "&",
-                BinaryOperation::Or => "|",
+                BinaryOperation::And => {
+                    if is_boolean_context {
+                        "&&"  // Logical AND for booleans (prevents bitwise & on float comparison results)
+                    } else {
+                        "&"   // Bitwise AND for integers
+                    }
+                }
+                BinaryOperation::Or => {
+                    if is_boolean_context {
+                        "||"  // Logical OR for booleans
+                    } else {
+                        "|"   // Bitwise OR for integers
+                    }
+                }
                 BinaryOperation::Xor => "^",
                 BinaryOperation::Eq => "==",
                 BinaryOperation::Neq => "!=",
@@ -1804,9 +1818,10 @@ impl<'a> MetalShaderGenerator<'a> {
             let mut components = vec!["0u".to_string(); 4];
             let mut bit_offset = 0;
 
-            // BUG FIX #65: Don't reverse for uint4 - inputs are in tuple order (first to last)
-            // uint4(a, b, c, d) maps to {.x=a, .y=b, .z=c, .w=d} which is LSB to MSB
-            // Tuple (a, b, c) should map to {.x=a, .y=b, .z=c} for proper element access
+            // BUG FIX #15: Hardware concat {a, b, c, d} has a in MSB, d in LSB
+            // SystemVerilog {a, b, c, d} = {a[127:96], b[95:64], c[63:32], d[31:0]}
+            // Metal uint4(x, y, z, w) = {x[31:0], y[63:32], z[95:64], w[127:96]}
+            // So {a, b, c, d} maps to uint4(d, c, b, a) - REVERSE order
             let mut input_idx = 0;
             for (input_name, width) in input_widths.iter() {
                 let component_idx = bit_offset / 32;
@@ -1846,13 +1861,14 @@ impl<'a> MetalShaderGenerator<'a> {
                 input_idx += 1;
             }
 
+            // REVERSE components: SystemVerilog MSB-first → Metal LSB-first
             self.write_indented(&format!(
                 "signals->{} = uint4({}, {}, {}, {});\n",
                 self.sanitize_name(output),
-                components[0],
-                components[1],
+                components[3],
                 components[2],
-                components[3]
+                components[1],
+                components[0]
             ));
         } else if output_width > 32 {
             // Output is 33-64 bits -> uint2
@@ -1865,7 +1881,10 @@ impl<'a> MetalShaderGenerator<'a> {
             let mut components = vec!["0u".to_string(); 2];
             let mut bit_offset = 0;
 
-            // BUG FIX #65: Don't reverse for uint2 - inputs are in tuple order
+            // BUG FIX #15: Hardware concat {a, b} has a in MSB, b in LSB
+            // SystemVerilog {a, b} = {a[63:32], b[31:0]}
+            // Metal uint2(x, y) = {x[31:0], y[63:32]}
+            // So {a, b} maps to uint2(b, a) - REVERSE order
             for (input_name, width) in input_widths.iter() {
                 let component_idx = bit_offset / 32;
                 if component_idx < 2 {
@@ -1894,11 +1913,12 @@ impl<'a> MetalShaderGenerator<'a> {
                 bit_offset += width;
             }
 
+            // REVERSE components: SystemVerilog MSB-first → Metal LSB-first
             self.write_indented(&format!(
                 "signals->{} = uint2({}, {});\n",
                 self.sanitize_name(output),
-                components[0],
-                components[1]
+                components[1],
+                components[0]
             ));
         } else {
             // Output is 1-32 bits -> uint
