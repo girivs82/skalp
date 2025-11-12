@@ -3462,7 +3462,7 @@ impl<'hir> HirToMir<'hir> {
 
             // BUG FIX #6: Use global match ID with arm index to make prefix unique
             let arm_prefix = format!("match_{}_{}", match_id, arm_idx);
-            self.match_arm_prefix = Some(arm_prefix);
+            self.match_arm_prefix = Some(arm_prefix.clone());
 
             let arm_expr = self.convert_expression(&arm.expr);
 
@@ -4027,26 +4027,25 @@ impl<'hir> HirToMir<'hir> {
                 if let Some(var_name) = var_id_to_name.get(var_id) {
                     if let Some(arg_expr) = param_map.get(var_name) {
                         // Found in substitution map, replace with expression
-                        eprintln!(
-                            "[DEBUG] Variable substitution: var_name={}, expr type: {:?}",
-                            var_name,
-                            std::mem::discriminant(&**arg_expr)
-                        );
-                        if let hir::HirExpression::Match(m) = &**arg_expr {
-                            eprintln!(
-                                "[DEBUG] Variable: substituting Match expression with {} arms",
-                                m.arms.len()
-                            );
+                        // BUG #20 FIX: Don't inline match expressions during substitution
+                        // Match expressions should be converted once and the variable reference preserved
+                        // Otherwise, the match gets converted multiple times (once per use), causing:
+                        // 1. Duplicate conversions with different match IDs
+                        // 2. Variables from earlier conversions not accessible in later ones
+                        // 3. Premature exits from recursive conversion
+                        if let hir::HirExpression::Match(_) = &**arg_expr {
+                            return Some(expr.clone()); // Keep as Variable reference
                         }
+
+                        // BUG #20 FIX: Also don't inline Block expressions that might contain matches
+                        if let hir::HirExpression::Block { .. } = &**arg_expr {
+                            return Some(expr.clone()); // Keep as Variable reference
+                        }
+
+                        // For simple expressions, safe to inline
                         let cloned = (*arg_expr).clone();
-                        if let hir::HirExpression::Match(m) = &cloned {}
                         return Some(cloned);
                     } else {
-                        eprintln!(
-                            "[DEBUG] Variable: name '{}' not found in param_map (keys: {:?})",
-                            var_name,
-                            param_map.keys().collect::<Vec<_>>()
-                        );
                     }
                 }
 
