@@ -3356,6 +3356,22 @@ impl HirBuilderContext {
                         prev_sibling
                             .first_token_of_kind(SyntaxKind::Ident)
                             .map(|t| t.text().to_string())?
+                    } else if prev_sibling.kind() == SyntaxKind::PathExpr {
+                        // BUG #21 FIX: Handle module-qualified function calls (e.g., imported_funcs::process_data)
+                        // PathExpr contains multiple Ident tokens separated by :: tokens
+                        let mut idents = Vec::new();
+                        for elem in prev_sibling.children_with_tokens() {
+                            if let Some(token) = elem.as_token() {
+                                if token.kind() == SyntaxKind::Ident {
+                                    idents.push(token.text().to_string());
+                                }
+                            }
+                        }
+                        if idents.is_empty() {
+                            return None;
+                        }
+                        // Join all identifiers with "::" to reconstruct the full path
+                        idents.join("::")
                     } else {
                         return None;
                     }

@@ -3537,6 +3537,11 @@ impl<'hir> HirToMir<'hir> {
     fn find_function(&self, function_name: &str) -> Option<&hir::HirFunction> {
         let hir = self.hir?;
 
+        // BUG #21 FIX: Handle module-qualified function names (e.g., "imported_funcs::process_data")
+        // The HIR stores only the simple function name (e.g., "process_data"), not the full path.
+        // Extract the simple name by taking the last component after "::"
+        let simple_name = function_name.rsplit("::").next().unwrap_or(function_name);
+
         // First, try to find in current implementation's functions
         if let Some(entity_id) = self.current_entity_id {
             if let Some(impl_block) = hir
@@ -3545,7 +3550,7 @@ impl<'hir> HirToMir<'hir> {
                 .find(|impl_b| impl_b.entity == entity_id)
             {
                 for func in &impl_block.functions {
-                    if func.name == function_name {
+                    if func.name == simple_name {
                         return Some(func);
                     }
                 }
@@ -3553,7 +3558,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Second, try top-level functions
-        hir.functions.iter().find(|func| func.name == function_name)
+        hir.functions.iter().find(|func| func.name == simple_name)
     }
 
     /// Transform early returns into nested if-else expressions
