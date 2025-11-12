@@ -3092,20 +3092,25 @@ impl<'hir> HirToMir<'hir> {
                 // We need to track ALL new variables from BOTH branches for nested if/else.
                 let then_branch_vars = self.dynamic_variables.clone();
 
+                // BUG FIX #71: Before restoring for else-branch, merge new then-branch variables
+                // into saved state. This prevents nested restorations in the else-branch from
+                // losing variables created in deeply nested scopes of the then-branch.
+                //
+                // Without this fix, variables like edge1 created in nested matches inside the
+                // then-branch would be lost when the else-branch does its own restorations,
+                // and couldn't be recovered by the final restoration.
+                let mut state_for_else = saved_dynamic_vars.clone();
+                for (hir_var_id, (mir_var_id, name, hir_type)) in then_branch_vars.iter() {
+                    if !saved_dynamic_vars.contains_key(hir_var_id) {
+                        // Preserve new variables from then-branch for else-branch context
+                        state_for_else.insert(*hir_var_id, (*mir_var_id, name.clone(), hir_type.clone()));
+                    }
+                }
+
                 // BUG FIX #63: Restore dynamic_variables before else-branch
-                // We must completely restore to prevent variable name collisions when
-                // functions inlined in different branches create variables with the same name.
-                //
-                // Example bug case:
-                //   if cond { exec_l0_l1(...) } else { exec_l2(...) }
-                // Both functions create a variable named "result_32". If we preserve variables
-                // from the then-branch, the else-branch will reuse the same MIR variable ID,
-                // causing incorrect codegen (both branches use the same variable).
-                //
-                // The original Bug #61 fix tried to preserve variables for block expressions,
-                // but this breaks function inlining. The correct fix is to completely isolate
-                // branch scopes and let each branch create its own variables.
-                self.dynamic_variables = saved_dynamic_vars.clone();
+                // Start else-branch with original variables PLUS new variables from then-branch.
+                // This prevents variable name collisions while preserving nested scope variables.
+                self.dynamic_variables = state_for_else;
 
                 eprintln!("[IF_DEBUG] Converting ELSE branch, expr type: {:?}",
                     std::mem::discriminant(&*if_expr.else_expr));
@@ -3146,6 +3151,17 @@ impl<'hir> HirToMir<'hir> {
                 let mut restored_vars = saved_dynamic_vars.clone();
                 let mut preserved_count = 0;
 
+                // BUG #71 DEBUG: Check if edge1 is in then_branch_vars
+                let edge1_in_then = then_branch_vars.values().any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
+                eprintln!("[BUG #71 THEN_VARS] edge1/var_148 in then_branch_vars? {}", edge1_in_then);
+                if edge1_in_then {
+                    for (mir_id, name, _) in then_branch_vars.values() {
+                        if mir_id.0 == 148 || name.contains("edge1") {
+                            eprintln!("[BUG #71 THEN_VARS]   Found: MIR {:?}, name='{}'", mir_id, name);
+                        }
+                    }
+                }
+
                 // Preserve new variables from then-branch
                 for (hir_var_id, (mir_var_id, name, hir_type)) in then_branch_vars.iter() {
                     if !saved_dynamic_vars.contains_key(hir_var_id) {
@@ -3172,7 +3188,23 @@ impl<'hir> HirToMir<'hir> {
 
                 eprintln!("[BUG #68] If-expression restoration: saved {} vars, then-branch {} vars, else-branch {} vars, preserved {} new vars",
                     saved_dynamic_vars.len(), then_branch_vars.len(), self.dynamic_variables.len(), preserved_count);
+
+                // BUG #71 DEBUG: Check if edge1 is in restored_vars before assignment
+                let has_edge1_before = restored_vars.values().any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
+                eprintln!("[BUG #71 RESTORE] About to restore dynamic_variables, has edge1/var_148? {}", has_edge1_before);
+                if has_edge1_before {
+                    for (mir_id, name, _) in restored_vars.values() {
+                        if mir_id.0 == 148 || name.contains("edge1") {
+                            eprintln!("[BUG #71 RESTORE]   Found: MIR {:?}, name='{}'", mir_id, name);
+                        }
+                    }
+                }
+
                 self.dynamic_variables = restored_vars;
+
+                // BUG #71 DEBUG: Verify edge1 is still there after assignment
+                let has_edge1_after = self.dynamic_variables.values().any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
+                eprintln!("[BUG #71 RESTORE] After restore, has edge1/var_148? {}", has_edge1_after);
 
                 let cond = Box::new(cond);
                 let then_expr = Box::new(then_expr);
