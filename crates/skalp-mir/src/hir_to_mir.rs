@@ -1718,7 +1718,16 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
-        let lhs = self.convert_lvalue(&assign.lhs)?;
+        let lhs = self.convert_lvalue(&assign.lhs);
+        if lhs.is_none() {
+            eprintln!(
+                "[DEBUG] convert_lvalue returned None for LHS: {:?}",
+                std::mem::discriminant(&assign.lhs)
+            );
+            return None;
+        }
+        let lhs = lhs?;
+        eprintln!("[DEBUG] LHS converted successfully: {:?}", std::mem::discriminant(&lhs));
 
         let rhs = self.convert_expression(&assign.rhs);
         if rhs.is_none() {
@@ -1730,6 +1739,7 @@ impl<'hir> HirToMir<'hir> {
         }
         let rhs = rhs?;
 
+        eprintln!("[DEBUG] Continuous assignment successful!");
         Some(ContinuousAssign { lhs, rhs })
     }
 
@@ -2924,20 +2934,26 @@ impl<'hir> HirToMir<'hir> {
                 // are added to pending_statements (to be emitted as global assignments).
                 // We must preserve these variables across branch isolation so that the
                 // result expression can reference them.
+                eprintln!("[IF_DEBUG] ========== STARTING IF EXPRESSION CONVERSION ==========");
                 eprintln!(
-                    "[BUG #7 DEBUG] Converting If-expression condition, type: {:?}",
+                    "[IF_DEBUG] Converting If-expression condition, type: {:?}",
                     std::mem::discriminant(&*if_expr.condition)
                 );
                 if let hir::HirExpression::Call(call) = &*if_expr.condition {
                     eprintln!(
-                        "[BUG #7 DEBUG]   Condition is Call: function={}, args={}",
+                        "[IF_DEBUG]   Condition is Call: function={}, args={}",
                         call.function,
                         call.args.len()
                     );
                 }
-                let cond = self.convert_expression(&if_expr.condition)?;
+                let cond = self.convert_expression(&if_expr.condition);
+                if cond.is_none() {
+                    eprintln!("[IF_DEBUG] ❌ CONDITION conversion FAILED");
+                    return None;
+                }
+                let cond = cond?;
                 eprintln!(
-                    "[BUG #7 DEBUG] Converted condition to MIR: {:?}",
+                    "[IF_DEBUG] ✅ Converted condition to MIR: {:?}",
                     std::mem::discriminant(&cond)
                 );
 
@@ -2945,15 +2961,22 @@ impl<'hir> HirToMir<'hir> {
                 let saved_dynamic_vars = self.dynamic_variables.clone();
                 let saved_pending_count = self.pending_statements.len();
 
+                eprintln!("[IF_DEBUG] Converting THEN branch, expr type: {:?}",
+                    std::mem::discriminant(&*if_expr.then_expr));
+                if let hir::HirExpression::Call(call) = &*if_expr.then_expr {
+                    eprintln!("[IF_DEBUG]   Then-expr is Call: function={}, args={}",
+                        call.function, call.args.len());
+                }
                 let then_expr = self.convert_expression(&if_expr.then_expr);
                 if then_expr.is_none() {
                     eprintln!(
-                        "[DEBUG] If expression: then_expr conversion failed, type: {:?}",
+                        "[IF_DEBUG] ❌ THEN BRANCH conversion FAILED, type: {:?}",
                         std::mem::discriminant(&*if_expr.then_expr)
                     );
                     return None;
                 }
                 let then_expr = then_expr?;
+                eprintln!("[IF_DEBUG] ✅ THEN branch converted successfully");
 
                 eprintln!("[DEBUG] If-expr: then_expr = {:?}", then_expr);
 
@@ -2976,15 +2999,25 @@ impl<'hir> HirToMir<'hir> {
                 // branch scopes and let each branch create its own variables.
                 self.dynamic_variables = saved_dynamic_vars.clone();
 
+                eprintln!("[IF_DEBUG] Converting ELSE branch, expr type: {:?}",
+                    std::mem::discriminant(&*if_expr.else_expr));
+                if let hir::HirExpression::Call(call) = &*if_expr.else_expr {
+                    eprintln!("[IF_DEBUG]   Else-expr is Call: function={}, args={}",
+                        call.function, call.args.len());
+                }
+                if let hir::HirExpression::If(_) = &*if_expr.else_expr {
+                    eprintln!("[IF_DEBUG]   Else-expr is nested If (else-if chain)");
+                }
                 let else_expr = self.convert_expression(&if_expr.else_expr);
                 if else_expr.is_none() {
                     eprintln!(
-                        "[DEBUG] If expression: else_expr conversion failed, type: {:?}",
+                        "[IF_DEBUG] ❌ ELSE BRANCH conversion FAILED, type: {:?}",
                         std::mem::discriminant(&*if_expr.else_expr)
                     );
                     return None;
                 }
                 let else_expr = else_expr?;
+                eprintln!("[IF_DEBUG] ✅ ELSE branch converted successfully");
 
                 // BUG FIX #63/#68: After both branches are processed, restore to the original state
                 // BUT preserve NEW variables created during branch processing from BOTH branches.
@@ -3037,6 +3070,8 @@ impl<'hir> HirToMir<'hir> {
                 let then_expr = Box::new(then_expr);
                 let else_expr = Box::new(else_expr);
 
+                eprintln!("[IF_DEBUG] ✅ IF EXPRESSION CONVERSION COMPLETED SUCCESSFULLY");
+                eprintln!("[IF_DEBUG] ========================================");
                 Some(Expression::Conditional {
                     cond,
                     then_expr,
@@ -6228,6 +6263,35 @@ impl<'hir> HirToMir<'hir> {
                     );
                     return None;
                 }
+                hir::HirExpression::TupleLiteral(elements) => {
+                    // BUG FIX #22: Handle field access on tuple literals
+                    // This occurs when function inlining creates tuple returns that are then destructured
+                    // Example: let (rx, ry, rz) = vec3_add(...) where vec3_add returns (x, y, z)
+                    // After inlining: let rx = (x, y, z).0, let ry = (x, y, z).1, etc.
+                    //
+                    // Parse the field name as a tuple index (e.g., "0", "1", "2")
+                    if let Ok(index) = field_name.parse::<usize>() {
+                        if index < elements.len() {
+                            eprintln!(
+                                "[DEBUG] FieldAccess on TupleLiteral: extracting element {} of {}",
+                                index, elements.len()
+                            );
+                            return self.convert_expression(&elements[index]);
+                        } else {
+                            eprintln!(
+                                "[DEBUG] FieldAccess on TupleLiteral: index {} out of bounds (len={})",
+                                index, elements.len()
+                            );
+                            return None;
+                        }
+                    } else {
+                        eprintln!(
+                            "[DEBUG] FieldAccess on TupleLiteral: field '{}' is not a valid index",
+                            field_name
+                        );
+                        return None;
+                    }
+                }
                 hir::HirExpression::GenericParam(param_name) => {
                     // BUG FIX #70 Part 2: Handle field access on GenericParam (unsubstituted parameter)
                     // This occurs when parameter substitution fails or is incomplete during function inlining
@@ -6270,6 +6334,67 @@ impl<'hir> HirToMir<'hir> {
 
                     // Recursively convert - this will hit StructLiteral handler if applicable
                     return self.convert_expression(&field_access);
+                }
+                hir::HirExpression::Block {
+                    statements,
+                    result_expr,
+                } => {
+                    // BUG FIX #22: Handle field access on Block expressions
+                    // This occurs when function inlining creates Block expressions that return tuples/structs
+                    // Example: let (rx, ry, rz) = vec3_add(...) where vec3_add inlines to a Block
+                    // After inlining: let rx = <Block>.0, let ry = <Block>.1, etc.
+                    //
+                    // Strategy: Access the field directly on the result expression of the Block
+                    // This avoids converting the entire Block to MIR prematurely
+                    eprintln!(
+                        "[DEBUG] FieldAccess on Block: accessing field '{}' on result_expr (type: {:?})",
+                        field_name,
+                        std::mem::discriminant(&**result_expr)
+                    );
+
+                    // Create new FieldAccess with the Block's result expression as base
+                    let field_access = hir::HirExpression::FieldAccess {
+                        base: result_expr.clone(),
+                        field: field_name.to_string(),
+                    };
+
+                    // Recursively convert the field access
+                    // This will hit the appropriate handler (StructLiteral, TupleLiteral, etc.)
+                    return self.convert_expression(&field_access);
+                }
+                hir::HirExpression::If(if_expr) => {
+                    // BUG FIX #22: Handle field access on If expressions
+                    // This occurs when function inlining creates If expressions that return tuples/structs
+                    // Example: let rx = (if cond { tuple1 } else { tuple2 }).0
+                    // After inlining: if cond { tuple1.0 } else { tuple2.0 }
+                    //
+                    // Strategy: Push the field access into both branches of the If
+                    eprintln!(
+                        "[DEBUG] FieldAccess on If: accessing field '{}', pushing into both branches",
+                        field_name
+                    );
+
+                    // Create FieldAccess for then branch
+                    let then_field_access = hir::HirExpression::FieldAccess {
+                        base: if_expr.then_expr.clone(),
+                        field: field_name.to_string(),
+                    };
+
+                    // Create FieldAccess for else branch
+                    let else_field_access = hir::HirExpression::FieldAccess {
+                        base: if_expr.else_expr.clone(),
+                        field: field_name.to_string(),
+                    };
+
+                    // Create new If expression with field access in both branches
+                    let new_if = hir::HirExpression::If(hir::HirIfExpr {
+                        condition: if_expr.condition.clone(),
+                        then_expr: Box::new(then_field_access),
+                        else_expr: Box::new(else_field_access),
+                    });
+
+                    // Convert the new If expression
+                    return self.convert_expression(&new_if);
                 }
                 _ => {
                     // Complex base - can't handle
