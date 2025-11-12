@@ -2110,7 +2110,15 @@ impl<'hir> HirToMir<'hir> {
         let result = match lval {
             hir::HirLValue::Signal(id) => self.signal_map.get(id).map(|&id| LValue::Signal(id)),
             hir::HirLValue::Variable(id) => {
-                self.variable_map.get(id).map(|&id| LValue::Variable(id))
+                // BUG #20 FIX: Check variable_map first, then fall back to dynamic_variables
+                // Same as expr_to_lvalue - dynamic variables need to be accessible as LValues
+                if let Some(&mir_id) = self.variable_map.get(id) {
+                    Some(LValue::Variable(mir_id))
+                } else if let Some((mir_id, _, _)) = self.dynamic_variables.get(id) {
+                    Some(LValue::Variable(*mir_id))
+                } else {
+                    None
+                }
             }
             hir::HirLValue::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
             hir::HirLValue::Index(base, index) => {
@@ -5125,7 +5133,24 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Signal(id) => self.signal_map.get(id).map(|&id| LValue::Signal(id)),
             hir::HirExpression::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
             hir::HirExpression::Variable(id) => {
-                self.variable_map.get(id).map(|&id| LValue::Variable(id))
+                // BUG #20 FIX: Check variable_map first, then fall back to dynamic_variables
+                // Dynamic variables are created during function inlining (e.g., in match arm blocks)
+                // and must be accessible for Index/Range operations.
+                //
+                // Example: In Karythra's exec_l0_l1, match arm 9 creates:
+                //   let shift_amt = b[4:0];
+                //   if sign && shift_amt > 0 { ... }
+                // The condition references shift_amt, which is only in dynamic_variables.
+                if let Some(&mir_id) = self.variable_map.get(id) {
+                    return Some(LValue::Variable(mir_id));
+                }
+
+                // Fall back to dynamic_variables (for let-bound variables from inlined functions)
+                if let Some((mir_id, _, _)) = self.dynamic_variables.get(id) {
+                    return Some(LValue::Variable(*mir_id));
+                }
+
+                None
             }
             _ => None,
         }
