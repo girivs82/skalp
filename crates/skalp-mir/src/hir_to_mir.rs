@@ -2775,6 +2775,17 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Convert struct field access to bit slice (range select)
+                eprintln!("[BUG #71 FIELD] Converting FieldAccess: field='{}', base={:?}", field, std::mem::discriminant(&**base));
+                if let hir::HirExpression::Variable(var_id) = &**base {
+                    eprintln!("[BUG #71 FIELD]   Base is Variable({})", var_id.0);
+                    // Check if this variable is in dynamic_variables (tuple temporary)
+                    if let Some((mir_id, name, hir_type)) = self.dynamic_variables.get(var_id) {
+                        eprintln!("[BUG #71 FIELD]   Found in dynamic_variables: name='{}', type={:?}", name, hir_type);
+                        if matches!(hir_type, hir::HirType::Tuple(_)) {
+                            eprintln!("[BUG #71 FIELD]   ✅ This is a TUPLE variable!");
+                        }
+                    }
+                }
                 self.convert_field_access(base, field)
             }
             hir::HirExpression::EnumVariant { enum_type, variant } => {
@@ -4560,28 +4571,6 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
 
-            // BUG FIX #18: Handle field access - substitute the base expression
-            hir::HirExpression::FieldAccess { base, field } => {
-                eprintln!(
-                    "[DEBUG] FieldAccess substitution: field='{}', base type: {:?}",
-                    field,
-                    std::mem::discriminant(&**base)
-                );
-                let substituted_base = Box::new(self.substitute_expression_with_var_map(
-                    base,
-                    param_map,
-                    var_id_to_name,
-                )?);
-                eprintln!(
-                    "[DEBUG] FieldAccess: base substituted successfully, new base type: {:?}",
-                    std::mem::discriminant(&*substituted_base)
-                );
-                Some(hir::HirExpression::FieldAccess {
-                    base: substituted_base,
-                    field: field.clone(),
-                })
-            }
-
             // Recursively handle other expression types as needed
             _ => {
                 // For unhandled cases, clone as-is (may need expansion for full support)
@@ -6132,9 +6121,14 @@ impl<'hir> HirToMir<'hir> {
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<Expression> {
+        eprintln!("[BUG #71 TUPLE FIELD ACCESS] convert_field_access called:");
+        eprintln!("[BUG #71 TUPLE FIELD ACCESS]   field_name='{}'", field_name);
+        eprintln!("[BUG #71 TUPLE FIELD ACCESS]   base expr type={:?}", std::mem::discriminant(base));
+
         // Map numeric field names (tuple indices) to struct field names
         // e.g., "0" -> "_0", "1" -> "_1", "2" -> "_2"
         let normalized_field_name = if field_name.chars().all(|c| c.is_ascii_digit()) {
+            eprintln!("[BUG #71 TUPLE FIELD ACCESS]   Normalized '{}' -> '_{}'", field_name, field_name);
             format!("_{}", field_name)
         } else {
             field_name.to_string()
@@ -6273,20 +6267,27 @@ impl<'hir> HirToMir<'hir> {
                     if let Ok(index) = field_name.parse::<usize>() {
                         if index < elements.len() {
                             eprintln!(
-                                "[DEBUG] FieldAccess on TupleLiteral: extracting element {} of {}",
+                                "[BUG #71 TUPLE] ✅ FieldAccess on TupleLiteral: extracting element {} of {} elements",
                                 index, elements.len()
                             );
-                            return self.convert_expression(&elements[index]);
+                            eprintln!("[BUG #71 TUPLE]   Element type: {:?}", std::mem::discriminant(&elements[index]));
+                            let result = self.convert_expression(&elements[index]);
+                            if result.is_some() {
+                                eprintln!("[BUG #71 TUPLE]   ✅ Successfully extracted element");
+                            } else {
+                                eprintln!("[BUG #71 TUPLE]   ❌ Failed to extract element");
+                            }
+                            return result;
                         } else {
                             eprintln!(
-                                "[DEBUG] FieldAccess on TupleLiteral: index {} out of bounds (len={})",
+                                "[BUG #71 TUPLE] ❌ FieldAccess on TupleLiteral: index {} out of bounds (len={})",
                                 index, elements.len()
                             );
                             return None;
                         }
                     } else {
                         eprintln!(
-                            "[DEBUG] FieldAccess on TupleLiteral: field '{}' is not a valid index",
+                            "[BUG #71 TUPLE] ❌ FieldAccess on TupleLiteral: field '{}' is not a valid index",
                             field_name
                         );
                         return None;
@@ -6414,8 +6415,10 @@ impl<'hir> HirToMir<'hir> {
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<(usize, usize)> {
+        eprintln!("[BUG #70 FIELD RANGE] get_field_bit_range called: field_name='{}', base expr discriminant={:?}", field_name, std::mem::discriminant(base));
         // First, check if this is a vector type
         if let Some(base_type) = self.infer_hir_type(base) {
+            eprintln!("[BUG #70 FIELD RANGE] Inferred base type: {:?}", std::mem::discriminant(&base_type));
             // Handle Custom types that might be vec2/vec3/vec4
             // BUG FIX #44: HIR stores vec2<fp32> as Custom("vec2") instead of Vec2(Float32)
             if let hir::HirType::Custom(type_name) = &base_type {
@@ -6479,7 +6482,13 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Get the struct type from the base expression
-        let struct_type = self.get_expression_struct_type(base)?;
+        eprintln!("[BUG #70 FIELD RANGE] Calling get_expression_struct_type...");
+        let struct_type = self.get_expression_struct_type(base);
+        if struct_type.is_none() {
+            eprintln!("[BUG #70 FIELD RANGE] get_expression_struct_type returned None!");
+            return None;
+        }
+        let struct_type = struct_type?;
 
         // Clone the fields to avoid borrow checker issues
         let fields: Vec<_> = struct_type
@@ -6494,10 +6503,19 @@ impl<'hir> HirToMir<'hir> {
         // We need to calculate offsets from MSB downward for tuple fields
 
         // First, calculate total width to determine if we need MSB-first ordering
+        eprintln!("[BUG #70 TUPLE DEBUG] Calculating total width for {} fields:", fields.len());
+        for (name, ty) in &fields {
+            eprintln!("[BUG #70 TUPLE DEBUG]   Field '{}': type discriminant = {:?}", name, std::mem::discriminant(ty));
+        }
         let total_width: usize = fields
             .iter()
-            .map(|(_, ty)| self.get_hir_type_width(ty))
+            .map(|(_, ty)| {
+                let width = self.get_hir_type_width(ty);
+                eprintln!("[BUG #70 TUPLE DEBUG]   Width calculated: {}", width);
+                width
+            })
             .sum();
+        eprintln!("[BUG #70 TUPLE DEBUG] Total width: {}", total_width);
 
         // Check if this is a tuple (fields named "_0", "_1", etc.)
         let is_tuple = fields
@@ -6712,8 +6730,41 @@ impl<'hir> HirToMir<'hir> {
                 // Stream types don't have a defined width in hardware
                 self.get_hir_type_width(element_type)
             }
-            hir::HirType::Custom(_) => {
-                // Custom types default to 32 bits
+            hir::HirType::Vec3(element_type) => {
+                // BUG FIX #70: vec3 is 3 elements
+                let element_width = self.get_hir_type_width(element_type);
+                eprintln!("[BUG #70 FIX] Vec3 element width: {}, total: {}", element_width, element_width * 3);
+                element_width * 3
+            }
+            hir::HirType::Vec4(element_type) => {
+                // BUG FIX #70: vec4 is 4 elements
+                let element_width = self.get_hir_type_width(element_type);
+                eprintln!("[BUG #70 FIX] Vec4 element width: {}, total: {}", element_width, element_width * 4);
+                element_width * 4
+            }
+            hir::HirType::Custom(type_name) => {
+                // BUG FIX #70: Look up custom struct types and calculate their actual width
+                eprintln!("[BUG #70 DEBUG] get_hir_type_width called for Custom type '{}'", type_name);
+                // Check if this is a known struct type
+                if let Some(hir) = self.hir {
+                    eprintln!("[BUG #70 DEBUG] HIR available, searching {} user_defined_types", hir.user_defined_types.len());
+                    // Search in user-defined types
+                    for user_type in &hir.user_defined_types {
+                        if user_type.name == *type_name {
+                            // Check if it's a struct type
+                            if let hir::HirType::Struct(struct_type) = &user_type.type_def {
+                                let mut total_width = 0;
+                                for field in &struct_type.fields {
+                                    total_width += self.get_hir_type_width(&field.field_type);
+                                }
+                                eprintln!("[BUG #70 FIX] Custom type '{}' resolved to struct with width {}", type_name, total_width);
+                                return total_width;
+                            }
+                        }
+                    }
+                }
+                // Fallback: Custom types default to 32 bits if not found
+                eprintln!("[BUG #70 WARNING] Custom type '{}' not found in user_defined_types, defaulting to 32 bits", type_name);
                 32
             }
             // Parametric types - use default widths

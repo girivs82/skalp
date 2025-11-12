@@ -2106,6 +2106,23 @@ impl HirBuilderContext {
                     var_id.0, var_type
                 );
                 var_type
+            } else if let HirExpression::Call(ref call_expr) = value {
+                // BUG FIX #69: If RHS is a function call, look up its return type from function_return_types
+                let func_return_type = self
+                    .symbols
+                    .function_return_types
+                    .get(&call_expr.function)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        // Fallback: Create tuple type with Nat(32) placeholders
+                        let element_types = vec![HirType::Nat(32); var_names.len()];
+                        HirType::Tuple(element_types)
+                    });
+                eprintln!(
+                    "🔍 TUPLE TYPE INFERENCE: Call({}) -> {:?}",
+                    call_expr.function, func_return_type
+                );
+                func_return_type
             } else {
                 // Fallback: Create tuple type with Nat(32) placeholders for each element
                 let element_types = vec![HirType::Nat(32); var_names.len()];
