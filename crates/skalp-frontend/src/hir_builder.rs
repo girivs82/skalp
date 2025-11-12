@@ -4819,26 +4819,58 @@ impl HirBuilderContext {
         // CastExpr structure from parser (manual tree building):
         //   ParenExpr (or other expression)
         //   TypeAnnotation
-        // Find the expression (first child)
-        let expr = node
-            .children()
-            .find(|n| {
-                matches!(
-                    n.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::CallExpr
-                        | SyntaxKind::FieldExpr
-                        | SyntaxKind::IndexExpr
-                        | SyntaxKind::PathExpr
-                        | SyntaxKind::ParenExpr
-                        | SyntaxKind::IfExpr
-                        | SyntaxKind::MatchExpr
-                )
+        // BUG #18 FIX: The parser creates sibling IdentExpr + FieldExpr nodes for field access
+        // Example: "my_vec.x as bit[32]" creates:
+        //   CastExpr
+        //     IdentExpr("my_vec")
+        //     FieldExpr(".x")
+        //     TypeAnnotation("bit[32]")
+        // We need to combine these into FieldAccess(Ident("my_vec"), "x")
+
+        // Check if we have both IdentExpr and FieldExpr as siblings
+        let has_ident = node.children().any(|n| n.kind() == SyntaxKind::IdentExpr);
+        let has_field = node.children().any(|n| n.kind() == SyntaxKind::FieldExpr);
+
+        let expr = if has_ident && has_field {
+            // Build field access from sibling Ident + Field nodes
+            let base = node
+                .children()
+                .find(|n| n.kind() == SyntaxKind::IdentExpr)
+                .and_then(|n| self.build_expression(&n))?;
+
+            let field_text = node
+                .children()
+                .find(|n| n.kind() == SyntaxKind::FieldExpr)
+                .map(|n| n.text().to_string())?;
+
+            // Extract field name (remove leading '.')
+            let field_name = field_text.trim_start_matches('.');
+
+            Some(HirExpression::FieldAccess {
+                base: Box::new(base),
+                field: field_name.to_string(),
             })
-            .and_then(|n| self.build_expression(&n))?;
+        } else {
+            // Normal case: find single expression child
+            node.children()
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                    )
+                })
+                .and_then(|n| self.build_expression(&n))
+        }?;
 
         // Find the target type from TypeAnnotation
         let target_type = node

@@ -4222,14 +4222,12 @@ impl<'hir> HirToMir<'hir> {
                     "[DEBUG] **MATCHED** Block substitution: {} statements",
                     statements.len()
                 );
-                // Create a mutable copy of param_map to track local variables
-                // We'll also keep owned expressions for let-bound variables
-                let mut extended_param_map = param_map.clone();
-                let mut local_var_exprs: Vec<hir::HirExpression> = Vec::new();
+                // BUG FIX #18: Use owned HashMap for local variables to allow incremental updates
+                // This allows each statement to reference previously defined local variables
+                let mut local_var_map: std::collections::HashMap<String, hir::HirExpression> = std::collections::HashMap::new();
 
                 // Substitute all statements in the block
                 let mut substituted_statements = Vec::new();
-                let mut var_names = Vec::new(); // Track variable names to update map later
                 for (i, stmt) in statements.iter().enumerate() {
                     match stmt {
                         hir::HirStatement::Let(let_stmt) => {
@@ -4237,9 +4235,15 @@ impl<'hir> HirToMir<'hir> {
                                 "[DEBUG] Block: substituting let statement {} ({})",
                                 i, let_stmt.name
                             );
+                            // Build a combined map with both params and local vars for substitution
+                            let mut combined_map: std::collections::HashMap<String, &hir::HirExpression> = param_map.clone();
+                            for (name, expr) in &local_var_map {
+                                combined_map.insert(name.clone(), expr);
+                            }
+
                             let substituted_value = self.substitute_expression_with_var_map(
                                 &let_stmt.value,
-                                &extended_param_map,
+                                &combined_map,
                                 var_id_to_name,
                             )?;
                             if let hir::HirExpression::Match(m) = &substituted_value {
@@ -4257,14 +4261,12 @@ impl<'hir> HirToMir<'hir> {
                                     var_type: let_stmt.var_type.clone(),
                                 },
                             ));
-                            // Add this variable to the extended param map for subsequent statements
-                            // BUG FIX #71 Part 2: Use the actual substituted value (e.g., StructLiteral)
-                            // instead of a Variable reference, so later references get the full value
+                            // Add this variable to local map immediately for subsequent statements
+                            // Use the actual substituted value (e.g., StructLiteral) instead of a Variable reference
                             // Example: let ray_dir = vec3{x,y,z}; vec_dot(ray_dir, ...) should inline the vec3 literal
-                            local_var_exprs.push(substituted_value.clone());
-                            var_names.push(let_stmt.name.clone());
+                            local_var_map.insert(let_stmt.name.clone(), substituted_value);
                             eprintln!(
-                                "[DEBUG] Block: queued {} (id {:?}) for param_map",
+                                "[DEBUG] Block: added {} (id {:?}) to local_var_map immediately",
                                 let_stmt.name, let_stmt.id
                             );
                         }
@@ -4274,16 +4276,15 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
-                // Now update the param_map with all local variables
-                for (i, name) in var_names.iter().enumerate() {
-                    let var_ref = &local_var_exprs[i];
-                    extended_param_map.insert(name.clone(), var_ref);
-                    eprintln!("[DEBUG] Block: added {} to extended param_map", name);
+                // Build final combined map for result expression
+                let mut combined_map: std::collections::HashMap<String, &hir::HirExpression> = param_map.clone();
+                for (name, expr) in &local_var_map {
+                    combined_map.insert(name.clone(), expr);
                 }
 
                 let substituted_result = Box::new(self.substitute_expression_with_var_map(
                     result_expr,
-                    &extended_param_map,
+                    &combined_map,
                     var_id_to_name,
                 )?);
 
@@ -4510,6 +4511,28 @@ impl<'hir> HirToMir<'hir> {
                     type_name: struct_lit.type_name.clone(),
                     fields: substituted_fields,
                 }))
+            }
+
+            // BUG FIX #18: Handle field access - substitute the base expression
+            hir::HirExpression::FieldAccess { base, field } => {
+                eprintln!(
+                    "[DEBUG] FieldAccess substitution: field='{}', base type: {:?}",
+                    field,
+                    std::mem::discriminant(&**base)
+                );
+                let substituted_base = Box::new(self.substitute_expression_with_var_map(
+                    base,
+                    param_map,
+                    var_id_to_name,
+                )?);
+                eprintln!(
+                    "[DEBUG] FieldAccess: base substituted successfully, new base type: {:?}",
+                    std::mem::discriminant(&*substituted_base)
+                );
+                Some(hir::HirExpression::FieldAccess {
+                    base: substituted_base,
+                    field: field.clone(),
+                })
             }
 
             // Recursively handle other expression types as needed
