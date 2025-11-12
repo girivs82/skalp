@@ -268,6 +268,7 @@ impl<'hir> HirToMir<'hir> {
                                 .as_ref()
                                 .and_then(|expr| self.convert_literal_expr(expr)),
                         };
+                        eprintln!("[BUG #71 PUSH LOC1] Pushing variable: id={:?}, name={}", var_id, hir_var.name);
                         module.variables.push(variable);
                     }
 
@@ -282,6 +283,13 @@ impl<'hir> HirToMir<'hir> {
                     // only gets one variable ID, which is reused by all let bindings with that name
                     let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
 
+                    // BUG #71 DEBUG: Check if var_148 is in dynamic_variables before adding
+                    if let Some((_, name, _)) = self.dynamic_variables.values().find(|(id, _, _)| id.0 == 148) {
+                        eprintln!("[BUG #71 BEFORE LOC2] var_148 IS in dynamic_variables with name: {}", name);
+                    } else {
+                        eprintln!("[BUG #71 BEFORE LOC2] var_148 NOT in dynamic_variables (size={})", self.dynamic_variables.len());
+                    }
+
                     for (mir_var_id, name, hir_type) in dynamic_vars {
                         eprintln!(
                             "[DEBUG] Adding dynamic variable: name={}, hir_type={:?}",
@@ -289,12 +297,18 @@ impl<'hir> HirToMir<'hir> {
                         );
                         let mir_type = self.convert_type(&hir_type);
                         eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
+                        // BUG #71 DEBUG
+                        if name.contains("edge1") || name.contains("edge2") || name.contains("_h") || name.contains("_s") {
+                            eprintln!("[BUG #71 EVENT BLOCK VAR] Adding variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
+                                name, mir_var_id, hir_type, mir_type);
+                        }
                         let variable = Variable {
                             id: mir_var_id,
-                            name,
+                            name: name.clone(),
                             var_type: mir_type,
                             initial: None,
                         };
+                        eprintln!("[BUG #71 PUSH LOC2] Pushing dynamic variable: id={:?}, name={}", mir_var_id, name);
                         module.variables.push(variable);
                     }
                     // Clear dynamic variables for next impl block
@@ -318,22 +332,68 @@ impl<'hir> HirToMir<'hir> {
                         // Convert the assignment (may generate pending statements from block expressions)
                         let assigns = self.convert_continuous_assignment_expanded(hir_assign);
 
+                        // BUG #71 DEBUG: Check variable_map size after assignment conversion
+                        eprintln!("[BUG #71 AFTER ASSIGNMENT {}] variable_map size={}", idx, self.variable_map.len());
+                        eprintln!("[BUG #71 AFTER ASSIGNMENT {}] Checking if HIR VariableId(5) is in variable_map: {}",
+                            idx, self.variable_map.contains_key(&hir::VariableId(5)));
+
                         // BUGFIX: First, scan pending_statements for any variables that need to be declared
                         // These come from let bindings in block expressions that don't go through
                         // the dynamic_variables mechanism (e.g., when functions are inlined)
 
-                        // BUG FIX #56: Clone snapshots to avoid borrow checker issues
-                        let dyn_vars_snapshot: HashMap<_, _> = self.dynamic_variables.clone();
+                        // BUG FIX #71: Don't use a snapshot - use current dynamic_variables directly!
+                        // Variables are created during assignment conversion (via match expressions, etc.)
+                        // and preserved by BUG #68. A snapshot taken before conversion would be empty.
+                        //
+                        // Original BUG #56 tried to use a snapshot to avoid borrow checker issues,
+                        // but that was taken BEFORE assignment conversion when dynamic_variables was
+                        // empty (cleared at line 308).
+                        //
+                        // The correct approach: Process pending statements and look up types from
+                        // the CURRENT state of dynamic_variables, which includes all preserved variables.
                         let pending_stmts_snapshot = self.pending_statements.clone();
+
+                        // BUG #71 DEBUG: Check variable_map size before processing pending statements
+                        eprintln!("[BUG #71 BEFORE PENDING LOOP] variable_map size={}", self.variable_map.len());
+                        eprintln!("[BUG #71 BEFORE PENDING LOOP] Checking if HIR VariableId(5) is in variable_map: {}",
+                            self.variable_map.contains_key(&hir::VariableId(5)));
 
                         for pending_stmt in &pending_stmts_snapshot {
                             if let Statement::Assignment(assign) = pending_stmt {
                                 if let LValue::Variable(var_id) = &assign.lhs {
+                                    // BUG #71 DEBUG: Check if var_148 is already in the module
+                                    let in_module = module.variables.iter().any(|v| v.id == *var_id);
+                                    if var_id.0 == 148 {
+                                        eprintln!("[BUG #71 IN_MODULE] var_148 in module? {}", in_module);
+                                    }
                                     // Check if this variable is already in the module
-                                    if !module.variables.iter().any(|v| v.id == *var_id) {
-                                        // BUG FIX #56: Look up type from dynamic_variables instead of inferring from RHS
+                                    if !in_module {
+                                        // BUG FIX #56/#71: Look up type from dynamic_variables instead of inferring from RHS
                                         // This preserves Float types that were declared in let statements
-                                        let dyn_var_info = dyn_vars_snapshot
+                                        // BUG #71: Use CURRENT dynamic_variables, not empty snapshot
+
+                                        // BUG #71 FIX: Search dynamic_variables by MIR ID, not HIR ID!
+                                        // HIR IDs are reused across function contexts, but MIR IDs are unique.
+                                        // dynamic_variables is keyed by HIR ID, but the values contain MIR IDs.
+                                        // We must search the values to find the entry with matching MIR ID.
+
+                                        // BUG #71 DEBUG: Check if var_148 is in dynamic_variables
+                                        if var_id.0 == 148 {
+                                            eprintln!("[BUG #71 DYN_VAR LOOKUP] Searching for MIR {:?} in dynamic_variables (size={})",
+                                                var_id, self.dynamic_variables.len());
+                                            let found = self.dynamic_variables.values().any(|(id, _, _)| id == var_id);
+                                            eprintln!("[BUG #71 DYN_VAR LOOKUP] Found var_148? {}", found);
+                                            if !found {
+                                                eprintln!("[BUG #71 DYN_VAR LOOKUP] Listing all variables with 'edge' in name:");
+                                                for (mir_id, name, hir_type) in self.dynamic_variables.values() {
+                                                    if name.contains("edge") {
+                                                        eprintln!("  - MIR {:?}: name='{}', HIR type={:?}", mir_id, name, hir_type);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        let dyn_var_info = self.dynamic_variables
                                             .values()
                                             .find(|(id, _, _)| id == var_id)
                                             .cloned();
@@ -348,6 +408,11 @@ impl<'hir> HirToMir<'hir> {
                                             let mir_type = self.convert_type(&hir_type);
                                             eprintln!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
                                                     var_id.0, name, hir_type, mir_type);
+                                            // BUG #71 DEBUG
+                                            if name.contains("edge1") || name.contains("edge2") || name.contains("_h") || name.contains("_s") {
+                                                eprintln!("[BUG #71 PENDING VAR] Variable '{}' (from pending_statements): HIR={:?} -> MIR={:?}",
+                                                    name, hir_type, mir_type);
+                                            }
                                             (name, mir_type)
                                         } else {
                                             // Not in dynamic_variables - fall back to name lookup and type inference
@@ -366,6 +431,11 @@ impl<'hir> HirToMir<'hir> {
                                                 &assign.rhs,
                                                 module,
                                             );
+                                            // BUG #71 DEBUG
+                                            if var_name.contains("edge1") || var_name.contains("edge2") || var_name.contains("_h") || var_name.contains("_s") {
+                                                eprintln!("[BUG #71 PENDING VAR INFERRED] Variable '{}' (from pending_statements, TYPE INFERRED): inferred_type={:?}",
+                                                    var_name, var_type);
+                                            }
                                             (var_name, var_type)
                                         };
 
@@ -375,6 +445,7 @@ impl<'hir> HirToMir<'hir> {
                                             var_type,
                                             initial: None,
                                         };
+                                        eprintln!("[BUG #71 PUSH LOC3] Pushing pending variable: id={:?}, name={}", var_id, var_name);
                                         module.variables.push(variable);
                                     }
                                 }
@@ -392,12 +463,18 @@ impl<'hir> HirToMir<'hir> {
                                 eprintln!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
                                 let mir_type = self.convert_type(&hir_type);
                                 eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
+                                // BUG #71 DEBUG: Check if this is one of the problematic variables
+                                if name.contains("edge1") || name.contains("edge2") || name.contains("_h") || name.contains("_s") {
+                                    eprintln!("[BUG #71 DYNAMIC VAR] Variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
+                                        name, mir_var_id, hir_type, mir_type);
+                                }
                                 let variable = Variable {
                                     id: mir_var_id,
                                     name: name.clone(),
                                     var_type: mir_type,
                                     initial: None,
                                 };
+                                eprintln!("[BUG #71 PUSH LOC4] Pushing assignment-dynamic variable: id={:?}, name={}", mir_var_id, name);
                                 module.variables.push(variable);
                             }
                         }
@@ -810,6 +887,14 @@ impl<'hir> HirToMir<'hir> {
                                 "[BUG #67] Variable '{}': Using HIR placeholder type {:?} for complex RHS",
                                 var_name, let_stmt.var_type
                             );
+                            eprintln!(
+                                "[BUG #71] Variable '{}'  (MIR ID={:?}): HIR type={:?}, RHS discriminant={:?}",
+                                var_name, new_id, let_stmt.var_type, std::mem::discriminant(&let_stmt.value)
+                            );
+                            // BUG #71 FIX: For complex RHS with tuple type placeholders, try to infer from RHS after conversion
+                            if matches!(let_stmt.var_type, hir::HirType::Nat(32)) {
+                                eprintln!("[BUG #71] Variable '{}': HIR type is Nat(32) placeholder - will need to infer from RHS later", var_name);
+                            }
                             let_stmt.var_type.clone()
                         };
 
@@ -833,6 +918,18 @@ impl<'hir> HirToMir<'hir> {
                             let_stmt.id, prefix, new_id
                         );
                         self.context_variable_map.insert(context_key, new_id);
+                        // BUG #71 FIX: Also add to variable_map so pending statements can find it
+                        // This is needed because pending statements only have the MIR ID and need
+                        // to reverse-lookup the HIR ID to find the variable in dynamic_variables
+                        if new_id.0 >= 148 && new_id.0 <= 150 {
+                            eprintln!("[BUG #71 INSERT] BEFORE insert: variable_map size={}", self.variable_map.len());
+                            eprintln!("[BUG #71 INSERT] Inserting HIR {:?} -> MIR {:?} into variable_map", let_stmt.id, new_id);
+                        }
+                        self.variable_map.insert(let_stmt.id, new_id);
+                        if new_id.0 >= 148 && new_id.0 <= 150 {
+                            eprintln!("[BUG #71 INSERT] AFTER insert: variable_map size={}", self.variable_map.len());
+                            eprintln!("[BUG #71 INSERT] Verify: variable_map contains {:?}? {}", let_stmt.id, self.variable_map.contains_key(&let_stmt.id));
+                        }
                     } else {
                         self.variable_map.insert(let_stmt.id, new_id);
                     }
@@ -5148,8 +5245,14 @@ impl<'hir> HirToMir<'hir> {
         // Step 8: Clean up function-local variables from variable_map to prevent scope leakage
         // Function-local variables should not persist across different function inlining contexts.
         // Without this cleanup, variables from one match arm can incorrectly be reused in another arm.
+        //
+        // BUG #71 FIX: BUT don't remove variables that have been preserved to dynamic_variables!
+        // These variables (preserved by BUG #68) need to persist for use in pending statements.
         for var_id in var_id_to_name.keys() {
-            self.variable_map.remove(var_id);
+            // Only remove if NOT in dynamic_variables (not preserved)
+            if !self.dynamic_variables.contains_key(var_id) {
+                self.variable_map.remove(var_id);
+            }
         }
 
         result
@@ -5510,9 +5613,18 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(dim_char) = name.chars().nth(3) {
                         if let Some(dimension) = dim_char.to_digit(10) {
                             match dimension {
-                                2 => return DataType::Vec2(Box::new(DataType::Float32)),
-                                3 => return DataType::Vec3(Box::new(DataType::Float32)),
-                                4 => return DataType::Vec4(Box::new(DataType::Float32)),
+                                2 => {
+                                    eprintln!("[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec2(Float32)", name);
+                                    return DataType::Vec2(Box::new(DataType::Float32))
+                                },
+                                3 => {
+                                    eprintln!("[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec3(Float32)", name);
+                                    return DataType::Vec3(Box::new(DataType::Float32))
+                                },
+                                4 => {
+                                    eprintln!("[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec4(Float32)", name);
+                                    return DataType::Vec4(Box::new(DataType::Float32))
+                                },
                                 _ => {}
                             }
                         }
