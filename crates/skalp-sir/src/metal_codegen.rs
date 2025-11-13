@@ -1410,18 +1410,40 @@ impl<'a> MetalShaderGenerator<'a> {
                         // Metal stores this as an array - use array indexing
                         let elem_width =
                             input_type_val.elem_type().map(|t| t.width()).unwrap_or(32);
-                        let element_idx = low / elem_width;
 
-                        eprintln!(
-                            "   🎯 VECTOR->ARRAY SLICE: {}[{}] (SIR vector but Metal array, elem_width={}, low={})",
-                            input, element_idx, elem_width, low
-                        );
+                        // BUG FIX #71d: Handle decomposed signals
+                        let (actual_input_ref, adjusted_element_idx) = if is_decomposed {
+                            let sanitized = self.sanitize_name(input);
+                            if let Some((_total_width, _num_parts, part_width)) = self.wide_signal_decomposition.get(&sanitized) {
+                                // Calculate which part and which element within that part
+                                let part_index = low / part_width;
+                                let bit_offset_in_part = low % part_width;
+                                let element_idx_in_part = bit_offset_in_part / elem_width;
+
+                                let part_ref = format!("signals->{}_part{}", sanitized, part_index);
+
+                                eprintln!(
+                                    "   🎯 VECTOR->ARRAY SLICE from DECOMPOSED: part={}, element={} (low={}, part_width={}, elem_width={})",
+                                    part_index, element_idx_in_part, low, part_width, elem_width
+                                );
+
+                                (part_ref, element_idx_in_part)
+                            } else {
+                                // Shouldn't happen, but fallback
+                                let element_idx = low / elem_width;
+                                (input_ref.clone(), element_idx)
+                            }
+                        } else {
+                            // Not decomposed - use original logic
+                            let element_idx = low / elem_width;
+                            (input_ref.clone(), element_idx)
+                        };
 
                         self.write_indented(&format!(
                             "signals->{} = {}[{}];\n",
                             self.sanitize_name(output),
-                            input_ref,
-                            element_idx
+                            actual_input_ref,
+                            adjusted_element_idx
                         ));
                         return;
                     }
@@ -1462,21 +1484,52 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 if input_width > 128 || is_metal_array {
                     // Wide Bits type stored as array - need element access
-                    let element_idx = shift / 32; // Which array element
-                    let bit_offset = shift % 32; // Bit offset within that element
+
+                    // BUG FIX #71d: Handle decomposed signals (>256 bits)
+                    // For decomposed signals, calculate which part to reference
+                    let (actual_input_ref, adjusted_element_idx, adjusted_bit_offset) = if is_decomposed {
+                        let sanitized = self.sanitize_name(input);
+                        if let Some((_total_width, _num_parts, part_width)) = self.wide_signal_decomposition.get(&sanitized) {
+                            // Calculate which part and which element within that part
+                            let part_index = shift / part_width;
+                            let bit_offset_in_part = shift % part_width;
+                            let element_idx_in_part = bit_offset_in_part / 32;
+                            let bit_offset_in_element = bit_offset_in_part % 32;
+
+                            let part_ref = format!("signals->{}_part{}", sanitized, part_index);
+
+                            eprintln!(
+                                "   🎯 SLICE from DECOMPOSED signal: part={}, element={}, bit_offset={} (total_shift={}, part_width={})",
+                                part_index, element_idx_in_part, bit_offset_in_element, shift, part_width
+                            );
+
+                            (part_ref, element_idx_in_part, bit_offset_in_element)
+                        } else {
+                            // Shouldn't happen, but fallback
+                            let element_idx = shift / 32;
+                            let bit_offset = shift % 32;
+                            (input_ref.clone(), element_idx, bit_offset)
+                        }
+                    } else {
+                        // Not decomposed - use original logic
+                        let element_idx = shift / 32;
+                        let bit_offset = shift % 32;
+                        (input_ref.clone(), element_idx, bit_offset)
+                    };
+
                     let mask = (1u64 << width) - 1;
 
                     eprintln!(
-                        "   🎯 SLICE from array: {}[{}] (width={}, shift={}, is_metal_array={})",
-                        input, element_idx, input_width, shift, is_metal_array
+                        "   🎯 SLICE from array: {} (width={}, shift={}, is_decomposed={})",
+                        input, input_width, shift, is_decomposed
                     );
 
                     self.write_indented(&format!(
                         "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
                         self.sanitize_name(output),
-                        input_ref,
-                        element_idx,
-                        bit_offset,
+                        actual_input_ref,
+                        adjusted_element_idx,
+                        adjusted_bit_offset,
                         mask
                     ));
                     return;
