@@ -12,7 +12,7 @@ fn make_vecs() -> (vec3<fp32>, vec3<fp32>, vec3<fp32>) {
     let v1 = vec3 { x: 1.0, y: 2.0, z: 3.0 };
     let v2 = vec3 { x: 4.0, y: 5.0, z: 6.0 };
     let v3 = vec3 { x: 7.0, y: 8.0, z: 9.0 };
-    (v1, v2, v3)
+    return (v1, v2, v3);
 }
 
 entity Test {
