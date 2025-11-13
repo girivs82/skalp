@@ -45,18 +45,47 @@ impl<'a> MetalShaderGenerator<'a> {
     fn write_to_decomposed_array(&mut self, signal_name: &str, element_idx: usize, value: &str) {
         let sanitized = self.sanitize_name(signal_name);
 
-        if let Some((_total_width, _num_parts, _part_width)) =
-            self.wide_signal_decomposition.get(&sanitized)
+        if let Some((total_width, num_parts, _part_width)) =
+            self.wide_signal_decomposition.get(&sanitized).cloned()
         {
             // Signal is decomposed - figure out which part and index within part
             let part_idx = element_idx / 8; // 8 elements (256 bits) per part
             let idx_in_part = element_idx % 8;
             let part_name = format!("{}_part{}", sanitized, part_idx);
 
-            self.write_indented(&format!(
-                "signals->{}[{}] = {};\n",
-                part_name, idx_in_part, value
-            ));
+            // BUG FIX #71e: Check if this is the last part and if it's a scalar (<64 bits)
+            let is_last_part = part_idx == num_parts - 1;
+            let last_part_width = if is_last_part {
+                total_width - (num_parts - 1) * 256
+            } else {
+                256
+            };
+            let is_scalar = last_part_width <= 32;
+
+            if is_last_part && is_scalar && idx_in_part == 0 {
+                // Last part is a scalar (≤32 bits) - use direct assignment without array index
+                eprintln!(
+                    "  [BUG FIX #71e] Scalar last part: signals->{} = {} (width={} bits)",
+                    part_name, value, last_part_width
+                );
+                self.write_indented(&format!(
+                    "signals->{} = {};\n",
+                    part_name, value
+                ));
+            } else if is_last_part && is_scalar && idx_in_part > 0 {
+                // Trying to access beyond a scalar - this is an error, skip it
+                eprintln!(
+                    "  ⚠️ WARNING: Skipping invalid array access to scalar part: {}[{}]",
+                    part_name, idx_in_part
+                );
+                // Don't generate any code - this shouldn't happen with correct widths
+            } else {
+                // Normal case: part is an array
+                self.write_indented(&format!(
+                    "signals->{}[{}] = {};\n",
+                    part_name, idx_in_part, value
+                ));
+            }
         } else {
             // Normal case - not decomposed
             self.write_indented(&format!(
@@ -1995,17 +2024,35 @@ impl<'a> MetalShaderGenerator<'a> {
                             let part_name = format!("{}_part{}", sanitized_input, part_idx);
 
                             // Each part is up to 256 bits = 8 uint elements
-                            let part_elements = if part_idx == num_parts - 1 {
+                            let is_last_part = part_idx == num_parts - 1;
+                            let part_elements = if is_last_part {
                                 // Last part might be smaller
                                 input_array_size - elements_copied
                             } else {
                                 8 // 256 bits / 32 bits per element
                             };
 
+                            // BUG FIX #71e: Check if last part is a scalar (<64 bits)
+                            let last_part_width = *width - (num_parts - 1) * 256;
+                            let is_scalar = is_last_part && last_part_width <= 32;
+
                             for i in 0..part_elements {
                                 let dest_elem = (bit_offset + (elements_copied + i) * 32) / 32;
-                                // BUG FIX #71: Use helper for decomposed outputs
-                                let value_expr = format!("signals->{}[{}]", part_name, i);
+                                // BUG FIX #71e: Use scalar reference for small last parts
+                                let value_expr = if is_scalar && i == 0 {
+                                    // Last part is a scalar - reference it directly without indexing
+                                    format!("signals->{}", part_name)
+                                } else if is_scalar && i > 0 {
+                                    // Trying to access beyond scalar - shouldn't happen, skip
+                                    eprintln!(
+                                        "  ⚠️ WARNING: Skipping read from scalar part {}[{}]",
+                                        part_name, i
+                                    );
+                                    continue;
+                                } else {
+                                    // Normal case: array indexing
+                                    format!("signals->{}[{}]", part_name, i)
+                                };
                                 self.write_to_decomposed_array(output, dest_elem, &value_expr);
                             }
                             elements_copied += part_elements;

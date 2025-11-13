@@ -189,10 +189,21 @@ impl GpuRuntime {
             33..=64 => 8,    // uint2 (64-bit)
             65..=128 => 16,  // uint4 (128-bit)
             129..=256 => 32, // uint[8] (256-bit array)
-            _ => panic!(
-                "Unsupported bit width {} for Metal type size (max 256 bits)",
-                width
-            ),
+            _ => {
+                // BUG FIX #71e: Handle decomposed signals (>256 bits)
+                // Calculate sum of all parts' sizes
+                let num_parts = width.div_ceil(256);
+                let mut total_size = 0;
+                for part_idx in 0..num_parts {
+                    let part_width = if part_idx == num_parts - 1 {
+                        width - (num_parts - 1) * 256
+                    } else {
+                        256
+                    };
+                    total_size += self.get_metal_type_size(part_width);
+                }
+                total_size
+            }
         }
     }
 

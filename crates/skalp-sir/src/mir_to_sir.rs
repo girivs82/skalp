@@ -2639,33 +2639,36 @@ impl<'a> MirToSirConverter<'a> {
 
         eprintln!("  Sum width: {}", sum_width);
 
-        // BUG FIX #49: Use target width if provided and different from sum
-        // This handles cases like {0, var_2} where 0 should be 224 bits to make total 256
-        let width = if let Some(target) = target_width {
+        // BUG FIX #49/#71e: Handle target width mismatch
+        // If target < sum: Create Concat with full width, then Slice to extract target bits
+        // If target > sum: This is padding (for constants), create as target width
+        // If target == sum: No adjustment needed
+        let needs_slice = target_width.map(|t| t < sum_width).unwrap_or(false);
+        let concat_width = sum_width; // Concat always outputs full sum width
+
+        if let Some(target) = target_width {
             if target != sum_width {
                 eprintln!(
-                    "🔧 CONCAT WIDTH FIX: node_{} sum={} → target={} (diff={})",
+                    "🔧 CONCAT WIDTH FIX: node_{} sum={} → target={} (diff={}, needs_slice={})",
                     node_id,
                     sum_width,
                     target,
-                    target as i64 - sum_width as i64
+                    target as i64 - sum_width as i64,
+                    needs_slice
                 );
             }
-            target
-        } else {
-            sum_width
-        };
+        }
 
-        // Create output signal for this node - concatenation always produces bits
-        let output_signal_name = format!("node_{}_out", node_id);
-        let output_signal = SignalRef {
-            signal_id: output_signal_name.clone(),
+        // Create output signal for the Concat node with its actual full width
+        let concat_output_name = format!("node_{}_out", node_id);
+        let concat_output = SignalRef {
+            signal_id: concat_output_name.clone(),
             bit_range: None,
         };
         self.sir.signals.push(SirSignal {
-            name: output_signal_name,
-            width,
-            sir_type: SirType::Bits(width),
+            name: concat_output_name,
+            width: concat_width,
+            sir_type: SirType::Bits(concat_width),
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
@@ -2675,11 +2678,24 @@ impl<'a> MirToSirConverter<'a> {
             id: node_id,
             kind: SirNodeKind::Concat,
             inputs: part_signals,
-            outputs: vec![output_signal],
+            outputs: vec![concat_output],
             clock_domain: None,
         };
 
         self.sir.combinational_nodes.push(node);
+
+        // BUG FIX #71e: If target < sum, create a Slice to extract the target bits
+        if needs_slice {
+            let target = target_width.unwrap();
+            eprintln!(
+                "  ✂️ BUG FIX #71e: Creating Slice node to extract bits [0:{}] from {}-bit Concat",
+                target - 1,
+                concat_width
+            );
+            let slice_node = self.create_slice_node(node_id, target - 1, 0);
+            return slice_node;
+        }
+
         node_id
     }
 
