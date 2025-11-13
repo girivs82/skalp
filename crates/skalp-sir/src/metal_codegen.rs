@@ -20,17 +20,99 @@ pub fn generate_metal_shader(sir_module: &SirModule) -> String {
 struct MetalShaderGenerator<'a> {
     output: &'a mut String,
     indent: usize,
+    /// Track signals that need to be decomposed (width > 256 bits)
+    /// Maps signal name to (total_width, num_parts, part_width)
+    wide_signal_decomposition: std::collections::HashMap<String, (usize, usize, usize)>,
 }
 
 impl<'a> MetalShaderGenerator<'a> {
     fn new(output: &'a mut String) -> Self {
-        MetalShaderGenerator { output, indent: 0 }
+        MetalShaderGenerator {
+            output,
+            indent: 0,
+            wide_signal_decomposition: std::collections::HashMap::new(),
+        }
     }
 
     /// Sanitize signal names for Metal by replacing dots with underscores
     /// This handles hierarchical signal names like "stage1.reg" -> "stage1_reg"
     fn sanitize_name(&self, name: &str) -> String {
         name.replace('.', "_")
+    }
+
+    /// Generate code to write to an array element of a potentially decomposed signal
+    /// BUG FIX #71: Handle wide signals (>256 bits) that are decomposed into parts
+    fn write_to_decomposed_array(&mut self, signal_name: &str, element_idx: usize, value: &str) {
+        let sanitized = self.sanitize_name(signal_name);
+
+        if let Some((_total_width, _num_parts, _part_width)) =
+            self.wide_signal_decomposition.get(&sanitized)
+        {
+            // Signal is decomposed - figure out which part and index within part
+            let part_idx = element_idx / 8; // 8 elements (256 bits) per part
+            let idx_in_part = element_idx % 8;
+            let part_name = format!("{}_part{}", sanitized, part_idx);
+
+            self.write_indented(&format!(
+                "signals->{}[{}] = {};\n",
+                part_name, idx_in_part, value
+            ));
+        } else {
+            // Normal case - not decomposed
+            self.write_indented(&format!(
+                "signals->{}[{}] = {};\n",
+                sanitized, element_idx, value
+            ));
+        }
+    }
+
+    /// Generate field(s) for a signal, decomposing if width > 256 bits
+    /// Returns true if the signal was decomposed
+    fn generate_signal_field(&mut self, name: &str, sir_type: &SirType) -> bool {
+        let width = sir_type.width();
+        let sanitized_name = self.sanitize_name(name);
+
+        if width > 256 {
+            // Decompose into multiple 256-bit (or smaller) chunks
+            let num_parts = width.div_ceil(256);
+            let last_part_width = width - (num_parts - 1) * 256;
+
+            eprintln!(
+                "[METAL DECOMP] Signal '{}' ({} bits) decomposed into {} parts",
+                name, width, num_parts
+            );
+
+            // Track this decomposition
+            self.wide_signal_decomposition
+                .insert(sanitized_name.clone(), (width, num_parts, 256));
+
+            // Generate a field for each part
+            for part_idx in 0..num_parts {
+                let part_width = if part_idx == num_parts - 1 {
+                    last_part_width
+                } else {
+                    256
+                };
+
+                let (base_type, array_opt) = self.get_metal_type_for_wide_bits(part_width);
+                let part_name = format!("{}_part{}", sanitized_name, part_idx);
+
+                if let Some(array_size) = array_opt {
+                    self.write_indented(&format!("{} {}[{}];\n", base_type, part_name, array_size));
+                } else {
+                    self.write_indented(&format!("{} {};\n", base_type, part_name));
+                }
+            }
+            true
+        } else {
+            // Normal case: single field
+            let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(sir_type);
+            self.write_indented(&format!(
+                "{} {}{};\n",
+                base_type, sanitized_name, array_suffix
+            ));
+            false
+        }
     }
 
     fn generate_header(&mut self) {
@@ -95,12 +177,7 @@ impl<'a> MetalShaderGenerator<'a> {
         for output in &sir.outputs {
             let sanitized_name = self.sanitize_name(&output.name);
             if added_names.insert(sanitized_name.clone()) {
-                let (base_type, array_suffix) =
-                    self.get_metal_type_parts_for_struct(&output.sir_type);
-                self.write_indented(&format!(
-                    "{} {}{};\n",
-                    base_type, sanitized_name, array_suffix
-                ));
+                self.generate_signal_field(&output.name, &output.sir_type);
             }
         }
 
@@ -115,34 +192,21 @@ impl<'a> MetalShaderGenerator<'a> {
                 && !input_names.contains(&signal.name)
                 && added_names.insert(sanitized_name.clone())
             {
-                // DEBUG: Log signal width for tuple-related signals
-                if signal.name.contains("tuple")
+                // DEBUG: Log signal width for tuple-related signals OR wide signals
+                let should_log = signal.name.contains("tuple")
                     || signal.name.contains("rx")
                     || signal.name.contains("ry")
                     || signal.name.contains("rz")
-                {
+                    || signal.width > 128; // BUG #71: Also log wide signals
+
+                if should_log {
                     eprintln!(
                         "🔍 METAL STRUCT: signal='{}', width={}, sir_type={:?}",
                         signal.name, signal.width, signal.sir_type
                     );
                 }
 
-                let (base_type, array_suffix) =
-                    self.get_metal_type_parts_for_struct(&signal.sir_type);
-
-                // DEBUG: Log Metal type chosen
-                if signal.name.contains("tuple")
-                    || signal.name.contains("rx")
-                    || signal.name.contains("ry")
-                    || signal.name.contains("rz")
-                {
-                    eprintln!("  → Metal type: {}{}", base_type, array_suffix);
-                }
-
-                self.write_indented(&format!(
-                    "{} {}{};\n",
-                    base_type, sanitized_name, array_suffix
-                ));
+                self.generate_signal_field(&signal.name, &signal.sir_type);
             }
         }
         self.indent -= 1;
@@ -773,17 +837,17 @@ impl<'a> MetalShaderGenerator<'a> {
                     let left_actual_width = self.get_signal_width_from_sir(sir, left);
                     let right_actual_width = self.get_signal_width_from_sir(sir, right);
 
+                    // BUG FIX #71b: Use format_signal_reference to handle vec3/vec4 extraction
+                    let left_signal_ref = self.format_signal_reference(sir, left, Some(0));
+                    let right_signal_ref = self.format_signal_reference(sir, right, Some(0));
+
                     let left_expr = if left_is_float {
-                        format!("signals->{}", self.sanitize_name(left))
+                        left_signal_ref
                     } else {
                         // Need to cast from bits to float
                         if left_actual_width == fp_precision {
                             // Widths match - direct as_type cast
-                            format!(
-                                "as_type<{}>(signals->{})",
-                                float_type,
-                                self.sanitize_name(left)
-                            )
+                            format!("as_type<{}>({})", float_type, left_signal_ref)
                         } else {
                             // Widths don't match - need intermediate cast
                             let intermediate_type = match fp_precision {
@@ -792,25 +856,19 @@ impl<'a> MetalShaderGenerator<'a> {
                                 _ => "uint",
                             };
                             format!(
-                                "as_type<{}>(({})signals->{})",
-                                float_type,
-                                intermediate_type,
-                                self.sanitize_name(left)
+                                "as_type<{}>(({}){})",
+                                float_type, intermediate_type, left_signal_ref
                             )
                         }
                     };
 
                     let right_expr = if right_is_float {
-                        format!("signals->{}", self.sanitize_name(right))
+                        right_signal_ref
                     } else {
                         // Need to cast from bits to float
                         if right_actual_width == fp_precision {
                             // Widths match - direct as_type cast
-                            format!(
-                                "as_type<{}>(signals->{})",
-                                float_type,
-                                self.sanitize_name(right)
-                            )
+                            format!("as_type<{}>({})", float_type, right_signal_ref)
                         } else {
                             // Widths don't match - need intermediate cast
                             let intermediate_type = match fp_precision {
@@ -819,10 +877,8 @@ impl<'a> MetalShaderGenerator<'a> {
                                 _ => "uint",
                             };
                             format!(
-                                "as_type<{}>(({})signals->{})",
-                                float_type,
-                                intermediate_type,
-                                self.sanitize_name(right)
+                                "as_type<{}>(({}){})",
+                                float_type, intermediate_type, right_signal_ref
                             )
                         }
                     };
@@ -1202,44 +1258,41 @@ impl<'a> MetalShaderGenerator<'a> {
                 let true_width = true_type.as_ref().map(|t| t.width()).unwrap_or(32);
                 let false_width = false_type.as_ref().map(|t| t.width()).unwrap_or(32);
 
+                // BUG FIX #71b: Use format_signal_reference to handle vector component extraction
+                // When extracting scalar from vector, we need .x accessor, not cast
+                let true_signal_ref = self.format_signal_reference(sir, true_val, Some(0));
+                let false_signal_ref = self.format_signal_reference(sir, false_val, Some(0));
+
                 let true_expr = if true_is_float != output_is_float {
                     if true_is_float && true_width != output_width {
                         // Float to different-width integer: convert to bits first, then cast
+                        // BUG FIX #71b: Use signal ref that may include .x accessor
                         format!(
-                            "({})(as_type<uint>(signals->{}))",
-                            output_metal_type,
-                            self.sanitize_name(true_val)
+                            "({})(as_type<uint>({}))",
+                            output_metal_type, true_signal_ref
                         )
                     } else {
                         // Same width or integer-to-float: direct as_type
-                        format!(
-                            "as_type<{}>(signals->{})",
-                            output_metal_type,
-                            self.sanitize_name(true_val)
-                        )
+                        format!("as_type<{}>({})", output_metal_type, true_signal_ref)
                     }
                 } else {
-                    format!("signals->{}", self.sanitize_name(true_val))
+                    true_signal_ref
                 };
 
                 let false_expr = if false_is_float != output_is_float {
                     if false_is_float && false_width != output_width {
                         // Float to different-width integer: convert to bits first, then cast
+                        // BUG FIX #71b: Use signal ref that may include .x accessor
                         format!(
-                            "({})(as_type<uint>(signals->{}))",
-                            output_metal_type,
-                            self.sanitize_name(false_val)
+                            "({})(as_type<uint>({}))",
+                            output_metal_type, false_signal_ref
                         )
                     } else {
                         // Same width or integer-to-float: direct as_type
-                        format!(
-                            "as_type<{}>(signals->{})",
-                            output_metal_type,
-                            self.sanitize_name(false_val)
-                        )
+                        format!("as_type<{}>({})", output_metal_type, false_signal_ref)
                     }
                 } else {
-                    format!("signals->{}", self.sanitize_name(false_val))
+                    false_signal_ref
                 };
 
                 self.write_indented(&format!(
@@ -1732,6 +1785,53 @@ impl<'a> MetalShaderGenerator<'a> {
         format!("signals->{}", sanitized)
     }
 
+    /// Format a signal reference for use in expressions, handling vector component extraction
+    /// BUG FIX #71b: Handle vec3/vec4 types stored as Metal vectors
+    fn format_signal_reference(
+        &self,
+        sir: &SirModule,
+        signal_name: &str,
+        component_index: Option<usize>,
+    ) -> String {
+        let sanitized = self.sanitize_name(signal_name);
+        let base_ref = format!("signals->{}", sanitized);
+
+        // Get the signal width to determine Metal representation
+        let width = self.get_signal_width_from_sir(sir, signal_name);
+        if width == 0 {
+            return base_ref;
+        }
+
+        // Check what Metal type this signal uses
+        let (metal_type, metal_array_size) = self.get_metal_type_for_wide_bits(width);
+
+        // If stored as array (>256 bits after decomposition)
+        if metal_array_size.is_some() {
+            let index = component_index.unwrap_or(0);
+            return format!("{}[{}]", base_ref, index);
+        }
+
+        // BUG FIX #71b: If signal is stored as Metal vector type (uint2, uint4),
+        // extract component when we need scalar value
+        // uint2: 33-64 bits, uint4: 65-128 bits
+        let is_metal_vector = metal_type == "uint2" || metal_type == "uint4";
+
+        if is_metal_vector {
+            if let Some(idx) = component_index {
+                let component = match idx {
+                    0 => "x",
+                    1 => "y",
+                    2 => "z",
+                    3 => "w",
+                    _ => "x",
+                };
+                return format!("{}.{}", base_ref, component);
+            }
+        }
+
+        base_ref
+    }
+
     #[allow(dead_code)]
     fn generate_signal_ref(&mut self, node: &SirNode, signal: &str) {
         if !node.outputs.is_empty() && !node.inputs.is_empty() {
@@ -1775,14 +1875,10 @@ impl<'a> MetalShaderGenerator<'a> {
             ));
 
             // Initialize output array to zeros first
-            self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
-            self.indent += 1;
-            self.write_indented(&format!(
-                "signals->{}[i] = 0;\n",
-                self.sanitize_name(output)
-            ));
-            self.indent -= 1;
-            self.write_indented("}\n");
+            // BUG FIX #71: Use helper for decomposed outputs
+            for i in 0..array_size {
+                self.write_to_decomposed_array(output, i, "0");
+            }
 
             // Concatenation packs from MSB to LSB
             // Inputs are ordered: [high_bits, ..., low_bits]
@@ -1796,35 +1892,79 @@ impl<'a> MetalShaderGenerator<'a> {
                     // Simple case: scalar input aligned to element boundary
                     // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
                     let input_ref = self.format_signal_for_bitwise_op(sir, input_name);
-                    self.write_indented(&format!(
-                        "signals->{}[{}] = {};\n",
-                        self.sanitize_name(output),
-                        element_idx,
-                        input_ref
-                    ));
+                    // BUG FIX #71: Use helper for decomposed outputs
+                    self.write_to_decomposed_array(output, element_idx, &input_ref);
                 } else if *width <= 32 {
                     // Scalar input not aligned - need bit manipulation
                     // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
                     let input_ref = self.format_signal_for_bitwise_op(sir, input_name);
-                    self.write_indented(&format!(
-                        "signals->{}[{}] |= ({} << {});\n",
-                        self.sanitize_name(output),
-                        element_idx,
-                        input_ref,
-                        bit_in_element
-                    ));
+                    // BUG FIX #71: Need to handle decomposed outputs with |= operator
+                    // Generate the compound assignment differently
+                    let sanitized_out = self.sanitize_name(output);
+                    if let Some((_total_width, _num_parts, _part_width)) =
+                        self.wide_signal_decomposition.get(&sanitized_out)
+                    {
+                        // Decomposed - figure out which part
+                        let part_idx = element_idx / 8;
+                        let idx_in_part = element_idx % 8;
+                        let part_name = format!("{}_part{}", sanitized_out, part_idx);
+                        self.write_indented(&format!(
+                            "signals->{}[{}] |= ({} << {});\n",
+                            part_name, idx_in_part, input_ref, bit_in_element
+                        ));
+                    } else {
+                        // Normal case
+                        self.write_indented(&format!(
+                            "signals->{}[{}] |= ({} << {});\n",
+                            sanitized_out, element_idx, input_ref, bit_in_element
+                        ));
+                    }
                 } else {
                     // Wide input - copy element by element
                     let input_array_size = width.div_ceil(32);
-                    for i in 0..input_array_size {
-                        let dest_elem = (bit_offset + i * 32) / 32;
-                        self.write_indented(&format!(
-                            "signals->{}[{}] = signals->{}[{}];\n",
-                            self.sanitize_name(output),
-                            dest_elem,
-                            self.sanitize_name(input_name),
-                            i
-                        ));
+                    let sanitized_input = self.sanitize_name(input_name);
+
+                    // BUG FIX #71: Check if input signal is decomposed (>256 bits)
+                    if let Some((_total_width, num_parts, _part_width)) = self
+                        .wide_signal_decomposition
+                        .get(&sanitized_input)
+                        .cloned()
+                    {
+                        // Signal is decomposed - copy from parts
+                        eprintln!(
+                            "[CONCAT DECOMP] Copying from decomposed signal '{}' ({} parts)",
+                            input_name, num_parts
+                        );
+
+                        // Copy from each part
+                        let mut elements_copied = 0;
+                        for part_idx in 0..num_parts {
+                            let part_name = format!("{}_part{}", sanitized_input, part_idx);
+
+                            // Each part is up to 256 bits = 8 uint elements
+                            let part_elements = if part_idx == num_parts - 1 {
+                                // Last part might be smaller
+                                input_array_size - elements_copied
+                            } else {
+                                8 // 256 bits / 32 bits per element
+                            };
+
+                            for i in 0..part_elements {
+                                let dest_elem = (bit_offset + (elements_copied + i) * 32) / 32;
+                                // BUG FIX #71: Use helper for decomposed outputs
+                                let value_expr = format!("signals->{}[{}]", part_name, i);
+                                self.write_to_decomposed_array(output, dest_elem, &value_expr);
+                            }
+                            elements_copied += part_elements;
+                        }
+                    } else {
+                        // Normal case - signal not decomposed
+                        for i in 0..input_array_size {
+                            let dest_elem = (bit_offset + i * 32) / 32;
+                            // BUG FIX #71: Use helper for decomposed outputs
+                            let value_expr = format!("signals->{}[{}]", sanitized_input, i);
+                            self.write_to_decomposed_array(output, dest_elem, &value_expr);
+                        }
                     }
                 }
 
@@ -3122,6 +3262,14 @@ impl<'a> MetalShaderGenerator<'a> {
     fn get_metal_type_for_wide_bits(&self, width: usize) -> (String, Option<usize>) {
         // BUG FIX #57: Use appropriate Metal types for different bit widths
         // This ensures Bits(16) maps to ushort, not uint
+        if width > 256 {
+            eprintln!(
+                "❌ BUG #71 PANIC: Attempting to create Metal type for width={} (max 256 bits)",
+                width
+            );
+            eprintln!("❌ BUG #71 PANIC: This indicates a 288-bit signal was created in SIR");
+            eprintln!("❌ BUG #71 PANIC: Check stack trace to see which signal");
+        }
         match width {
             1..=8 => ("uchar".to_string(), None),
             9..=16 => ("ushort".to_string(), None),

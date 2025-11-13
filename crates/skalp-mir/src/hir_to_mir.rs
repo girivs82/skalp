@@ -268,7 +268,10 @@ impl<'hir> HirToMir<'hir> {
                                 .as_ref()
                                 .and_then(|expr| self.convert_literal_expr(expr)),
                         };
-                        eprintln!("[BUG #71 PUSH LOC1] Pushing variable: id={:?}, name={}", var_id, hir_var.name);
+                        eprintln!(
+                            "[BUG #71 PUSH LOC1] Pushing variable: id={:?}, name={}",
+                            var_id, hir_var.name
+                        );
                         module.variables.push(variable);
                     }
 
@@ -284,10 +287,20 @@ impl<'hir> HirToMir<'hir> {
                     let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
 
                     // BUG #71 DEBUG: Check if var_148 is in dynamic_variables before adding
-                    if let Some((_, name, _)) = self.dynamic_variables.values().find(|(id, _, _)| id.0 == 148) {
-                        eprintln!("[BUG #71 BEFORE LOC2] var_148 IS in dynamic_variables with name: {}", name);
+                    if let Some((_, name, _)) = self
+                        .dynamic_variables
+                        .values()
+                        .find(|(id, _, _)| id.0 == 148)
+                    {
+                        eprintln!(
+                            "[BUG #71 BEFORE LOC2] var_148 IS in dynamic_variables with name: {}",
+                            name
+                        );
                     } else {
-                        eprintln!("[BUG #71 BEFORE LOC2] var_148 NOT in dynamic_variables (size={})", self.dynamic_variables.len());
+                        eprintln!(
+                            "[BUG #71 BEFORE LOC2] var_148 NOT in dynamic_variables (size={})",
+                            self.dynamic_variables.len()
+                        );
                     }
 
                     for (mir_var_id, name, hir_type) in dynamic_vars {
@@ -298,7 +311,11 @@ impl<'hir> HirToMir<'hir> {
                         let mir_type = self.convert_type(&hir_type);
                         eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
                         // BUG #71 DEBUG
-                        if name.contains("edge1") || name.contains("edge2") || name.contains("_h") || name.contains("_s") {
+                        if name.contains("edge1")
+                            || name.contains("edge2")
+                            || name.contains("_h")
+                            || name.contains("_s")
+                        {
                             eprintln!("[BUG #71 EVENT BLOCK VAR] Adding variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
                                 name, mir_var_id, hir_type, mir_type);
                         }
@@ -308,7 +325,10 @@ impl<'hir> HirToMir<'hir> {
                             var_type: mir_type,
                             initial: None,
                         };
-                        eprintln!("[BUG #71 PUSH LOC2] Pushing dynamic variable: id={:?}, name={}", mir_var_id, name);
+                        eprintln!(
+                            "[BUG #71 PUSH LOC2] Pushing dynamic variable: id={:?}, name={}",
+                            mir_var_id, name
+                        );
                         module.variables.push(variable);
                     }
                     // Clear dynamic variables for next impl block
@@ -333,7 +353,11 @@ impl<'hir> HirToMir<'hir> {
                         let assigns = self.convert_continuous_assignment_expanded(hir_assign);
 
                         // BUG #71 DEBUG: Check variable_map size after assignment conversion
-                        eprintln!("[BUG #71 AFTER ASSIGNMENT {}] variable_map size={}", idx, self.variable_map.len());
+                        eprintln!(
+                            "[BUG #71 AFTER ASSIGNMENT {}] variable_map size={}",
+                            idx,
+                            self.variable_map.len()
+                        );
                         eprintln!("[BUG #71 AFTER ASSIGNMENT {}] Checking if HIR VariableId(5) is in variable_map: {}",
                             idx, self.variable_map.contains_key(&hir::VariableId(5)));
 
@@ -354,7 +378,10 @@ impl<'hir> HirToMir<'hir> {
                         let pending_stmts_snapshot = self.pending_statements.clone();
 
                         // BUG #71 DEBUG: Check variable_map size before processing pending statements
-                        eprintln!("[BUG #71 BEFORE PENDING LOOP] variable_map size={}", self.variable_map.len());
+                        eprintln!(
+                            "[BUG #71 BEFORE PENDING LOOP] variable_map size={}",
+                            self.variable_map.len()
+                        );
                         eprintln!("[BUG #71 BEFORE PENDING LOOP] Checking if HIR VariableId(5) is in variable_map: {}",
                             self.variable_map.contains_key(&hir::VariableId(5)));
 
@@ -362,9 +389,13 @@ impl<'hir> HirToMir<'hir> {
                             if let Statement::Assignment(assign) = pending_stmt {
                                 if let LValue::Variable(var_id) = &assign.lhs {
                                     // BUG #71 DEBUG: Check if var_148 is already in the module
-                                    let in_module = module.variables.iter().any(|v| v.id == *var_id);
+                                    let in_module =
+                                        module.variables.iter().any(|v| v.id == *var_id);
                                     if var_id.0 == 148 {
-                                        eprintln!("[BUG #71 IN_MODULE] var_148 in module? {}", in_module);
+                                        eprintln!(
+                                            "[BUG #71 IN_MODULE] var_148 in module? {}",
+                                            in_module
+                                        );
                                     }
                                     // Check if this variable is already in the module
                                     if !in_module {
@@ -381,11 +412,19 @@ impl<'hir> HirToMir<'hir> {
                                         if var_id.0 == 148 {
                                             eprintln!("[BUG #71 DYN_VAR LOOKUP] Searching for MIR {:?} in dynamic_variables (size={})",
                                                 var_id, self.dynamic_variables.len());
-                                            let found = self.dynamic_variables.values().any(|(id, _, _)| id == var_id);
-                                            eprintln!("[BUG #71 DYN_VAR LOOKUP] Found var_148? {}", found);
+                                            let found = self
+                                                .dynamic_variables
+                                                .values()
+                                                .any(|(id, _, _)| id == var_id);
+                                            eprintln!(
+                                                "[BUG #71 DYN_VAR LOOKUP] Found var_148? {}",
+                                                found
+                                            );
                                             if !found {
                                                 eprintln!("[BUG #71 DYN_VAR LOOKUP] Listing all variables with 'edge' in name:");
-                                                for (mir_id, name, hir_type) in self.dynamic_variables.values() {
+                                                for (mir_id, name, hir_type) in
+                                                    self.dynamic_variables.values()
+                                                {
                                                     if name.contains("edge") {
                                                         eprintln!("  - MIR {:?}: name='{}', HIR type={:?}", mir_id, name, hir_type);
                                                     }
@@ -393,7 +432,8 @@ impl<'hir> HirToMir<'hir> {
                                             }
                                         }
 
-                                        let dyn_var_info = self.dynamic_variables
+                                        let dyn_var_info = self
+                                            .dynamic_variables
                                             .values()
                                             .find(|(id, _, _)| id == var_id)
                                             .cloned();
@@ -409,7 +449,11 @@ impl<'hir> HirToMir<'hir> {
                                             eprintln!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
                                                     var_id.0, name, hir_type, mir_type);
                                             // BUG #71 DEBUG
-                                            if name.contains("edge1") || name.contains("edge2") || name.contains("_h") || name.contains("_s") {
+                                            if name.contains("edge1")
+                                                || name.contains("edge2")
+                                                || name.contains("_h")
+                                                || name.contains("_s")
+                                            {
                                                 eprintln!("[BUG #71 PENDING VAR] Variable '{}' (from pending_statements): HIR={:?} -> MIR={:?}",
                                                     name, hir_type, mir_type);
                                             }
@@ -432,7 +476,11 @@ impl<'hir> HirToMir<'hir> {
                                                 module,
                                             );
                                             // BUG #71 DEBUG
-                                            if var_name.contains("edge1") || var_name.contains("edge2") || var_name.contains("_h") || var_name.contains("_s") {
+                                            if var_name.contains("edge1")
+                                                || var_name.contains("edge2")
+                                                || var_name.contains("_h")
+                                                || var_name.contains("_s")
+                                            {
                                                 eprintln!("[BUG #71 PENDING VAR INFERRED] Variable '{}' (from pending_statements, TYPE INFERRED): inferred_type={:?}",
                                                     var_name, var_type);
                                             }
@@ -464,7 +512,11 @@ impl<'hir> HirToMir<'hir> {
                                 let mir_type = self.convert_type(&hir_type);
                                 eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
                                 // BUG #71 DEBUG: Check if this is one of the problematic variables
-                                if name.contains("edge1") || name.contains("edge2") || name.contains("_h") || name.contains("_s") {
+                                if name.contains("edge1")
+                                    || name.contains("edge2")
+                                    || name.contains("_h")
+                                    || name.contains("_s")
+                                {
                                     eprintln!("[BUG #71 DYNAMIC VAR] Variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
                                         name, mir_var_id, hir_type, mir_type);
                                 }
@@ -922,13 +974,26 @@ impl<'hir> HirToMir<'hir> {
                         // This is needed because pending statements only have the MIR ID and need
                         // to reverse-lookup the HIR ID to find the variable in dynamic_variables
                         if new_id.0 >= 148 && new_id.0 <= 150 {
-                            eprintln!("[BUG #71 INSERT] BEFORE insert: variable_map size={}", self.variable_map.len());
-                            eprintln!("[BUG #71 INSERT] Inserting HIR {:?} -> MIR {:?} into variable_map", let_stmt.id, new_id);
+                            eprintln!(
+                                "[BUG #71 INSERT] BEFORE insert: variable_map size={}",
+                                self.variable_map.len()
+                            );
+                            eprintln!(
+                                "[BUG #71 INSERT] Inserting HIR {:?} -> MIR {:?} into variable_map",
+                                let_stmt.id, new_id
+                            );
                         }
                         self.variable_map.insert(let_stmt.id, new_id);
                         if new_id.0 >= 148 && new_id.0 <= 150 {
-                            eprintln!("[BUG #71 INSERT] AFTER insert: variable_map size={}", self.variable_map.len());
-                            eprintln!("[BUG #71 INSERT] Verify: variable_map contains {:?}? {}", let_stmt.id, self.variable_map.contains_key(&let_stmt.id));
+                            eprintln!(
+                                "[BUG #71 INSERT] AFTER insert: variable_map size={}",
+                                self.variable_map.len()
+                            );
+                            eprintln!(
+                                "[BUG #71 INSERT] Verify: variable_map contains {:?}? {}",
+                                let_stmt.id,
+                                self.variable_map.contains_key(&let_stmt.id)
+                            );
                         }
                     } else {
                         self.variable_map.insert(let_stmt.id, new_id);
@@ -1824,7 +1889,10 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
         let lhs = lhs?;
-        eprintln!("[DEBUG] LHS converted successfully: {:?}", std::mem::discriminant(&lhs));
+        eprintln!(
+            "[DEBUG] LHS converted successfully: {:?}",
+            std::mem::discriminant(&lhs)
+        );
 
         let rhs = self.convert_expression(&assign.rhs);
         if rhs.is_none() {
@@ -2872,12 +2940,19 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Convert struct field access to bit slice (range select)
-                eprintln!("[BUG #71 FIELD] Converting FieldAccess: field='{}', base={:?}", field, std::mem::discriminant(&**base));
+                eprintln!(
+                    "[BUG #71 FIELD] Converting FieldAccess: field='{}', base={:?}",
+                    field,
+                    std::mem::discriminant(&**base)
+                );
                 if let hir::HirExpression::Variable(var_id) = &**base {
                     eprintln!("[BUG #71 FIELD]   Base is Variable({})", var_id.0);
                     // Check if this variable is in dynamic_variables (tuple temporary)
                     if let Some((mir_id, name, hir_type)) = self.dynamic_variables.get(var_id) {
-                        eprintln!("[BUG #71 FIELD]   Found in dynamic_variables: name='{}', type={:?}", name, hir_type);
+                        eprintln!(
+                            "[BUG #71 FIELD]   Found in dynamic_variables: name='{}', type={:?}",
+                            name, hir_type
+                        );
                         if matches!(hir_type, hir::HirType::Tuple(_)) {
                             eprintln!("[BUG #71 FIELD]   ✅ This is a TUPLE variable!");
                         }
@@ -3069,11 +3144,16 @@ impl<'hir> HirToMir<'hir> {
                 let saved_dynamic_vars = self.dynamic_variables.clone();
                 let saved_pending_count = self.pending_statements.len();
 
-                eprintln!("[IF_DEBUG] Converting THEN branch, expr type: {:?}",
-                    std::mem::discriminant(&*if_expr.then_expr));
+                eprintln!(
+                    "[IF_DEBUG] Converting THEN branch, expr type: {:?}",
+                    std::mem::discriminant(&*if_expr.then_expr)
+                );
                 if let hir::HirExpression::Call(call) = &*if_expr.then_expr {
-                    eprintln!("[IF_DEBUG]   Then-expr is Call: function={}, args={}",
-                        call.function, call.args.len());
+                    eprintln!(
+                        "[IF_DEBUG]   Then-expr is Call: function={}, args={}",
+                        call.function,
+                        call.args.len()
+                    );
                 }
                 let then_expr = self.convert_expression(&if_expr.then_expr);
                 if then_expr.is_none() {
@@ -3103,7 +3183,8 @@ impl<'hir> HirToMir<'hir> {
                 for (hir_var_id, (mir_var_id, name, hir_type)) in then_branch_vars.iter() {
                     if !saved_dynamic_vars.contains_key(hir_var_id) {
                         // Preserve new variables from then-branch for else-branch context
-                        state_for_else.insert(*hir_var_id, (*mir_var_id, name.clone(), hir_type.clone()));
+                        state_for_else
+                            .insert(*hir_var_id, (*mir_var_id, name.clone(), hir_type.clone()));
                     }
                 }
 
@@ -3112,11 +3193,16 @@ impl<'hir> HirToMir<'hir> {
                 // This prevents variable name collisions while preserving nested scope variables.
                 self.dynamic_variables = state_for_else;
 
-                eprintln!("[IF_DEBUG] Converting ELSE branch, expr type: {:?}",
-                    std::mem::discriminant(&*if_expr.else_expr));
+                eprintln!(
+                    "[IF_DEBUG] Converting ELSE branch, expr type: {:?}",
+                    std::mem::discriminant(&*if_expr.else_expr)
+                );
                 if let hir::HirExpression::Call(call) = &*if_expr.else_expr {
-                    eprintln!("[IF_DEBUG]   Else-expr is Call: function={}, args={}",
-                        call.function, call.args.len());
+                    eprintln!(
+                        "[IF_DEBUG]   Else-expr is Call: function={}, args={}",
+                        call.function,
+                        call.args.len()
+                    );
                 }
                 if let hir::HirExpression::If(_) = &*if_expr.else_expr {
                     eprintln!("[IF_DEBUG]   Else-expr is nested If (else-if chain)");
@@ -3152,12 +3238,20 @@ impl<'hir> HirToMir<'hir> {
                 let mut preserved_count = 0;
 
                 // BUG #71 DEBUG: Check if edge1 is in then_branch_vars
-                let edge1_in_then = then_branch_vars.values().any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
-                eprintln!("[BUG #71 THEN_VARS] edge1/var_148 in then_branch_vars? {}", edge1_in_then);
+                let edge1_in_then = then_branch_vars
+                    .values()
+                    .any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
+                eprintln!(
+                    "[BUG #71 THEN_VARS] edge1/var_148 in then_branch_vars? {}",
+                    edge1_in_then
+                );
                 if edge1_in_then {
                     for (mir_id, name, _) in then_branch_vars.values() {
                         if mir_id.0 == 148 || name.contains("edge1") {
-                            eprintln!("[BUG #71 THEN_VARS]   Found: MIR {:?}, name='{}'", mir_id, name);
+                            eprintln!(
+                                "[BUG #71 THEN_VARS]   Found: MIR {:?}, name='{}'",
+                                mir_id, name
+                            );
                         }
                     }
                 }
@@ -3190,12 +3284,20 @@ impl<'hir> HirToMir<'hir> {
                     saved_dynamic_vars.len(), then_branch_vars.len(), self.dynamic_variables.len(), preserved_count);
 
                 // BUG #71 DEBUG: Check if edge1 is in restored_vars before assignment
-                let has_edge1_before = restored_vars.values().any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
-                eprintln!("[BUG #71 RESTORE] About to restore dynamic_variables, has edge1/var_148? {}", has_edge1_before);
+                let has_edge1_before = restored_vars
+                    .values()
+                    .any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
+                eprintln!(
+                    "[BUG #71 RESTORE] About to restore dynamic_variables, has edge1/var_148? {}",
+                    has_edge1_before
+                );
                 if has_edge1_before {
                     for (mir_id, name, _) in restored_vars.values() {
                         if mir_id.0 == 148 || name.contains("edge1") {
-                            eprintln!("[BUG #71 RESTORE]   Found: MIR {:?}, name='{}'", mir_id, name);
+                            eprintln!(
+                                "[BUG #71 RESTORE]   Found: MIR {:?}, name='{}'",
+                                mir_id, name
+                            );
                         }
                     }
                 }
@@ -3203,8 +3305,14 @@ impl<'hir> HirToMir<'hir> {
                 self.dynamic_variables = restored_vars;
 
                 // BUG #71 DEBUG: Verify edge1 is still there after assignment
-                let has_edge1_after = self.dynamic_variables.values().any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
-                eprintln!("[BUG #71 RESTORE] After restore, has edge1/var_148? {}", has_edge1_after);
+                let has_edge1_after = self
+                    .dynamic_variables
+                    .values()
+                    .any(|(id, name, _)| id.0 == 148 || name.contains("edge1"));
+                eprintln!(
+                    "[BUG #71 RESTORE] After restore, has edge1/var_148? {}",
+                    has_edge1_after
+                );
 
                 let cond = Box::new(cond);
                 let then_expr = Box::new(then_expr);
@@ -4225,7 +4333,6 @@ impl<'hir> HirToMir<'hir> {
                         // For simple expressions, safe to inline
                         let cloned = (*arg_expr).clone();
                         return Some(cloned);
-                    } else {
                     }
                 }
 
@@ -4411,7 +4518,8 @@ impl<'hir> HirToMir<'hir> {
                 );
                 // BUG FIX #18: Use owned HashMap for local variables to allow incremental updates
                 // This allows each statement to reference previously defined local variables
-                let mut local_var_map: std::collections::HashMap<String, hir::HirExpression> = std::collections::HashMap::new();
+                let mut local_var_map: std::collections::HashMap<String, hir::HirExpression> =
+                    std::collections::HashMap::new();
 
                 // Substitute all statements in the block
                 let mut substituted_statements = Vec::new();
@@ -4423,7 +4531,10 @@ impl<'hir> HirToMir<'hir> {
                                 i, let_stmt.name
                             );
                             // Build a combined map with both params and local vars for substitution
-                            let mut combined_map: std::collections::HashMap<String, &hir::HirExpression> = param_map.clone();
+                            let mut combined_map: std::collections::HashMap<
+                                String,
+                                &hir::HirExpression,
+                            > = param_map.clone();
                             for (name, expr) in &local_var_map {
                                 combined_map.insert(name.clone(), expr);
                             }
@@ -4464,7 +4575,8 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Build final combined map for result expression
-                let mut combined_map: std::collections::HashMap<String, &hir::HirExpression> = param_map.clone();
+                let mut combined_map: std::collections::HashMap<String, &hir::HirExpression> =
+                    param_map.clone();
                 for (name, expr) in &local_var_map {
                     combined_map.insert(name.clone(), expr);
                 }
@@ -5646,17 +5758,26 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(dimension) = dim_char.to_digit(10) {
                             match dimension {
                                 2 => {
-                                    eprintln!("[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec2(Float32)", name);
-                                    return DataType::Vec2(Box::new(DataType::Float32))
-                                },
+                                    eprintln!(
+                                        "[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec2(Float32)",
+                                        name
+                                    );
+                                    return DataType::Vec2(Box::new(DataType::Float32));
+                                }
                                 3 => {
-                                    eprintln!("[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec3(Float32)", name);
-                                    return DataType::Vec3(Box::new(DataType::Float32))
-                                },
+                                    eprintln!(
+                                        "[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec3(Float32)",
+                                        name
+                                    );
+                                    return DataType::Vec3(Box::new(DataType::Float32));
+                                }
                                 4 => {
-                                    eprintln!("[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec4(Float32)", name);
-                                    return DataType::Vec4(Box::new(DataType::Float32))
-                                },
+                                    eprintln!(
+                                        "[BUG #71 CONVERT_TYPE] Custom(\"{}\") -> Vec4(Float32)",
+                                        name
+                                    );
+                                    return DataType::Vec4(Box::new(DataType::Float32));
+                                }
                                 _ => {}
                             }
                         }
@@ -6267,12 +6388,18 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<Expression> {
         eprintln!("[BUG #71 TUPLE FIELD ACCESS] convert_field_access called:");
         eprintln!("[BUG #71 TUPLE FIELD ACCESS]   field_name='{}'", field_name);
-        eprintln!("[BUG #71 TUPLE FIELD ACCESS]   base expr type={:?}", std::mem::discriminant(base));
+        eprintln!(
+            "[BUG #71 TUPLE FIELD ACCESS]   base expr type={:?}",
+            std::mem::discriminant(base)
+        );
 
         // Map numeric field names (tuple indices) to struct field names
         // e.g., "0" -> "_0", "1" -> "_1", "2" -> "_2"
         let normalized_field_name = if field_name.chars().all(|c| c.is_ascii_digit()) {
-            eprintln!("[BUG #71 TUPLE FIELD ACCESS]   Normalized '{}' -> '_{}'", field_name, field_name);
+            eprintln!(
+                "[BUG #71 TUPLE FIELD ACCESS]   Normalized '{}' -> '_{}'",
+                field_name, field_name
+            );
             format!("_{}", field_name)
         } else {
             field_name.to_string()
@@ -6414,7 +6541,10 @@ impl<'hir> HirToMir<'hir> {
                                 "[BUG #71 TUPLE] ✅ FieldAccess on TupleLiteral: extracting element {} of {} elements",
                                 index, elements.len()
                             );
-                            eprintln!("[BUG #71 TUPLE]   Element type: {:?}", std::mem::discriminant(&elements[index]));
+                            eprintln!(
+                                "[BUG #71 TUPLE]   Element type: {:?}",
+                                std::mem::discriminant(&elements[index])
+                            );
                             let result = self.convert_expression(&elements[index]);
                             if result.is_some() {
                                 eprintln!("[BUG #71 TUPLE]   ✅ Successfully extracted element");
@@ -6562,7 +6692,10 @@ impl<'hir> HirToMir<'hir> {
         eprintln!("[BUG #70 FIELD RANGE] get_field_bit_range called: field_name='{}', base expr discriminant={:?}", field_name, std::mem::discriminant(base));
         // First, check if this is a vector type
         if let Some(base_type) = self.infer_hir_type(base) {
-            eprintln!("[BUG #70 FIELD RANGE] Inferred base type: {:?}", std::mem::discriminant(&base_type));
+            eprintln!(
+                "[BUG #70 FIELD RANGE] Inferred base type: {:?}",
+                std::mem::discriminant(&base_type)
+            );
             // Handle Custom types that might be vec2/vec3/vec4
             // BUG FIX #44: HIR stores vec2<fp32> as Custom("vec2") instead of Vec2(Float32)
             if let hir::HirType::Custom(type_name) = &base_type {
@@ -6647,9 +6780,16 @@ impl<'hir> HirToMir<'hir> {
         // We need to calculate offsets from MSB downward for tuple fields
 
         // First, calculate total width to determine if we need MSB-first ordering
-        eprintln!("[BUG #70 TUPLE DEBUG] Calculating total width for {} fields:", fields.len());
+        eprintln!(
+            "[BUG #70 TUPLE DEBUG] Calculating total width for {} fields:",
+            fields.len()
+        );
         for (name, ty) in &fields {
-            eprintln!("[BUG #70 TUPLE DEBUG]   Field '{}': type discriminant = {:?}", name, std::mem::discriminant(ty));
+            eprintln!(
+                "[BUG #70 TUPLE DEBUG]   Field '{}': type discriminant = {:?}",
+                name,
+                std::mem::discriminant(ty)
+            );
         }
         let total_width: usize = fields
             .iter()
@@ -6877,21 +7017,35 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Vec3(element_type) => {
                 // BUG FIX #70: vec3 is 3 elements
                 let element_width = self.get_hir_type_width(element_type);
-                eprintln!("[BUG #70 FIX] Vec3 element width: {}, total: {}", element_width, element_width * 3);
+                eprintln!(
+                    "[BUG #70 FIX] Vec3 element width: {}, total: {}",
+                    element_width,
+                    element_width * 3
+                );
                 element_width * 3
             }
             hir::HirType::Vec4(element_type) => {
                 // BUG FIX #70: vec4 is 4 elements
                 let element_width = self.get_hir_type_width(element_type);
-                eprintln!("[BUG #70 FIX] Vec4 element width: {}, total: {}", element_width, element_width * 4);
+                eprintln!(
+                    "[BUG #70 FIX] Vec4 element width: {}, total: {}",
+                    element_width,
+                    element_width * 4
+                );
                 element_width * 4
             }
             hir::HirType::Custom(type_name) => {
                 // BUG FIX #70: Look up custom struct types and calculate their actual width
-                eprintln!("[BUG #70 DEBUG] get_hir_type_width called for Custom type '{}'", type_name);
+                eprintln!(
+                    "[BUG #70 DEBUG] get_hir_type_width called for Custom type '{}'",
+                    type_name
+                );
                 // Check if this is a known struct type
                 if let Some(hir) = self.hir {
-                    eprintln!("[BUG #70 DEBUG] HIR available, searching {} user_defined_types", hir.user_defined_types.len());
+                    eprintln!(
+                        "[BUG #70 DEBUG] HIR available, searching {} user_defined_types",
+                        hir.user_defined_types.len()
+                    );
                     // Search in user-defined types
                     for user_type in &hir.user_defined_types {
                         if user_type.name == *type_name {
@@ -6932,8 +7086,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Float64 => 64,
             // Vector types - width is element_width * component_count
             hir::HirType::Vec2(element_type) => self.get_hir_type_width(element_type) * 2,
-            hir::HirType::Vec3(element_type) => self.get_hir_type_width(element_type) * 3,
-            hir::HirType::Vec4(element_type) => self.get_hir_type_width(element_type) * 4,
+            // Vec3 and Vec4 handled above with debug output (lines 7017-7036)
 
             // Parametric numeric types
             hir::HirType::FpParametric { format } => {
