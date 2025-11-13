@@ -1231,16 +1231,36 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 // Handle cases where one operand might be a scalar and needs broadcasting
                 let true_access = if true_val_width > 128 {
+                    // Array type (>128 bits) - use array indexing
                     format!("signals->{}[i]", self.sanitize_name(true_val))
+                } else if true_val_width > 32 {
+                    // Vector type (33-128 bits: uint2/uint4) - index with bounds check
+                    // BUG FIX #72: Metal vectors (uint2/uint4) need element indexing, not scalar broadcast
+                    let true_elements = true_val_width.div_ceil(32);
+                    format!(
+                        "(i < {} ? signals->{}[i] : 0)",
+                        true_elements,
+                        self.sanitize_name(true_val)
+                    )
                 } else {
-                    // Scalar - broadcast to all elements (only element 0 gets the value, rest get 0)
+                    // Scalar type (1-32 bits: uint) - broadcast to all elements
                     format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(true_val))
                 };
 
                 let false_access = if false_val_width > 128 {
+                    // Array type (>128 bits) - use array indexing
                     format!("signals->{}[i]", self.sanitize_name(false_val))
+                } else if false_val_width > 32 {
+                    // Vector type (33-128 bits: uint2/uint4) - index with bounds check
+                    // BUG FIX #72: Metal vectors (uint2/uint4) need element indexing, not scalar broadcast
+                    let false_elements = false_val_width.div_ceil(32);
+                    format!(
+                        "(i < {} ? signals->{}[i] : 0)",
+                        false_elements,
+                        self.sanitize_name(false_val)
+                    )
                 } else {
-                    // Scalar - broadcast to all elements (only element 0 gets the value, rest get 0)
+                    // Scalar type (1-32 bits: uint) - broadcast to all elements
                     format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(false_val))
                 };
 
