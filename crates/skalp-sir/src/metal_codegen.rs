@@ -1400,11 +1400,11 @@ impl<'a> MetalShaderGenerator<'a> {
             // Check if this is a vector component access
             if let Some(ref input_type_val) = input_type {
                 if input_type_val.is_vector() {
-                    // BUG FIX #10: Before using component access, verify the Metal representation supports it
+                    // BUG FIX #10 & #71: Before using component access, verify the Metal representation supports it
                     // Some signals that are vectors in SIR may be stored as arrays in Metal
                     let input_width = input_type_val.width();
-                    let (_, metal_array_size) = self.get_metal_type_for_wide_bits(input_width);
-                    let is_metal_array = metal_array_size.is_some();
+                    let (_, metal_array_size, is_decomposed) = self.get_metal_type_safe(input, input_width);
+                    let is_metal_array = metal_array_size.is_some() || is_decomposed;
 
                     if is_metal_array {
                         // Metal stores this as an array - use array indexing
@@ -1455,10 +1455,10 @@ impl<'a> MetalShaderGenerator<'a> {
 
             // For non-vector types, check if it's a wide Bits type requiring element access
             if let Some(SirType::Bits(input_width)) = input_type {
-                // BUG FIX #10: Check if the Metal representation is an array before using component access
+                // BUG FIX #10 & #71: Check if the Metal representation is an array before using component access
                 // Some signals are stored as uint[N] arrays in Metal, not as vector types
-                let (_, metal_array_size) = self.get_metal_type_for_wide_bits(input_width);
-                let is_metal_array = metal_array_size.is_some();
+                let (_, metal_array_size, is_decomposed) = self.get_metal_type_safe(input, input_width);
+                let is_metal_array = metal_array_size.is_some() || is_decomposed;
 
                 if input_width > 128 || is_metal_array {
                     // Wide Bits type stored as array - need element access
@@ -2198,32 +2198,83 @@ impl<'a> MetalShaderGenerator<'a> {
                             self.write_indented("}\n");
                         }
                     } else if is_wide_bits {
-                        // Wide Bits type (>128 bits) - use element-wise copy
-                        let array_size = output_width.div_ceil(32); // Ceil division
-                        let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
-                            format!("inputs->{}", self.sanitize_name(signal))
-                        } else if sir.state_elements.contains_key(signal) {
-                            format!("registers->{}", self.sanitize_name(signal))
-                        } else {
-                            format!("signals->{}", self.sanitize_name(signal))
-                        };
+                        // Wide Bits type (>128 bits) - check if decomposed
+                        // BUG FIX #71: Handle decomposed signals (>256 bits)
+                        let source_sanitized = self.sanitize_name(signal);
+                        let output_sanitized = self.sanitize_name(output);
 
-                        self.write_indented(&format!(
-                            "// Element-wise copy for {}-bit signal (uint[{}])\n",
-                            output_width, array_size
-                        ));
-                        self.write_indented(&format!(
-                            "for (uint i = 0; i < {}; i++) {{\n",
-                            array_size
-                        ));
-                        self.indent += 1;
-                        self.write_indented(&format!(
-                            "signals->{}[i] = {}[i];\n",
-                            self.sanitize_name(output),
-                            source_location
-                        ));
-                        self.indent -= 1;
-                        self.write_indented("}\n");
+                        let source_is_decomposed = self.wide_signal_decomposition.contains_key(&source_sanitized);
+                        let output_is_decomposed = self.wide_signal_decomposition.contains_key(&output_sanitized);
+
+                        if source_is_decomposed || output_is_decomposed {
+                            // At least one signal is decomposed - copy part by part
+                            let source_parts = if let Some((_, num_parts, _)) = self.wide_signal_decomposition.get(&source_sanitized) {
+                                *num_parts
+                            } else {
+                                1 // Source not decomposed, treat as single part
+                            };
+
+                            let output_parts = if let Some((_, num_parts, _)) = self.wide_signal_decomposition.get(&output_sanitized) {
+                                *num_parts
+                            } else {
+                                1 // Output not decomposed, treat as single part
+                            };
+
+                            self.write_indented(&format!(
+                                "// BUG FIX #71: Decomposed signal copy ({}-bit)\n",
+                                output_width
+                            ));
+
+                            // Copy each part
+                            let copy_parts = source_parts.min(output_parts);
+                            for part_idx in 0..copy_parts {
+                                let source_part = if source_is_decomposed {
+                                    format!("signals->{}_part{}", source_sanitized, part_idx)
+                                } else if sir.inputs.iter().any(|i| i.name == *signal) {
+                                    format!("inputs->{}", source_sanitized)
+                                } else {
+                                    format!("signals->{}", source_sanitized)
+                                };
+
+                                let output_part = if output_is_decomposed {
+                                    format!("signals->{}_part{}", output_sanitized, part_idx)
+                                } else {
+                                    format!("signals->{}", output_sanitized)
+                                };
+
+                                self.write_indented(&format!(
+                                    "for (uint i = 0; i < 8; i++) {{ {}[i] = {}[i]; }}\n",
+                                    output_part, source_part
+                                ));
+                            }
+                        } else {
+                            // Neither decomposed - regular element-wise copy
+                            let array_size = output_width.div_ceil(32); // Ceil division
+                            let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
+                                format!("inputs->{}", self.sanitize_name(signal))
+                            } else if sir.state_elements.contains_key(signal) {
+                                format!("registers->{}", self.sanitize_name(signal))
+                            } else {
+                                format!("signals->{}", self.sanitize_name(signal))
+                            };
+
+                            self.write_indented(&format!(
+                                "// Element-wise copy for {}-bit signal (uint[{}])\n",
+                                output_width, array_size
+                            ));
+                            self.write_indented(&format!(
+                                "for (uint i = 0; i < {}; i++) {{\n",
+                                array_size
+                            ));
+                            self.indent += 1;
+                            self.write_indented(&format!(
+                                "signals->{}[i] = {}[i];\n",
+                                self.sanitize_name(output),
+                                source_location
+                            ));
+                            self.indent -= 1;
+                            self.write_indented("}\n");
+                        }
                     } else if source_width > 32 && source_width <= 128 && output_width > 128 {
                         // BUG FIX #65 & Metal Backend: Vector/Array-to-array conversion
                         // Source could be uint2/uint4 (vector) OR uint[N] (array)
@@ -2331,10 +2382,11 @@ impl<'a> MetalShaderGenerator<'a> {
 
                         // Check for vector-to-scalar conversion (uint2/uint4 -> uint)
                         if source_width > 32 && output_width <= 32 {
-                            // BUG FIX #10: Check if source is actually stored as a vector before using .x
-                            let (_, metal_array_size) =
-                                self.get_metal_type_for_wide_bits(source_width);
-                            let is_metal_array = metal_array_size.is_some();
+                            // BUG FIX #10 & #71: Check if source is actually stored as a vector before using .x
+                            // Use safe version to handle decomposed signals
+                            let (_, metal_array_size, source_decomposed) =
+                                self.get_metal_type_safe(signal, source_width);
+                            let is_metal_array = metal_array_size.is_some() || source_decomposed;
 
                             if is_metal_array {
                                 // Source is stored as array - use array indexing
@@ -3281,6 +3333,39 @@ impl<'a> MetalShaderGenerator<'a> {
                 "Unsupported bit width {} for Metal codegen (max 256 bits)",
                 width
             ),
+        }
+    }
+
+    /// Safe version of get_metal_type_for_wide_bits that handles decomposed signals
+    /// BUG FIX #71: For signals > 256 bits, returns info about first decomposed part
+    /// Returns (base_type, array_size, is_decomposed)
+    fn get_metal_type_safe(&self, signal_name: &str, width: usize) -> (String, Option<usize>, bool) {
+        let sanitized = self.sanitize_name(signal_name);
+
+        // Check if this signal is decomposed
+        if let Some((total_width, _num_parts, part_width)) = self.wide_signal_decomposition.get(&sanitized) {
+            eprintln!(
+                "[METAL DECOMP SAFE] Signal '{}' is decomposed: total={} bits, part={} bits",
+                signal_name, total_width, part_width
+            );
+            // Return type info for one part
+            let (base_type, array_size) = self.get_metal_type_for_wide_bits(*part_width);
+            return (base_type, array_size, true);
+        }
+
+        // Not decomposed, use regular logic
+        if width <= 256 {
+            let (base_type, array_size) = self.get_metal_type_for_wide_bits(width);
+            (base_type, array_size, false)
+        } else {
+            // Signal should have been decomposed but wasn't found in HashMap
+            // This shouldn't happen if generate_signal_field was called properly
+            eprintln!(
+                "⚠️ WARNING: Signal '{}' has width {} but not found in decomposition map",
+                signal_name, width
+            );
+            // Fall back to treating as 256-bit array
+            ("uint".to_string(), Some(8), false)
         }
     }
 

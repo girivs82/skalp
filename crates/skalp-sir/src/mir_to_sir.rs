@@ -1793,6 +1793,33 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
             Expression::Binary { op, left, right } => {
+                // BUG #71 DEBUG: Check if operands are variable references to Concat
+                if matches!(
+                    op,
+                    BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv
+                ) {
+                    eprintln!("[BUG #71 BINARY] FP Binary operation: op={:?}", op);
+                    eprintln!(
+                        "[BUG #71 BINARY]   left: {:?}",
+                        std::mem::discriminant(&**left)
+                    );
+                    eprintln!(
+                        "[BUG #71 BINARY]   right: {:?}",
+                        std::mem::discriminant(&**right)
+                    );
+                    if let Expression::Ref(lval) = &**left {
+                        eprintln!(
+                            "[BUG #71 BINARY]   left is Ref: {:?}",
+                            std::mem::discriminant(lval)
+                        );
+                    }
+                    if let Expression::Ref(lval) = &**right {
+                        eprintln!(
+                            "[BUG #71 BINARY]   right is Ref: {:?}",
+                            std::mem::discriminant(lval)
+                        );
+                    }
+                }
                 let left_node = self.create_expression_with_local_context(left, local_context);
                 let right_node = self.create_expression_with_local_context(right, local_context);
                 self.create_binary_op_node(op, left_node, right_node)
@@ -1813,11 +1840,24 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             Expression::Concat(exprs) => {
+                eprintln!(
+                    "[BUG #71 CONCAT] Creating Concat with {} parts",
+                    exprs.len()
+                );
+                for (i, expr) in exprs.iter().enumerate() {
+                    eprintln!(
+                        "[BUG #71 CONCAT]   Part {}: {:?}",
+                        i,
+                        std::mem::discriminant(expr)
+                    );
+                }
                 let part_nodes: Vec<usize> = exprs
                     .iter()
                     .map(|e| self.create_expression_with_local_context(e, local_context))
                     .collect();
-                self.create_concat_node(part_nodes)
+                let concat_node = self.create_concat_node(part_nodes);
+                eprintln!("[BUG #71 CONCAT] Created Concat node_{}", concat_node);
+                concat_node
             }
             Expression::Replicate { count, value } => {
                 let _count_node = self.create_expression_with_local_context(count, local_context);
@@ -2164,6 +2204,38 @@ impl<'a> MirToSirConverter<'a> {
             Expression::Literal(value) => self.create_literal_node(value),
             Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
             Expression::Binary { op, left, right } => {
+                // BUG #71 DEBUG: Check if operands contain Cast with Concat inside
+                if matches!(
+                    op,
+                    BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv
+                ) {
+                    eprintln!("[BUG #71 BINARY NODE] FP Binary operation: op={:?}", op);
+                    eprintln!(
+                        "[BUG #71 BINARY NODE]   left: {:?}",
+                        std::mem::discriminant(&**left)
+                    );
+                    eprintln!(
+                        "[BUG #71 BINARY NODE]   right: {:?}",
+                        std::mem::discriminant(&**right)
+                    );
+
+                    // Check if left is Cast wrapping a Ref to a variable
+                    if let Expression::Cast { expr, target_type } = &**left {
+                        if let Expression::Ref(LValue::Variable(var_id)) = &**expr {
+                            eprintln!(
+                                "[BUG #71 BINARY NODE]   left is Cast(Ref(Variable({:?}))) to {:?}",
+                                var_id, target_type
+                            );
+                        }
+                    }
+
+                    // Check if right is Cast wrapping a Ref to a variable
+                    if let Expression::Cast { expr, target_type } = &**right {
+                        if let Expression::Ref(LValue::Variable(var_id)) = &**expr {
+                            eprintln!("[BUG #71 BINARY NODE]   right is Cast(Ref(Variable({:?}))) to {:?}", var_id, target_type);
+                        }
+                    }
+                }
                 let left_node = self.create_expression_node(left);
                 let right_node = self.create_expression_node(right);
                 self.create_binary_op_node(op, left_node, right_node)
@@ -2347,6 +2419,22 @@ impl<'a> MirToSirConverter<'a> {
                 "  🔍 Looking up types: left='{}', right='{}'",
                 left_signal.signal_id, right_signal.signal_id
             );
+            eprintln!(
+                "  🔍 Type results: left_type={:?} (width={}), right_type={:?} (width={})",
+                left_type,
+                left_type.width(),
+                right_type,
+                right_type.width()
+            );
+            if left_type.width() > 256 || right_type.width() > 256 {
+                eprintln!(
+                    "  ❌ BUG #71: Signal with width > 256 found! left='{}' ({}), right='{}' ({})",
+                    left_signal.signal_id,
+                    left_type.width(),
+                    right_signal.signal_id,
+                    right_type.width()
+                );
+            }
         }
 
         let sir_type = if bin_op.is_float_op() {

@@ -459,10 +459,15 @@ fn generate_module(
 
     for assign in &mir_module.assignments {
         eprintln!(
-            "[CODEGEN_DEBUG] Assignment RHS type: {:?}",
+            "[CODEGEN_DEBUG] Assignment LHS type: {:?}, RHS type: {:?}",
+            std::mem::discriminant(&assign.lhs),
             std::mem::discriminant(&assign.rhs)
         );
         let expanded = expand_struct_assignment(&assign.lhs, &assign.rhs, mir_module);
+        eprintln!(
+            "[CODEGEN_DEBUG] Expanded into {} assignments",
+            expanded.len()
+        );
         for (lhs_str, rhs_str) in expanded {
             // Check if this target has already been assigned
             if assigned_targets.contains(&lhs_str) {
