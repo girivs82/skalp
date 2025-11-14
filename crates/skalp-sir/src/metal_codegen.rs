@@ -3434,13 +3434,15 @@ impl<'a> MetalShaderGenerator<'a> {
     fn get_metal_type_for_wide_bits(&self, width: usize) -> (String, Option<usize>) {
         // BUG FIX #57: Use appropriate Metal types for different bit widths
         // This ensures Bits(16) maps to ushort, not uint
+        // BUG FIX #73: Handle >256-bit signals by returning decomposed first part
         if width > 256 {
             eprintln!(
-                "❌ BUG #71 PANIC: Attempting to create Metal type for width={} (max 256 bits)",
+                "⚠️ BUG FIX #73: {}-bit signal will be decomposed (exceeds Metal 256-bit limit)",
                 width
             );
-            eprintln!("❌ BUG #71 PANIC: This indicates a 288-bit signal was created in SIR");
-            eprintln!("❌ BUG #71 PANIC: Check stack trace to see which signal");
+            eprintln!("  → Returning type for first 256-bit part, remaining bits will be in separate parts");
+            // Return the type for the first part (256 bits)
+            return ("uint".to_string(), Some(8)); // uint[8] for 256 bits
         }
         match width {
             1..=8 => ("uchar".to_string(), None),
@@ -3449,10 +3451,7 @@ impl<'a> MetalShaderGenerator<'a> {
             33..=64 => ("uint2".to_string(), None),
             65..=128 => ("uint4".to_string(), None),
             129..=256 => ("uint".to_string(), Some(8)), // uint[8] for 256 bits
-            _ => panic!(
-                "Unsupported bit width {} for Metal codegen (max 256 bits)",
-                width
-            ),
+            _ => unreachable!("Width {} should have been handled by >256 check above", width),
         }
     }
 

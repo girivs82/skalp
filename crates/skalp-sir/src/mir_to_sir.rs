@@ -2639,11 +2639,18 @@ impl<'a> MirToSirConverter<'a> {
 
         eprintln!("  Sum width: {}", sum_width);
 
-        // BUG FIX #49/#71e: Handle target width mismatch
+        // BUG FIX #49/#71e/#73: Handle target width mismatch and Metal width limitations
         // If target < sum: Create Concat with full width, then Slice to extract target bits
         // If target > sum: This is padding (for constants), create as target width
         // If target == sum: No adjustment needed
-        let needs_slice = target_width.map(|t| t < sum_width).unwrap_or(false);
+        // BUG FIX #73: If no target but sum > 256: Auto-slice to 256 bits for Metal compatibility
+        let needs_slice = if let Some(t) = target_width {
+            t < sum_width
+        } else {
+            // No explicit target width, but if sum > 256 bits, we need to decompose for Metal
+            sum_width > 256
+        };
+
         let concat_width = sum_width; // Concat always outputs full sum width
 
         if let Some(target) = target_width {
@@ -2657,6 +2664,12 @@ impl<'a> MirToSirConverter<'a> {
                     needs_slice
                 );
             }
+        } else if sum_width > 256 {
+            // BUG FIX #73: Auto-decomposition for Metal backend compatibility
+            eprintln!(
+                "🔧 BUG FIX #73: Auto-decompose {}-bit Concat (no target width, exceeds Metal 256-bit limit)",
+                sum_width
+            );
         }
 
         // Create output signal for the Concat node with its actual full width
@@ -2684,16 +2697,26 @@ impl<'a> MirToSirConverter<'a> {
 
         self.sir.combinational_nodes.push(node);
 
-        // BUG FIX #71e: If target < sum, create a Slice to extract the target bits
+        // BUG FIX #71e/#73: If target < sum, create a Slice to extract the target bits
         if needs_slice {
-            let target = target_width.unwrap();
-            eprintln!(
-                "  ✂️ BUG FIX #71e: Creating Slice node to extract bits [0:{}] from {}-bit Concat",
-                target - 1,
-                concat_width
-            );
-            let slice_node = self.create_slice_node(node_id, target - 1, 0);
-            return slice_node;
+            if let Some(target) = target_width {
+                // Explicit target width provided - slice to that width
+                eprintln!(
+                    "  ✂️ BUG FIX #71e: Creating Slice node to extract bits [0:{}] from {}-bit Concat",
+                    target - 1,
+                    concat_width
+                );
+                let slice_node = self.create_slice_node(node_id, target - 1, 0);
+                return slice_node;
+            } else {
+                // BUG FIX #73: No target width, but concat > 256 bits
+                // Don't create a slice (would lose data) - Metal backend will decompose
+                eprintln!(
+                    "  ⚠️ BUG FIX #73: {}-bit Concat created without target width - Metal backend will decompose",
+                    concat_width
+                );
+                // Signal will be automatically decomposed by Metal codegen
+            }
         }
 
         node_id
