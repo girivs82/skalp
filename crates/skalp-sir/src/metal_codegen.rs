@@ -803,6 +803,11 @@ impl<'a> MetalShaderGenerator<'a> {
 
             if output_width > 128 {
                 // Wide bit type - use element-wise operations
+                // BUG FIX #75: For shift operations, check if right operand is scalar
+                let is_shift_op = matches!(op, BinaryOperation::Shl | BinaryOperation::Shr);
+                let right_width = self.get_signal_width_from_sir(sir, right);
+                let right_is_scalar = right_width <= 128; // Scalars fit in <= 128 bits
+
                 let array_size = output_width.div_ceil(32); // Ceil division
                 self.write_indented(&format!(
                     "// Element-wise {} for {}-bit operands (uint[{}])\n",
@@ -810,13 +815,26 @@ impl<'a> MetalShaderGenerator<'a> {
                 ));
                 self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
                 self.indent += 1;
-                self.write_indented(&format!(
-                    "signals->{}[i] = signals->{}[i] {} signals->{}[i];\n",
-                    self.sanitize_name(output),
-                    self.sanitize_name(left),
-                    op_str,
-                    self.sanitize_name(right)
-                ));
+
+                // BUG FIX #75: For shift ops with scalar shift amount, don't index right operand
+                if is_shift_op && right_is_scalar {
+                    self.write_indented(&format!(
+                        "signals->{}[i] = signals->{}[i] {} signals->{};\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(left),
+                        op_str,
+                        self.sanitize_name(right)  // No [i] - it's scalar
+                    ));
+                } else {
+                    self.write_indented(&format!(
+                        "signals->{}[i] = signals->{}[i] {} signals->{}[i];\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(left),
+                        op_str,
+                        self.sanitize_name(right)
+                    ));
+                }
+
                 self.indent -= 1;
                 self.write_indented("}\n");
             } else {
