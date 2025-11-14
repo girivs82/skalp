@@ -2386,10 +2386,6 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR expression to MIR
     fn convert_expression(&mut self, expr: &hir::HirExpression) -> Option<Expression> {
-        eprintln!(
-            "[EXPR_DEBUG] convert_expression called with: {:?}",
-            std::mem::discriminant(expr)
-        );
         match expr {
             hir::HirExpression::Literal(lit) => self.convert_literal(lit).map(Expression::Literal),
             hir::HirExpression::Signal(id) => {
@@ -2537,8 +2533,10 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::Literal(Value::Integer(0)))
             }
             hir::HirExpression::Binary(binary) => {
-                let left = Box::new(self.convert_expression(&binary.left)?);
-                let right = Box::new(self.convert_expression(&binary.right)?);
+                let left = self.convert_expression(&binary.left)?;
+                let right = self.convert_expression(&binary.right)?;
+                let left = Box::new(left);
+                let right = Box::new(right);
                 let op = self.convert_binary_op(&binary.op, &binary.left);
                 Some(Expression::Binary { op, left, right })
             }
@@ -5426,6 +5424,26 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 None
+            }
+            hir::HirExpression::Range(base, high, low) => {
+                // BUG #77 FIX: Support nested range operations (e.g., data[31:0][4:0])
+                let base_lval = self.expr_to_lvalue(base)?;
+                let high_expr = self.convert_expression(high)?;
+                let low_expr = self.convert_expression(low)?;
+                Some(LValue::RangeSelect {
+                    base: Box::new(base_lval),
+                    high: Box::new(high_expr),
+                    low: Box::new(low_expr),
+                })
+            }
+            hir::HirExpression::Index(base, index) => {
+                // BUG #77 FIX: Support nested index operations (e.g., arr[i][j])
+                let base_lval = self.expr_to_lvalue(base)?;
+                let index_expr = self.convert_expression(index)?;
+                Some(LValue::BitSelect {
+                    base: Box::new(base_lval),
+                    index: Box::new(index_expr),
+                })
             }
             _ => None,
         }
