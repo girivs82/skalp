@@ -3470,11 +3470,32 @@ impl<'a> MetalShaderGenerator<'a> {
         // This ensures Bits(16) maps to ushort, not uint
         // BUG FIX #73: Handle >256-bit signals by returning decomposed first part
         if width > 256 {
-            eprintln!(
-                "⚠️ BUG FIX #73: {}-bit signal will be decomposed (exceeds Metal 256-bit limit)",
-                width
-            );
-            eprintln!("  → Returning type for first 256-bit part, remaining bits will be in separate parts");
+            eprintln!("\n⚠️  Metal Backend Width Limit");
+            eprintln!("   Signal width: {} bits (Metal maximum: 256 bits)", width);
+            eprintln!("\n   How SKALP handles this:");
+            eprintln!("   • Signal will be automatically decomposed into {} parts", width.div_ceil(256));
+            eprintln!("   • Part 0: {} bits (uint[{}])", 256.min(width), 256.min(width) / 32);
+            if width > 256 {
+                eprintln!("   • Part 1: {} bits", width - 256);
+            }
+
+            eprintln!("\n   Common causes:");
+            eprintln!("   • Large tuple concatenation: (vec3, vec3, vec3) = 96+96+96 = 288 bits");
+            eprintln!("   • Wide struct that hasn't been decomposed");
+            eprintln!("   • Multiple return values packed into one signal");
+
+            eprintln!("\n   Suggestions for cleaner code:");
+            eprintln!("   1. Return separate values instead of one large tuple:");
+            eprintln!("      // Instead of:");
+            eprintln!("      let result = (vec3_a, vec3_b, vec3_c);  // 288 bits");
+            eprintln!("      // Try:");
+            eprintln!("      (vec3_a, (vec3_b, vec3_c))  // 96 + 192 bits");
+            eprintln!("\n   2. Access struct fields individually:");
+            eprintln!("      let x = my_struct.field1;  // Extract only what you need");
+
+            eprintln!("\n   Note: Decomposition is automatic and transparent, but may be less");
+            eprintln!("         efficient than keeping signals under 256 bits.\n");
+
             // Return the type for the first part (256 bits)
             return ("uint".to_string(), Some(8)); // uint[8] for 256 bits
         }

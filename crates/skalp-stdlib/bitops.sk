@@ -1,0 +1,225 @@
+// Bit Manipulation Operations
+// Common hardware bit manipulation primitives
+
+/// Count leading zeros in a 32-bit value
+/// Returns the number of consecutive zero bits starting from MSB
+///
+/// Examples:
+///   clz32(0b00000000_00000000_00000001_00000000) = 23
+///   clz32(0b10000000_00000000_00000000_00000000) = 0
+///   clz32(0) = 32
+pub fn clz32(value: bit[32]) -> nat[6] {
+    // Hardware implementation: priority encoder
+    return match value {
+        0 => 32,
+        _ => {
+            let mut count: nat[6] = 0;
+            let mut temp = value;
+
+            // Binary search for first 1 bit
+            if (temp & 0xFFFF0000) == 0 { count = count + 16; temp = temp << 16; }
+            if (temp & 0xFF000000) == 0 { count = count + 8;  temp = temp << 8; }
+            if (temp & 0xF0000000) == 0 { count = count + 4;  temp = temp << 4; }
+            if (temp & 0xC0000000) == 0 { count = count + 2;  temp = temp << 2; }
+            if (temp & 0x80000000) == 0 { count = count + 1; }
+
+            count
+        }
+    }
+}
+
+/// Count trailing zeros in a 32-bit value
+/// Returns the number of consecutive zero bits starting from LSB
+///
+/// Examples:
+///   ctz32(0b00000001_00000000_00000000_00000000) = 24
+///   ctz32(0b00000000_00000000_00000000_00000001) = 0
+///   ctz32(0) = 32
+pub fn ctz32(value: bit[32]) -> nat[6] {
+    return match value {
+        0 => 32,
+        _ => {
+            let mut count: nat[6] = 0;
+            let mut temp = value;
+
+            // Binary search for first 1 bit from LSB
+            if (temp & 0x0000FFFF) == 0 { count = count + 16; temp = temp >> 16; }
+            if (temp & 0x000000FF) == 0 { count = count + 8;  temp = temp >> 8; }
+            if (temp & 0x0000000F) == 0 { count = count + 4;  temp = temp >> 4; }
+            if (temp & 0x00000003) == 0 { count = count + 2;  temp = temp >> 2; }
+            if (temp & 0x00000001) == 0 { count = count + 1; }
+
+            count
+        }
+    }
+}
+
+/// Population count (count number of 1 bits) in a 32-bit value
+///
+/// Examples:
+///   popcount32(0b00000000_00000000_00000000_00000000) = 0
+///   popcount32(0b00000000_00000000_00000000_00000001) = 1
+///   popcount32(0b11111111_11111111_11111111_11111111) = 32
+pub fn popcount32(value: bit[32]) -> nat[6] {
+    // Hardware-efficient implementation using parallel counting
+    let mut x = value;
+
+    // Count pairs of bits
+    x = (x & 0x55555555) + ((x >> 1) & 0x55555555);
+    // Count groups of 4 bits
+    x = (x & 0x33333333) + ((x >> 2) & 0x33333333);
+    // Count groups of 8 bits
+    x = (x & 0x0F0F0F0F) + ((x >> 4) & 0x0F0F0F0F);
+    // Count groups of 16 bits
+    x = (x & 0x00FF00FF) + ((x >> 8) & 0x00FF00FF);
+    // Final count
+    x = (x & 0x0000FFFF) + ((x >> 16) & 0x0000FFFF);
+
+    return x[5:0] as nat[6]
+}
+
+/// Reverse the bit order in a 32-bit value
+///
+/// Examples:
+///   bitreverse32(0b10000000_00000000_00000000_00000001)
+///             = 0b10000000_00000000_00000000_00000001
+///   bitreverse32(0b11110000_00000000_00000000_00000000)
+///             = 0b00000000_00000000_00000000_00001111
+pub fn bitreverse32(value: bit[32]) -> bit[32] {
+    let mut x = value;
+
+    // Swap consecutive pairs
+    x = ((x & 0x55555555) << 1) | ((x >> 1) & 0x55555555);
+    // Swap consecutive pairs of pairs
+    x = ((x & 0x33333333) << 2) | ((x >> 2) & 0x33333333);
+    // Swap nibbles
+    x = ((x & 0x0F0F0F0F) << 4) | ((x >> 4) & 0x0F0F0F0F);
+    // Swap bytes
+    x = ((x & 0x00FF00FF) << 8) | ((x >> 8) & 0x00FF00FF);
+    // Swap 16-bit halves
+    x = (x << 16) | (x >> 16);
+
+    return x
+}
+
+/// Find first set bit (1-indexed, returns 0 if no bit set)
+///
+/// Examples:
+///   ffs32(0b00000000_00000000_00000000_00000001) = 1
+///   ffs32(0b00000000_00000000_00000001_00000000) = 9
+///   ffs32(0) = 0
+pub fn ffs32(value: bit[32]) -> nat[6] {
+    return match value {
+        0 => 0,
+        _ => ctz32(value) + 1
+    }
+}
+
+/// Find last set bit (1-indexed, returns 0 if no bit set)
+///
+/// Examples:
+///   fls32(0b10000000_00000000_00000000_00000000) = 32
+///   fls32(0b00000000_00000001_00000000_00000000) = 17
+///   fls32(0) = 0
+pub fn fls32(value: bit[32]) -> nat[6] {
+    return match value {
+        0 => 0,
+        _ => 32 - clz32(value)
+    }
+}
+
+/// Check if value is a power of 2
+///
+/// Examples:
+///   is_pow2_32(0) = false
+///   is_pow2_32(1) = true
+///   is_pow2_32(2) = true
+///   is_pow2_32(3) = false
+///   is_pow2_32(16) = true
+pub fn is_pow2_32(value: bit[32]) -> bit[1] {
+    return (value != 0) & ((value & (value - 1)) == 0)
+}
+
+/// Round up to next power of 2
+///
+/// Examples:
+///   next_pow2_32(0) = 1
+///   next_pow2_32(1) = 1
+///   next_pow2_32(5) = 8
+///   next_pow2_32(16) = 16
+pub fn next_pow2_32(value: bit[32]) -> bit[32] {
+    return match value {
+        0 => 1,
+        _ => match is_pow2_32(value) {
+            1 => value,
+            _ => 1 << fls32(value)
+        }
+    }
+}
+
+/// Extract a bitfield from a value
+///
+/// Arguments:
+///   value: Source value
+///   start: Starting bit position (LSB = 0)
+///   width: Number of bits to extract (1-32)
+///
+/// Examples:
+///   bitfield_extract32(0xABCD1234, 8, 8) = 0x12
+///   bitfield_extract32(0xABCD1234, 16, 16) = 0xABCD
+pub fn bitfield_extract32(value: bit[32], start: nat[5], width: nat[6]) -> bit[32] {
+    let mask = (1 << width) - 1;
+    return (value >> start) & mask
+}
+
+/// Insert a bitfield into a value
+///
+/// Arguments:
+///   dest: Destination value
+///   src: Source value (bits to insert)
+///   start: Starting bit position in dest (LSB = 0)
+///   width: Number of bits to insert (1-32)
+///
+/// Examples:
+///   bitfield_insert32(0x00000000, 0xFF, 8, 8) = 0x0000FF00
+///   bitfield_insert32(0xABCD0000, 0x1234, 0, 16) = 0xABCD1234
+pub fn bitfield_insert32(dest: bit[32], src: bit[32], start: nat[5], width: nat[6]) -> bit[32] {
+    let mask = ((1 << width) - 1) << start;
+    let cleared = dest & ~mask;
+    let shifted = (src << start) & mask;
+    return cleared | shifted
+}
+
+/// Parity (XOR of all bits, returns 1 if odd number of 1s)
+///
+/// Examples:
+///   parity32(0b00000000_00000000_00000000_00000001) = 1
+///   parity32(0b00000000_00000000_00000000_00000011) = 0
+///   parity32(0b10000000_00000000_00000000_00000001) = 0
+pub fn parity32(value: bit[32]) -> bit[1] {
+    let mut x = value;
+    x = x ^ (x >> 16);
+    x = x ^ (x >> 8);
+    x = x ^ (x >> 4);
+    x = x ^ (x >> 2);
+    x = x ^ (x >> 1);
+    return x[0:0]
+}
+
+/// Sign extension - extend a value from N bits to 32 bits with sign
+///
+/// Arguments:
+///   value: Value to extend
+///   from_width: Original width of value (1-31)
+///
+/// Examples:
+///   sign_extend32(0b1111, 4) = 0xFFFFFFFF  // -1 in 4-bit
+///   sign_extend32(0b0111, 4) = 0x00000007  // +7 in 4-bit
+pub fn sign_extend32(value: bit[32], from_width: nat[5]) -> bit[32] {
+    let sign_bit = (value >> (from_width - 1)) & 1;
+    let mask = match sign_bit {
+        1 => 0xFFFFFFFF << from_width,
+        _ => 0
+    };
+    return value | mask
+}
