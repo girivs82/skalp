@@ -1868,6 +1868,14 @@ impl<'a> MetalShaderGenerator<'a> {
     fn format_signal_for_bitwise_op(&self, sir: &SirModule, signal_name: &str) -> String {
         let sanitized = self.sanitize_name(signal_name);
 
+        // BUG FIX #74: Check if this signal is decomposed
+        // If decomposed, use the first part instead of the original signal name
+        let signal_ref = if self.wide_signal_decomposition.contains_key(&sanitized) {
+            format!("signals->{}_part0", sanitized)
+        } else {
+            format!("signals->{}", sanitized)
+        };
+
         // Check if this signal has a Float type - use the more comprehensive lookup
         // BUG FIX #12: Use get_signal_sir_type instead of get_signal_type_from_sir
         if let Some(sir_type) = self.get_signal_sir_type(sir, signal_name) {
@@ -1877,14 +1885,14 @@ impl<'a> MetalShaderGenerator<'a> {
                     SirType::Float16 => "ushort",
                     SirType::Float32 => "uint",
                     SirType::Float64 => "ulong",
-                    _ => return format!("signals->{}", sanitized),
+                    _ => return signal_ref,
                 };
-                return format!("as_type<{}>(signals->{})", bit_type, sanitized);
+                return format!("as_type<{}>({})", bit_type, signal_ref);
             }
         }
 
         // 32-bit or smaller signals can be used directly
-        format!("signals->{}", sanitized)
+        signal_ref
     }
 
     /// Format a signal reference for use in expressions, handling vector component extraction
@@ -1896,7 +1904,33 @@ impl<'a> MetalShaderGenerator<'a> {
         component_index: Option<usize>,
     ) -> String {
         let sanitized = self.sanitize_name(signal_name);
-        let base_ref = format!("signals->{}", sanitized);
+
+        // BUG FIX #74: Check if this signal is decomposed
+        // If decomposed, use the appropriate part instead of the original signal name
+        let base_ref = if let Some((_total_width, num_parts, part_width)) =
+            self.wide_signal_decomposition.get(&sanitized)
+        {
+            // Signal is decomposed - figure out which part to reference
+            if let Some(idx) = component_index {
+                // Calculate which part contains this component
+                let elements_per_part = part_width / 32; // 32 bits per element
+                let part_idx = idx / elements_per_part;
+                let idx_in_part = idx % elements_per_part;
+
+                if part_idx < *num_parts {
+                    let part_name = format!("signals->{}_part{}", sanitized, part_idx);
+                    return format!("{}[{}]", part_name, idx_in_part);
+                } else {
+                    // Index out of range, use first part
+                    format!("signals->{}_part0", sanitized)
+                }
+            } else {
+                // No specific index, use first part
+                format!("signals->{}_part0", sanitized)
+            }
+        } else {
+            format!("signals->{}", sanitized)
+        };
 
         // Get the signal width to determine Metal representation
         let width = self.get_signal_width_from_sir(sir, signal_name);
