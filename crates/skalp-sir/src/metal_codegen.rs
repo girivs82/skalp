@@ -1591,14 +1591,31 @@ impl<'a> MetalShaderGenerator<'a> {
                         input, input_width, shift, is_decomposed
                     );
 
-                    self.write_indented(&format!(
-                        "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
-                        self.sanitize_name(output),
-                        actual_input_ref,
-                        adjusted_element_idx,
-                        adjusted_bit_offset,
-                        mask
-                    ));
+                    // BUG FIX #76: Check if output is wide and needs array handling
+                    let output_width = self.get_signal_width_from_sir(sir, output);
+                    if output_width > 128 {
+                        // Output is wide - use element-wise assignment
+                        // The slice result is scalar, so broadcast to first element only
+                        let array_size = output_width.div_ceil(32);
+                        let scalar_result = format!("({}[{}] >> {}) & 0x{:X}", actual_input_ref, adjusted_element_idx, adjusted_bit_offset, mask);
+
+                        // Initialize array to zeros first
+                        for i in 0..array_size {
+                            self.write_to_decomposed_array(output, i, "0");
+                        }
+                        // Assign scalar result to first element
+                        self.write_to_decomposed_array(output, 0, &scalar_result);
+                    } else {
+                        // Output is scalar - direct assignment
+                        self.write_indented(&format!(
+                            "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
+                            self.sanitize_name(output),
+                            actual_input_ref,
+                            adjusted_element_idx,
+                            adjusted_bit_offset,
+                            mask
+                        ));
+                    }
                     return;
                 } else if input_width > 64 {
                     // uint4 type (65-128 bits) - use component access
@@ -1645,13 +1662,31 @@ impl<'a> MetalShaderGenerator<'a> {
 
             // For scalar types (<= 32 bits), use bit shifts and masks
             let mask = (1u64 << width) - 1;
-            self.write_indented(&format!(
-                "signals->{} = ({} >> {}) & 0x{:X};\n",
-                self.sanitize_name(output),
-                input_ref,
-                shift,
-                mask
-            ));
+
+            // BUG FIX #76: Check if output is wide and needs array handling
+            let output_width = self.get_signal_width_from_sir(sir, output);
+            if output_width > 128 {
+                // Output is wide - use element-wise assignment
+                // The slice result is scalar, so broadcast to first element only
+                let array_size = output_width.div_ceil(32);
+                let scalar_result = format!("({} >> {}) & 0x{:X}", input_ref, shift, mask);
+
+                // Initialize array to zeros first
+                for i in 0..array_size {
+                    self.write_to_decomposed_array(output, i, "0");
+                }
+                // Assign scalar result to first element
+                self.write_to_decomposed_array(output, 0, &scalar_result);
+            } else {
+                // Output is scalar - direct assignment
+                self.write_indented(&format!(
+                    "signals->{} = ({} >> {}) & 0x{:X};\n",
+                    self.sanitize_name(output),
+                    input_ref,
+                    shift,
+                    mask
+                ));
+            }
         }
     }
 
