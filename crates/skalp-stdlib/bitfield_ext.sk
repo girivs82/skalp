@@ -1,0 +1,494 @@
+// Extended Bitfield Operations
+// Byte swapping, packing/unpacking, alignment, and encoding helpers
+
+// ============================================================================
+// Byte Swapping (Endianness Conversion)
+// ============================================================================
+
+/// Swap bytes in 16-bit value
+///
+/// Examples:
+///   bswap16(0xABCD) = 0xCDAB
+///   bswap16(0x1234) = 0x3412
+pub fn bswap16(value: bit[16]) -> bit[16] {
+    return {value[7:0], value[15:8]}
+}
+
+/// Swap bytes in 32-bit value
+///
+/// Examples:
+///   bswap32(0x12345678) = 0x78563412
+///   bswap32(0xAABBCCDD) = 0xDDCCBBAA
+pub fn bswap32(value: bit[32]) -> bit[32] {
+    return {
+        value[7:0],
+        value[15:8],
+        value[23:16],
+        value[31:24]
+    }
+}
+
+/// Swap bytes in 64-bit value
+///
+/// Examples:
+///   bswap64(0x0123456789ABCDEF) = 0xEFCDAB8967452301
+pub fn bswap64(value: bit[64]) -> bit[64] {
+    return {
+        value[7:0],
+        value[15:8],
+        value[23:16],
+        value[31:24],
+        value[39:32],
+        value[47:40],
+        value[55:48],
+        value[63:56]
+    }
+}
+
+// ============================================================================
+// Byte Packing and Unpacking
+// ============================================================================
+
+/// Pack 4 bytes into a 32-bit word (little endian)
+///
+/// Examples:
+///   pack_bytes_le(0x12, 0x34, 0x56, 0x78) = 0x78563412
+pub fn pack_bytes_le(b0: bit[8], b1: bit[8], b2: bit[8], b3: bit[8]) -> bit[32] {
+    return {b3, b2, b1, b0}
+}
+
+/// Pack 4 bytes into a 32-bit word (big endian)
+///
+/// Examples:
+///   pack_bytes_be(0x12, 0x34, 0x56, 0x78) = 0x12345678
+pub fn pack_bytes_be(b0: bit[8], b1: bit[8], b2: bit[8], b3: bit[8]) -> bit[32] {
+    return {b0, b1, b2, b3}
+}
+
+/// Unpack byte 0 (LSB) from 32-bit word
+pub fn unpack_byte0(value: bit[32]) -> bit[8] {
+    return value[7:0]
+}
+
+/// Unpack byte 1 from 32-bit word
+pub fn unpack_byte1(value: bit[32]) -> bit[8] {
+    return value[15:8]
+}
+
+/// Unpack byte 2 from 32-bit word
+pub fn unpack_byte2(value: bit[32]) -> bit[8] {
+    return value[23:16]
+}
+
+/// Unpack byte 3 (MSB) from 32-bit word
+pub fn unpack_byte3(value: bit[32]) -> bit[8] {
+    return value[31:24]
+}
+
+/// Pack 2 16-bit halfwords into 32-bit word (little endian)
+///
+/// Examples:
+///   pack_halfwords_le(0x1234, 0x5678) = 0x56781234
+pub fn pack_halfwords_le(h0: bit[16], h1: bit[16]) -> bit[32] {
+    return {h1, h0}
+}
+
+/// Pack 2 16-bit halfwords into 32-bit word (big endian)
+///
+/// Examples:
+///   pack_halfwords_be(0x1234, 0x5678) = 0x12345678
+pub fn pack_halfwords_be(h0: bit[16], h1: bit[16]) -> bit[32] {
+    return {h0, h1}
+}
+
+/// Unpack lower halfword from 32-bit word
+pub fn unpack_halfword_lo(value: bit[32]) -> bit[16] {
+    return value[15:0]
+}
+
+/// Unpack upper halfword from 32-bit word
+pub fn unpack_halfword_hi(value: bit[32]) -> bit[16] {
+    return value[31:16]
+}
+
+// ============================================================================
+// Alignment Operations
+// ============================================================================
+
+/// Check if value is aligned to given power-of-2 alignment
+///
+/// Examples:
+///   is_aligned(0x1000, 16) = true   // 0x1000 is 16-byte aligned
+///   is_aligned(0x1004, 16) = false  // 0x1004 is not 16-byte aligned
+///   is_aligned(0x1008, 8) = true    // 0x1008 is 8-byte aligned
+pub fn is_aligned(value: bit[32], alignment: nat[6]) -> bit[1] {
+    let mask = (1 << alignment) - 1;
+    return (value & mask) == 0
+}
+
+/// Align value up to given power-of-2 alignment
+///
+/// Examples:
+///   align_up(0x1001, 4) = 0x1010  // Align to 16-byte (2^4)
+///   align_up(0x1000, 4) = 0x1000  // Already aligned
+///   align_up(0x1234, 3) = 0x1238  // Align to 8-byte (2^3)
+pub fn align_up(value: bit[32], alignment: nat[6]) -> bit[32] {
+    let mask = (1 << alignment) - 1;
+    return (value + mask) & ~mask
+}
+
+/// Align value down to given power-of-2 alignment
+///
+/// Examples:
+///   align_down(0x1234, 4) = 0x1230  // Align down to 16-byte
+///   align_down(0x1000, 4) = 0x1000  // Already aligned
+///   align_down(0x1237, 3) = 0x1230  // Align down to 8-byte
+pub fn align_down(value: bit[32], alignment: nat[6]) -> bit[32] {
+    let mask = (1 << alignment) - 1;
+    return value & ~mask
+}
+
+/// Check if value is aligned to 2-byte boundary
+pub fn is_aligned_2(value: bit[32]) -> bit[1] {
+    return value[0:0] == 0
+}
+
+/// Check if value is aligned to 4-byte boundary
+pub fn is_aligned_4(value: bit[32]) -> bit[1] {
+    return value[1:0] == 0
+}
+
+/// Check if value is aligned to 8-byte boundary
+pub fn is_aligned_8(value: bit[32]) -> bit[1] {
+    return value[2:0] == 0
+}
+
+/// Check if value is aligned to 16-byte boundary
+pub fn is_aligned_16(value: bit[32]) -> bit[1] {
+    return value[3:0] == 0
+}
+
+// ============================================================================
+// Gray Code Conversion
+// ============================================================================
+
+/// Convert binary to Gray code
+///
+/// Gray code: adjacent values differ by only 1 bit
+///
+/// Examples:
+///   gray_encode(0) = 0
+///   gray_encode(1) = 1
+///   gray_encode(2) = 3
+///   gray_encode(3) = 2
+///   gray_encode(4) = 6
+pub fn gray_encode32(binary: bit[32]) -> bit[32] {
+    return binary ^ (binary >> 1)
+}
+
+/// Convert Gray code to binary
+///
+/// Examples:
+///   gray_decode(0) = 0
+///   gray_decode(1) = 1
+///   gray_decode(3) = 2
+///   gray_decode(2) = 3
+pub fn gray_decode32(gray: bit[32]) -> bit[32] {
+    let mut binary = gray;
+
+    // XOR with shifted versions
+    binary = binary ^ (binary >> 1);
+    binary = binary ^ (binary >> 2);
+    binary = binary ^ (binary >> 4);
+    binary = binary ^ (binary >> 8);
+    binary = binary ^ (binary >> 16);
+
+    return binary
+}
+
+/// Gray code for 8-bit values
+pub fn gray_encode8(binary: bit[8]) -> bit[8] {
+    return binary ^ (binary >> 1)
+}
+
+/// Gray code decode for 8-bit values
+pub fn gray_decode8(gray: bit[8]) -> bit[8] {
+    let mut binary = gray;
+    binary = binary ^ (binary >> 1);
+    binary = binary ^ (binary >> 2);
+    binary = binary ^ (binary >> 4);
+    return binary
+}
+
+// ============================================================================
+// Bit Scatter/Gather Operations
+// ============================================================================
+
+/// Deposit bits according to mask (scatter)
+///
+/// Takes bits from src and deposits them at positions indicated by 1s in mask
+///
+/// Examples:
+///   bit_deposit(0b11111111, 0b10101010) = 0b10101010
+///   bit_deposit(0b00001111, 0b11110000) = 0b11110000
+pub fn bit_deposit32(src: bit[32], mask: bit[32]) -> bit[32] {
+    let mut result: bit[32] = 0;
+    let mut src_bit: nat[6] = 0;
+
+    // Iterate through mask bits
+    for i in 0..32 {
+        let mask_bit = (mask >> i) & 1;
+
+        // If mask bit is set, take bit from src
+        result = result | match mask_bit {
+            1 => {
+                let bit = (src >> src_bit) & 1;
+                src_bit = src_bit + 1;
+                bit << i
+            },
+            _ => 0
+        };
+    }
+
+    return result
+}
+
+/// Extract bits according to mask (gather)
+///
+/// Extracts bits from src at positions indicated by 1s in mask
+///
+/// Examples:
+///   bit_extract(0b10101010, 0b11110000) = 0b00001010
+pub fn bit_extract32(src: bit[32], mask: bit[32]) -> bit[32] {
+    let mut result: bit[32] = 0;
+    let mut result_bit: nat[6] = 0;
+
+    // Iterate through mask bits
+    for i in 0..32 {
+        let mask_bit = (mask >> i) & 1;
+
+        // If mask bit is set, extract bit from src
+        result = result | match mask_bit {
+            1 => {
+                let bit = (src >> i) & 1;
+                let shifted = bit << result_bit;
+                result_bit = result_bit + 1;
+                shifted
+            },
+            _ => 0
+        };
+    }
+
+    return result
+}
+
+// ============================================================================
+// Bit Packing for Multiple Values
+// ============================================================================
+
+/// Pack 8 4-bit values into 32-bit word
+///
+/// Examples:
+///   pack_4bit_x8(0xF, 0xE, 0xD, 0xC, 0xB, 0xA, 0x9, 0x8) = 0xFEDCBA98
+pub fn pack_4bit_x8(
+    v0: bit[4], v1: bit[4], v2: bit[4], v3: bit[4],
+    v4: bit[4], v5: bit[4], v6: bit[4], v7: bit[4]
+) -> bit[32] {
+    return {v7, v6, v5, v4, v3, v2, v1, v0}
+}
+
+/// Unpack 32-bit word into 8 4-bit values
+pub fn unpack_4bit_x8(value: bit[32]) -> (
+    bit[4], bit[4], bit[4], bit[4],
+    bit[4], bit[4], bit[4], bit[4]
+) {
+    return (
+        value[3:0],
+        value[7:4],
+        value[11:8],
+        value[15:12],
+        value[19:16],
+        value[23:20],
+        value[27:24],
+        value[31:28]
+    )
+}
+
+/// Pack 4 8-bit values into 32-bit word
+pub fn pack_8bit_x4(v0: bit[8], v1: bit[8], v2: bit[8], v3: bit[8]) -> bit[32] {
+    return {v3, v2, v1, v0}
+}
+
+/// Pack 2 16-bit values into 32-bit word
+pub fn pack_16bit_x2(v0: bit[16], v1: bit[16]) -> bit[32] {
+    return {v1, v0}
+}
+
+// ============================================================================
+// Bit Interleaving (Morton Code / Z-Order Curve)
+// ============================================================================
+
+/// Interleave bits from two 16-bit values
+///
+/// Used for Morton codes (Z-order curve) in spatial indexing
+///
+/// Examples:
+///   interleave_bits16(0x00FF, 0xFF00) = 0xF0F0F0F0
+pub fn interleave_bits16(x: bit[16], y: bit[16]) -> bit[32] {
+    let mut result: bit[32] = 0;
+
+    for i in 0..16 {
+        let x_bit = (x >> i) & 1;
+        let y_bit = (y >> i) & 1;
+
+        result = result | (x_bit << (2 * i));
+        result = result | (y_bit << (2 * i + 1));
+    }
+
+    return result
+}
+
+/// De-interleave bits into two 16-bit values
+pub fn deinterleave_bits32(value: bit[32]) -> (bit[16], bit[16]) {
+    let mut x: bit[16] = 0;
+    let mut y: bit[16] = 0;
+
+    for i in 0..16 {
+        let x_bit = (value >> (2 * i)) & 1;
+        let y_bit = (value >> (2 * i + 1)) & 1;
+
+        x = x | (x_bit << i);
+        y = y | (y_bit << i);
+    }
+
+    return (x, y)
+}
+
+// ============================================================================
+// Bit Rotation
+// ============================================================================
+
+/// Rotate left by N bits
+///
+/// Examples:
+///   rotl32(0x12345678, 4) = 0x23456781
+///   rotl32(0x80000000, 1) = 0x00000001
+pub fn rotl32(value: bit[32], shift: nat[5]) -> bit[32] {
+    return (value << shift) | (value >> (32 - shift))
+}
+
+/// Rotate right by N bits
+///
+/// Examples:
+///   rotr32(0x12345678, 4) = 0x81234567
+///   rotr32(0x00000001, 1) = 0x80000000
+pub fn rotr32(value: bit[32], shift: nat[5]) -> bit[32] {
+    return (value >> shift) | (value << (32 - shift))
+}
+
+// ============================================================================
+// Bit Mask Generation
+// ============================================================================
+
+/// Generate mask with N consecutive 1s starting at position
+///
+/// Examples:
+///   gen_mask(4, 8) = 0x00000F00  // 4 bits starting at bit 8
+///   gen_mask(8, 0) = 0x000000FF  // 8 bits starting at bit 0
+pub fn gen_mask32(width: nat[6], position: nat[5]) -> bit[32] {
+    let mask = (1 << width) - 1;
+    return mask << position
+}
+
+/// Generate mask with 1s from start to end (inclusive)
+///
+/// Examples:
+///   gen_range_mask(7, 0) = 0x000000FF  // Bits 0-7
+///   gen_range_mask(15, 8) = 0x0000FF00 // Bits 8-15
+pub fn gen_range_mask32(end: nat[5], start: nat[5]) -> bit[32] {
+    let width = (end - start) + 1;
+    return gen_mask32(width, start)
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Replicate 8-bit value to fill 32-bit word
+///
+/// Examples:
+///   replicate_byte(0xAB) = 0xABABABAB
+pub fn replicate_byte(value: bit[8]) -> bit[32] {
+    return {value, value, value, value}
+}
+
+/// Replicate 16-bit value to fill 32-bit word
+///
+/// Examples:
+///   replicate_halfword(0x1234) = 0x12341234
+pub fn replicate_halfword(value: bit[16]) -> bit[32] {
+    return {value, value}
+}
+
+/// Clear bit at position
+pub fn clear_bit32(value: bit[32], position: nat[5]) -> bit[32] {
+    let mask = 1 << position;
+    return value & ~mask
+}
+
+/// Set bit at position
+pub fn set_bit32(value: bit[32], position: nat[5]) -> bit[32] {
+    let mask = 1 << position;
+    return value | mask
+}
+
+/// Toggle bit at position
+pub fn toggle_bit32(value: bit[32], position: nat[5]) -> bit[32] {
+    let mask = 1 << position;
+    return value ^ mask
+}
+
+/// Test bit at position
+pub fn test_bit32(value: bit[32], position: nat[5]) -> bit[1] {
+    return (value >> position) & 1
+}
+
+/// Count consecutive 1s starting from LSB
+pub fn count_trailing_ones32(value: bit[32]) -> nat[6] {
+    let inverted = ~value;
+    return match inverted {
+        0 => 32,
+        _ => {
+            let mut count: nat[6] = 0;
+            let mut temp = inverted;
+
+            if (temp & 0x0000FFFF) == 0 { count = count + 16; temp = temp >> 16; }
+            if (temp & 0x000000FF) == 0 { count = count + 8;  temp = temp >> 8; }
+            if (temp & 0x0000000F) == 0 { count = count + 4;  temp = temp >> 4; }
+            if (temp & 0x00000003) == 0 { count = count + 2;  temp = temp >> 2; }
+            if (temp & 0x00000001) == 0 { count = count + 1; }
+
+            count
+        }
+    }
+}
+
+/// Count consecutive 1s starting from MSB
+pub fn count_leading_ones32(value: bit[32]) -> nat[6] {
+    let inverted = ~value;
+    return match inverted {
+        0 => 32,
+        _ => {
+            let mut count: nat[6] = 0;
+            let mut temp = inverted;
+
+            if (temp & 0xFFFF0000) == 0 { count = count + 16; temp = temp << 16; }
+            if (temp & 0xFF000000) == 0 { count = count + 8;  temp = temp << 8; }
+            if (temp & 0xF0000000) == 0 { count = count + 4;  temp = temp << 4; }
+            if (temp & 0xC0000000) == 0 { count = count + 2;  temp = temp << 2; }
+            if (temp & 0x80000000) == 0 { count = count + 1; }
+
+            count
+        }
+    }
+}

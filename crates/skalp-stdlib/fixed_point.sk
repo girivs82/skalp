@@ -1,0 +1,344 @@
+// Simple Fixed-Point Arithmetic Functions
+// Function-based wrappers for common Q-format operations
+
+// ============================================================================
+// Q15.16 Format (16-bit integer, 16-bit fraction, signed)
+// ============================================================================
+
+/// Q15.16 addition
+///
+/// Examples:
+///   q15_16_add(1.5, 2.5) = 4.0
+///   q15_16_add(32767.99, 0.01) = Saturates to 32767.99
+pub fn q15_16_add(a: bit[32], b: bit[32]) -> bit[32] {
+    let sum = (a as bit[33]) + (b as bit[33]);
+
+    // Check for overflow
+    let overflow = (sum[32:32] != sum[31:31]);
+
+    return match overflow {
+        1 => match sum[31:31] {
+            1 => 0x80000000,  // Saturate to min (-32768.0)
+            _ => 0x7FFFFFFF   // Saturate to max (32767.99...)
+        },
+        _ => sum[31:0]
+    }
+}
+
+/// Q15.16 subtraction
+///
+/// Examples:
+///   q15_16_sub(5.0, 3.0) = 2.0
+///   q15_16_sub(-32768.0, 1.0) = Saturates to -32768.0
+pub fn q15_16_sub(a: bit[32], b: bit[32]) -> bit[32] {
+    let diff = (a as bit[33]) - (b as bit[33]);
+
+    // Check for overflow
+    let overflow = (diff[32:32] != diff[31:31]);
+
+    return match overflow {
+        1 => match diff[31:31] {
+            1 => 0x80000000,  // Saturate to min
+            _ => 0x7FFFFFFF   // Saturate to max
+        },
+        _ => diff[31:0]
+    }
+}
+
+/// Q15.16 multiplication
+///
+/// Examples:
+///   q15_16_mul(2.0, 3.0) = 6.0
+///   q15_16_mul(256.0, 128.0) = 32768.0
+pub fn q15_16_mul(a: bit[32], b: bit[32]) -> bit[32] {
+    // Sign-extend to 64 bits
+    let a_ext = match a[31:31] {
+        1 => {0xFFFFFFFF, a},
+        _ => {0x00000000, a}
+    };
+
+    let b_ext = match b[31:31] {
+        1 => {0xFFFFFFFF, b},
+        _ => {0x00000000, b}
+    };
+
+    // Multiply (64-bit result)
+    let product = a_ext * b_ext;
+
+    // Shift right by 16 to maintain Q15.16 format
+    let shifted = product >> 16;
+
+    // Check for overflow (high 32 bits should be sign extension)
+    let result_sign = shifted[31:31];
+    let high_bits = shifted[63:32];
+    let overflow = match result_sign {
+        1 => high_bits != 0xFFFFFFFF,
+        _ => high_bits != 0x00000000
+    };
+
+    return match overflow {
+        1 => match result_sign {
+            1 => 0x80000000,  // Saturate to min
+            _ => 0x7FFFFFFF   // Saturate to max
+        },
+        _ => shifted[31:0]
+    }
+}
+
+/// Q15.16 division
+///
+/// Examples:
+///   q15_16_div(10.0, 2.0) = 5.0
+///   q15_16_div(1.0, 3.0) = 0.333...
+pub fn q15_16_div(a: bit[32], b: bit[32]) -> bit[32] {
+    // Check for division by zero
+    return match b {
+        0 => 0x7FFFFFFF,  // Return max on div by zero
+        _ => {
+            // Shift dividend left by 16 (48 bits total)
+            let a_ext = match a[31:31] {
+                1 => {0xFFFF, a},  // Sign extend
+                _ => {0x0000, a}   // Zero extend
+            } as bit[48];
+
+            let b_ext = match b[31:31] {
+                1 => {0xFFFF, b},
+                _ => {0x0000, b}
+            } as bit[48];
+
+            // Divide
+            let quotient = a_ext / b_ext;
+
+            quotient[31:0]
+        }
+    }
+}
+
+/// Convert FP32 to Q15.16
+///
+/// Examples:
+///   q15_16_from_fp32(3.14159) = Q15.16 representation
+pub fn q15_16_from_fp32(f: fp32) -> bit[32] {
+    // Multiply by 2^16 (65536.0)
+    let scaled = f * 65536.0;
+
+    // Convert to integer
+    return scaled as bit[32]
+}
+
+/// Convert Q15.16 to FP32
+///
+/// Examples:
+///   q15_16_to_fp32(Q15.16(3.14159)) = 3.14159 (fp32)
+pub fn q15_16_to_fp32(q: bit[32]) -> fp32 {
+    // Convert to signed integer, then to float
+    let as_int = q as int[32];
+    let as_float = as_int as fp32;
+
+    // Divide by 2^16
+    return as_float / 65536.0
+}
+
+// ============================================================================
+// Q31.32 Format (32-bit integer, 32-bit fraction, signed, 64-bit total)
+// ============================================================================
+
+/// Q31.32 addition
+///
+/// Examples:
+///   q31_32_add(1.5, 2.5) = 4.0
+pub fn q31_32_add(a: bit[64], b: bit[64]) -> bit[64] {
+    let sum = (a as bit[65]) + (b as bit[65]);
+
+    // Check for overflow
+    let overflow = (sum[64:64] != sum[63:63]);
+
+    return match overflow {
+        1 => match sum[63:63] {
+            1 => {1, 0x0000000000000000},  // Saturate to min
+            _ => {0, 0xFFFFFFFFFFFFFFFF}   // Saturate to max
+        },
+        _ => sum[63:0]
+    }
+}
+
+/// Q31.32 subtraction
+///
+/// Examples:
+///   q31_32_sub(5.0, 3.0) = 2.0
+pub fn q31_32_sub(a: bit[64], b: bit[64]) -> bit[64] {
+    let diff = (a as bit[65]) - (b as bit[65]);
+
+    // Check for overflow
+    let overflow = (diff[64:64] != diff[63:63]);
+
+    return match overflow {
+        1 => match diff[63:63] {
+            1 => {1, 0x0000000000000000},  // Saturate to min
+            _ => {0, 0xFFFFFFFFFFFFFFFF}   // Saturate to max
+        },
+        _ => diff[63:0]
+    }
+}
+
+/// Q31.32 multiplication
+///
+/// Examples:
+///   q31_32_mul(2.0, 3.0) = 6.0
+pub fn q31_32_mul(a: bit[64], b: bit[64]) -> bit[64] {
+    // Sign-extend to 128 bits
+    let a_ext = match a[63:63] {
+        1 => {0xFFFFFFFFFFFFFFFF, a},
+        _ => {0x0000000000000000, a}
+    };
+
+    let b_ext = match b[63:63] {
+        1 => {0xFFFFFFFFFFFFFFFF, b},
+        _ => {0x0000000000000000, b}
+    };
+
+    // Multiply (128-bit result)
+    let product = a_ext * b_ext;
+
+    // Shift right by 32 to maintain Q31.32 format
+    let shifted = product >> 32;
+
+    // Check for overflow
+    let result_sign = shifted[63:63];
+    let high_bits = shifted[127:64];
+    let overflow = match result_sign {
+        1 => high_bits != 0xFFFFFFFFFFFFFFFF,
+        _ => high_bits != 0x0000000000000000
+    };
+
+    return match overflow {
+        1 => match result_sign {
+            1 => {1, 0x0000000000000000},  // Saturate to min
+            _ => {0, 0xFFFFFFFFFFFFFFFF}   // Saturate to max
+        },
+        _ => shifted[63:0]
+    }
+}
+
+/// Q31.32 division
+///
+/// Examples:
+///   q31_32_div(10.0, 2.0) = 5.0
+pub fn q31_32_div(a: bit[64], b: bit[64]) -> bit[64] {
+    // Check for division by zero
+    return match b {
+        0 => {0, 0xFFFFFFFFFFFFFFFF},  // Return max on div by zero
+        _ => {
+            // Shift dividend left by 32 (96 bits total)
+            let a_ext = match a[63:63] {
+                1 => {0xFFFFFFFF, a},  // Sign extend
+                _ => {0x00000000, a}   // Zero extend
+            } as bit[96];
+
+            let b_ext = match b[63:63] {
+                1 => {0xFFFFFFFF, b},
+                _ => {0x00000000, b}
+            } as bit[96];
+
+            // Divide
+            let quotient = a_ext / b_ext;
+
+            quotient[63:0]
+        }
+    }
+}
+
+/// Convert FP64 to Q31.32
+///
+/// Examples:
+///   q31_32_from_fp64(3.14159265359) = Q31.32 representation
+pub fn q31_32_from_fp64(f: fp64) -> bit[64] {
+    // Multiply by 2^32
+    let scaled = f * 4294967296.0;
+
+    // Convert to integer
+    return scaled as bit[64]
+}
+
+/// Convert Q31.32 to FP64
+///
+/// Examples:
+///   q31_32_to_fp64(Q31.32(3.14159)) = 3.14159 (fp64)
+pub fn q31_32_to_fp64(q: bit[64]) -> fp64 {
+    // Convert to signed integer, then to double
+    let as_int = q as int[64];
+    let as_double = as_int as fp64;
+
+    // Divide by 2^32
+    return as_double / 4294967296.0
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Q15.16 absolute value
+pub fn q15_16_abs(a: bit[32]) -> bit[32] {
+    return match a[31:31] {
+        1 => {
+            // Check for MIN_VALUE (cannot be negated)
+            match a {
+                0x80000000 => 0x7FFFFFFF,  // Saturate
+                _ => (0 - a)  // Negate
+            }
+        },
+        _ => a  // Already positive
+    }
+}
+
+/// Q31.32 absolute value
+pub fn q31_32_abs(a: bit[64]) -> bit[64] {
+    return match a[63:63] {
+        1 => {
+            // Check for MIN_VALUE (cannot be negated)
+            match a {
+                {1, 0x0000000000000000} => {0, 0xFFFFFFFFFFFFFFFF},  // Saturate
+                _ => (0 - a)  // Negate
+            }
+        },
+        _ => a  // Already positive
+    }
+}
+
+/// Q15.16 minimum
+pub fn q15_16_min(a: bit[32], b: bit[32]) -> bit[32] {
+    // Signed comparison
+    let a_sign = a[31:31];
+    let b_sign = b[31:31];
+
+    return match (a_sign, b_sign) {
+        (1, 0) => a,  // a negative, b positive
+        (0, 1) => b,  // a positive, b negative
+        _ => match (a < b) {
+            1 => a,
+            _ => b
+        }
+    }
+}
+
+/// Q15.16 maximum
+pub fn q15_16_max(a: bit[32], b: bit[32]) -> bit[32] {
+    // Signed comparison
+    let a_sign = a[31:31];
+    let b_sign = b[31:31];
+
+    return match (a_sign, b_sign) {
+        (1, 0) => b,  // a negative, b positive
+        (0, 1) => a,  // a positive, b negative
+        _ => match (a > b) {
+            1 => a,
+            _ => b
+        }
+    }
+}
+
+/// Q15.16 clamp to range [min, max]
+pub fn q15_16_clamp(value: bit[32], min: bit[32], max: bit[32]) -> bit[32] {
+    let clamped_min = q15_16_max(value, min);
+    return q15_16_min(clamped_min, max)
+}

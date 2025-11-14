@@ -1,0 +1,439 @@
+// Simple Vector Operations
+// Function-based helpers for vec3 and vec4 operations
+
+// Import math operations
+use crate::math_ops::*;
+
+// ============================================================================
+// Vec3 Operations (FP32)
+// ============================================================================
+
+/// Vec3 dot product
+///
+/// dot(a, b) = a.x*b.x + a.y*b.y + a.z*b.z
+///
+/// Examples:
+///   vec3_dot({1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}) = 1.0
+///   vec3_dot({1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}) = 32.0
+pub fn vec3_dot_fp32(ax: fp32, ay: fp32, az: fp32, bx: fp32, by: fp32, bz: fp32) -> fp32 {
+    return ax * bx + ay * by + az * bz
+}
+
+/// Vec3 cross product
+///
+/// cross(a, b) = (a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
+///
+/// Examples:
+///   vec3_cross({1, 0, 0}, {0, 1, 0}) = {0, 0, 1}
+///   vec3_cross({1, 2, 3}, {4, 5, 6}) = {-3, 6, -3}
+pub fn vec3_cross_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    let rx = ay * bz - az * by;
+    let ry = az * bx - ax * bz;
+    let rz = ax * by - ay * bx;
+    return (rx, ry, rz)
+}
+
+/// Vec3 squared length (magnitude²)
+///
+/// length_sq(v) = v.x² + v.y² + v.z²
+///
+/// Examples:
+///   vec3_length_sq({3.0, 4.0, 0.0}) = 25.0
+///   vec3_length_sq({1.0, 1.0, 1.0}) = 3.0
+pub fn vec3_length_sq_fp32(x: fp32, y: fp32, z: fp32) -> fp32 {
+    return x * x + y * y + z * z
+}
+
+/// Vec3 length (magnitude)
+///
+/// length(v) = sqrt(v.x² + v.y² + v.z²)
+///
+/// Examples:
+///   vec3_length({3.0, 4.0, 0.0}) = 5.0
+///   vec3_length({1.0, 0.0, 0.0}) = 1.0
+pub fn vec3_length_fp32(x: fp32, y: fp32, z: fp32) -> fp32 {
+    let len_sq = vec3_length_sq_fp32(x, y, z);
+    return sqrt_fp32(len_sq)
+}
+
+/// Vec3 normalize (unit vector)
+///
+/// normalize(v) = v / |v|
+///
+/// Examples:
+///   vec3_normalize({3.0, 0.0, 0.0}) = {1.0, 0.0, 0.0}
+///   vec3_normalize({1.0, 1.0, 0.0}) = {0.707, 0.707, 0.0}
+pub fn vec3_normalize_fp32(x: fp32, y: fp32, z: fp32) -> (fp32, fp32, fp32) {
+    let len = vec3_length_fp32(x, y, z);
+
+    return match len {
+        0.0 => (0.0, 0.0, 0.0),  // Zero vector
+        _ => {
+            let inv_len = 1.0 / len;
+            (x * inv_len, y * inv_len, z * inv_len)
+        }
+    }
+}
+
+/// Vec3 fast normalize using inverse square root
+///
+/// Faster but slightly less accurate than normalize
+///
+/// Examples:
+///   vec3_normalize_fast({3.0, 0.0, 0.0}) ≈ {1.0, 0.0, 0.0}
+pub fn vec3_normalize_fast_fp32(x: fp32, y: fp32, z: fp32) -> (fp32, fp32, fp32) {
+    let len_sq = vec3_length_sq_fp32(x, y, z);
+
+    return match len_sq {
+        0.0 => (0.0, 0.0, 0.0),
+        _ => {
+            let inv_sqrt_len = rsqrt_fp32(len_sq);
+            (x * inv_sqrt_len, y * inv_sqrt_len, z * inv_sqrt_len)
+        }
+    }
+}
+
+/// Vec3 distance between two points
+///
+/// distance(a, b) = |b - a|
+///
+/// Examples:
+///   vec3_distance({0, 0, 0}, {3, 4, 0}) = 5.0
+pub fn vec3_distance_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> fp32 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let dz = bz - az;
+    return vec3_length_fp32(dx, dy, dz)
+}
+
+/// Vec3 squared distance (avoids sqrt)
+///
+/// distance_sq(a, b) = (b - a)²
+///
+/// Examples:
+///   vec3_distance_sq({0, 0, 0}, {3, 4, 0}) = 25.0
+pub fn vec3_distance_sq_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> fp32 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let dz = bz - az;
+    return vec3_length_sq_fp32(dx, dy, dz)
+}
+
+/// Vec3 linear interpolation
+///
+/// lerp(a, b, t) = a + t * (b - a)
+///
+/// Examples:
+///   vec3_lerp({0, 0, 0}, {10, 10, 10}, 0.5) = {5, 5, 5}
+pub fn vec3_lerp_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32,
+    t: fp32
+) -> (fp32, fp32, fp32) {
+    let rx = ax + t * (bx - ax);
+    let ry = ay + t * (by - ay);
+    let rz = az + t * (bz - az);
+    return (rx, ry, rz)
+}
+
+/// Vec3 reflection across normal
+///
+/// reflect(v, n) = v - 2 * (v·n) * n
+///
+/// Examples:
+///   vec3_reflect({1, -1, 0}, {0, 1, 0}) = {1, 1, 0}
+pub fn vec3_reflect_fp32(
+    vx: fp32, vy: fp32, vz: fp32,
+    nx: fp32, ny: fp32, nz: fp32
+) -> (fp32, fp32, fp32) {
+    let dot = vec3_dot_fp32(vx, vy, vz, nx, ny, nz);
+    let two_dot = 2.0 * dot;
+
+    let rx = vx - two_dot * nx;
+    let ry = vy - two_dot * ny;
+    let rz = vz - two_dot * nz;
+
+    return (rx, ry, rz)
+}
+
+/// Vec3 component-wise addition
+pub fn vec3_add_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    return (ax + bx, ay + by, az + bz)
+}
+
+/// Vec3 component-wise subtraction
+pub fn vec3_sub_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    return (ax - bx, ay - by, az - bz)
+}
+
+/// Vec3 component-wise multiplication
+pub fn vec3_mul_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    return (ax * bx, ay * by, az * bz)
+}
+
+/// Vec3 scalar multiplication
+pub fn vec3_scale_fp32(x: fp32, y: fp32, z: fp32, s: fp32) -> (fp32, fp32, fp32) {
+    return (x * s, y * s, z * s)
+}
+
+/// Vec3 negate
+pub fn vec3_neg_fp32(x: fp32, y: fp32, z: fp32) -> (fp32, fp32, fp32) {
+    return (-x, -y, -z)
+}
+
+// ============================================================================
+// Vec4 Operations (FP32)
+// ============================================================================
+
+/// Vec4 dot product
+///
+/// dot(a, b) = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w
+///
+/// Examples:
+///   vec4_dot({1, 0, 0, 0}, {1, 0, 0, 0}) = 1.0
+///   vec4_dot({1, 2, 3, 4}, {5, 6, 7, 8}) = 70.0
+pub fn vec4_dot_fp32(
+    ax: fp32, ay: fp32, az: fp32, aw: fp32,
+    bx: fp32, by: fp32, bz: fp32, bw: fp32
+) -> fp32 {
+    return ax * bx + ay * by + az * bz + aw * bw
+}
+
+/// Vec4 squared length
+pub fn vec4_length_sq_fp32(x: fp32, y: fp32, z: fp32, w: fp32) -> fp32 {
+    return x * x + y * y + z * z + w * w
+}
+
+/// Vec4 length
+pub fn vec4_length_fp32(x: fp32, y: fp32, z: fp32, w: fp32) -> fp32 {
+    let len_sq = vec4_length_sq_fp32(x, y, z, w);
+    return sqrt_fp32(len_sq)
+}
+
+/// Vec4 normalize
+pub fn vec4_normalize_fp32(x: fp32, y: fp32, z: fp32, w: fp32) -> (fp32, fp32, fp32, fp32) {
+    let len = vec4_length_fp32(x, y, z, w);
+
+    return match len {
+        0.0 => (0.0, 0.0, 0.0, 0.0),
+        _ => {
+            let inv_len = 1.0 / len;
+            (x * inv_len, y * inv_len, z * inv_len, w * inv_len)
+        }
+    }
+}
+
+/// Vec4 component-wise addition
+pub fn vec4_add_fp32(
+    ax: fp32, ay: fp32, az: fp32, aw: fp32,
+    bx: fp32, by: fp32, bz: fp32, bw: fp32
+) -> (fp32, fp32, fp32, fp32) {
+    return (ax + bx, ay + by, az + bz, aw + bw)
+}
+
+/// Vec4 component-wise subtraction
+pub fn vec4_sub_fp32(
+    ax: fp32, ay: fp32, az: fp32, aw: fp32,
+    bx: fp32, by: fp32, bz: fp32, bw: fp32
+) -> (fp32, fp32, fp32, fp32) {
+    return (ax - bx, ay - by, az - bz, aw - bw)
+}
+
+/// Vec4 scalar multiplication
+pub fn vec4_scale_fp32(x: fp32, y: fp32, z: fp32, w: fp32, s: fp32) -> (fp32, fp32, fp32, fp32) {
+    return (x * s, y * s, z * s, w * s)
+}
+
+/// Vec4 linear interpolation
+pub fn vec4_lerp_fp32(
+    ax: fp32, ay: fp32, az: fp32, aw: fp32,
+    bx: fp32, by: fp32, bz: fp32, bw: fp32,
+    t: fp32
+) -> (fp32, fp32, fp32, fp32) {
+    let rx = ax + t * (bx - ax);
+    let ry = ay + t * (by - ay);
+    let rz = az + t * (bz - az);
+    let rw = aw + t * (bw - aw);
+    return (rx, ry, rz, rw)
+}
+
+// ============================================================================
+// Vec2 Operations (FP32)
+// ============================================================================
+
+/// Vec2 dot product
+pub fn vec2_dot_fp32(ax: fp32, ay: fp32, bx: fp32, by: fp32) -> fp32 {
+    return ax * bx + ay * by
+}
+
+/// Vec2 length
+pub fn vec2_length_fp32(x: fp32, y: fp32) -> fp32 {
+    let len_sq = x * x + y * y;
+    return sqrt_fp32(len_sq)
+}
+
+/// Vec2 normalize
+pub fn vec2_normalize_fp32(x: fp32, y: fp32) -> (fp32, fp32) {
+    let len = vec2_length_fp32(x, y);
+
+    return match len {
+        0.0 => (0.0, 0.0),
+        _ => {
+            let inv_len = 1.0 / len;
+            (x * inv_len, y * inv_len)
+        }
+    }
+}
+
+/// Vec2 perpendicular (rotate 90° counterclockwise)
+pub fn vec2_perp_fp32(x: fp32, y: fp32) -> (fp32, fp32) {
+    return (-y, x)
+}
+
+/// Vec2 angle between vectors (radians)
+pub fn vec2_angle_fp32(ax: fp32, ay: fp32, bx: fp32, by: fp32) -> fp32 {
+    let dot = vec2_dot_fp32(ax, ay, bx, by);
+    let len_a = vec2_length_fp32(ax, ay);
+    let len_b = vec2_length_fp32(bx, by);
+
+    let cos_angle = dot / (len_a * len_b);
+    return acos_fp32(cos_angle)
+}
+
+// ============================================================================
+// FP16 Vector Operations (for user's FP16 vectors)
+// ============================================================================
+
+/// Vec3 dot product (FP16)
+pub fn vec3_dot_fp16(ax: fp16, ay: fp16, az: fp16, bx: fp16, by: fp16, bz: fp16) -> fp16 {
+    return ax * bx + ay * by + az * bz
+}
+
+/// Vec3 cross product (FP16)
+pub fn vec3_cross_fp16(
+    ax: fp16, ay: fp16, az: fp16,
+    bx: fp16, by: fp16, bz: fp16
+) -> (fp16, fp16, fp16) {
+    let rx = ay * bz - az * by;
+    let ry = az * bx - ax * bz;
+    let rz = ax * by - ay * bx;
+    return (rx, ry, rz)
+}
+
+/// Vec3 length (FP16)
+pub fn vec3_length_fp16(x: fp16, y: fp16, z: fp16) -> fp16 {
+    let len_sq = x * x + y * y + z * z;
+    // FP16 sqrt - convert to FP32, sqrt, convert back
+    let len_sq_32 = len_sq as fp32;
+    let len_32 = sqrt_fp32(len_sq_32);
+    return len_32 as fp16
+}
+
+/// Vec3 normalize (FP16)
+pub fn vec3_normalize_fp16(x: fp16, y: fp16, z: fp16) -> (fp16, fp16, fp16) {
+    let len = vec3_length_fp16(x, y, z);
+
+    return match len {
+        0.0 => (0.0, 0.0, 0.0),
+        _ => {
+            let inv_len = 1.0 / len;
+            (x * inv_len, y * inv_len, z * inv_len)
+        }
+    }
+}
+
+// ============================================================================
+// Integer Vector Operations (for bit operations)
+// ============================================================================
+
+/// Vec3 dot product (bit[32])
+pub fn vec3_dot_i32(ax: bit[32], ay: bit[32], az: bit[32], bx: bit[32], by: bit[32], bz: bit[32]) -> bit[32] {
+    return ax * bx + ay * by + az * bz
+}
+
+/// Vec3 length squared (bit[32])
+pub fn vec3_length_sq_i32(x: bit[32], y: bit[32], z: bit[32]) -> bit[32] {
+    return x * x + y * y + z * z
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Project vector a onto vector b
+///
+/// proj_b(a) = (a·b / b·b) * b
+pub fn vec3_project_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    let dot_ab = vec3_dot_fp32(ax, ay, az, bx, by, bz);
+    let dot_bb = vec3_dot_fp32(bx, by, bz, bx, by, bz);
+
+    let scale = dot_ab / dot_bb;
+
+    return vec3_scale_fp32(bx, by, bz, scale)
+}
+
+/// Reject vector a from vector b (orthogonal component)
+///
+/// reject_b(a) = a - proj_b(a)
+pub fn vec3_reject_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    let (px, py, pz) = vec3_project_fp32(ax, ay, az, bx, by, bz);
+    return (ax - px, ay - py, az - pz)
+}
+
+/// Component-wise minimum
+pub fn vec3_min_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    let rx = min_fp32(ax, bx);
+    let ry = min_fp32(ay, by);
+    let rz = min_fp32(az, bz);
+    return (rx, ry, rz)
+}
+
+/// Component-wise maximum
+pub fn vec3_max_fp32(
+    ax: fp32, ay: fp32, az: fp32,
+    bx: fp32, by: fp32, bz: fp32
+) -> (fp32, fp32, fp32) {
+    let rx = max_fp32(ax, bx);
+    let ry = max_fp32(ay, by);
+    let rz = max_fp32(az, bz);
+    return (rx, ry, rz)
+}
+
+/// Component-wise clamp
+pub fn vec3_clamp_fp32(
+    x: fp32, y: fp32, z: fp32,
+    min_x: fp32, min_y: fp32, min_z: fp32,
+    max_x: fp32, max_y: fp32, max_z: fp32
+) -> (fp32, fp32, fp32) {
+    let rx = clamp_fp32(x, min_x, max_x);
+    let ry = clamp_fp32(y, min_y, max_y);
+    let rz = clamp_fp32(z, min_z, max_z);
+    return (rx, ry, rz)
+}
