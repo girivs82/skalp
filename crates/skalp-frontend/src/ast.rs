@@ -330,7 +330,8 @@ pub struct BlockStatement {
 /// Supports tuple destructuring for multiple return values.
 ///
 /// Syntax:
-/// - Single binding: `let name [: type] = value`
+/// - Immutable binding: `let name [: type] = value`
+/// - Mutable binding: `let mut name [: type] = value`
 /// - Tuple destructuring: `let (a, b) = func()`
 ///
 /// Example:
@@ -338,9 +339,12 @@ pub struct BlockStatement {
 /// let next_ptr = ptr + 1
 /// let gray = next_ptr ^ (next_ptr >> 1)
 /// let (result, valid) = exec_operation(data)
+/// let mut count = 0  // Mutable variable (Bug #78 fix)
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LetStatement {
+    /// Whether the binding is mutable (let mut)
+    pub mutable: bool,
     /// Pattern to bind (can be identifier or tuple pattern)
     pub pattern: Pattern,
     /// Optional type annotation

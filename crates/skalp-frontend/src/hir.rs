@@ -303,6 +303,8 @@ pub struct HirLetStatement {
     pub id: VariableId,
     /// Variable name
     pub name: String,
+    /// Whether the binding is mutable (let mut)
+    pub mutable: bool,
     /// Variable type
     pub var_type: HirType,
     /// Initializer expression

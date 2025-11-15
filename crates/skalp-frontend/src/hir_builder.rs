@@ -2010,6 +2010,13 @@ impl HirBuilderContext {
     ) -> Vec<HirStatement> {
         let mut statements = Vec::new();
 
+        // Extract mutability flag (Bug #78 fix)
+        // For tuple destructuring, all variables inherit the mutability from the let statement
+        let mutable = let_node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .any(|t| t.kind() == SyntaxKind::MutKw);
+
         // Extract variable names from tuple pattern
         let var_names: Vec<String> = pattern_node
             .children()
@@ -2142,6 +2149,7 @@ impl HirBuilderContext {
         statements.push(HirStatement::Let(HirLetStatement {
             id: tmp_id,
             name: tmp_name.clone(),
+            mutable, // Inherit mutability from original let statement
             var_type: tmp_type.clone(),
             value,
         }));
@@ -2185,6 +2193,7 @@ impl HirBuilderContext {
             statements.push(HirStatement::Let(HirLetStatement {
                 id: var_id,
                 name: var_name.clone(),
+                mutable, // Inherit mutability from original let statement
                 var_type: element_type,
                 value: field_access,
             }));
@@ -2195,6 +2204,12 @@ impl HirBuilderContext {
 
     /// Build simple let statement (single identifier pattern)
     fn build_let_statement(&mut self, node: &SyntaxNode) -> Option<HirLetStatement> {
+        // Extract mutability flag (Bug #78 fix)
+        let mutable = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .any(|t| t.kind() == SyntaxKind::MutKw);
+
         // Extract variable name - look for IdentPattern first, then fallback to bare Ident
         let name = node
             .children()
@@ -2353,6 +2368,7 @@ impl HirBuilderContext {
         Some(HirLetStatement {
             id,
             name,
+            mutable,
             var_type,
             value,
         })

@@ -839,17 +839,11 @@ impl<'a> ParseState<'a> {
 
         self.expect(SyntaxKind::IfKw);
 
-        // Parentheses are optional in SKALP
-        let has_parens = self.at(SyntaxKind::LParen);
-        if has_parens {
-            self.bump();
-        }
-
+        // Parse condition expression (parentheses are part of the expression itself)
+        // Bug #79 fix: Don't try to handle optional parens specially - the expression
+        // parser handles them naturally. This fixes parsing of complex expressions like:
+        // if (temp & 0xFFFF0000) == 0 { ... }
         self.parse_expression();
-
-        if has_parens {
-            self.expect(SyntaxKind::RParen);
-        }
 
         self.parse_block_statement();
 
@@ -867,13 +861,18 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse let statement
-    /// Syntax: let pattern [: type] = value [;]
-    /// Supports: let x = expr, let (a, b) = expr
+    /// Syntax: let [mut] pattern [: type] = value [;]
+    /// Supports: let x = expr, let mut x = expr, let (a, b) = expr
     fn parse_let_statement(&mut self) {
         self.start_node(SyntaxKind::LetStmt);
 
         // 'let' keyword
         self.expect(SyntaxKind::LetKw);
+
+        // Optional 'mut' keyword (Bug #78 fix)
+        if self.at(SyntaxKind::MutKw) {
+            self.bump(); // consume 'mut'
+        }
 
         // Pattern (identifier or tuple destructuring)
         self.parse_pattern();

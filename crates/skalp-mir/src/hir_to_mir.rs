@@ -4553,6 +4553,7 @@ impl<'hir> HirToMir<'hir> {
                                 hir::HirLetStatement {
                                     id: let_stmt.id,
                                     name: let_stmt.name.clone(),
+                                    mutable: let_stmt.mutable, // Bug #78: Preserve mutability
                                     value: substituted_value.clone(),
                                     var_type: let_stmt.var_type.clone(),
                                 },

@@ -123,6 +123,8 @@ pub enum Token {
     Return,
     #[token("let")]
     Let,
+    #[token("mut")]
+    Mut,
 
     // Type Conversion (1)
     #[token("as")]

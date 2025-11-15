@@ -67,12 +67,13 @@ pub enum SyntaxKind {
     FlowKw,
     RequirementKw,
 
-    // Testbench Only (5)
+    // Testbench Only (6)
     AsyncKw,
     AwaitKw,
     FnKw,
     ReturnKw,
     LetKw,
+    MutKw,
 
     // Type Conversion (1)
     AsKw,
@@ -482,8 +483,8 @@ impl SyntaxKind {
             | MatchKw | ForKw
             // Design Intent (3)
             | IntentKw | FlowKw | RequirementKw
-            // Testbench Only (5)
-            | AsyncKw | AwaitKw | FnKw | ReturnKw | LetKw
+            // Testbench Only (6)
+            | AsyncKw | AwaitKw | FnKw | ReturnKw | LetKw | MutKw
             // Type Conversion (1)
             | AsKw
             // Module System (4)
@@ -609,12 +610,13 @@ impl SyntaxKind {
             FlowKw => "'flow'",
             RequirementKw => "'requirement'",
 
-            // Testbench Only (5)
+            // Testbench Only (6)
             AsyncKw => "'async'",
             AwaitKw => "'await'",
             FnKw => "'fn'",
             ReturnKw => "'return'",
             LetKw => "'let'",
+            MutKw => "'mut'",
 
             // Type Conversion (1)
             AsKw => "'as'",
@@ -847,12 +849,13 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Flow => FlowKw,
             Token::Requirement => RequirementKw,
 
-            // Testbench Only (5)
+            // Testbench Only (6)
             Token::Async => AsyncKw,
             Token::Await => AwaitKw,
             Token::Fn => FnKw,
             Token::Return => ReturnKw,
             Token::Let => LetKw,
+            Token::Mut => MutKw,
 
             // Type Conversion (1)
             Token::As => AsKw,
