@@ -247,13 +247,9 @@ impl<'a> ParseState<'a> {
         // 'for' keyword
         self.expect(SyntaxKind::ForKw);
 
-        // Target type
-        self.expect(SyntaxKind::Ident);
-
-        // Optional generic arguments for target
-        if self.at(SyntaxKind::Lt) {
-            self.parse_generic_params();
-        }
+        // Target type - can be nat[32], bit[8], fp32, or CustomType<T>
+        // Use parse_type() to handle all type forms
+        self.parse_type();
 
         // Optional where clause
         if self.at(SyntaxKind::WhereKw) {

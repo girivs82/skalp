@@ -6539,26 +6539,35 @@ impl HirBuilderContext {
 
     /// Build trait implementation
     fn build_trait_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitImplementation> {
-        // Extract trait name and target type from tokens
-        let tokens: Vec<_> = node
+        // Extract trait name from first identifier
+        let ident_tokens: Vec<_> = node
             .children_with_tokens()
             .filter_map(|element| element.into_token())
-            .collect();
-
-        let ident_tokens: Vec<_> = tokens
-            .iter()
             .filter(|token| token.kind() == SyntaxKind::Ident)
             .collect();
 
-        if ident_tokens.len() < 2 {
+        if ident_tokens.is_empty() {
             return None;
         }
 
         let trait_name = ident_tokens[0].text().to_string();
-        let target_type = ident_tokens[1].text().to_string();
 
-        // Look up target entity
-        let target_entity = *self.symbols.entities.get(&target_type)?;
+        // Find the target type (comes after 'for' keyword, now as TypeAnnotation)
+        let target = if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+            // Parse as type (e.g., nat[32], bit[8], fp32, CustomType<T>)
+            let target_type = self.build_hir_type(&type_node);
+            TraitImplTarget::Type(target_type)
+        } else if ident_tokens.len() >= 2 {
+            // Old format: try parsing as entity name for backward compatibility
+            let target_name = ident_tokens[1].text().to_string();
+            if let Some(entity_id) = self.symbols.entities.get(&target_name) {
+                TraitImplTarget::Entity(*entity_id)
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
 
         // Parse implementation items
         let mut method_implementations = Vec::new();
@@ -6590,7 +6599,7 @@ impl HirBuilderContext {
 
         Some(HirTraitImplementation {
             trait_name,
-            target_entity,
+            target,
             method_implementations,
             type_implementations,
             const_implementations,

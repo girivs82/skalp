@@ -1054,13 +1054,22 @@ pub struct HirTraitDefinition {
     pub associated_constants: Vec<HirTraitAssociatedConst>,
 }
 
+/// Target for trait implementation (entity or type)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TraitImplTarget {
+    /// Implementation for an entity
+    Entity(EntityId),
+    /// Implementation for a type (e.g., impl Trait for nat[32])
+    Type(HirType),
+}
+
 /// Trait implementation in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirTraitImplementation {
     /// Trait name being implemented
     pub trait_name: String,
-    /// Target entity
-    pub target_entity: EntityId,
+    /// Target (entity or type)
+    pub target: TraitImplTarget,
     /// Method implementations
     pub method_implementations: Vec<HirTraitMethodImpl>,
     /// Type implementations
