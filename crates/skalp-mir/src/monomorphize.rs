@@ -487,11 +487,53 @@ impl Monomorphizer {
                             context
                         );
 
-                        // Convert type arguments to ConcreteType
-                        let type_args = call
+                        // Convert type arguments to ConcreteType based on generic parameter kind
+                        let type_args: Vec<ConcreteType> = call
                             .type_args
                             .iter()
-                            .map(|ty| ConcreteType::Type(ty.clone()))
+                            .zip(&func.generics)
+                            .map(|(ty, generic)| {
+                                eprintln!("    [MONO_DEBUG] Converting type arg: {:?}, generic param type: {:?}",
+                                    ty, generic.param_type);
+                                match &generic.param_type {
+                                    hir::HirGenericType::Const(_) => {
+                                        // For const parameters, extract the constant value
+                                        match ty {
+                                            HirType::NatExpr(expr) => {
+                                                // Extract literal value from expression
+                                                if let hir::HirExpression::Literal(lit) = expr.as_ref() {
+                                                    let value = match lit {
+                                                        hir::HirLiteral::Integer(v) => *v,
+                                                        _ => {
+                                                            eprintln!("    [MONO_DEBUG] NatExpr contains non-integer literal: {:?}", lit);
+                                                            0
+                                                        }
+                                                    };
+                                                    eprintln!("    [MONO_DEBUG] Extracted const value from NatExpr: {}", value);
+                                                    ConcreteType::ConstValue(value)
+                                                } else {
+                                                    eprintln!("    [MONO_DEBUG] NatExpr contains non-literal expression: {:?}", expr);
+                                                    ConcreteType::Type(ty.clone())
+                                                }
+                                            }
+                                            HirType::Bit(width) => {
+                                                eprintln!("    [MONO_DEBUG] Extracted const value from Bit: {}", width);
+                                                ConcreteType::ConstValue(*width as u64)
+                                            }
+                                            _ => {
+                                                eprintln!("    [MONO_DEBUG] Type arg is not NatExpr or Bit, treating as type: {:?}", ty);
+                                                // Fallback: treat as type
+                                                ConcreteType::Type(ty.clone())
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // For type parameters, use the type directly
+                                        eprintln!("    [MONO_DEBUG] Type parameter, using type directly");
+                                        ConcreteType::Type(ty.clone())
+                                    }
+                                }
+                            })
                             .collect();
 
                         // Queue this specialization
@@ -853,11 +895,43 @@ impl Monomorphizer {
             hir::HirExpression::Call(call) => {
                 // Check if this is a generic call that needs replacement
                 if !call.type_args.is_empty() {
-                    if let Some((func_id, _)) = self.find_generic_function_by_name(&call.function) {
+                    if let Some((func_id, func)) = self.find_generic_function_by_name(&call.function) {
                         let type_args: Vec<ConcreteType> = call
                             .type_args
                             .iter()
-                            .map(|ty| ConcreteType::Type(ty.clone()))
+                            .zip(&func.generics)
+                            .map(|(ty, generic)| {
+                                match &generic.param_type {
+                                    hir::HirGenericType::Const(_) => {
+                                        // For const parameters, extract the constant value
+                                        match ty {
+                                            HirType::NatExpr(expr) => {
+                                                // Extract literal value from expression
+                                                if let hir::HirExpression::Literal(lit) = expr.as_ref() {
+                                                    let value = match lit {
+                                                        hir::HirLiteral::Integer(v) => *v,
+                                                        _ => 0,
+                                                    };
+                                                    ConcreteType::ConstValue(value)
+                                                } else {
+                                                    ConcreteType::Type(ty.clone())
+                                                }
+                                            }
+                                            HirType::Bit(width) => {
+                                                ConcreteType::ConstValue(*width as u64)
+                                            }
+                                            _ => {
+                                                // Fallback: treat as type
+                                                ConcreteType::Type(ty.clone())
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // For type parameters, use the type directly
+                                        ConcreteType::Type(ty.clone())
+                                    }
+                                }
+                            })
                             .collect();
 
                         let key = self.make_specialization_key(func_id, &type_args);

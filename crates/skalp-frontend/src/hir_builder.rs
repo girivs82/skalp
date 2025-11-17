@@ -3436,8 +3436,11 @@ impl HirBuilderContext {
         // Extract type arguments (Phase 1: Generic function calls like func::<T>(args))
         let mut type_args = Vec::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
+            eprintln!("[HIR_TYPE_ARGS] Found ArgList with {} children", arg_list.children().count());
             for arg_node in arg_list.children() {
+                eprintln!("[HIR_TYPE_ARGS] Processing arg_node kind: {:?}", arg_node.kind());
                 let hir_type = self.extract_hir_type(&arg_node);
+                eprintln!("[HIR_TYPE_ARGS] Extracted type: {:?}", hir_type);
                 type_args.push(hir_type);
             }
         }
@@ -5717,6 +5720,25 @@ impl HirBuilderContext {
                     return HirType::Tuple(element_types);
                 }
                 _ => {}
+            }
+        }
+
+        // Check if this is a literal expression (for const generic arguments like ::<32>)
+        // Phase 1: Generic functions with const parameters
+        // The node might be wrapped in an Arg node, so check children too
+        if node.kind() == SyntaxKind::LiteralExpr {
+            if let Some(expr) = self.build_literal_expr(node) {
+                // Wrap literals in NatExpr so they can be used as const arguments
+                return HirType::NatExpr(Box::new(expr));
+            }
+        }
+
+        // Check if any child is a literal (for type arguments wrapped in Arg nodes)
+        for child in node.children() {
+            if child.kind() == SyntaxKind::LiteralExpr {
+                if let Some(expr) = self.build_literal_expr(&child) {
+                    return HirType::NatExpr(Box::new(expr));
+                }
             }
         }
 
