@@ -6360,6 +6360,9 @@ impl<'hir> HirToMir<'hir> {
     fn convert_generic_type(&mut self, hir_type: &hir::HirGenericType) -> GenericParameterType {
         match hir_type {
             hir::HirGenericType::Type => GenericParameterType::Type,
+            // Phase 2: TypeWithBounds is treated as Type in MIR
+            // Trait bounds are checked during type checking, not needed in MIR
+            hir::HirGenericType::TypeWithBounds(_bounds) => GenericParameterType::Type,
             hir::HirGenericType::Const(hir_data_type) => {
                 GenericParameterType::Const(self.convert_type(hir_data_type))
             }

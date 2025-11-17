@@ -654,6 +654,9 @@ pub struct HirGeneric {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HirGenericType {
     Type,
+    /// Type parameter with trait bounds (e.g., T: FloatingPoint + Numeric)
+    /// Phase 2: Enables bounded polymorphism for generic functions
+    TypeWithBounds(Vec<String>), // trait bound names
     Const(HirType),
     Width,
     ClockDomain, // Clock domain lifetime parameter
