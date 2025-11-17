@@ -4804,6 +4804,7 @@ impl<'hir> HirToMir<'hir> {
                 );
                 Some(hir::HirExpression::Call(hir::HirCallExpr {
                     function: call.function.clone(),
+                    type_args: call.type_args.clone(), // Preserve type args during parameter substitution
                     args: substituted_args,
                 }))
             }

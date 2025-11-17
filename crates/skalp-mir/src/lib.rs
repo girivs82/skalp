@@ -12,6 +12,7 @@ pub mod compiler;
 pub mod hir_to_mir;
 pub mod mir;
 pub mod mir_validation;
+pub mod monomorphize;
 pub mod optimize;
 pub mod timing;
 pub mod transform;
@@ -34,6 +35,7 @@ pub use mir::{
     Value, Variable, VariableId,
 };
 pub use mir_validation::{validate_mir, ValidationError};
+pub use monomorphize::Monomorphizer;
 pub use optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 
 use anyhow::Result;
@@ -41,10 +43,14 @@ use skalp_frontend::Hir;
 
 /// Lower HIR to MIR
 pub fn lower_to_mir(hir: &Hir) -> Result<Mir> {
-    // Monomorphization already happened in the frontend
-    // Use the actual HIR to MIR transformer
+    // Phase 1: Monomorphize generic functions
+    // This replaces generic functions with specialized (monomorphic) versions
+    let mut monomorphizer = Monomorphizer::new();
+    let monomorphic_hir = monomorphizer.monomorphize(hir);
+
+    // Phase 2: Transform HIR to MIR
     let mut transformer = HirToMir::new();
-    let mir = transformer.transform(hir);
+    let mir = transformer.transform(&monomorphic_hir);
 
     // Validate MIR invariants
     // This catches bugs early if type flattening isn't complete

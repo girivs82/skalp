@@ -471,6 +471,7 @@ fn remap_expr_ports(
                 .collect();
             hir::HirExpression::Call(hir::HirCallExpr {
                 function: call.function.clone(),
+                type_args: call.type_args.clone(), // Preserve type args during port remapping
                 args: new_args,
             })
         }

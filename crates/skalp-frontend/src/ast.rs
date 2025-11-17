@@ -150,6 +150,10 @@ pub struct ConstantDecl {
 /// Const functions (const fn) can be evaluated at compile time and used
 /// in type expressions and generic parameters.
 ///
+/// Generic functions (Phase 1) support parametric polymorphism:
+/// - Type parameters: `fn identity<T>(value: T) -> T`
+/// - Const parameters: `fn add<const W: nat>(a: bit[W], b: bit[W]) -> bit[W]`
+///
 /// Example:
 /// ```skalp
 /// fn vec3_to_vec4(v: Vec3, w: fp32) -> Vec4 {
@@ -159,6 +163,15 @@ pub struct ConstantDecl {
 /// const fn clog2(n: nat) -> nat {
 ///     if n <= 1 { 0 } else { 1 + clog2(n / 2) }
 /// }
+///
+/// // Phase 1: Generic functions
+/// fn identity<T>(value: T) -> T {
+///     return value
+/// }
+///
+/// fn add<const W: nat>(a: bit[W], b: bit[W]) -> bit[W] {
+///     return a + b
+/// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDecl {
@@ -166,6 +179,8 @@ pub struct FunctionDecl {
     pub is_const: bool,
     /// Function name
     pub name: String,
+    /// Generic parameters (Phase 1: type and const parameters)
+    pub generics: Vec<Generic>,
     /// Parameters as (name, type) pairs
     pub params: Vec<(String, Type)>,
     /// Return type (optional for void functions)
@@ -450,6 +465,9 @@ pub enum UnaryOp {
 pub struct CallExpr {
     /// Function name
     pub function: String,
+    /// Type arguments for generic functions (Phase 1)
+    /// Example: func::<bit[32], fp32>(args)
+    pub type_args: Vec<Type>,
     /// Arguments
     pub args: Vec<Expression>,
 }

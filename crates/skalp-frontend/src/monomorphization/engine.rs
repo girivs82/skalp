@@ -1121,6 +1121,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     .collect();
                 HirExpression::Call(crate::hir::HirCallExpr {
                     function: call.function.clone(),
+                    type_args: call.type_args.clone(), // Preserve type args during port remapping
                     args: new_args,
                 })
             }

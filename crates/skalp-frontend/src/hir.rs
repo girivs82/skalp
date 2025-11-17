@@ -175,6 +175,10 @@ pub struct HirConstant {
 /// sequential blocks, combinational assignments, or other functions.
 ///
 /// Const functions can be evaluated at compile time.
+///
+/// Generic functions (Phase 1) support parametric polymorphism.
+/// During HIR→MIR transformation, generic functions are monomorphized
+/// (specialized for each set of type arguments used).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirFunction {
     /// Function identifier
@@ -183,6 +187,8 @@ pub struct HirFunction {
     pub is_const: bool,
     /// Function name
     pub name: String,
+    /// Generic parameters (Phase 1: type and const parameters)
+    pub generics: Vec<HirGeneric>,
     /// Function parameters
     pub params: Vec<HirParameter>,
     /// Return type (None for void functions)
@@ -511,6 +517,9 @@ pub enum HirUnaryOp {
 pub struct HirCallExpr {
     /// Function name
     pub function: String,
+    /// Type arguments for generic functions (Phase 1)
+    /// Example: func::<T, U>(args) has type_args = [T, U]
+    pub type_args: Vec<HirType>,
     /// Arguments
     pub args: Vec<HirExpression>,
 }

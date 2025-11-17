@@ -871,6 +871,16 @@ impl HirBuilderContext {
             .find(|t| t.kind() == SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
+        // Extract generic parameters (Phase 1)
+        let mut generics = Vec::new();
+        if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
+            for generic_node in generic_list.children_of_kind(SyntaxKind::GenericParam) {
+                if let Some(generic) = self.build_generic_param(&generic_node) {
+                    generics.push(generic);
+                }
+            }
+        }
+
         // Build parameters
         let mut params = Vec::new();
         if let Some(param_list) = node.first_child_of_kind(SyntaxKind::ParameterList) {
@@ -930,6 +940,7 @@ impl HirBuilderContext {
             id,
             is_const,
             name,
+            generics, // Phase 1: Extracted from AST
             params,
             return_type,
             body,
@@ -1349,6 +1360,7 @@ impl HirBuilderContext {
 
                                             let nested_call = HirExpression::Call(HirCallExpr {
                                                 function: nested_func_name,
+                                                type_args: Vec::new(), // TODO Phase 1: Parse from AST
                                                 args: nested_args,
                                             });
                                             args.push(nested_call);
@@ -1370,6 +1382,7 @@ impl HirBuilderContext {
                             }
                             let call_expr = HirExpression::Call(HirCallExpr {
                                 function: func_name,
+                                type_args: Vec::new(), // TODO Phase 1: Parse from AST
                                 args,
                             });
                             return Some(HirStatement::Expression(call_expr));
@@ -1798,6 +1811,7 @@ impl HirBuilderContext {
 
                         result = HirExpression::Call(HirCallExpr {
                             function: method_name,
+                            type_args: Vec::new(), // TODO Phase 1: Parse from AST
                             args,
                         });
 
@@ -3362,6 +3376,7 @@ impl HirBuilderContext {
 
                         return Some(HirExpression::Call(HirCallExpr {
                             function: method_name,
+                            type_args: Vec::new(), // TODO Phase 1: Parse from AST
                             args,
                         }));
                     }
@@ -3418,17 +3433,35 @@ impl HirBuilderContext {
             return None;
         };
 
+        // Extract type arguments (Phase 1: Generic function calls like func::<T>(args))
+        let mut type_args = Vec::new();
+        if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
+            for arg_node in arg_list.children() {
+                let hir_type = self.extract_hir_type(&arg_node);
+                type_args.push(hir_type);
+            }
+        }
+
         // Parse arguments - ALL children are arguments (function name is not in children)
+        // Skip ArgList children (those are type arguments, not value arguments)
         let mut args = Vec::new();
 
         for child in node.children() {
-            // All children are expression arguments
+            // Skip ArgList (type arguments) and only process expression arguments
+            if child.kind() == SyntaxKind::ArgList {
+                continue;
+            }
+            // All other children are expression arguments
             if let Some(expr) = self.build_expression(&child) {
                 args.push(expr);
             }
         }
 
-        Some(HirExpression::Call(HirCallExpr { function, args }))
+        Some(HirExpression::Call(HirCallExpr {
+            function,
+            type_args, // Phase 1: Extracted from AST
+            args,
+        }))
     }
 
     /// Build struct literal expression
@@ -5814,6 +5847,7 @@ impl HirBuilderContext {
 
                         let call_expr = HirExpression::Call(HirCallExpr {
                             function: func_name,
+                            type_args: Vec::new(), // TODO Phase 1: Parse from AST
                             args,
                         });
                         return HirType::NatExpr(Box::new(call_expr));
