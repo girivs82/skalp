@@ -945,9 +945,33 @@ impl<'a> ParseState<'a> {
                     self.parse_return_statement();
                 }
                 Some(SyntaxKind::IfKw) => {
-                    // Bug #80 fix: Parse if as statement (optional else) in block expressions
-                    // This allows: match x { _ => { if cond { stmt; } expr } }
-                    self.parse_if_statement();
+                    // Bug #80/#81 fix: Determine if this is an if-statement or if-expression
+                    // - If has no else → must be statement (parse as statement)
+                    // - If has else → could be expression or statement, let parse_expression() handle it
+                    // We peek ahead to check if there's an else after the if block
+                    if self.is_if_without_else_lookahead() {
+                        // Parse as statement (optional else)
+                        self.parse_if_statement();
+                    } else {
+                        // Fall through to expression parsing (will handle if-expression with else)
+                        // Parse as expression
+                        let pos_before = self.current;
+                        self.parse_expression();
+                        let pos_after = self.current;
+
+                        if pos_before == pos_after {
+                            self.error("failed to parse expression in block");
+                            self.bump();
+                            continue;
+                        }
+
+                        if self.at(SyntaxKind::Semicolon) {
+                            self.bump();
+                        } else {
+                            break;
+                        }
+                        continue;
+                    }
                 }
                 _ => {
                     // Try to parse as expression
@@ -4557,6 +4581,61 @@ impl<'a> ParseState<'a> {
     /// (e.g., 'area' as intent constraint name)
     fn at_keyword_as_ident(&self) -> bool {
         matches!(self.current_kind(), Some(SyntaxKind::AreaKw))
+    }
+
+    /// Lookahead to check if the current if statement has no else clause
+    /// Assumes we're currently at an IfKw token
+    /// Returns true if there's no else, false if there is an else
+    fn is_if_without_else_lookahead(&self) -> bool {
+        if self.current_kind() != Some(SyntaxKind::IfKw) {
+            return false;
+        }
+
+        // Scan forward to find the matching closing brace of the if block
+        // and check if it's followed by 'else'
+        let mut pos = self.current + 1; // Skip 'if'
+        let mut brace_depth = 0;
+        let mut found_then_block = false;
+
+        while pos < self.tokens.len() {
+            let kind = SyntaxKind::from(self.tokens[pos].token.clone());
+
+            // Skip trivia
+            if kind.is_trivia() {
+                pos += 1;
+                continue;
+            }
+
+            // Track braces in the if condition and body
+            match kind {
+                SyntaxKind::LBrace => {
+                    brace_depth += 1;
+                    found_then_block = true;
+                }
+                SyntaxKind::RBrace => {
+                    brace_depth -= 1;
+                    // When we close the then-block, check next token
+                    if found_then_block && brace_depth == 0 {
+                        // Look at next non-trivia token
+                        let mut next_pos = pos + 1;
+                        while next_pos < self.tokens.len() {
+                            let next_kind = SyntaxKind::from(self.tokens[next_pos].token.clone());
+                            if !next_kind.is_trivia() {
+                                return next_kind != SyntaxKind::ElseKw;
+                            }
+                            next_pos += 1;
+                        }
+                        // No more tokens after closing brace = no else
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            pos += 1;
+        }
+
+        // Couldn't find matching brace, assume no else
+        true
     }
 
     /// Get current binary operator
