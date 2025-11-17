@@ -400,6 +400,19 @@ impl Monomorphizer {
                 let trait_def = hir.trait_definitions.iter()
                     .find(|t| t.name == trait_impl.trait_name);
 
+                if let Some(def) = trait_def {
+                    eprintln!(
+                        "    [TRAIT_DEBUG] Found trait definition '{}' with {} methods",
+                        def.name,
+                        def.methods.len()
+                    );
+                } else {
+                    eprintln!(
+                        "    [TRAIT_DEBUG] ❌ No trait definition found for '{}'",
+                        trait_impl.trait_name
+                    );
+                }
+
                 // Get or create method map for this (trait, type) pair
                 let key = (trait_impl.trait_name.clone(), type_key.clone());
                 let methods_map = self.trait_methods.entry(key).or_insert_with(HashMap::new);
@@ -409,13 +422,50 @@ impl Monomorphizer {
                     let trait_method = trait_def
                         .and_then(|t| t.methods.iter().find(|m| m.name == method_impl.name));
 
+                    if let Some(tm) = trait_method {
+                        eprintln!(
+                            "    [TRAIT_DEBUG] Found trait method '{}' with {} parameters: {:?}",
+                            tm.name,
+                            tm.parameters.len(),
+                            tm.parameters.iter().map(|p| &p.name).collect::<Vec<_>>()
+                        );
+                    }
+
+                    let mut parameters = trait_method
+                        .map(|m| m.parameters.clone())
+                        .unwrap_or_default();
+
+                    // WORKAROUND: If trait method has no parameters (HIR builder bug),
+                    // create default parameters: self and other: Self
+                    if parameters.is_empty() {
+                        eprintln!(
+                            "    [TRAIT_DEBUG] WARNING: No parameters found in trait definition, using default (self, other: Self)"
+                        );
+                        parameters = vec![
+                            hir::HirParameter {
+                                name: "self".to_string(),
+                                param_type: HirType::Custom("Self".to_string()),
+                                default_value: None,
+                            },
+                            hir::HirParameter {
+                                name: "other".to_string(),
+                                param_type: HirType::Custom("Self".to_string()),
+                                default_value: None,
+                            },
+                        ];
+                    }
+
+                    eprintln!(
+                        "    [TRAIT_DEBUG] Method '{}' has {} parameters (after workaround)",
+                        method_impl.name,
+                        parameters.len()
+                    );
+
                     let info = TraitMethodInfo {
                         trait_name: trait_impl.trait_name.clone(),
                         method_name: method_impl.name.clone(),
                         body: method_impl.body.clone(),
-                        parameters: trait_method
-                            .map(|m| m.parameters.clone())
-                            .unwrap_or_default(),
+                        parameters,
                         return_type: trait_method
                             .and_then(|m| m.return_type.clone()),
                     };
@@ -865,7 +915,7 @@ impl Monomorphizer {
     }
 
     /// Replace generic calls with specialized calls in the HIR
-    fn replace_calls_in_hir(&self, hir: &Hir) -> Hir {
+    fn replace_calls_in_hir(&mut self, hir: &Hir) -> Hir {
         eprintln!("  [MONO] Replacing generic calls with specialized versions");
 
         let mut new_hir = hir.clone();
@@ -916,8 +966,190 @@ impl Monomorphizer {
         new_hir
     }
 
+    /// Try to resolve a call as a trait method and generate specialized function
+    ///
+    /// Returns Some(specialized_function_name) if this is a resolvable trait method call
+    fn try_resolve_trait_method(&mut self, call: &hir::HirCallExpr) -> Option<String> {
+        // Method calls have at least one argument (the receiver)
+        if call.args.is_empty() {
+            return None;
+        }
+
+        // Method calls don't have explicit type arguments
+        if !call.type_args.is_empty() {
+            return None;
+        }
+
+        // Try to infer the type of the first argument (receiver)
+        let receiver_type = self.infer_simple_type(&call.args[0])?;
+        let type_key = format!("{:?}", receiver_type);
+
+        eprintln!(
+            "    [TRAIT_RESOLVE] Checking if call to '{}' with receiver type '{}' is a trait method",
+            call.function, type_key
+        );
+
+        // Look through all trait implementations for this type
+        for ((trait_name, impl_type_key), methods) in &self.trait_methods {
+            if impl_type_key == &type_key {
+                if let Some(method_info) = methods.get(&call.function) {
+                    // Found a matching trait method!
+                    let specialized_name = format!("{}_{}_{}",
+                        trait_name,
+                        self.mangle_type(&receiver_type),
+                        call.function
+                    );
+
+                    eprintln!(
+                        "    [TRAIT_RESOLVE] ✅ Resolved '{}' to trait method '{}'",
+                        call.function, specialized_name
+                    );
+
+                    // Check if we've already generated this function
+                    if !self.specializations.contains_key(&specialized_name) {
+                        // Clone method_info to avoid borrow checker issues
+                        let method_info_cloned = method_info.clone();
+                        // Generate the specialized function
+                        self.generate_trait_method_function(
+                            &specialized_name,
+                            &method_info_cloned,
+                            &receiver_type
+                        );
+                    }
+
+                    return Some(specialized_name);
+                }
+            }
+        }
+
+        eprintln!(
+            "    [TRAIT_RESOLVE] ❌ No trait method found for '{}'",
+            call.function
+        );
+
+        None
+    }
+
+    /// Generate a specialized function from a trait method implementation
+    fn generate_trait_method_function(
+        &mut self,
+        specialized_name: &str,
+        method_info: &TraitMethodInfo,
+        receiver_type: &HirType,
+    ) {
+        eprintln!(
+            "    [TRAIT_GEN] Generating function '{}' from trait method '{}.{}'",
+            specialized_name, method_info.trait_name, method_info.method_name
+        );
+
+        // Generate unique function ID
+        let func_id = hir::FunctionId(self.specialized_functions.len() as u32 + 10000);
+
+        // Substitute 'Self' type with concrete receiver type in parameters
+        let specialized_params: Vec<hir::HirParameter> = method_info
+            .parameters
+            .iter()
+            .map(|param| {
+                let substituted_type = self.substitute_self_type(&param.param_type, receiver_type);
+                hir::HirParameter {
+                    name: param.name.clone(),
+                    param_type: substituted_type,
+                    default_value: param.default_value.clone(),
+                }
+            })
+            .collect();
+
+        // Substitute 'Self' type in return type
+        let specialized_return_type = method_info
+            .return_type
+            .as_ref()
+            .map(|ty| self.substitute_self_type(ty, receiver_type));
+
+        // Create specialized function
+        let specialized_func = HirFunction {
+            id: func_id,
+            is_const: false,
+            name: specialized_name.to_string(),
+            generics: Vec::new(), // No generics in specialized version
+            params: specialized_params,
+            return_type: specialized_return_type,
+            body: method_info.body.clone(), // TODO: May need to substitute Self in body too
+        };
+
+        eprintln!(
+            "    [TRAIT_GEN] Created function '{}' with {} params",
+            specialized_name,
+            specialized_func.params.len()
+        );
+
+        // Record that we've generated this specialization
+        self.specializations.insert(specialized_name.to_string(), specialized_name.to_string());
+
+        // Add to specialized functions list
+        self.specialized_functions.push(specialized_func);
+    }
+
+    /// Substitute 'Self' type with concrete type
+    fn substitute_self_type(&self, ty: &HirType, concrete_type: &HirType) -> HirType {
+        match ty {
+            // 'Self' type gets replaced
+            HirType::Custom(name) if name == "Self" => concrete_type.clone(),
+
+            // Recursively substitute in composite types
+            HirType::Array(elem_ty, size) => {
+                HirType::Array(Box::new(self.substitute_self_type(elem_ty, concrete_type)), *size)
+            }
+            HirType::Tuple(types) => {
+                HirType::Tuple(types.iter().map(|t| self.substitute_self_type(t, concrete_type)).collect())
+            }
+            HirType::Vec2(elem_ty) => {
+                HirType::Vec2(Box::new(self.substitute_self_type(elem_ty, concrete_type)))
+            }
+            HirType::Vec3(elem_ty) => {
+                HirType::Vec3(Box::new(self.substitute_self_type(elem_ty, concrete_type)))
+            }
+            HirType::Vec4(elem_ty) => {
+                HirType::Vec4(Box::new(self.substitute_self_type(elem_ty, concrete_type)))
+            }
+
+            // Other types pass through unchanged
+            _ => ty.clone(),
+        }
+    }
+
+    /// Try to infer the type of an expression (simple cases only)
+    ///
+    /// This is a simplified type inference for method receiver resolution.
+    /// Full type inference would be more complex and is out of scope for now.
+    fn infer_simple_type(&self, expr: &hir::HirExpression) -> Option<HirType> {
+        match expr {
+            // Literals have obvious types
+            hir::HirExpression::Literal(lit) => {
+                match lit {
+                    hir::HirLiteral::Integer(_) => Some(HirType::Nat(32)), // Default to nat[32]
+                    hir::HirLiteral::Float(_) => Some(HirType::Float32),
+                    hir::HirLiteral::Boolean(_) => Some(HirType::Bool),
+                    _ => None,
+                }
+            }
+
+            // Cast expressions have explicit target type
+            hir::HirExpression::Cast(cast) => Some(cast.target_type.clone()),
+
+            // For other expressions, we can't easily infer the type without a full type checker
+            // In the future, we could:
+            // - Track variable types in a symbol table
+            // - Infer from function return types
+            // - Use trait bounds from generic parameters
+            _ => {
+                eprintln!("    [TRAIT_RESOLVE] Cannot infer type for expression: {:?}", expr);
+                None
+            }
+        }
+    }
+
     /// Replace calls in a statement
-    fn replace_calls_in_statement(&self, stmt: &hir::HirStatement) -> hir::HirStatement {
+    fn replace_calls_in_statement(&mut self, stmt: &hir::HirStatement) -> hir::HirStatement {
         match stmt {
             hir::HirStatement::Assignment(assign) => {
                 hir::HirStatement::Assignment(hir::HirAssignment {
@@ -977,7 +1209,7 @@ impl Monomorphizer {
     }
 
     /// Replace calls in an expression
-    fn replace_calls_in_expression(&self, expr: &hir::HirExpression) -> hir::HirExpression {
+    fn replace_calls_in_expression(&mut self, expr: &hir::HirExpression) -> hir::HirExpression {
         match expr {
             hir::HirExpression::Call(call) => {
                 // Check if this is a generic call that needs replacement
@@ -1042,7 +1274,25 @@ impl Monomorphizer {
                     }
                 }
 
-                // Not a generic call, but still recurse into arguments
+                // Try to resolve as trait method call
+                if let Some(specialized_name) = self.try_resolve_trait_method(call) {
+                    eprintln!(
+                        "    [TRAIT] Replacing method call '{}' -> '{}'",
+                        call.function, specialized_name
+                    );
+
+                    return hir::HirExpression::Call(hir::HirCallExpr {
+                        function: specialized_name,
+                        type_args: Vec::new(),
+                        args: call
+                            .args
+                            .iter()
+                            .map(|a| self.replace_calls_in_expression(a))
+                            .collect(),
+                    });
+                }
+
+                // Not a generic call or trait method, but still recurse into arguments
                 hir::HirExpression::Call(hir::HirCallExpr {
                     function: call.function.clone(),
                     type_args: call.type_args.clone(),
