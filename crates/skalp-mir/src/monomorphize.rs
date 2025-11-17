@@ -300,6 +300,23 @@ impl TypeSubstitution {
     }
 }
 
+/// Trait method implementation info
+///
+/// Stores a trait method implementation for resolution
+#[derive(Debug, Clone)]
+struct TraitMethodInfo {
+    /// Trait name
+    trait_name: String,
+    /// Method name
+    method_name: String,
+    /// Method body statements
+    body: Vec<hir::HirStatement>,
+    /// Method parameters (including self)
+    parameters: Vec<hir::HirParameter>,
+    /// Return type
+    return_type: Option<HirType>,
+}
+
 /// Monomorphizer
 ///
 /// Main struct for performing monomorphization on a HIR.
@@ -319,6 +336,10 @@ pub struct Monomorphizer {
 
     /// Set of function IDs that are generic
     generic_function_ids: HashSet<hir::FunctionId>,
+
+    /// Trait method registry: (trait_name, type_key) -> HashMap<method_name -> TraitMethodInfo>
+    /// Maps (trait, type) pairs to their method implementations for method resolution
+    trait_methods: HashMap<(String, String), HashMap<String, TraitMethodInfo>>,
 }
 
 impl Monomorphizer {
@@ -330,6 +351,7 @@ impl Monomorphizer {
             specialized_functions: Vec::new(),
             generic_functions: HashMap::new(),
             generic_function_ids: HashSet::new(),
+            trait_methods: HashMap::new(),
         }
     }
 
@@ -339,17 +361,82 @@ impl Monomorphizer {
     pub fn monomorphize(&mut self, hir: &Hir) -> Hir {
         eprintln!("🔄 [MONOMORPHIZE] Starting monomorphization pass");
 
-        // Step 1: Identify generic functions
+        // Step 1: Build trait method registry
+        self.build_trait_registry(hir);
+
+        // Step 2: Identify generic functions
         self.identify_generic_functions(hir);
 
-        // Step 2: Collect all calls to generic functions
+        // Step 3: Collect all calls to generic functions
         self.collect_generic_calls(hir);
 
-        // Step 3: Generate specializations (breadth-first)
+        // Step 4: Generate specializations (breadth-first)
         self.generate_all_specializations();
 
         // Step 4: Replace generic calls with specialized calls
         self.replace_calls_in_hir(hir)
+    }
+
+    /// Build trait method registry for method resolution
+    ///
+    /// Extracts all trait implementations and stores method info for later resolution
+    fn build_trait_registry(&mut self, hir: &Hir) {
+        eprintln!("  [TRAIT] Building trait method registry");
+
+        for trait_impl in &hir.trait_implementations {
+            // Only process type-based implementations
+            // Entity-based impls are not relevant for function calls
+            if let hir::TraitImplTarget::Type(target_type) = &trait_impl.target {
+                // Get type key string for lookup
+                let type_key = format!("{:?}", target_type);
+
+                eprintln!(
+                    "  [TRAIT] Found impl {} for {:?}",
+                    trait_impl.trait_name,
+                    target_type
+                );
+
+                // Get trait definition to get parameter info
+                let trait_def = hir.trait_definitions.iter()
+                    .find(|t| t.name == trait_impl.trait_name);
+
+                // Get or create method map for this (trait, type) pair
+                let key = (trait_impl.trait_name.clone(), type_key.clone());
+                let methods_map = self.trait_methods.entry(key).or_insert_with(HashMap::new);
+
+                for method_impl in &trait_impl.method_implementations {
+                    // Find corresponding trait method definition for params/return type
+                    let trait_method = trait_def
+                        .and_then(|t| t.methods.iter().find(|m| m.name == method_impl.name));
+
+                    let info = TraitMethodInfo {
+                        trait_name: trait_impl.trait_name.clone(),
+                        method_name: method_impl.name.clone(),
+                        body: method_impl.body.clone(),
+                        parameters: trait_method
+                            .map(|m| m.parameters.clone())
+                            .unwrap_or_default(),
+                        return_type: trait_method
+                            .and_then(|m| m.return_type.clone()),
+                    };
+
+                    methods_map.insert(method_impl.name.clone(), info);
+
+                    eprintln!(
+                        "    [TRAIT] Registered method: {}.{}",
+                        trait_impl.trait_name,
+                        method_impl.name
+                    );
+                }
+            }
+        }
+
+        let total_methods: usize = self.trait_methods.values().map(|m| m.len()).sum();
+        eprintln!(
+            "  [TRAIT] Registered {} trait implementations with {} total methods",
+            self.trait_methods.len(),
+            total_methods
+        );
     }
 
     /// Identify which functions are generic
