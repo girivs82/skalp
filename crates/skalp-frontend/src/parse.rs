@@ -944,6 +944,11 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ReturnKw) => {
                     self.parse_return_statement();
                 }
+                Some(SyntaxKind::IfKw) => {
+                    // Bug #80 fix: Parse if as statement (optional else) in block expressions
+                    // This allows: match x { _ => { if cond { stmt; } expr } }
+                    self.parse_if_statement();
+                }
                 _ => {
                     // Try to parse as expression
                     // If the expression is followed by a semicolon, it's an expression statement
