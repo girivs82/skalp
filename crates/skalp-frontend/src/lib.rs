@@ -33,7 +33,17 @@ pub use parser::Parser;
 
 use anyhow::{Context, Result};
 use module_resolver::ModuleResolver;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Compilation context containing the main HIR and all loaded module HIRs
+/// This allows the MIR compiler to resolve functions in their proper module scope
+pub struct CompilationContext {
+    /// The main/merged HIR for the top-level module
+    pub main_hir: Hir,
+    /// All loaded module HIRs (path -> HIR) for scope resolution
+    pub module_hirs: HashMap<PathBuf, Hir>,
+}
 
 /// Find the project root by searching for skalp.toml
 ///
@@ -65,7 +75,8 @@ fn find_project_root(start_path: &Path) -> Option<PathBuf> {
 }
 
 /// Parse and build HIR from a file with full module resolution
-pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
+/// Returns a CompilationContext containing both the main HIR and all module HIRs
+pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<CompilationContext> {
     use module_resolver::ModuleResolver;
     use std::fs;
 
@@ -130,7 +141,23 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
     let mut engine = MonomorphizationEngine::new();
     let monomorphized_hir = engine.monomorphize(&hir);
 
-    Ok(monomorphized_hir)
+    // Extract all loaded module HIRs from the resolver
+    let module_hirs: HashMap<PathBuf, Hir> = resolver
+        .loaded_modules()
+        .map(|(path, hir)| (path.clone(), hir.clone()))
+        .collect();
+
+    Ok(CompilationContext {
+        main_hir: monomorphized_hir,
+        module_hirs,
+    })
+}
+
+/// Parse and build HIR from a file with full module resolution (backward compatibility)
+/// Returns only the main HIR. For proper module scope resolution, use parse_and_build_compilation_context()
+pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
+    let context = parse_and_build_compilation_context(file_path)?;
+    Ok(context.main_hir)
 }
 
 /// Rebuild instances with imported entities now available

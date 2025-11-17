@@ -8,6 +8,8 @@ use crate::mir::Mir;
 use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 use anyhow::Result;
 use skalp_frontend::hir::Hir;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Optimization level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,12 +52,28 @@ impl MirCompiler {
     }
 
     /// Compile HIR to MIR with CDC analysis
+    ///
+    /// If module_hirs is provided, the compiler can properly resolve function calls
+    /// in their original module scope, enabling proper transitive imports.
     pub fn compile_to_mir(&self, hir: &Hir) -> Result<Mir, String> {
+        self.compile_to_mir_with_modules(hir, &HashMap::new())
+    }
+
+    /// Compile HIR to MIR with CDC analysis and module scope resolution
+    ///
+    /// The module_hirs parameter provides access to all loaded module HIRs, allowing
+    /// the compiler to resolve function calls in their proper module scope.
+    /// This fixes Bug #84: transitive imports now work correctly.
+    pub fn compile_to_mir_with_modules(
+        &self,
+        hir: &Hir,
+        module_hirs: &HashMap<PathBuf, Hir>,
+    ) -> Result<Mir, String> {
         // Step 1: Transform HIR to MIR
         if self.verbose {
             println!("Phase 1: HIR to MIR transformation");
         }
-        let mut transformer = HirToMir::new();
+        let mut transformer = HirToMir::new_with_modules(module_hirs);
         let mut mir = transformer.transform(hir);
 
         // Step 2: Perform CDC analysis

@@ -8,6 +8,7 @@ use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Information about a flattened port or signal field
 #[derive(Debug, Clone)]
@@ -64,6 +65,9 @@ pub struct HirToMir<'hir> {
     clock_domain_map: HashMap<hir::ClockDomainId, ClockDomainId>,
     /// Reference to HIR for type resolution
     hir: Option<&'hir Hir>,
+    /// All loaded module HIRs for proper scope resolution (Bug #84 fix)
+    /// This allows resolving function calls in their original module scope
+    module_hirs: HashMap<PathBuf, Hir>,
     /// Current entity being converted (for generic parameter resolution)
     current_entity_id: Option<hir::EntityId>,
     /// Const evaluator for evaluating const expressions (including user-defined const functions)
@@ -85,6 +89,11 @@ pub struct HirToMir<'hir> {
 impl<'hir> HirToMir<'hir> {
     /// Create a new transformer
     pub fn new() -> Self {
+        Self::new_with_modules(&HashMap::new())
+    }
+
+    /// Create a new transformer with module HIRs for proper scope resolution (Bug #84 fix)
+    pub fn new_with_modules(module_hirs: &HashMap<PathBuf, Hir>) -> Self {
         Self {
             next_module_id: 0,
             next_port_id: 0,
@@ -104,6 +113,7 @@ impl<'hir> HirToMir<'hir> {
             context_variable_map: HashMap::new(),
             clock_domain_map: HashMap::new(),
             hir: None,
+            module_hirs: module_hirs.clone(),
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
             dynamic_variables: HashMap::new(),
@@ -3839,7 +3849,98 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Second, try top-level functions
-        hir.functions.iter().find(|func| func.name == simple_name)
+        eprintln!(
+            "[DEBUG find_function] Searching {} top-level functions for '{}'",
+            hir.functions.len(),
+            simple_name
+        );
+        if let Some(func) = hir.functions.iter().find(|func| func.name == simple_name) {
+            eprintln!(
+                "[DEBUG find_function] ✅ FOUND '{}' in top-level functions!",
+                simple_name
+            );
+            return Some(func);
+        }
+
+        // BUG #83 FIX: Third, search ALL implementation blocks for imported stdlib functions
+        // When functions are imported via "use bitops::*", they get merged into the global
+        // implementation block (EntityId(0)). We need to search all impl blocks, not just
+        // the current entity's block.
+        eprintln!(
+            "[DEBUG find_function] Searching {} implementation blocks in main HIR for '{}'",
+            hir.implementations.len(),
+            simple_name
+        );
+        for (impl_idx, impl_block) in hir.implementations.iter().enumerate() {
+            eprintln!(
+                "[DEBUG find_function]   Impl block {} (entity {:?}): {} functions",
+                impl_idx,
+                impl_block.entity,
+                impl_block.functions.len()
+            );
+            for func in &impl_block.functions {
+                if func.name == simple_name {
+                    eprintln!(
+                        "[DEBUG find_function] ✅ FOUND '{}' in main HIR impl block {}!",
+                        simple_name, impl_idx
+                    );
+                    return Some(func);
+                }
+            }
+        }
+
+        // BUG #84 FIX: Fourth, search ALL module HIRs for proper transitive import support
+        // When a function from module A calls a function from module B (which A imported),
+        // we need to search B's HIR, not just the main HIR.
+        eprintln!(
+            "[DEBUG find_function] Searching {} module HIRs for '{}'",
+            self.module_hirs.len(),
+            simple_name
+        );
+        for (module_path, module_hir) in &self.module_hirs {
+            eprintln!(
+                "[DEBUG find_function]   Module {:?}: {} top-level functions, {} impl blocks",
+                module_path.file_name().unwrap_or_default(),
+                module_hir.functions.len(),
+                module_hir.implementations.len()
+            );
+
+            // Search top-level functions in this module
+            if let Some(func) = module_hir.functions.iter().find(|f| f.name == simple_name) {
+                eprintln!(
+                    "[DEBUG find_function] ✅ FOUND '{}' in module {:?} top-level functions!",
+                    simple_name,
+                    module_path.file_name().unwrap_or_default()
+                );
+                // SAFETY: We need to return a reference with lifetime 'hir, but module_hirs
+                // is owned by self and lives as long as HirToMir, which lives as long as
+                // the transform() call. This is safe.
+                return unsafe { std::mem::transmute(func) };
+            }
+
+            // Search implementation blocks in this module
+            for impl_block in &module_hir.implementations {
+                for func in &impl_block.functions {
+                    if func.name == simple_name {
+                        eprintln!(
+                            "[DEBUG find_function] ✅ FOUND '{}' in module {:?} impl block!",
+                            simple_name,
+                            module_path.file_name().unwrap_or_default()
+                        );
+                        // SAFETY: Same as above
+                        return unsafe { std::mem::transmute(func) };
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "[DEBUG find_function] ❌ NOT FOUND: '{}' after searching main HIR ({} impl blocks) and {} module HIRs",
+            simple_name,
+            hir.implementations.len(),
+            self.module_hirs.len()
+        );
+        None
     }
 
     /// Transform early returns into nested if-else expressions

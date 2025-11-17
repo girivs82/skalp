@@ -54,16 +54,17 @@ impl Testbench {
 
     /// Create a new testbench with custom simulation config
     pub async fn with_config(source_path: &str, config: SimulationConfig) -> Result<Self> {
-        // Parse and build HIR with full module resolution support
+        // Parse and build HIR with full module resolution support (Bug #84 fix)
         // This handles imports like "mod async_fifo; use async_fifo::AsyncFifo"
         let path = Path::new(source_path);
-        let hir = parse_and_build_hir_from_file(path)?;
+        let context = skalp_frontend::parse_and_build_compilation_context(path)?;
 
-        // Compile to MIR with optimizations
+        // Compile to MIR with optimizations and module scope resolution
         // The proper HIR→MIR fix ensures array assignments are expanded correctly
+        // Bug #84 fix: Pass module HIRs for proper transitive import support
         let compiler = MirCompiler::new();
         let mir = compiler
-            .compile_to_mir(&hir)
+            .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Convert to SIR with hierarchical elaboration

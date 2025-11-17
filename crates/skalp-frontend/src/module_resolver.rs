@@ -83,23 +83,79 @@ impl ModuleResolver {
 
         // Add standard library path if it exists
         if let Ok(stdlib_path) = std::env::var("SKALP_STDLIB_PATH") {
+            eprintln!(
+                "[MODULE_RESOLVER] Using SKALP_STDLIB_PATH from environment: {:?}",
+                stdlib_path
+            );
             search_paths.push(PathBuf::from(stdlib_path));
         } else {
             // Default stdlib location relative to root
             let default_stdlib = root_dir.join("stdlib");
             if default_stdlib.exists() {
+                eprintln!(
+                    "[MODULE_RESOLVER] Found stdlib relative to root: {:?}",
+                    default_stdlib
+                );
                 search_paths.push(default_stdlib);
             }
 
-            // Try crates/skalp-stdlib for development
-            let dev_stdlib = root_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("crates/skalp-stdlib"));
-            if let Some(dev_path) = dev_stdlib {
-                if dev_path.exists() {
-                    search_paths.push(dev_path);
+            // Search upward through parent directories for crates/skalp-stdlib
+            // This handles projects at different nesting levels (e.g., Karythra vs SKALP own tests)
+            // First, convert root_dir to absolute path
+            let abs_root = root_dir
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::current_dir().unwrap().join(&root_dir));
+
+            eprintln!(
+                "[MODULE_RESOLVER] Searching for stdlib starting from: {:?}",
+                abs_root
+            );
+
+            let mut current = Some(abs_root.as_path());
+            let mut found_stdlib = false;
+
+            while let Some(dir) = current {
+                // Check current/crates/skalp-stdlib
+                let potential_stdlib = dir.join("crates/skalp-stdlib");
+                eprintln!(
+                    "[MODULE_RESOLVER] Checking for stdlib at: {:?}",
+                    potential_stdlib
+                );
+                if potential_stdlib.exists() && potential_stdlib.is_dir() {
+                    eprintln!(
+                        "[MODULE_RESOLVER] ✅ Found development stdlib: {:?}",
+                        potential_stdlib
+                    );
+                    search_paths.push(potential_stdlib);
+                    found_stdlib = true;
+                    break;
                 }
+
+                // Also check sibling 'hls' directory: ../hls/crates/skalp-stdlib
+                // This handles the case where we have /src/hw/karythra and /src/hw/hls as siblings
+                if let Some(parent) = dir.parent() {
+                    let hls_stdlib = parent.join("hls/crates/skalp-stdlib");
+                    eprintln!(
+                        "[MODULE_RESOLVER] Checking for stdlib in sibling hls: {:?}",
+                        hls_stdlib
+                    );
+                    if hls_stdlib.exists() && hls_stdlib.is_dir() {
+                        eprintln!(
+                            "[MODULE_RESOLVER] ✅ Found stdlib in sibling hls directory: {:?}",
+                            hls_stdlib
+                        );
+                        search_paths.push(hls_stdlib);
+                        found_stdlib = true;
+                        break;
+                    }
+                }
+
+                current = dir.parent();
+            }
+
+            if !found_stdlib {
+                eprintln!("[MODULE_RESOLVER] Warning: Could not find SKALP stdlib. Imports like 'use bitops::*' will fail.");
+                eprintln!("[MODULE_RESOLVER] Hint: Set SKALP_STDLIB_PATH environment variable or ensure crates/skalp-stdlib exists in a parent directory.");
             }
         }
 
