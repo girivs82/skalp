@@ -2772,6 +2772,7 @@ dependencies = [
  "skalp-backends",
  "skalp-codegen",
  "skalp-frontend",
+ "skalp-lint",
  "skalp-lir",
  "skalp-manifest",
  "skalp-mir",
@@ -2889,6 +2890,17 @@ dependencies = [
  "tokio",
  "tokio-test",
  "walkdir",
+]
+
+[[package]]
+name = "skalp-lint"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "skalp-frontend",
+ "skalp-mir",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]

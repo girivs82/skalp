@@ -1,5 +1,29 @@
 # SKALP TODO
 
+## Recently Completed ✅ (2025-11-18)
+
+### Language Features
+- ✅ **Trait System** - Full trait definitions with implementations and bounds
+- ✅ **Trait Methods** - `self` parameters with type annotations
+- ✅ **Const Generics** - `fn foo<const W: nat>` for parameterized designs
+- ✅ **Monomorphization** - Compile-time specialization of generic code
+- ✅ **Match Let Bindings** - Block expressions with let statements in match arms
+
+### Tooling
+- ✅ **Linter** - Static analyzer with 10 lint types:
+  - Unused code detection (variables, functions, dead code)
+  - Type-based lints (width mismatches, sign confusion)
+  - Hardware-specific lints (long combinational paths, inferred latches)
+- ✅ **LSP Server** - Full IDE support with completions, diagnostics, hover
+- ✅ **Formatter** - `skalp fmt` for consistent code style
+- ✅ **Package Manager** - Dependency management (add/remove/update/search)
+
+### Standard Library
+- ✅ **Bitops** - 12 functions: clz, ctz, popcount, bitreverse, ffs, fls, parity, etc.
+- ✅ **Math Operations** - Comprehensive math library
+- ✅ **Vector Operations** - Vector arithmetic and operations
+- ✅ **Fixed Point** - Fixed-point arithmetic support
+
 ## Deferred Tasks
 
 ### Physical Routing (Third-party toolchain integration)

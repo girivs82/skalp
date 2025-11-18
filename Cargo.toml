@@ -66,6 +66,9 @@ skalp-resolve = { path = "crates/skalp-resolve" }
 skalp-manifest = { path = "crates/skalp-manifest" }
 skalp-package = { path = "crates/skalp-package" }
 
+# Linter
+skalp-lint = { path = "crates/skalp-lint" }
+
 [dev-dependencies]
 pretty_assertions = "1.4"
 insta = "1.34"  # Snapshot testing

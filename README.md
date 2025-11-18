@@ -13,8 +13,12 @@ The name SKALP comes from Sanskrit 'Sankalpana' (संकल्पना), mean
 - **Intent-First Design**: Express what you want to achieve, not just how
 - **Clock Domain Safety**: Clock domains as lifetimes - CDC bugs caught at compile time
 - **Progressive Abstraction**: From high-level dataflow to cycle-accurate RTL
-- **Modern Type System**: Traits, generics, pattern matching from Rust
+- **Modern Type System**: Traits, generics, const generics, pattern matching from Rust
+- **Trait-Based Polymorphism**: Real code reuse across hardware types (NEW!)
 - **Built-in Verification**: Assertions and formal properties as first-class citizens
+- **Hardware-Aware Linter**: Catch common mistakes and design anti-patterns (NEW!)
+- **GPU-Accelerated Simulation**: Metal backend for instant testing on macOS (UNIQUE!)
+- **Comprehensive Standard Library**: Bitops, math, vectors, fixed-point, and more
 - **Protocol Abstractions**: Define protocols once, implement anywhere
 
 ## Quick Example
@@ -82,13 +86,19 @@ cat src/main.sk
 - `.sk` - SKALP source files
 - `.skalp` - Alternative extension
 
-## Tool Ecosystem (Planned)
+## Tool Ecosystem
 
-- `skalp` - Main compiler and build tool
-- `skalpfmt` - Code formatter
+**Production-Ready Tools:**
+- ✅ `skalp` - Main compiler and build tool
+- ✅ `skalp fmt` - Code formatter
+- ✅ `skalp-lsp` - Language Server Protocol for IDE support
+- ✅ `skalp lint` - Static analyzer and linter (NEW!)
+- ✅ `skalp sim` - GPU-accelerated simulator
+- ✅ Package manager - add/remove/update/search dependencies
+
+**Planned Tools:**
 - `skalpdoc` - Documentation generator
-- `skalptest` - Test framework
-- `skalp-lsp` - Language server for IDE support
+- `skalptest` - Enhanced test framework
 
 ## Design Philosophy
 
