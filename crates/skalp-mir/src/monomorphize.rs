@@ -479,28 +479,22 @@ impl Monomorphizer {
                         .map(|m| m.parameters.clone())
                         .unwrap_or_default();
 
-                    // WORKAROUND: If trait method has no parameters (HIR builder bug),
-                    // create default parameters: self and other: Self
-                    if parameters.is_empty() {
+                    // WORKAROUND: Parser doesn't capture 'self' parameter without type annotation
+                    // Prepend 'self: Self' if not present (method calls need it for resolution)
+                    let has_self = parameters.iter().any(|p| p.name == "self");
+                    if !has_self {
                         eprintln!(
-                            "    [TRAIT_DEBUG] WARNING: No parameters found in trait definition, using default (self, other: Self)"
+                            "    [TRAIT_DEBUG] Adding implicit 'self' parameter (parser doesn't capture untyped self)"
                         );
-                        parameters = vec![
-                            hir::HirParameter {
-                                name: "self".to_string(),
-                                param_type: HirType::Custom("Self".to_string()),
-                                default_value: None,
-                            },
-                            hir::HirParameter {
-                                name: "other".to_string(),
-                                param_type: HirType::Custom("Self".to_string()),
-                                default_value: None,
-                            },
-                        ];
+                        parameters.insert(0, hir::HirParameter {
+                            name: "self".to_string(),
+                            param_type: HirType::Custom("Self".to_string()),
+                            default_value: None,
+                        });
                     }
 
                     eprintln!(
-                        "    [TRAIT_DEBUG] Method '{}' has {} parameters (after workaround)",
+                        "    [TRAIT_DEBUG] Method '{}' has {} parameters",
                         method_impl.name,
                         parameters.len()
                     );

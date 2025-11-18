@@ -6769,10 +6769,11 @@ impl HirBuilderContext {
     fn parse_method_parameters(&mut self, node: &SyntaxNode) -> Vec<HirParameter> {
         let mut parameters = Vec::new();
 
-        // Look for Parameter nodes within the method node
-        for child in node.children() {
-            if child.kind() == SyntaxKind::Parameter {
-                if let Some(param) = self.build_parameter(&child) {
+        // Look for ParameterList node first, then iterate its Parameter children
+        // This matches how function parameters are parsed (see build_function_definition)
+        if let Some(param_list) = node.first_child_of_kind(SyntaxKind::ParameterList) {
+            for param_node in param_list.children_of_kind(SyntaxKind::Parameter) {
+                if let Some(param) = self.build_parameter(&param_node) {
                     parameters.push(param);
                 }
             }
