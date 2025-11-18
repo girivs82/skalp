@@ -324,12 +324,15 @@ struct TraitMethodInfo {
 struct TypeContext {
     /// Map from variable name to type
     variables: HashMap<String, HirType>,
+    /// Map from variable ID to type (for let bindings)
+    variable_ids: HashMap<hir::VariableId, HirType>,
 }
 
 impl TypeContext {
     fn new() -> Self {
         Self {
             variables: HashMap::new(),
+            variable_ids: HashMap::new(),
         }
     }
 
@@ -337,8 +340,16 @@ impl TypeContext {
         self.variables.insert(name, ty);
     }
 
+    fn add_variable_id(&mut self, id: hir::VariableId, ty: HirType) {
+        self.variable_ids.insert(id, ty);
+    }
+
     fn get_variable_type(&self, name: &str) -> Option<&HirType> {
         self.variables.get(name)
+    }
+
+    fn get_variable_id_type(&self, id: &hir::VariableId) -> Option<&HirType> {
+        self.variable_ids.get(id)
     }
 
     fn with_variables(&self, vars: Vec<(String, HirType)>) -> Self {
@@ -967,11 +978,16 @@ impl Monomorphizer {
                 ctx.variables.len()
             );
 
-            func.body = func
-                .body
-                .iter()
-                .map(|stmt| self.replace_calls_in_statement(stmt, &ctx))
-                .collect();
+            // Process statements with accumulating context (for let bindings)
+            let (new_body, _final_ctx) = func.body.iter().fold(
+                (Vec::new(), ctx.clone()),
+                |(mut stmts, mut acc_ctx), stmt| {
+                    let (new_stmt, updated_ctx) = self.replace_calls_in_statement_with_context(stmt, acc_ctx);
+                    stmts.push(new_stmt);
+                    (stmts, updated_ctx)
+                }
+            );
+            func.body = new_body;
         }
 
         // Replace calls in implementation blocks
@@ -1193,12 +1209,21 @@ impl Monomorphizer {
                 }
             }
 
-            // Variables - would need to track variable ID -> name mapping
-            hir::HirExpression::Variable(_var_id) => {
-                // For now, we can't handle variables without a name mapping
-                // This would require tracking variable IDs in the context
-                eprintln!("    [TRAIT_RESOLVE] Cannot infer type for Variable (ID-based)");
-                None
+            // Variables - look up by ID in context!
+            hir::HirExpression::Variable(var_id) => {
+                if let Some(ty) = ctx.get_variable_id_type(var_id) {
+                    eprintln!(
+                        "    [TRAIT_RESOLVE] Found type for variable ID {:?}: {:?}",
+                        var_id, ty
+                    );
+                    Some(ty.clone())
+                } else {
+                    eprintln!(
+                        "    [TRAIT_RESOLVE] No type found for variable ID {:?} in context",
+                        var_id
+                    );
+                    None
+                }
             }
 
             // Literals have obvious types
@@ -1225,7 +1250,46 @@ impl Monomorphizer {
         }
     }
 
-    /// Replace calls in a statement
+    /// Replace calls in a statement, returning both the new statement and updated context
+    fn replace_calls_in_statement_with_context(
+        &mut self,
+        stmt: &hir::HirStatement,
+        ctx: TypeContext
+    ) -> (hir::HirStatement, TypeContext) {
+        match stmt {
+            hir::HirStatement::Let(let_stmt) => {
+                // Process the value expression first with current context
+                let new_value = self.replace_calls_in_expression(&let_stmt.value, &ctx);
+
+                // Create new context with this variable for subsequent statements
+                let mut new_ctx = ctx.clone();
+                new_ctx.add_variable(let_stmt.name.clone(), let_stmt.var_type.clone());
+                new_ctx.add_variable_id(let_stmt.id, let_stmt.var_type.clone());
+
+                eprintln!(
+                    "  [TYPE_CTX] Added let binding '{}' (id={:?}) with type {:?}",
+                    let_stmt.name, let_stmt.id, let_stmt.var_type
+                );
+
+                let new_stmt = hir::HirStatement::Let(hir::HirLetStatement {
+                    id: let_stmt.id,
+                    name: let_stmt.name.clone(),
+                    mutable: let_stmt.mutable,
+                    var_type: let_stmt.var_type.clone(),
+                    value: new_value,
+                });
+
+                (new_stmt, new_ctx)
+            }
+            // All other statements don't modify context
+            _ => {
+                let new_stmt = self.replace_calls_in_statement(stmt, &ctx);
+                (new_stmt, ctx)
+            }
+        }
+    }
+
+    /// Replace calls in a statement (preserves context)
     fn replace_calls_in_statement(&mut self, stmt: &hir::HirStatement, ctx: &TypeContext) -> hir::HirStatement {
         match stmt {
             hir::HirStatement::Assignment(assign) => {
@@ -1240,16 +1304,13 @@ impl Monomorphizer {
                 hir::HirStatement::Expression(self.replace_calls_in_expression(expr, ctx))
             }
             hir::HirStatement::Let(let_stmt) => {
-                // Add variable to context for subsequent statements
-                let mut new_ctx = ctx.clone();
-                new_ctx.add_variable(let_stmt.name.clone(), let_stmt.var_type.clone());
-
+                // For this non-context-returning version, just process the expression
                 hir::HirStatement::Let(hir::HirLetStatement {
                     id: let_stmt.id,
                     name: let_stmt.name.clone(),
                     mutable: let_stmt.mutable,
                     var_type: let_stmt.var_type.clone(),
-                    value: self.replace_calls_in_expression(&let_stmt.value, &new_ctx),
+                    value: self.replace_calls_in_expression(&let_stmt.value, ctx),
                 })
             }
             hir::HirStatement::Return(expr_opt) => {
