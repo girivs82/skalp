@@ -475,23 +475,9 @@ impl Monomorphizer {
                         );
                     }
 
-                    let mut parameters = trait_method
+                    let parameters = trait_method
                         .map(|m| m.parameters.clone())
                         .unwrap_or_default();
-
-                    // WORKAROUND: Parser doesn't capture 'self' parameter without type annotation
-                    // Prepend 'self: Self' if not present (method calls need it for resolution)
-                    let has_self = parameters.iter().any(|p| p.name == "self");
-                    if !has_self {
-                        eprintln!(
-                            "    [TRAIT_DEBUG] Adding implicit 'self' parameter (parser doesn't capture untyped self)"
-                        );
-                        parameters.insert(0, hir::HirParameter {
-                            name: "self".to_string(),
-                            param_type: HirType::Custom("Self".to_string()),
-                            default_value: None,
-                        });
-                    }
 
                     eprintln!(
                         "    [TRAIT_DEBUG] Method '{}' has {} parameters",

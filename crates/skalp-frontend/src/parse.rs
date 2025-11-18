@@ -4469,11 +4469,21 @@ impl<'a> ParseState<'a> {
             self.bump(); // &
             if self.at(SyntaxKind::SelfKw) {
                 self.bump(); // self
+                // Check for optional type annotation: &self: Type
+                if self.at(SyntaxKind::Colon) {
+                    self.bump();
+                    self.parse_type();
+                }
                 self.finish_node();
                 return;
             }
         } else if self.at(SyntaxKind::SelfKw) {
             self.bump(); // self
+            // Check for optional type annotation: self: Self or self: Type
+            if self.at(SyntaxKind::Colon) {
+                self.bump();
+                self.parse_type();
+            }
             self.finish_node();
             return;
         }

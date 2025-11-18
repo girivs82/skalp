@@ -6784,7 +6784,27 @@ impl HirBuilderContext {
 
     /// Build a single parameter from AST
     fn build_parameter(&mut self, node: &SyntaxNode) -> Option<HirParameter> {
-        // Extract parameter name
+        // Check for 'self' parameter first (special case - uses SelfKw, not Ident)
+        if let Some(self_token) = node.first_token_of_kind(SyntaxKind::SelfKw) {
+            let name = self_token.text().to_string(); // "self"
+
+            // Extract type if present (e.g., self: Self or self: &Self)
+            let mut param_type = self.extract_hir_type(node);
+
+            // If no type annotation, default to Self
+            // extract_hir_type returns Bit(8) as default when no type is found
+            if matches!(param_type, HirType::Bit(8)) {
+                param_type = HirType::Custom("Self".to_string());
+            }
+
+            return Some(HirParameter {
+                name,
+                param_type,
+                default_value: None,
+            });
+        }
+
+        // Extract regular parameter name
         let name = self.extract_name(node)?;
 
         // Extract parameter type
