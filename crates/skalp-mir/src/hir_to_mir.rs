@@ -61,6 +61,14 @@ pub struct HirToMir<'hir> {
     /// Maps (match_arm_prefix, HIR VariableId) -> MIR VariableId
     /// This prevents HIR VariableId collisions across different match arms
     context_variable_map: HashMap<(Option<String>, hir::VariableId), VariableId>,
+    /// MIR VariableId to name mapping for reverse lookups
+    /// CRITICAL FIX #IMPORT_MATCH: This prevents name lookup errors when
+    /// variable_map contains collisions (multiple HIR IDs mapping to same MIR ID)
+    mir_variable_names: HashMap<VariableId, String>,
+    /// MIR VariableId to HIR type mapping
+    /// CRITICAL FIX #IMPORT_MATCH: This prevents type lookup errors when
+    /// dynamic_variables contains collisions (same HIR ID for different variables)
+    mir_variable_types: HashMap<VariableId, hir::HirType>,
     /// Clock domain ID mapping (HIR to MIR)
     clock_domain_map: HashMap<hir::ClockDomainId, ClockDomainId>,
     /// Reference to HIR for type resolution
@@ -84,6 +92,12 @@ pub struct HirToMir<'hir> {
     /// When set, all variables created in this context will be prefixed
     /// to avoid name collisions between match arms
     match_arm_prefix: Option<String>,
+    /// Function inlining context stack to prevent variable ID collisions
+    /// Each function inlining pushes a unique context ID onto this stack
+    /// This allows variables from different functions to coexist even if they have the same HIR VariableId
+    inlining_context_stack: Vec<u32>,
+    /// Next inlining context ID (incremented for each function inline)
+    next_inlining_context_id: u32,
 }
 
 impl<'hir> HirToMir<'hir> {
@@ -111,6 +125,8 @@ impl<'hir> HirToMir<'hir> {
             signal_to_hir: HashMap::new(),
             variable_map: HashMap::new(),
             context_variable_map: HashMap::new(),
+            mir_variable_names: HashMap::new(),
+            mir_variable_types: HashMap::new(),
             clock_domain_map: HashMap::new(),
             hir: None,
             module_hirs: module_hirs.clone(),
@@ -120,6 +136,8 @@ impl<'hir> HirToMir<'hir> {
             type_flattener: TypeFlattener::new(0), // Will be re-initialized per use
             pending_statements: Vec::new(),
             match_arm_prefix: None,
+            inlining_context_stack: Vec::new(),
+            next_inlining_context_id: 0,
         }
     }
 
@@ -470,15 +488,28 @@ impl<'hir> HirToMir<'hir> {
                                             (name, mir_type)
                                         } else {
                                             // Not in dynamic_variables - fall back to name lookup and type inference
+                                            // CRITICAL FIX #IMPORT_MATCH: Use mir_variable_names for reverse lookup
+                                            // to avoid collision issues when multiple HIR IDs map to same MIR ID
                                             let var_name = self
-                                                .variable_map
-                                                .iter()
-                                                .find(|(_, &mir_id)| mir_id == *var_id)
-                                                .and_then(|(hir_id, _)| {
-                                                    // Try to find the variable name from the HIR
-                                                    self.find_variable_name(*hir_id)
+                                                .mir_variable_names
+                                                .get(var_id)
+                                                .cloned()
+                                                .or_else(|| {
+                                                    // Fall back to old method if not in mir_variable_names
+                                                    self.variable_map
+                                                        .iter()
+                                                        .find(|(_, &mir_id)| mir_id == *var_id)
+                                                        .and_then(|(hir_id, _)| {
+                                                            // Try to find the variable name from the HIR
+                                                            self.find_variable_name(*hir_id)
+                                                        })
                                                 })
                                                 .unwrap_or_else(|| format!("var_{}", var_id.0));
+
+                                            eprintln!(
+                                                "[BUG #IMPORT_MATCH] Reverse lookup for MIR {:?}: found name '{}'",
+                                                var_id, var_name
+                                            );
 
                                             // Infer the type from the RHS expression
                                             let var_type = self.infer_expression_type_with_module(
@@ -740,14 +771,14 @@ impl<'hir> HirToMir<'hir> {
                 // Convert let statement to assignment
                 // Let bindings are local variables that need to be treated as blocking assignments
 
-                // BUG FIX: Check context-aware map first when in match arm context
-                let var_id = if let Some(ref prefix) = self.match_arm_prefix {
-                    let context_key = (Some(prefix.clone()), let_stmt.id);
+                // BUG FIX: Check context-aware map first when in ANY context (match arm OR function inlining)
+                let var_id = if let Some(context) = self.get_current_context() {
+                    let context_key = (Some(context.clone()), let_stmt.id);
                     if let Some(&id) = self.context_variable_map.get(&context_key) {
-                        eprintln!("[DEBUG] Let '{}' (ID {:?}): Found in context_variable_map for '{}' as MIR ID={:?}", let_stmt.name, let_stmt.id, prefix, id);
+                        eprintln!("[DEBUG] Let '{}' (ID {:?}): Found in context_variable_map for '{}' as MIR ID={:?}", let_stmt.name, let_stmt.id, context, id);
                         id
                     } else {
-                        eprintln!("[DEBUG] Let '{}' (ID {:?}): NOT in context_variable_map for '{}', will check variable_map", let_stmt.name, let_stmt.id, prefix);
+                        eprintln!("[DEBUG] Let '{}' (ID {:?}): NOT in context_variable_map for '{}', will check variable_map", let_stmt.name, let_stmt.id, context);
                         VariableId(u32::MAX) // Will check variable_map next
                     }
                 } else if let Some(&id) = self.variable_map.get(&let_stmt.id) {
@@ -965,19 +996,86 @@ impl<'hir> HirToMir<'hir> {
                             "[DEBUG] Creating dynamic variable: name={}, HIR ID={:?}, MIR ID={:?}, type={:?}",
                             var_name, let_stmt.id, new_id, final_hir_type
                         );
-                        self.dynamic_variables
-                            .insert(let_stmt.id, (new_id, var_name.clone(), final_hir_type));
+                        eprintln!(
+                            "[BUG #IMPORT_MATCH] Before insert: dynamic_variables[{:?}] = {:?}",
+                            let_stmt.id,
+                            self.dynamic_variables.get(&let_stmt.id)
+                        );
+
+                        // CRITICAL FIX #IMPORT_MATCH: Handle VariableId collisions properly
+                        //
+                        // PROBLEM: When inlining nested functions, different variables from different
+                        // functions can have the same HIR VariableId. For example:
+                        //   - test_func has 'result' with VariableId(0)
+                        //   - my_fp_add has 'a_fp' also with VariableId(0)
+                        //
+                        // SOLUTION:
+                        // 1. If in match arm context: Store in context_variable_map with prefix
+                        // 2. If collision in dynamic_variables: Log warning but don't store
+                        //    (context_variable_map will be used for lookup instead)
+                        // 3. If no collision: Store in dynamic_variables as usual
+
+                        // CRITICAL FIX #IMPORT_MATCH: Store MIR ID -> name and type mappings for ALL variables
+                        // This allows correct reverse lookups even when HIR IDs collide
+                        self.mir_variable_names.insert(new_id, var_name.clone());
+                        self.mir_variable_types.insert(new_id, final_hir_type.clone());
+                        eprintln!(
+                            "[BUG #IMPORT_MATCH] Stored MIR {:?} -> '{}' (type {:?}) in mir_variable_names/types",
+                            new_id, var_name, final_hir_type
+                        );
+
+                        if let Some(ref prefix) = self.match_arm_prefix {
+                            // In match arm context - always use context_variable_map
+                            eprintln!(
+                                "[BUG #IMPORT_MATCH] In match arm '{}': storing HIR {:?} ('{}') -> MIR {:?} in context_variable_map",
+                                prefix, let_stmt.id, var_name, new_id
+                            );
+                            // context_variable_map will be populated below (line ~1021)
+                        }
+
+                        // Also try to store in dynamic_variables for backward compatibility
+                        // But detect collisions and warn
+                        if let Some((existing_mir_id, existing_name, _)) = self.dynamic_variables.get(&let_stmt.id) {
+                            if existing_name != &var_name {
+                                eprintln!(
+                                    "[BUG #IMPORT_MATCH] COLLISION DETECTED! HIR {:?} already maps to '{}' (MIR {:?}), NOT overwriting with '{}' (MIR {:?})",
+                                    let_stmt.id, existing_name, existing_mir_id, var_name, new_id
+                                );
+                                eprintln!(
+                                    "[BUG #IMPORT_MATCH] Relying on context_variable_map for correct lookup (match_arm_prefix={:?})",
+                                    self.match_arm_prefix
+                                );
+                                // Don't insert - keep the existing entry
+                                // The context_variable_map will handle the correct lookup
+                            } else {
+                                // Same variable name - safe to update
+                                eprintln!(
+                                    "[BUG #IMPORT_MATCH] Updating existing entry for '{}': {:?} -> {:?}",
+                                    var_name, existing_mir_id, new_id
+                                );
+                                self.dynamic_variables
+                                    .insert(let_stmt.id, (new_id, var_name.clone(), final_hir_type));
+                            }
+                        } else {
+                            // New entry - safe to insert
+                            self.dynamic_variables
+                                .insert(let_stmt.id, (new_id, var_name.clone(), final_hir_type));
+                            eprintln!(
+                                "[BUG #IMPORT_MATCH] After insert: dynamic_variables[{:?}] = ({:?}, {}, ...)",
+                                let_stmt.id, new_id, var_name
+                            );
+                        }
 
                         new_id
                     };
 
                     // Map this HIR variable ID to the MIR variable ID (whether new or reused)
-                    // BUG FIX: Use context-aware map when in match arm context to prevent collisions
-                    if let Some(ref prefix) = self.match_arm_prefix {
-                        let context_key = (Some(prefix.clone()), let_stmt.id);
+                    // BUG FIX: Use context-aware map when in ANY context (match arm OR function inlining) to prevent collisions
+                    if let Some(context) = self.get_current_context() {
+                        let context_key = (Some(context.clone()), let_stmt.id);
                         eprintln!(
                             "[DEBUG] Storing context-aware mapping: {:?} in '{}' -> MIR {:?}",
-                            let_stmt.id, prefix, new_id
+                            let_stmt.id, context, new_id
                         );
                         self.context_variable_map.insert(context_key, new_id);
                         // BUG #71 FIX: Also add to variable_map so pending statements can find it
@@ -2422,32 +2520,61 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::Variable(id) => {
-                // BUG FIX: Check context-aware map first when in match arm context
-                // This prevents HIR VariableId collisions across different match arms
-                if let Some(ref prefix) = self.match_arm_prefix {
-                    let context_key = (Some(prefix.clone()), *id);
+                // CRITICAL FIX #IMPORT_MATCH: Use context-aware lookup for ALL variable resolutions
+                //
+                // ROOT CAUSE: When inlining nested functions (e.g., test_func calls my_fp_add),
+                // different functions can have local variables with the same HIR VariableId.
+                // For example:
+                //   - test_func has local var 'result' with VariableId(0)
+                //   - my_fp_add has local var 'a_fp' also with VariableId(0)
+                //
+                // When both are inlined into the same entity (via match arm), a simple
+                // VariableId lookup in dynamic_variables or variable_map will find the WRONG
+                // variable because the HashMap can only store ONE entry per VariableId.
+                //
+                // SOLUTION: Always use context-aware lookup when in a match arm context.
+                // The context_variable_map uses (match_arm_prefix, VariableId) as the key,
+                // so variables from different contexts can coexist without collision.
+                //
+                // LOOKUP ORDER:
+                // 1. context_variable_map (if in ANY context - match arm OR function inlining) - most specific
+                // 2. variable_map - for variables declared at entity level
+                // 3. dynamic_variables - fallback for other cases
+
+                let mir_id = if let Some(context) = self.get_current_context() {
+                    let context_key = (Some(context.clone()), *id);
                     if let Some(&mir_id) = self.context_variable_map.get(&context_key) {
                         eprintln!(
                             "[DEBUG] Variable lookup: Found context-aware mapping for {:?} in '{}' -> MIR {:?}",
-                            id, prefix, mir_id
+                            id, context, mir_id
                         );
-                        return Some(Expression::Ref(LValue::Variable(mir_id)));
+                        Some(mir_id)
+                    } else {
+                        // Not in context map, try other lookups
+                        None
                     }
-                }
+                } else {
+                    None
+                };
 
-                // Check regular variable_map
-                if let Some(&mir_id) = self.variable_map.get(id) {
+                // If not found in context map, try variable_map and dynamic_variables
+                let mir_id = mir_id
+                    .or_else(|| self.variable_map.get(id).copied())
+                    .or_else(|| {
+                        self.dynamic_variables.get(id).map(|(mir_id, name, _)| {
+                            eprintln!(
+                                "[DEBUG] Variable lookup: Found '{}' (HIR {:?}) in dynamic_variables -> MIR {:?}",
+                                name, id, mir_id
+                            );
+                            *mir_id
+                        })
+                    });
+
+                if let Some(mir_id) = mir_id {
                     Some(Expression::Ref(LValue::Variable(mir_id)))
-                } else if let Some((mir_id, name, _)) = self.dynamic_variables.get(id) {
-                    // Check dynamic_variables for let bindings from inlined functions
-                    eprintln!(
-                        "[DEBUG] Variable lookup: Found '{}' in dynamic_variables -> {:?}",
-                        name, mir_id
-                    );
-                    Some(Expression::Ref(LValue::Variable(*mir_id)))
                 } else {
                     eprintln!(
-                        "[DEBUG] Variable not found in variable_map or dynamic_variables: HIR ID {:?}",
+                        "[DEBUG] Variable not found in any lookup map: HIR ID {:?}",
                         id
                     );
                     eprintln!(
@@ -2458,7 +2585,7 @@ impl<'hir> HirToMir<'hir> {
                         "[DEBUG]   Current dynamic_variables: {:?}",
                         self.dynamic_variables
                             .iter()
-                            .map(|(_, (_, name, _))| name)
+                            .map(|(hir_id, (mir_id, name, _))| format!("HIR {:?} -> MIR {:?} ({})", hir_id, mir_id, name))
                             .collect::<Vec<_>>()
                     );
                     eprintln!(
@@ -3755,7 +3882,13 @@ impl<'hir> HirToMir<'hir> {
             let arm_prefix = format!("match_{}_{}", match_id, arm_idx);
             self.match_arm_prefix = Some(arm_prefix.clone());
 
+            eprintln!("[BUG #IMPORT_MATCH] Before converting arm {} expr (type: {:?}), match_arm_prefix={:?}",
+                arm_idx, std::mem::discriminant(&arm.expr), self.match_arm_prefix);
+
             let arm_expr = self.convert_expression(&arm.expr);
+
+            eprintln!("[BUG #IMPORT_MATCH] After converting arm {} expr, result is_some={}, match_arm_prefix={:?}",
+                arm_idx, arm_expr.is_some(), self.match_arm_prefix);
 
             // Clear the prefix after processing this arm
             self.match_arm_prefix = None;
@@ -4410,28 +4543,19 @@ impl<'hir> HirToMir<'hir> {
 
             // Variable reference - replace with mapped expression
             hir::HirExpression::Variable(var_id) => {
+                eprintln!("[BUG #IMPORT_MATCH] Variable substitution: var_id={:?}", var_id);
                 // Look up variable name using the provided map (for function-local variables)
                 if let Some(var_name) = var_id_to_name.get(var_id) {
+                    eprintln!("[CONTEXT] Variable substitution: var_id={:?} -> var_name='{}', in var_id_to_name", var_id, var_name);
+                    // Check if this variable should be substituted from param_map
                     if let Some(arg_expr) = param_map.get(var_name) {
-                        // Found in substitution map, replace with expression
-                        // BUG #20 FIX: Don't inline match expressions during substitution
-                        // Match expressions should be converted once and the variable reference preserved
-                        // Otherwise, the match gets converted multiple times (once per use), causing:
-                        // 1. Duplicate conversions with different match IDs
-                        // 2. Variables from earlier conversions not accessible in later ones
-                        // 3. Premature exits from recursive conversion
-                        if let hir::HirExpression::Match(_) = &**arg_expr {
-                            return Some(expr.clone()); // Keep as Variable reference
-                        }
-
-                        // BUG #20 FIX: Also don't inline Block expressions that might contain matches
-                        if let hir::HirExpression::Block { .. } = &**arg_expr {
-                            return Some(expr.clone()); // Keep as Variable reference
-                        }
-
-                        // For simple expressions, safe to inline
-                        let cloned = (*arg_expr).clone();
-                        return Some(cloned);
+                        eprintln!("[CONTEXT] Variable '{}' found in param_map, substituting", var_name);
+                        // Substitute with the argument expression
+                        return Some((*arg_expr).clone());
+                    } else {
+                        eprintln!("[CONTEXT] Variable '{}' NOT in param_map, keeping as-is", var_name);
+                        // Not a parameter, keep as variable reference
+                        return Some(expr.clone());
                     }
                 }
 
@@ -5344,6 +5468,18 @@ impl<'hir> HirToMir<'hir> {
         let params = func.params.clone();
         let body = func.body.clone();
 
+        // ARCHITECTURAL FIX: Push a new inlining context to prevent variable ID collisions
+        // This ensures variables from different functions don't collide even if they have the same HIR VariableId
+        let inlining_context_id = self.next_inlining_context_id;
+        self.next_inlining_context_id += 1;
+        self.inlining_context_stack.push(inlining_context_id);
+        eprintln!(
+            "[CONTEXT] Pushed inlining context {} for function '{}', stack depth: {}",
+            inlining_context_id,
+            call.function,
+            self.inlining_context_stack.len()
+        );
+
         eprintln!(
             "[DEBUG] inline_function_call: original body has {} statements",
             body.len()
@@ -5377,6 +5513,8 @@ impl<'hir> HirToMir<'hir> {
                 "Error: Recursive function calls are not supported: function '{}'",
                 call.function
             );
+            self.inlining_context_stack.pop();
+            eprintln!("[CONTEXT] Popped inlining context (recursion check failed)");
             return None;
         }
 
@@ -5388,6 +5526,8 @@ impl<'hir> HirToMir<'hir> {
                 params.len(),
                 call.args.len()
             );
+            self.inlining_context_stack.pop();
+            eprintln!("[CONTEXT] Popped inlining context (arity check failed)");
             return None;
         }
 
@@ -5403,7 +5543,8 @@ impl<'hir> HirToMir<'hir> {
         // Debug: Show what's in the param map
         for (param_name, arg_expr) in &substitution_map {
             eprintln!(
-                "[DEBUG] inline_function_call: param '{}' -> {:?}",
+                "[BUG #IMPORT_MATCH] inline_function_call '{}': param_map['{}'] -> {:?}",
+                call.function,
                 param_name,
                 std::mem::discriminant(arg_expr)
             );
@@ -5417,6 +5558,12 @@ impl<'hir> HirToMir<'hir> {
             "[DEBUG] inline_function_call: built var_id map with {} entries (recursive)",
             var_id_to_name.len()
         );
+        for (var_id, var_name) in &var_id_to_name {
+            eprintln!(
+                "[BUG #IMPORT_MATCH] inline_function_call '{}': var_id_to_name[{:?}] = '{}'",
+                call.function, var_id, var_name
+            );
+        }
 
         // Step 5: Convert statement-based body to expression (handles early returns)
         eprintln!("[DEBUG] inline_function_call: About to convert_body_to_expression");
@@ -5425,6 +5572,8 @@ impl<'hir> HirToMir<'hir> {
             eprintln!(
                 "[DEBUG] inline_function_call: convert_body_to_expression FAILED - returning None"
             );
+            self.inlining_context_stack.pop();
+            eprintln!("[CONTEXT] Popped inlining context (convert_body_to_expression failed)");
             return None;
         }
         let body_expr = body_expr?;
@@ -5442,6 +5591,8 @@ impl<'hir> HirToMir<'hir> {
         );
         if substituted_expr.is_none() {
             eprintln!("[DEBUG] inline_function_call: substitute_expression_with_var_map FAILED - returning None");
+            self.inlining_context_stack.pop();
+            eprintln!("[CONTEXT] Popped inlining context (substitute_expression_with_var_map failed)");
             return None;
         }
         let substituted_expr = substituted_expr?;
@@ -5473,7 +5624,15 @@ impl<'hir> HirToMir<'hir> {
             "[DEBUG] inline_function_call: '{}' substituted expression type: {}",
             call.function, expr_type_name
         );
+        eprintln!(
+            "[BUG #IMPORT_MATCH] inline_function_call '{}': Before convert_expression, match_arm_prefix={:?}",
+            call.function, self.match_arm_prefix
+        );
         let result = self.convert_expression(&substituted_expr);
+        eprintln!(
+            "[BUG #IMPORT_MATCH] inline_function_call '{}': After convert_expression, match_arm_prefix={:?}, result is_some={}",
+            call.function, self.match_arm_prefix, result.is_some()
+        );
         if result.is_none() {
             eprintln!(
                 "[DEBUG] inline_function_call: '{}' FAILED to convert substituted expression to MIR (type: {})",
@@ -5485,6 +5644,12 @@ impl<'hir> HirToMir<'hir> {
                 "[DEBUG] inline_function_call: '{}' successfully converted to MIR",
                 call.function
             );
+            if let Some(ref expr) = result {
+                eprintln!(
+                    "[BUG #IMPORT_MATCH] inline_function_call '{}': Result expression type: {:?}",
+                    call.function, std::mem::discriminant(expr)
+                );
+            }
         }
 
         // Step 8: Clean up function-local variables from variable_map to prevent scope leakage
@@ -5499,6 +5664,14 @@ impl<'hir> HirToMir<'hir> {
                 self.variable_map.remove(var_id);
             }
         }
+
+        // ARCHITECTURAL FIX: Pop the inlining context before returning
+        self.inlining_context_stack.pop();
+        eprintln!(
+            "[CONTEXT] Popped inlining context for function '{}', stack depth: {}",
+            call.function,
+            self.inlining_context_stack.len()
+        );
 
         result
     }
@@ -5590,8 +5763,33 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
+                // CRITICAL FIX #IMPORT_MATCH: Check context_variable_map first when in ANY context
+                // to avoid finding wrong variable type due to HIR VariableId collisions
+                if let Some(context) = self.get_current_context() {
+                    let context_key = (Some(context.clone()), *var_id);
+                    if let Some(&mir_id) = self.context_variable_map.get(&context_key) {
+                        // Found context-aware mapping - get type from mir_variable_types
+                        if let Some(var_type) = self.mir_variable_types.get(&mir_id) {
+                            eprintln!(
+                                "[BUG #IMPORT_MATCH] infer_hir_type: Found context-aware type for HIR {:?} via MIR {:?}: {:?}",
+                                var_id, mir_id, var_type
+                            );
+                            return Some(var_type.clone());
+                        }
+                    }
+                }
+
                 // Fall back to dynamic_variables (for let-bound variables from inlined functions)
-                if let Some((_, _, var_type)) = self.dynamic_variables.get(var_id) {
+                // But this will be wrong if there are collisions!
+                if let Some((mir_id, _, var_type)) = self.dynamic_variables.get(var_id) {
+                    // Also check mir_variable_types to see if there's a more accurate type
+                    if let Some(accurate_type) = self.mir_variable_types.get(mir_id) {
+                        eprintln!(
+                            "[BUG #IMPORT_MATCH] infer_hir_type: Using mir_variable_types for HIR {:?} -> MIR {:?}: {:?}",
+                            var_id, mir_id, accurate_type
+                        );
+                        return Some(accurate_type.clone());
+                    }
                     return Some(var_type.clone());
                 }
 
@@ -6605,10 +6803,19 @@ impl<'hir> HirToMir<'hir> {
                 }
                 hir::HirExpression::Variable(var_id) => {
                     // Variables don't get flattened the same way, use bit range approach
-                    // BUG FIX #3: Check context-aware map first when in match arm context
-                    let var_id_mir = if let Some(ref prefix) = self.match_arm_prefix {
-                        let context_key = (Some(prefix.clone()), *var_id);
-                        self.context_variable_map.get(&context_key).copied()
+                    // CRITICAL FIX #IMPORT_MATCH: Use context-aware lookup for field access too
+                    // This matches the fix applied to regular variable lookups
+                    let var_id_mir = if let Some(context) = self.get_current_context() {
+                        let context_key = (Some(context.clone()), *var_id);
+                        if let Some(&mir_id) = self.context_variable_map.get(&context_key) {
+                            eprintln!(
+                                "[DEBUG] Field access variable lookup: Found context-aware mapping for {:?} in '{}' -> MIR {:?}",
+                                var_id, context, mir_id
+                            );
+                            Some(mir_id)
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -6617,7 +6824,13 @@ impl<'hir> HirToMir<'hir> {
                         // Check dynamic_variables for let bindings from inlined functions
                         self.dynamic_variables
                             .get(var_id)
-                            .map(|(mir_id, _, _)| *mir_id)
+                            .map(|(mir_id, name, _)| {
+                                eprintln!(
+                                    "[DEBUG] Field access variable lookup: Found '{}' (HIR {:?}) in dynamic_variables -> MIR {:?}",
+                                    name, var_id, mir_id
+                                );
+                                *mir_id
+                            })
                     });
 
                     if let Some(var_id_mir) = var_id_mir {
@@ -7391,6 +7604,33 @@ impl<'hir> HirToMir<'hir> {
         let id = VariableId(self.next_variable_id);
         self.next_variable_id += 1;
         id
+    }
+
+    /// Get the current variable resolution context
+    /// This combines match_arm_prefix and inlining_context_stack into a unique context identifier
+    fn get_current_context(&self) -> Option<String> {
+        let mut parts = Vec::new();
+
+        // Add inlining context stack (function nesting)
+        if !self.inlining_context_stack.is_empty() {
+            let inline_context = self.inlining_context_stack
+                .iter()
+                .map(|id| format!("fn{}", id))
+                .collect::<Vec<_>>()
+                .join("_");
+            parts.push(inline_context);
+        }
+
+        // Add match arm prefix
+        if let Some(ref prefix) = self.match_arm_prefix {
+            parts.push(prefix.clone());
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("_"))
+        }
     }
 
     fn next_process_id(&mut self) -> ProcessId {

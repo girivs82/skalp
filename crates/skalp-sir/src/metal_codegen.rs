@@ -1584,7 +1584,12 @@ impl<'a> MetalShaderGenerator<'a> {
                         (input_ref.clone(), element_idx, bit_offset)
                     };
 
-                    let mask = (1u64 << width) - 1;
+                    // BUG FIX: Prevent shift overflow when width >= 64
+                    let mask = if width >= 64 {
+                        u64::MAX  // All bits set for wide widths
+                    } else {
+                        (1u64 << width) - 1
+                    };
 
                     eprintln!(
                         "   🎯 SLICE from array: {} (width={}, shift={}, is_decomposed={})",
@@ -1661,7 +1666,12 @@ impl<'a> MetalShaderGenerator<'a> {
             }
 
             // For scalar types (<= 32 bits), use bit shifts and masks
-            let mask = (1u64 << width) - 1;
+            // BUG FIX: Prevent shift overflow when width >= 64
+            let mask = if width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
 
             // BUG FIX #76: Check if output is wide and needs array handling
             let output_width = self.get_signal_width_from_sir(sir, output);
@@ -3397,10 +3407,13 @@ impl<'a> MetalShaderGenerator<'a> {
                             // Register is narrow (≤128 bits)
                             // Extract LSBs if data is wide, otherwise use scalar assignment with mask
                             let width = state_elem.width;
-                            let mask = if width < 32 {
-                                format!("0x{:X}", (1u64 << width) - 1)
-                            } else {
+                            // BUG FIX: Prevent shift overflow
+                            let mask = if width >= 64 {
+                                "0xFFFFFFFFFFFFFFFF".to_string()
+                            } else if width >= 32 {
                                 "0xFFFFFFFF".to_string()
+                            } else {
+                                format!("0x{:X}", (1u64 << width) - 1)
                             };
 
                             let data_expr = if data_is_wide {
