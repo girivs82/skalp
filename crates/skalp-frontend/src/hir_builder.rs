@@ -3445,19 +3445,40 @@ impl HirBuilderContext {
             }
         }
 
-        // Parse arguments - ALL children are arguments (function name is not in children)
+        // Parse arguments - need to handle nested function calls correctly
         // Skip ArgList children (those are type arguments, not value arguments)
+        // BUG FIX: Skip IdentExpr if followed by CallExpr (nested function call pattern)
         let mut args = Vec::new();
 
-        for child in node.children() {
-            // Skip ArgList (type arguments) and only process expression arguments
+        let call_children: Vec<_> = node.children().collect();
+        let mut i = 0;
+        while i < call_children.len() {
+            let child = &call_children[i];
+
+            // Skip ArgList (type arguments)
             if child.kind() == SyntaxKind::ArgList {
+                i += 1;
                 continue;
             }
-            // All other children are expression arguments
+
+            // Skip IdentExpr if followed by CallExpr (nested function call pattern)
+            // Example: fp_mul(fp_sub(a, b), c) creates [IdentExpr("fp_sub"), CallExpr([a,b]), IdentExpr("c")]
+            // We should skip the IdentExpr and process only the CallExpr
+            if child.kind() == SyntaxKind::IdentExpr
+                && i + 1 < call_children.len()
+                && call_children[i + 1].kind() == SyntaxKind::CallExpr
+            {
+                eprintln!("[HIR_CALL_FIX] Skipping IdentExpr (function name for following CallExpr)");
+                i += 1;
+                continue;
+            }
+
+            // Process as argument
             if let Some(expr) = self.build_expression(&child) {
                 args.push(expr);
             }
+
+            i += 1;
         }
 
         Some(HirExpression::Call(HirCallExpr {

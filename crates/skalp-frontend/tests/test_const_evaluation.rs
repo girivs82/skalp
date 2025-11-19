@@ -68,6 +68,7 @@ fn test_builtin_clog2() {
     // Test clog2(1024) = 10
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "clog2".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(1024))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
@@ -75,6 +76,7 @@ fn test_builtin_clog2() {
     // Test clog2(1) = 0
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "clog2".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(1))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(0));
@@ -82,6 +84,7 @@ fn test_builtin_clog2() {
     // Test clog2(7) = 3
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "clog2".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(3));
@@ -94,6 +97,7 @@ fn test_builtin_pow2() {
     // Test pow2(3) = 8
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "pow2".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(3))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(8));
@@ -101,6 +105,7 @@ fn test_builtin_pow2() {
     // Test pow2(0) = 1
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "pow2".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(0))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(1));
@@ -113,6 +118,7 @@ fn test_builtin_max_min() {
     // Test max(5, 10) = 10
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "max".to_string(),
+        type_args: vec![],
         args: vec![
             HirExpression::Literal(HirLiteral::Integer(5)),
             HirExpression::Literal(HirLiteral::Integer(10)),
@@ -123,6 +129,7 @@ fn test_builtin_max_min() {
     // Test min(5, 10) = 5
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "min".to_string(),
+        type_args: vec![],
         args: vec![
             HirExpression::Literal(HirLiteral::Integer(5)),
             HirExpression::Literal(HirLiteral::Integer(10)),
@@ -138,6 +145,7 @@ fn test_builtin_popcount() {
     // Test popcount(7) = 3 (binary: 111)
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "popcount".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(3));
@@ -145,6 +153,7 @@ fn test_builtin_popcount() {
     // Test popcount(15) = 4 (binary: 1111)
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "popcount".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(15))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(4));
@@ -157,6 +166,7 @@ fn test_builtin_is_power_of_2() {
     // Test is_power_of_2(8) = true
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "is_power_of_2".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(8))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Bool(true));
@@ -164,6 +174,7 @@ fn test_builtin_is_power_of_2() {
     // Test is_power_of_2(7) = false
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "is_power_of_2".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Bool(false));
@@ -176,6 +187,7 @@ fn test_builtin_gray_code() {
     // Test gray_encode(5) = 7 (binary: 101 -> 111)
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "gray_encode".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(5))],
     });
     let encoded = eval.eval(&expr).unwrap();
@@ -184,6 +196,7 @@ fn test_builtin_gray_code() {
     // Test gray_decode(7) = 5 (reverse of above)
     let expr = HirExpression::Call(skalp_frontend::hir::HirCallExpr {
         function: "gray_decode".to_string(),
+        type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));

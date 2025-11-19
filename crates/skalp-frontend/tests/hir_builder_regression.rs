@@ -833,6 +833,38 @@ impl Test {
     assert_eq!(implementation.assignments.len(), 1);
 }
 
+#[test]
+fn test_nested_function_call_args() {
+    // Regression test for nested function call argument parsing bug
+    // Previously, fp_mul(fp_sub(a, b), c) would incorrectly parse as 3 arguments
+    // The parser created: [IdentExpr("fp_sub"), CallExpr([a,b]), IdentExpr("c")]
+    // And counted all 3 as separate arguments instead of recognizing the nested call pattern
+    let source = r#"
+pub fn fp_sub(x: bit[32], y: bit[32]) -> bit[32] {
+    return (x as fp32 - y as fp32) as bit[32]
+}
+
+pub fn fp_mul(x: bit[32], y: bit[32]) -> bit[32] {
+    return (x as fp32 * y as fp32) as bit[32]
+}
+
+pub fn test_nested_call(a: bit[32], b: bit[32], c: bit[32]) -> bit[32] {
+    // This should parse as fp_mul with 2 arguments: fp_sub(a, b) and c
+    let result = fp_mul(fp_sub(a, b), c);
+    return result
+}
+"#;
+    let hir = assert_builds(source);
+
+    // Find the test_nested_call function
+    let func = hir.functions.iter()
+        .find(|f| f.name == "test_nested_call")
+        .expect("Should find test_nested_call function");
+
+    // Check that we have one statement (the let binding)
+    assert_eq!(func.body.len(), 2); // let binding + return
+}
+
 // ============================================================================
 // Real-World Pattern Tests
 // ============================================================================

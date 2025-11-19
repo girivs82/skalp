@@ -1058,6 +1058,7 @@ mod tests {
         // clog2(1024) = 10
         let expr = HirExpression::Call(crate::hir::HirCallExpr {
             function: "clog2".to_string(),
+            type_args: vec![],
             args: vec![HirExpression::Literal(HirLiteral::Integer(1024))],
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
@@ -1065,6 +1066,7 @@ mod tests {
         // clog2(1) = 0
         let expr = HirExpression::Call(crate::hir::HirCallExpr {
             function: "clog2".to_string(),
+            type_args: vec![],
             args: vec![HirExpression::Literal(HirLiteral::Integer(1))],
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(0));
