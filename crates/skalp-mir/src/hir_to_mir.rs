@@ -5400,30 +5400,67 @@ impl<'hir> HirToMir<'hir> {
     /// Annotate an expression with type information (BUG #76 FIX)
     /// For Concat expressions representing tuples, recursively annotate parts with element types
     fn annotate_expression_with_type(&self, expr: Expression, ty: Type) -> Expression {
-        // If this is a Concat and the type is a Tuple, annotate each part with its element type
-        if let ExpressionKind::Concat(parts) = &expr.kind {
-            if let Type::Tuple(element_types) = &ty {
-                // Recursively annotate each concat part with its corresponding tuple element type
-                if parts.len() == element_types.len() {
-                    let annotated_parts: Vec<Expression> = parts.iter().zip(element_types.iter())
-                        .map(|(part, elem_type)| {
-                            self.annotate_expression_with_type(part.clone(), elem_type.clone())
-                        })
-                        .collect();
+        eprintln!("[BUG #76 ANNOTATE] annotate_expression_with_type: target type = {:?}", ty);
+        eprintln!("[BUG #76 ANNOTATE]   expr.kind = {:?}", std::mem::discriminant(&expr.kind));
+        eprintln!("[BUG #76 ANNOTATE]   expr.ty (before) = {:?}", expr.ty);
 
-                    return Expression {
-                        kind: ExpressionKind::Concat(annotated_parts),
-                        ty,
-                    };
+        match &expr.kind {
+            // If this is a Concat and the type is a Tuple, annotate each part with its element type
+            ExpressionKind::Concat(parts) => {
+                eprintln!("[BUG #76 ANNOTATE]   This is a Concat with {} parts", parts.len());
+                if let Type::Tuple(element_types) = &ty {
+                    eprintln!("[BUG #76 ANNOTATE]   Target type is Tuple with {} element types", element_types.len());
+                    // Recursively annotate each concat part with its corresponding tuple element type
+                    if parts.len() == element_types.len() {
+                        eprintln!("[BUG #76 ANNOTATE]   Lengths match! Annotating each part recursively");
+                        let annotated_parts: Vec<Expression> = parts.iter().zip(element_types.iter())
+                            .enumerate()
+                            .map(|(i, (part, elem_type))| {
+                                eprintln!("[BUG #76 ANNOTATE]     Part {}: elem_type = {:?}", i, elem_type);
+                                self.annotate_expression_with_type(part.clone(), elem_type.clone())
+                            })
+                            .collect();
+
+                        let result = Expression {
+                            kind: ExpressionKind::Concat(annotated_parts),
+                            ty: ty.clone(),
+                        };
+                        eprintln!("[BUG #76 ANNOTATE]   Returning annotated Concat with type: {:?}", result.ty);
+                        return result;
+                    } else {
+                        eprintln!("[BUG #76 ANNOTATE]   Length mismatch! parts={}, types={}", parts.len(), element_types.len());
+                    }
                 }
             }
+
+            // If this is a Conditional, recursively annotate both branches with the same type
+            ExpressionKind::Conditional { cond, then_expr, else_expr } => {
+                eprintln!("[BUG #76 ANNOTATE]   This is a Conditional, recursively annotating branches");
+                let annotated_then = Box::new(self.annotate_expression_with_type(then_expr.as_ref().clone(), ty.clone()));
+                let annotated_else = Box::new(self.annotate_expression_with_type(else_expr.as_ref().clone(), ty.clone()));
+
+                let result = Expression {
+                    kind: ExpressionKind::Conditional {
+                        cond: cond.clone(),
+                        then_expr: annotated_then,
+                        else_expr: annotated_else,
+                    },
+                    ty: ty.clone(),
+                };
+                eprintln!("[BUG #76 ANNOTATE]   Returning annotated Conditional with type: {:?}", result.ty);
+                return result;
+            }
+
+            _ => {}
         }
 
         // For other expressions, just update the type
-        Expression {
+        let result = Expression {
             kind: expr.kind,
-            ty,
-        }
+            ty: ty.clone(),
+        };
+        eprintln!("[BUG #76 ANNOTATE]   Returning expression with updated type: {:?}", result.ty);
+        result
     }
 
     /// Check if a function body contains a recursive call (Phase 5)

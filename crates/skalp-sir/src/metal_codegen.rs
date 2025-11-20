@@ -1623,44 +1623,110 @@ impl<'a> MetalShaderGenerator<'a> {
                     }
                     return;
                 } else if input_width > 64 {
-                    // uint4 type (65-128 bits) - use component access
+                    // uint4 type (65-128 bits)
+                    // BUG #76 FIX: For non-aligned or sub-32-bit slices, use bit shifts and masks
                     let component_index = shift / 32;
-                    let component = match component_index {
-                        0 => "x",
-                        1 => "y",
-                        2 => "z",
-                        3 => "w",
-                        _ => "x",
-                    };
+                    let bit_offset_in_component = shift % 32;
+                    let needs_bit_extraction = width < 32 || bit_offset_in_component != 0;
 
-                    eprintln!(
-                        "   🎯 SLICE from uint4: {} -> .{} (width={}, shift={})",
-                        input, component, input_width, shift
-                    );
+                    if needs_bit_extraction {
+                        // Need bit-level extraction using shift and mask
+                        let component = match component_index {
+                            0 => "x",
+                            1 => "y",
+                            2 => "z",
+                            3 => "w",
+                            _ => "x",
+                        };
 
-                    self.write_indented(&format!(
-                        "signals->{} = {}.{};\n",
-                        self.sanitize_name(output),
-                        input_ref,
-                        component
-                    ));
+                        let mask = if width >= 32 {
+                            0xFFFFFFFFu64
+                        } else {
+                            (1u64 << width) - 1
+                        };
+
+                        eprintln!(
+                            "   🎯 SLICE from uint4 with bit extraction: {} -> .{} >> {} & 0x{:X} (width={}, shift={})",
+                            input, component, bit_offset_in_component, mask, width, shift
+                        );
+
+                        self.write_indented(&format!(
+                            "signals->{} = ({}.{} >> {}) & 0x{:X};\n",
+                            self.sanitize_name(output),
+                            input_ref,
+                            component,
+                            bit_offset_in_component,
+                            mask
+                        ));
+                    } else {
+                        // Aligned 32-bit extraction - use component access directly
+                        let component = match component_index {
+                            0 => "x",
+                            1 => "y",
+                            2 => "z",
+                            3 => "w",
+                            _ => "x",
+                        };
+
+                        eprintln!(
+                            "   🎯 SLICE from uint4: {} -> .{} (width={}, shift={})",
+                            input, component, input_width, shift
+                        );
+
+                        self.write_indented(&format!(
+                            "signals->{} = {}.{};\n",
+                            self.sanitize_name(output),
+                            input_ref,
+                            component
+                        ));
+                    }
                     return;
                 } else if input_width > 32 {
-                    // uint2 type (33-64 bits) - use component access
+                    // uint2 type (33-64 bits)
+                    // BUG #76 FIX: For non-aligned or sub-32-bit slices, use bit shifts and masks
                     let component_index = shift / 32;
-                    let component = if component_index == 0 { "x" } else { "y" };
+                    let bit_offset_in_component = shift % 32;
+                    let needs_bit_extraction = width < 32 || bit_offset_in_component != 0;
 
-                    eprintln!(
-                        "   🎯 SLICE from uint2: {} -> .{} (width={}, shift={})",
-                        input, component, input_width, shift
-                    );
+                    if needs_bit_extraction {
+                        // Need bit-level extraction using shift and mask
+                        let component = if component_index == 0 { "x" } else { "y" };
 
-                    self.write_indented(&format!(
-                        "signals->{} = {}.{};\n",
-                        self.sanitize_name(output),
-                        input_ref,
-                        component
-                    ));
+                        let mask = if width >= 32 {
+                            0xFFFFFFFFu64
+                        } else {
+                            (1u64 << width) - 1
+                        };
+
+                        eprintln!(
+                            "   🎯 SLICE from uint2 with bit extraction: {} -> .{} >> {} & 0x{:X} (width={}, shift={})",
+                            input, component, bit_offset_in_component, mask, width, shift
+                        );
+
+                        self.write_indented(&format!(
+                            "signals->{} = ({}.{} >> {}) & 0x{:X};\n",
+                            self.sanitize_name(output),
+                            input_ref,
+                            component,
+                            bit_offset_in_component,
+                            mask
+                        ));
+                    } else {
+                        // Aligned 32-bit extraction - use component access directly
+                        let component = if component_index == 0 { "x" } else { "y" };
+
+                        eprintln!(
+                            "   🎯 SLICE from uint2: {} -> .{} (width={}, shift={})",
+                            input, component, input_width, shift
+                        );
+
+                        self.write_indented(&format!(
+                            "signals->{} = {}.{};\n",
+                            self.sanitize_name(output),
+                            input_ref,
+                            component
+                        ));
+                    }
                     return;
                 }
             }
@@ -2189,64 +2255,116 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         } else if output_width > 64 {
             // Output is 65-128 bits -> uint4
-            // Construct uint4 from 32-bit components
+            // BUG #76 FIX: Properly handle bit-level packing for mixed-width tuples
             self.write_indented(&format!(
                 "// Concat: pack inputs into {}-bit output (uint4)\n",
                 output_width
             ));
 
-            let mut components = vec!["0u".to_string(); 4];
+            // Build a list of contributions to each 32-bit component
+            // Each component can receive bits from multiple inputs
+            struct ComponentContribution {
+                input_expr: String,
+                input_width: usize,
+                start_bit_in_component: usize,
+                bits_in_this_component: usize,
+                start_bit_in_input: usize,
+            }
+            let mut component_contributions: Vec<Vec<ComponentContribution>> = vec![vec![], vec![], vec![], vec![]];
+
             let mut bit_offset = 0;
-
-            // BUG FIX #15: Hardware concat {a, b, c, d} has a in MSB, d in LSB
-            // SystemVerilog {a, b, c, d} = {a[127:96], b[95:64], c[63:32], d[31:0]}
-            // Metal uint4(x, y, z, w) = {x[31:0], y[63:32], z[95:64], w[127:96]}
-            // So {a, b, c, d} maps to uint4(d, c, b, a) - REVERSE order
             for (input_name, width) in input_widths.iter() {
-                let component_idx = bit_offset / 32;
-                if component_idx < 4 {
-                    // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
-                    let component_str = self.format_signal_for_bitwise_op(sir, input_name);
+                let input_expr = self.format_signal_for_bitwise_op(sir, input_name);
+                let input_expr = if input_expr == "0u" || input_expr.contains("as_type") {
+                    input_expr
+                } else if input_expr.contains(".x") || input_expr.contains("[0]") {
+                    format!("(uint)({})", input_expr)
+                } else {
+                    format!("(uint)({})", input_expr)
+                };
 
-                    // BUG FIX #12: uint4 constructor requires all arguments to be exactly 'unsigned int'
-                    // Handle different input widths:
-                    // - Literals (0u) and as_type<> casts: use as-is
-                    // - 32-bit or smaller non-floats: cast to (uint)
-                    // - Wider than 32 bits: extract first 32-bit component (signal.x or signal[0])
-                    // Note: format_signal_for_bitwise_op may already have done extraction for wide signals
-                    if component_str == "0u" || component_str.contains("as_type") {
-                        // Literal or already has as_type cast - use as-is
-                        components[component_idx] = component_str;
-                    } else if component_str.contains(".x") || component_str.contains("[0]") {
-                        // Already has component extraction - just cast to uint if needed
-                        components[component_idx] = format!("(uint)({})", component_str);
-                    } else if *width <= 32 {
-                        // 32-bit or smaller - cast to uint to ensure correct type
-                        components[component_idx] = format!("(uint)({})", component_str);
-                    } else {
-                        // Wider than 32 bits - it's a vector (uint2/uint4) or array in Metal
-                        // Extract the first 32-bit component
-                        let (_, metal_array_size) = self.get_metal_type_for_wide_bits(*width);
-                        if metal_array_size.is_some() {
-                            // Array storage - use array indexing
-                            components[component_idx] = format!("{}[0]", component_str);
-                        } else {
-                            // Vector storage (uint2/uint4) - use .x component
-                            components[component_idx] = format!("{}.x", component_str);
-                        }
-                    }
+                // An input may span multiple 32-bit components
+                let mut remaining_bits = *width;
+                let mut input_bit_offset = 0;
+
+                while remaining_bits > 0 {
+                    let component_idx = (bit_offset + input_bit_offset) / 32;
+                    if component_idx >= 4 { break; }
+
+                    let bit_pos_in_component = (bit_offset + input_bit_offset) % 32;
+                    let bits_available = 32 - bit_pos_in_component;
+                    let bits_to_pack = remaining_bits.min(bits_available);
+
+                    component_contributions[component_idx].push(ComponentContribution {
+                        input_expr: input_expr.clone(),
+                        input_width: *width,
+                        start_bit_in_component: bit_pos_in_component,
+                        bits_in_this_component: bits_to_pack,
+                        start_bit_in_input: input_bit_offset,
+                    });
+
+                    remaining_bits -= bits_to_pack;
+                    input_bit_offset += bits_to_pack;
                 }
+
                 bit_offset += width;
             }
 
-            // REVERSE components: SystemVerilog MSB-first → Metal LSB-first
+            // Build each component expression by OR'ing shifted contributions
+            let mut components = vec![];
+            for comp_idx in 0..4 {
+                let contribs = &component_contributions[comp_idx];
+                if contribs.is_empty() {
+                    components.push("0u".to_string());
+                } else if contribs.len() == 1 && contribs[0].start_bit_in_component == 0 &&
+                          contribs[0].bits_in_this_component == 32 && contribs[0].start_bit_in_input == 0 {
+                    // Simple case: full 32-bit value aligned at start
+                    components.push(contribs[0].input_expr.clone());
+                } else {
+                    // Need bit manipulation
+                    let mut parts = vec![];
+                    for contrib in contribs {
+                        let mask = if contrib.bits_in_this_component >= 32 {
+                            0xFFFFFFFFu64
+                        } else {
+                            (1u64 << contrib.bits_in_this_component) - 1
+                        };
+
+                        let value_expr = if contrib.start_bit_in_input == 0 && contrib.bits_in_this_component < contrib.input_width {
+                            // Extract low bits
+                            format!("({} & 0x{:X})", contrib.input_expr, mask)
+                        } else if contrib.start_bit_in_input > 0 {
+                            // Extract high bits
+                            let extract_mask = if contrib.bits_in_this_component >= 32 {
+                                0xFFFFFFFFu64
+                            } else {
+                                (1u64 << contrib.bits_in_this_component) - 1
+                            };
+                            format!("(({} >> {}) & 0x{:X})", contrib.input_expr, contrib.start_bit_in_input, extract_mask)
+                        } else {
+                            contrib.input_expr.clone()
+                        };
+
+                        let shifted = if contrib.start_bit_in_component > 0 {
+                            format!("({} << {})", value_expr, contrib.start_bit_in_component)
+                        } else {
+                            value_expr
+                        };
+
+                        parts.push(shifted);
+                    }
+                    components.push(parts.join(" | "));
+                }
+            }
+
+            // uint4(x, y, z, w) where x=bits[0:31], y=bits[32:63], z=bits[64:95], w=bits[96:127]
             self.write_indented(&format!(
                 "signals->{} = uint4({}, {}, {}, {});\n",
                 self.sanitize_name(output),
-                components[3],
-                components[2],
-                components[1],
-                components[0]
+                components[0],  // .x = bits 0-31 (LSB)
+                components[1],  // .y = bits 32-63
+                components[2],  // .z = bits 64-95
+                components[3]   // .w = bits 96-127 (MSB)
             ));
         } else if output_width > 32 {
             // Output is 33-64 bits -> uint2
