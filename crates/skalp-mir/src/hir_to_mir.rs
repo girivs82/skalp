@@ -208,6 +208,80 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
 
+            // Process entity body signals and assignments (before impl blocks)
+            eprintln!("[HIR→MIR] Processing entity '{}' with {} signals and {} assignments",
+                entity.name, entity.signals.len(), entity.assignments.len());
+
+            // Set current entity for generic parameter resolution
+            self.current_entity_id = Some(entity.id);
+
+            // Convert entity body signals - flatten structs/vectors into individual signals
+            for hir_signal in &entity.signals {
+                let signal_type = self.convert_type(&hir_signal.signal_type);
+                let initial = hir_signal
+                    .initial_value
+                    .as_ref()
+                    .and_then(|expr| self.convert_literal_expr(expr));
+                let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
+
+                let (flattened_signals, flattened_fields) = self.flatten_signal(
+                    &hir_signal.name,
+                    &signal_type,
+                    initial,
+                    clock_domain,
+                );
+
+                if !flattened_fields.is_empty() {
+                    self.flattened_signals
+                        .insert(hir_signal.id, flattened_fields.clone());
+                }
+
+                for field in &flattened_fields {
+                    self.signal_to_hir.insert(
+                        SignalId(field.id),
+                        (hir_signal.id, field.field_path.clone()),
+                    );
+                }
+
+                if let Some(first_signal) = flattened_signals.first() {
+                    self.signal_map.insert(hir_signal.id, first_signal.id);
+                }
+
+                for signal in flattened_signals {
+                    module.signals.push(signal);
+                }
+            }
+
+            // Convert entity body assignments (may expand to multiple for structs)
+            for (idx, hir_assign) in entity.assignments.iter().enumerate() {
+                eprintln!(
+                    "[HIR→MIR] Entity body assignment {}: LHS={:?}, RHS={:?}",
+                    idx,
+                    std::mem::discriminant(&hir_assign.lhs),
+                    std::mem::discriminant(&hir_assign.rhs)
+                );
+
+                // Clear any pending statements from previous assignments
+                self.pending_statements.clear();
+
+                // Convert the assignment
+                let mir_assigns = self.convert_continuous_assignment_expanded(hir_assign);
+
+                // Add any pending statements (from block expressions)
+                for pending_stmt in self.pending_statements.drain(..) {
+                    if let Statement::Assignment(assign) = pending_stmt {
+                        let continuous = ContinuousAssign {
+                            lhs: assign.lhs,
+                            rhs: assign.rhs,
+                        };
+                        module.assignments.push(continuous);
+                    }
+                }
+
+                // Add the main assignments
+                module.assignments.extend(mir_assigns);
+            }
+
             mir.add_module(module);
         }
 
@@ -2494,6 +2568,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR expression to MIR
     fn convert_expression(&mut self, expr: &hir::HirExpression) -> Option<Expression> {
+        eprintln!("[BUG #74 CONVERT_EXPR] convert_expression called with discriminant: {:?}", std::mem::discriminant(expr));
         match expr {
             hir::HirExpression::Literal(lit) => self.convert_literal(lit).map(Expression::Literal),
             hir::HirExpression::Signal(id) => {
@@ -2857,6 +2932,81 @@ impl<'hir> HirToMir<'hir> {
                                 op: UnaryOp::FSqrt,
                                 operand,
                             });
+                        }
+                    }
+                }
+
+                // BUG FIX #74: Handle fp_* function calls even when type inference fails
+                // After variable substitution in inlined functions, arguments may be complex expressions
+                // that don't have easily-inferable types, so is_fp_method check fails.
+                // Explicitly check for fp_* function names as a fallback.
+                if call.function.starts_with("fp_") {
+                    eprintln!("[MIR_CALL] Detected fp_* function: {}", call.function);
+                    match call.function.as_str() {
+                        "fp_lt" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FLess,
+                                left,
+                                right,
+                            });
+                        }
+                        "fp_mul" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FMul,
+                                left,
+                                right,
+                            });
+                        }
+                        "fp_add" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FAdd,
+                                left,
+                                right,
+                            });
+                        }
+                        "fp_sub" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FSub,
+                                left,
+                                right,
+                            });
+                        }
+                        "fp_div" if call.args.len() == 2 => {
+                            let left = Box::new(self.convert_expression(&call.args[0])?);
+                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FDiv,
+                                left,
+                                right,
+                            });
+                        }
+                        "fp_sqrt" if call.args.len() == 1 => {
+                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            return Some(Expression::Unary {
+                                op: UnaryOp::FSqrt,
+                                operand,
+                            });
+                        }
+                        "fp_neg" if call.args.len() == 1 => {
+                            let zero = Box::new(Expression::Literal(Value::Float(0.0)));
+                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            return Some(Expression::Binary {
+                                op: BinaryOp::FSub,
+                                left: zero,
+                                right: operand,
+                            });
+                        }
+                        _ => {
+                            eprintln!("[MIR_CALL] Unknown fp_* function: {}", call.function);
+                            // Fall through to inlining
                         }
                     }
                 }
@@ -5426,6 +5576,231 @@ impl<'hir> HirToMir<'hir> {
         Some(substituted_expr)
     }
 
+    fn inline_function_call_to_hir_with_lets(&mut self, call: &hir::HirCallExpr) -> Option<hir::HirExpression> {
+        // Similar to inline_function_to_hir, but also inlines let bindings into the result expression
+        // This produces a fully inlined HIR expression with no variable references
+
+        eprintln!("[BUG #74 INLINE_WITH_LETS] Inlining function '{}' with let binding resolution", call.function);
+
+        // Find the function
+        let func = self.find_function(&call.function)?;
+
+        // Clone the data we need
+        let params = func.params.clone();
+        let body = func.body.clone();
+
+        // Build a map from VariableId to variable name by walking through the function body
+        // VariableIds are assigned sequentially to let bindings in declaration order
+        let mut var_id_to_name = HashMap::new();
+        let mut var_counter = 0;
+
+        // Helper function to recursively collect let bindings
+        fn collect_lets_recursive(
+            stmts: &[hir::HirStatement],
+            var_id_to_name: &mut HashMap<hir::VariableId, String>,
+            var_counter: &mut usize,
+        ) {
+            for stmt in stmts {
+                match stmt {
+                    hir::HirStatement::Let(let_stmt) => {
+                        var_id_to_name.insert(hir::VariableId(*var_counter as u32), let_stmt.name.clone());
+                        eprintln!("[BUG #74 VAR_MAP] Mapped VariableId({}) -> '{}'", var_counter, let_stmt.name);
+                        *var_counter += 1;
+                    }
+                    hir::HirStatement::If(if_stmt) => {
+                        collect_lets_recursive(&if_stmt.then_statements, var_id_to_name, var_counter);
+                        if let Some(else_stmts) = &if_stmt.else_statements {
+                            collect_lets_recursive(else_stmts, var_id_to_name, var_counter);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        collect_lets_recursive(&body, &mut var_id_to_name, &mut var_counter);
+        eprintln!("[BUG #74 VAR_MAP] Built var_id_to_name map with {} entries", var_id_to_name.len());
+
+        // Transform early returns
+        let body = self.transform_early_returns(body);
+
+        // Check for recursion
+        if self.contains_recursive_call(&body, &call.function) {
+            eprintln!(
+                "Error: Recursive function calls are not supported: function '{}'",
+                call.function
+            );
+            return None;
+        }
+
+        // Check arity
+        if params.len() != call.args.len() {
+            eprintln!(
+                "Function {}: expected {} arguments, got {}",
+                call.function,
+                params.len(),
+                call.args.len()
+            );
+            return None;
+        }
+
+        // Build parameter substitution map
+        let mut substitution_map = HashMap::new();
+        for (param, arg) in params.iter().zip(&call.args) {
+            substitution_map.insert(param.name.clone(), arg.clone());
+        }
+
+        // Build let binding substitution map by walking through the function body
+        // and collecting all let bindings with their RHS expressions
+        let mut let_bindings = HashMap::new();
+        for stmt in &body {
+            if let hir::HirStatement::Let(let_stmt) = stmt {
+                // Substitute any previously-defined let bindings and parameters in this RHS
+                let rhs_substituted = self.substitute_hir_expr_recursively(
+                    &let_stmt.value,
+                    &substitution_map,
+                    &let_bindings,
+                    &var_id_to_name,
+                );
+                if let Some(rhs) = rhs_substituted {
+                    let_bindings.insert(let_stmt.name.clone(), rhs);
+                    eprintln!("[BUG #74 INLINE_WITH_LETS] Collected let binding: {}", let_stmt.name);
+                }
+            }
+        }
+
+        eprintln!("[BUG #74 INLINE_WITH_LETS] Collected {} let bindings", let_bindings.len());
+
+        // Convert body to expression (extracts the return value)
+        let body_expr = self.convert_body_to_expression(&body)?;
+
+        eprintln!("[BUG #74 INLINE_WITH_LETS] Body converted to expression: {:?}", std::mem::discriminant(&body_expr));
+
+        // Substitute both parameters and let bindings in the result expression
+        let substituted_expr = self.substitute_hir_expr_recursively(
+            &body_expr,
+            &substitution_map,
+            &let_bindings,
+            &var_id_to_name,
+        )?;
+
+        eprintln!("[BUG #74 INLINE_WITH_LETS] Final expression after substitution: {:?}", std::mem::discriminant(&substituted_expr));
+
+        // Return the fully substituted HIR expression
+        Some(substituted_expr)
+    }
+
+    // Helper function to recursively substitute both parameters and let bindings
+    fn substitute_hir_expr_recursively(
+        &self,
+        expr: &hir::HirExpression,
+        params: &HashMap<String, hir::HirExpression>,
+        lets: &HashMap<String, hir::HirExpression>,
+        var_id_to_name: &HashMap<hir::VariableId, String>,
+    ) -> Option<hir::HirExpression> {
+        match expr {
+            // If it's a variable reference, look it up in let bindings or parameters
+            hir::HirExpression::Variable(var_id) => {
+                // Try to find the variable name using the var_id_to_name map
+                let name = var_id_to_name.get(var_id)
+                    .or_else(|| {
+                        // Fallback: try dynamic_variables
+                        self.dynamic_variables.get(var_id).map(|(_, n, _)| n)
+                    });
+
+                eprintln!("[BUG #74 VARIABLE] Looking up Variable({:?}), found name: {:?}", var_id, name);
+                eprintln!("[BUG #74 VARIABLE] Available lets: {:?}", lets.keys().collect::<Vec<_>>());
+                eprintln!("[BUG #74 VARIABLE] Available params: {:?}", params.keys().collect::<Vec<_>>());
+
+                if let Some(name) = name {
+                    // Check let bindings first
+                    if let Some(let_rhs) = lets.get(name) {
+                        eprintln!("[BUG #74 SUBSTITUTE] Replacing variable '{}' with let binding", name);
+                        return Some(let_rhs.clone());
+                    }
+                    // Then check parameters
+                    if let Some(param_rhs) = params.get(name) {
+                        eprintln!("[BUG #74 SUBSTITUTE] Replacing variable '{}' with parameter", name);
+                        return Some(param_rhs.clone());
+                    }
+                    eprintln!("[BUG #74 VARIABLE] Variable '{}' not found in lets or params, keeping as-is", name);
+                } else {
+                    eprintln!("[BUG #74 VARIABLE] Could not resolve variable name for {:?}, keeping as-is", var_id);
+                }
+                // If not found in either, return as-is (might be from outer scope)
+                Some(expr.clone())
+            }
+
+            // For complex expressions, recursively substitute in children
+            hir::HirExpression::TupleLiteral(elements) => {
+                let substituted_elements: Option<Vec<_>> = elements
+                    .iter()
+                    .map(|elem| self.substitute_hir_expr_recursively(elem, params, lets, var_id_to_name))
+                    .collect();
+                Some(hir::HirExpression::TupleLiteral(substituted_elements?))
+            }
+
+            hir::HirExpression::Call(call_expr) => {
+                let substituted_args: Option<Vec<_>> = call_expr
+                    .args
+                    .iter()
+                    .map(|arg| self.substitute_hir_expr_recursively(arg, params, lets, var_id_to_name))
+                    .collect();
+                Some(hir::HirExpression::Call(hir::HirCallExpr {
+                    function: call_expr.function.clone(),
+                    args: substituted_args?,
+                    type_args: call_expr.type_args.clone(),
+                }))
+            }
+
+            hir::HirExpression::Binary(bin_expr) => {
+                let left_sub = self.substitute_hir_expr_recursively(&bin_expr.left, params, lets, var_id_to_name)?;
+                let right_sub = self.substitute_hir_expr_recursively(&bin_expr.right, params, lets, var_id_to_name)?;
+                Some(hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    op: bin_expr.op.clone(),
+                    left: Box::new(left_sub),
+                    right: Box::new(right_sub),
+                }))
+            }
+
+            hir::HirExpression::If(if_expr) => {
+                let cond_sub = self.substitute_hir_expr_recursively(&if_expr.condition, params, lets, var_id_to_name)?;
+                let then_sub = self.substitute_hir_expr_recursively(&if_expr.then_expr, params, lets, var_id_to_name)?;
+                let else_sub = self.substitute_hir_expr_recursively(&if_expr.else_expr, params, lets, var_id_to_name)?;
+                Some(hir::HirExpression::If(hir::HirIfExpr {
+                    condition: Box::new(cond_sub),
+                    then_expr: Box::new(then_sub),
+                    else_expr: Box::new(else_sub),
+                }))
+            }
+
+            hir::HirExpression::Block { statements, result_expr } => {
+                // For Block expressions, we need to handle nested let bindings
+                // Collect let bindings from the block
+                eprintln!("[BUG #74 BLOCK] Processing Block with {} statements", statements.len());
+                let mut nested_lets = lets.clone();
+                for stmt in statements {
+                    if let hir::HirStatement::Let(let_stmt) = stmt {
+                        eprintln!("[BUG #74 BLOCK] Found nested let binding: {}", let_stmt.name);
+                        // Substitute in the RHS of this let binding
+                        let rhs_sub = self.substitute_hir_expr_recursively(&let_stmt.value, params, &nested_lets, var_id_to_name)?;
+                        nested_lets.insert(let_stmt.name.clone(), rhs_sub);
+                        eprintln!("[BUG #74 BLOCK] Collected nested let: {} (total: {})", let_stmt.name, nested_lets.len());
+                    }
+                }
+                eprintln!("[BUG #74 BLOCK] Total nested lets: {}, result_expr type: {:?}", nested_lets.len(), std::mem::discriminant(&**result_expr));
+                // Substitute in the result expression with all nested lets
+                let result_sub = self.substitute_hir_expr_recursively(&result_expr, params, &nested_lets, var_id_to_name)?;
+                eprintln!("[BUG #74 BLOCK] Result after substitution: {:?}", std::mem::discriminant(&result_sub));
+                // Return the result directly (no need to keep the Block wrapper since lets are substituted)
+                Some(result_sub)
+            }
+
+            // For literals and other leaf nodes, return as-is
+            _ => Some(expr.clone()),
+        }
+    }
+
     fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
         eprintln!(
             "[DEBUG] inline_function_call: {} with {} args",
@@ -6933,19 +7308,36 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 hir::HirExpression::Call(call) => {
-                    // BUG FIX #74: Handle field access on function call results
+                    // BUG FIX #74 (Updated): Handle field access on function call results
                     // Example: vec_cross(a, b).x where vec_cross returns a struct
-                    // Inline the function to get HIR expression (before MIR conversion)
-                    let inlined_hir_expr = self.inline_function_to_hir(call)?;
+                    // Example: quadratic_solve(a, b, c).0 where function returns tuple
 
-                    // Create new FieldAccess with inlined expression as base
+                    eprintln!("[BUG #74 CALL IN FIELD_ACCESS] Function: {}, field: {}", call.function, field_name);
+
+                    // CRITICAL: Cannot convert Call to MIR first because tuples are flattened in MIR
+                    // Instead, inline at HIR level with full let binding resolution,
+                    // then extract the field at HIR level where tuples still exist
+
+                    // Inline at HIR level with full let binding resolution
+                    let inlined_hir_expr = self.inline_function_call_to_hir_with_lets(call)?;
+
+                    eprintln!("[BUG #74 CALL IN FIELD_ACCESS] Function inlined to HIR expression: {:?}", std::mem::discriminant(&inlined_hir_expr));
+
+                    // Create new FieldAccess with fully inlined expression as base
                     let field_access = hir::HirExpression::FieldAccess {
                         base: Box::new(inlined_hir_expr),
                         field: field_name.to_string(),
                     };
 
-                    // Recursively convert - this will hit StructLiteral handler if applicable
-                    return self.convert_expression(&field_access);
+                    eprintln!("[BUG #74 CALL IN FIELD_ACCESS] Converting FieldAccess to MIR...");
+                    // Recursively convert the field access
+                    let mir_result = self.convert_expression(&field_access);
+                    if mir_result.is_some() {
+                        eprintln!("[BUG #74 CALL IN FIELD_ACCESS] ✅ FieldAccess conversion succeeded");
+                    } else {
+                        eprintln!("[BUG #74 CALL IN FIELD_ACCESS] ❌ FieldAccess conversion returned None");
+                    }
+                    return mir_result;
                 }
                 hir::HirExpression::Block {
                     statements,

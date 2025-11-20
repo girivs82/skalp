@@ -6,6 +6,6 @@ module NestedIf (
     output [7:0] result
 );
 
-    assign result = ((a > 10) ? 0 : 0);
+    assign result = ((a > 10) ? ((a > 12) ? 255 : 128) : 0);
 
 endmodule
