@@ -54,20 +54,29 @@ impl Testbench {
 
     /// Create a new testbench with custom simulation config
     pub async fn with_config(source_path: &str, config: SimulationConfig) -> Result<Self> {
+        use std::time::Instant;
+        let start_total = Instant::now();
+        eprintln!("⏱️  [TESTBENCH] Starting compilation of '{}'", source_path);
+
         // Parse and build HIR with full module resolution support (Bug #84 fix)
         // This handles imports like "mod async_fifo; use async_fifo::AsyncFifo"
+        let start_hir = Instant::now();
         let path = Path::new(source_path);
         let context = skalp_frontend::parse_and_build_compilation_context(path)?;
+        eprintln!("⏱️  [TESTBENCH] HIR parsing completed in {:?}", start_hir.elapsed());
 
         // Compile to MIR with optimizations and module scope resolution
         // The proper HIR→MIR fix ensures array assignments are expanded correctly
         // Bug #84 fix: Pass module HIRs for proper transitive import support
+        let start_mir = Instant::now();
         let compiler = MirCompiler::new();
         let mir = compiler
             .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+        eprintln!("⏱️  [TESTBENCH] MIR compilation completed in {:?}", start_mir.elapsed());
 
         // Convert to SIR with hierarchical elaboration
+        let start_sir = Instant::now();
         if mir.modules.is_empty() {
             anyhow::bail!("No modules found in design");
         }
@@ -136,10 +145,16 @@ impl Testbench {
         );
 
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
+        eprintln!("⏱️  [TESTBENCH] SIR conversion completed in {:?}", start_sir.elapsed());
 
         // Create simulator and load design
+        let start_sim = Instant::now();
+        eprintln!("⏱️  [TESTBENCH] Creating simulator and loading design...");
         let mut sim = Simulator::new(config).await?;
         sim.load_module(&sir).await?;
+        eprintln!("⏱️  [TESTBENCH] Simulator initialization completed in {:?}", start_sim.elapsed());
+
+        eprintln!("⏱️  [TESTBENCH] ✅ Total testbench creation time: {:?}", start_total.elapsed());
 
         Ok(Self {
             sim,

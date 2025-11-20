@@ -2201,7 +2201,7 @@ impl<'a> MirToSirConverter<'a> {
         target_width: Option<usize>,
     ) -> usize {
         match expr {
-            Expression::Literal(value) => self.create_literal_node(value),
+            Expression::Literal(value) => self.create_literal_node_with_width(value, target_width),
             Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
             Expression::Binary { op, left, right } => {
                 // BUG #71 DEBUG: Check if operands contain Cast with Concat inside
@@ -2282,8 +2282,16 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_literal_node(&mut self, value: &Value) -> usize {
+        self.create_literal_node_with_width(value, None)
+    }
+
+    fn create_literal_node_with_width(&mut self, value: &Value, target_width: Option<usize>) -> usize {
         let (val, width) = match value {
-            Value::Integer(i) => (*i as u64, 32),
+            Value::Integer(i) => {
+                // BUG #76 FIX: Use target width for integer literals when provided
+                let inferred_width = target_width.unwrap_or(32);
+                (*i as u64, inferred_width)
+            }
             Value::BitVector { width, value } => (*value, *width),
             // BUG FIX: Handle float literals by converting to IEEE 754 bit representation
             Value::Float(f) => {
