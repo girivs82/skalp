@@ -85,18 +85,18 @@ fn is_generic_type(data_type: &DataType) -> bool {
 /// This is needed because variables are declared with their type width (e.g., fp32 = 32 bits)
 /// but may be assigned expressions with different widths (e.g., {a, b, c} = 96 bits)
 fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -> Option<usize> {
-    match expr {
-        skalp_mir::Expression::Literal(value) => match value {
+    match &expr.kind {
+        skalp_mir::ExpressionKind::Literal(value) => match value {
             skalp_mir::Value::Integer(_) => Some(32),
             skalp_mir::Value::Float(_) => Some(32), // Single-precision float
             skalp_mir::Value::BitVector { width, .. } => Some(*width),
             _ => None,
         },
-        skalp_mir::Expression::Ref(lvalue) => {
+        skalp_mir::ExpressionKind::Ref(lvalue) => {
             // Get the width of the referenced LValue
             compute_lvalue_width(lvalue, mir_module)
         }
-        skalp_mir::Expression::Concat(exprs) => {
+        skalp_mir::ExpressionKind::Concat(exprs) => {
             // Sum the widths of all concatenated expressions
             let mut total_width = 0;
             for e in exprs {
@@ -108,13 +108,13 @@ fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -
             }
             Some(total_width)
         }
-        skalp_mir::Expression::Binary { left, right, .. } => {
+        skalp_mir::ExpressionKind::Binary { left, right, .. } => {
             // For binary ops, use the wider of the two operands
             let left_width = compute_expression_width(left, mir_module)?;
             let right_width = compute_expression_width(right, mir_module)?;
             Some(left_width.max(right_width))
         }
-        skalp_mir::Expression::Conditional {
+        skalp_mir::ExpressionKind::Conditional {
             then_expr,
             else_expr,
             ..
@@ -124,7 +124,7 @@ fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -
             let else_width = compute_expression_width(else_expr, mir_module)?;
             Some(then_width.max(else_width))
         }
-        skalp_mir::Expression::Cast { target_type, .. } => {
+        skalp_mir::ExpressionKind::Cast { target_type, .. } => {
             // Cast specifies the target type width
             Some(safe_get_type_width(target_type))
         }
@@ -172,9 +172,9 @@ fn compute_lvalue_width(lvalue: &skalp_mir::LValue, mir_module: &Module) -> Opti
             // For constant range selects, try to compute the width
             // Otherwise return None for dynamic ranges
             if let (
-                skalp_mir::Expression::Literal(skalp_mir::Value::Integer(h)),
-                skalp_mir::Expression::Literal(skalp_mir::Value::Integer(l)),
-            ) = (&**high, &**low)
+                skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(h)),
+                skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(l)),
+            ) = (&high.kind, &low.kind)
             {
                 Some((h - l + 1) as usize)
             } else {
@@ -461,7 +461,7 @@ fn generate_module(
         eprintln!(
             "[CODEGEN_DEBUG] Assignment LHS type: {:?}, RHS type: {:?}",
             std::mem::discriminant(&assign.lhs),
-            std::mem::discriminant(&assign.rhs)
+            std::mem::discriminant(&assign.rhs.kind)
         );
         let expanded = expand_struct_assignment(&assign.lhs, &assign.rhs, mir_module);
         eprintln!(
@@ -602,7 +602,7 @@ fn generate_instance(
             if !flattened_ports.is_empty() {
                 // Found flattened ports - we need to infer the structure and expand
                 // Get the signal name from the expression
-                if let skalp_mir::Expression::Ref(lvalue) = expr {
+                if let skalp_mir::ExpressionKind::Ref(lvalue) = &expr.kind {
                     let signal_full_name = format_lvalue_with_context(lvalue, parent_module);
 
                     // The signal might be referencing a flattened field (like geom_vertex_position_x)
@@ -948,10 +948,10 @@ fn format_lvalue(lvalue: &skalp_mir::LValue) -> String {
 
 /// Format an expression with module context
 fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module) -> String {
-    match expr {
-        skalp_mir::Expression::Literal(val) => format_value(val),
-        skalp_mir::Expression::Ref(lval) => format_lvalue_with_context(lval, module),
-        skalp_mir::Expression::Binary { op, left, right } => {
+    match &expr.kind {
+        skalp_mir::ExpressionKind::Literal(val) => format_value(val),
+        skalp_mir::ExpressionKind::Ref(lval) => format_lvalue_with_context(lval, module),
+        skalp_mir::ExpressionKind::Binary { op, left, right } => {
             // BUG FIX #17: FP operations need shortreal conversion
             if matches!(
                 op,
@@ -991,7 +991,7 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                 )
             }
         }
-        skalp_mir::Expression::Unary { op, operand } => {
+        skalp_mir::ExpressionKind::Unary { op, operand } => {
             // Special handling for FSqrt - it's a function call in SystemVerilog
             // BUG FIX #73: $sqrt() returns real type, must convert to/from bits for bit vector operands
             if matches!(op, skalp_mir::UnaryOp::FSqrt) {
@@ -1009,7 +1009,7 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                 )
             }
         }
-        skalp_mir::Expression::Conditional {
+        skalp_mir::ExpressionKind::Conditional {
             cond,
             then_expr,
             else_expr,
@@ -1021,21 +1021,21 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                 format_expression_with_context(else_expr, module)
             )
         }
-        skalp_mir::Expression::Concat(exprs) => {
+        skalp_mir::ExpressionKind::Concat(exprs) => {
             let parts: Vec<_> = exprs
                 .iter()
                 .map(|e| format_expression_with_context(e, module))
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
-        skalp_mir::Expression::Replicate { count, value } => {
+        skalp_mir::ExpressionKind::Replicate { count, value } => {
             format!(
                 "{{{}{{{}}}}}",
                 format_expression_with_context(count, module),
                 format_expression_with_context(value, module)
             )
         }
-        skalp_mir::Expression::FunctionCall { name, args } => {
+        skalp_mir::ExpressionKind::FunctionCall { name, args } => {
             // BUG FIX #76: Handle fabs for floating-point absolute value
             if name == "fabs" && args.len() == 1 {
                 let arg_str = format_expression_with_context(&args[0], module);
@@ -1048,7 +1048,7 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                 format!("{}({})", name, arg_strs.join(", "))
             }
         }
-        skalp_mir::Expression::Cast { expr, .. } => {
+        skalp_mir::ExpressionKind::Cast { expr, .. } => {
             // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
             format_expression_with_context(expr, module)
         }
@@ -1057,10 +1057,10 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
 
 /// Format an expression (fallback without context)
 fn format_expression(expr: &skalp_mir::Expression) -> String {
-    match expr {
-        skalp_mir::Expression::Literal(val) => format_value(val),
-        skalp_mir::Expression::Ref(lval) => format_lvalue(lval),
-        skalp_mir::Expression::Binary { op, left, right } => {
+    match &expr.kind {
+        skalp_mir::ExpressionKind::Literal(val) => format_value(val),
+        skalp_mir::ExpressionKind::Ref(lval) => format_lvalue(lval),
+        skalp_mir::ExpressionKind::Binary { op, left, right } => {
             // BUG FIX #17: FP operations need shortreal conversion
             // Hardware represents floats as bit patterns, but arithmetic needs real type
             if matches!(
@@ -1101,7 +1101,7 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
                 )
             }
         }
-        skalp_mir::Expression::Unary { op, operand } => {
+        skalp_mir::ExpressionKind::Unary { op, operand } => {
             // BUG FIX #73: FSqrt must convert to/from bits
             if matches!(op, skalp_mir::UnaryOp::FSqrt) {
                 format!(
@@ -1112,7 +1112,7 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
                 format!("{}{}", format_unary_op(op), format_expression(operand))
             }
         }
-        skalp_mir::Expression::Conditional {
+        skalp_mir::ExpressionKind::Conditional {
             cond,
             then_expr,
             else_expr,
@@ -1124,18 +1124,18 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
                 format_expression(else_expr)
             )
         }
-        skalp_mir::Expression::Concat(exprs) => {
+        skalp_mir::ExpressionKind::Concat(exprs) => {
             let parts: Vec<_> = exprs.iter().map(format_expression).collect();
             format!("{{{}}}", parts.join(", "))
         }
-        skalp_mir::Expression::Replicate { count, value } => {
+        skalp_mir::ExpressionKind::Replicate { count, value } => {
             format!(
                 "{{{}{{{}}}}}",
                 format_expression(count),
                 format_expression(value)
             )
         }
-        skalp_mir::Expression::FunctionCall { name, args } => {
+        skalp_mir::ExpressionKind::FunctionCall { name, args } => {
             // BUG FIX #76: Handle fabs for floating-point absolute value
             if name == "fabs" && args.len() == 1 {
                 let arg_str = format_expression(&args[0]);
@@ -1145,7 +1145,7 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
                 format!("{}({})", name, arg_strs.join(", "))
             }
         }
-        skalp_mir::Expression::Cast { expr, .. } => {
+        skalp_mir::ExpressionKind::Cast { expr, .. } => {
             // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
             format_expression(expr)
         }
@@ -1484,7 +1484,7 @@ fn expand_struct_assignment(
             let lhs_base_name = format_lvalue_with_context(base_lvalue, module);
 
             // Check if RHS is also a signal/port reference to expand from
-            let rhs_base_name = if let skalp_mir::Expression::Ref(rhs_lvalue) = rhs {
+            let rhs_base_name = if let skalp_mir::ExpressionKind::Ref(rhs_lvalue) = &rhs.kind {
                 Some(format_lvalue_with_context(rhs_lvalue, module))
             } else {
                 None
@@ -1517,7 +1517,7 @@ fn expand_struct_assignment(
             let lhs_base_name = format_lvalue_with_context(base_lvalue, module);
 
             // Check if RHS is also a signal/port reference
-            let rhs_base_name = if let skalp_mir::Expression::Ref(rhs_lvalue) = rhs {
+            let rhs_base_name = if let skalp_mir::ExpressionKind::Ref(rhs_lvalue) = &rhs.kind {
                 Some(format_lvalue_with_context(rhs_lvalue, module))
             } else {
                 None
@@ -1613,7 +1613,7 @@ fn expand_port_connection(
     match port_type {
         DataType::Struct(struct_type) => {
             // Get the signal base name if it's a simple reference
-            let signal_base_name = if let skalp_mir::Expression::Ref(lvalue) = signal_expr {
+            let signal_base_name = if let skalp_mir::ExpressionKind::Ref(lvalue) = &signal_expr.kind {
                 Some(format_lvalue_with_context(lvalue, parent_module))
             } else {
                 None
@@ -1642,7 +1642,7 @@ fn expand_port_connection(
         | DataType::Vec3(element_type)
         | DataType::Vec4(element_type) => {
             // Get the signal base name
-            let signal_base_name = if let skalp_mir::Expression::Ref(lvalue) = signal_expr {
+            let signal_base_name = if let skalp_mir::ExpressionKind::Ref(lvalue) = &signal_expr.kind {
                 Some(format_lvalue_with_context(lvalue, parent_module))
             } else {
                 None
@@ -2135,9 +2135,9 @@ fn get_systemverilog_type(data_type: &DataType) -> &'static str {
 /// Convert a MIR expression to a SystemVerilog expression string
 /// This is specifically for const expressions used in type positions (like clog2(SIZE))
 fn convert_mir_expr_to_sv(expr: &skalp_mir::Expression) -> String {
-    match expr {
-        skalp_mir::Expression::Literal(val) => format_value(val),
-        skalp_mir::Expression::Binary { op, left, right } => {
+    match &expr.kind {
+        skalp_mir::ExpressionKind::Literal(val) => format_value(val),
+        skalp_mir::ExpressionKind::Binary { op, left, right } => {
             format!(
                 "({}{}{})",
                 convert_mir_expr_to_sv(left),
@@ -2145,7 +2145,7 @@ fn convert_mir_expr_to_sv(expr: &skalp_mir::Expression) -> String {
                 convert_mir_expr_to_sv(right)
             )
         }
-        skalp_mir::Expression::FunctionCall { name, args } => {
+        skalp_mir::ExpressionKind::FunctionCall { name, args } => {
             // Handle built-in functions that map to SystemVerilog functions
             match name.as_str() {
                 "clog2" => {

@@ -7,6 +7,7 @@
 //!
 //! MIR is lower-level than HIR but still hardware-agnostic
 
+use crate::Type;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -396,9 +397,24 @@ pub enum LValue {
     Concat(Vec<LValue>),
 }
 
-/// Expression (right-hand side)
+/// Expression (right-hand side) with type information
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Expression {
+pub struct Expression {
+    /// The kind/variant of this expression
+    pub kind: ExpressionKind,
+    /// The type of this expression
+    #[serde(skip, default = "default_unknown_type")]
+    pub ty: Type,
+}
+
+/// Default function for serde deserialization of Type field
+fn default_unknown_type() -> Type {
+    Type::Unknown
+}
+
+/// Expression kinds (variants)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExpressionKind {
     /// Literal value
     Literal(Value),
     /// LValue reference
@@ -434,6 +450,104 @@ pub enum Expression {
         expr: Box<Expression>,
         target_type: DataType,
     },
+}
+
+impl Expression {
+    /// Create a new expression with the given kind and type
+    pub fn new(kind: ExpressionKind, ty: Type) -> Self {
+        Self { kind, ty }
+    }
+
+    /// Create an expression with Unknown type (TEMPORARY: for migration to typed expressions)
+    /// TODO(Bug #76): Replace all uses with properly typed constructors
+    pub fn with_unknown_type(kind: ExpressionKind) -> Self {
+        Self {
+            kind,
+            ty: Type::Unknown,
+        }
+    }
+
+    /// Create a literal expression
+    pub fn literal(value: Value, ty: Type) -> Self {
+        Self::new(ExpressionKind::Literal(value), ty)
+    }
+
+    /// Create an LValue reference expression
+    pub fn lvalue_ref(lvalue: LValue, ty: Type) -> Self {
+        Self::new(ExpressionKind::Ref(lvalue), ty)
+    }
+
+    /// Create a binary operation expression
+    pub fn binary(op: BinaryOp, left: Expression, right: Expression, ty: Type) -> Self {
+        Self::new(
+            ExpressionKind::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+            ty,
+        )
+    }
+
+    /// Create a unary operation expression
+    pub fn unary(op: UnaryOp, operand: Expression, ty: Type) -> Self {
+        Self::new(
+            ExpressionKind::Unary {
+                op,
+                operand: Box::new(operand),
+            },
+            ty,
+        )
+    }
+
+    /// Create a conditional (ternary) expression
+    pub fn conditional(
+        cond: Expression,
+        then_expr: Expression,
+        else_expr: Expression,
+        ty: Type,
+    ) -> Self {
+        Self::new(
+            ExpressionKind::Conditional {
+                cond: Box::new(cond),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+            },
+            ty,
+        )
+    }
+
+    /// Create a concatenation expression
+    pub fn concat(exprs: Vec<Expression>, ty: Type) -> Self {
+        Self::new(ExpressionKind::Concat(exprs), ty)
+    }
+
+    /// Create a replication expression
+    pub fn replicate(count: Expression, value: Expression, ty: Type) -> Self {
+        Self::new(
+            ExpressionKind::Replicate {
+                count: Box::new(count),
+                value: Box::new(value),
+            },
+            ty,
+        )
+    }
+
+    /// Create a function call expression
+    pub fn function_call(name: String, args: Vec<Expression>, ty: Type) -> Self {
+        Self::new(ExpressionKind::FunctionCall { name, args }, ty)
+    }
+
+    /// Create a cast expression
+    pub fn cast(expr: Expression, target_type: DataType, ty: Type) -> Self {
+        Self::new(
+            ExpressionKind::Cast {
+                expr: Box::new(expr),
+                target_type,
+            },
+            ty,
+        )
+    }
 }
 
 /// Literal value

@@ -311,19 +311,19 @@ impl MirToLirTransform {
 
     /// Decompose an expression into gates and return the output net
     fn decompose_expression(&mut self, expr: &skalp_mir::mir::Expression) -> String {
-        match expr {
-            skalp_mir::mir::Expression::Literal(value) => {
+        match &expr.kind {
+            skalp_mir::mir::ExpressionKind::Literal(value) => {
                 // For literals, create a constant driver net
 
                 // In a real implementation, we'd create tie-high/tie-low cells
                 // For now, just return the net name
                 self.create_temp_net()
             }
-            skalp_mir::mir::Expression::Ref(lvalue) => {
+            skalp_mir::mir::ExpressionKind::Ref(lvalue) => {
                 // Reference to a signal/port - return its net
                 self.get_lvalue_net(lvalue)
             }
-            skalp_mir::mir::Expression::Binary { op, left, right } => {
+            skalp_mir::mir::ExpressionKind::Binary { op, left, right } => {
                 // Decompose left and right operands
                 let left_net = self.decompose_expression(left);
                 let right_net = self.decompose_expression(right);
@@ -345,7 +345,7 @@ impl MirToLirTransform {
 
                 output_net
             }
-            skalp_mir::mir::Expression::Unary { op, operand } => {
+            skalp_mir::mir::ExpressionKind::Unary { op, operand } => {
                 // Decompose operand
                 let input_net = self.decompose_expression(operand);
 

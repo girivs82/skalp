@@ -2,7 +2,7 @@ use crate::sir::*;
 use skalp_mir::mir::PortDirection as MirPortDirection;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::{
-    BinaryOp, Block, DataType, EdgeType, Expression, IfStatement, LValue, Mir, Module, ProcessKind,
+    BinaryOp, Block, DataType, EdgeType, Expression, ExpressionKind, IfStatement, LValue, Mir, Module, ProcessKind,
     SensitivityList, Statement, Value,
 };
 use std::collections::HashMap;
@@ -1092,21 +1092,21 @@ impl<'a> MirToSirConverter<'a> {
         expr: &Expression,
         signals: &std::collections::HashSet<String>,
     ) -> bool {
-        match expr {
-            Expression::Ref(lvalue) => {
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => {
                 let signal_name = self.lvalue_to_string(lvalue);
                 // Also check the base signal for range selects and bit selects
                 let base_signal = self.get_base_signal_name(lvalue);
                 signals.contains(&signal_name) || signals.contains(&base_signal)
             }
-            Expression::Binary { left, right, .. } => {
+            ExpressionKind::Binary { left, right, .. } => {
                 self.expression_references_signals(left, signals)
                     || self.expression_references_signals(right, signals)
             }
-            Expression::Unary { operand, .. } => {
+            ExpressionKind::Unary { operand, .. } => {
                 self.expression_references_signals(operand, signals)
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -1115,14 +1115,14 @@ impl<'a> MirToSirConverter<'a> {
                     || self.expression_references_signals(then_expr, signals)
                     || self.expression_references_signals(else_expr, signals)
             }
-            Expression::Concat(exprs) => exprs
+            ExpressionKind::Concat(exprs) => exprs
                 .iter()
                 .any(|e| self.expression_references_signals(e, signals)),
-            Expression::Replicate { count, value } => {
+            ExpressionKind::Replicate { count, value } => {
                 self.expression_references_signals(count, signals)
                     || self.expression_references_signals(value, signals)
             }
-            Expression::FunctionCall { args, .. } => args
+            ExpressionKind::FunctionCall { args, .. } => args
                 .iter()
                 .any(|e| self.expression_references_signals(e, signals)),
             _ => false,
@@ -1324,7 +1324,7 @@ impl<'a> MirToSirConverter<'a> {
                         i,
                         std::mem::discriminant(&assign.lhs),
                         lval_name,
-                        std::mem::discriminant(&assign.rhs)
+                        std::mem::discriminant(&assign.rhs.kind)
                     );
 
                     // Check if RHS contains array writes even if LHS is just a Signal
@@ -1760,9 +1760,9 @@ impl<'a> MirToSirConverter<'a> {
         expr: &Expression,
         local_context: &std::collections::HashMap<String, usize>,
     ) -> usize {
-        match expr {
-            Expression::Literal(value) => self.create_literal_node(value),
-            Expression::Ref(lvalue) => {
+        match &expr.kind {
+            ExpressionKind::Literal(value) => self.create_literal_node(value),
+            ExpressionKind::Ref(lvalue) => {
                 let signal_name = self.lvalue_to_string(lvalue);
 
                 // Check if this signal has a computed value in the local context
@@ -1792,7 +1792,7 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
             }
-            Expression::Binary { op, left, right } => {
+            ExpressionKind::Binary { op, left, right } => {
                 // BUG #71 DEBUG: Check if operands are variable references to Concat
                 if matches!(
                     op,
@@ -1801,19 +1801,19 @@ impl<'a> MirToSirConverter<'a> {
                     eprintln!("[BUG #71 BINARY] FP Binary operation: op={:?}", op);
                     eprintln!(
                         "[BUG #71 BINARY]   left: {:?}",
-                        std::mem::discriminant(&**left)
+                        std::mem::discriminant(&left.kind)
                     );
                     eprintln!(
                         "[BUG #71 BINARY]   right: {:?}",
-                        std::mem::discriminant(&**right)
+                        std::mem::discriminant(&right.kind)
                     );
-                    if let Expression::Ref(lval) = &**left {
+                    if let ExpressionKind::Ref(lval) = &left.kind {
                         eprintln!(
                             "[BUG #71 BINARY]   left is Ref: {:?}",
                             std::mem::discriminant(lval)
                         );
                     }
-                    if let Expression::Ref(lval) = &**right {
+                    if let ExpressionKind::Ref(lval) = &right.kind {
                         eprintln!(
                             "[BUG #71 BINARY]   right is Ref: {:?}",
                             std::mem::discriminant(lval)
@@ -1824,12 +1824,12 @@ impl<'a> MirToSirConverter<'a> {
                 let right_node = self.create_expression_with_local_context(right, local_context);
                 self.create_binary_op_node(op, left_node, right_node)
             }
-            Expression::Unary { op, operand } => {
+            ExpressionKind::Unary { op, operand } => {
                 let operand_node =
                     self.create_expression_with_local_context(operand, local_context);
                 self.create_unary_op_node(op, operand_node)
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -1839,7 +1839,7 @@ impl<'a> MirToSirConverter<'a> {
                 let else_node = self.create_expression_with_local_context(else_expr, local_context);
                 self.create_mux_node(cond_node, then_node, else_node)
             }
-            Expression::Concat(exprs) => {
+            ExpressionKind::Concat(exprs) => {
                 eprintln!(
                     "[BUG #71 CONCAT] Creating Concat with {} parts",
                     exprs.len()
@@ -1848,7 +1848,7 @@ impl<'a> MirToSirConverter<'a> {
                     eprintln!(
                         "[BUG #71 CONCAT]   Part {}: {:?}",
                         i,
-                        std::mem::discriminant(expr)
+                        std::mem::discriminant(&expr.kind)
                     );
                 }
                 let part_nodes: Vec<usize> = exprs
@@ -1859,16 +1859,16 @@ impl<'a> MirToSirConverter<'a> {
                 eprintln!("[BUG #71 CONCAT] Created Concat node_{}", concat_node);
                 concat_node
             }
-            Expression::Replicate { count, value } => {
+            ExpressionKind::Replicate { count, value } => {
                 let _count_node = self.create_expression_with_local_context(count, local_context);
                 // For now, just return the value (replication logic would be more complex)
                 self.create_expression_with_local_context(value, local_context)
             }
-            Expression::FunctionCall { .. } => {
+            ExpressionKind::FunctionCall { .. } => {
                 // Fall back to original implementation for function calls
                 self.create_expression_node(expr)
             }
-            Expression::Cast { expr, .. } => {
+            ExpressionKind::Cast { expr, .. } => {
                 // Cast is a no-op for hardware generation (bitwise reinterpretation)
                 // Just process the inner expression
                 self.create_expression_with_local_context(expr, local_context)
@@ -1897,8 +1897,8 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn evaluate_const_expr(&self, expr: &Expression) -> usize {
-        match expr {
-            Expression::Literal(value) => match value {
+        match &expr.kind {
+            ExpressionKind::Literal(value) => match value {
                 skalp_mir::Value::Integer(i) => *i as usize,
                 skalp_mir::Value::BitVector { value, .. } => *value as usize,
                 _ => 0,
@@ -1967,9 +1967,9 @@ impl<'a> MirToSirConverter<'a> {
         expr: &Expression,
         context: &std::collections::HashMap<String, usize>,
     ) -> usize {
-        match expr {
-            Expression::Literal(value) => self.create_literal_node(value),
-            Expression::Ref(lvalue) => {
+        match &expr.kind {
+            ExpressionKind::Literal(value) => self.create_literal_node(value),
+            ExpressionKind::Ref(lvalue) => {
                 let signal_name = self.lvalue_to_string(lvalue);
                 // Check if this signal has a computed value in the current context
                 if let Some(&computed_value) = context.get(&signal_name) {
@@ -1979,16 +1979,16 @@ impl<'a> MirToSirConverter<'a> {
                     self.create_lvalue_ref_node(lvalue)
                 }
             }
-            Expression::Binary { op, left, right } => {
+            ExpressionKind::Binary { op, left, right } => {
                 let left_node = self.create_expression_node_with_context(left, context);
                 let right_node = self.create_expression_node_with_context(right, context);
                 self.create_binary_op_node(op, left_node, right_node)
             }
-            Expression::Unary { op, operand } => {
+            ExpressionKind::Unary { op, operand } => {
                 let operand_node = self.create_expression_node_with_context(operand, context);
                 self.create_unary_op_node(op, operand_node)
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -2190,6 +2190,30 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// Extract bit width from a Type (BUG #76 FIX - full Option A)
+    fn type_to_width(ty: &skalp_frontend::types::Type) -> Option<usize> {
+        use skalp_frontend::types::{Type, Width};
+
+        match ty {
+            Type::Bit(Width::Fixed(w)) => Some(*w as usize),
+            Type::Logic(Width::Fixed(w)) => Some(*w as usize),
+            Type::Int(Width::Fixed(w)) => Some(*w as usize),
+            Type::Nat(Width::Fixed(w)) => Some(*w as usize),
+            Type::Bool => Some(1),
+            Type::Tuple(elements) => {
+                // Sum of all element widths
+                let total: usize = elements.iter()
+                    .filter_map(|t| Self::type_to_width(t))
+                    .sum();
+                if total > 0 { Some(total) } else { None }
+            }
+            Type::Array { element_type, size } => {
+                Self::type_to_width(element_type).map(|w| w * (*size as usize))
+            }
+            _ => None,
+        }
+    }
+
     fn create_expression_node(&mut self, expr: &Expression) -> usize {
         // Call with no width hint
         self.create_expression_node_with_width(expr, None)
@@ -2200,10 +2224,13 @@ impl<'a> MirToSirConverter<'a> {
         expr: &Expression,
         target_width: Option<usize>,
     ) -> usize {
-        match expr {
-            Expression::Literal(value) => self.create_literal_node_with_width(value, target_width),
-            Expression::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
-            Expression::Binary { op, left, right } => {
+        // BUG #76 FIX: Use expression's type information when target_width not provided
+        let target_width = target_width.or_else(|| Self::type_to_width(&expr.ty));
+
+        match &expr.kind {
+            ExpressionKind::Literal(value) => self.create_literal_node_with_width(value, target_width),
+            ExpressionKind::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
+            ExpressionKind::Binary { op, left, right } => {
                 // BUG #71 DEBUG: Check if operands contain Cast with Concat inside
                 if matches!(
                     op,
@@ -2212,16 +2239,16 @@ impl<'a> MirToSirConverter<'a> {
                     eprintln!("[BUG #71 BINARY NODE] FP Binary operation: op={:?}", op);
                     eprintln!(
                         "[BUG #71 BINARY NODE]   left: {:?}",
-                        std::mem::discriminant(&**left)
+                        std::mem::discriminant(&left.kind)
                     );
                     eprintln!(
                         "[BUG #71 BINARY NODE]   right: {:?}",
-                        std::mem::discriminant(&**right)
+                        std::mem::discriminant(&right.kind)
                     );
 
                     // Check if left is Cast wrapping a Ref to a variable
-                    if let Expression::Cast { expr, target_type } = &**left {
-                        if let Expression::Ref(LValue::Variable(var_id)) = &**expr {
+                    if let ExpressionKind::Cast { expr, target_type } = &left.kind {
+                        if let ExpressionKind::Ref(LValue::Variable(var_id)) = &expr.kind {
                             eprintln!(
                                 "[BUG #71 BINARY NODE]   left is Cast(Ref(Variable({:?}))) to {:?}",
                                 var_id, target_type
@@ -2230,8 +2257,8 @@ impl<'a> MirToSirConverter<'a> {
                     }
 
                     // Check if right is Cast wrapping a Ref to a variable
-                    if let Expression::Cast { expr, target_type } = &**right {
-                        if let Expression::Ref(LValue::Variable(var_id)) = &**expr {
+                    if let ExpressionKind::Cast { expr, target_type } = &right.kind {
+                        if let ExpressionKind::Ref(LValue::Variable(var_id)) = &expr.kind {
                             eprintln!("[BUG #71 BINARY NODE]   right is Cast(Ref(Variable({:?}))) to {:?}", var_id, target_type);
                         }
                     }
@@ -2240,11 +2267,11 @@ impl<'a> MirToSirConverter<'a> {
                 let right_node = self.create_expression_node(right);
                 self.create_binary_op_node(op, left_node, right_node)
             }
-            Expression::Unary { op, operand } => {
+            ExpressionKind::Unary { op, operand } => {
                 let operand_node = self.create_expression_node(operand);
                 self.create_unary_op_node(op, operand_node)
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -2256,20 +2283,29 @@ impl<'a> MirToSirConverter<'a> {
                 let else_node = self.create_expression_node_with_width(else_expr, target_width);
                 self.create_mux_node(cond_node, then_node, else_node)
             }
-            Expression::Concat(parts) => {
-                eprintln!("🔍 Converting Concat expression with {} parts", parts.len());
-                for (i, part) in parts.iter().enumerate() {
-                    eprintln!("  Part {}: {:?}", i, part);
-                }
-                let part_nodes: Vec<usize> = parts
-                    .iter()
-                    .map(|p| self.create_expression_node(p))
+            ExpressionKind::Concat(parts) => {
+                eprintln!("🔍 [BUG #76] Converting Concat with type: {:?}", expr.ty);
+
+                // Extract element widths from tuple type
+                let part_widths: Vec<Option<usize>> = if let skalp_frontend::types::Type::Tuple(element_types) = &expr.ty {
+                    element_types.iter().map(|t| Self::type_to_width(t)).collect()
+                } else {
+                    vec![None; parts.len()]
+                };
+
+                // Create nodes with proper widths
+                let part_nodes: Vec<usize> = parts.iter().zip(part_widths.iter())
+                    .enumerate()
+                    .map(|(i, (p, width))| {
+                        eprintln!("  Part {}: inferred_width={:?}, type={:?}", i, width, p.ty);
+                        self.create_expression_node_with_width(p, *width)
+                    })
                     .collect();
+
                 eprintln!("  → Created {} SIR nodes for concat", part_nodes.len());
-                // Pass target width to concat node creation
                 self.create_concat_node_with_width(part_nodes, target_width)
             }
-            Expression::Cast { expr, .. } => {
+            ExpressionKind::Cast { expr, .. } => {
                 // Cast is a no-op for hardware generation (bitwise reinterpretation)
                 // Just process the inner expression
                 self.create_expression_node_with_width(expr, target_width)
@@ -3633,8 +3669,8 @@ impl<'a> MirToSirConverter<'a> {
                         "         Suffix: '{}', parent_expr: {:?}",
                         suffix, parent_expr
                     );
-                    let parent_flattened_expr = if let Expression::Ref(lval) = parent_expr {
-                        eprintln!("         Parent is Expression::Ref");
+                    let parent_flattened_expr = if let ExpressionKind::Ref(lval) = &parent_expr.kind {
+                        eprintln!("         Parent is ExpressionKind::Ref");
                         if let LValue::Signal(parent_sig_id) = lval {
                             eprintln!("         Parent is LValue::Signal({:?})", parent_sig_id);
                             // Find parent signal in MIR module
@@ -3688,7 +3724,7 @@ impl<'a> MirToSirConverter<'a> {
                                 );
 
                                 parent_flattened_sig_opt
-                                    .map(|s| Expression::Ref(LValue::Signal(s.id)))
+                                    .map(|s| Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(s.id))))
                             } else {
                                 None
                             }
@@ -3725,7 +3761,7 @@ impl<'a> MirToSirConverter<'a> {
                                     .find(|p| p.name == parent_flattened_name);
 
                                 parent_flattened_port_opt
-                                    .map(|p| Expression::Ref(LValue::Port(p.id)))
+                                    .map(|p| Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(p.id))))
                             } else {
                                 None
                             }
@@ -4588,9 +4624,9 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) -> usize {
-        let result = match expr {
-            Expression::Literal(value) => self.create_literal_node(value),
-            Expression::Ref(lvalue) => {
+        let result = match &expr.kind {
+            ExpressionKind::Literal(value) => self.create_literal_node(value),
+            ExpressionKind::Ref(lvalue) => {
                 // Map through ports if needed
                 if let Some(sig_name) =
                     self.get_signal_from_lvalue(lvalue, inst_prefix, port_mapping, child_module)
@@ -4601,7 +4637,7 @@ impl<'a> MirToSirConverter<'a> {
                     self.create_constant_node(0, 1)
                 }
             }
-            Expression::Binary { op, left, right } => {
+            ExpressionKind::Binary { op, left, right } => {
                 let left_node = self.create_expression_node_for_instance(
                     left,
                     inst_prefix,
@@ -4616,7 +4652,7 @@ impl<'a> MirToSirConverter<'a> {
                 );
                 self.create_binary_op_node(op, left_node, right_node)
             }
-            Expression::Unary { op, operand } => {
+            ExpressionKind::Unary { op, operand } => {
                 let operand_node = self.create_expression_node_for_instance(
                     operand,
                     inst_prefix,
@@ -4625,7 +4661,7 @@ impl<'a> MirToSirConverter<'a> {
                 );
                 self.create_unary_op_node(op, operand_node)
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -4650,7 +4686,7 @@ impl<'a> MirToSirConverter<'a> {
                 );
                 self.create_mux_node(cond_node, then_node, else_node)
             }
-            Expression::Concat(parts) => {
+            ExpressionKind::Concat(parts) => {
                 let part_nodes: Vec<usize> = parts
                     .iter()
                     .map(|p| {
@@ -4687,8 +4723,8 @@ impl<'a> MirToSirConverter<'a> {
     ) -> Vec<SignalRef> {
         let mut inputs = Vec::new();
 
-        match expr {
-            Expression::Ref(lvalue) => {
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => {
                 // Extract signal from LValue
                 if let Some(sig_name) =
                     self.get_signal_from_lvalue(lvalue, inst_prefix, port_mapping, child_module)
@@ -4699,7 +4735,7 @@ impl<'a> MirToSirConverter<'a> {
                     });
                 }
             }
-            Expression::Binary { op: _, left, right } => {
+            ExpressionKind::Binary { op: _, left, right } => {
                 inputs.extend(self.collect_expression_inputs(
                     left,
                     inst_prefix,
@@ -4713,7 +4749,7 @@ impl<'a> MirToSirConverter<'a> {
                     child_module,
                 ));
             }
-            Expression::Unary { op: _, operand } => {
+            ExpressionKind::Unary { op: _, operand } => {
                 inputs.extend(self.collect_expression_inputs(
                     operand,
                     inst_prefix,
@@ -4721,7 +4757,7 @@ impl<'a> MirToSirConverter<'a> {
                     child_module,
                 ));
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -4804,8 +4840,8 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Extract signal name from expression (for port mapping)
     fn get_signal_name_from_expression(&self, expr: &Expression) -> String {
-        match expr {
-            Expression::Ref(lvalue) => {
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => {
                 match lvalue {
                     LValue::Signal(sig_id) => {
                         // Find signal by ID in current module
@@ -5013,24 +5049,24 @@ impl<'a> MirToSirConverter<'a> {
         target_field: &str,
         child_module: &Module,
     ) -> Expression {
-        match expr {
-            Expression::Ref(lvalue) => {
-                Expression::Ref(self.adapt_lvalue_field(lvalue, target_field, child_module))
+        let new_kind = match &expr.kind {
+            ExpressionKind::Ref(lvalue) => {
+                ExpressionKind::Ref(self.adapt_lvalue_field(lvalue, target_field, child_module))
             }
-            Expression::Binary { op, left, right } => Expression::Binary {
+            ExpressionKind::Binary { op, left, right } => ExpressionKind::Binary {
                 op: *op,
                 left: Box::new(self.adapt_expression_field(left, target_field, child_module)),
                 right: Box::new(self.adapt_expression_field(right, target_field, child_module)),
             },
-            Expression::Unary { op, operand } => Expression::Unary {
+            ExpressionKind::Unary { op, operand } => ExpressionKind::Unary {
                 op: *op,
                 operand: Box::new(self.adapt_expression_field(operand, target_field, child_module)),
             },
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
-            } => Expression::Conditional {
+            } => ExpressionKind::Conditional {
                 cond: Box::new(self.adapt_expression_field(cond, target_field, child_module)),
                 then_expr: Box::new(self.adapt_expression_field(
                     then_expr,
@@ -5044,8 +5080,9 @@ impl<'a> MirToSirConverter<'a> {
                 )),
             },
             // For other expression types, return as-is
-            _ => expr.clone(),
-        }
+            _ => return expr.clone(),
+        };
+        Expression::with_unknown_type(new_kind)
     }
 
     /// Adapt an LValue to use a different field suffix
@@ -5169,11 +5206,11 @@ impl<'a> MirToSirConverter<'a> {
 
         // Build ternary chain from right to left (lowest to highest priority)
         for case in mux.cases.iter().rev() {
-            result_expr = Expression::Conditional {
+            result_expr = Expression::with_unknown_type(ExpressionKind::Conditional {
                 cond: Box::new(case.condition.clone()),
                 then_expr: Box::new(case.value.clone()),
                 else_expr: Box::new(result_expr),
-            };
+            });
         }
 
         // Create SIR node for the final expression
@@ -5190,11 +5227,11 @@ impl<'a> MirToSirConverter<'a> {
 
         // Build ternary chain from right to left (lowest to highest priority)
         for case in mux.cases.iter().rev() {
-            result_expr = Expression::Conditional {
+            result_expr = Expression::with_unknown_type(ExpressionKind::Conditional {
                 cond: Box::new(case.condition.clone()),
                 then_expr: Box::new(case.value.clone()),
                 else_expr: Box::new(result_expr),
-            };
+            });
         }
 
         // CRITICAL: Create SIR node using the local context
@@ -5209,8 +5246,8 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Evaluate a constant expression to get a compile-time constant value
     fn evaluate_constant_expression(&self, expr: &Expression) -> Option<u64> {
-        match expr {
-            Expression::Literal(value) => match value {
+        match &expr.kind {
+            ExpressionKind::Literal(value) => match value {
                 Value::Integer(i) => Some(*i as u64),
                 Value::BitVector { value, .. } => Some(*value),
                 _ => None,

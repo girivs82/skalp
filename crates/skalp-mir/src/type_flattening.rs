@@ -15,8 +15,8 @@
 //! ONLY scalar types in ports and signals (no DataType::Struct, etc.).
 
 use crate::mir::{
-    Assignment, AssignmentKind, ClockDomainId, DataType, Expression, LValue, Port, PortDirection,
-    PortId, Signal, SignalId, StructType, Value,
+    Assignment, AssignmentKind, ClockDomainId, DataType, Expression, ExpressionKind, LValue, Port,
+    PortDirection, PortId, Signal, SignalId, StructType, Value,
 };
 
 /// Information about a flattened field
@@ -222,7 +222,10 @@ impl TypeFlattener {
             let lhs_field = LValue::Signal(SignalId(field_info.id));
 
             // For RHS, we create a reference to the flattened RHS signal
-            let rhs_field = Expression::Ref(LValue::Signal(SignalId(field_info.id)));
+            // TODO(Bug #76): Use proper type from field_info.leaf_type instead of Unknown
+            let rhs_field = Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
+                SignalId(field_info.id),
+            )));
 
             assignments.push(Assignment {
                 lhs: lhs_field,
@@ -603,16 +606,16 @@ impl TypeFlattener {
 
     /// Extract base name from an Expression
     fn get_expression_base_name(expr: &Expression) -> String {
-        match expr {
-            Expression::Ref(lvalue) => Self::get_lvalue_base_name(lvalue),
-            Expression::Literal(_) => "literal".to_string(),
-            Expression::Binary { .. } => "binary".to_string(),
-            Expression::Unary { .. } => "unary".to_string(),
-            Expression::Conditional { .. } => "cond".to_string(),
-            Expression::Concat(_) => "concat".to_string(),
-            Expression::Replicate { .. } => "replicate".to_string(),
-            Expression::FunctionCall { name, .. } => name.clone(),
-            Expression::Cast { expr, .. } => Self::get_expression_base_name(expr),
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => Self::get_lvalue_base_name(lvalue),
+            ExpressionKind::Literal(_) => "literal".to_string(),
+            ExpressionKind::Binary { .. } => "binary".to_string(),
+            ExpressionKind::Unary { .. } => "unary".to_string(),
+            ExpressionKind::Conditional { .. } => "cond".to_string(),
+            ExpressionKind::Concat(_) => "concat".to_string(),
+            ExpressionKind::Replicate { .. } => "replicate".to_string(),
+            ExpressionKind::FunctionCall { name, .. } => name.clone(),
+            ExpressionKind::Cast { expr, .. } => Self::get_expression_base_name(expr),
         }
     }
 }

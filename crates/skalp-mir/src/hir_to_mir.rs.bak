@@ -991,7 +991,7 @@ impl<'hir> HirToMir<'hir> {
                     if let_stmt.name == "_tuple_tmp_66" {
                         eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=false, using placeholder");
                     }
-                    (Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))), false) // Placeholder, will be replaced
+                    (Expression::Literal(Value::Integer(0)), false) // Placeholder, will be replaced
                 };
 
                 let var_id = if var_id == VariableId(u32::MAX) {
@@ -1493,9 +1493,9 @@ impl<'hir> HirToMir<'hir> {
             };
 
             let rhs_expr = if rhs_is_signal {
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(rhs_field.id))))
+                Expression::Ref(LValue::Signal(SignalId(rhs_field.id)))
             } else {
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(rhs_field.id))))
+                Expression::Ref(LValue::Port(PortId(rhs_field.id)))
             };
 
             assignments.push(Assignment {
@@ -1682,12 +1682,12 @@ impl<'hir> HirToMir<'hir> {
         for (idx_str, fields_at_index) in array_indices {
             let array_index: usize = idx_str.parse().ok()?;
             // Create condition: index == array_index
-            let index_literal = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(array_index as i64)));
-            let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+            let index_literal = Expression::Literal(Value::Integer(array_index as i64));
+            let condition = Expression::Binary {
                 op: BinaryOp::Equal,
                 left: Box::new(mir_index.clone()),
                 right: Box::new(index_literal),
-            });
+            };
 
             // For each field at this index (e.g., x, y, z for a struct element)
             for field_info in &fields_at_index {
@@ -1703,14 +1703,14 @@ impl<'hir> HirToMir<'hir> {
                 let rhs_for_field = self.adapt_rhs_for_array_element(&mir_rhs, field_info);
 
                 // Create self-reference for "keep" value: mem_N_field
-                let keep_value = Expression::with_unknown_type(ExpressionKind::Ref(lhs_lval.clone()));
+                let keep_value = Expression::Ref(lhs_lval.clone());
 
                 // Build conditional: (index == N) ? data_field : mem_N_field
-                let conditional_rhs = Expression::with_unknown_type(ExpressionKind::Conditional {
+                let conditional_rhs = Expression::Conditional {
                     cond: Box::new(condition.clone()),
                     then_expr: Box::new(rhs_for_field),
                     else_expr: Box::new(keep_value),
-                });
+                };
 
                 assignments.push(Assignment {
                     lhs: lhs_lval,
@@ -1863,9 +1863,9 @@ impl<'hir> HirToMir<'hir> {
 
                 // Create reference to this array element's field
                 let array_element_ref = if array_is_signal {
-                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(matching_array_field.id))))
+                    Expression::Ref(LValue::Signal(SignalId(matching_array_field.id)))
                 } else {
-                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(matching_array_field.id))))
+                    Expression::Ref(LValue::Port(PortId(matching_array_field.id)))
                 };
 
                 if mux_expr.is_none() {
@@ -1873,17 +1873,17 @@ impl<'hir> HirToMir<'hir> {
                     mux_expr = Some(array_element_ref);
                 } else {
                     // Subsequent iterations - wrap previous with conditional
-                    let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                    let condition = Expression::Binary {
                         op: BinaryOp::Equal,
                         left: Box::new(mir_index.clone()),
-                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(array_index as i64)))),
-                    });
+                        right: Box::new(Expression::Literal(Value::Integer(array_index as i64))),
+                    };
 
-                    mux_expr = Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                    mux_expr = Some(Expression::Conditional {
                         cond: Box::new(condition),
                         then_expr: Box::new(array_element_ref),
                         else_expr: Box::new(mux_expr.unwrap()),
-                    }));
+                    });
                 }
             }
 
@@ -1905,8 +1905,8 @@ impl<'hir> HirToMir<'hir> {
 
     /// Adapt RHS expression to reference the correct field for an array element
     ///
-    /// For example, if RHS is `Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(wr_data)))` and we need field "x",
-    /// this should return `Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(wr_data_x)))`
+    /// For example, if RHS is `Expression::Ref(LValue::Signal(wr_data))` and we need field "x",
+    /// this should return `Expression::Ref(LValue::Signal(wr_data_x))`
     fn adapt_rhs_for_array_element(
         &self,
         rhs: &Expression,
@@ -1933,26 +1933,26 @@ impl<'hir> HirToMir<'hir> {
 
     /// Recursively adapt an expression to reference a specific field
     fn adapt_expression_for_field(&self, expr: &Expression, field_path: &[String]) -> Expression {
-        match &expr.kind {
-            ExpressionKind::Ref(lval) => Expression::with_unknown_type(ExpressionKind::Ref(self.adapt_lvalue_for_field(lval, field_path))),
-            ExpressionKind::Binary { op, left, right } => Expression::with_unknown_type(ExpressionKind::Binary {
+        match expr {
+            Expression::Ref(lval) => Expression::Ref(self.adapt_lvalue_for_field(lval, field_path)),
+            Expression::Binary { op, left, right } => Expression::Binary {
                 op: *op,
                 left: Box::new(self.adapt_expression_for_field(left, field_path)),
                 right: Box::new(self.adapt_expression_for_field(right, field_path)),
-            }),
-            ExpressionKind::Unary { op, operand } => Expression::with_unknown_type(ExpressionKind::Unary {
+            },
+            Expression::Unary { op, operand } => Expression::Unary {
                 op: *op,
                 operand: Box::new(self.adapt_expression_for_field(operand, field_path)),
-            }),
-            ExpressionKind::Conditional {
+            },
+            Expression::Conditional {
                 cond,
                 then_expr,
                 else_expr,
-            } => Expression::with_unknown_type(ExpressionKind::Conditional {
+            } => Expression::Conditional {
                 cond: Box::new(self.adapt_expression_for_field(cond, field_path)),
                 then_expr: Box::new(self.adapt_expression_for_field(then_expr, field_path)),
                 else_expr: Box::new(self.adapt_expression_for_field(else_expr, field_path)),
-            }),
+            },
             // Literals and other non-reference expressions don't need adaptation
             _ => expr.clone(),
         }
@@ -2205,9 +2205,9 @@ impl<'hir> HirToMir<'hir> {
             };
 
             let rhs_expr = if rhs_is_signal {
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(rhs_field.id))))
+                Expression::Ref(LValue::Signal(SignalId(rhs_field.id)))
             } else {
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(rhs_field.id))))
+                Expression::Ref(LValue::Port(PortId(rhs_field.id)))
             };
 
             assignments.push(ContinuousAssign {
@@ -2325,9 +2325,9 @@ impl<'hir> HirToMir<'hir> {
 
             // Create expression referencing the flattened RHS field
             let rhs_field_expr = if is_signal {
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(rhs_field.id))))
+                Expression::Ref(LValue::Signal(SignalId(rhs_field.id)))
             } else {
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(rhs_field.id))))
+                Expression::Ref(LValue::Port(PortId(rhs_field.id)))
             };
 
             connections.push((port_field_name, rhs_field_expr));
@@ -2408,15 +2408,15 @@ impl<'hir> HirToMir<'hir> {
                 // Convert literal pattern to expression
                 match lit {
                     hir::HirLiteral::Integer(val) => {
-                        Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(*val as i64))))
+                        Some(Expression::Literal(Value::Integer(*val as i64)))
                     }
-                    hir::HirLiteral::Float(f) => Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(*f)))),
+                    hir::HirLiteral::Float(f) => Some(Expression::Literal(Value::Float(*f))),
                     hir::HirLiteral::String(s) => {
-                        Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::String(s.clone()))))
+                        Some(Expression::Literal(Value::String(s.clone())))
                     }
                     hir::HirLiteral::Boolean(b) => {
                         // Convert boolean to integer (true = 1, false = 0)
-                        Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(if *b { 1 } else { 0 }))))
+                        Some(Expression::Literal(Value::Integer(if *b { 1 } else { 0 })))
                     }
                     hir::HirLiteral::BitVector(bits) => {
                         // Convert bit vector to integer value
@@ -2427,7 +2427,7 @@ impl<'hir> HirToMir<'hir> {
                                 value |= 1 << i;
                             }
                         }
-                        Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::BitVector { width, value })))
+                        Some(Expression::Literal(Value::BitVector { width, value }))
                     }
                 }
             }
@@ -2444,7 +2444,7 @@ impl<'hir> HirToMir<'hir> {
                         variant_name.chars().map(|c| c as u32).sum::<u32>() % 16
                     }
                 };
-                Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(variant_value as i64))))
+                Some(Expression::Literal(Value::Integer(variant_value as i64)))
             }
             hir::HirPattern::Variable(_) => {
                 // Variable patterns can't be converted to case values directly
@@ -2544,8 +2544,8 @@ impl<'hir> HirToMir<'hir> {
                 let base_expr = self.lvalue_to_expression(base)?;
                 let (high_bit, low_bit) = self.get_field_bit_range(&base_expr, field)?;
 
-                let high_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(high_bit as i64)));
-                let low_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(low_bit as i64)));
+                let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
 
                 Some(LValue::RangeSelect {
                     base: Box::new(base_mir),
@@ -2570,23 +2570,18 @@ impl<'hir> HirToMir<'hir> {
     /// Convert HIR expression to MIR
     fn convert_expression(&mut self, expr: &hir::HirExpression) -> Option<Expression> {
         eprintln!("[BUG #74 CONVERT_EXPR] convert_expression called with discriminant: {:?}", std::mem::discriminant(expr));
-
-        // BUG #76 FIX: Infer type first for proper type propagation
-        let ty = self.infer_hir_expression_type(expr);
-        eprintln!("[BUG #76] Inferred type for expr: {:?}", ty);
-
         match expr {
-            hir::HirExpression::Literal(lit) => self.convert_literal(lit).map(|v| Expression::new(ExpressionKind::Literal(v), ty)),
+            hir::HirExpression::Literal(lit) => self.convert_literal(lit).map(Expression::Literal),
             hir::HirExpression::Signal(id) => {
                 // First try signal_map
                 if let Some(&signal_id) = self.signal_map.get(id) {
-                    Some(Expression::new(ExpressionKind::Ref(LValue::Signal(signal_id)), ty))
+                    Some(Expression::Ref(LValue::Signal(signal_id)))
                 } else {
                     // If not found in signals, check if it's a port masquerading as a signal
                     // (due to HIR builder converting ports to signals in expressions)
                     let hir_port_id = hir::PortId(id.0);
                     if let Some(&mir_port_id) = self.port_map.get(&hir_port_id) {
-                        Some(Expression::new(ExpressionKind::Ref(LValue::Port(mir_port_id)), ty))
+                        Some(Expression::Ref(LValue::Port(mir_port_id)))
                     } else {
                         None
                     }
@@ -2595,7 +2590,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Port(id) => {
                 // Handle port references in expressions
                 if let Some(&mir_port_id) = self.port_map.get(id) {
-                    Some(Expression::new(ExpressionKind::Ref(LValue::Port(mir_port_id)), ty))
+                    Some(Expression::Ref(LValue::Port(mir_port_id)))
                 } else {
                     None
                 }
@@ -2652,7 +2647,7 @@ impl<'hir> HirToMir<'hir> {
                     });
 
                 if let Some(mir_id) = mir_id {
-                    Some(Expression::new(ExpressionKind::Ref(LValue::Variable(mir_id)), ty))
+                    Some(Expression::Ref(LValue::Variable(mir_id)))
                 } else {
                     eprintln!(
                         "[DEBUG] Variable not found in any lookup map: HIR ID {:?}",
@@ -2702,7 +2697,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 // Fallback if constant not found
-                Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty))
+                Some(Expression::Literal(Value::Integer(0)))
             }
             hir::HirExpression::GenericParam(param_name) => {
                 // BUG FIX #7: WORKAROUND for Bug #42/43 - Cast expressions create malformed AST
@@ -2713,7 +2708,7 @@ impl<'hir> HirToMir<'hir> {
                     .values()
                     .find(|(_, var_name, _)| var_name == param_name)
                 {
-                    return Some(Expression::new(ExpressionKind::Ref(LValue::Variable(*mir_var_id)), ty));
+                    return Some(Expression::Ref(LValue::Variable(*mir_var_id)));
                 }
 
                 // Look up the generic parameter value in the current context
@@ -2748,7 +2743,7 @@ impl<'hir> HirToMir<'hir> {
                 }
                 // If not found, return a literal 0 as fallback
                 // This will be properly resolved during monomorphization/type checking
-                Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty))
+                Some(Expression::Literal(Value::Integer(0)))
             }
             hir::HirExpression::Binary(binary) => {
                 let left = self.convert_expression(&binary.left)?;
@@ -2756,12 +2751,12 @@ impl<'hir> HirToMir<'hir> {
                 let left = Box::new(left);
                 let right = Box::new(right);
                 let op = self.convert_binary_op(&binary.op, &binary.left);
-                Some(Expression::new(ExpressionKind::Binary { op, left, right }, ty))
+                Some(Expression::Binary { op, left, right })
             }
             hir::HirExpression::Unary(unary) => {
                 let operand = Box::new(self.convert_expression(&unary.operand)?);
                 let op = self.convert_unary_op(&unary.op);
-                Some(Expression::new(ExpressionKind::Unary { op, operand }, ty))
+                Some(Expression::Unary { op, operand })
             }
             hir::HirExpression::Call(call) => {
                 eprintln!(
@@ -2818,108 +2813,108 @@ impl<'hir> HirToMir<'hir> {
                             }
                             let right = Box::new(right_result?);
                             eprintln!("[MIR_CALL] FP add conversion succeeded");
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FAdd,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "sub" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FSub,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "mul" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FMul,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "div" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FDiv,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         // Unary FP operations
                         "sqrt" if call.args.len() == 1 => {
                             let operand = Box::new(self.convert_expression(&call.args[0])?);
-                            return Some(Expression::new(ExpressionKind::Unary {
+                            return Some(Expression::Unary {
                                 op: UnaryOp::FSqrt,
                                 operand,
-                            }, ty));
+                            });
                         }
                         "abs" if call.args.len() == 1 => {
                             let arg = self.convert_expression(&call.args[0])?;
-                            return Some(Expression::new(ExpressionKind::FunctionCall {
+                            return Some(Expression::FunctionCall {
                                 name: "fabs".to_string(),
                                 args: vec![arg],
-                            }, ty));
+                            });
                         }
                         // BUG FIX #4: FP comparison methods
                         "lt" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FLess,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "gt" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FGreater,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "le" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FLessEqual,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "ge" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FGreaterEqual,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "eq" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FEqual,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "ne" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FNotEqual,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         _ => {
                             // Unknown FP method - fall through to regular inlining
@@ -2934,10 +2929,10 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(arg_type) = self.infer_hir_type(&call.args[0]) {
                         if self.is_float_type(&arg_type) {
                             let operand = Box::new(self.convert_expression(&call.args[0])?);
-                            return Some(Expression::new(ExpressionKind::Unary {
+                            return Some(Expression::Unary {
                                 op: UnaryOp::FSqrt,
                                 operand,
-                            }, ty));
+                            });
                         }
                     }
                 }
@@ -2952,64 +2947,63 @@ impl<'hir> HirToMir<'hir> {
                         "fp_lt" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FLess,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "fp_mul" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FMul,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "fp_add" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FAdd,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "fp_sub" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FSub,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "fp_div" if call.args.len() == 2 => {
                             let left = Box::new(self.convert_expression(&call.args[0])?);
                             let right = Box::new(self.convert_expression(&call.args[1])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FDiv,
                                 left,
                                 right,
-                            }, ty));
+                            });
                         }
                         "fp_sqrt" if call.args.len() == 1 => {
                             let operand = Box::new(self.convert_expression(&call.args[0])?);
-                            return Some(Expression::new(ExpressionKind::Unary {
+                            return Some(Expression::Unary {
                                 op: UnaryOp::FSqrt,
                                 operand,
-                            }, ty));
+                            });
                         }
                         "fp_neg" if call.args.len() == 1 => {
-                            // Note: fp_neg special case - the zero literal needs Unknown type as it's internal
-                            let zero = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(0.0))));
+                            let zero = Box::new(Expression::Literal(Value::Float(0.0)));
                             let operand = Box::new(self.convert_expression(&call.args[0])?);
-                            return Some(Expression::new(ExpressionKind::Binary {
+                            return Some(Expression::Binary {
                                 op: BinaryOp::FSub,
                                 left: zero,
                                 right: operand,
-                            }, ty));
+                            });
                         }
                         _ => {
                             eprintln!("[MIR_CALL] Unknown fp_* function: {}", call.function);
@@ -3072,9 +3066,9 @@ impl<'hir> HirToMir<'hir> {
                         {
                             // Found it! Return direct signal/port reference
                             return if is_signal {
-                                Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(field.id)))))
+                                Some(Expression::Ref(LValue::Signal(SignalId(field.id))))
                             } else {
-                                Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(field.id)))))
+                                Some(Expression::Ref(LValue::Port(PortId(field.id))))
                             };
                         }
                     }
@@ -3164,9 +3158,9 @@ impl<'hir> HirToMir<'hir> {
                             // Simple scalar array element - just reference the field
                             let field = &group_fields[0];
                             let elem_expr = if is_signal {
-                                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(field.id))))
+                                Expression::Ref(LValue::Signal(SignalId(field.id)))
                             } else {
-                                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(field.id))))
+                                Expression::Ref(LValue::Port(PortId(field.id)))
                             };
                             element_exprs.push((*array_idx, elem_expr));
                         } else {
@@ -3184,19 +3178,19 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(else_expr) = mux_expr {
                             // Build condition: index == array_idx
                             let index_literal =
-                                Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(*array_idx as i64)));
-                            let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                                Expression::Literal(Value::Integer(*array_idx as i64));
+                            let condition = Expression::Binary {
                                 op: BinaryOp::Equal,
                                 left: Box::new(mir_index.clone()),
                                 right: Box::new(index_literal),
-                            });
+                            };
 
                             // Build ternary: condition ? elem_expr : else_expr
-                            mux_expr = Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                            mux_expr = Some(Expression::Conditional {
                                 cond: Box::new(condition),
                                 then_expr: Box::new(elem_expr.clone()),
                                 else_expr: Box::new(else_expr),
-                            }));
+                            });
                         } else {
                             // Last element (no else branch)
                             mux_expr = Some(elem_expr.clone());
@@ -3214,21 +3208,21 @@ impl<'hir> HirToMir<'hir> {
                 // Fall back to bit select
                 let base_lval = self.expr_to_lvalue(base)?;
                 let index_expr = self.convert_expression(index)?;
-                Some(Expression::new(ExpressionKind::Ref(LValue::BitSelect {
+                Some(Expression::Ref(LValue::BitSelect {
                     base: Box::new(base_lval),
                     index: Box::new(index_expr),
-                }), ty))
+                }))
             }
             hir::HirExpression::Range(base, high, low) => {
                 // Convert range expression to range select
                 let base_lval = self.expr_to_lvalue(base)?;
                 let high_expr = self.convert_expression(high)?;
                 let low_expr = self.convert_expression(low)?;
-                Some(Expression::new(ExpressionKind::Ref(LValue::RangeSelect {
+                Some(Expression::Ref(LValue::RangeSelect {
                     base: Box::new(base_lval),
                     high: Box::new(high_expr),
                     low: Box::new(low_expr),
-                }), ty))
+                }))
             }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Convert struct field access to bit slice (range select)
@@ -3273,14 +3267,14 @@ impl<'hir> HirToMir<'hir> {
                 // - MAX_VALUE: type maximum
                 // - MIN_VALUE: type minimum
                 match constant_name.as_str() {
-                    "ZERO" => Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty)),
-                    "ONE" => Some(Expression::new(ExpressionKind::Literal(Value::Integer(1)), ty)),
-                    "MAX_VALUE" => Some(Expression::new(ExpressionKind::Literal(Value::Integer(i64::MAX)), ty)),
-                    "MIN_VALUE" => Some(Expression::new(ExpressionKind::Literal(Value::Integer(i64::MIN)), ty)),
+                    "ZERO" => Some(Expression::Literal(Value::Integer(0))),
+                    "ONE" => Some(Expression::Literal(Value::Integer(1))),
+                    "MAX_VALUE" => Some(Expression::Literal(Value::Integer(i64::MAX))),
+                    "MIN_VALUE" => Some(Expression::Literal(Value::Integer(i64::MIN))),
                     _ => {
                         // Unknown associated constant - return 0 as fallback
                         // This will be properly resolved during type checking/monomorphization
-                        Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty))
+                        Some(Expression::Literal(Value::Integer(0)))
                     }
                 }
             }
@@ -3303,7 +3297,7 @@ impl<'hir> HirToMir<'hir> {
                         // TODO: Add proper array initialization support in MIR/codegen
                         if count_nat > 1024 {
                             // Return zero for large arrays
-                            return Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty));
+                            return Some(Expression::Literal(Value::Integer(0)));
                         }
 
                         // For small arrays, we could expand, but for now just return
@@ -3313,7 +3307,7 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // If count couldn't be evaluated, return placeholder
-                Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty))
+                Some(Expression::Literal(Value::Integer(0)))
             }
             hir::HirExpression::Concat(expressions) => {
                 // Bit concatenation: {a, b, c}
@@ -3333,7 +3327,7 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 if expressions.is_empty() {
-                    return Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty));
+                    return Some(Expression::Literal(Value::Integer(0)));
                 }
 
                 if expressions.len() == 1 {
@@ -3377,7 +3371,7 @@ impl<'hir> HirToMir<'hir> {
                     "[DEBUG] Concat successfully converted with {} MIR elements",
                     mir_exprs.len()
                 );
-                Some(Expression::new(ExpressionKind::Concat(mir_exprs), ty))
+                Some(Expression::Concat(mir_exprs))
             }
             hir::HirExpression::Ternary {
                 condition,
@@ -3390,11 +3384,11 @@ impl<'hir> HirToMir<'hir> {
                 let then_expr = Box::new(self.convert_expression(true_expr)?);
                 let else_expr = Box::new(self.convert_expression(false_expr)?);
 
-                Some(Expression::new(ExpressionKind::Conditional {
+                Some(Expression::Conditional {
                     cond,
                     then_expr,
                     else_expr,
-                }, ty))
+                })
             }
             hir::HirExpression::If(if_expr) => {
                 // Convert if-expression to a conditional (ternary) expression in MIR
@@ -3429,7 +3423,7 @@ impl<'hir> HirToMir<'hir> {
                 let cond = cond?;
                 eprintln!(
                     "[IF_DEBUG] ✅ Converted condition to MIR: {:?}",
-                    std::mem::discriminant(&cond.kind)
+                    std::mem::discriminant(&cond)
                 );
 
                 // Save current dynamic_variables state and pending_statements count
@@ -3612,11 +3606,11 @@ impl<'hir> HirToMir<'hir> {
 
                 eprintln!("[IF_DEBUG] ✅ IF EXPRESSION CONVERSION COMPLETED SUCCESSFULLY");
                 eprintln!("[IF_DEBUG] ========================================");
-                Some(Expression::new(ExpressionKind::Conditional {
+                Some(Expression::Conditional {
                     cond,
                     then_expr,
                     else_expr,
-                }, ty))
+                })
             }
             hir::HirExpression::Match(match_expr) => {
                 // Convert match-expression to nested conditionals
@@ -3661,10 +3655,10 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
-                Some(Expression::new(ExpressionKind::Cast {
+                Some(Expression::Cast {
                     expr: Box::new(inner_expr),
                     target_type,
-                }, ty))
+                })
             }
             hir::HirExpression::StructLiteral(struct_lit) => {
                 // Convert struct literal to packed bit vector
@@ -3740,7 +3734,7 @@ impl<'hir> HirToMir<'hir> {
                 } else {
                     eprintln!(
                         "[DEBUG] Block expression: result_expr converted to MIR type: {:?}",
-                        std::mem::discriminant(&result.as_ref().unwrap().kind)
+                        std::mem::discriminant(result.as_ref().unwrap())
                     );
                 }
                 result
@@ -3800,7 +3794,7 @@ impl<'hir> HirToMir<'hir> {
                 field_exprs.len()
             );
             // Concatenate all fields: { x, y, z } becomes {x, y, z}
-            return Some(Expression::with_unknown_type(ExpressionKind::Concat(field_exprs)));
+            return Some(Expression::Concat(field_exprs));
         }
 
         // Find the struct type definition to get field layout
@@ -3883,7 +3877,7 @@ impl<'hir> HirToMir<'hir> {
         // Multi-element tuple - concatenate all elements
         // Elements are packed from left to right: (a, b, c) becomes {a, b, c}
         // In bit representation: MSB is 'a', LSB is 'c'
-        Some(Expression::with_unknown_type(ExpressionKind::Concat(element_exprs)))
+        Some(Expression::Concat(element_exprs))
     }
 
     /// Convert array literal to concatenation expression
@@ -3909,7 +3903,7 @@ impl<'hir> HirToMir<'hir> {
         // Multi-element array - concatenate all elements
         // Array elements are packed from left to right: [a, b, c] becomes {a, b, c}
         // In SystemVerilog: element 0 is at MSB, element N-1 is at LSB
-        Some(Expression::with_unknown_type(ExpressionKind::Concat(element_exprs)))
+        Some(Expression::Concat(element_exprs))
     }
 
     /// Convert match expression to nested conditional expressions
@@ -3959,12 +3953,12 @@ impl<'hir> HirToMir<'hir> {
                     // Compare match_value with literal
                     // Clone the pre-converted match value instead of re-converting
                     let left = Box::new(match_value_expr.clone());
-                    let right = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(self.convert_literal(lit)?)));
-                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                    let right = Box::new(Expression::Literal(self.convert_literal(lit)?));
+                    Some(Expression::Binary {
                         op: BinaryOp::Equal,
                         left,
                         right,
-                    }))
+                    })
                 }
                 hir::HirPattern::Wildcard => {
                     // Wildcard always matches - shouldn't appear except as last arm
@@ -3978,11 +3972,11 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(const_value) = self.resolve_constant_value(variant) {
                             let left = Box::new(match_value_expr.clone());
                             let right = Box::new(const_value);
-                            Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                            Some(Expression::Binary {
                                 op: BinaryOp::Equal,
                                 left,
                                 right,
-                            }))
+                            })
                         } else {
                             None
                         }
@@ -3993,11 +3987,11 @@ impl<'hir> HirToMir<'hir> {
                         {
                             let left = Box::new(match_value_expr.clone());
                             let right = Box::new(variant_value);
-                            Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                            Some(Expression::Binary {
                                 op: BinaryOp::Equal,
                                 left,
                                 right,
-                            }))
+                            })
                         } else {
                             eprintln!(
                                 "[DEBUG] Match: failed to resolve enum variant {}::{}",
@@ -4024,11 +4018,11 @@ impl<'hir> HirToMir<'hir> {
             let final_condition = if let Some(guard) = &arm.guard {
                 let guard_expr = Box::new(self.convert_expression(guard)?);
                 let cond_expr = Box::new(condition);
-                Expression::with_unknown_type(ExpressionKind::Binary {
+                Expression::Binary {
                     op: BinaryOp::LogicalAnd,
                     left: cond_expr,
                     right: guard_expr,
-                })
+                }
             } else {
                 condition
             };
@@ -4057,11 +4051,11 @@ impl<'hir> HirToMir<'hir> {
                 );
                 return None;
             }
-            result = Expression::with_unknown_type(ExpressionKind::Conditional {
+            result = Expression::Conditional {
                 cond: Box::new(final_condition),
                 then_expr: Box::new(arm_expr.unwrap()),
                 else_expr: Box::new(result),
-            });
+            };
         }
 
         Some(result)
@@ -4102,14 +4096,14 @@ impl<'hir> HirToMir<'hir> {
     /// Convert const value to MIR expression
     fn const_value_to_mir_expression(&self, const_value: &ConstValue) -> Expression {
         match const_value {
-            ConstValue::Nat(n) => Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(*n as i64))),
-            ConstValue::Int(i) => Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(*i))),
-            ConstValue::Bool(b) => Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(if *b { 1 } else { 0 }))),
-            ConstValue::Float(f) => Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(*f))),
-            ConstValue::String(s) => Expression::with_unknown_type(ExpressionKind::Literal(Value::String(s.clone()))),
+            ConstValue::Nat(n) => Expression::Literal(Value::Integer(*n as i64)),
+            ConstValue::Int(i) => Expression::Literal(Value::Integer(*i)),
+            ConstValue::Bool(b) => Expression::Literal(Value::Integer(if *b { 1 } else { 0 })),
+            ConstValue::Float(f) => Expression::Literal(Value::Float(*f)),
+            ConstValue::String(s) => Expression::Literal(Value::String(s.clone())),
             // For complex types that don't have direct MIR equivalents, return 0 as fallback
             ConstValue::FloatFormat(_) | ConstValue::Struct(_) => {
-                Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)))
+                Expression::Literal(Value::Integer(0))
             }
         }
     }
@@ -5260,172 +5254,6 @@ impl<'hir> HirToMir<'hir> {
         None
     }
 
-    /// Convert HIR type to frontend Type for MIR expression annotation (BUG #76 FIX)
-    fn hir_type_to_type(&self, hir_type: &hir::HirType) -> Type {
-        use skalp_frontend::types::Width;
-
-        match hir_type {
-            hir::HirType::Bit(width) => Type::Bit(Width::Fixed(*width)),
-            hir::HirType::Logic(width) => Type::Logic(Width::Fixed(*width)),
-            hir::HirType::Int(width) => Type::Int(Width::Fixed(*width)),
-            hir::HirType::Nat(width) => Type::Nat(Width::Fixed(*width)),
-            hir::HirType::Bool => Type::Bool,
-            hir::HirType::Clock(_) => Type::Clock(None),
-            hir::HirType::Reset { .. } => Type::Reset(skalp_frontend::types::ResetPolarity::ActiveHigh),
-            hir::HirType::Event => Type::Event,
-            hir::HirType::Tuple(elements) => {
-                Type::Tuple(elements.iter().map(|t| self.hir_type_to_type(t)).collect())
-            }
-            hir::HirType::Array(elem_type, size) => {
-                Type::Array {
-                    element_type: Box::new(self.hir_type_to_type(elem_type)),
-                    size: *size,
-                }
-            }
-            _ => Type::Unknown,  // For unsupported types (including Custom)
-        }
-    }
-
-    /// Infer the type of a HIR expression from context (BUG #76 FIX - full Option A)
-    fn infer_hir_expression_type(&self, expr: &hir::HirExpression) -> Type {
-        match expr {
-            hir::HirExpression::Literal(lit) => self.infer_literal_type(lit),
-
-            hir::HirExpression::Signal(id) => {
-                // Look up signal type in HIR
-                if let Some(hir) = self.hir {
-                    for impl_block in &hir.implementations {
-                        if let Some(signal) = impl_block.signals.iter().find(|s| s.id == *id) {
-                            return self.hir_type_to_type(&signal.signal_type);
-                        }
-                    }
-                }
-                Type::Unknown
-            }
-
-            hir::HirExpression::Port(id) => {
-                // Look up port type in HIR
-                if let Some(hir) = self.hir {
-                    for entity in &hir.entities {
-                        if let Some(port) = entity.ports.iter().find(|p| p.id == *id) {
-                            return self.hir_type_to_type(&port.port_type);
-                        }
-                    }
-                }
-                Type::Unknown
-            }
-
-            hir::HirExpression::Variable(id) => {
-                // Look up variable type - check multiple sources
-                // 1. Context-aware map
-                if let Some(context) = self.get_current_context() {
-                    let key = (Some(context), *id);
-                    if let Some(&mir_id) = self.context_variable_map.get(&key) {
-                        if let Some(hir_type) = self.mir_variable_types.get(&mir_id) {
-                            return self.hir_type_to_type(hir_type);
-                        }
-                    }
-                }
-
-                // 2. Dynamic variables
-                if let Some((_, _, hir_type)) = self.dynamic_variables.get(id) {
-                    return self.hir_type_to_type(hir_type);
-                }
-
-                // 3. Variable map + type map
-                if let Some(&mir_id) = self.variable_map.get(id) {
-                    if let Some(hir_type) = self.mir_variable_types.get(&mir_id) {
-                        return self.hir_type_to_type(hir_type);
-                    }
-                }
-
-                Type::Unknown
-            }
-
-            hir::HirExpression::Binary(bin) => {
-                // Type depends on operation - usually inherits from operands
-                let left_type = self.infer_hir_expression_type(&bin.left);
-                left_type // Simplified - proper inference would consider operation
-            }
-
-            hir::HirExpression::Concat(exprs) => {
-                // Concat creates a tuple type
-                let element_types: Vec<Type> = exprs.iter()
-                    .map(|e| self.infer_hir_expression_type(e))
-                    .collect();
-                Type::Tuple(element_types)
-            }
-
-            hir::HirExpression::Call(call) => {
-                // Look up function return type
-                self.infer_function_return_type(&call.function)
-            }
-
-            _ => Type::Unknown,
-        }
-    }
-
-    fn infer_literal_type(&self, lit: &hir::HirLiteral) -> Type {
-        use skalp_frontend::types::{Type, Width};
-
-        match lit {
-            hir::HirLiteral::Integer(_) => Type::Bit(Width::Fixed(32)), // Default to 32-bit
-            hir::HirLiteral::BitVector(bits) => Type::Bit(Width::Fixed(bits.len() as u32)),
-            hir::HirLiteral::Boolean(_) => Type::Bool,
-            hir::HirLiteral::String(_) => Type::Unknown,
-            _ => Type::Unknown,
-        }
-    }
-
-    fn infer_function_return_type(&self, func_name: &str) -> Type {
-        if let Some(hir) = self.hir {
-            // Search in implementations
-            for impl_block in &hir.implementations {
-                if let Some(func) = impl_block.functions.iter().find(|f| f.name == func_name) {
-                    if let Some(ref return_type) = func.return_type {
-                        return self.hir_type_to_type(return_type);
-                    }
-                }
-            }
-            // Search in top-level functions
-            if let Some(func) = hir.functions.iter().find(|f| f.name == func_name) {
-                if let Some(ref return_type) = func.return_type {
-                    return self.hir_type_to_type(return_type);
-                }
-            }
-        }
-        Type::Unknown
-    }
-
-    /// Annotate an expression with type information (BUG #76 FIX)
-    /// For Concat expressions representing tuples, recursively annotate parts with element types
-    fn annotate_expression_with_type(&self, expr: Expression, ty: Type) -> Expression {
-        // If this is a Concat and the type is a Tuple, annotate each part with its element type
-        if let ExpressionKind::Concat(parts) = &expr.kind {
-            if let Type::Tuple(element_types) = &ty {
-                // Recursively annotate each concat part with its corresponding tuple element type
-                if parts.len() == element_types.len() {
-                    let annotated_parts: Vec<Expression> = parts.iter().zip(element_types.iter())
-                        .map(|(part, elem_type)| {
-                            self.annotate_expression_with_type(part.clone(), elem_type.clone())
-                        })
-                        .collect();
-
-                    return Expression {
-                        kind: ExpressionKind::Concat(annotated_parts),
-                        ty,
-                    };
-                }
-            }
-        }
-
-        // For other expressions, just update the type
-        Expression {
-            kind: expr.kind,
-            ty,
-        }
-    }
-
     /// Check if a function body contains a recursive call (Phase 5)
     fn contains_recursive_call(&self, body: &[hir::HirStatement], func_name: &str) -> bool {
         for stmt in body {
@@ -5563,119 +5391,119 @@ impl<'hir> HirToMir<'hir> {
             "add" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FAdd,
                     left,
                     right,
-                }))
+                })
             }
             "sub" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FSub,
                     left,
                     right,
-                }))
+                })
             }
             "mul" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FMul,
                     left,
                     right,
-                }))
+                })
             }
             "div" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FDiv,
                     left,
                     right,
-                }))
+                })
             }
             // Unary FP operations
             "neg" if call.args.len() == 1 => {
                 // Negate is handled as unary minus (0 - x)
-                let zero = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(0.0))));
+                let zero = Box::new(Expression::Literal(Value::Float(0.0)));
                 let operand = Box::new(self.convert_expression(&call.args[0])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FSub,
                     left: zero,
                     right: operand,
-                }))
+                })
             }
             "abs" if call.args.len() == 1 => {
                 // abs is handled as a function call to fabs
                 let arg = self.convert_expression(&call.args[0])?;
-                Some(Expression::with_unknown_type(ExpressionKind::FunctionCall {
+                Some(Expression::FunctionCall {
                     name: "fabs".to_string(),
                     args: vec![arg],
-                }))
+                })
             }
             "sqrt" if call.args.len() == 1 => {
                 let operand = Box::new(self.convert_expression(&call.args[0])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Unary {
+                Some(Expression::Unary {
                     op: UnaryOp::FSqrt,
                     operand,
-                }))
+                })
             }
             // Comparison FP operations
             "lt" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FLess,
                     left,
                     right,
-                }))
+                })
             }
             "gt" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FGreater,
                     left,
                     right,
-                }))
+                })
             }
             "le" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FLessEqual,
                     left,
                     right,
-                }))
+                })
             }
             "ge" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FGreaterEqual,
                     left,
                     right,
-                }))
+                })
             }
             "eq" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FEqual,
                     left,
                     right,
-                }))
+                })
             }
             "ne" if call.args.len() == 2 => {
                 let left = Box::new(self.convert_expression(&call.args[0])?);
                 let right = Box::new(self.convert_expression(&call.args[1])?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op: BinaryOp::FNotEqual,
                     left,
                     right,
-                }))
+                })
             }
             _ => {
                 eprintln!(
@@ -6023,7 +5851,6 @@ impl<'hir> HirToMir<'hir> {
         // Clone the data we need before doing mutable operations
         let params = func.params.clone();
         let body = func.body.clone();
-        let return_type = func.return_type.clone(); // BUG #76 FIX: Clone return type for later annotation
 
         // ARCHITECTURAL FIX: Push a new inlining context to prevent variable ID collisions
         // This ensures variables from different functions don't collide even if they have the same HIR VariableId
@@ -6186,22 +6013,6 @@ impl<'hir> HirToMir<'hir> {
             call.function, self.match_arm_prefix
         );
         let result = self.convert_expression(&substituted_expr);
-
-        // BUG #76 FIX: Annotate the result expression with the function's return type
-        // This allows tuple literals to have correct element widths
-        let result = result.map(|expr| {
-            if let Some(ref ret_ty) = return_type {
-                let return_type_ty = self.hir_type_to_type(ret_ty);
-                eprintln!(
-                    "[BUG #76] inline_function_call '{}': Annotating result with return type: {:?}",
-                    call.function, return_type_ty
-                );
-                self.annotate_expression_with_type(expr, return_type_ty)
-            } else {
-                expr
-            }
-        });
-
         eprintln!(
             "[BUG #IMPORT_MATCH] inline_function_call '{}': After convert_expression, match_arm_prefix={:?}, result is_some={}",
             call.function, self.match_arm_prefix, result.is_some()
@@ -6220,7 +6031,7 @@ impl<'hir> HirToMir<'hir> {
             if let Some(ref expr) = result {
                 eprintln!(
                     "[BUG #IMPORT_MATCH] inline_function_call '{}': Result expression type: {:?}",
-                    call.function, std::mem::discriminant(&expr.kind)
+                    call.function, std::mem::discriminant(expr)
                 );
             }
         }
@@ -6877,8 +6688,8 @@ impl<'hir> HirToMir<'hir> {
         expr: &Expression,
         module_opt: Option<&Module>,
     ) -> DataType {
-        match &expr.kind {
-            ExpressionKind::Literal(value) => match value {
+        match expr {
+            Expression::Literal(value) => match value {
                 Value::Integer(_) => DataType::Int(32),
                 Value::Float(_) => DataType::Float32,
                 Value::BitVector { width, .. } => DataType::Bit(*width),
@@ -6886,7 +6697,7 @@ impl<'hir> HirToMir<'hir> {
                 Value::HighZ => DataType::Logic(1),
                 Value::Unknown => DataType::Logic(1), // Unknown value
             },
-            ExpressionKind::Ref(lval) => {
+            Expression::Ref(lval) => {
                 // Look up the signal/port/variable type
                 match lval {
                     LValue::Signal(sig_id) => {
@@ -6920,7 +6731,7 @@ impl<'hir> HirToMir<'hir> {
                     LValue::Concat(_) => DataType::Nat(32),
                 }
             }
-            ExpressionKind::Binary { op, left, right } => {
+            Expression::Binary { op, left, right } => {
                 // BUG #65/#66 FIX: For FP binary operations, infer Float32 if operands are Float types
                 // Check if this is an FP operation (Add, Sub, Mul, Div)
                 if matches!(
@@ -6959,15 +6770,15 @@ impl<'hir> HirToMir<'hir> {
                     DataType::Nat(32) // Other binary ops
                 }
             }
-            ExpressionKind::Unary { .. } => DataType::Nat(32),
-            ExpressionKind::Conditional { then_expr, .. } => {
+            Expression::Unary { .. } => DataType::Nat(32),
+            Expression::Conditional { then_expr, .. } => {
                 // Infer from then branch
                 self.infer_expression_type_internal(then_expr, module_opt)
             }
-            ExpressionKind::FunctionCall { .. } => DataType::Nat(32), // Default for function calls
-            ExpressionKind::Concat(_) => DataType::Nat(32),
-            ExpressionKind::Replicate { .. } => DataType::Nat(32),
-            ExpressionKind::Cast { target_type, .. } => target_type.clone(),
+            Expression::FunctionCall { .. } => DataType::Nat(32), // Default for function calls
+            Expression::Concat(_) => DataType::Nat(32),
+            Expression::Replicate { .. } => DataType::Nat(32),
+            Expression::Cast { target_type, .. } => target_type.clone(),
         }
     }
 
@@ -6988,7 +6799,7 @@ impl<'hir> HirToMir<'hir> {
                 let left = self.try_eval_const_expr(&bin_expr.left)?;
                 let right = self.try_eval_const_expr(&bin_expr.right)?;
 
-                match &bin_expr.op {
+                match bin_expr.op {
                     hir::HirBinaryOp::Add => Some(left + right),
                     hir::HirBinaryOp::Sub => Some(left.saturating_sub(right)),
                     hir::HirBinaryOp::Mul => Some(left * right),
@@ -7058,7 +6869,7 @@ impl<'hir> HirToMir<'hir> {
     fn convert_const_expr_to_mir(&self, expr: &hir::HirExpression) -> Expression {
         match expr {
             hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) => {
-                Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(*val as i64)))
+                Expression::Literal(Value::Integer(*val as i64))
             }
             hir::HirExpression::Binary(bin_expr) => {
                 let left = Box::new(self.convert_const_expr_to_mir(&bin_expr.left));
@@ -7071,10 +6882,10 @@ impl<'hir> HirToMir<'hir> {
                     hir::HirBinaryOp::Mod => BinaryOp::Mod,
                     _ => {
                         // For unsupported operators, fall back to a literal 0
-                        return Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)));
+                        return Expression::Literal(Value::Integer(0));
                     }
                 };
-                Expression::with_unknown_type(ExpressionKind::Binary { op, left, right })
+                Expression::Binary { op, left, right }
             }
             hir::HirExpression::Call(call_expr) => {
                 // Convert function call (like clog2(SIZE))
@@ -7083,24 +6894,24 @@ impl<'hir> HirToMir<'hir> {
                     .iter()
                     .map(|arg| self.convert_const_expr_to_mir(arg))
                     .collect();
-                Expression::with_unknown_type(ExpressionKind::FunctionCall {
+                Expression::FunctionCall {
                     name: call_expr.function.clone(),
                     args,
-                })
+                }
             }
             hir::HirExpression::GenericParam(param_name) => {
                 // Reference to a generic parameter (like SIZE)
                 // We can't resolve this yet, so we keep it as a function call-like reference
                 // The codegen will handle emitting the parameter name
-                Expression::with_unknown_type(ExpressionKind::FunctionCall {
+                Expression::FunctionCall {
                     name: param_name.clone(),
                     args: vec![],
-                })
+                }
             }
             _ => {
                 // For other expression types, fall back to literal 0
                 // This shouldn't normally happen for const type expressions
-                Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)))
+                Expression::Literal(Value::Integer(0))
             }
         }
     }
@@ -7219,19 +7030,19 @@ impl<'hir> HirToMir<'hir> {
             },
             DataType::Event => hir::HirType::Event,
             DataType::Array(inner, size) => {
-                hir::HirType::Array(Box::new(self.convert_mir_to_hir_type(&inner)), *size as u32)
+                hir::HirType::Array(Box::new(self.convert_mir_to_hir_type(inner)), *size as u32)
             }
             DataType::Float16 => hir::HirType::Float16,
             DataType::Float32 => hir::HirType::Float32,
             DataType::Float64 => hir::HirType::Float64,
             DataType::Vec2(element) => {
-                hir::HirType::Vec2(Box::new(self.convert_mir_to_hir_type(&element)))
+                hir::HirType::Vec2(Box::new(self.convert_mir_to_hir_type(element)))
             }
             DataType::Vec3(element) => {
-                hir::HirType::Vec3(Box::new(self.convert_mir_to_hir_type(&element)))
+                hir::HirType::Vec3(Box::new(self.convert_mir_to_hir_type(element)))
             }
             DataType::Vec4(element) => {
-                hir::HirType::Vec4(Box::new(self.convert_mir_to_hir_type(&element)))
+                hir::HirType::Vec4(Box::new(self.convert_mir_to_hir_type(element)))
             }
             // Parametric types - use default values
             DataType::BitParam { default, .. } => hir::HirType::Bit(*default as u32),
@@ -7326,8 +7137,8 @@ impl<'hir> HirToMir<'hir> {
                         // Find the flattened field with matching path
                         for flat_field in flattened {
                             if flat_field.field_path == field_path {
-                                return Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(
-                                    flat_field.id),
+                                return Some(Expression::Ref(LValue::Signal(SignalId(
+                                    flat_field.id,
                                 ))));
                             }
                         }
@@ -7338,13 +7149,13 @@ impl<'hir> HirToMir<'hir> {
                         let base_lval = LValue::Signal(*signal_id);
                         let (high_bit, low_bit) =
                             self.get_field_bit_range(base, &normalized_field_name)?;
-                        let high_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(high_bit as i64)));
-                        let low_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(low_bit as i64)));
-                        return Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::RangeSelect {
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
                             base: Box::new(base_lval),
                             high: Box::new(high_expr),
                             low: Box::new(low_expr),
-                        })));
+                        }));
                     }
                     return None;
                 }
@@ -7354,7 +7165,7 @@ impl<'hir> HirToMir<'hir> {
                         // Find the flattened field with matching path
                         for flat_field in flattened {
                             if flat_field.field_path == field_path {
-                                return Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(flat_field.id)))));
+                                return Some(Expression::Ref(LValue::Port(PortId(flat_field.id))));
                             }
                         }
                     }
@@ -7364,13 +7175,13 @@ impl<'hir> HirToMir<'hir> {
                         let base_lval = LValue::Port(port_id_mir);
                         let (high_bit, low_bit) =
                             self.get_field_bit_range(base, &normalized_field_name)?;
-                        let high_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(high_bit as i64)));
-                        let low_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(low_bit as i64)));
-                        return Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::RangeSelect {
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
                             base: Box::new(base_lval),
                             high: Box::new(high_expr),
                             low: Box::new(low_expr),
-                        })));
+                        }));
                     }
                     return None;
                 }
@@ -7410,13 +7221,13 @@ impl<'hir> HirToMir<'hir> {
                         let base_lval = LValue::Variable(var_id_mir);
                         let (high_bit, low_bit) =
                             self.get_field_bit_range(base, &normalized_field_name)?;
-                        let high_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(high_bit as i64)));
-                        let low_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(low_bit as i64)));
-                        return Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::RangeSelect {
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
                             base: Box::new(base_lval),
                             high: Box::new(high_expr),
                             low: Box::new(low_expr),
-                        })));
+                        }));
                     }
                     return None;
                 }
@@ -7491,13 +7302,13 @@ impl<'hir> HirToMir<'hir> {
                         let base_lval = LValue::Variable(var_id_mir);
                         let (high_bit, low_bit) =
                             self.get_field_bit_range(current_base, &normalized_field_name)?;
-                        let high_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(high_bit as i64)));
-                        let low_expr = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(low_bit as i64)));
-                        return Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::RangeSelect {
+                        let high_expr = Expression::Literal(Value::Integer(high_bit as i64));
+                        let low_expr = Expression::Literal(Value::Integer(low_bit as i64));
+                        return Some(Expression::Ref(LValue::RangeSelect {
                             base: Box::new(base_lval),
                             high: Box::new(high_expr),
                             low: Box::new(low_expr),
-                        })));
+                        }));
                     }
                     eprintln!(
                         "[DEBUG] FieldAccess on GenericParam '{}': not found in dynamic_variables",
@@ -8078,7 +7889,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // If not found, return default value 0
-        Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))))
+        Some(Expression::Literal(Value::Integer(0)))
     }
 
     /// Find the value of a specific variant in an enum
@@ -8088,15 +7899,15 @@ impl<'hir> HirToMir<'hir> {
                 // If the variant has an explicit value, use it
                 if let Some(ref value_expr) = enum_variant.value {
                     if let Some(value) = self.convert_literal_expr_immutable(value_expr) {
-                        return Some(Expression::with_unknown_type(ExpressionKind::Literal(value)));
+                        return Some(Expression::Literal(value));
                     }
                 }
                 // Otherwise, use the index
-                return Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(index as i64))));
+                return Some(Expression::Literal(Value::Integer(index as i64)));
             }
         }
         // Variant not found, return 0
-        Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))))
+        Some(Expression::Literal(Value::Integer(0)))
     }
 
     /// Convert literal expression (immutable version)
@@ -8135,18 +7946,18 @@ impl<'hir> HirToMir<'hir> {
     fn convert_expression_for_constant(&self, expr: &hir::HirExpression) -> Option<Expression> {
         match expr {
             hir::HirExpression::Literal(lit) => {
-                Some(Expression::with_unknown_type(ExpressionKind::Literal(self.convert_literal_immutable(lit)?)))
+                Some(Expression::Literal(self.convert_literal_immutable(lit)?))
             }
             hir::HirExpression::Binary(bin) => {
                 // For simple binary expressions like 0b010010, handle it
                 let left = self.convert_expression_for_constant(&bin.left)?;
                 let right = self.convert_expression_for_constant(&bin.right)?;
                 let op = self.convert_binary_op(&bin.op, &bin.left);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                Some(Expression::Binary {
                     op,
                     left: Box::new(left),
                     right: Box::new(right),
-                }))
+                })
             }
             _ => None,
         }
@@ -8423,7 +8234,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // If no explicit default, use zero (synthesizers typically do this)
-        Some(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))))
+        Some(Expression::Literal(Value::Integer(0)))
     }
 
     /// Check if this is a complex if-else-if chain (multiple conditions)

@@ -4,7 +4,9 @@
 //! CDC violations occur when signals from different clock domains are used together without
 //! proper synchronization, which can lead to metastability and data corruption.
 
-use crate::mir::{ClockDomainId, Expression, LValue, Module, Process, Signal, Statement};
+use crate::mir::{
+    ClockDomainId, Expression, ExpressionKind, LValue, Module, Process, Signal, Statement,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -403,23 +405,23 @@ impl CdcAnalyzer {
     fn get_expression_clock_domains(&self, expression: &Expression) -> HashSet<ClockDomainId> {
         let mut domains = HashSet::new();
 
-        match expression {
-            Expression::Literal(_) => {
+        match &expression.kind {
+            ExpressionKind::Literal(_) => {
                 // Literals don't have clock domains
             }
-            Expression::Ref(lvalue) => {
+            ExpressionKind::Ref(lvalue) => {
                 if let Some(domain) = self.get_lvalue_clock_domain(lvalue) {
                     domains.insert(domain);
                 }
             }
-            Expression::Binary { left, right, .. } => {
+            ExpressionKind::Binary { left, right, .. } => {
                 domains.extend(self.get_expression_clock_domains(left));
                 domains.extend(self.get_expression_clock_domains(right));
             }
-            Expression::Unary { operand, .. } => {
+            ExpressionKind::Unary { operand, .. } => {
                 domains.extend(self.get_expression_clock_domains(operand));
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -428,21 +430,21 @@ impl CdcAnalyzer {
                 domains.extend(self.get_expression_clock_domains(then_expr));
                 domains.extend(self.get_expression_clock_domains(else_expr));
             }
-            Expression::Concat(expressions) => {
+            ExpressionKind::Concat(expressions) => {
                 for expr in expressions {
                     domains.extend(self.get_expression_clock_domains(expr));
                 }
             }
-            Expression::Replicate { count, value } => {
+            ExpressionKind::Replicate { count, value } => {
                 domains.extend(self.get_expression_clock_domains(count));
                 domains.extend(self.get_expression_clock_domains(value));
             }
-            Expression::FunctionCall { args, .. } => {
+            ExpressionKind::FunctionCall { args, .. } => {
                 for arg in args {
                     domains.extend(self.get_expression_clock_domains(arg));
                 }
             }
-            Expression::Cast { expr, .. } => {
+            ExpressionKind::Cast { expr, .. } => {
                 // Cast is a no-op, propagate domains from inner expression
                 domains.extend(self.get_expression_clock_domains(expr));
             }

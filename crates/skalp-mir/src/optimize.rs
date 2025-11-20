@@ -38,16 +38,16 @@ impl DeadCodeElimination {
 
     /// Mark signals and variables as used in an expression
     fn mark_used_in_expression(&mut self, expr: &Expression) {
-        match expr {
-            Expression::Ref(lval) => self.mark_used_in_lvalue(lval),
-            Expression::Binary { left, right, .. } => {
+        match &expr.kind {
+            ExpressionKind::Ref(lval) => self.mark_used_in_lvalue(lval),
+            ExpressionKind::Binary { left, right, .. } => {
                 self.mark_used_in_expression(left);
                 self.mark_used_in_expression(right);
             }
-            Expression::Unary { operand, .. } => {
+            ExpressionKind::Unary { operand, .. } => {
                 self.mark_used_in_expression(operand);
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -56,21 +56,21 @@ impl DeadCodeElimination {
                 self.mark_used_in_expression(then_expr);
                 self.mark_used_in_expression(else_expr);
             }
-            Expression::Concat(exprs) => {
+            ExpressionKind::Concat(exprs) => {
                 for expr in exprs {
                     self.mark_used_in_expression(expr);
                 }
             }
-            Expression::Replicate { count, value } => {
+            ExpressionKind::Replicate { count, value } => {
                 self.mark_used_in_expression(count);
                 self.mark_used_in_expression(value);
             }
-            Expression::FunctionCall { args, .. } => {
+            ExpressionKind::FunctionCall { args, .. } => {
                 for arg in args {
                     self.mark_used_in_expression(arg);
                 }
             }
-            Expression::Cast { expr, .. } => {
+            ExpressionKind::Cast { expr, .. } => {
                 self.mark_used_in_expression(expr);
             }
             _ => {}
@@ -259,8 +259,8 @@ impl ConstantFolding {
         left: &Expression,
         right: &Expression,
     ) -> Option<Expression> {
-        match (left, right) {
-            (Expression::Literal(Value::Integer(l)), Expression::Literal(Value::Integer(r))) => {
+        match (&left.kind, &right.kind) {
+            (ExpressionKind::Literal(Value::Integer(l)), ExpressionKind::Literal(Value::Integer(r))) => {
                 let result = match op {
                     BinaryOp::Add => l + r,
                     BinaryOp::Sub => l - r,
@@ -271,7 +271,8 @@ impl ConstantFolding {
                     BinaryOp::RightShift => l >> r,
                     _ => return None,
                 };
-                Some(Expression::Literal(Value::Integer(result)))
+                // Use the type from the left operand (both should have the same type for these ops)
+                Some(Expression::literal(Value::Integer(result), left.ty.clone()))
             }
             _ => None,
         }
@@ -279,11 +280,11 @@ impl ConstantFolding {
 
     /// Try to fold a unary expression
     fn fold_unary(&self, op: &UnaryOp, operand: &Expression) -> Option<Expression> {
-        match operand {
-            Expression::Literal(Value::Integer(n)) => match op {
-                UnaryOp::Negate => Some(Expression::Literal(Value::Integer(-n))),
-                UnaryOp::Not if *n == 0 => Some(Expression::Literal(Value::Integer(1))),
-                UnaryOp::Not => Some(Expression::Literal(Value::Integer(0))),
+        match &operand.kind {
+            ExpressionKind::Literal(Value::Integer(n)) => match op {
+                UnaryOp::Negate => Some(Expression::literal(Value::Integer(-n), operand.ty.clone())),
+                UnaryOp::Not if *n == 0 => Some(Expression::literal(Value::Integer(1), operand.ty.clone())),
+                UnaryOp::Not => Some(Expression::literal(Value::Integer(0), operand.ty.clone())),
                 _ => None,
             },
             _ => None,
@@ -292,8 +293,8 @@ impl ConstantFolding {
 
     /// Fold expressions recursively
     fn fold_expression(&self, expr: &mut Expression) {
-        match expr {
-            Expression::Binary { op, left, right } => {
+        match &mut expr.kind {
+            ExpressionKind::Binary { op, left, right } => {
                 // First fold children
                 self.fold_expression(left);
                 self.fold_expression(right);
@@ -303,7 +304,7 @@ impl ConstantFolding {
                     *expr = folded;
                 }
             }
-            Expression::Unary { op, operand } => {
+            ExpressionKind::Unary { op, operand } => {
                 // First fold child
                 self.fold_expression(operand);
 
@@ -312,7 +313,7 @@ impl ConstantFolding {
                     *expr = folded;
                 }
             }
-            Expression::Conditional {
+            ExpressionKind::Conditional {
                 cond,
                 then_expr,
                 else_expr,
@@ -322,7 +323,7 @@ impl ConstantFolding {
                 self.fold_expression(else_expr);
 
                 // If condition is constant, select appropriate branch
-                if let Expression::Literal(Value::Integer(n)) = cond.as_ref() {
+                if let ExpressionKind::Literal(Value::Integer(n)) = &cond.kind {
                     *expr = if *n != 0 {
                         then_expr.as_ref().clone()
                     } else {
@@ -330,14 +331,14 @@ impl ConstantFolding {
                     };
                 }
             }
-            Expression::Concat(exprs) => {
+            ExpressionKind::Concat(exprs) => {
                 for expr in exprs {
                     self.fold_expression(expr);
                 }
             }
-            Expression::Cast { expr, .. } => {
+            ExpressionKind::Cast { expr: inner_expr, .. } => {
                 // Fold the inner expression, but preserve the cast
-                self.fold_expression(expr);
+                self.fold_expression(inner_expr);
             }
             _ => {}
         }

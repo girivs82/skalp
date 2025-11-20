@@ -28,11 +28,11 @@ pub use compiler::{MirCompiler, OptimizationLevel};
 pub use hir_to_mir::HirToMir;
 pub use mir::{
     Assignment, AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType,
-    EdgeSensitivity, EdgeType, EnumType, EnumVariant, Expression, GenericParameter,
-    GenericParameterType, IfStatement, LValue, LoopStatement, Mir, Module, ModuleId,
-    ModuleInstance, Port, PortDirection, PortId, Process, ProcessId, ProcessKind, ReduceOp,
-    SensitivityList, Signal, SignalId, Statement, StructField, StructType, UnaryOp, UnionType,
-    Value, Variable, VariableId,
+    EdgeSensitivity, EdgeType, EnumType, EnumVariant, Expression, ExpressionKind,
+    GenericParameter, GenericParameterType, IfStatement, LValue, LoopStatement, Mir, Module,
+    ModuleId, ModuleInstance, Port, PortDirection, PortId, Process, ProcessId, ProcessKind,
+    ReduceOp, SensitivityList, Signal, SignalId, Statement, StructField, StructType, UnaryOp,
+    UnionType, Value, Variable, VariableId,
 };
 pub use mir_validation::{validate_mir, ValidationError};
 pub use monomorphize::Monomorphizer;
@@ -40,6 +40,9 @@ pub use optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 
 use anyhow::Result;
 use skalp_frontend::Hir;
+
+// Re-export Type from frontend for use in MIR Expression typing
+pub use skalp_frontend::types::Type;
 
 /// Lower HIR to MIR
 pub fn lower_to_mir(hir: &Hir) -> Result<Mir> {
