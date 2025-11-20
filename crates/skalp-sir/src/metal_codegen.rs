@@ -23,6 +23,8 @@ struct MetalShaderGenerator<'a> {
     /// Track signals that need to be decomposed (width > 256 bits)
     /// Maps signal name to (total_width, num_parts, part_width)
     wide_signal_decomposition: std::collections::HashMap<String, (usize, usize, usize)>,
+    /// Track recursion depth for concat generation (Bug #76 debug)
+    concat_recursion_depth: usize,
 }
 
 impl<'a> MetalShaderGenerator<'a> {
@@ -31,6 +33,7 @@ impl<'a> MetalShaderGenerator<'a> {
             output,
             indent: 0,
             wide_signal_decomposition: std::collections::HashMap::new(),
+            concat_recursion_depth: 0,
         }
     }
 
@@ -2112,8 +2115,16 @@ impl<'a> MetalShaderGenerator<'a> {
     }
 
     fn generate_concat(&mut self, sir: &SirModule, node: &SirNode) {
-        eprintln!("🔧 CONCAT: node {}, {} inputs", node.id, node.inputs.len());
+        // Bug #76 debug: Track recursion depth to detect infinite loops
+        self.concat_recursion_depth += 1;
+        eprintln!("🔧 CONCAT [depth={}]: node {}, {} inputs", self.concat_recursion_depth, node.id, node.inputs.len());
+
+        if self.concat_recursion_depth > 100 {
+            panic!("🚨 Bug #76: Concat recursion depth exceeded 100! Infinite loop detected in node {}", node.id);
+        }
+
         if node.outputs.is_empty() {
+            self.concat_recursion_depth -= 1;
             return;
         }
 
@@ -2465,6 +2476,9 @@ impl<'a> MetalShaderGenerator<'a> {
                 concat_expr
             ));
         }
+
+        // Bug #76 debug: Decrement recursion depth
+        self.concat_recursion_depth -= 1;
     }
 
     fn generate_node_computation_v2(&mut self, sir: &SirModule, node: &SirNode) {

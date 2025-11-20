@@ -14,6 +14,10 @@ use skalp_mir::type_width; // Use shared type width calculations
 use std::collections::HashMap;
 use bitvec::prelude::*;
 
+/// Maximum recursion depth for expression conversion (SIR)
+/// This prevents stack overflow on deeply nested expressions like {{{{{...}}}}}
+const MAX_EXPRESSION_RECURSION_DEPTH: usize = 256;
+
 /// Transformer from MIR to SIR
 pub struct MirToSir {
     /// Current signal ID counter
@@ -211,7 +215,7 @@ impl MirToSir {
 
         // Convert the assignment
         let target_signal = self.convert_lvalue(&assignment.lhs);
-        let source_expr = self.convert_expression(&assignment.rhs, &mut inputs);
+        let source_expr = self.convert_expression(&assignment.rhs, &mut inputs, 0);
 
         outputs.push(target_signal);
 
@@ -253,7 +257,7 @@ impl MirToSir {
         match statement {
             Statement::Assignment(assignment) => {
                 let target_signal = self.convert_lvalue(&assignment.lhs);
-                let source_expr = self.convert_expression(&assignment.rhs, inputs);
+                let source_expr = self.convert_expression(&assignment.rhs, inputs, 0);
 
                 if !outputs.contains(&target_signal) {
                     outputs.push(target_signal);
@@ -266,7 +270,7 @@ impl MirToSir {
                 operations.push(operation);
             }
             Statement::If(if_stmt) => {
-                let condition = self.convert_expression(&if_stmt.condition, inputs);
+                let condition = self.convert_expression(&if_stmt.condition, inputs, 0);
 
                 // Convert then block
                 let mut then_ops = Vec::new();
@@ -323,7 +327,15 @@ impl MirToSir {
     }
 
     /// Convert MIR Expression to SIR Expression
-    fn convert_expression(&self, expr: &Expression, inputs: &mut Vec<SirSignalId>) -> SirExpression {
+    fn convert_expression(&self, expr: &Expression, inputs: &mut Vec<SirSignalId>, depth: usize) -> SirExpression {
+        // Guard against stack overflow on deeply nested expressions
+        if depth > MAX_EXPRESSION_RECURSION_DEPTH {
+            panic!(
+                "Expression conversion recursion depth exceeded {} - likely infinite recursion in nested concat/tuple expressions",
+                MAX_EXPRESSION_RECURSION_DEPTH
+            );
+        }
+
         match expr {
             Expression::Literal(value) => {
                 SirExpression::Constant(self.convert_value_to_bitvec(value))
@@ -336,8 +348,8 @@ impl MirToSir {
                 SirExpression::Signal(signal_id)
             }
             Expression::Binary { op, left, right } => {
-                let left_expr = self.convert_expression(left, inputs);
-                let right_expr = self.convert_expression(right, inputs);
+                let left_expr = self.convert_expression(left, inputs, depth + 1);
+                let right_expr = self.convert_expression(right, inputs, depth + 1);
                 SirExpression::Binary {
                     op: self.convert_binary_op(op),
                     left: Box::new(left_expr),
@@ -345,7 +357,7 @@ impl MirToSir {
                 }
             }
             Expression::Unary { op, operand } => {
-                let operand_expr = self.convert_expression(operand, inputs);
+                let operand_expr = self.convert_expression(operand, inputs, depth + 1);
                 SirExpression::Unary {
                     op: self.convert_unary_op(op),
                     operand: Box::new(operand_expr),
@@ -354,11 +366,11 @@ impl MirToSir {
             Expression::Conditional { cond, then_expr, else_expr } => {
                 // Convert ternary to binary with conditional logic
                 // TODO: Implement proper conditional expression
-                self.convert_expression(then_expr, inputs)
+                self.convert_expression(then_expr, inputs, depth + 1)
             }
             Expression::Concat(exprs) => {
                 let sir_exprs: Vec<SirExpression> = exprs.iter()
-                    .map(|e| self.convert_expression(e, inputs))
+                    .map(|e| self.convert_expression(e, inputs, depth + 1))
                     .collect();
                 SirExpression::Concat(sir_exprs)
             }

@@ -11,6 +11,10 @@ use skalp_frontend::hir::{self as hir, Hir};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Maximum recursion depth for type inference and expression annotation
+/// This prevents stack overflow on deeply nested expressions like {{{{{...}}}}}
+const MAX_EXPRESSION_RECURSION_DEPTH: usize = 256;
+
 /// Information about a flattened port or signal field
 #[derive(Debug, Clone)]
 struct FlattenedField {
@@ -985,7 +989,7 @@ impl<'hir> HirToMir<'hir> {
                     if let_stmt.name == "_tuple_tmp_66" {
                         eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=true, converting RHS now");
                     }
-                    (self.convert_expression(&let_stmt.value)?, true)
+                    (self.convert_expression(&let_stmt.value, 0)?, true)
                 } else {
                     // Complex expression: will convert after variable registration
                     if let_stmt.name == "_tuple_tmp_66" {
@@ -1217,7 +1221,7 @@ impl<'hir> HirToMir<'hir> {
                             "[MIR_LET_TRACE] _tuple_tmp_66: Calling convert_expression on RHS"
                         );
                     }
-                    let converted = self.convert_expression(&let_stmt.value);
+                    let converted = self.convert_expression(&let_stmt.value, 0);
                     if let_stmt.name == "_tuple_tmp_66" {
                         eprintln!(
                             "[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned: {:?}",
@@ -1362,7 +1366,7 @@ impl<'hir> HirToMir<'hir> {
 
     fn convert_assignment(&mut self, assign: &hir::HirAssignment) -> Option<Assignment> {
         let lhs = self.convert_lvalue(&assign.lhs)?;
-        let rhs = self.convert_expression(&assign.rhs)?;
+        let rhs = self.convert_expression(&assign.rhs, 0)?;
         let kind = match assign.assignment_type {
             hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
             hir::HirAssignmentType::Blocking => AssignmentKind::Blocking,
@@ -1575,7 +1579,7 @@ impl<'hir> HirToMir<'hir> {
 
                 // Create assignment to the flattened signal
                 let lhs_lval = LValue::Signal(SignalId(flat_field.id));
-                let rhs_expr = self.convert_expression(&assign.rhs)?;
+                let rhs_expr = self.convert_expression(&assign.rhs, 0)?;
 
                 return Some(vec![Assignment {
                     lhs: lhs_lval,
@@ -1650,10 +1654,10 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Convert the index expression to MIR
-        let mir_index = self.convert_expression(index_expr)?;
+        let mir_index = self.convert_expression(index_expr, 0)?;
 
         // Convert the RHS expression to MIR
-        let mir_rhs = self.convert_expression(&assign.rhs)?;
+        let mir_rhs = self.convert_expression(&assign.rhs, 0)?;
 
         // Group flattened fields by array index
         // field_path will be like ["0", "x"], ["0", "y"], ["1", "x"], etc.
@@ -1821,7 +1825,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Convert index expression
-        let mir_index = self.convert_expression(index_expr)?;
+        let mir_index = self.convert_expression(index_expr, 0)?;
 
         // Generate continuous assignments with multiplexer logic
         let mut assignments = Vec::new();
@@ -2077,7 +2081,7 @@ impl<'hir> HirToMir<'hir> {
             std::mem::discriminant(&lhs)
         );
 
-        let rhs = self.convert_expression(&assign.rhs);
+        let rhs = self.convert_expression(&assign.rhs, 0);
         if rhs.is_none() {
             eprintln!(
                 "[DEBUG] convert_expression returned None for RHS: {:?}",
@@ -2256,11 +2260,11 @@ impl<'hir> HirToMir<'hir> {
                     self.expand_instance_connection(&conn.port, &conn.expr)?
                 } else {
                     // Simple connection
-                    vec![(conn.port.clone(), self.convert_expression(&conn.expr)?)]
+                    vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
                 }
             } else {
                 // Port not found in entity, use default conversion
-                vec![(conn.port.clone(), self.convert_expression(&conn.expr)?)]
+                vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
             };
 
             for (port_name, expr) in expanded_connections {
@@ -2338,7 +2342,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR if statement to MIR
     fn convert_if_statement(&mut self, if_stmt: &hir::HirIfStatement) -> Option<IfStatement> {
-        let condition = self.convert_expression(&if_stmt.condition)?;
+        let condition = self.convert_expression(&if_stmt.condition, 0)?;
         let then_block = self.convert_statements(&if_stmt.then_statements);
         let else_block = if_stmt
             .else_statements
@@ -2357,7 +2361,7 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         match_stmt: &hir::HirMatchStatement,
     ) -> Option<CaseStatement> {
-        let expr = self.convert_expression(&match_stmt.expr)?;
+        let expr = self.convert_expression(&match_stmt.expr, 0)?;
 
         let mut items = Vec::new();
         let mut default = None;
@@ -2366,7 +2370,7 @@ impl<'hir> HirToMir<'hir> {
             let block = self.convert_statements(&arm.statements);
             let final_block = if let Some(guard_expr) = &arm.guard {
                 // If there's a guard, wrap the statements in an if statement
-                let guard_condition = self.convert_expression(guard_expr)?;
+                let guard_condition = self.convert_expression(guard_expr, 0)?;
                 let if_stmt = Statement::If(IfStatement {
                     condition: guard_condition,
                     then_block: block,
@@ -2481,13 +2485,13 @@ impl<'hir> HirToMir<'hir> {
             hir::HirLValue::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
             hir::HirLValue::Index(base, index) => {
                 let base = Box::new(self.convert_lvalue(base)?);
-                let index = Box::new(self.convert_expression(index)?);
+                let index = Box::new(self.convert_expression(index, 0)?);
                 Some(LValue::BitSelect { base, index })
             }
             hir::HirLValue::Range(base, high, low) => {
                 let base = Box::new(self.convert_lvalue(base)?);
-                let high = Box::new(self.convert_expression(high)?);
-                let low = Box::new(self.convert_expression(low)?);
+                let high = Box::new(self.convert_expression(high, 0)?);
+                let low = Box::new(self.convert_expression(low, 0)?);
                 Some(LValue::RangeSelect { base, high, low })
             }
             hir::HirLValue::FieldAccess { base, field } => {
@@ -2568,11 +2572,19 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR expression to MIR
-    fn convert_expression(&mut self, expr: &hir::HirExpression) -> Option<Expression> {
-        eprintln!("[BUG #74 CONVERT_EXPR] convert_expression called with discriminant: {:?}", std::mem::discriminant(expr));
+    fn convert_expression(&mut self, expr: &hir::HirExpression, depth: usize) -> Option<Expression> {
+        // Guard against stack overflow on deeply nested expressions
+        if depth > MAX_EXPRESSION_RECURSION_DEPTH {
+            panic!(
+                "[HIR_TO_MIR] Expression conversion recursion depth exceeded {} - likely infinite recursion in nested concat/tuple/call expressions",
+                MAX_EXPRESSION_RECURSION_DEPTH
+            );
+        }
+
+        eprintln!("[BUG #74 CONVERT_EXPR] convert_expression called with discriminant: {:?}, depth: {}", std::mem::discriminant(expr), depth);
 
         // BUG #76 FIX: Infer type first for proper type propagation
-        let ty = self.infer_hir_expression_type(expr);
+        let ty = self.infer_hir_expression_type(expr, depth);
         eprintln!("[BUG #76] Inferred type for expr: {:?}", ty);
 
         match expr {
@@ -2695,7 +2707,7 @@ impl<'hir> HirToMir<'hir> {
                                     return Some(self.const_value_to_mir_expression(&const_value));
                                 } else {
                                     // If evaluation fails, try recursive conversion as fallback
-                                    return self.convert_expression(&constant.value);
+                                    return self.convert_expression(&constant.value, depth + 1);
                                 }
                             }
                         }
@@ -2728,7 +2740,7 @@ impl<'hir> HirToMir<'hir> {
                                         // Found the generic parameter, use its default value
                                         if let Some(default_expr) = &generic.default_value {
                                             // Recursively convert the default value expression
-                                            return self.convert_expression(default_expr);
+                                            return self.convert_expression(default_expr, depth + 1);
                                         }
                                     }
                                 }
@@ -2741,7 +2753,7 @@ impl<'hir> HirToMir<'hir> {
                     for implementation in &hir.implementations {
                         for constant in &implementation.constants {
                             if constant.name == *param_name {
-                                return self.convert_expression(&constant.value);
+                                return self.convert_expression(&constant.value, depth + 1);
                             }
                         }
                     }
@@ -2751,15 +2763,15 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty))
             }
             hir::HirExpression::Binary(binary) => {
-                let left = self.convert_expression(&binary.left)?;
-                let right = self.convert_expression(&binary.right)?;
+                let left = self.convert_expression(&binary.left, depth + 1)?;
+                let right = self.convert_expression(&binary.right, depth + 1)?;
                 let left = Box::new(left);
                 let right = Box::new(right);
                 let op = self.convert_binary_op(&binary.op, &binary.left);
                 Some(Expression::new(ExpressionKind::Binary { op, left, right }, ty))
             }
             hir::HirExpression::Unary(unary) => {
-                let operand = Box::new(self.convert_expression(&unary.operand)?);
+                let operand = Box::new(self.convert_expression(&unary.operand, depth + 1)?);
                 let op = self.convert_unary_op(&unary.op);
                 Some(Expression::new(ExpressionKind::Unary { op, operand }, ty))
             }
@@ -2805,13 +2817,13 @@ impl<'hir> HirToMir<'hir> {
                         // Binary FP operations
                         "add" if call.args.len() == 2 => {
                             eprintln!("[MIR_CALL] Converting FP add with {} args", call.args.len());
-                            let left_result = self.convert_expression(&call.args[0]);
+                            let left_result = self.convert_expression(&call.args[0], depth + 1);
                             if left_result.is_none() {
                                 eprintln!("[MIR_CALL] FP add: left argument conversion FAILED");
                                 return None;
                             }
                             let left = Box::new(left_result?);
-                            let right_result = self.convert_expression(&call.args[1]);
+                            let right_result = self.convert_expression(&call.args[1], depth + 1);
                             if right_result.is_none() {
                                 eprintln!("[MIR_CALL] FP add: right argument conversion FAILED");
                                 return None;
@@ -2825,8 +2837,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "sub" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FSub,
                                 left,
@@ -2834,8 +2846,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "mul" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FMul,
                                 left,
@@ -2843,8 +2855,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "div" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FDiv,
                                 left,
@@ -2853,14 +2865,14 @@ impl<'hir> HirToMir<'hir> {
                         }
                         // Unary FP operations
                         "sqrt" if call.args.len() == 1 => {
-                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            let operand = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Unary {
                                 op: UnaryOp::FSqrt,
                                 operand,
                             }, ty));
                         }
                         "abs" if call.args.len() == 1 => {
-                            let arg = self.convert_expression(&call.args[0])?;
+                            let arg = self.convert_expression(&call.args[0], depth + 1)?;
                             return Some(Expression::new(ExpressionKind::FunctionCall {
                                 name: "fabs".to_string(),
                                 args: vec![arg],
@@ -2868,8 +2880,8 @@ impl<'hir> HirToMir<'hir> {
                         }
                         // BUG FIX #4: FP comparison methods
                         "lt" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FLess,
                                 left,
@@ -2877,8 +2889,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "gt" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FGreater,
                                 left,
@@ -2886,8 +2898,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "le" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FLessEqual,
                                 left,
@@ -2895,8 +2907,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "ge" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FGreaterEqual,
                                 left,
@@ -2904,8 +2916,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "eq" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FEqual,
                                 left,
@@ -2913,8 +2925,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "ne" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FNotEqual,
                                 left,
@@ -2933,7 +2945,7 @@ impl<'hir> HirToMir<'hir> {
                     // Check if argument has FP type
                     if let Some(arg_type) = self.infer_hir_type(&call.args[0]) {
                         if self.is_float_type(&arg_type) {
-                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            let operand = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Unary {
                                 op: UnaryOp::FSqrt,
                                 operand,
@@ -2950,8 +2962,8 @@ impl<'hir> HirToMir<'hir> {
                     eprintln!("[MIR_CALL] Detected fp_* function: {}", call.function);
                     match call.function.as_str() {
                         "fp_lt" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FLess,
                                 left,
@@ -2959,8 +2971,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "fp_mul" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FMul,
                                 left,
@@ -2968,8 +2980,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "fp_add" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FAdd,
                                 left,
@@ -2977,8 +2989,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "fp_sub" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FSub,
                                 left,
@@ -2986,8 +2998,8 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "fp_div" if call.args.len() == 2 => {
-                            let left = Box::new(self.convert_expression(&call.args[0])?);
-                            let right = Box::new(self.convert_expression(&call.args[1])?);
+                            let left = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
+                            let right = Box::new(self.convert_expression(&call.args[1], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FDiv,
                                 left,
@@ -2995,7 +3007,7 @@ impl<'hir> HirToMir<'hir> {
                             }, ty));
                         }
                         "fp_sqrt" if call.args.len() == 1 => {
-                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            let operand = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Unary {
                                 op: UnaryOp::FSqrt,
                                 operand,
@@ -3004,7 +3016,7 @@ impl<'hir> HirToMir<'hir> {
                         "fp_neg" if call.args.len() == 1 => {
                             // Note: fp_neg special case - the zero literal needs Unknown type as it's internal
                             let zero = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(0.0))));
-                            let operand = Box::new(self.convert_expression(&call.args[0])?);
+                            let operand = Box::new(self.convert_expression(&call.args[0], depth + 1)?);
                             return Some(Expression::new(ExpressionKind::Binary {
                                 op: BinaryOp::FSub,
                                 left: zero,
@@ -3146,7 +3158,7 @@ impl<'hir> HirToMir<'hir> {
                     array_elements.sort_by_key(|(idx, _)| *idx);
 
                     // Convert index expression to MIR (needs mutable borrow)
-                    let mir_index = self.convert_expression(index)?;
+                    let mir_index = self.convert_expression(index, depth + 1)?;
 
                     // NOTE: For arrays of structs, we can't build struct literals in MIR
                     // because MIR only has scalar expressions. The array read should be
@@ -3213,7 +3225,7 @@ impl<'hir> HirToMir<'hir> {
 
                 // Fall back to bit select
                 let base_lval = self.expr_to_lvalue(base)?;
-                let index_expr = self.convert_expression(index)?;
+                let index_expr = self.convert_expression(index, depth + 1)?;
                 Some(Expression::new(ExpressionKind::Ref(LValue::BitSelect {
                     base: Box::new(base_lval),
                     index: Box::new(index_expr),
@@ -3222,8 +3234,8 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Range(base, high, low) => {
                 // Convert range expression to range select
                 let base_lval = self.expr_to_lvalue(base)?;
-                let high_expr = self.convert_expression(high)?;
-                let low_expr = self.convert_expression(low)?;
+                let high_expr = self.convert_expression(high, depth + 1)?;
+                let low_expr = self.convert_expression(low, depth + 1)?;
                 Some(Expression::new(ExpressionKind::Ref(LValue::RangeSelect {
                     base: Box::new(base_lval),
                     high: Box::new(high_expr),
@@ -3308,7 +3320,7 @@ impl<'hir> HirToMir<'hir> {
 
                         // For small arrays, we could expand, but for now just return
                         // the value (proper array support needed)
-                        return self.convert_expression(value);
+                        return self.convert_expression(value, depth + 1);
                     }
                 }
 
@@ -3338,7 +3350,7 @@ impl<'hir> HirToMir<'hir> {
 
                 if expressions.len() == 1 {
                     eprintln!("[DEBUG] Concat has only 1 element, unwrapping");
-                    return self.convert_expression(&expressions[0]);
+                    return self.convert_expression(&expressions[0], depth + 1);
                 }
 
                 // Convert all concat elements to MIR expressions
@@ -3361,7 +3373,7 @@ impl<'hir> HirToMir<'hir> {
                             self.dynamic_variables.contains_key(var_id)
                         );
                     }
-                    if let Some(mir_expr) = self.convert_expression(expr) {
+                    if let Some(mir_expr) = self.convert_expression(expr, depth + 1) {
                         mir_exprs.push(mir_expr);
                     } else {
                         eprintln!(
@@ -3386,9 +3398,9 @@ impl<'hir> HirToMir<'hir> {
             } => {
                 // Ternary conditional expression: condition ? true_expr : false_expr
                 // This is identical to an if-expression, so convert to MIR conditional
-                let cond = Box::new(self.convert_expression(condition)?);
-                let then_expr = Box::new(self.convert_expression(true_expr)?);
-                let else_expr = Box::new(self.convert_expression(false_expr)?);
+                let cond = Box::new(self.convert_expression(condition, depth + 1)?);
+                let then_expr = Box::new(self.convert_expression(true_expr, depth + 1)?);
+                let else_expr = Box::new(self.convert_expression(false_expr, depth + 1)?);
 
                 Some(Expression::new(ExpressionKind::Conditional {
                     cond,
@@ -3421,7 +3433,7 @@ impl<'hir> HirToMir<'hir> {
                         call.args.len()
                     );
                 }
-                let cond = self.convert_expression(&if_expr.condition);
+                let cond = self.convert_expression(&if_expr.condition, depth + 1);
                 if cond.is_none() {
                     eprintln!("[IF_DEBUG] ❌ CONDITION conversion FAILED");
                     return None;
@@ -3447,7 +3459,7 @@ impl<'hir> HirToMir<'hir> {
                         call.args.len()
                     );
                 }
-                let then_expr = self.convert_expression(&if_expr.then_expr);
+                let then_expr = self.convert_expression(&if_expr.then_expr, depth + 1);
                 if then_expr.is_none() {
                     eprintln!(
                         "[IF_DEBUG] ❌ THEN BRANCH conversion FAILED, type: {:?}",
@@ -3499,7 +3511,7 @@ impl<'hir> HirToMir<'hir> {
                 if let hir::HirExpression::If(_) = &*if_expr.else_expr {
                     eprintln!("[IF_DEBUG]   Else-expr is nested If (else-if chain)");
                 }
-                let else_expr = self.convert_expression(&if_expr.else_expr);
+                let else_expr = self.convert_expression(&if_expr.else_expr, depth + 1);
                 if else_expr.is_none() {
                     eprintln!(
                         "[IF_DEBUG] ❌ ELSE BRANCH conversion FAILED, type: {:?}",
@@ -3640,7 +3652,7 @@ impl<'hir> HirToMir<'hir> {
                 // Preserve the cast in MIR so codegen knows the intended type
                 // For FP/bit reinterpretation casts, this is a no-op in hardware
                 // but critical for type tracking
-                let inner_expr = self.convert_expression(&cast_expr.expr)?;
+                let inner_expr = self.convert_expression(&cast_expr.expr, depth + 1)?;
                 let mut target_type = self.convert_type(&cast_expr.target_type);
 
                 // BUG #65/#66 FIX: Detect and correct erroneous Float16 casts from 32-bit values
@@ -3731,7 +3743,7 @@ impl<'hir> HirToMir<'hir> {
                         eprintln!("[DEBUG] Block expression: Found in dynamic_variables as {} (MIR ID {:?})", name, mir_id);
                     }
                 }
-                let result = self.convert_expression(result_expr);
+                let result = self.convert_expression(result_expr, depth + 1);
                 if result.is_none() {
                     eprintln!(
                         "[DEBUG] Block expression: result_expr conversion failed, type: {:?}",
@@ -3791,7 +3803,7 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 let field_init = field_init.unwrap();
-                let field_expr = self.convert_expression(&field_init.value)?;
+                let field_expr = self.convert_expression(&field_init.value, 0)?;
                 field_exprs.push(field_expr);
             }
 
@@ -3843,7 +3855,7 @@ impl<'hir> HirToMir<'hir> {
         for struct_field in &struct_def.fields {
             // Find the corresponding field init
             let field_init = fields.iter().find(|f| f.name == struct_field.name)?;
-            let field_expr = self.convert_expression(&field_init.value)?;
+            let field_expr = self.convert_expression(&field_init.value, 0)?;
             field_exprs.push(field_expr);
         }
 
@@ -3866,7 +3878,7 @@ impl<'hir> HirToMir<'hir> {
         // Convert each tuple element expression
         let mut element_exprs = Vec::new();
         for element in elements {
-            let element_expr = self.convert_expression(element)?;
+            let element_expr = self.convert_expression(element, 0)?;
             element_exprs.push(element_expr);
         }
 
@@ -3891,7 +3903,7 @@ impl<'hir> HirToMir<'hir> {
         // Convert each array element expression
         let mut element_exprs = Vec::new();
         for element in elements {
-            let element_expr = self.convert_expression(element)?;
+            let element_expr = self.convert_expression(element, 0)?;
             element_exprs.push(element_expr);
         }
 
@@ -3924,7 +3936,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert the match value expression ONCE to avoid exponential blowup
         // when we create N comparisons against it
-        let match_value_expr = self.convert_expression(match_value)?;
+        let match_value_expr = self.convert_expression(match_value, 0)?;
 
         // Build nested conditionals from right to left
         // Start with the last arm as the default (usually wildcard)
@@ -3940,7 +3952,7 @@ impl<'hir> HirToMir<'hir> {
         let last_arm_prefix = format!("match_{}_{}", match_id, last_arm_idx);
         self.match_arm_prefix = Some(last_arm_prefix);
 
-        let last_expr = self.convert_expression(&arms.last()?.expr);
+        let last_expr = self.convert_expression(&arms.last()?.expr, 0);
 
         // Clear the prefix after processing
         self.match_arm_prefix = None;
@@ -4022,7 +4034,7 @@ impl<'hir> HirToMir<'hir> {
 
             // Apply guard if present
             let final_condition = if let Some(guard) = &arm.guard {
-                let guard_expr = Box::new(self.convert_expression(guard)?);
+                let guard_expr = Box::new(self.convert_expression(guard, 0)?);
                 let cond_expr = Box::new(condition);
                 Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::LogicalAnd,
@@ -4042,7 +4054,7 @@ impl<'hir> HirToMir<'hir> {
             eprintln!("[BUG #IMPORT_MATCH] Before converting arm {} expr (type: {:?}), match_arm_prefix={:?}",
                 arm_idx, std::mem::discriminant(&arm.expr), self.match_arm_prefix);
 
-            let arm_expr = self.convert_expression(&arm.expr);
+            let arm_expr = self.convert_expression(&arm.expr, 0);
 
             eprintln!("[BUG #IMPORT_MATCH] After converting arm {} expr, result is_some={}, match_arm_prefix={:?}",
                 arm_idx, arm_expr.is_some(), self.match_arm_prefix);
@@ -5287,7 +5299,15 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Infer the type of a HIR expression from context (BUG #76 FIX - full Option A)
-    fn infer_hir_expression_type(&self, expr: &hir::HirExpression) -> Type {
+    fn infer_hir_expression_type(&self, expr: &hir::HirExpression, depth: usize) -> Type {
+        // Guard against stack overflow on deeply nested expressions
+        if depth > MAX_EXPRESSION_RECURSION_DEPTH {
+            panic!(
+                "Expression recursion depth exceeded {} - likely infinite recursion in nested concat/tuple expressions",
+                MAX_EXPRESSION_RECURSION_DEPTH
+            );
+        }
+
         match expr {
             hir::HirExpression::Literal(lit) => self.infer_literal_type(lit),
 
@@ -5344,14 +5364,14 @@ impl<'hir> HirToMir<'hir> {
 
             hir::HirExpression::Binary(bin) => {
                 // Type depends on operation - usually inherits from operands
-                let left_type = self.infer_hir_expression_type(&bin.left);
+                let left_type = self.infer_hir_expression_type(&bin.left, depth + 1);
                 left_type // Simplified - proper inference would consider operation
             }
 
             hir::HirExpression::Concat(exprs) => {
                 // Concat creates a tuple type
                 let element_types: Vec<Type> = exprs.iter()
-                    .map(|e| self.infer_hir_expression_type(e))
+                    .map(|e| self.infer_hir_expression_type(e, depth + 1))
                     .collect();
                 Type::Tuple(element_types)
             }
@@ -5399,7 +5419,15 @@ impl<'hir> HirToMir<'hir> {
 
     /// Annotate an expression with type information (BUG #76 FIX)
     /// For Concat expressions representing tuples, recursively annotate parts with element types
-    fn annotate_expression_with_type(&self, expr: Expression, ty: Type) -> Expression {
+    fn annotate_expression_with_type(&self, expr: Expression, ty: Type, depth: usize) -> Expression {
+        // Guard against stack overflow on deeply nested expressions
+        if depth > MAX_EXPRESSION_RECURSION_DEPTH {
+            panic!(
+                "Expression annotation recursion depth exceeded {} - likely infinite recursion in nested concat/tuple expressions",
+                MAX_EXPRESSION_RECURSION_DEPTH
+            );
+        }
+
         eprintln!("[BUG #76 ANNOTATE] annotate_expression_with_type: target type = {:?}", ty);
         eprintln!("[BUG #76 ANNOTATE]   expr.kind = {:?}", std::mem::discriminant(&expr.kind));
         eprintln!("[BUG #76 ANNOTATE]   expr.ty (before) = {:?}", expr.ty);
@@ -5417,7 +5445,7 @@ impl<'hir> HirToMir<'hir> {
                             .enumerate()
                             .map(|(i, (part, elem_type))| {
                                 eprintln!("[BUG #76 ANNOTATE]     Part {}: elem_type = {:?}", i, elem_type);
-                                self.annotate_expression_with_type(part.clone(), elem_type.clone())
+                                self.annotate_expression_with_type(part.clone(), elem_type.clone(), depth + 1)
                             })
                             .collect();
 
@@ -5436,8 +5464,8 @@ impl<'hir> HirToMir<'hir> {
             // If this is a Conditional, recursively annotate both branches with the same type
             ExpressionKind::Conditional { cond, then_expr, else_expr } => {
                 eprintln!("[BUG #76 ANNOTATE]   This is a Conditional, recursively annotating branches");
-                let annotated_then = Box::new(self.annotate_expression_with_type(then_expr.as_ref().clone(), ty.clone()));
-                let annotated_else = Box::new(self.annotate_expression_with_type(else_expr.as_ref().clone(), ty.clone()));
+                let annotated_then = Box::new(self.annotate_expression_with_type(then_expr.as_ref().clone(), ty.clone(), depth + 1));
+                let annotated_else = Box::new(self.annotate_expression_with_type(else_expr.as_ref().clone(), ty.clone(), depth + 1));
 
                 let result = Expression {
                     kind: ExpressionKind::Conditional {
@@ -5598,8 +5626,8 @@ impl<'hir> HirToMir<'hir> {
         match call.function.as_str() {
             // Binary FP operations
             "add" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FAdd,
                     left,
@@ -5607,8 +5635,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "sub" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FSub,
                     left,
@@ -5616,8 +5644,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "mul" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FMul,
                     left,
@@ -5625,8 +5653,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "div" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FDiv,
                     left,
@@ -5637,7 +5665,7 @@ impl<'hir> HirToMir<'hir> {
             "neg" if call.args.len() == 1 => {
                 // Negate is handled as unary minus (0 - x)
                 let zero = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(0.0))));
-                let operand = Box::new(self.convert_expression(&call.args[0])?);
+                let operand = Box::new(self.convert_expression(&call.args[0], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FSub,
                     left: zero,
@@ -5646,14 +5674,14 @@ impl<'hir> HirToMir<'hir> {
             }
             "abs" if call.args.len() == 1 => {
                 // abs is handled as a function call to fabs
-                let arg = self.convert_expression(&call.args[0])?;
+                let arg = self.convert_expression(&call.args[0], 0)?;
                 Some(Expression::with_unknown_type(ExpressionKind::FunctionCall {
                     name: "fabs".to_string(),
                     args: vec![arg],
                 }))
             }
             "sqrt" if call.args.len() == 1 => {
-                let operand = Box::new(self.convert_expression(&call.args[0])?);
+                let operand = Box::new(self.convert_expression(&call.args[0], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Unary {
                     op: UnaryOp::FSqrt,
                     operand,
@@ -5661,8 +5689,8 @@ impl<'hir> HirToMir<'hir> {
             }
             // Comparison FP operations
             "lt" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FLess,
                     left,
@@ -5670,8 +5698,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "gt" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FGreater,
                     left,
@@ -5679,8 +5707,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "le" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FLessEqual,
                     left,
@@ -5688,8 +5716,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "ge" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FGreaterEqual,
                     left,
@@ -5697,8 +5725,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "eq" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FEqual,
                     left,
@@ -5706,8 +5734,8 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
             "ne" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0])?);
-                let right = Box::new(self.convert_expression(&call.args[1])?);
+                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
+                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
                 Some(Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::FNotEqual,
                     left,
@@ -6067,6 +6095,18 @@ impl<'hir> HirToMir<'hir> {
         let inlining_context_id = self.next_inlining_context_id;
         self.next_inlining_context_id += 1;
         self.inlining_context_stack.push(inlining_context_id);
+
+        // Guard against excessive function inlining depth (indirect recursion)
+        if self.inlining_context_stack.len() > MAX_EXPRESSION_RECURSION_DEPTH {
+            panic!(
+                "[HIR_TO_MIR] Function inlining depth exceeded {} - likely indirect recursion in function calls (function '{}', inlining context {}, call chain depth: {})",
+                MAX_EXPRESSION_RECURSION_DEPTH,
+                call.function,
+                inlining_context_id,
+                self.inlining_context_stack.len()
+            );
+        }
+
         eprintln!(
             "[CONTEXT] Pushed inlining context {} for function '{}', stack depth: {}",
             inlining_context_id,
@@ -6222,7 +6262,7 @@ impl<'hir> HirToMir<'hir> {
             "[BUG #IMPORT_MATCH] inline_function_call '{}': Before convert_expression, match_arm_prefix={:?}",
             call.function, self.match_arm_prefix
         );
-        let result = self.convert_expression(&substituted_expr);
+        let result = self.convert_expression(&substituted_expr, 0);
 
         // BUG #76 FIX: Annotate the result expression with the function's return type
         // This allows tuple literals to have correct element widths
@@ -6233,7 +6273,7 @@ impl<'hir> HirToMir<'hir> {
                     "[BUG #76] inline_function_call '{}': Annotating result with return type: {:?}",
                     call.function, return_type_ty
                 );
-                self.annotate_expression_with_type(expr, return_type_ty)
+                self.annotate_expression_with_type(expr, return_type_ty, 0)
             } else {
                 expr
             }
@@ -6314,8 +6354,8 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Range(base, high, low) => {
                 // BUG #77 FIX: Support nested range operations (e.g., data[31:0][4:0])
                 let base_lval = self.expr_to_lvalue(base)?;
-                let high_expr = self.convert_expression(high)?;
-                let low_expr = self.convert_expression(low)?;
+                let high_expr = self.convert_expression(high, 0)?;
+                let low_expr = self.convert_expression(low, 0)?;
                 Some(LValue::RangeSelect {
                     base: Box::new(base_lval),
                     high: Box::new(high_expr),
@@ -6325,7 +6365,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Index(base, index) => {
                 // BUG #77 FIX: Support nested index operations (e.g., arr[i][j])
                 let base_lval = self.expr_to_lvalue(base)?;
-                let index_expr = self.convert_expression(index)?;
+                let index_expr = self.convert_expression(index, 0)?;
                 Some(LValue::BitSelect {
                     base: Box::new(base_lval),
                     index: Box::new(index_expr),
@@ -7466,7 +7506,7 @@ impl<'hir> HirToMir<'hir> {
                     // Extract the specific field from the struct literal and convert just that field
                     for field_init in &struct_lit.fields {
                         if field_init.name == field_name {
-                            return self.convert_expression(&field_init.value);
+                            return self.convert_expression(&field_init.value, 0);
                         }
                     }
                     eprintln!(
@@ -7492,7 +7532,7 @@ impl<'hir> HirToMir<'hir> {
                                 "[BUG #71 TUPLE]   Element type: {:?}",
                                 std::mem::discriminant(&elements[index])
                             );
-                            let result = self.convert_expression(&elements[index]);
+                            let result = self.convert_expression(&elements[index], 0);
                             if result.is_some() {
                                 eprintln!("[BUG #71 TUPLE]   ✅ Successfully extracted element");
                             } else {
@@ -7566,7 +7606,7 @@ impl<'hir> HirToMir<'hir> {
 
                     eprintln!("[BUG #74 CALL IN FIELD_ACCESS] Converting FieldAccess to MIR...");
                     // Recursively convert the field access
-                    let mir_result = self.convert_expression(&field_access);
+                    let mir_result = self.convert_expression(&field_access, 0);
                     if mir_result.is_some() {
                         eprintln!("[BUG #74 CALL IN FIELD_ACCESS] ✅ FieldAccess conversion succeeded");
                     } else {
@@ -7599,7 +7639,7 @@ impl<'hir> HirToMir<'hir> {
 
                     // Recursively convert the field access
                     // This will hit the appropriate handler (StructLiteral, TupleLiteral, etc.)
-                    return self.convert_expression(&field_access);
+                    return self.convert_expression(&field_access, 0);
                 }
                 hir::HirExpression::If(if_expr) => {
                     // BUG FIX #22: Handle field access on If expressions
@@ -7633,7 +7673,7 @@ impl<'hir> HirToMir<'hir> {
                     });
 
                     // Convert the new If expression
-                    return self.convert_expression(&new_if);
+                    return self.convert_expression(&new_if, 0);
                 }
                 _ => {
                     // Complex base - can't handle
@@ -8281,7 +8321,7 @@ impl<'hir> HirToMir<'hir> {
         // Check if this is a conditional assignment pattern suitable for synthesis resolution
         if let Some((target, kind)) = self.extract_conditional_assignment_target(if_stmt) {
             // This is a conditional assignment - resolve it using synthesis approach
-            let condition = self.convert_expression(&if_stmt.condition)?;
+            let condition = self.convert_expression(&if_stmt.condition, 0)?;
             let original_if = IfStatement {
                 condition: condition.clone(),
                 then_block: self.convert_statements(&if_stmt.then_statements),
@@ -8409,7 +8449,7 @@ impl<'hir> HirToMir<'hir> {
         cases: &mut Vec<ConditionalCase>,
     ) -> Option<()> {
         // Add current condition-value pair
-        let condition = self.convert_expression(&if_stmt.condition)?;
+        let condition = self.convert_expression(&if_stmt.condition, 0)?;
         let value = self.extract_assignment_value(&if_stmt.then_statements)?;
 
         cases.push(ConditionalCase { condition, value });
@@ -8432,7 +8472,7 @@ impl<'hir> HirToMir<'hir> {
     fn extract_assignment_value(&mut self, stmts: &[hir::HirStatement]) -> Option<Expression> {
         if stmts.len() == 1 {
             if let hir::HirStatement::Assignment(assign) = &stmts[0] {
-                return self.convert_expression(&assign.rhs);
+                return self.convert_expression(&assign.rhs, 0);
             }
         }
         None
@@ -8448,7 +8488,7 @@ impl<'hir> HirToMir<'hir> {
                 match &else_stmts[0] {
                     hir::HirStatement::Assignment(assign) => {
                         // This is the final else clause
-                        return self.convert_expression(&assign.rhs);
+                        return self.convert_expression(&assign.rhs, 0);
                     }
                     hir::HirStatement::If(nested_if) => {
                         // Continue searching in nested if
