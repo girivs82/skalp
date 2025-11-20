@@ -404,10 +404,142 @@ impl HirBuilderContext {
 
         // Build ports after generics so they can reference generic clock domains
         let mut ports = Vec::new();
+        let mut signals = Vec::new();
+        let mut assignments = Vec::new();
+
         if let Some(port_list) = node.first_child_of_kind(SyntaxKind::PortList) {
+            // First pass: build ports
             for port_node in port_list.children_of_kind(SyntaxKind::PortDecl) {
                 if let Some(port) = self.build_port(&port_node) {
                     ports.push(port);
+                }
+            }
+
+            // Second pass: build entity body items (signals, assignments, let bindings)
+            for child in port_list.children() {
+                match child.kind() {
+                    SyntaxKind::SignalDecl => {
+                        if let Some(signal) = self.build_signal(&child) {
+                            signals.push(signal);
+                        }
+                    }
+                    SyntaxKind::AssignmentStmt => {
+                        eprintln!("[HIR_ENTITY_DEBUG] Processing entity body AssignmentStmt");
+
+                        // Check if this is a tuple destructuring assignment (LHS is a TupleExpr)
+                        if let Some(tuple_expr) = child
+                            .children()
+                            .find(|n| n.kind() == SyntaxKind::TupleExpr)
+                        {
+                            eprintln!("[HIR_ENTITY_DEBUG] Detected tuple destructuring");
+                            // Extract signal names from tuple expression
+                            let signal_names: Vec<String> = tuple_expr
+                                .children()
+                                .filter(|n| n.kind() == SyntaxKind::IdentExpr)
+                                .filter_map(|n| {
+                                    n.children_with_tokens()
+                                        .filter_map(|elem| elem.into_token())
+                                        .find(|t| t.kind() == SyntaxKind::Ident)
+                                        .map(|t| t.text().to_string())
+                                })
+                                .collect();
+
+                            // Extract RHS expression
+                            // Skip the first child (LHS TupleExpr) and collect all RHS nodes
+                            // Parser creates function calls as: IdentExpr + CallExpr siblings
+                            // Use build_chained_rhs_expression to combine them
+                            eprintln!("[HIR_ENTITY_DEBUG] Assignment statement children:");
+                            for (i, ch) in child.children().enumerate() {
+                                eprintln!("  [{}] {:?}", i, ch.kind());
+                            }
+
+                            // Build the RHS by combining IdentExpr + CallExpr siblings
+                            let rhs_nodes: Vec<_> = child.children().skip(1).collect();
+                            eprintln!("[HIR_ENTITY_DEBUG] Building RHS from {} nodes", rhs_nodes.len());
+
+                            let rhs_expr = if rhs_nodes.len() == 2
+                                && rhs_nodes[0].kind() == SyntaxKind::IdentExpr
+                                && rhs_nodes[1].kind() == SyntaxKind::CallExpr
+                            {
+                                // IdentExpr + CallExpr pattern: function call
+                                // Extract function name from IdentExpr
+                                let func_name = rhs_nodes[0]
+                                    .children_with_tokens()
+                                    .filter_map(|elem| elem.into_token())
+                                    .find(|t| t.kind() == SyntaxKind::Ident)
+                                    .map(|t| t.text().to_string());
+
+                                // Extract arguments from CallExpr
+                                let call_node = &rhs_nodes[1];
+                                let args: Vec<HirExpression> = call_node
+                                    .children()
+                                    .filter_map(|arg_node| self.build_expression(&arg_node))
+                                    .collect();
+
+                                func_name.map(|name| HirExpression::Call(HirCallExpr {
+                                    function: name,
+                                    type_args: vec![],
+                                    args,
+                                }))
+                            } else {
+                                None
+                            };
+
+                            if let Some(rhs_expr) = rhs_expr {
+                                eprintln!("[HIR_ENTITY_DEBUG] Expanding tuple destructuring into {} assignments", signal_names.len());
+                                eprintln!("[HIR_ENTITY_DEBUG] RHS expression type: {:?}", std::mem::discriminant(&rhs_expr));
+                                    // Create an assignment for each signal: signal_i = rhs.i
+                                    for (idx, signal_name) in signal_names.iter().enumerate() {
+                                        // Find the signal ID by name
+                                        if let Some(&signal_id) = self.symbols.signals.get(signal_name) {
+                                            let assignment = HirAssignment {
+                                                id: self.next_assignment_id(),
+                                                lhs: HirLValue::Signal(signal_id),
+                                                assignment_type: HirAssignmentType::Combinational,
+                                                rhs: HirExpression::FieldAccess {
+                                                    base: Box::new(rhs_expr.clone()),
+                                                    field: idx.to_string(),
+                                                },
+                                            };
+                                            assignments.push(assignment);
+                                        }
+                                    }
+                            }
+                        } else if let Some(assignment) =
+                            self.build_assignment(&child, HirAssignmentType::Combinational)
+                        {
+                            eprintln!("[HIR_ENTITY_DEBUG] Assignment built successfully");
+                            assignments.push(assignment);
+                        }
+                    }
+                    SyntaxKind::LetStmt => {
+                        // Let bindings in entity bodies are treated as combinational assignments
+                        // Convert let statements to signals + assignments
+                        let let_stmts = self.build_let_statements_from_node(&child);
+                        for stmt in let_stmts {
+                            if let HirStatement::Let(let_stmt) = stmt {
+                                // Create a signal for the let binding
+                                let signal = HirSignal {
+                                    id: SignalId(let_stmt.id.0), // Reuse the variable ID as signal ID
+                                    name: let_stmt.name.clone(),
+                                    signal_type: let_stmt.var_type.clone(),
+                                    initial_value: None,
+                                    clock_domain: None,
+                                };
+                                signals.push(signal);
+
+                                // Create a combinational assignment for the initialization
+                                let assignment = HirAssignment {
+                                    id: self.next_assignment_id(),
+                                    lhs: HirLValue::Signal(SignalId(let_stmt.id.0)),
+                                    assignment_type: HirAssignmentType::Combinational,
+                                    rhs: let_stmt.value,
+                                };
+                                assignments.push(assignment);
+                            }
+                        }
+                    }
+                    _ => {} // Ports are already handled, ignore others
                 }
             }
         }
@@ -438,6 +570,8 @@ impl HirBuilderContext {
             }
         }
 
+        eprintln!("[HIR_ENTITY_DEBUG] Built entity '{}' with {} signals and {} assignments", name, signals.len(), assignments.len());
+
         Some(HirEntity {
             id,
             name,
@@ -445,6 +579,8 @@ impl HirBuilderContext {
             ports,
             generics,
             clock_domains,
+            signals,
+            assignments,
         })
     }
 

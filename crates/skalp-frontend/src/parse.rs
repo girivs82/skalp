@@ -426,11 +426,20 @@ impl<'a> ParseState<'a> {
                 if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
                     self.bump();
                 }
+            } else if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::LParen) {
+                // Allow assignments in entity body (for direct signal assignments and tuple destructuring)
+                // This enables patterns like: result = expr or (a, b, c) = func()
+                self.parse_assignment_or_statement();
+
+                // Consume optional separator (comma or semicolon)
+                if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
+                    self.bump();
+                }
             } else if self.at(SyntaxKind::RBrace) {
                 break;
             } else {
                 self.error_and_bump(
-                    "expected port declaration, signal declaration, or let binding",
+                    "expected port declaration, signal declaration, let binding, or assignment",
                 );
             }
         }
@@ -4223,6 +4232,8 @@ impl<'a> ParseState<'a> {
 
     /// Parse identifier expression with possible postfix operations
     fn parse_identifier_expression(&mut self) {
+        eprintln!("[PARSER_DEBUG] parse_identifier_expression: current={:?}, peek(1)={:?}",
+                  self.current_kind(), self.peek_kind(1));
         // Check for special patterns that need lookahead:
         // 1. Type::Variant or Type<T>::Variant (path expression)
         // 2. function<T>(args) (generic function call)
@@ -4286,6 +4297,7 @@ impl<'a> ParseState<'a> {
 
         // Handle postfix operations (works for both path and identifier expressions)
         loop {
+            eprintln!("[PARSER_DEBUG] postfix loop: current={:?}", self.current_kind());
             match self.current_kind() {
                 Some(SyntaxKind::Dot) => {
                     // Field access (can be identifier for struct fields or numeric literal for tuple fields)
@@ -4317,6 +4329,7 @@ impl<'a> ParseState<'a> {
                 }
                 Some(SyntaxKind::LParen) => {
                     // Function call
+                    eprintln!("[PARSER_DEBUG] Creating CallExpr for function call");
                     self.finish_node(); // finish current expression
                     self.start_node(SyntaxKind::CallExpr);
                     self.bump(); // consume '('

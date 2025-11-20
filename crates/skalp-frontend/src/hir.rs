@@ -53,6 +53,10 @@ pub struct HirEntity {
     pub generics: Vec<HirGeneric>,
     /// Clock domain parameters
     pub clock_domains: Vec<HirClockDomain>,
+    /// Continuous assignments in entity body (for direct signal assignments)
+    pub assignments: Vec<HirAssignment>,
+    /// Signals declared in entity body
+    pub signals: Vec<HirSignal>,
 }
 
 /// Implementation in HIR

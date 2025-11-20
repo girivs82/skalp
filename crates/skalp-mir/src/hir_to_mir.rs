@@ -5618,8 +5618,16 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
+        // BUG FIX #75: Function parameters are also represented as Variables
+        // Parameters get VariableIds 0, 1, 2, ... then let bindings continue from there
+        for (i, param) in params.iter().enumerate() {
+            var_id_to_name.insert(hir::VariableId(i as u32), param.name.clone());
+            eprintln!("[BUG #75 PARAM_MAP] Mapped parameter VariableId({}) -> '{}'", i, param.name);
+            var_counter += 1;
+        }
+
         collect_lets_recursive(&body, &mut var_id_to_name, &mut var_counter);
-        eprintln!("[BUG #74 VAR_MAP] Built var_id_to_name map with {} entries", var_id_to_name.len());
+        eprintln!("[BUG #74 VAR_MAP] Built var_id_to_name map with {} entries (including {} params)", var_id_to_name.len(), params.len());
 
         // Transform early returns
         let body = self.transform_early_returns(body);

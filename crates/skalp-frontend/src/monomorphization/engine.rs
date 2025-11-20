@@ -296,6 +296,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
             ports: specialized_ports,
             generics: vec![], // No generics in specialized version
             clock_domains: entity.clock_domains.clone(),
+            signals: entity.signals.clone(),
+            assignments: entity.assignments.clone(),
         };
 
         (specialized_entity, port_id_map)
