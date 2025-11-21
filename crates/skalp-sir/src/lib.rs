@@ -1,4 +1,10 @@
 #[cfg(target_os = "macos")]
+
+// GLOBAL: Disable all debug output for performance
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{}};
+}
+
 pub mod metal_codegen;
 pub mod mir_to_sir;
 pub mod sir;

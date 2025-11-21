@@ -1,4 +1,5 @@
 #![allow(dead_code, unused_variables, unused_imports)]
+
 //! SKALP MIR - Mid-level Intermediate Representation
 //!
 //! This crate handles:
@@ -6,6 +7,11 @@
 //! - Process generation (always blocks)
 //! - Optimization passes
 //! - Preparation for code generation
+
+// GLOBAL: Disable all debug output for performance
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{}};
+}
 
 pub mod cdc_analysis;
 pub mod compiler;

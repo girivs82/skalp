@@ -1,4 +1,5 @@
 #![allow(dead_code, unused_variables, unused_imports)]
+
 //! Property-based testing framework for SKALP hardware designs
 //!
 //! This crate provides:
@@ -6,6 +7,11 @@
 //! - Coverage-driven verification
 //! - Constrained random testing
 //! - Hardware-specific generators
+
+// GLOBAL: Disable all debug output for performance
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{}};
+}
 
 pub mod constraints;
 pub mod coverage;

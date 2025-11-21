@@ -7,6 +7,11 @@ use skalp_mir::{
 };
 use std::collections::HashMap;
 
+// Disable verbose debug output for performance
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{}};
+}
+
 /// Convert MIR to SIR with full hierarchical elaboration
 /// This function takes the entire Mir (all modules) and elaborates the first module
 /// by recursively flattening all instantiated submodules

@@ -1142,39 +1142,49 @@ impl<'a> MetalShaderGenerator<'a> {
             };
 
             if let Some(size) = array_size {
-                // For arrays, initialize element by element
+                // FIX: Metal requires array brackets AFTER variable name, not before type
+                // Correct syntax: "uint temp[8]" not "uint[8] temp"
+                // Also, Metal does NOT support direct array assignment
                 eprintln!(
                     "🔢 Metal codegen: node {} = {}[{}] with value {}",
                     node.id, base_type, size, value
                 );
                 self.write_indented(&format!(
-                    "{}[{}] temp_const_{} = {{",
+                    "{} temp_const_{}[{}] = {{",
                     base_type,
-                    size,
-                    self.sanitize_name(output)
+                    self.sanitize_name(output),
+                    size
                 ));
                 for i in 0..size {
                     if i > 0 {
                         write!(self.output, ", ").unwrap();
                     }
                     // Extract the appropriate 32 bits from the value
-                    let elem_val = if width <= 64 {
-                        if i == 0 {
-                            value as u32
+                    let elem_val = if i == 0 {
+                        value as u32
+                    } else if width <= 64 {
+                        0
+                    } else {
+                        // For 256-bit, extract bits [i*32..(i+1)*32]
+                        if i == 1 {
+                            (value >> 32) as u32
                         } else {
                             0
                         }
-                    } else {
-                        0 // For 256-bit, value is typically 0
                     };
                     write!(self.output, "{}", elem_val).unwrap();
                 }
                 writeln!(self.output, "}};").unwrap();
-                self.write_indented(&format!(
-                    "signals->{} = temp_const_{};\n",
-                    self.sanitize_name(output),
-                    self.sanitize_name(output)
-                ));
+                // FIX: Metal doesn't support array assignment, copy element-by-element
+                for i in 0..size {
+                    self.write_indented(&format!(
+                        "signals->{}[{}] = temp_const_{}[{}];\n",
+                        self.sanitize_name(output),
+                        i,
+                        self.sanitize_name(output),
+                        i
+                    ));
+                }
             } else {
                 eprintln!(
                     "🔢 Metal codegen: node {} = {}({})",
