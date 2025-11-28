@@ -782,36 +782,74 @@ impl<'a> MetalShaderGenerator<'a> {
             if output_width > 128 {
                 // Wide bit type - use element-wise operations
                 // BUG FIX #75: For shift operations, check if right operand is scalar
+                // BUG FIX #88: Also check if left operand is scalar (non-shift operations too)
                 let is_shift_op = matches!(op, BinaryOperation::Shl | BinaryOperation::Shr);
+                let left_width = self.get_signal_width_from_sir(sir, left);
                 let right_width = self.get_signal_width_from_sir(sir, right);
-                let right_is_scalar = right_width <= 128; // Scalars fit in <= 128 bits
+                // Note: Scalars are <=32 bits; 33-128 bits are uint2/uint4 vectors that support [i];
+                // >128 bits are arrays (uint[N]) that also support [i]
+                let left_is_scalar = left_width <= 32;
+                let right_is_scalar = right_width <= 32;
+                // Vectors (33-128 bits) need bounds checking since they have fewer elements
+                let left_is_vector = left_width > 32 && left_width <= 128;
+                let right_is_vector = right_width > 32 && right_width <= 128;
 
                 let array_size = output_width.div_ceil(32); // Ceil division
                 self.write_indented(&format!(
-                    "// Element-wise {} for {}-bit operands (uint[{}])\n",
-                    op_str, output_width, array_size
+                    "// Element-wise {} for {}-bit output (uint[{}]), left={}-bit, right={}-bit\n",
+                    op_str, output_width, array_size, left_width, right_width
                 ));
                 self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
                 self.indent += 1;
 
-                // BUG FIX #75: For shift ops with scalar shift amount, don't index right operand
-                if is_shift_op && right_is_scalar {
-                    self.write_indented(&format!(
-                        "signals->{}[i] = signals->{}[i] {} signals->{};\n",
-                        self.sanitize_name(output),
-                        self.sanitize_name(left),
-                        op_str,
-                        self.sanitize_name(right)  // No [i] - it's scalar
-                    ));
+                // BUG FIX #88: Handle all combinations of scalar/vector/array operands
+                let left_access = if left_is_scalar {
+                    // Scalar (<=32 bits): only contributes to element 0, zero elsewhere
+                    format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(left))
+                } else if left_is_vector {
+                    // Vector (33-128 bits): use [i] with bounds check
+                    let left_elements = left_width.div_ceil(32);
+                    format!(
+                        "(i < {} ? signals->{}[i] : 0)",
+                        left_elements,
+                        self.sanitize_name(left)
+                    )
                 } else {
-                    self.write_indented(&format!(
-                        "signals->{}[i] = signals->{}[i] {} signals->{}[i];\n",
-                        self.sanitize_name(output),
-                        self.sanitize_name(left),
-                        op_str,
+                    // Array (>128 bits): direct [i] access
+                    format!("signals->{}[i]", self.sanitize_name(left))
+                };
+
+                let right_access = if is_shift_op && (right_is_scalar || right_is_vector) {
+                    // BUG FIX #75: Shift amount applies to all elements (use scalar directly)
+                    if right_is_scalar {
+                        format!("signals->{}", self.sanitize_name(right))
+                    } else {
+                        // Vector shift amount - use element 0
+                        format!("signals->{}[0]", self.sanitize_name(right))
+                    }
+                } else if right_is_scalar {
+                    // Scalar (<=32 bits): only contributes to element 0
+                    format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(right))
+                } else if right_is_vector {
+                    // Vector (33-128 bits): use [i] with bounds check
+                    let right_elements = right_width.div_ceil(32);
+                    format!(
+                        "(i < {} ? signals->{}[i] : 0)",
+                        right_elements,
                         self.sanitize_name(right)
-                    ));
-                }
+                    )
+                } else {
+                    // Array (>128 bits): direct [i] access
+                    format!("signals->{}[i]", self.sanitize_name(right))
+                };
+
+                self.write_indented(&format!(
+                    "signals->{}[i] = {} {} {};\n",
+                    self.sanitize_name(output),
+                    left_access,
+                    op_str,
+                    right_access
+                ));
 
                 self.indent -= 1;
                 self.write_indented("}\n");
@@ -962,28 +1000,52 @@ impl<'a> MetalShaderGenerator<'a> {
 
             if output_width > 128 {
                 // Wide bit type - use element-wise operations
+                // BUG FIX #88: Check if input is scalar or vector
+                let input_width = self.get_signal_width_from_sir(sir, input);
+                let input_is_scalar = input_width <= 32;
+                let input_is_vector = input_width > 32 && input_width <= 128;
+
                 let array_size = output_width.div_ceil(32); // Ceil division
                 self.write_indented(&format!(
-                    "// Element-wise {} for {}-bit operand (uint[{}])\n",
+                    "// Element-wise {} for {}-bit output (uint[{}]), input={}-bit\n",
                     if is_function { op_str } else { "unary op" },
                     output_width,
-                    array_size
+                    array_size,
+                    input_width
                 ));
                 self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
                 self.indent += 1;
+
+                // BUG FIX #88: Handle scalar/vector/array input with wide output
+                let input_access = if input_is_scalar {
+                    // Scalar (<=32 bits): only element 0 has value
+                    format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(input))
+                } else if input_is_vector {
+                    // Vector (33-128 bits): use [i] with bounds check
+                    let input_elements = input_width.div_ceil(32);
+                    format!(
+                        "(i < {} ? signals->{}[i] : 0)",
+                        input_elements,
+                        self.sanitize_name(input)
+                    )
+                } else {
+                    // Array (>128 bits): direct [i] access
+                    format!("signals->{}[i]", self.sanitize_name(input))
+                };
+
                 if is_function {
                     self.write_indented(&format!(
-                        "signals->{}[i] = {}(signals->{}[i]);\n",
+                        "signals->{}[i] = {}({});\n",
                         self.sanitize_name(output),
                         op_str,
-                        self.sanitize_name(input)
+                        input_access
                     ));
                 } else {
                     self.write_indented(&format!(
-                        "signals->{}[i] = {}signals->{}[i];\n",
+                        "signals->{}[i] = {}{};\n",
                         self.sanitize_name(output),
                         op_str,
-                        self.sanitize_name(input)
+                        input_access
                     ));
                 }
                 self.indent -= 1;
