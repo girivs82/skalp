@@ -4072,11 +4072,12 @@ impl<'hir> HirToMir<'hir> {
                 }, ty))
             }
             hir::HirExpression::Match(match_expr) => {
-                // Convert match-expression to nested conditionals
-                // match x { 1 => a, 2 => b, _ => c } becomes: (x == 1) ? a : ((x == 2) ? b : c)
+                // Convert match-expression to conditionals
+                // Choice of priority (nested ternary) vs parallel (OR of ANDs) based on mux_style
                 eprintln!(
-                    "[DEBUG] Match expression conversion: {} arms",
-                    match_expr.arms.len()
+                    "[DEBUG] Match expression conversion: {} arms, mux_style={:?}",
+                    match_expr.arms.len(),
+                    match_expr.mux_style
                 );
                 for (i, arm) in match_expr.arms.iter().enumerate() {
                     eprintln!(
@@ -4086,7 +4087,18 @@ impl<'hir> HirToMir<'hir> {
                         std::mem::discriminant(&arm.expr)
                     );
                 }
-                self.convert_match_to_conditionals(&match_expr.expr, &match_expr.arms)
+
+                // Choose mux generation strategy based on intent/attribute
+                match match_expr.mux_style {
+                    hir::MuxStyle::Parallel => {
+                        // Generate OR-of-ANDs: ({W{sel==0}} & a) | ({W{sel==1}} & b) | ...
+                        self.convert_match_to_parallel_mux(&match_expr.expr, &match_expr.arms)
+                    }
+                    hir::MuxStyle::Priority | hir::MuxStyle::Auto => {
+                        // Generate nested ternary (priority encoder): (c1) ? v1 : ((c2) ? v2 : default)
+                        self.convert_match_to_conditionals(&match_expr.expr, &match_expr.arms)
+                    }
+                }
             }
             hir::HirExpression::Cast(cast_expr) => {
                 // Convert type cast expression
@@ -4502,6 +4514,125 @@ impl<'hir> HirToMir<'hir> {
             });
         }
 
+        Some(result)
+    }
+
+    /// Convert match expression to parallel mux (OR of ANDs)
+    /// Generates: ({W{sel==0}} & a) | ({W{sel==1}} & b) | ...
+    /// This produces a one-hot mux with shorter critical path but requires mutually exclusive conditions
+    fn convert_match_to_parallel_mux(
+        &mut self,
+        match_value: &hir::HirExpression,
+        arms: &[hir::HirMatchArmExpr],
+    ) -> Option<Expression> {
+        if arms.is_empty() {
+            return None;
+        }
+
+        eprintln!(
+            "[PARALLEL_MUX] Converting {} arms to OR-of-ANDs",
+            arms.len()
+        );
+
+        // Convert the match value expression once
+        let match_value_expr = self.convert_expression(match_value, 0)?;
+
+        // Collect all (condition, value) pairs
+        let mut terms: Vec<Expression> = Vec::new();
+        let mut default_value: Option<Expression> = None;
+
+        for arm in arms.iter() {
+            match &arm.pattern {
+                hir::HirPattern::Wildcard => {
+                    // Wildcard is the default - save it for the final OR
+                    default_value = self.convert_expression(&arm.expr, 0);
+                }
+                hir::HirPattern::Literal(lit) => {
+                    // Build: (sel == lit) ? value : 0 -> ({W{sel==lit}} & value)
+                    let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(match_value_expr.clone()),
+                        right: Box::new(Expression::with_unknown_type(
+                            ExpressionKind::Literal(self.convert_literal(lit)?),
+                        )),
+                    });
+                    let value = self.convert_expression(&arm.expr, 0)?;
+
+                    // Build: condition ? value : 0
+                    // For synthesis, this becomes ({W{condition}} & value) after optimization
+                    // We use conditional here and let codegen/synthesis optimize to AND-mask
+                    let term = Expression::with_unknown_type(ExpressionKind::Conditional {
+                        cond: Box::new(condition),
+                        then_expr: Box::new(value),
+                        else_expr: Box::new(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::Integer(0)),
+                        )),
+                    });
+                    terms.push(term);
+                }
+                hir::HirPattern::Path(enum_name, variant) => {
+                    // Handle enum/constant patterns
+                    let pattern_value = if enum_name == "__CONST__" {
+                        self.resolve_constant_value(variant)?
+                    } else {
+                        self.resolve_enum_variant_value(enum_name, variant)?
+                    };
+
+                    let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(match_value_expr.clone()),
+                        right: Box::new(pattern_value),
+                    });
+                    let value = self.convert_expression(&arm.expr, 0)?;
+
+                    let term = Expression::with_unknown_type(ExpressionKind::Conditional {
+                        cond: Box::new(condition),
+                        then_expr: Box::new(value),
+                        else_expr: Box::new(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::Integer(0)),
+                        )),
+                    });
+                    terms.push(term);
+                }
+                _ => {
+                    // Unsupported pattern for parallel mux - fall back to priority
+                    eprintln!(
+                        "[PARALLEL_MUX] Unsupported pattern {:?}, falling back to priority",
+                        arm.pattern
+                    );
+                    return self.convert_match_to_conditionals(match_value, arms);
+                }
+            }
+        }
+
+        // Build the OR tree: term0 | term1 | term2 | ...
+        if terms.is_empty() {
+            return default_value;
+        }
+
+        let mut result = terms.remove(0);
+        for term in terms {
+            result = Expression::with_unknown_type(ExpressionKind::Binary {
+                op: BinaryOp::Or,
+                left: Box::new(result),
+                right: Box::new(term),
+            });
+        }
+
+        // If there's a default, OR it in (handles the "none of the above" case)
+        // For truly one-hot selectors, default should never be reached
+        if let Some(default) = default_value {
+            // For parallel mux, we include the default as another OR term
+            // In theory, if conditions are mutually exclusive and exhaustive, default is unreachable
+            // But we include it for safety and to handle partial matches
+            result = Expression::with_unknown_type(ExpressionKind::Binary {
+                op: BinaryOp::Or,
+                left: Box::new(result),
+                right: Box::new(default),
+            });
+        }
+
+        eprintln!("[PARALLEL_MUX] Generated OR-of-ANDs expression");
         Some(result)
     }
 
