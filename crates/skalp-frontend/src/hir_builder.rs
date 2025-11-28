@@ -6887,7 +6887,9 @@ impl HirBuilderContext {
         // Find the target type (comes after 'for' keyword, now as TypeAnnotation)
         let target = if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
             // Parse as type (e.g., nat[32], bit[8], fp32, CustomType<T>)
-            let target_type = self.build_hir_type(&type_node);
+            // BUG FIX: Use extract_hir_type which handles all type variants (nat, int, bit, etc.)
+            // build_hir_type only handles a subset and falls through to Bit(8) as default
+            let target_type = self.extract_hir_type(&type_node);
             TraitImplTarget::Type(target_type)
         } else if ident_tokens.len() >= 2 {
             // Old format: try parsing as entity name for backward compatibility
