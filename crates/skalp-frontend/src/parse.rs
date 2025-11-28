@@ -841,6 +841,14 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ReturnKw) => self.parse_return_statement(),
                 Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
                 Some(SyntaxKind::LBrace) => self.parse_block_statement(),
+                Some(SyntaxKind::LParen) => {
+                    // Handle tuple expression as statement (e.g., implicit return: (y, x))
+                    // Bug #85 fix: Support tuple expressions in function bodies for implicit returns
+                    self.start_node(SyntaxKind::ExprStmt);
+                    self.parse_expression();
+                    self.consume_semicolon();
+                    self.finish_node();
+                }
                 Some(SyntaxKind::AssignKw) => {
                     self.error("'assign' statements cannot be inside event blocks");
                     // Skip the assign statement without creating a node

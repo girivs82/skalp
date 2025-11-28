@@ -1576,6 +1576,7 @@ impl HirBuilderContext {
                                 | SyntaxKind::PathExpr
                                 | SyntaxKind::LiteralExpr
                                 | SyntaxKind::IdentExpr
+                                | SyntaxKind::TupleExpr // Bug #85 fix: Support tuple expressions for implicit returns
                         )
                     })
                     .and_then(|n| self.build_expression(&n))?;
