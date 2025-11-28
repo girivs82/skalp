@@ -304,6 +304,9 @@ pub struct HirIfStatement {
     pub then_statements: Vec<HirStatement>,
     /// Else statements
     pub else_statements: Option<Vec<HirStatement>>,
+    /// Mux style hint from intent/attribute (defaults to Priority)
+    #[serde(default)]
+    pub mux_style: MuxStyle,
 }
 
 /// Let statement in HIR - local variable binding
@@ -328,6 +331,9 @@ pub struct HirMatchStatement {
     pub expr: HirExpression,
     /// Match arms
     pub arms: Vec<HirMatchArm>,
+    /// Mux style hint from intent/attribute (defaults to Priority)
+    #[serde(default)]
+    pub mux_style: MuxStyle,
 }
 
 /// Match arm in HIR
@@ -436,6 +442,9 @@ pub struct HirMatchExpr {
     pub expr: Box<HirExpression>,
     /// Match arms
     pub arms: Vec<HirMatchArmExpr>,
+    /// Mux style hint from intent/attribute (defaults to Priority)
+    #[serde(default)]
+    pub mux_style: MuxStyle,
 }
 
 /// Match arm for match expressions (contains expressions, not statements)
@@ -787,6 +796,21 @@ pub enum HirConstraintType {
     Power,
     Area,
     Performance,
+}
+
+/// Mux style for conditionals and match expressions
+/// This determines how conditions are synthesized to hardware muxes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MuxStyle {
+    /// Priority encoder - cascaded ternary, handles overlapping conditions (default)
+    /// Generated as: (c1) ? v1 : ((c2) ? v2 : default)
+    #[default]
+    Priority,
+    /// Parallel one-hot mux - assumes mutually exclusive conditions, shorter critical path
+    /// Generated as: ({W{sel==0}} & a) | ({W{sel==1}} & b) | ...
+    Parallel,
+    /// Compiler analyzes conditions and chooses optimal style
+    Auto,
 }
 
 /// Requirement in HIR

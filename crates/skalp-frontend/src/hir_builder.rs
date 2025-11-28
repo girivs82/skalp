@@ -2133,6 +2133,7 @@ impl HirBuilderContext {
             condition,
             then_statements,
             else_statements,
+            mux_style: MuxStyle::default(),
         })
     }
 
@@ -2560,7 +2561,11 @@ impl HirBuilderContext {
             }
         }
 
-        Some(HirMatchStatement { expr, arms })
+        Some(HirMatchStatement {
+            expr,
+            arms,
+            mux_style: MuxStyle::default(),
+        })
     }
 
     /// Build match arm
@@ -5057,6 +5062,7 @@ impl HirBuilderContext {
         Some(HirExpression::Match(HirMatchExpr {
             expr: Box::new(expr),
             arms,
+            mux_style: MuxStyle::default(),
         }))
     }
 

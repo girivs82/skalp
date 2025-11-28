@@ -170,6 +170,7 @@ impl TypeSubstitution {
                 else_statements: if_stmt.else_statements.as_ref().map(|stmts| {
                     stmts.iter().map(|s| self.substitute_statement(s)).collect()
                 }),
+                mux_style: if_stmt.mux_style,
             }),
             hir::HirStatement::Match(match_stmt) => {
                 hir::HirStatement::Match(hir::HirMatchStatement {
@@ -187,6 +188,7 @@ impl TypeSubstitution {
                                 .collect(),
                         })
                         .collect(),
+                    mux_style: match_stmt.mux_style,
                 })
             }
             hir::HirStatement::Block(stmts) => hir::HirStatement::Block(
@@ -232,6 +234,7 @@ impl TypeSubstitution {
                             expr: self.substitute_expression(&arm.expr),
                         })
                         .collect(),
+                    mux_style: match_expr.mux_style,
                 })
             }
             hir::HirExpression::Block {
@@ -1306,6 +1309,7 @@ impl Monomorphizer {
                 else_statements: if_stmt.else_statements.as_ref().map(|stmts| {
                     stmts.iter().map(|s| self.replace_calls_in_statement(s, ctx)).collect()
                 }),
+                mux_style: if_stmt.mux_style,
             }),
             hir::HirStatement::Match(match_stmt) => {
                 hir::HirStatement::Match(hir::HirMatchStatement {
@@ -1323,6 +1327,7 @@ impl Monomorphizer {
                                 .collect(),
                         })
                         .collect(),
+                    mux_style: match_stmt.mux_style,
                 })
             }
             hir::HirStatement::Block(stmts) => hir::HirStatement::Block(
@@ -1455,6 +1460,7 @@ impl Monomorphizer {
                             expr: self.replace_calls_in_expression(&arm.expr, ctx),
                         })
                         .collect(),
+                    mux_style: match_expr.mux_style,
                 })
             }
             hir::HirExpression::Block {

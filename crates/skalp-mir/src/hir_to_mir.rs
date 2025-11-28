@@ -4822,6 +4822,7 @@ impl<'hir> HirToMir<'hir> {
                                 else_statements: if_stmt.else_statements.as_ref().map(|stmts| {
                                     self.transform_early_returns_recursive(stmts.clone())
                                 }),
+                                mux_style: if_stmt.mux_style,
                             })
                         } else {
                             // Move remaining statements into else-branch
@@ -4833,6 +4834,7 @@ impl<'hir> HirToMir<'hir> {
                                     if_stmt.then_statements.clone(),
                                 ),
                                 else_statements: Some(else_body),
+                                mux_style: if_stmt.mux_style,
                             })
                         };
 
@@ -4853,6 +4855,7 @@ impl<'hir> HirToMir<'hir> {
                     else_statements: if_stmt
                         .else_statements
                         .map(|stmts| self.transform_early_returns_recursive(stmts)),
+                    mux_style: if_stmt.mux_style,
                 }),
                 hir::HirStatement::Block(stmts) => {
                     hir::HirStatement::Block(self.transform_early_returns_recursive(stmts))
@@ -5066,6 +5069,7 @@ impl<'hir> HirToMir<'hir> {
         Some(hir::HirExpression::Match(hir::HirMatchExpr {
             expr: Box::new(match_stmt.expr.clone()),
             arms,
+            mux_style: match_stmt.mux_style,
         }))
     }
 
@@ -5428,7 +5432,11 @@ impl<'hir> HirToMir<'hir> {
                     "[DEBUG] Match: substitution complete, final arms count: {}",
                     arms.len()
                 );
-                Some(hir::HirExpression::Match(hir::HirMatchExpr { expr, arms }))
+                Some(hir::HirExpression::Match(hir::HirMatchExpr {
+                    expr,
+                    arms,
+                    mux_style: match_expr.mux_style,
+                }))
             }
 
             // Block expression - substitute statements and result
