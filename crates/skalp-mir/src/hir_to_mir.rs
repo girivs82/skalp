@@ -10046,6 +10046,7 @@ impl<'hir> HirToMir<'hir> {
             let port_name = format!("param_{}", param_idx);
             let port_type = self.convert_type(&param.param_type);
 
+
             let port = Port {
                 id: port_id,
                 name: port_name,
@@ -10124,34 +10125,85 @@ impl<'hir> HirToMir<'hir> {
         // Handle: let bindings, if statements with early returns, final return
         // BUG FIX #85: Store full let statements to use their actual VariableIds, not sequential assumptions
         // BUG FIX #85 (continued): Extract let bindings from match arms, not just top-level
+
+        // BUG FIX: Transform early returns into nested if-else before processing
+        // This converts: if cond { return A } ... return B
+        // Into: return if cond { A } else { B }
+        println!("🔍 BEFORE transform_early_returns: {} statements", func.body.len());
+        for (i, stmt) in func.body.iter().enumerate() {
+            println!("   [{:02}] {:?}", i, std::mem::discriminant(stmt));
+            if let hir::HirStatement::If(_) = stmt {
+                println!("        ^^^^ THIS IS AN IF STATEMENT!");
+            }
+        }
+        let body = self.transform_early_returns(func.body.clone());
+        println!("🔄 AFTER transform_early_returns: {} statements", body.len());
+        for (i, stmt) in body.iter().enumerate() {
+            println!("   [{:02}] {:?}", i, std::mem::discriminant(stmt));
+        }
+
         let mut let_bindings: Vec<hir::HirLetStatement> = Vec::new();
         let mut return_expr: Option<hir::HirExpression> = None;
         let mut if_return_statements: Vec<&hir::HirIfStatement> = Vec::new();
 
         // First pass: identify let bindings, if statements, and return statement
-        for stmt in &func.body {
+        println!("🔍🔍🔍 FIRST PASS: Scanning {} statements for early returns 🔍🔍🔍", body.len());
+        for (idx, stmt) in body.iter().enumerate() {
+            println!("   Statement {}: {:?}", idx, std::mem::discriminant(stmt));
             match stmt {
                 hir::HirStatement::Let(let_stmt) => {
-                    eprintln!("    • Found top-level let binding: {} (actual VariableId={})", let_stmt.name, let_stmt.id.0);
+                    println!("    • Found top-level let binding: {} (actual VariableId={})", let_stmt.name, let_stmt.id.0);
                     let_bindings.push(let_stmt.clone());
                 }
                 hir::HirStatement::Return(value) => {
                     if let Some(val) = value {
                         return_expr = Some(val.clone());
-                        eprintln!("    • Found return expression");
+                        println!("    • Found return expression: {:?}", std::mem::discriminant(val));
+                        // Check if the return is a ternary/if expression (early return transformed)
+                        match val {
+                            hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+                                println!("      🎯 Return is a Ternary (conditional)!");
+                                println!("         condition: {:?}", std::mem::discriminant(condition.as_ref()));
+                                println!("         true: {:?}", std::mem::discriminant(true_expr.as_ref()));
+                                println!("         false: {:?}", std::mem::discriminant(false_expr.as_ref()));
+                            }
+                            hir::HirExpression::If(if_expr) => {
+                                println!("      🎯 Return is an If expression!");
+                            }
+                            hir::HirExpression::TupleLiteral(elements) => {
+                                println!("      🎯 Return is a TupleLiteral with {} elements:", elements.len());
+                                for (i, elem) in elements.iter().enumerate() {
+                                    println!("         [{i}] {:?}", std::mem::discriminant(elem));
+                                    // Check if element is conditional
+                                    match elem {
+                                        hir::HirExpression::Ternary { .. } => println!("             -> Is Ternary!"),
+                                        hir::HirExpression::If(_) => println!("             -> Is If expression!"),
+                                        hir::HirExpression::Variable(v) => println!("             -> Variable({:?})", v),
+                                        hir::HirExpression::Literal(_) => println!("             -> Literal"),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 hir::HirStatement::If(if_stmt) => {
                     // Check if this is an early return pattern (if condition { return ... })
                     if_return_statements.push(if_stmt);
-                    eprintln!("    • Found if statement (may contain early return)");
+                    println!("    • 🚨 Found if statement (may contain early return)");
+                    // Check if then branch has a return
+                    let has_return = if_stmt.then_statements.iter().any(|s| matches!(s, hir::HirStatement::Return(_)));
+                    println!("      -> Then branch has return: {}", has_return);
                 }
                 _ => {
-                    eprintln!("    ⚠️  Skipping unsupported statement type: {:?}",
+                    println!("    ⚠️  Skipping unsupported statement type: {:?}",
                              std::mem::discriminant(stmt));
                 }
             }
         }
+        println!("🔍🔍🔍 FIRST PASS DONE: {} let bindings, {} if statements, return_expr={} 🔍🔍🔍",
+                 let_bindings.len(), if_return_statements.len(), return_expr.is_some());
 
         // BUG FIX #85: If return expression is a Match, extract let bindings from match arms
         // This handles functions like exec_l4_l5 that have: return match opcode { ... }
@@ -10302,6 +10354,115 @@ impl<'hir> HirToMir<'hir> {
             } else {
                 // No early returns - just convert the return expression
                 self.convert_return_to_output(&ret_expr, &ctx, &output_port_ids, &mut module, &mut conversion_errors);
+            }
+        } else if !if_return_statements.is_empty() && if_return_statements.len() == 1 {
+            // BUG FIX #86: Handle the case where transform_early_returns moved ALL returns inside the if/else
+            // After transform: if (cond) { return A } else { ...let bindings...; return B }
+            // Both returns are inside the if statement, so return_expr is None
+            eprintln!("  🔧 Phase 3c: No top-level return, but if statement contains returns (transformed early return pattern)");
+
+            let if_stmt = if_return_statements[0];
+
+            // Extract return from then-branch
+            let then_return = if_stmt.then_statements.iter().find_map(|s| {
+                if let hir::HirStatement::Return(Some(e)) = s {
+                    Some(e)
+                } else {
+                    None
+                }
+            });
+
+            // Extract return from else-branch (may be nested after let bindings)
+            let else_return = if let Some(else_stmts) = &if_stmt.else_statements {
+                // Look for return in the else branch - it may be the last statement after let bindings
+                else_stmts.iter().rev().find_map(|s| {
+                    if let hir::HirStatement::Return(Some(e)) = s {
+                        Some(e)
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            if let (Some(then_ret), Some(else_ret)) = (then_return, else_return) {
+                eprintln!("    • Found returns in both branches - creating conditional");
+                eprintln!("    • then return: {:?}", std::mem::discriminant(then_ret));
+                eprintln!("    • else return: {:?}", std::mem::discriminant(else_ret));
+
+                // First, process any let bindings in the else branch and add them to ctx
+                if let Some(else_stmts) = &if_stmt.else_statements {
+                    for stmt in else_stmts {
+                        if let hir::HirStatement::Let(let_stmt) = stmt {
+                            // Check if we already have this let binding
+                            if ctx.var_to_signal.contains_key(&let_stmt.id) {
+                                continue;
+                            }
+
+                            // Create signal for this let binding
+                            let signal_id = self.next_signal_id();
+                            let unique_signal_name = format!("{}_{}", let_stmt.name, let_stmt.id.0);
+                            let signal = Signal {
+                                id: signal_id,
+                                name: unique_signal_name.clone(),
+                                signal_type: DataType::Bit(32),
+                                initial: None,
+                                clock_domain: None,
+                            };
+                            module.signals.push(signal);
+
+                            // Create variable entry
+                            let variable = Variable {
+                                id: VariableId(let_stmt.id.0),
+                                name: unique_signal_name.clone(),
+                                var_type: DataType::Bit(32),
+                                initial: None,
+                            };
+                            module.variables.push(variable);
+
+                            ctx.var_to_signal.insert(let_stmt.id, signal_id);
+                            ctx.var_id_to_name.insert(let_stmt.id, let_stmt.name.clone());
+                            eprintln!("      ✓ Created signal for else-branch let binding: {} (var_id={}, signal_id={})",
+                                     let_stmt.name, let_stmt.id.0, signal_id.0);
+
+                            // Convert the let binding expression to an assignment
+                            if let Some(converted_expr) = self.convert_hir_expr_for_module(&let_stmt.value, &ctx, 0) {
+                                let assignment = ContinuousAssign {
+                                    lhs: LValue::Signal(signal_id),
+                                    rhs: converted_expr,
+                                };
+                                module.assignments.push(assignment);
+                            }
+                        }
+                    }
+                }
+
+                // Convert condition and return values
+                let cond = self.convert_hir_expr_for_module(&if_stmt.condition, &ctx, 0);
+                let then_val = self.convert_hir_expr_for_module(then_ret, &ctx, 0);
+                let else_val = self.convert_hir_expr_for_module(else_ret, &ctx, 0);
+
+                if let (Some(cond_mir), Some(then_mir), Some(else_mir)) = (cond, then_val, else_val) {
+                    // Create conditional: condition ? then_value : else_value
+                    let conditional = Expression::with_unknown_type(ExpressionKind::Conditional {
+                        cond: Box::new(cond_mir),
+                        then_expr: Box::new(then_mir),
+                        else_expr: Box::new(else_mir),
+                    });
+
+                    // Assign to output port(s)
+                    self.assign_to_output_ports(&conditional, &output_port_ids, &mut module);
+                    eprintln!("    ✓ Created conditional output assignment (transformed early return pattern)");
+                } else {
+                    eprintln!("    ❌ Failed to convert conditional return expression (transformed)");
+                    conversion_errors += 1;
+                }
+            } else {
+                eprintln!("    ❌ Could not extract returns from both branches");
+                eprintln!("      then_return: {}", then_return.is_some());
+                eprintln!("      else_return: {}", else_return.is_some());
+                conversion_errors += 1;
             }
         }
 

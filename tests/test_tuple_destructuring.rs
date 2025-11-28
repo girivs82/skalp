@@ -292,7 +292,6 @@ mod tuple_destructuring_tests {
     /// functions are not yet properly handled (separate bug from tuple destructuring).
     /// The if-return pattern needs to be converted to mux logic during inlining.
     #[tokio::test]
-    #[ignore = "Conditional early returns in synthesized functions not yet supported"]
     async fn test_tuple_fp32_quadratic_no_real_roots() {
         let source = r#"
         fn fp_mul(a: bit[32], b: bit[32]) -> bit[32] {

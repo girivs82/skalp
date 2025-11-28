@@ -1319,8 +1319,12 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::IfStmt => {
+                    println!("[HIR_COLLECT] 🔍 Found IfStmt, calling build_if_statement");
                     if let Some(if_stmt) = self.build_if_statement(&child) {
+                        println!("[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements");
                         statements.push(HirStatement::If(if_stmt));
+                    } else {
+                        println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
                     }
                 }
                 SyntaxKind::MatchStmt => {
@@ -2084,11 +2088,16 @@ impl HirBuilderContext {
         //
         // Solution: Find the expression node that is a DIRECT CHILD of the IfStmt node (not nested deeper).
         // We look for expression nodes BEFORE the first BlockStmt (the then-block).
+        println!("[build_if_statement] Starting - node children:");
+        for child in node.children() {
+            println!("  child: {:?}", child.kind());
+        }
         let condition = {
             let mut found_condition = None;
             for child in node.children() {
                 // Stop when we hit the then-block
                 if child.kind() == SyntaxKind::BlockStmt {
+                    println!("[build_if_statement] Found BlockStmt, stopping condition search");
                     break;
                 }
                 // Capture any expression node (prefer complex over simple)
@@ -2106,11 +2115,23 @@ impl HirBuilderContext {
                     SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr
                 );
 
+                println!("[build_if_statement] Checking child {:?} - is_complex={}, is_simple={}", child.kind(), is_complex, is_simple);
                 if is_complex || (is_simple && found_condition.is_none()) {
+                    println!("[build_if_statement] ✓ Selected as condition candidate");
                     found_condition = Some(child);
                 }
             }
-            found_condition.and_then(|n| self.build_expression(&n))?
+            if found_condition.is_none() {
+                println!("[build_if_statement] ❌ No condition expression found!");
+                return None;
+            }
+            let cond_node = found_condition.unwrap();
+            println!("[build_if_statement] Building expression for condition {:?}", cond_node.kind());
+            let result = self.build_expression(&cond_node);
+            if result.is_none() {
+                println!("[build_if_statement] ❌ build_expression returned None for condition!");
+            }
+            result?
         };
 
         // Get then and else blocks
@@ -4089,13 +4110,23 @@ impl HirBuilderContext {
             })
             .collect();
 
-        // BUG FIX #9: Filter out expressions that are immediately followed by FieldExpr
+        // BUG FIX #9: Filter out expressions that are immediately followed by FieldExpr or CallExpr
         // When the parser creates "a.x", it makes siblings [IdentExpr(a), FieldExpr(.x)]
         // The FieldExpr will handle the IdentExpr as its base, so we shouldn't treat
         // the IdentExpr as a separate operand in the binary expression
+        // BUG FIX #86: Same for function calls - "fp_lt(a,b)" creates [IdentExpr(fp_lt), CallExpr((a,b))]
+        // The CallExpr's build_call_expr will find the function name from its preceding sibling
         let mut indices_to_skip = Vec::new();
         for i in 0..expr_children.len() {
-            if i + 1 < expr_children.len() && expr_children[i + 1].kind() == SyntaxKind::FieldExpr {
+            let next_kind = if i + 1 < expr_children.len() {
+                Some(expr_children[i + 1].kind())
+            } else {
+                None
+            };
+            // Skip IdentExpr if followed by FieldExpr or CallExpr
+            if expr_children[i].kind() == SyntaxKind::IdentExpr
+                && matches!(next_kind, Some(SyntaxKind::FieldExpr) | Some(SyntaxKind::CallExpr))
+            {
                 // Check if they're adjacent siblings (not separated by other nodes)
                 if let Some(parent) = expr_children[i].parent() {
                     if parent == expr_children[i + 1].parent().unwrap_or(parent.clone()) {
@@ -5003,8 +5034,12 @@ impl HirBuilderContext {
                     statements.extend(let_stmts);
                 }
                 SyntaxKind::IfStmt => {
+                    println!("[HIR_COLLECT] 🔍 Found IfStmt, calling build_if_statement");
                     if let Some(if_stmt) = self.build_if_statement(&child) {
+                        println!("[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements");
                         statements.push(HirStatement::If(if_stmt));
+                    } else {
+                        println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
                     }
                 }
                 SyntaxKind::MatchStmt => {
