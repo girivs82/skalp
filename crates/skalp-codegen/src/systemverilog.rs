@@ -9,9 +9,44 @@ use skalp_mir::mir::PriorityMux;
 use skalp_mir::type_width; // Use shared type width calculations
 use skalp_mir::{
     Assignment, AssignmentKind, DataType, EdgeType, EnumType, Mir, Module, Process, ProcessKind,
-    Statement, StructType,
+    SignalId, Statement, StructType,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+
+// BUG FIX #85: Thread-local storage for tuple source mapping
+// This maps signal IDs to their module instance prefix for resolving TupleFieldAccess
+thread_local! {
+    static TUPLE_SOURCE_MAP: RefCell<HashMap<SignalId, String>> = RefCell::new(HashMap::new());
+}
+
+/// BUG FIX #85: Build a mapping of signal IDs to their module instance source
+/// This is used to correctly resolve TupleFieldAccess expressions when the base
+/// signal is assigned from a module instance result (e.g., `_tuple_tmp_76 = inst_result_0`)
+fn build_tuple_source_mapping(module: &Module) -> HashMap<SignalId, String> {
+    let mut mapping = HashMap::new();
+
+    for assign in &module.assignments {
+        // Check if LHS is a signal and RHS is a reference to another signal
+        if let skalp_mir::LValue::Signal(lhs_id) = &assign.lhs {
+            if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(rhs_id)) = &assign.rhs.kind {
+                // Check if RHS signal name contains "_inst_" and "_result_"
+                // This indicates it's a module instance result signal
+                if let Some(rhs_signal) = module.signals.iter().find(|s| s.id == *rhs_id) {
+                    if rhs_signal.name.contains("_inst_") && rhs_signal.name.contains("_result_") {
+                        // Extract the prefix (everything before "_result_N")
+                        if let Some(pos) = rhs_signal.name.rfind("_result_") {
+                            let prefix = &rhs_signal.name[..pos];
+                            mapping.insert(*lhs_id, prefix.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    mapping
+}
 
 /// Generate SystemVerilog from MIR and LIR
 pub fn generate_systemverilog_from_mir(mir: &Mir, lir: &LirDesign) -> Result<String> {
@@ -286,6 +321,12 @@ fn generate_module(
     // BUG FIX #8: Infer actual variable widths from their assignments
     // Variables may be typed as fp32 (32 bits) but assigned concatenations (96+ bits)
     let variable_width_overrides = infer_variable_widths(mir_module);
+
+    // BUG FIX #85: Build and set tuple source mapping for TupleFieldAccess resolution
+    let tuple_mapping = build_tuple_source_mapping(mir_module);
+    TUPLE_SOURCE_MAP.with(|map| {
+        *map.borrow_mut() = tuple_mapping;
+    });
 
     // Collect all unique struct and enum types from ports and signals
     let mut struct_types: HashSet<String> = HashSet::new();
@@ -1109,9 +1150,40 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
         }
         // BUG FIX #85: Handle tuple/field access for module synthesis
         skalp_mir::ExpressionKind::TupleFieldAccess { base, index } => {
-            // In SystemVerilog, tuple field access should have been resolved to specific signals
-            // For now, just format the base - the actual field extraction happens at MIR level
-            format_expression_with_context(base, module)
+            // First, check if the base is a signal reference that's in our tuple source mapping
+            if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(sig_id)) = &base.kind {
+                // Check the thread-local mapping for this signal
+                let prefix = TUPLE_SOURCE_MAP.with(|map| {
+                    map.borrow().get(sig_id).cloned()
+                });
+
+                if let Some(inst_prefix) = prefix {
+                    // Found in mapping - use the module instance result signal directly
+                    return format!("{}_result_{}", inst_prefix, index);
+                }
+            }
+
+            // For tuple returns from synthesized modules, the base signal name ends with _result_N
+            // We need to replace N with the correct index
+            let base_str = format_expression_with_context(base, module);
+
+            // Check if this is a module result signal (pattern: *_inst_*_result_* or *_result_*)
+            // Transform <prefix>_result_0 to <prefix>_result_<index>
+            if let Some(prefix) = base_str.strip_suffix("_result_0") {
+                format!("{}_result_{}", prefix, index)
+            } else if base_str.contains("_result_") {
+                // Already has a result suffix, try to replace the index
+                // Find the last occurrence of _result_ and replace what follows
+                if let Some(pos) = base_str.rfind("_result_") {
+                    let prefix = &base_str[..pos];
+                    format!("{}_result_{}", prefix, index)
+                } else {
+                    base_str
+                }
+            } else {
+                // Not a module result signal - just return base (fallback)
+                base_str
+            }
         }
         skalp_mir::ExpressionKind::FieldAccess { base, .. } => {
             // Named field access - similar handling
