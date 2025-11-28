@@ -10,6 +10,9 @@ pub struct SirModule {
     pub sequential_nodes: Vec<SirNode>,
     pub state_elements: HashMap<String, StateElement>,
     pub clock_domains: HashMap<String, ClockDomain>,
+    /// Pre-computed topological order for all combinational nodes.
+    /// This is computed once and stored for efficient simulation.
+    pub sorted_combinational_node_ids: Vec<usize>,
 }
 
 /// Type information for SIR signals and ports
@@ -259,7 +262,15 @@ impl SirModule {
             sequential_nodes: Vec::new(),
             state_elements: HashMap::new(),
             clock_domains: HashMap::new(),
+            sorted_combinational_node_ids: Vec::new(),
         }
+    }
+
+    /// Compute and store the topological order for all combinational nodes.
+    /// Call this after all nodes have been added to the module.
+    pub fn finalize_topological_order(&mut self) {
+        let node_ids: Vec<usize> = self.combinational_nodes.iter().map(|n| n.id).collect();
+        self.sorted_combinational_node_ids = self.topological_sort_cone_nodes(&node_ids);
     }
 
     pub fn extract_combinational_cones(&self) -> Vec<CombinationalCone> {
@@ -310,8 +321,10 @@ impl SirModule {
 
                 // If we found combinational nodes, create a cone
                 if !cone_nodes.is_empty() {
+                    let sorted = self.topological_sort_cone_nodes(&cone_nodes);
                     cones.push(CombinationalCone {
                         nodes: cone_nodes.clone(),
+                        sorted_nodes: sorted,
                         inputs: self.get_cone_inputs(&cone_nodes),
                         outputs: self.get_cone_outputs(&cone_nodes),
                     });
@@ -355,8 +368,10 @@ impl SirModule {
 
             // If we found combinational nodes, create a cone
             if !cone_nodes.is_empty() {
+                let sorted = self.topological_sort_cone_nodes(&cone_nodes);
                 cones.push(CombinationalCone {
                     nodes: cone_nodes.clone(),
+                    sorted_nodes: sorted,
                     inputs: self.get_cone_inputs(&cone_nodes),
                     outputs: self.get_cone_outputs(&cone_nodes),
                 });
@@ -367,8 +382,10 @@ impl SirModule {
         if self.sequential_nodes.is_empty() && !self.combinational_nodes.is_empty() {
             let all_comb_nodes: Vec<usize> =
                 self.combinational_nodes.iter().map(|n| n.id).collect();
+            let sorted = self.topological_sort_cone_nodes(&all_comb_nodes);
             cones.push(CombinationalCone {
                 nodes: all_comb_nodes.clone(),
+                sorted_nodes: sorted,
                 inputs: self.get_cone_inputs(&all_comb_nodes),
                 outputs: self.get_cone_outputs(&all_comb_nodes),
             });
@@ -428,11 +445,115 @@ impl SirModule {
 
         outputs.into_iter().collect()
     }
+
+    /// Topologically sort nodes within a combinational cone.
+    /// Returns nodes in evaluation order (inputs before outputs).
+    /// This is computed once when extracting cones and stored in sorted_nodes.
+    fn topological_sort_cone_nodes(&self, node_ids: &[usize]) -> Vec<usize> {
+        use std::collections::VecDeque;
+
+        // Build a map from output signal_id to node_id (which node produces each signal)
+        let mut signal_to_producer: HashMap<String, usize> = HashMap::new();
+        let node_id_set: HashSet<usize> = node_ids.iter().copied().collect();
+
+        for &node_id in node_ids {
+            if let Some(node) = self.combinational_nodes.iter().find(|n| n.id == node_id) {
+                for output in &node.outputs {
+                    signal_to_producer.insert(output.signal_id.clone(), node_id);
+                }
+            }
+        }
+
+        // Build dependency graph: for each node, track which nodes depend on it
+        let mut dependencies: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+
+        // Initialize all nodes
+        for &id in node_ids {
+            dependencies.insert(id, HashSet::new());
+            in_degree.insert(id, 0);
+        }
+
+        // Build dependency relationships
+        for &node_id in node_ids {
+            if let Some(node) = self.combinational_nodes.iter().find(|n| n.id == node_id) {
+                for input in &node.inputs {
+                    // Find which node produces this input signal
+                    if let Some(&producer_id) = signal_to_producer.get(&input.signal_id) {
+                        if producer_id != node_id && node_id_set.contains(&producer_id) {
+                            // producer_id -> node_id dependency (producer must come first)
+                            if let Some(deps) = dependencies.get_mut(&producer_id) {
+                                if deps.insert(node_id) {
+                                    // Only increment if this is a new dependency
+                                    *in_degree.get_mut(&node_id).unwrap() += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        let mut queue = VecDeque::new();
+        let mut sorted = Vec::with_capacity(node_ids.len());
+
+        // Start with nodes that have no dependencies (in_degree == 0)
+        for &id in node_ids {
+            if in_degree.get(&id) == Some(&0) {
+                queue.push_back(id);
+            }
+        }
+
+        while let Some(node_id) = queue.pop_front() {
+            sorted.push(node_id);
+
+            if let Some(deps) = dependencies.get(&node_id) {
+                for &dep in deps {
+                    if let Some(degree) = in_degree.get_mut(&dep) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            queue.push_back(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If topological sort didn't include all nodes (cycle detected), append remaining
+        if sorted.len() != node_ids.len() {
+            let sorted_set: HashSet<usize> = sorted.iter().copied().collect();
+            let unsorted: Vec<usize> = node_ids
+                .iter()
+                .filter(|id| !sorted_set.contains(*id))
+                .copied()
+                .collect();
+
+            eprintln!(
+                "⚠️ SIR: Combinational cycle detected: {} of {} nodes sorted, {} stuck",
+                sorted.len(),
+                node_ids.len(),
+                unsorted.len()
+            );
+
+            // Fall back to node ID order for stuck nodes
+            let mut id_sorted: Vec<usize> = unsorted;
+            id_sorted.sort();
+            sorted.extend(id_sorted);
+        }
+
+        sorted
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct CombinationalCone {
+    /// Unsorted node IDs in this cone
     pub nodes: Vec<usize>,
+    /// Node IDs in topologically sorted evaluation order (inputs before outputs)
+    pub sorted_nodes: Vec<usize>,
+    /// Input signals to this cone (from outside the cone)
     pub inputs: Vec<String>,
+    /// Output signals from this cone
     pub outputs: Vec<String>,
 }

@@ -295,75 +295,30 @@ impl<'a> MetalShaderGenerator<'a> {
 
         self.write_indented("// Combinational logic evaluation\n");
 
-        // BUG FIX #85: Combine cone nodes with missing nodes and sort ALL together
-        // This ensures correct dependency order when missing nodes are dependencies of cone nodes
+        // Use pre-computed topological order from SIR (computed once at SIR construction)
+        // For cone 0, we may need to include nodes not in any cone
         let all_comb_ids: std::collections::HashSet<usize> =
             sir.combinational_nodes.iter().map(|n| n.id).collect();
         let cone_ids: std::collections::HashSet<usize> = cone.nodes.iter().copied().collect();
         let missing_ids: Vec<usize> = all_comb_ids.difference(&cone_ids).copied().collect();
 
-        // In cone 0, include all missing nodes alongside cone nodes
-        let nodes_to_process: Vec<usize> = if index == 0 {
-            if !missing_ids.is_empty() {
-                eprintln!(
-                    "⚠️  {} combinational nodes NOT in any cone (adding to cone 0)",
-                    missing_ids.len()
-                );
-            }
-            // Combine cone nodes + missing nodes, then sort together
-            let mut all_nodes = cone.nodes.clone();
-            all_nodes.extend(missing_ids);
-            all_nodes
+        // Use pre-sorted nodes from SIR - computed once during SIR creation
+        let sorted_nodes: Vec<usize> = if index == 0 && !missing_ids.is_empty() {
+            // Cone 0 needs all nodes (including those not in any cone)
+            // Use the module's pre-computed sorted order for all combinational nodes
+            eprintln!(
+                "⚠️  {} combinational nodes NOT in any cone (using module's sorted order)",
+                missing_ids.len()
+            );
+            sir.sorted_combinational_node_ids.clone()
         } else {
-            cone.nodes.clone()
+            // Use cone's pre-computed sorted order
+            cone.sorted_nodes.clone()
         };
 
-        // Sort all nodes together for correct topological order
-        println!("XYZZY DEBUG: About to sort {} nodes for cone {}", nodes_to_process.len(), index);
-        let sorted_nodes = self.topological_sort_nodes(sir, &nodes_to_process);
-        println!("XYZZY DEBUG: Sorted {} nodes for cone {}", sorted_nodes.len(), index);
-
-        // Debug: check first few nodes in sorted result
-        if index == 0 {
-            println!("IMMEDIATE AFTER SORT: first 5 = {:?}", &sorted_nodes[..5.min(sorted_nodes.len())]);
-            // Find position of tracked nodes
-            for &target in &[1768usize, 1738, 1762, 1761] {
-                if let Some(pos) = sorted_nodes.iter().position(|&x| x == target) {
-                    println!("  FIND: node {} at position {}", target, pos);
-                }
-            }
-        }
-
-        // Debug: check if quadratic_solve nodes are in this cone
-        let qs_nodes = [186usize, 191, 194, 196, 197, 199, 200];
-        for &qn in &qs_nodes {
-            if nodes_to_process.contains(&qn) {
-                if let Some(pos) = sorted_nodes.iter().position(|&x| x == qn) {
-                    eprintln!("  📍 quadratic node {} at position {} in sorted order", qn, pos);
-                }
-            }
-        }
-
-        // Process all nodes in topological order
-        // Debug: print node order for cone 0
-        if index == 0 && sorted_nodes.len() > 10 {
-            println!("TOPO DEBUG cone {}: first 10 nodes: {:?}", index, &sorted_nodes[..10]);
-            println!("TOPO DEBUG cone {}: last 10 nodes: {:?}", index, &sorted_nodes[sorted_nodes.len()-10..]);
-
-            // Print details of first 5 nodes
-            for &node_id in sorted_nodes.iter().take(5) {
-                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                    let inputs: Vec<_> = node.inputs.iter().map(|i| i.signal_id.clone()).collect();
-                    let outputs: Vec<_> = node.outputs.iter().map(|o| o.signal_id.clone()).collect();
-                    println!("  Node {}: kind={:?}, inputs={:?}, outputs={:?}", node_id, std::mem::discriminant(&node.kind), inputs, outputs);
-                }
-            }
-        }
+        // Process all nodes in pre-computed topological order
         for node_id in &sorted_nodes {
             if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == *node_id) {
-                if matches!(node.kind, SirNodeKind::Concat) {
-                    eprintln!("  ✅ Processing Concat node {}", node_id);
-                }
                 self.generate_node_computation_v2(sir, node);
             }
         }
@@ -3659,170 +3614,8 @@ impl<'a> MetalShaderGenerator<'a> {
         false
     }
 
-    fn topological_sort_nodes(&self, sir: &SirModule, node_ids: &[usize]) -> Vec<usize> {
-        use std::collections::{HashMap, HashSet, VecDeque};
-
-        // Build a map from output signal_id to node_id (which node produces each signal)
-        let mut signal_to_producer: HashMap<String, usize> = HashMap::new();
-        let node_id_set: HashSet<usize> = node_ids.iter().copied().collect();
-
-        for &node_id in node_ids {
-            if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                for output in &node.outputs {
-                    signal_to_producer.insert(output.signal_id.clone(), node_id);
-                }
-            }
-        }
-
-        // Build dependency graph: for each node, track which nodes depend on it
-        let mut dependencies: HashMap<usize, HashSet<usize>> = HashMap::new();
-        let mut in_degree: HashMap<usize, usize> = HashMap::new();
-
-        // Initialize all nodes
-        for &id in node_ids {
-            dependencies.insert(id, HashSet::new());
-            in_degree.insert(id, 0);
-        }
-
-        // Build dependency relationships
-        let debug_nodes: HashSet<usize> = [1738usize, 1762, 1768, 1761].iter().copied().collect();
-        for &node_id in node_ids {
-            if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                for input in &node.inputs {
-                    // Find which node produces this input signal
-                    if let Some(&producer_id) = signal_to_producer.get(&input.signal_id) {
-                        if producer_id != node_id && node_id_set.contains(&producer_id) {
-                            // producer_id -> node_id dependency (producer must come first)
-                            if let Some(deps) = dependencies.get_mut(&producer_id) {
-                                if deps.insert(node_id) {
-                                    // Only increment if this is a new dependency
-                                    *in_degree.get_mut(&node_id).unwrap() += 1;
-                                    // Debug: log dependencies for specific nodes
-                                    if debug_nodes.contains(&node_id) || debug_nodes.contains(&producer_id) {
-                                        println!("  🔗 DEP: producer {} -> consumer {} (via {})", producer_id, node_id, input.signal_id);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Debug: log unresolved dependencies
-                        if debug_nodes.contains(&node_id) {
-                            println!("  ⚠️ Node {} input {} has no producer in node set", node_id, input.signal_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Kahn's algorithm for topological sort
-        let mut queue = VecDeque::new();
-        let mut sorted = Vec::new();
-
-        // Debug: show in_degrees for tracked nodes
-        for &node_id in &debug_nodes {
-            if let Some(&degree) = in_degree.get(&node_id) {
-                println!("  📊 in_degree[{}] = {}", node_id, degree);
-            }
-        }
-
-        // Start with nodes that have no dependencies (in_degree == 0)
-        for &id in node_ids {
-            if in_degree.get(&id) == Some(&0) {
-                queue.push_back(id);
-            }
-        }
-
-        // Debug: show initial queue
-        let queue_vec: Vec<_> = queue.iter().copied().collect();
-        if queue_vec.iter().any(|&id| debug_nodes.contains(&id)) {
-            println!("  🚀 Initial queue contains tracked nodes: {:?}",
-                queue_vec.iter().filter(|&&id| debug_nodes.contains(&id)).collect::<Vec<_>>());
-        }
-
-        while let Some(node_id) = queue.pop_front() {
-            // Debug: track when key nodes are popped
-            if debug_nodes.contains(&node_id) {
-                println!("  ▶️ Popped node {} from queue, adding to sorted at position {}", node_id, sorted.len());
-            }
-            sorted.push(node_id);
-
-            if let Some(deps) = dependencies.get(&node_id) {
-                for &dep in deps {
-                    if let Some(degree) = in_degree.get_mut(&dep) {
-                        *degree -= 1;
-                        if debug_nodes.contains(&dep) {
-                            println!("    📉 Decremented in_degree of {} to {}", dep, *degree);
-                        }
-                        if *degree == 0 {
-                            if debug_nodes.contains(&dep) {
-                                println!("    ➕ Added {} to queue (in_degree became 0)", dep);
-                            }
-                            queue.push_back(dep);
-                        }
-                    }
-                }
-            }
-        }
-
-        // If topological sort didn't include all nodes (cycle detected), append unsorted nodes
-        if sorted.len() != node_ids.len() {
-            let sorted_set: HashSet<usize> = sorted.iter().copied().collect();
-            let unsorted: Vec<usize> = node_ids.iter()
-                .filter(|id| !sorted_set.contains(*id))
-                .copied()
-                .collect();
-            println!(
-                "⚠️ TOPO PARTIAL: {} of {} nodes sorted, appending {} unsorted nodes",
-                sorted.len(),
-                node_ids.len(),
-                unsorted.len()
-            );
-
-            // Combinational cycle detected - this is a bug in the SIR generation
-            // Print diagnostic information
-            println!("🔴 COMBINATIONAL CYCLE DETECTED: {} of {} nodes sorted", sorted.len(), node_ids.len());
-            println!("   This indicates a signal name collision in the generated hardware.");
-
-            // Build a map from node to what it's waiting on (its unsorted producers)
-            let unsorted_set: HashSet<usize> = unsorted.iter().copied().collect();
-            for &node_id in unsorted.iter().take(10) {  // Show first 10 stuck nodes
-                let remaining_in_degree = in_degree.get(&node_id).copied().unwrap_or(999);
-                let waiting_on: Vec<usize> = node_ids.iter()
-                    .filter(|&&other_id| {
-                        if let Some(deps) = dependencies.get(&other_id) {
-                            deps.contains(&node_id) && unsorted_set.contains(&other_id)
-                        } else {
-                            false
-                        }
-                    })
-                    .copied()
-                    .collect();
-                // Find the node details
-                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                    let inputs: Vec<_> = node.inputs.iter().map(|i| &i.signal_id).collect();
-                    let outputs: Vec<_> = node.outputs.iter().map(|o| &o.signal_id).collect();
-                    println!("  Node {} ({:?}): in={:?}, out={:?}, waiting_on={:?}",
-                        node_id, std::mem::discriminant(&node.kind), inputs, outputs, waiting_on);
-                }
-            }
-
-            // Fall back to node ID order as a last resort
-            // (This shouldn't happen with BUG FIX #86 for unique signal names)
-            println!("⚠️ Falling back to node ID order - results may be incorrect");
-            let mut id_sorted: Vec<usize> = node_ids.to_vec();
-            id_sorted.sort();
-            id_sorted
-        } else {
-            // Debug: verify sorted order
-            println!("TOPO INTERNAL: first 5 = {:?}", sorted.iter().take(5).collect::<Vec<_>>());
-            for &node_id in &debug_nodes {
-                if let Some(pos) = sorted.iter().position(|&x| x == node_id) {
-                    println!("  TOPO INTERNAL: node {} at pos {}", node_id, pos);
-                }
-            }
-            sorted
-        }
-    }
+    // Note: topological_sort_nodes was removed - sorting is now done once in SIR
+    // and stored in sir.sorted_combinational_node_ids and cone.sorted_nodes
 
     #[allow(dead_code)]
     fn get_metal_type_name(&self, width: usize) -> &str {

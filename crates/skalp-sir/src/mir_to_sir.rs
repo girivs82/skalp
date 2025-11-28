@@ -100,6 +100,14 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
                 .collect::<Vec<_>>()
         );
     }
+
+    // Pre-compute topological order for efficient simulation
+    sir.finalize_topological_order();
+    println!(
+        "✅ SIR: Pre-computed topological order for {} combinational nodes",
+        sir.sorted_combinational_node_ids.len()
+    );
+
     sir
 }
 

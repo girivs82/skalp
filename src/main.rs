@@ -482,6 +482,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
             sequential_nodes: Vec::new(),
             state_elements: HashMap::new(),
             clock_domains: HashMap::new(),
+            sorted_combinational_node_ids: Vec::new(), // Empty for LIR (no combinational nodes)
         }
     } else if design_file.extension() == Some(std::ffi::OsStr::new("mir")) {
         // Load MIR and convert to SIR
