@@ -51,6 +51,13 @@ impl<'a> ParseState<'a> {
                 break;
             }
 
+            // Parse optional attributes before item
+            // Attributes attach to the following item: #[parallel] entity Foo { ... }
+            self.parse_attributes();
+
+            // Skip trivia after attributes
+            self.skip_trivia();
+
             // Parse top-level items
             match self.current_kind() {
                 Some(SyntaxKind::UseKw) => self.parse_use_decl(),
@@ -79,6 +86,10 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::FnKw) => {
                     // Top-level function
                     self.parse_impl_function()
+                }
+                Some(SyntaxKind::HashBracket) => {
+                    // Stray attribute with no following item - error
+                    self.error_and_bump("attribute must precede an item");
                 }
                 _ => {
                     // Unknown item - consume token as error and continue
@@ -267,6 +278,11 @@ impl<'a> ParseState<'a> {
     /// Parse implementation body
     fn parse_impl_body(&mut self) {
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            // Parse optional attributes before item
+            // e.g., #[parallel] fn decode() { ... }
+            self.parse_attributes();
             self.skip_trivia();
 
             match self.current_kind() {
@@ -805,6 +821,11 @@ impl<'a> ParseState<'a> {
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
             self.skip_trivia();
 
+            // Parse optional attributes before statement
+            // e.g., #[parallel] match sel { ... }
+            self.parse_attributes();
+            self.skip_trivia();
+
             match self.current_kind() {
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
@@ -940,6 +961,11 @@ impl<'a> ParseState<'a> {
             if self.at(SyntaxKind::RBrace) {
                 break;
             }
+
+            // Parse optional attributes before statement/expression
+            // e.g., #[parallel] match sel { ... }
+            self.parse_attributes();
+            self.skip_trivia();
 
             // Check if this looks like a statement (starts with a statement keyword)
             match self.current_kind() {
@@ -2346,6 +2372,9 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse intent declaration
+    /// Supports both block form and single-line form:
+    ///   Block form: `intent low_power { mux_style: priority, ... }`
+    ///   Single-line: `intent parallel = mux_style::parallel;`
     fn parse_intent_decl(&mut self) {
         self.start_node(SyntaxKind::IntentDecl);
         self.expect(SyntaxKind::IntentKw);
@@ -2359,13 +2388,97 @@ impl<'a> ParseState<'a> {
             self.expect(SyntaxKind::Ident);
         }
 
-        self.expect(SyntaxKind::LBrace);
+        // Check for single-line form: `intent parallel = mux_style::parallel;`
+        if self.at(SyntaxKind::Assign) {
+            self.bump(); // consume '='
+            self.parse_intent_value();
+            self.expect(SyntaxKind::Semicolon);
+        } else {
+            // Block form
+            self.expect(SyntaxKind::LBrace);
+            self.parse_intent_constraints();
+            self.expect(SyntaxKind::RBrace);
+        }
 
-        // Parse intent constraints
-        self.parse_intent_constraints();
-
-        self.expect(SyntaxKind::RBrace);
         self.finish_node();
+    }
+
+    /// Parse intent value expression (for single-line intents)
+    /// Supports: `mux_style::parallel`, `foo + bar`, `mux_style::parallel + timing::critical`
+    fn parse_intent_value(&mut self) {
+        self.start_node(SyntaxKind::IntentValue);
+
+        // Parse first term (either path like mux_style::parallel or identifier like parallel)
+        self.parse_intent_term();
+
+        // Handle composition with + operator
+        while self.at(SyntaxKind::Plus) {
+            self.bump(); // consume '+'
+            self.parse_intent_term();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a single intent term: either a path (mux_style::parallel) or identifier (parallel)
+    fn parse_intent_term(&mut self) {
+        // Parse identifier (namespace or intent name)
+        if self.at(SyntaxKind::Ident) {
+            self.bump();
+
+            // Check for path separator ::
+            while self.at(SyntaxKind::ColonColon) {
+                self.bump(); // consume '::'
+                self.expect(SyntaxKind::Ident);
+            }
+        } else {
+            self.error("expected intent name or namespace::value");
+        }
+    }
+
+    /// Parse attribute list: zero or more `#[...]` attributes
+    /// Returns true if any attributes were parsed
+    fn parse_attributes(&mut self) -> bool {
+        let mut found_any = false;
+
+        while self.at(SyntaxKind::HashBracket) {
+            found_any = true;
+            self.parse_attribute();
+        }
+
+        found_any
+    }
+
+    /// Parse a single attribute: `#[name]`, `#[name, name2]`, or `#[name + name2]`
+    fn parse_attribute(&mut self) {
+        self.start_node(SyntaxKind::Attribute);
+
+        // Consume '#['
+        self.expect(SyntaxKind::HashBracket);
+
+        // Parse the attribute content (intent value with optional composition)
+        self.parse_attribute_content();
+
+        // Handle comma-separated list: #[parallel, critical]
+        while self.at(SyntaxKind::Comma) {
+            self.bump(); // consume ','
+            self.skip_trivia();
+            if !self.at(SyntaxKind::RBracket) {
+                self.parse_attribute_content();
+            }
+        }
+
+        // Consume ']'
+        self.expect(SyntaxKind::RBracket);
+
+        self.finish_node();
+    }
+
+    /// Parse attribute content: either an intent path or composition
+    /// Supports: `parallel`, `mux_style::parallel`, `parallel + critical`
+    fn parse_attribute_content(&mut self) {
+        // Reuse intent value parsing which handles paths and + composition
+        self.parse_intent_value();
     }
 
     /// Parse intent constraints
@@ -5617,5 +5730,167 @@ mod tests {
 
         let entity = tree.first_child().unwrap();
         assert_eq!(entity.kind(), SyntaxKind::EntityDecl);
+    }
+
+    // Tests for intent syntax refinements
+
+    #[test]
+    fn test_parse_single_line_intent() {
+        let source = r#"
+            intent parallel = mux_style::parallel;
+            intent priority = mux_style::priority;
+            intent critical = timing::critical_path;
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Single-line intent syntax should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_composed_intent() {
+        let source = r#"
+            intent parallel = mux_style::parallel;
+            intent critical = timing::critical_path;
+            intent fast_decode = parallel + critical;
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Composed intent syntax should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_attribute_on_entity() {
+        let source = r#"
+            intent parallel = mux_style::parallel;
+
+            #[parallel]
+            entity Decoder {
+                in sel: bit[3]
+                out result: bit[8]
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Attribute on entity should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_attribute_on_function() {
+        let source = r#"
+            intent critical = timing::critical_path;
+
+            #[critical]
+            fn decode(sel: bit[3]) -> bit[8] {
+                match sel {
+                    0 => 1,
+                    _ => 0,
+                }
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Attribute on function should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_multiple_attributes() {
+        let source = r#"
+            intent parallel = mux_style::parallel;
+            intent critical = timing::critical_path;
+
+            #[parallel, critical]
+            entity Decoder {
+                in sel: bit[3]
+                out result: bit[8]
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Multiple attributes should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_composed_attribute() {
+        let source = r#"
+            intent parallel = mux_style::parallel;
+            intent critical = timing::critical_path;
+
+            #[parallel + critical]
+            entity FastDecoder {
+                in opcode: bit[4]
+                out result: bit[16]
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Composed attribute should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_attribute_in_function_body() {
+        let source = r#"
+            fn decode(sel: bit[3]) -> bit[8] {
+                #[parallel]
+                let result = match sel {
+                    0 => 1,
+                    1 => 2,
+                    _ => 0,
+                };
+                result
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Attribute in function body should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_namespaced_intent_value() {
+        let source = r#"
+            intent low_latency = mux_style::parallel + timing::critical_path + pipeline::disabled;
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Namespaced intent composition should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
     }
 }

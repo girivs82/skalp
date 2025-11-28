@@ -198,6 +198,7 @@ pub enum SyntaxKind {
     Implies,           // |->
     ImpliesOverlap,    // |=>
     HashHash,          // ##
+    HashBracket,       // #[ (for attributes)
     RepeatOpen,        // [*
     RepeatClose,       // *]
     RepeatPlusOpen,    // [+
@@ -241,6 +242,9 @@ pub enum SyntaxKind {
     ImplBlock,
     ProtocolDecl,
     IntentDecl,
+    IntentValue,       // Single-line intent value: mux_style::parallel
+    Attribute,         // #[parallel] or #[parallel + critical]
+    AttributeList,     // List of attributes
     RequirementDecl,
     TraitDef,
     TraitImpl,
@@ -449,7 +453,6 @@ pub enum SyntaxKind {
     NameRef,
     Path,
     PathSegment,
-    Attribute,
     Visibility,
 
     // Placeholder for the end
@@ -738,6 +741,7 @@ impl SyntaxKind {
             Implies => "'|->'",
             ImpliesOverlap => "'|=>'",
             HashHash => "'##'",
+            HashBracket => "'#['",
             RepeatOpen => "'[*'",
             RepeatClose => "'*]'",
             RepeatPlusOpen => "'[+'",
@@ -771,6 +775,9 @@ impl SyntaxKind {
             ImplBlock => "implementation block",
             ProtocolDecl => "protocol declaration",
             IntentDecl => "intent declaration",
+            IntentValue => "intent value",
+            Attribute => "attribute",
+            AttributeList => "attribute list",
             RequirementDecl => "requirement declaration",
             TypeAlias => "type alias",
             UseDecl => "use declaration",
@@ -931,6 +938,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Implies => Implies,
             Token::ImpliesOverlap => ImpliesOverlap,
             Token::HashHash => HashHash,
+            Token::HashBracket => HashBracket,
             Token::RepeatOpen => RepeatOpen,
             Token::RepeatClose => RepeatClose,
             Token::RepeatPlusOpen => RepeatPlusOpen,

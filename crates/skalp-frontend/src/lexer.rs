@@ -401,6 +401,9 @@ pub enum Token {
     #[token("##")]
     HashHash,
 
+    #[token("#[")]
+    HashBracket,  // For attributes: #[parallel]
+
     #[token("[*")]
     RepeatOpen,
 
