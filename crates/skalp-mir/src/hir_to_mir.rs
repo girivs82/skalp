@@ -4742,6 +4742,18 @@ impl<'hir> HirToMir<'hir> {
                     statements.len(),
                     std::mem::discriminant(&**result_expr)
                 );
+
+                // BUG #86 FIX: Try to transform mutable variable pattern in block expressions
+                // This handles patterns like:
+                //   { let mut count = 0; let mut temp = value;
+                //     if (cond) { count = count + 16; temp = temp << 16; }
+                //     count }
+                // Transform to conditional expressions BEFORE processing statements individually.
+                if let Some(transformed_expr) = self.try_transform_block_mutable_vars(statements, result_expr) {
+                    eprintln!("[BUG #86] Block expression: transformed mutable variable pattern");
+                    return self.convert_expression(&transformed_expr, depth + 1);
+                }
+
                 for stmt in statements {
                     if let Some(mir_stmt) = self.convert_statement(stmt) {
                         self.pending_statements.push(mir_stmt);
@@ -5812,17 +5824,55 @@ impl<'hir> HirToMir<'hir> {
             stmts if stmts.len() > 1 => {
                 // Check if last statement is a return
                 if let Some(hir::HirStatement::Return(Some(return_expr))) = stmts.last() {
+                    // BUG #86 FIX: Handle mutable variable pattern
+                    // Pattern: if (cond) { var = new_value; } return var
+                    // Transform to: if cond { new_value } else { initial_value }
+                    if let Some(mutable_var_expr) = self.try_convert_mutable_var_pattern(
+                        &stmts[..stmts.len() - 1],  // statements before return
+                        return_expr,
+                        &let_bindings,
+                    ) {
+                        eprintln!("[BUG #86] Successfully converted mutable variable pattern to if-expression");
+                        return Some(mutable_var_expr);
+                    }
+
                     // Build block with all statements except the last, then use return expr as result
                     let block_stmts: Vec<_> = stmts[..stmts.len() - 1].to_vec();
                     Some(hir::HirExpression::Block {
                         statements: block_stmts,
                         result_expr: Box::new(return_expr.clone()),
                     })
-                } else {
+                }
+                // BUG #86 FIX: Also handle implicit return (Expression statement at end)
+                // This happens in match arm blocks like:
+                //   { let mut count = 0; if (cond) { count = 16; } count }
+                // The final `count` is an Expression statement, not Return
+                else if let Some(hir::HirStatement::Expression(result_expr)) = stmts.last() {
+                    eprintln!("[BUG #86] Multiple statements with final Expression - trying mutable var pattern");
+                    if let Some(mutable_var_expr) = self.try_convert_mutable_var_pattern(
+                        &stmts[..stmts.len() - 1],  // statements before final expression
+                        result_expr,
+                        &let_bindings,
+                    ) {
+                        eprintln!("[BUG #86] Successfully converted mutable variable pattern (Expression) to if-expression");
+                        return Some(mutable_var_expr);
+                    }
+
+                    // Build block with all statements except the last, then use expression as result
+                    let block_stmts: Vec<_> = stmts[..stmts.len() - 1].to_vec();
+                    Some(hir::HirExpression::Block {
+                        statements: block_stmts,
+                        result_expr: Box::new(result_expr.clone()),
+                    })
+                }
+                else {
                     eprintln!(
-                        "convert_body_to_expression: multiple statements without final return"
+                        "convert_body_to_expression: multiple statements without final return or expression"
                     );
                     eprintln!("  Statements: {:?}", stmts.len());
+                    if let Some(last) = stmts.last() {
+                        eprintln!("  Last statement type: {:?}", std::mem::discriminant(last));
+                    }
                     None
                 }
             }
@@ -5856,6 +5906,393 @@ impl<'hir> HirToMir<'hir> {
         } else {
             Some(self.build_let_expression(let_bindings, body_expr))
         }
+    }
+
+    /// BUG #86 FIX: Try to convert mutable variable pattern to conditional expression
+    ///
+    /// Pattern: `let mut var = initial; if (cond) { var = new_value; } return var`
+    /// Transforms to: `if cond { new_value } else { initial }`
+    ///
+    /// This handles functions that use mutable variables with conditional updates,
+    /// which is common in algorithms like clz32, ctz32, popcount32, etc.
+    ///
+    /// For complex cases like clz32 with multiple mutable variables:
+    /// ```
+    /// let mut count = 0;
+    /// let mut temp = value;
+    /// if (temp & 0xFFFF0000) == 0 { count = count + 16; temp = temp << 16; }
+    /// if (temp & 0xFF000000) == 0 { count = count + 8;  temp = temp << 8; }
+    /// ...
+    /// return count
+    /// ```
+    ///
+    /// We perform SSA-style conversion:
+    /// 1. Track current expression for each mutable variable
+    /// 2. Substitute variable references with current expressions
+    /// 3. Create conditional expressions for ALL modified variables
+    fn try_convert_mutable_var_pattern(
+        &self,
+        stmts_before_return: &[hir::HirStatement],
+        return_expr: &hir::HirExpression,
+        let_bindings: &[hir::HirLetStatement],
+    ) -> Option<hir::HirExpression> {
+        use std::collections::HashMap;
+
+        eprintln!("[BUG #86] try_convert_mutable_var_pattern: {} stmts before return", stmts_before_return.len());
+
+        // Check if return expression is a variable reference
+        let returned_var_id = match return_expr {
+            hir::HirExpression::Variable(var_id) => *var_id,
+            _ => return None,
+        };
+
+        // Build a map from VariableId to current expression for ALL mutable variables
+        let mut var_exprs: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
+
+        // Initialize with mutable bindings' initial values
+        for let_stmt in let_bindings {
+            if let_stmt.mutable {
+                eprintln!("[BUG #86] Tracking mutable variable '{}' (id={:?})", let_stmt.name, let_stmt.id);
+                var_exprs.insert(let_stmt.id, let_stmt.value.clone());
+            }
+        }
+
+        // If no mutable variables, this isn't our pattern
+        if var_exprs.is_empty() {
+            eprintln!("[BUG #86] No mutable variables found");
+            return None;
+        }
+
+        // Check that returned variable is mutable
+        if !var_exprs.contains_key(&returned_var_id) {
+            eprintln!("[BUG #86] Returned variable is not mutable");
+            return None;
+        }
+
+        let mut modified = false;
+
+        // Process each if statement
+        for stmt in stmts_before_return {
+            if let hir::HirStatement::If(if_stmt) = stmt {
+                // Get all assignments in the then-block
+                let assignments = self.collect_assignments_in_block(&if_stmt.then_statements);
+
+                if assignments.is_empty() {
+                    continue;
+                }
+
+                modified = true;
+
+                // Substitute variable references in the condition
+                let condition = self.substitute_variables(&if_stmt.condition, &var_exprs, let_bindings);
+
+                // For each assignment, create a conditional expression
+                for (var_id, rhs) in &assignments {
+                    // Substitute variable references in the RHS
+                    let substituted_rhs = self.substitute_variables(rhs, &var_exprs, let_bindings);
+
+                    // Get current value for else branch
+                    let current_value = var_exprs.get(var_id).cloned()
+                        .unwrap_or_else(|| hir::HirExpression::Variable(*var_id));
+
+                    // Create: if condition { substituted_rhs } else { current_value }
+                    let new_expr = hir::HirExpression::If(hir::HirIfExpr {
+                        condition: Box::new(condition.clone()),
+                        then_expr: Box::new(substituted_rhs),
+                        else_expr: Box::new(current_value),
+                    });
+
+                    eprintln!("[BUG #86] Created conditional for var {:?}", var_id);
+                    var_exprs.insert(*var_id, new_expr);
+                }
+            }
+        }
+
+        if modified {
+            // Return the final expression for the returned variable
+            let result = var_exprs.get(&returned_var_id).cloned();
+            eprintln!("[BUG #86] Successfully converted mutable variable pattern");
+            result
+        } else {
+            eprintln!("[BUG #86] No if statements modified any variables");
+            None
+        }
+    }
+
+    /// Helper: Collect all variable assignments from a block of statements
+    fn collect_assignments_in_block(
+        &self,
+        stmts: &[hir::HirStatement],
+    ) -> Vec<(hir::VariableId, hir::HirExpression)> {
+        let mut assignments = Vec::new();
+        for stmt in stmts {
+            if let hir::HirStatement::Assignment(assign) = stmt {
+                if let hir::HirLValue::Variable(var_id) = &assign.lhs {
+                    assignments.push((*var_id, assign.rhs.clone()));
+                }
+            }
+        }
+        assignments
+    }
+
+    /// Helper: Substitute variable references in an expression with current values
+    fn substitute_variables(
+        &self,
+        expr: &hir::HirExpression,
+        var_exprs: &std::collections::HashMap<hir::VariableId, hir::HirExpression>,
+        _let_bindings: &[hir::HirLetStatement],
+    ) -> hir::HirExpression {
+        match expr {
+            hir::HirExpression::Variable(var_id) => {
+                // If we have a current expression for this variable, use it
+                if let Some(current_expr) = var_exprs.get(var_id) {
+                    current_expr.clone()
+                } else {
+                    expr.clone()
+                }
+            }
+            hir::HirExpression::Binary(bin) => {
+                hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    op: bin.op.clone(),
+                    left: Box::new(self.substitute_variables(&bin.left, var_exprs, _let_bindings)),
+                    right: Box::new(self.substitute_variables(&bin.right, var_exprs, _let_bindings)),
+                })
+            }
+            hir::HirExpression::Unary(un) => {
+                hir::HirExpression::Unary(hir::HirUnaryExpr {
+                    op: un.op.clone(),
+                    operand: Box::new(self.substitute_variables(&un.operand, var_exprs, _let_bindings)),
+                })
+            }
+            hir::HirExpression::Call(call) => {
+                hir::HirExpression::Call(hir::HirCallExpr {
+                    function: call.function.clone(),
+                    args: call.args.iter()
+                        .map(|a| self.substitute_variables(a, var_exprs, _let_bindings))
+                        .collect(),
+                    type_args: call.type_args.clone(),
+                })
+            }
+            hir::HirExpression::If(if_expr) => {
+                hir::HirExpression::If(hir::HirIfExpr {
+                    condition: Box::new(self.substitute_variables(&if_expr.condition, var_exprs, _let_bindings)),
+                    then_expr: Box::new(self.substitute_variables(&if_expr.then_expr, var_exprs, _let_bindings)),
+                    else_expr: Box::new(self.substitute_variables(&if_expr.else_expr, var_exprs, _let_bindings)),
+                })
+            }
+            hir::HirExpression::Index(base, idx) => {
+                hir::HirExpression::Index(
+                    Box::new(self.substitute_variables(base, var_exprs, _let_bindings)),
+                    Box::new(self.substitute_variables(idx, var_exprs, _let_bindings)),
+                )
+            }
+            hir::HirExpression::Range(base, lo, hi) => {
+                hir::HirExpression::Range(
+                    Box::new(self.substitute_variables(base, var_exprs, _let_bindings)),
+                    Box::new(self.substitute_variables(lo, var_exprs, _let_bindings)),
+                    Box::new(self.substitute_variables(hi, var_exprs, _let_bindings)),
+                )
+            }
+            hir::HirExpression::Cast(cast) => {
+                hir::HirExpression::Cast(hir::HirCastExpr {
+                    expr: Box::new(self.substitute_variables(&cast.expr, var_exprs, _let_bindings)),
+                    target_type: cast.target_type.clone(),
+                })
+            }
+            hir::HirExpression::Concat(exprs) => {
+                hir::HirExpression::Concat(
+                    exprs.iter()
+                        .map(|e| self.substitute_variables(e, var_exprs, _let_bindings))
+                        .collect()
+                )
+            }
+            hir::HirExpression::TupleLiteral(exprs) => {
+                hir::HirExpression::TupleLiteral(
+                    exprs.iter()
+                        .map(|e| self.substitute_variables(e, var_exprs, _let_bindings))
+                        .collect()
+                )
+            }
+            hir::HirExpression::ArrayLiteral(exprs) => {
+                hir::HirExpression::ArrayLiteral(
+                    exprs.iter()
+                        .map(|e| self.substitute_variables(e, var_exprs, _let_bindings))
+                        .collect()
+                )
+            }
+            hir::HirExpression::FieldAccess { base, field } => {
+                hir::HirExpression::FieldAccess {
+                    base: Box::new(self.substitute_variables(base, var_exprs, _let_bindings)),
+                    field: field.clone(),
+                }
+            }
+            hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+                hir::HirExpression::Ternary {
+                    condition: Box::new(self.substitute_variables(condition, var_exprs, _let_bindings)),
+                    true_expr: Box::new(self.substitute_variables(true_expr, var_exprs, _let_bindings)),
+                    false_expr: Box::new(self.substitute_variables(false_expr, var_exprs, _let_bindings)),
+                }
+            }
+            // For other expressions (literals, signals, etc.), return as-is
+            _ => expr.clone(),
+        }
+    }
+
+    /// BUG #86 FIX: Try to transform block expression with mutable variable pattern
+    ///
+    /// This handles block expressions like:
+    /// ```
+    /// {
+    ///     let mut count = 0;
+    ///     let mut temp = value;
+    ///     if (temp & 0xFFFF0000) == 0 { count = count + 16; temp = temp << 16; }
+    ///     if (temp & 0xFF000000) == 0 { count = count + 8;  temp = temp << 8; }
+    ///     count
+    /// }
+    /// ```
+    ///
+    /// Transforms to nested conditional expressions that properly chain the updates.
+    fn try_transform_block_mutable_vars(
+        &self,
+        statements: &[hir::HirStatement],
+        result_expr: &hir::HirExpression,
+    ) -> Option<hir::HirExpression> {
+        use std::collections::HashMap;
+
+        println!("🔧🔧🔧 [BUG #86] try_transform_block_mutable_vars: {} statements, result_expr type: {:?} 🔧🔧🔧",
+                 statements.len(), std::mem::discriminant(result_expr));
+        // Also print the actual result_expr for debugging
+        match result_expr {
+            hir::HirExpression::Variable(var_id) => println!("🔧🔧🔧 [BUG #86] result_expr is Variable({}) 🔧🔧🔧", var_id.0),
+            hir::HirExpression::Cast(cast) => println!("🔧🔧🔧 [BUG #86] result_expr is Cast, inner: {:?} 🔧🔧🔧", std::mem::discriminant(&*cast.expr)),
+            other => println!("🔧🔧🔧 [BUG #86] result_expr is {:?} 🔧🔧🔧", other),
+        }
+
+        // Check if result expression is a variable reference
+        let returned_var_id = match result_expr {
+            hir::HirExpression::Variable(var_id) => *var_id,
+            _ => {
+                println!("🔧🔧🔧 [BUG #86] Block: result_expr is NOT a variable (type: {:?}), skipping 🔧🔧🔧", std::mem::discriminant(result_expr));
+                return None;
+            }
+        };
+
+        // Extract let bindings and other statements
+        let mut let_bindings: Vec<&hir::HirLetStatement> = Vec::new();
+        let mut if_statements: Vec<&hir::HirIfStatement> = Vec::new();
+        let mut has_other_statements = false;
+
+        for stmt in statements {
+            match stmt {
+                hir::HirStatement::Let(let_stmt) => {
+                    let_bindings.push(let_stmt);
+                }
+                hir::HirStatement::If(if_stmt) => {
+                    if_statements.push(if_stmt);
+                }
+                _ => {
+                    // Other statements present - can't use simple pattern
+                    has_other_statements = true;
+                }
+            }
+        }
+
+        // Must have at least one let binding and one if statement
+        if let_bindings.is_empty() || if_statements.is_empty() {
+            println!("🔧🔧🔧 [BUG #86] Block: no let bindings ({}) or no if statements ({}), skipping 🔧🔧🔧",
+                     let_bindings.len(), if_statements.len());
+            return None;
+        }
+
+        // For now, reject if there are other statement types (could extend later)
+        if has_other_statements {
+            println!("🔧🔧🔧 [BUG #86] Block: has other statement types, skipping 🔧🔧🔧");
+            return None;
+        }
+
+        println!("🔧🔧🔧 [BUG #86] Block: {} let bindings, {} if statements 🔧🔧🔧",
+                 let_bindings.len(), if_statements.len());
+
+        // Build a map from VariableId to current expression for ALL mutable variables
+        let mut var_exprs: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
+
+        // Initialize with mutable bindings' initial values
+        for let_stmt in &let_bindings {
+            if let_stmt.mutable {
+                println!("🔧🔧🔧 [BUG #86] Block: Tracking mutable variable '{}' (id={}) 🔧🔧🔧", let_stmt.name, let_stmt.id.0);
+                var_exprs.insert(let_stmt.id, let_stmt.value.clone());
+            }
+        }
+
+        // If no mutable variables, this isn't our pattern
+        if var_exprs.is_empty() {
+            println!("🔧🔧🔧 [BUG #86] Block: No mutable variables found 🔧🔧🔧");
+            return None;
+        }
+
+        // Check that returned variable is mutable
+        if !var_exprs.contains_key(&returned_var_id) {
+            println!("🔧🔧🔧 [BUG #86] Block: Returned variable {} is not mutable 🔧🔧🔧", returned_var_id.0);
+            return None;
+        }
+
+        println!("🔧🔧🔧 [BUG #86] Block: Processing {} mutable vars, returned_var_id={} 🔧🔧🔧",
+                 var_exprs.len(), returned_var_id.0);
+
+        // Convert let_bindings to slice of owned for substitution
+        let let_bindings_owned: Vec<hir::HirLetStatement> = let_bindings.iter().map(|l| (*l).clone()).collect();
+
+        // Process each if statement
+        for (if_idx, if_stmt) in if_statements.iter().enumerate() {
+            // Get all assignments in the then-block
+            let assignments = self.collect_assignments_in_block(&if_stmt.then_statements);
+
+            if assignments.is_empty() {
+                continue;
+            }
+
+            println!("🔧🔧🔧 [BUG #86] Processing if_stmt {} 🔧🔧🔧", if_idx);
+            println!("🔧🔧🔧 [BUG #86]   var_exprs has {} entries 🔧🔧🔧", var_exprs.len());
+            for (vid, vexpr) in var_exprs.iter() {
+                println!("🔧🔧🔧 [BUG #86]   var_exprs[{}] = {:?} 🔧🔧🔧", vid.0, std::mem::discriminant(vexpr));
+            }
+
+            // Debug: Print original condition structure
+            println!("🔧🔧🔧 [BUG #86]   Original condition: {:?} 🔧🔧🔧", &if_stmt.condition);
+
+            // Substitute variable references in the condition
+            let condition = self.substitute_variables(&if_stmt.condition, &var_exprs, &let_bindings_owned);
+            println!("🔧🔧🔧 [BUG #86]   Condition after substitution: {:?} 🔧🔧🔧", &condition);
+
+            // For each assignment, create a conditional expression
+            for (var_id, rhs) in &assignments {
+                // Substitute variable references in the RHS
+                let substituted_rhs = self.substitute_variables(rhs, &var_exprs, &let_bindings_owned);
+
+                // Get current value for else branch
+                let current_value = var_exprs.get(var_id).cloned()
+                    .unwrap_or_else(|| hir::HirExpression::Variable(*var_id));
+
+                // Create: if condition { substituted_rhs } else { current_value }
+                let new_expr = hir::HirExpression::If(hir::HirIfExpr {
+                    condition: Box::new(condition.clone()),
+                    then_expr: Box::new(substituted_rhs),
+                    else_expr: Box::new(current_value),
+                });
+
+                println!("🔧🔧🔧 [BUG #86] Block: Created conditional for var {} 🔧🔧🔧", var_id.0);
+                var_exprs.insert(*var_id, new_expr);
+            }
+        }
+
+        // Return the final expression for the returned variable
+        let result = var_exprs.get(&returned_var_id).cloned();
+        if result.is_some() {
+            println!("🔧🔧🔧 [BUG #86] ✅ Successfully transformed mutable variable pattern! 🔧🔧🔧");
+        } else {
+            println!("🔧🔧🔧 [BUG #86] ❌ Failed: returned_var_id {} not in var_exprs 🔧🔧🔧", returned_var_id.0);
+        }
+        result
     }
 
     /// Convert an if-statement (with returns in branches) to an if-expression
@@ -6309,6 +6746,11 @@ impl<'hir> HirToMir<'hir> {
                 let mut local_var_map: std::collections::HashMap<String, hir::HirExpression> =
                     std::collections::HashMap::new();
 
+                // BUG FIX #86: Track mutable variable names to exclude from result_expr substitution
+                // Mutable variables should NOT be substituted in result_expr because they need
+                // to be transformed by try_transform_block_mutable_vars later
+                let mut mutable_var_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
                 // Substitute all statements in the block
                 let mut substituted_statements = Vec::new();
                 for (i, stmt) in statements.iter().enumerate() {
@@ -6348,14 +6790,96 @@ impl<'hir> HirToMir<'hir> {
                                     var_type: let_stmt.var_type.clone(),
                                 },
                             ));
-                            // Add this variable to local map immediately for subsequent statements
-                            // Use the actual substituted value (e.g., StructLiteral) instead of a Variable reference
-                            // Example: let ray_dir = vec3{x,y,z}; vec_dot(ray_dir, ...) should inline the vec3 literal
-                            local_var_map.insert(let_stmt.name.clone(), substituted_value);
+                            // BUG FIX #86: Only add IMMUTABLE variables to local_var_map.
+                            // Mutable variables should NOT be substituted in If conditions because
+                            // their values change. They need to be preserved as Variable references
+                            // so that try_transform_block_mutable_vars can properly track their
+                            // SSA-style updates.
+                            if let_stmt.mutable {
+                                eprintln!(
+                                    "[BUG #86] Block: tracking mutable variable '{}' (NOT added to local_var_map)",
+                                    let_stmt.name
+                                );
+                                mutable_var_names.insert(let_stmt.name.clone());
+                            } else {
+                                // Add immutable variable to local map for subsequent statements
+                                // Use the actual substituted value (e.g., StructLiteral) instead of a Variable reference
+                                // Example: let ray_dir = vec3{x,y,z}; vec_dot(ray_dir, ...) should inline the vec3 literal
+                                local_var_map.insert(let_stmt.name.clone(), substituted_value);
+                            }
+                            if !let_stmt.mutable {
+                                eprintln!(
+                                    "[DEBUG] Block: added {} (id {:?}) to local_var_map immediately",
+                                    let_stmt.name, let_stmt.id
+                                );
+                            }
+                        }
+                        // BUG #86: Handle If statements with parameter substitution
+                        hir::HirStatement::If(if_stmt) => {
                             eprintln!(
-                                "[DEBUG] Block: added {} (id {:?}) to local_var_map immediately",
-                                let_stmt.name, let_stmt.id
+                                "[BUG #86] substitute_expression_with_var_map: processing If statement in block"
                             );
+                            // Build combined map for substitution
+                            let mut combined_map: std::collections::HashMap<
+                                String,
+                                &hir::HirExpression,
+                            > = param_map.clone();
+                            for (name, expr) in &local_var_map {
+                                combined_map.insert(name.clone(), expr);
+                            }
+
+                            // Substitute condition
+                            let sub_cond = self.substitute_expression_with_var_map(
+                                &if_stmt.condition,
+                                &combined_map,
+                                var_id_to_name,
+                            )?;
+
+                            // Substitute then statements
+                            let sub_then: Vec<_> = if_stmt.then_statements.iter()
+                                .filter_map(|s| self.substitute_hir_stmt_in_block(s, &combined_map, var_id_to_name))
+                                .collect();
+
+                            // Substitute else statements
+                            let sub_else: Option<Vec<_>> = if_stmt.else_statements.as_ref().map(|stmts| {
+                                stmts.iter()
+                                    .filter_map(|s| self.substitute_hir_stmt_in_block(s, &combined_map, var_id_to_name))
+                                    .collect()
+                            });
+
+                            substituted_statements.push(hir::HirStatement::If(hir::HirIfStatement {
+                                condition: sub_cond,
+                                then_statements: sub_then,
+                                else_statements: sub_else,
+                                mux_style: if_stmt.mux_style.clone(),
+                            }));
+                        }
+                        // BUG #86: Handle Assignment statements with parameter substitution
+                        hir::HirStatement::Assignment(assign_stmt) => {
+                            eprintln!(
+                                "[BUG #86] substitute_expression_with_var_map: processing Assignment statement in block"
+                            );
+                            // Build combined map for substitution
+                            let mut combined_map: std::collections::HashMap<
+                                String,
+                                &hir::HirExpression,
+                            > = param_map.clone();
+                            for (name, expr) in &local_var_map {
+                                combined_map.insert(name.clone(), expr);
+                            }
+
+                            let sub_rhs = self.substitute_expression_with_var_map(
+                                &assign_stmt.rhs,
+                                &combined_map,
+                                var_id_to_name,
+                            )?;
+
+                            substituted_statements.push(hir::HirStatement::Assignment(hir::HirAssignment {
+                                id: assign_stmt.id,
+                                lhs: assign_stmt.lhs.clone(),
+                                rhs: sub_rhs,
+                                assignment_type: assign_stmt.assignment_type.clone(),
+                            }));
                         }
                         _ => {
                             substituted_statements.push(stmt.clone());
@@ -6386,6 +6910,15 @@ impl<'hir> HirToMir<'hir> {
                 let mut filtered_local_map = local_var_map
                     .iter()
                     .filter(|(name, expr)| {
+                        // BUG #86: Exclude mutable variables - they need to be preserved for
+                        // try_transform_block_mutable_vars to work correctly
+                        if mutable_var_names.contains(*name) {
+                            eprintln!(
+                                "[BUG #86] Excluding mutable variable '{}' from result_expr substitution",
+                                name
+                            );
+                            return false;
+                        }
                         // Exclude Match expressions to prevent BUG #89
                         let should_include = !matches!(expr, hir::HirExpression::Match(_));
                         if !should_include {
@@ -7568,31 +8101,106 @@ impl<'hir> HirToMir<'hir> {
             // BUG FIX #91: When processing Block's result_expr, we need to replace Variables
             // that reference the let bindings. Since Variables use VariableId (not name),
             // we need to substitute them here directly rather than relying on the Variable handler.
+            // BUG FIX #86: Preserve If statements! Previous code dropped all non-Let statements.
             hir::HirExpression::Block { statements, result_expr } => {
                 let mut nested_map = name_map.clone();
 
                 // Build a var_id-to-substituted_value map for let bindings in this Block
                 let mut var_id_to_value: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
 
+                // Check if there are any non-Let statements (If, Assign, etc.)
+                let has_non_let_stmts = statements.iter().any(|stmt| !matches!(stmt, hir::HirStatement::Let(_)));
+
+                // Collect substituted statements
+                let mut substituted_stmts: Vec<hir::HirStatement> = Vec::new();
+
                 for stmt in statements {
-                    if let hir::HirStatement::Let(let_stmt) = stmt {
-                        // Substitute in the let binding's value
-                        let mut sub_value = self.substitute_hir_expr_with_map(&let_stmt.value, &nested_map);
+                    match stmt {
+                        hir::HirStatement::Let(let_stmt) => {
+                            // Substitute in the let binding's value
+                            let mut sub_value = self.substitute_hir_expr_with_map(&let_stmt.value, &nested_map);
 
-                        // Also substitute any references to previous let bindings (by VariableId)
-                        sub_value = self.substitute_var_ids_in_expr(&sub_value, &var_id_to_value);
+                            // Also substitute any references to previous let bindings (by VariableId)
+                            sub_value = self.substitute_var_ids_in_expr(&sub_value, &var_id_to_value);
 
-                        // Store for name-based lookup
-                        nested_map.insert(let_stmt.name.clone(), sub_value.clone());
-                        // Store for VariableId-based lookup
-                        var_id_to_value.insert(let_stmt.id, sub_value);
+                            // BUG FIX #86: Only add IMMUTABLE variables to substitution maps.
+                            // Mutable variables should NOT be substituted because their values
+                            // change over time. They need to be preserved as Variable references
+                            // so that try_transform_block_mutable_vars can properly track their
+                            // SSA-style updates.
+                            if !let_stmt.mutable {
+                                // Store for name-based lookup
+                                nested_map.insert(let_stmt.name.clone(), sub_value.clone());
+                                // Store for VariableId-based lookup
+                                var_id_to_value.insert(let_stmt.id, sub_value.clone());
+                            }
+
+                            // Add to substituted statements
+                            substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
+                                id: let_stmt.id,
+                                name: let_stmt.name.clone(),
+                                mutable: let_stmt.mutable,
+                                var_type: let_stmt.var_type.clone(),
+                                value: sub_value,
+                            }));
+                        }
+                        hir::HirStatement::If(if_stmt) => {
+                            // Substitute in If statement condition and body
+                            let sub_cond = self.substitute_hir_expr_with_map(&if_stmt.condition, &nested_map);
+                            let sub_cond = self.substitute_var_ids_in_expr(&sub_cond, &var_id_to_value);
+
+                            let sub_then: Vec<_> = if_stmt.then_statements.iter().map(|s| {
+                                self.substitute_hir_stmt_with_maps(s, &nested_map, &var_id_to_value)
+                            }).collect();
+
+                            let sub_else: Option<Vec<_>> = if_stmt.else_statements.as_ref().map(|stmts| {
+                                stmts.iter().map(|s| {
+                                    self.substitute_hir_stmt_with_maps(s, &nested_map, &var_id_to_value)
+                                }).collect()
+                            });
+
+                            substituted_stmts.push(hir::HirStatement::If(hir::HirIfStatement {
+                                condition: sub_cond,
+                                then_statements: sub_then,
+                                else_statements: sub_else,
+                                mux_style: if_stmt.mux_style.clone(),
+                            }));
+                        }
+                        hir::HirStatement::Assignment(assign_stmt) => {
+                            // Substitute in Assignment statement
+                            let sub_rhs = self.substitute_hir_expr_with_map(&assign_stmt.rhs, &nested_map);
+                            let sub_rhs = self.substitute_var_ids_in_expr(&sub_rhs, &var_id_to_value);
+
+                            substituted_stmts.push(hir::HirStatement::Assignment(hir::HirAssignment {
+                                id: assign_stmt.id,
+                                lhs: assign_stmt.lhs.clone(),
+                                assignment_type: assign_stmt.assignment_type.clone(),
+                                rhs: sub_rhs,
+                            }));
+                        }
+                        _ => {
+                            // Other statement types - keep as-is for now
+                            substituted_stmts.push(stmt.clone());
+                        }
                     }
                 }
 
                 // Substitute in result_expr - first by name (for GenericParams etc)
                 let partially_substituted = self.substitute_hir_expr_with_map(result_expr, &nested_map);
                 // Then by VariableId (for Block's local Variables)
-                self.substitute_var_ids_in_expr(&partially_substituted, &var_id_to_value)
+                let sub_result = self.substitute_var_ids_in_expr(&partially_substituted, &var_id_to_value);
+
+                // If there are non-Let statements, preserve the Block structure
+                // Otherwise, just return the substituted result (optimization for pure let blocks)
+                if has_non_let_stmts {
+                    println!("[BUG #86] Block substitution: preserving {} statements (has non-Let)", substituted_stmts.len());
+                    hir::HirExpression::Block {
+                        statements: substituted_stmts,
+                        result_expr: Box::new(sub_result),
+                    }
+                } else {
+                    sub_result
+                }
             }
 
             // Cast - substitute in the inner expression
@@ -7712,6 +8320,125 @@ impl<'hir> HirToMir<'hir> {
 
             // Everything else - return as-is
             _ => expr.clone(),
+        }
+    }
+
+    /// BUG FIX #86: Helper to substitute parameters in a statement
+    /// Handles Let, If, Assign statements inside blocks during function inlining
+    fn substitute_hir_stmt_with_maps(
+        &self,
+        stmt: &hir::HirStatement,
+        name_map: &HashMap<String, hir::HirExpression>,
+        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+    ) -> hir::HirStatement {
+        match stmt {
+            hir::HirStatement::Let(let_stmt) => {
+                let mut sub_value = self.substitute_hir_expr_with_map(&let_stmt.value, name_map);
+                sub_value = self.substitute_var_ids_in_expr(&sub_value, var_id_map);
+                hir::HirStatement::Let(hir::HirLetStatement {
+                    id: let_stmt.id,
+                    name: let_stmt.name.clone(),
+                    mutable: let_stmt.mutable,
+                    var_type: let_stmt.var_type.clone(),
+                    value: sub_value,
+                })
+            }
+            hir::HirStatement::If(if_stmt) => {
+                let mut sub_cond = self.substitute_hir_expr_with_map(&if_stmt.condition, name_map);
+                sub_cond = self.substitute_var_ids_in_expr(&sub_cond, var_id_map);
+
+                let sub_then: Vec<_> = if_stmt.then_statements.iter().map(|s| {
+                    self.substitute_hir_stmt_with_maps(s, name_map, var_id_map)
+                }).collect();
+
+                let sub_else: Option<Vec<_>> = if_stmt.else_statements.as_ref().map(|stmts| {
+                    stmts.iter().map(|s| {
+                        self.substitute_hir_stmt_with_maps(s, name_map, var_id_map)
+                    }).collect()
+                });
+
+                hir::HirStatement::If(hir::HirIfStatement {
+                    condition: sub_cond,
+                    then_statements: sub_then,
+                    else_statements: sub_else,
+                    mux_style: if_stmt.mux_style.clone(),
+                })
+            }
+            hir::HirStatement::Assignment(assign_stmt) => {
+                let mut sub_rhs = self.substitute_hir_expr_with_map(&assign_stmt.rhs, name_map);
+                sub_rhs = self.substitute_var_ids_in_expr(&sub_rhs, var_id_map);
+                hir::HirStatement::Assignment(hir::HirAssignment {
+                    id: assign_stmt.id,
+                    lhs: assign_stmt.lhs.clone(),
+                    assignment_type: assign_stmt.assignment_type.clone(),
+                    rhs: sub_rhs,
+                })
+            }
+            _ => stmt.clone(),
+        }
+    }
+
+    /// BUG #86: Helper to substitute statements in a Block with reference-based param_map
+    /// This is used by substitute_expression_with_var_map for If/Assignment statements
+    fn substitute_hir_stmt_in_block(
+        &mut self,
+        stmt: &hir::HirStatement,
+        param_map: &std::collections::HashMap<String, &hir::HirExpression>,
+        var_id_to_name: &HashMap<hir::VariableId, String>,
+    ) -> Option<hir::HirStatement> {
+        match stmt {
+            hir::HirStatement::Let(let_stmt) => {
+                let sub_value = self.substitute_expression_with_var_map(
+                    &let_stmt.value,
+                    param_map,
+                    var_id_to_name,
+                )?;
+                Some(hir::HirStatement::Let(hir::HirLetStatement {
+                    id: let_stmt.id,
+                    name: let_stmt.name.clone(),
+                    mutable: let_stmt.mutable,
+                    var_type: let_stmt.var_type.clone(),
+                    value: sub_value,
+                }))
+            }
+            hir::HirStatement::If(if_stmt) => {
+                let sub_cond = self.substitute_expression_with_var_map(
+                    &if_stmt.condition,
+                    param_map,
+                    var_id_to_name,
+                )?;
+
+                let sub_then: Vec<_> = if_stmt.then_statements.iter()
+                    .filter_map(|s| self.substitute_hir_stmt_in_block(s, param_map, var_id_to_name))
+                    .collect();
+
+                let sub_else: Option<Vec<_>> = if_stmt.else_statements.as_ref().map(|stmts| {
+                    stmts.iter()
+                        .filter_map(|s| self.substitute_hir_stmt_in_block(s, param_map, var_id_to_name))
+                        .collect()
+                });
+
+                Some(hir::HirStatement::If(hir::HirIfStatement {
+                    condition: sub_cond,
+                    then_statements: sub_then,
+                    else_statements: sub_else,
+                    mux_style: if_stmt.mux_style.clone(),
+                }))
+            }
+            hir::HirStatement::Assignment(assign_stmt) => {
+                let sub_rhs = self.substitute_expression_with_var_map(
+                    &assign_stmt.rhs,
+                    param_map,
+                    var_id_to_name,
+                )?;
+                Some(hir::HirStatement::Assignment(hir::HirAssignment {
+                    id: assign_stmt.id,
+                    lhs: assign_stmt.lhs.clone(),
+                    assignment_type: assign_stmt.assignment_type.clone(),
+                    rhs: sub_rhs,
+                }))
+            }
+            _ => Some(stmt.clone()),
         }
     }
 
@@ -10529,36 +11256,38 @@ impl<'hir> HirToMir<'hir> {
                 // Now we inline the function body and convert it within the module context.
                 println!("    🔄🔄🔄 BUG91_INLINE: Inlining '{}' within module context 🔄🔄🔄", call.function);
 
-                // Get the function body and parameters
-                if let Some(hir) = self.hir.clone() {
-                    if let Some(func) = hir.functions.iter().find(|f| f.name == call.function) {
-                        // Build parameter substitution map: param_name -> argument expression
-                        let mut param_substitutions: HashMap<String, hir::HirExpression> = HashMap::new();
-                        for (param, arg_mir) in func.params.iter().zip(&arg_exprs) {
-                            // We need to keep the argument as HIR expression for substitution
-                            // Get the original HIR argument from the call
-                            if let Some(arg_hir) = call.args.get(func.params.iter().position(|p| p.name == param.name).unwrap_or(0)) {
-                                param_substitutions.insert(param.name.clone(), arg_hir.clone());
-                            }
+                // BUG #86 FIX: Use find_function which searches:
+                // 1. Current entity's impl block
+                // 2. Top-level functions in main HIR
+                // 3. All impl blocks in main HIR
+                // 4. All module HIRs (for stdlib functions like clz32)
+                if let Some(func) = self.find_function(&call.function) {
+                    // Build parameter substitution map: param_name -> argument expression
+                    let mut param_substitutions: HashMap<String, hir::HirExpression> = HashMap::new();
+                    for (param, _arg_mir) in func.params.iter().zip(&arg_exprs) {
+                        // Get the original HIR argument from the call
+                        if let Some(arg_hir) = call.args.get(func.params.iter().position(|p| p.name == param.name).unwrap_or(0)) {
+                            param_substitutions.insert(param.name.clone(), arg_hir.clone());
                         }
-                        println!("    🔄🔄🔄 BUG91_INLINE: Built param substitutions for {} parameters", param_substitutions.len());
+                    }
+                    println!("    🔄🔄🔄 BUG91_INLINE: Built param substitutions for {} parameters", param_substitutions.len());
 
-                        // Get the function body as an expression
-                        if let Some(body_expr) = self.convert_body_to_expression(&func.body.clone()) {
-                            // Substitute parameters in the body expression
-                            let substituted_body = self.substitute_hir_expr_with_map(&body_expr, &param_substitutions);
-                            println!("    🔄🔄🔄 BUG91_INLINE: Substituted body, type: {:?}", std::mem::discriminant(&substituted_body));
+                    // Get the function body as an expression
+                    if let Some(body_expr) = self.convert_body_to_expression(&func.body.clone()) {
+                        // Debug: Print body_expr BEFORE substitution
+                        println!("    🔍🔍🔍 [BUG #86] body_expr BEFORE substitution: {:?}", &body_expr);
 
-                            // Convert the substituted body within module context
-                            return self.convert_hir_expr_for_module(&substituted_body, ctx, depth + 1);
-                        } else {
-                            println!("    🔄🔄🔄 BUG91_INLINE: convert_body_to_expression FAILED!");
-                        }
+                        // Substitute parameters in the body expression
+                        let substituted_body = self.substitute_hir_expr_with_map(&body_expr, &param_substitutions);
+                        println!("    🔄🔄🔄 BUG91_INLINE: Substituted body, type: {:?}", std::mem::discriminant(&substituted_body));
+
+                        // Convert the substituted body within module context
+                        return self.convert_hir_expr_for_module(&substituted_body, ctx, depth + 1);
                     } else {
-                        println!("    🔄🔄🔄 BUG91_INLINE: function '{}' not found in HIR!", call.function);
+                        println!("    🔄🔄🔄 BUG91_INLINE: convert_body_to_expression FAILED!");
                     }
                 } else {
-                    println!("    🔄🔄🔄 BUG91_INLINE: no HIR available!");
+                    println!("    🔄🔄🔄 BUG91_INLINE: function '{}' not found (searched main HIR, impl blocks, and module HIRs)!", call.function);
                 }
 
                 // Last resort fallback if inlining fails
@@ -10649,6 +11378,17 @@ impl<'hir> HirToMir<'hir> {
             // BUG FIX #92: Also track by VariableId for proper substitution
             hir::HirExpression::Block { statements, result_expr } => {
                 println!("🧱🧱🧱 MODULE_BLOCK: Converting Block with {} statements in module context 🧱🧱🧱", statements.len());
+
+                // BUG FIX #86: First try the mutable variable pattern transformation
+                // This handles blocks like:
+                //   { let mut count = 0; let mut temp = value;
+                //     if (cond) { count = count + 16; temp = temp << 16; }
+                //     count }
+                // Transform to conditional expressions BEFORE processing.
+                if let Some(transformed_expr) = self.try_transform_block_mutable_vars(statements, result_expr) {
+                    eprintln!("[BUG #86] MODULE_BLOCK: transformed mutable variable pattern");
+                    return self.convert_hir_expr_for_module(&transformed_expr, ctx, depth + 1);
+                }
 
                 // Build maps from both name and VariableId to substituted values
                 // BUG FIX #92: Need both maps because Variables use var_id, not name
