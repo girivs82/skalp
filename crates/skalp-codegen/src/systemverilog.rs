@@ -803,6 +803,61 @@ fn build_ternary_expression(mux: &PriorityMux, module: &Module) -> String {
     result
 }
 
+/// Build parallel one-hot mux expression
+/// Generates: ({W{sel==v0}} & a) | ({W{sel==v1}} & b) | ...
+/// This assumes mutually exclusive conditions for correct operation
+fn build_parallel_mux_expression(mux: &skalp_mir::ParallelMux, module: &Module) -> String {
+    let width = mux.result_width;
+    let selector = format_expression_with_context(&mux.selector, module);
+
+    let mut terms: Vec<String> = Vec::new();
+
+    for case in &mux.cases {
+        let match_val = format_expression_with_context(&case.match_value, module);
+        let value = format_expression_with_context(&case.value, module);
+
+        // Generate: ({width{selector == match_val}} & value)
+        // The replication {width{cond}} creates a width-bit mask of all 1s or all 0s
+        terms.push(format!(
+            "({{{}'{{({}) == ({})}}}} & ({}))",
+            width, selector, match_val, value
+        ));
+    }
+
+    // Add default case if present
+    if let Some(ref default) = mux.default {
+        // Default fires when no other case matches
+        // Generate: ({width{!(sel==v0 || sel==v1 || ...)}} & default)
+        let no_match_cond: Vec<String> = mux
+            .cases
+            .iter()
+            .map(|c| {
+                format!(
+                    "({}) == ({})",
+                    selector,
+                    format_expression_with_context(&c.match_value, module)
+                )
+            })
+            .collect();
+        let default_val = format_expression_with_context(default, module);
+        // Format: ({32{!(cond)}} & (val))
+        // Escaping: {{ = {, }} = }, so {{{}'{{...}}}} produces {32'{...}}
+        terms.push(format!(
+            "({{{}'{{!({})}}}} & ({}))",
+            width,
+            no_match_cond.join(" || "),
+            default_val
+        ));
+    }
+
+    // OR all terms together
+    if terms.is_empty() {
+        format!("{}'b0", width)
+    } else {
+        terms.join(" | ")
+    }
+}
+
 /// Format sensitivity list
 fn format_sensitivity(sensitivity: &skalp_mir::SensitivityList, module: &Module) -> String {
     match sensitivity {

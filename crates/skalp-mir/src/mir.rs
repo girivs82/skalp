@@ -824,6 +824,38 @@ pub struct PriorityMux {
     pub default: Expression,
 }
 
+/// Parallel one-hot multiplexer (for mutually exclusive conditions)
+/// Generates: (sel==0 & a) | (sel==1 & b) | (sel==2 & c) | ...
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParallelMux {
+    /// Selector expression (typically the match scrutinee)
+    pub selector: Expression,
+    /// List of (match_value, result) pairs - must be mutually exclusive
+    pub cases: Vec<ParallelCase>,
+    /// Default value (when no cases match) - optional for full coverage
+    pub default: Option<Expression>,
+    /// Bit width of result
+    pub result_width: usize,
+}
+
+/// A single case in a parallel mux
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParallelCase {
+    /// Value to compare selector against
+    pub match_value: Expression,
+    /// Result value when selector matches
+    pub value: Expression,
+}
+
+/// Unified mux type that can be either priority or parallel
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MuxTree {
+    /// Priority encoder - cascaded ternary (default, safe for overlapping conditions)
+    Priority(PriorityMux),
+    /// Parallel one-hot - OR of AND terms (faster, requires mutually exclusive conditions)
+    Parallel(ParallelMux),
+}
+
 /// A single condition-value pair in a priority mux
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConditionalCase {

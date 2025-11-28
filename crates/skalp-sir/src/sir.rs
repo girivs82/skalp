@@ -120,7 +120,18 @@ pub enum SirNodeKind {
     // Combinational operations
     BinaryOp(BinaryOperation),
     UnaryOp(UnaryOperation),
+    /// Priority mux: inputs=[sel, true_val, false_val], cascaded ternary
     Mux,
+    /// Parallel one-hot mux: inputs=[selector, val0, val1, ...], OR of AND terms
+    /// Used when conditions are mutually exclusive (intent: mux_style = parallel)
+    ParallelMux {
+        /// Number of cases (inputs after selector are case values)
+        num_cases: usize,
+        /// Match values for each case (selector == match_values[i] selects input i+1)
+        match_values: Vec<u64>,
+        /// Result bit width
+        result_width: usize,
+    },
     Concat,
     Slice { start: usize, end: usize },
     Constant { value: u64, width: usize },

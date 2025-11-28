@@ -652,6 +652,19 @@ pub enum ConstraintType {
     Power,
     Area,
     Performance,
+    /// Mux selection style (priority encoder vs parallel one-hot)
+    MuxStyle(MuxStyle),
+}
+
+/// Mux selection style for conditionals and match expressions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MuxStyle {
+    /// Priority encoder - cascaded ternary, handles overlapping conditions (default)
+    Priority,
+    /// Parallel one-hot - assumes mutually exclusive conditions, shorter critical path
+    Parallel,
+    /// Compiler analyzes and chooses optimal style
+    Auto,
 }
 
 /// Requirement declaration
