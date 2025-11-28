@@ -9451,6 +9451,104 @@ impl<'hir> HirToMir<'hir> {
                     // Convert the new If expression
                     return self.convert_expression(&new_if, 0);
                 }
+                hir::HirExpression::Index(array_base, index_expr) => {
+                    // BUG FIX #31: Handle field access on array index expression
+                    // Example: points[index].x where points is Point[SIZE]
+                    // This becomes a MUX tree selecting from flattened fields:
+                    //   (index == 0) ? points_0_x : ((index == 1) ? points_1_x : ...)
+                    eprintln!(
+                        "[BUG #31 ARRAY_FIELD] FieldAccess on Index: accessing field '{}' on array element",
+                        field_name
+                    );
+
+                    // Get the flattened fields for the array base (Signal or Port)
+                    let (base_hir_id, is_signal, flattened_fields) = match array_base.as_ref() {
+                        hir::HirExpression::Signal(sig_id) => {
+                            if let Some(fields) = self.flattened_signals.get(sig_id) {
+                                (sig_id.0, true, fields.clone())
+                            } else {
+                                eprintln!("[BUG #31 ARRAY_FIELD] Signal not flattened");
+                                return None;
+                            }
+                        }
+                        hir::HirExpression::Port(port_id) => {
+                            if let Some(fields) = self.flattened_ports.get(port_id) {
+                                (port_id.0, false, fields.clone())
+                            } else {
+                                eprintln!("[BUG #31 ARRAY_FIELD] Port not flattened");
+                                return None;
+                            }
+                        }
+                        _ => {
+                            eprintln!("[BUG #31 ARRAY_FIELD] Array base is not Signal or Port");
+                            return None;
+                        }
+                    };
+
+                    // Group flattened fields by array index, then filter for the target field
+                    // For Point[4] with fields x, y: points_0_x, points_0_y, points_1_x, ...
+                    // We want all fields where path is ["<index>", "<field_name>"]
+                    let mut array_elements: Vec<(usize, &FlattenedField)> = Vec::new();
+
+                    for field in &flattened_fields {
+                        if field.field_path.len() >= 2 {
+                            // First element is array index, second is field name
+                            if let Ok(array_idx) = field.field_path[0].parse::<usize>() {
+                                // Check if this is the field we're accessing
+                                if field.field_path[1] == normalized_field_name {
+                                    array_elements.push((array_idx, field));
+                                }
+                            }
+                        }
+                    }
+
+                    if array_elements.is_empty() {
+                        eprintln!("[BUG #31 ARRAY_FIELD] No matching fields found for '{}'", field_name);
+                        return None;
+                    }
+
+                    // Sort by array index
+                    array_elements.sort_by_key(|(idx, _)| *idx);
+
+                    // Convert index expression to MIR
+                    let mir_index = self.convert_expression(index_expr, 0)?;
+
+                    // Build MUX tree: (index == 0) ? field_0 : ((index == 1) ? field_1 : ...)
+                    let mut mux_expr = None;
+
+                    for (array_idx, field) in array_elements.iter().rev() {
+                        let elem_expr = if is_signal {
+                            Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(field.id))))
+                        } else {
+                            Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(field.id))))
+                        };
+
+                        if let Some(else_expr) = mux_expr {
+                            // Build condition: index == array_idx
+                            let index_literal = Expression::with_unknown_type(
+                                ExpressionKind::Literal(Value::Integer(*array_idx as i64))
+                            );
+                            let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::Equal,
+                                left: Box::new(mir_index.clone()),
+                                right: Box::new(index_literal),
+                            });
+
+                            // Build ternary: condition ? elem_expr : else_expr
+                            mux_expr = Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                                cond: Box::new(condition),
+                                then_expr: Box::new(elem_expr),
+                                else_expr: Box::new(else_expr),
+                            }));
+                        } else {
+                            // Last element (default case)
+                            mux_expr = Some(elem_expr);
+                        }
+                    }
+
+                    eprintln!("[BUG #31 ARRAY_FIELD] Built MUX tree with {} elements", array_elements.len());
+                    return mux_expr;
+                }
                 _ => {
                     // Complex base - can't handle
                     eprintln!(

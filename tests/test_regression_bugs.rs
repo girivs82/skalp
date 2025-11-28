@@ -171,7 +171,7 @@ entity Counter<const WIDTH: nat> {
 }
 
 impl<const WIDTH: nat> Counter<WIDTH> {
-    reg count: nat[WIDTH];
+    signal count: nat[WIDTH];
 
     @(posedge clk) {
         if reset {
@@ -338,7 +338,7 @@ entity ColorBuffer {
 }
 
 impl ColorBuffer {
-    reg buffer: RGB[16];
+    signal buffer: RGB[16];
 
     @(posedge clk) {
         buffer[index] <= color;
@@ -586,7 +586,7 @@ entity Counter<const WIDTH: nat> {
 }
 
 impl<const WIDTH: nat> Counter<WIDTH> {
-    reg count: nat[WIDTH];
+    signal count: nat[WIDTH];
 
     @(posedge clk) {
         count <= count + 1;
@@ -669,7 +669,7 @@ entity CircularBuffer<const DEPTH: nat> {
 }
 
 impl<const DEPTH: nat> CircularBuffer<DEPTH> {
-    reg mem: nat[8][DEPTH];
+    signal mem: nat[8][DEPTH];
 
     mem[write_ptr % DEPTH] = write_data;  // Binary expression in index
     read_data = mem[read_ptr % DEPTH];    // Binary expression in index
@@ -725,7 +725,7 @@ entity ArrayPreserveTest<const SIZE: nat> {
 }
 
 impl<const SIZE: nat> ArrayPreserveTest<SIZE> {
-    reg data: nat[8][SIZE];  // Should be preserved as packed array
+    signal data: nat[8][SIZE];  // Should be preserved as packed array
 
     data[index] = write_data;
     read_data = data[index];
@@ -764,7 +764,7 @@ entity NestedFieldTest {
 }
 
 impl NestedFieldTest {
-    reg out_vertex: Vertex
+    signal out_vertex: Vertex
 
     @(posedge clk) {
         out_vertex.position.x <= input_x;  // Nested field assignment
@@ -862,7 +862,7 @@ entity ArrayAssignTest {
 }
 
 impl ArrayAssignTest {
-    reg mem: nat[8][16];
+    signal mem: nat[8][16];
 
     @(posedge clk) {
         mem[index] <= data;
@@ -890,7 +890,7 @@ entity SyncStage {
 }
 
 impl SyncStage {
-    reg data_sync: nat[8];
+    signal data_sync: nat[8];
 
     @(posedge clk) {
         data_sync <= data_in;
@@ -931,8 +931,8 @@ entity DualClock {
 }
 
 impl DualClock {
-    reg wr_data: nat[8];
-    reg rd_data: nat[8];
+    signal wr_data: nat[8];
+    signal rd_data: nat[8];
 
     @(posedge wr_clk) {
         wr_data <= write_data;
