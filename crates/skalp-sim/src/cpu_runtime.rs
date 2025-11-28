@@ -832,6 +832,11 @@ impl CpuRuntime {
             let output_names: std::collections::HashSet<_> =
                 module.outputs.iter().map(|o| &o.name).collect();
 
+            // BUG FIX #87: Build set of input port names to exclude (matching GPU behavior)
+            // Input ports are in the Inputs struct, not Signals, so they shouldn't appear in signal output
+            let input_names: std::collections::HashSet<_> =
+                module.inputs.iter().map(|i| &i.name).collect();
+
             // Add outputs to signals (matching GPU behavior)
             for output in &module.outputs {
                 if let Some(value) = self.outputs.get(&output.name) {
@@ -839,13 +844,14 @@ impl CpuRuntime {
                 }
             }
 
-            // Add non-state intermediate signals, skipping outputs (matching GPU behavior)
-            // For inputs that aren't in self.signals (because they're not driven by nodes),
-            // add them with zero values to match GPU's uninitialized signal_buffer behavior
+            // Add non-state intermediate signals, skipping outputs and input ports (matching GPU behavior)
             for signal in &module.signals {
-                if !signal.is_state && !output_names.contains(&signal.name) {
+                if !signal.is_state
+                    && !output_names.contains(&signal.name)
+                    && !input_names.contains(&signal.name)
+                {
                     let value = self.signals.get(&signal.name).cloned().unwrap_or_else(|| {
-                        // Input signals not driven by nodes get zero value (matching GPU)
+                        // Signals not driven by nodes get zero value (matching GPU)
                         vec![0u8; signal.width.div_ceil(8)]
                     });
                     signals.insert(signal.name.clone(), value);
@@ -939,22 +945,23 @@ impl SimulationRuntime for CpuRuntime {
         }
         self.evaluate_combinational()?;
 
-        // Capture outputs BEFORE sequential update (for correct pipeline timing)
-        // This ensures outputs reflect the state from BEFORE the clock edge
-        for (name, value) in &self.current_outputs {
-            self.outputs.insert(name.clone(), value.clone());
-        }
-
         // Phase 2: Sequential logic updates registers on clock edges
         // This samples the D inputs computed in phase 1 and updates state
         self.evaluate_sequential()?;
 
         // Phase 3: Re-execute combinational logic with NEW register state
-        // This updates internal signals but outputs remain captured from phase 1
+        // This updates signals and outputs to reflect the post-clock state
         for (name, value) in &self.state {
             self.signals.insert(name.clone(), value.clone());
         }
         self.evaluate_combinational()?;
+
+        // BUG FIX #87: Capture outputs AFTER phase 3 (matching GPU runtime)
+        // This provides correct FIFO/FWFT semantics where outputs reflect the post-clock state
+        // Before this fix, CPU captured outputs BEFORE phase 2, causing 1-cycle timing difference with GPU
+        for (name, value) in &self.current_outputs {
+            self.outputs.insert(name.clone(), value.clone());
+        }
 
         self.current_cycle += 1;
 

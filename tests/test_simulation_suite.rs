@@ -250,7 +250,6 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "Known issue: GPU vs CPU simulation has timing differences - see KNOWN_ISSUES.md"]
     #[cfg_attr(
         not(target_os = "macos"),
         ignore = "GPU simulation only available on macOS"
@@ -350,7 +349,6 @@ mod simulation_suite {
     }
 
     #[tokio::test]
-    #[ignore = "Known issue: GPU hierarchical pipeline simulation has timing differences - see KNOWN_ISSUES.md"]
     #[cfg_attr(
         not(target_os = "macos"),
         ignore = "GPU simulation only available on macOS"
@@ -455,16 +453,24 @@ impl Pipeline2 {
                 cycle, input_val, output
             );
 
-            // Verify 2-clock latency:
-            // Cycle 0: input=0x42, output=0x00 (still in reset)
-            // Cycle 1: input=0x55, output=0x00 (0x42 in stage1)
-            // Cycle 2: input=0xAA, output=0x42 (0x42 reaches output)
-            // Cycle 3: input=0xFF, output=0x55 (0x55 reaches output)
-            if cycle >= 2 {
-                let expected = test_sequence[cycle - 2];
+            // With "settle after clock" semantics, outputs reflect state AFTER the clock edge.
+            // A 2-stage pipeline means data takes 2 clock edges to move from input to output:
+            // - Cycle 0: stage1 captures 0x42, stage2 captures 0 (old stage1) -> output = 0x00
+            // - Cycle 1: stage1 captures 0x55, stage2 captures 0x42 (old stage1) -> output = 0x42
+            // - Cycle 2: stage1 captures 0xAA, stage2 captures 0x55 -> output = 0x55
+            // - Cycle 3: stage1 captures 0xFF, stage2 captures 0xAA -> output = 0xAA
+            // So at cycle N (≥1), output = test_sequence[N-1]
+            if cycle == 0 {
+                assert_eq!(
+                    output, 0,
+                    "Cycle 0: expected 0x00 (pipeline empty), got 0x{:02x}",
+                    output
+                );
+            } else {
+                let expected = test_sequence[cycle - 1];
                 assert_eq!(
                     output, expected,
-                    "Cycle {}: expected 0x{:02x}, got 0x{:02x} (2-cycle pipeline latency)",
+                    "Cycle {}: expected 0x{:02x}, got 0x{:02x} (1-cycle propagation delay)",
                     cycle, expected, output
                 );
             }
@@ -568,20 +574,20 @@ impl Pipeline2 {
                 cycle, input_val, output
             );
 
-            // 2-stage pipeline: output = input from 2 cycles ago
-            if cycle >= 2 {
-                let expected = test_sequence[cycle - 2];
+            // With "settle after clock" semantics, outputs reflect state AFTER the clock edge.
+            // A 2-stage pipeline: at cycle N (≥1), output = test_sequence[N-1]
+            if cycle == 0 {
+                assert_eq!(
+                    output, 0,
+                    "CPU: Cycle 0: expected 0x00 (pipeline empty), got 0x{:02x}",
+                    output
+                );
+            } else {
+                let expected = test_sequence[cycle - 1];
                 assert_eq!(
                     output, expected,
                     "CPU: Cycle {}: expected 0x{:02x}, got 0x{:02x}",
                     cycle, expected, output
-                );
-            } else {
-                // First 2 cycles should output 0 (initial state)
-                assert_eq!(
-                    output, 0,
-                    "CPU: Cycle {}: expected 0x00 (initial), got 0x{:02x}",
-                    cycle, output
                 );
             }
         }
