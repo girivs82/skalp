@@ -45,7 +45,7 @@ impl Testbench {
         let config = SimulationConfig {
             // SSA conversion is now implemented in skalp-mir to eliminate combinational cycles
             // from mutable variable reassignment (x = f(x) -> x_0 = value, x_1 = f(x_0), etc.)
-            use_gpu: false,
+            use_gpu: true,
             max_cycles: 1_000_000,
             timeout_ms: 60_000,
             capture_waveforms: true,

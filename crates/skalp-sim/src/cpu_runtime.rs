@@ -38,11 +38,20 @@ impl CpuRuntime {
         }
     }
 
-    /// Truncate a value to the specified bit width
+    /// Truncate or zero-extend a value to the specified bit width
     fn truncate_to_width(value: &[u8], width_bits: usize) -> Vec<u8> {
         let byte_size = width_bits.div_ceil(8);
-        if value.len() <= byte_size {
-            // Value already fits within width
+
+        if value.len() < byte_size {
+            // BUG FIX #89: Zero-extend value to target width (was just returning original)
+            // This is critical for signal propagation where narrower values feed wider outputs
+            let mut result = vec![0u8; byte_size];
+            result[..value.len()].copy_from_slice(value);
+            return result;
+        }
+
+        if value.len() == byte_size {
+            // Value is exact size, just clone
             return value.to_vec();
         }
 
@@ -269,12 +278,16 @@ impl CpuRuntime {
 
             SirNodeKind::Concat => {
                 // Concatenate all inputs
+                // BUG FIX #90: In HDL {A, B}, A is high bits and B is low bits
+                // Inputs are ordered [high_bits, ..., low_bits], so we iterate in reverse
+                // to place the last input (low bits) at bit_offset=0
                 let total_bits: usize = input_values.iter().map(|v| v.len() * 8).sum();
                 let byte_size = total_bits.div_ceil(8);
                 let mut result = vec![0u8; byte_size];
 
                 let mut bit_offset = 0;
-                for value in &input_values {
+                // Iterate in reverse to match HDL semantics (last input = lowest bits)
+                for value in input_values.iter().rev() {
                     for (byte_idx, &byte_val) in value.iter().enumerate() {
                         let target_byte = (bit_offset + byte_idx * 8) / 8;
                         let target_bit_in_byte = (bit_offset + byte_idx * 8) % 8;

@@ -2314,7 +2314,9 @@ impl<'a> MetalShaderGenerator<'a> {
             let mut component_contributions: Vec<Vec<ComponentContribution>> = vec![vec![], vec![], vec![], vec![]];
 
             let mut bit_offset = 0;
-            for (input_name, width) in input_widths.iter() {
+            // BUG FIX #91: In HDL {A, B}, B is low bits. Inputs are ordered [high, ..., low],
+            // so we iterate in reverse to place the last input (low bits) at bit_offset=0
+            for (input_name, width) in input_widths.iter().rev() {
                 let input_expr = self.format_signal_for_bitwise_op(sir, input_name);
                 let input_expr = if input_expr == "0u" || input_expr.contains("as_type") {
                     input_expr
@@ -2418,11 +2420,11 @@ impl<'a> MetalShaderGenerator<'a> {
             let mut components = vec!["0u".to_string(); 2];
             let mut bit_offset = 0;
 
-            // BUG FIX #15: Hardware concat {a, b} has a in MSB, b in LSB
+            // BUG FIX #15 & #91: Hardware concat {a, b} has a in MSB, b in LSB
             // SystemVerilog {a, b} = {a[63:32], b[31:0]}
             // Metal uint2(x, y) = {x[31:0], y[63:32]}
-            // So {a, b} maps to uint2(b, a) - REVERSE order
-            for (input_name, width) in input_widths.iter() {
+            // So we iterate in reverse: last input (low bits) at bit_offset=0
+            for (input_name, width) in input_widths.iter().rev() {
                 let component_idx = bit_offset / 32;
                 if component_idx < 2 {
                     // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types

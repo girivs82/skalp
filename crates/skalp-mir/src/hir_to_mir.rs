@@ -9534,20 +9534,57 @@ impl<'hir> HirToMir<'hir> {
             "fp_abs" | "abs" => {
                 if args.len() == 1 {
                     // FP abs: x < 0 ? -x : x
-                    let zero = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)));
+                    // BUG FIX: Use FSub(0.0, x) for negation, not UnaryOp::Negate
+                    let zero_float = Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(0.0)));
                     let is_negative = Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::FLess,
                         left: Box::new(args[0].clone()),
-                        right: Box::new(zero),
+                        right: Box::new(zero_float.clone()),
                     });
-                    let negated = Expression::with_unknown_type(ExpressionKind::Unary {
-                        op: UnaryOp::Negate,
-                        operand: Box::new(args[0].clone()),
+                    let negated = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FSub,
+                        left: Box::new(zero_float),
+                        right: Box::new(args[0].clone()),
                     });
                     Some(Expression::with_unknown_type(ExpressionKind::Conditional {
                         cond: Box::new(is_negative),
                         then_expr: Box::new(negated),
                         else_expr: Box::new(args[0].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            // BUG FIX #88: Implement fp_min and fp_max for module synthesis
+            "fp_min" | "min" => {
+                if args.len() == 2 {
+                    // fp_min(a, b) = a < b ? a : b
+                    let cond = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FLess,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    });
+                    Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                        cond: Box::new(cond),
+                        then_expr: Box::new(args[0].clone()),
+                        else_expr: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_max" | "max" => {
+                if args.len() == 2 {
+                    // fp_max(a, b) = a > b ? a : b
+                    let cond = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FGreater,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    });
+                    Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                        cond: Box::new(cond),
+                        then_expr: Box::new(args[0].clone()),
+                        else_expr: Box::new(args[1].clone()),
                     }))
                 } else {
                     None
