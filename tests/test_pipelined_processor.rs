@@ -5,7 +5,7 @@ mod pipelined_processor_tests {
     #[cfg(target_os = "macos")]
     use skalp_frontend::parse_and_build_hir;
     #[cfg(target_os = "macos")]
-    use skalp_mir::{Expression, Statement};
+    use skalp_mir::{Expression, ExpressionKind, Statement};
     #[cfg(target_os = "macos")]
     use skalp_mir::{MirCompiler, OptimizationLevel};
     #[cfg(target_os = "macos")]
@@ -315,7 +315,7 @@ mod pipelined_processor_tests {
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
-                    if let Expression::Binary { op, left, right } = &assign.rhs {
+                    if let ExpressionKind::Binary { op, left, right } = &assign.rhs.kind {
                         println!(
                             "{}⚙️ BINARY: {:?} <= {:?} {:?} {:?}",
                             indent_str, assign.lhs, left, op, right
@@ -331,7 +331,7 @@ mod pipelined_processor_tests {
                 Statement::ResolvedConditional(resolved) => {
                     // Check for binary operations in the resolved cases
                     for case in &resolved.resolved.cases {
-                        if let Expression::Binary { op, left, right } = &case.value {
+                        if let ExpressionKind::Binary { op, left, right } = &case.value.kind {
                             println!(
                                 "{}⚙️ CONDITIONAL BINARY: {:?} {:?} {:?}",
                                 indent_str, left, op, right

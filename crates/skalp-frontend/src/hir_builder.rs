@@ -5928,6 +5928,11 @@ impl HirBuilderContext {
             return self.build_hir_type(&type_node);
         }
 
+        // BUG FIX #86: Handle TypeAnnotation wrapper (common in function parameters)
+        if let Some(type_annotation) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+            return self.extract_hir_type(&type_annotation);
+        }
+
         // Check for specific type nodes
         for child in node.children() {
             match child.kind() {
