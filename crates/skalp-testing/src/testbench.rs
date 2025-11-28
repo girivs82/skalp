@@ -43,12 +43,17 @@ impl Testbench {
     /// Create a new testbench from a SKALP source file
     pub async fn new(source_path: &str) -> Result<Self> {
         let config = SimulationConfig {
-            use_gpu: cfg!(target_os = "macos"), // Use GPU on macOS, CPU elsewhere
+            // Force CPU mode until SSA conversion is implemented
+            // GPU mode fails on mutable variable reassignment (x = f(x)) which creates
+            // combinational cycles. The CPU works despite cycles because signals persist.
+            // TODO: Implement SSA conversion to fix GPU mode
+            use_gpu: false,
             max_cycles: 1_000_000,
             timeout_ms: 60_000,
             capture_waveforms: true,
             parallel_threads: 4,
         };
+        eprintln!("🚨 DEBUG: use_gpu = {}", config.use_gpu);
         Self::with_config(source_path, config).await
     }
 

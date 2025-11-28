@@ -450,6 +450,17 @@ pub enum ExpressionKind {
         expr: Box<Expression>,
         target_type: DataType,
     },
+    /// Tuple field/element access (for destructuring)
+    /// BUG FIX #85: Enables `let (a, b, c) = func()` pattern in module synthesis
+    TupleFieldAccess {
+        base: Box<Expression>,
+        index: usize,
+    },
+    /// Named field access on structs
+    FieldAccess {
+        base: Box<Expression>,
+        field: String,
+    },
 }
 
 impl Expression {

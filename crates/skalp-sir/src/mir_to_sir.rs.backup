@@ -7,11 +7,6 @@ use skalp_mir::{
 };
 use std::collections::HashMap;
 
-// Disable verbose debug output for performance
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{}};
-}
-
 /// Convert MIR to SIR with full hierarchical elaboration
 /// This function takes the entire Mir (all modules) and elaborates the first module
 /// by recursively flattening all instantiated submodules
@@ -53,15 +48,10 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
     converter.convert_ports();
     converter.convert_signals();
     converter.convert_variables(); // Convert MIR variables (let bindings) to SIR signals
-
-    // CRITICAL: Flatten hierarchical instances BEFORE converting top-level logic
-    // This ensures that instance output signals are driven before the top-level
-    // logic tries to read from them. Without this order, instance result signals
-    // (like exec_l4_l5_result_109) won't have drivers when top-level logic
-    // tries to use them.
-    converter.flatten_instances("");
-
     converter.convert_logic();
+
+    // CRITICAL: Flatten hierarchical instances
+    converter.flatten_instances("");
 
     converter.extract_clock_domains();
 
@@ -223,13 +213,9 @@ impl<'a> MirToSirConverter<'a> {
             let sir_type = self.convert_type(&variable.var_type);
             let width = sir_type.width();
 
-            // BUG FIX #86: Use unique signal names (name + id) to prevent collisions
-            // between variables with the same name in different scopes
-            let unique_name = format!("{}_{}", variable.name, variable.id.0);
-
             // Variables (let bindings) are always combinational wires, never registers
             self.sir.signals.push(SirSignal {
-                name: unique_name,
+                name: variable.name.clone(),
                 width,
                 sir_type: sir_type.clone(),
                 driver_node: None,
@@ -1139,16 +1125,6 @@ impl<'a> MirToSirConverter<'a> {
             ExpressionKind::FunctionCall { args, .. } => args
                 .iter()
                 .any(|e| self.expression_references_signals(e, signals)),
-            // BUG FIX #85: Handle tuple/field access
-            ExpressionKind::TupleFieldAccess { base, .. } => {
-                self.expression_references_signals(base, signals)
-            }
-            ExpressionKind::FieldAccess { base, .. } => {
-                self.expression_references_signals(base, signals)
-            }
-            ExpressionKind::Cast { expr, .. } => {
-                self.expression_references_signals(expr, signals)
-            }
             _ => false,
         }
     }
@@ -1897,47 +1873,6 @@ impl<'a> MirToSirConverter<'a> {
                 // Just process the inner expression
                 self.create_expression_with_local_context(expr, local_context)
             }
-            // BUG FIX #85: Handle tuple field access for module synthesis
-            ExpressionKind::TupleFieldAccess { base, index } => {
-                // Check if the base is a Signal reference (module instance result)
-                if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &base.kind {
-                    // Look up the signal name
-                    if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
-                        // Check if this is a module instance result signal (ends with _result_0)
-                        if signal.name.ends_with("_result_0") || signal.name.contains("_inst_") {
-                            // Derive the result_N signal name by replacing _result_0 with _result_N
-                            // Signal naming convention: {func}_inst_{id}_result_{N}
-                            let base_name = if let Some(pos) = signal.name.rfind("_result_") {
-                                &signal.name[..pos]
-                            } else {
-                                // If no _result_ suffix, this is the first element - use base name
-                                &signal.name[..]
-                            };
-                            let target_signal_name = format!("{}_result_{}", base_name, index);
-                            println!("🔍🔍🔍 TUPLE_FIELD_ACCESS: base='{}' index={} -> target='{}'",
-                                    signal.name, index, target_signal_name);
-
-                            // Look up or create a reference to the target signal
-                            return self.get_or_create_signal_driver(&target_signal_name);
-                        }
-                    }
-                }
-
-                // Fallback: For non-module results (actual concatenated tuples), use bit slicing
-                let base_node = self.create_expression_with_local_context(base, local_context);
-                // Create a slice to extract the specified element
-                // For now, assume 32-bit elements and extract accordingly
-                let element_width = 32;
-                let start_bit = (*index) * element_width;
-                let end_bit = start_bit + element_width - 1;
-                self.create_slice_node(base_node, start_bit, end_bit)
-            }
-            ExpressionKind::FieldAccess { base, field } => {
-                // For named field access, fall back to base expression
-                // This would need type information to determine field offsets
-                eprintln!("    ⚠️ FieldAccess on field '{}' - falling back to base", field);
-                self.create_expression_with_local_context(base, local_context)
-            }
         }
     }
 
@@ -1970,19 +1905,6 @@ impl<'a> MirToSirConverter<'a> {
             },
             _ => 0, // For non-constant expressions, return 0 as fallback
         }
-    }
-
-    /// BUG FIX #85: Create a range select node on a base node
-    /// Used for expressions like data1[31:0] where we need to extract a bit range
-    /// Note: create_slice_node expects (base, start=high, end=low) per HDL convention
-    fn create_range_select_node_on_base(&mut self, base_node: usize, high: usize, low: usize) -> usize {
-        self.create_slice_node(base_node, high, low)
-    }
-
-    /// BUG FIX #85: Create a bit select node on a base node
-    /// Used for expressions like data1[5] where we need to extract a single bit
-    fn create_bit_select_node_on_base(&mut self, base_node: usize, index: usize) -> usize {
-        self.create_slice_node(base_node, index, index)
     }
 
     fn collect_conditional_cases_with_context(
@@ -2247,7 +2169,7 @@ impl<'a> MirToSirConverter<'a> {
                 .variables
                 .iter()
                 .find(|v| v.id == *var_id)
-                .map(|v| format!("{}_{}", v.name, var_id.0))  // BUG FIX #86: Unique name
+                .map(|v| v.name.clone())
                 .unwrap_or_else(|| format!("var_{}", var_id.0)),
             LValue::BitSelect { base, .. } => {
                 // For bit select, use the base signal name
@@ -2388,38 +2310,6 @@ impl<'a> MirToSirConverter<'a> {
                 // Just process the inner expression
                 self.create_expression_node_with_width(expr, target_width)
             }
-            // BUG FIX #85: Handle tuple field access for module synthesis
-            ExpressionKind::TupleFieldAccess { base, index } => {
-                // Check if the base is a Signal reference (module instance result)
-                if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &base.kind {
-                    // Look up the signal name
-                    if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
-                        // Check if this is a module instance result signal
-                        if signal.name.ends_with("_result_0") || signal.name.contains("_inst_") {
-                            let base_name = if let Some(pos) = signal.name.rfind("_result_") {
-                                &signal.name[..pos]
-                            } else {
-                                &signal.name[..]
-                            };
-                            let target_signal_name = format!("{}_result_{}", base_name, index);
-                            println!("🔍🔍🔍 TUPLE_FIELD_ACCESS (node): base='{}' index={} -> target='{}'",
-                                    signal.name, index, target_signal_name);
-                            return self.get_or_create_signal_driver(&target_signal_name);
-                        }
-                    }
-                }
-                // Fallback: bit slicing
-                let base_node = self.create_expression_node_with_width(base, None);
-                let element_width = 32;
-                let start_bit = (*index) * element_width;
-                let end_bit = start_bit + element_width - 1;
-                self.create_slice_node(base_node, start_bit, end_bit)
-            }
-            ExpressionKind::FieldAccess { base, field } => {
-                // For named field access, fall back to base expression
-                eprintln!("    ⚠️ FieldAccess on field '{}' - falling back to base", field);
-                self.create_expression_node_with_width(base, target_width)
-            }
             _ => {
                 // For unsupported expressions, create a zero constant
                 self.create_constant_node(0, 1)
@@ -2510,16 +2400,12 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
             LValue::Variable(var_id) => {
-                // BUG FIX #86: Use unique signal names to prevent combinational cycles
-                // from signal name collisions. Variables with the same name in different
-                // scopes (e.g., "x" in multiple functions) must map to different signals.
-                // Format: {name}_{id} ensures uniqueness while preserving readability.
                 let var_name = self
                     .mir
                     .variables
                     .iter()
                     .find(|v| v.id == *var_id)
-                    .map(|v| format!("{}_{}", v.name, var_id.0))  // Unique: name + id
+                    .map(|v| v.name.clone())
                     .unwrap_or_else(|| format!("var_{}", var_id.0));
                 self.get_or_create_signal_driver(&var_name)
             }
@@ -3649,33 +3535,11 @@ impl<'a> MirToSirConverter<'a> {
         child_module: &Module,
         inst_prefix: &str,
     ) {
-        // Call with no parent context (for top-level instances)
-        self.elaborate_instance_with_context(instance, child_module, inst_prefix, None, "");
-    }
-
-    /// Elaborate a single instance with optional parent module context
-    /// For nested instances, parent_module_for_signals contains the module
-    /// that owns the SignalIds in instance.connections
-    fn elaborate_instance_with_context(
-        &mut self,
-        instance: &skalp_mir::ModuleInstance,
-        child_module: &Module,
-        inst_prefix: &str,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) {
         println!(
             "      🔨 Elaborating instance '{}' (module has {} signals)",
             inst_prefix,
             child_module.signals.len()
         );
-        if let Some(parent) = parent_module_for_signals {
-            println!(
-                "         Parent context: {} signals, prefix='{}'",
-                parent.signals.len(),
-                parent_prefix
-            );
-        }
         println!("         All signals in module:");
         for sig in &child_module.signals {
             println!("            - {}: {:?}", sig.name, sig.signal_type);
@@ -3742,66 +3606,25 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
 
-        // Step 1b: Also create signals for child module's variables (let bindings)
-        // Variables need to become signals so they can be referenced by nested instances
-        for variable in &child_module.variables {
-            let full_name = format!("{}.{}", inst_prefix, variable.name);
-            let sir_type = self.convert_type(&variable.var_type);
-            let width = sir_type.width();
-
-            println!(
-                "         ├─ Variable: {} (type={:?}) → SIR signal (width={})",
-                variable.name, variable.var_type, width
-            );
-
-            self.sir.signals.push(SirSignal {
-                name: full_name.clone(),
-                width,
-                sir_type: sir_type.clone(),
-                driver_node: None,
-                fanout_nodes: Vec::new(),
-                is_state: false, // Variables are not registers
-            });
-        }
-
         eprintln!(
             "         📊 After elaborating '{}': total {} state_elements",
             inst_prefix,
             self.sir.state_elements.len()
         );
 
-        // Step 2: FIRST recursively elaborate any instances within the child
-        // BUG FIX #85: This MUST happen before Step 3 so that nested module outputs
-        // have their drivers set up before we process TupleFieldAccess expressions
-        // that reference those outputs
-        // IMPORTANT: Pass child_module as the parent context for nested instances
-        // The nested instances' connections have SignalIds from child_module
+        // Step 2: Convert child module's logic with instance prefix
+        // This includes both combinational assignments and sequential processes
+        self.elaborate_child_logic(child_module, inst_prefix, instance);
+
+        // Step 3: Recursively elaborate any instances within the child
         if !child_module.instances.is_empty() {
             println!(
-                "         └─ Recursively elaborating {} nested instances FIRST",
+                "         └─ Recursively elaborating {} nested instances",
                 child_module.instances.len()
             );
             let nested_prefix = format!("{}.", inst_prefix);
-            // Pass child_module as the parent context and inst_prefix as the parent_prefix
-            self.flatten_instances_for_module(
-                child_module,
-                &nested_prefix,
-                Some(child_module),
-                &format!("{}.", inst_prefix),
-            );
+            self.flatten_instances_for_module(child_module, &nested_prefix);
         }
-
-        // Step 3: Convert child module's logic with instance prefix
-        // This includes both combinational assignments and sequential processes
-        // NOW nested instances are elaborated, so their output signals have drivers
-        eprintln!("💥💥💥 CALLING elaborate_child_logic_with_context for inst_prefix='{}', child_module='{}'", inst_prefix, child_module.name);
-        self.elaborate_child_logic_with_context(
-            child_module,
-            inst_prefix,
-            instance,
-            parent_module_for_signals,
-            parent_prefix,
-        );
     }
 
     /// Elaborate child module's logic (assignments and processes) with instance prefix
@@ -3810,21 +3633,6 @@ impl<'a> MirToSirConverter<'a> {
         child_module: &Module,
         inst_prefix: &str,
         instance: &skalp_mir::ModuleInstance,
-    ) {
-        // Call without parent context (for top-level instances)
-        self.elaborate_child_logic_with_context(child_module, inst_prefix, instance, None, "");
-    }
-
-    /// Elaborate child module's logic with optional parent module context
-    /// For nested instances, parent_module_for_signals contains the module
-    /// that owns the SignalIds in instance.connections
-    fn elaborate_child_logic_with_context(
-        &mut self,
-        child_module: &Module,
-        inst_prefix: &str,
-        instance: &skalp_mir::ModuleInstance,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
     ) {
         // Create a mapping from child port names to parent expressions
         // This connects the instance ports to the parent's signals
@@ -3977,26 +3785,12 @@ impl<'a> MirToSirConverter<'a> {
 
         // Convert combinational assignments from child module
         for assign in &child_module.assignments {
-            self.convert_child_assignment_with_context(
-                assign,
-                inst_prefix,
-                &port_mapping,
-                child_module,
-                parent_module_for_signals,
-                parent_prefix,
-            );
+            self.convert_child_assignment(assign, inst_prefix, &port_mapping, child_module);
         }
 
         // Convert sequential processes from child module
         for process in &child_module.processes {
-            self.convert_child_process_with_context(
-                process,
-                inst_prefix,
-                &port_mapping,
-                child_module,
-                parent_module_for_signals,
-                parent_prefix,
-            );
+            self.convert_child_process(process, inst_prefix, &port_mapping, child_module);
         }
     }
 
@@ -4008,28 +3802,6 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) {
-        // Call without parent context
-        self.convert_child_assignment_with_context(
-            assign,
-            inst_prefix,
-            port_mapping,
-            child_module,
-            None,
-            "",
-        );
-    }
-
-    /// Convert child module assignment with optional parent module context
-    fn convert_child_assignment_with_context(
-        &mut self,
-        assign: &skalp_mir::ContinuousAssign,
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) {
-        println!("⚡⚡⚡ CONVERT_CHILD_ASSIGN_WITH_CTX: inst_prefix='{}', child_module='{}'", inst_prefix, child_module.name);
         // Translate LHS: if it's a port (output), map to parent signal
         // Otherwise prefix with instance name
         let lhs_signal = match &assign.lhs {
@@ -4039,12 +3811,7 @@ impl<'a> MirToSirConverter<'a> {
                 } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
                     // Output port - this connects to parent signal
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
-                        // Use context-aware lookup for nested instances
-                        self.get_signal_name_from_expression_with_context(
-                            parent_expr,
-                            parent_module_for_signals,
-                            parent_prefix,
-                        )
+                        self.get_signal_name_from_expression(parent_expr)
                     } else {
                         format!("{}.{}", inst_prefix, port.name)
                     }
@@ -4056,12 +3823,7 @@ impl<'a> MirToSirConverter<'a> {
                 // First try direct ID lookup
                 if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
-                        // Use context-aware lookup for nested instances
-                        self.get_signal_name_from_expression_with_context(
-                            parent_expr,
-                            parent_module_for_signals,
-                            parent_prefix,
-                        )
+                        self.get_signal_name_from_expression(parent_expr)
                     } else {
                         format!("{}.{}", inst_prefix, port.name)
                     }
@@ -4072,12 +3834,7 @@ impl<'a> MirToSirConverter<'a> {
                     if port_index < child_module.ports.len() {
                         let port = &child_module.ports[port_index];
                         if let Some(parent_expr) = port_mapping.get(&port.name) {
-                            // Use context-aware lookup for nested instances
-                            self.get_signal_name_from_expression_with_context(
-                                parent_expr,
-                                parent_module_for_signals,
-                                parent_prefix,
-                            )
+                            self.get_signal_name_from_expression(parent_expr)
                         } else {
                             format!("{}.{}", inst_prefix, port.name)
                         }
@@ -4098,35 +3855,14 @@ impl<'a> MirToSirConverter<'a> {
         self.node_counter += 1;
 
         // Convert the RHS expression, substituting port references with parent signals
-        // Use context-aware version for nested instances
-        self.convert_expression_for_instance_with_context(
+        self.convert_expression_for_instance(
             &assign.rhs,
             inst_prefix,
             port_mapping,
             child_module,
             &lhs_signal,
             node_id,
-            parent_module_for_signals,
-            parent_prefix,
         );
-    }
-
-    /// Convert child process with parent module context
-    /// For now, sequential processes don't usually write to output ports directly,
-    /// so we delegate to the original function. Can be enhanced if needed.
-    fn convert_child_process_with_context(
-        &mut self,
-        process: &skalp_mir::Process,
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        _parent_module_for_signals: Option<&Module>,
-        _parent_prefix: &str,
-    ) {
-        // For now, delegate to the original implementation
-        // Sequential processes typically don't write directly to output ports
-        // If issues arise with nested sequential process signal resolution, enhance this
-        self.convert_child_process(process, inst_prefix, port_mapping, child_module);
     }
 
     /// Convert child process (always block) with instance prefix
@@ -4873,41 +4609,9 @@ impl<'a> MirToSirConverter<'a> {
         output_signal: &str,
         _node_id: usize,
     ) {
-        // Build the full expression tree recursively with port mapping (no parent context)
-        self.convert_expression_for_instance_with_context(
-            expr,
-            inst_prefix,
-            port_mapping,
-            child_module,
-            output_signal,
-            _node_id,
-            None,
-            "",
-        );
-    }
-
-    /// Convert expression for instance with optional parent module context
-    fn convert_expression_for_instance_with_context(
-        &mut self,
-        expr: &Expression,
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        output_signal: &str,
-        _node_id: usize,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) {
-        println!("🔥🔥🔥 CONVERT_EXPR_FOR_INST_WITH_CTX: output_signal='{}', inst_prefix='{}', expr.kind={:?}", output_signal, inst_prefix, std::mem::discriminant(&expr.kind));
         // Build the full expression tree recursively with port mapping
-        let result_node = self.create_expression_node_for_instance_with_context(
-            expr,
-            inst_prefix,
-            port_mapping,
-            child_module,
-            parent_module_for_signals,
-            parent_prefix,
-        );
+        let result_node =
+            self.create_expression_node_for_instance(expr, inst_prefix, port_mapping, child_module);
         // Connect the result node's output to the target signal
         self.connect_node_to_signal(result_node, output_signal);
     }
@@ -4920,117 +4624,40 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) -> usize {
-        // Call without parent context
-        self.create_expression_node_for_instance_with_context(
-            expr,
-            inst_prefix,
-            port_mapping,
-            child_module,
-            None,
-            "",
-        )
-    }
-
-    /// Create expression node with instance context and optional parent module context
-    fn create_expression_node_for_instance_with_context(
-        &mut self,
-        expr: &Expression,
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) -> usize {
-        println!("🎨🎨🎨 CREATE_EXPR_NODE_FOR_INSTANCE: expr.kind={:?}, inst_prefix='{}'", std::mem::discriminant(&expr.kind), inst_prefix);
         let result = match &expr.kind {
             ExpressionKind::Literal(value) => self.create_literal_node(value),
             ExpressionKind::Ref(lvalue) => {
-                println!("🎨🎨🎨   -> ExpressionKind::Ref({:?})", lvalue);
-
-                // BUG FIX #85: Handle RangeSelect and BitSelect specially
-                // For these, we need to create a node that selects bits from the base signal
-                match lvalue {
-                    LValue::RangeSelect { base, high, low } => {
-                        println!("🎨🎨🎨   -> RangeSelect on base {:?} [high:low]", base);
-                        // First, get the base signal node
-                        let base_expr = Expression::with_unknown_type(ExpressionKind::Ref((**base).clone()));
-                        let base_node = self.create_expression_node_for_instance_with_context(
-                            &base_expr,
-                            inst_prefix,
-                            port_mapping,
-                            child_module,
-                            parent_module_for_signals,
-                            parent_prefix,
-                        );
-                        // Now create a range select node on top
-                        let high_val = self.evaluate_const_expr(high);
-                        let low_val = self.evaluate_const_expr(low);
-                        println!("🎨🎨🎨   -> Creating RangeSelect node [{}:{}] on base_node={}", high_val, low_val, base_node);
-                        self.create_range_select_node_on_base(base_node, high_val as usize, low_val as usize)
-                    }
-                    LValue::BitSelect { base, index } => {
-                        println!("🎨🎨🎨   -> BitSelect on base {:?} [index]", base);
-                        // First, get the base signal node
-                        let base_expr = Expression::with_unknown_type(ExpressionKind::Ref((**base).clone()));
-                        let base_node = self.create_expression_node_for_instance_with_context(
-                            &base_expr,
-                            inst_prefix,
-                            port_mapping,
-                            child_module,
-                            parent_module_for_signals,
-                            parent_prefix,
-                        );
-                        // Now create a bit select node on top
-                        let index_val = self.evaluate_const_expr(index);
-                        println!("🎨🎨🎨   -> Creating BitSelect node [{}] on base_node={}", index_val, base_node);
-                        self.create_bit_select_node_on_base(base_node, index_val as usize)
-                    }
-                    _ => {
-                        // Map through ports if needed, using context-aware lookup
-                        if let Some(sig_name) = self.get_signal_from_lvalue_with_context(
-                            lvalue,
-                            inst_prefix,
-                            port_mapping,
-                            child_module,
-                            parent_module_for_signals,
-                            parent_prefix,
-                        ) {
-                            self.get_or_create_signal_driver(&sig_name)
-                        } else {
-                            // Fallback: create a zero constant
-                            eprintln!("🎨🎨🎨   -> FALLBACK: lvalue {:?} not found, creating Constant(0,1)", lvalue);
-                            self.create_constant_node(0, 1)
-                        }
-                    }
+                // Map through ports if needed
+                if let Some(sig_name) =
+                    self.get_signal_from_lvalue(lvalue, inst_prefix, port_mapping, child_module)
+                {
+                    self.get_or_create_signal_driver(&sig_name)
+                } else {
+                    // Fallback: create a zero constant
+                    self.create_constant_node(0, 1)
                 }
             }
             ExpressionKind::Binary { op, left, right } => {
-                let left_node = self.create_expression_node_for_instance_with_context(
+                let left_node = self.create_expression_node_for_instance(
                     left,
                     inst_prefix,
                     port_mapping,
                     child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
                 );
-                let right_node = self.create_expression_node_for_instance_with_context(
+                let right_node = self.create_expression_node_for_instance(
                     right,
                     inst_prefix,
                     port_mapping,
                     child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
                 );
                 self.create_binary_op_node(op, left_node, right_node)
             }
             ExpressionKind::Unary { op, operand } => {
-                let operand_node = self.create_expression_node_for_instance_with_context(
+                let operand_node = self.create_expression_node_for_instance(
                     operand,
                     inst_prefix,
                     port_mapping,
                     child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
                 );
                 self.create_unary_op_node(op, operand_node)
             }
@@ -5039,29 +4666,23 @@ impl<'a> MirToSirConverter<'a> {
                 then_expr,
                 else_expr,
             } => {
-                let cond_node = self.create_expression_node_for_instance_with_context(
+                let cond_node = self.create_expression_node_for_instance(
                     cond,
                     inst_prefix,
                     port_mapping,
                     child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
                 );
-                let then_node = self.create_expression_node_for_instance_with_context(
+                let then_node = self.create_expression_node_for_instance(
                     then_expr,
                     inst_prefix,
                     port_mapping,
                     child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
                 );
-                let else_node = self.create_expression_node_for_instance_with_context(
+                let else_node = self.create_expression_node_for_instance(
                     else_expr,
                     inst_prefix,
                     port_mapping,
                     child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
                 );
                 self.create_mux_node(cond_node, then_node, else_node)
             }
@@ -5069,105 +4690,15 @@ impl<'a> MirToSirConverter<'a> {
                 let part_nodes: Vec<usize> = parts
                     .iter()
                     .map(|p| {
-                        self.create_expression_node_for_instance_with_context(
+                        self.create_expression_node_for_instance(
                             p,
                             inst_prefix,
                             port_mapping,
                             child_module,
-                            parent_module_for_signals,
-                            parent_prefix,
                         )
                     })
                     .collect();
                 self.create_concat_node(part_nodes)
-            }
-            // BUG FIX #85: Handle tuple field access for module synthesis
-            ExpressionKind::TupleFieldAccess { base, index } => {
-                println!("🔍🔍🔍 TUPLE_FIELD_ACCESS (inst): ENTERING with index={}, base.kind={:?}", index, std::mem::discriminant(&base.kind));
-                // Check if the base is a Signal reference (module instance result)
-                if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &base.kind {
-                    println!("🔍🔍🔍   Base is Signal({}), looking in child_module with {} signals", sig_id.0, child_module.signals.len());
-                    // Look up the signal name in child module
-                    if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
-                        println!("🔍🔍🔍   Found signal: '{}' (checking pattern)", signal.name);
-
-                        // BUG FIX #85: Check for _tuple_tmp_ pattern - this is a tuple temporary
-                        // The _tuple_tmp_XX signals are intermediates that need to find the actual result signals
-                        // For example, _tuple_tmp_76_76 -> look for assignments FROM quadratic_solve_inst_145_result_N
-                        if signal.name.contains("_tuple_tmp_") {
-                            println!("🔍🔍🔍   Detected _tuple_tmp_ pattern - looking for module instance result");
-                            // Find the assignment to this signal to determine the source module instance
-                            // The assignment should be: _tuple_tmp_76_76 = quadratic_solve_inst_145_result_0
-                            // From that we can derive quadratic_solve_inst_145_result_N for index N
-                            for assign in &child_module.assignments {
-                                if let LValue::Signal(assign_sig_id) = &assign.lhs {
-                                    if assign_sig_id == sig_id {
-                                        // Found the assignment to this _tuple_tmp_ signal
-                                        // Check if RHS is a reference to another signal
-                                        if let ExpressionKind::Ref(LValue::Signal(src_sig_id)) = &assign.rhs.kind {
-                                            if let Some(src_signal) = child_module.signals.iter().find(|s| s.id == *src_sig_id) {
-                                                if src_signal.name.contains("_inst_") && src_signal.name.contains("_result_") {
-                                                    // Found the source module instance result signal
-                                                    // Replace _result_0 (or _result_N) with _result_{index}
-                                                    let base_name = if let Some(pos) = src_signal.name.rfind("_result_") {
-                                                        &src_signal.name[..pos]
-                                                    } else {
-                                                        &src_signal.name[..]
-                                                    };
-                                                    let target_signal_name = format!("{}.{}_result_{}", inst_prefix, base_name, index);
-                                                    println!("🔍🔍🔍   Found source: '{}' -> target: '{}'", src_signal.name, target_signal_name);
-                                                    return self.get_or_create_signal_driver(&target_signal_name);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            println!("🔍🔍🔍   Could not find source assignment for _tuple_tmp_ signal");
-                        } else if signal.name.ends_with("_result_0") || signal.name.contains("_inst_") {
-                            let base_name = if let Some(pos) = signal.name.rfind("_result_") {
-                                &signal.name[..pos]
-                            } else {
-                                &signal.name[..]
-                            };
-                            let target_signal_name = format!("{}.{}_result_{}", inst_prefix, base_name, index);
-                            println!("🔍🔍🔍 TUPLE_FIELD_ACCESS (inst): base='{}' index={} -> target='{}'",
-                                    signal.name, index, target_signal_name);
-                            return self.get_or_create_signal_driver(&target_signal_name);
-                        } else {
-                            println!("🔍🔍🔍   Signal name doesn't match pattern");
-                        }
-                    } else {
-                        println!("🔍🔍🔍   Signal {} NOT FOUND in child_module.signals", sig_id.0);
-                    }
-                } else {
-                    println!("🔍🔍🔍   Base is NOT a Signal reference, falling back");
-                }
-                // Fallback: bit slicing
-                let base_node = self.create_expression_node_for_instance_with_context(
-                    base,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                let element_width = 32;
-                let start_bit = (*index) * element_width;
-                let end_bit = start_bit + element_width - 1;
-                self.create_slice_node(base_node, start_bit, end_bit)
-            }
-            ExpressionKind::FieldAccess { base, field } => {
-                // For named field access, fall back to base expression
-                eprintln!("    ⚠️ FieldAccess on field '{}' - falling back to base (inst)", field);
-                self.create_expression_node_for_instance_with_context(
-                    base,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                )
             }
             _ => {
                 // For unsupported expressions, create a zero constant
@@ -5264,33 +4795,8 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
     ) -> Option<String> {
-        // Call with no parent context (for top-level instances)
-        self.get_signal_from_lvalue_with_context(
-            lvalue,
-            inst_prefix,
-            port_mapping,
-            child_module,
-            None,
-            "",
-        )
-    }
-
-    /// Get signal name from lvalue with optional parent module context
-    /// For nested instances, parent_module_for_signals contains the module
-    /// that owns the SignalIds in port_mapping values
-    fn get_signal_from_lvalue_with_context(
-        &self,
-        lvalue: &LValue,
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) -> Option<String> {
-        eprintln!("🔍🔍🔍 GET_SIGNAL_FROM_LVALUE: lvalue={:?}, inst_prefix='{}'", lvalue, inst_prefix);
         match lvalue {
             LValue::Signal(sig_id) => {
-                eprintln!("🔍🔍🔍   -> LValue::Signal({})", sig_id.0);
                 // LValue::Signal should only match signals, not ports
                 // (ports have their own LValue::Port variant)
                 child_module
@@ -5302,30 +4808,15 @@ impl<'a> MirToSirConverter<'a> {
             LValue::Port(port_id) => {
                 // Direct port reference - map to parent signal through port connections
                 // First try direct ID lookup
-                println!("🔌🔌🔌 PORT LOOKUP: Looking for port_id={} in child_module '{}' (has {} ports)", port_id.0, child_module.name, child_module.ports.len());
-                for p in &child_module.ports {
-                    println!("🔌🔌🔌   Child port: id={}, name='{}'", p.id.0, p.name);
-                }
-                println!("🔌🔌🔌 PORT MAPPING keys: {:?}", port_mapping.keys().collect::<Vec<_>>());
                 if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
-                    println!("🔌🔌🔌 PORT LOOKUP: Found port '{}' by id={}", port.name, port_id.0);
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
-                        println!("🔌🔌🔌 PORT LOOKUP: Found mapping for '{}' -> {:?}", port.name, parent_expr.kind);
-                        // Use context-aware lookup for nested instances
-                        let mapped_name = self.get_signal_name_from_expression_with_context(
-                            parent_expr,
-                            parent_module_for_signals,
-                            parent_prefix,
-                        );
-                        println!("🔌🔌🔌 PORT LOOKUP: Mapped to '{}'", mapped_name);
+                        let mapped_name = self.get_signal_name_from_expression(parent_expr);
                         Some(mapped_name)
                     } else {
-                        println!("🔌🔌🔌 PORT LOOKUP: NO mapping for '{}' - using fallback", port.name);
                         // No mapping - use prefixed port name as fallback
                         Some(format!("{}.{}", inst_prefix, port.name))
                     }
                 } else {
-                    println!("🔌🔌🔌 PORT LOOKUP: Port id={} NOT FOUND by direct lookup, trying index", port_id.0);
                     // BUG#24 FIX: Port IDs get renumbered during monomorphization, but MIR Process
                     // objects still reference the original IDs. Fall back to using port ID value
                     // as an index, since ports remain in the same order after specialization.
@@ -5333,12 +4824,7 @@ impl<'a> MirToSirConverter<'a> {
                     if port_index < child_module.ports.len() {
                         let port = &child_module.ports[port_index];
                         if let Some(parent_expr) = port_mapping.get(&port.name) {
-                            // Use context-aware lookup for nested instances
-                            let mapped_name = self.get_signal_name_from_expression_with_context(
-                                parent_expr,
-                                parent_module_for_signals,
-                                parent_prefix,
-                            );
+                            let mapped_name = self.get_signal_name_from_expression(parent_expr);
                             Some(mapped_name)
                         } else {
                             Some(format!("{}.{}", inst_prefix, port.name))
@@ -5354,34 +4840,11 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Extract signal name from expression (for port mapping)
     fn get_signal_name_from_expression(&self, expr: &Expression) -> String {
-        self.get_signal_name_from_expression_with_context(expr, None, "")
-    }
-
-    /// Extract signal name from expression with optional parent module context
-    /// For nested instances, we need to look up signals in the parent module, not self.mir
-    /// The inst_prefix is prepended to signal names found in the parent module
-    fn get_signal_name_from_expression_with_context(
-        &self,
-        expr: &Expression,
-        parent_module: Option<&Module>,
-        inst_prefix: &str,
-    ) -> String {
         match &expr.kind {
             ExpressionKind::Ref(lvalue) => {
                 match lvalue {
                     LValue::Signal(sig_id) => {
-                        // First try parent module if provided (for nested instances)
-                        if let Some(parent) = parent_module {
-                            if let Some(signal) = parent.signals.iter().find(|s| s.id == *sig_id) {
-                                // Signal found in parent module - prepend instance prefix
-                                return format!("{}{}", inst_prefix, signal.name);
-                            }
-                            if let Some(port) = parent.ports.iter().find(|p| p.id.0 == sig_id.0) {
-                                return format!("{}{}", inst_prefix, port.name);
-                            }
-                        }
-
-                        // Fall back to current top-level module
+                        // Find signal by ID in current module
                         if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
                             signal.name.clone()
                         } else if let Some(port) =
@@ -5393,43 +4856,12 @@ impl<'a> MirToSirConverter<'a> {
                         }
                     }
                     LValue::Port(port_id) => {
-                        // First try parent module if provided
-                        if let Some(parent) = parent_module {
-                            if let Some(port) = parent.ports.iter().find(|p| p.id == *port_id) {
-                                return format!("{}{}", inst_prefix, port.name);
-                            }
-                        }
-
                         // Find port by ID in current module (top-level)
                         if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
                             port.name.clone()
                         } else {
                             format!("unknown_port_{:?}", port_id)
                         }
-                    }
-                    LValue::Variable(var_id) => {
-                        // BUG FIX #86: Use unique signal names (name + id) to prevent collisions
-                        // First try parent module if provided
-                        if let Some(parent) = parent_module {
-                            if let Some(var) = parent.variables.iter().find(|v| v.id == *var_id) {
-                                return format!("{}{}_{}",  inst_prefix, var.name, var_id.0);
-                            }
-                        }
-
-                        // Find variable by ID in current module
-                        if let Some(var) = self.mir.variables.iter().find(|v| v.id == *var_id) {
-                            format!("{}_{}", var.name, var_id.0)
-                        } else {
-                            format!("var_{}", var_id.0)
-                        }
-                    }
-                    LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => {
-                        // For bit/range selects, get the base signal name
-                        self.get_signal_name_from_expression_with_context(
-                            &Expression::with_unknown_type(ExpressionKind::Ref((**base).clone())),
-                            parent_module,
-                            inst_prefix,
-                        )
                     }
                     _ => "complex_lvalue".to_string(),
                 }
@@ -5719,15 +5151,7 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     /// Flatten instances for a specific module (used for recursion)
-    /// parent_module_for_signals: The module containing the SignalIds in instance.connections
-    /// parent_prefix: The prefix to use when looking up signals from parent_module_for_signals
-    fn flatten_instances_for_module(
-        &mut self,
-        module: &Module,
-        instance_prefix: &str,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) {
+    fn flatten_instances_for_module(&mut self, module: &Module, instance_prefix: &str) {
         let instances = module.instances.clone();
 
         for instance in &instances {
@@ -5739,13 +5163,7 @@ impl<'a> MirToSirConverter<'a> {
                 .unwrap_or_else(|| panic!("Module {:?} not found", instance.module));
 
             let inst_prefix = format!("{}{}", instance_prefix, instance.name);
-            self.elaborate_instance_with_context(
-                instance,
-                child_module,
-                &inst_prefix,
-                parent_module_for_signals,
-                parent_prefix,
-            );
+            self.elaborate_instance(instance, child_module, &inst_prefix);
         }
     }
 

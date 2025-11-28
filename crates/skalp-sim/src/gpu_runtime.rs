@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
 use skalp_sir::{generate_metal_shader, SirModule};
 use std::collections::HashMap;
+use std::fs;
 
 pub struct GpuDevice {
     device: Device,
@@ -468,6 +469,7 @@ impl GpuRuntime {
 #[async_trait]
 impl SimulationRuntime for GpuRuntime {
     async fn initialize(&mut self, module: &SirModule) -> SimulationResult<()> {
+        eprintln!("🚀🚀🚀 GPU RUNTIME INITIALIZE CALLED 🚀🚀🚀");
         self.module = Some(module.clone());
 
         // Register clocks from the module
@@ -486,6 +488,13 @@ impl SimulationRuntime for GpuRuntime {
 
         // Generate Metal shader from SIR
         let shader_source = generate_metal_shader(module);
+
+        // DEBUG: Write Metal shader source to file for inspection
+        if let Err(e) = fs::write("/tmp/skalp_metal_shader.metal", &shader_source) {
+            eprintln!("Warning: Could not write Metal shader to /tmp/skalp_metal_shader.metal: {}", e);
+        } else {
+            eprintln!("✅ Metal shader written to /tmp/skalp_metal_shader.metal");
+        }
 
         // Get the number of combinational cones
         let cones = module.extract_combinational_cones();

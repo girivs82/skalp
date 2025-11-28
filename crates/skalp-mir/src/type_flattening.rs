@@ -616,6 +616,13 @@ impl TypeFlattener {
             ExpressionKind::Replicate { .. } => "replicate".to_string(),
             ExpressionKind::FunctionCall { name, .. } => name.clone(),
             ExpressionKind::Cast { expr, .. } => Self::get_expression_base_name(expr),
+            // BUG FIX #85: Handle tuple/field access
+            ExpressionKind::TupleFieldAccess { base, index } => {
+                format!("{}.{}", Self::get_expression_base_name(base), index)
+            }
+            ExpressionKind::FieldAccess { base, field } => {
+                format!("{}.{}", Self::get_expression_base_name(base), field)
+            }
         }
     }
 }

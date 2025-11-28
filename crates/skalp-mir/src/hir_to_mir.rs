@@ -8,12 +8,23 @@ use crate::{ExpressionKind, Type};
 use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{self as hir, Hir};
+use skalp_frontend::types::Width;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Maximum recursion depth for type inference and expression annotation
 /// This prevents stack overflow on deeply nested expressions like {{{{{...}}}}}
-const MAX_EXPRESSION_RECURSION_DEPTH: usize = 256;
+/// Increased to 32768 to support complex match expressions with nested function calls (e.g., exec_l4_l5)
+/// Note: This extremely high depth is required for deeply nested vector operations in ray-triangle intersection
+const MAX_EXPRESSION_RECURSION_DEPTH: usize = 32768;
+
+/// Maximum number of function calls in a function body before using module instantiation instead of inlining
+/// Functions with > this many calls will be synthesized as separate modules (like Verilog modules)
+/// Functions with <= this many calls will be inlined (existing behavior)
+/// This hybrid approach ensures:
+/// - Simple functions (fp_mul, fp_sub, etc.) are inlined for efficiency
+/// - Complex functions (quadratic_solve, etc.) become modules for correctness and scalability
+const MAX_INLINE_CALL_COUNT: usize = 5;
 
 /// Information about a flattened port or signal field
 #[derive(Debug, Clone)]
@@ -46,6 +57,9 @@ pub struct HirToMir<'hir> {
     next_match_id: u32,
     /// Entity to module ID mapping
     entity_map: HashMap<hir::EntityId, ModuleId>,
+    /// Function to module ID mapping (for module instantiation instead of inlining)
+    /// Maps function name -> ModuleId
+    function_map: HashMap<String, ModuleId>,
     /// Port ID mapping (HIR to MIR) - now 1-to-many for flattened structs
     port_map: HashMap<hir::PortId, PortId>,
     /// Flattened ports: HIR port ID -> list of flattened MIR ports
@@ -88,6 +102,10 @@ pub struct HirToMir<'hir> {
     /// Track dynamically created variables (from let bindings in event blocks)
     /// Maps HIR VariableId to (MIR VariableId, name, type)
     dynamic_variables: HashMap<hir::VariableId, (VariableId, String, hir::HirType)>,
+    /// Track RHS expressions for dynamic variables (for module instance argument expansion)
+    /// Maps MIR VariableId to the converted RHS expression
+    /// This allows expanding variable references to their actual values when used as module args
+    dynamic_variable_rhs: HashMap<VariableId, Expression>,
     /// Type flattener for consistent struct/vector expansion
     type_flattener: TypeFlattener,
     /// Pending statements from block expressions
@@ -103,6 +121,38 @@ pub struct HirToMir<'hir> {
     inlining_context_stack: Vec<u32>,
     /// Next inlining context ID (incremented for each function inline)
     next_inlining_context_id: u32,
+    /// Synthesized modules from functions (module instantiation instead of inlining)
+    /// These modules will be added to the MIR output at the end of transformation
+    synthesized_modules: Vec<Module>,
+    /// Pending module instances from complex function calls
+    /// These are created during expression conversion and added to the module after
+    /// Format: (result_signal_id, function_name, module_id, argument_expressions, hir_return_type, frontend_type)
+    pending_module_instances: Vec<(SignalId, String, ModuleId, Vec<Expression>, Option<hir::HirType>, Type)>,
+}
+
+/// Context for converting HIR expressions within a synthesized module
+/// This holds the mappings from variable names to their corresponding MIR representations
+struct ModuleSynthesisContext {
+    /// Maps parameter names to their input port IDs
+    param_to_port: HashMap<String, PortId>,
+    /// BUG FIX #85: Maps HIR VariableId to signal ID (not by name, to avoid collisions)
+    /// Different match arms can have variables with the same name but different IDs
+    var_to_signal: HashMap<hir::VariableId, SignalId>,
+    /// Maps names to their types (for type inference)
+    name_to_type: HashMap<String, hir::HirType>,
+    /// Maps HIR VariableId to variable name (for resolving variable references)
+    var_id_to_name: HashMap<hir::VariableId, String>,
+}
+
+impl ModuleSynthesisContext {
+    fn new() -> Self {
+        Self {
+            param_to_port: HashMap::new(),
+            var_to_signal: HashMap::new(),
+            name_to_type: HashMap::new(),
+            var_id_to_name: HashMap::new(),
+        }
+    }
 }
 
 impl<'hir> HirToMir<'hir> {
@@ -122,6 +172,7 @@ impl<'hir> HirToMir<'hir> {
             next_clock_domain_id: 0,
             next_match_id: 0, // BUG FIX #6
             entity_map: HashMap::new(),
+            function_map: HashMap::new(),
             port_map: HashMap::new(),
             flattened_ports: HashMap::new(),
             port_to_hir: HashMap::new(),
@@ -138,16 +189,23 @@ impl<'hir> HirToMir<'hir> {
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
             dynamic_variables: HashMap::new(),
+            dynamic_variable_rhs: HashMap::new(),
             type_flattener: TypeFlattener::new(0), // Will be re-initialized per use
             pending_statements: Vec::new(),
             match_arm_prefix: None,
             inlining_context_stack: Vec::new(),
             next_inlining_context_id: 0,
+            synthesized_modules: Vec::new(),
+            pending_module_instances: Vec::new(),
         }
     }
 
     /// Transform HIR to MIR
     pub fn transform(&mut self, hir: &'hir Hir) -> Mir {
+        use std::time::Instant;
+        let transform_start = Instant::now();
+        eprintln!("⏱️  [PERF] Starting HIR→MIR transform...");
+
         self.hir = Some(hir);
 
         // Register all user-defined const functions in the evaluator
@@ -156,7 +214,10 @@ impl<'hir> HirToMir<'hir> {
         let mut mir = Mir::new(hir.name.clone());
 
         // First pass: create modules for entities
+        eprintln!("⏱️  [PERF] Processing {} entities...", hir.entities.len());
         for entity in &hir.entities {
+            let entity_start = Instant::now();
+            eprintln!("⏱️  [PERF]   Starting entity '{}'...", entity.name);
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
 
@@ -283,15 +344,22 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
+                // Drain pending module instances (from complex function calls)
+                self.drain_pending_module_instances(&mut module);
+
                 // Add the main assignments
                 module.assignments.extend(mir_assigns);
             }
 
+            eprintln!("⏱️  [PERF]   Finished entity '{}' in {:?}", entity.name, entity_start.elapsed());
             mir.add_module(module);
         }
 
+        eprintln!("⏱️  [PERF] Entities complete. Starting {} impl blocks...", hir.implementations.len());
         // Second pass: add implementations
-        for impl_block in &hir.implementations {
+        for (impl_idx, impl_block) in hir.implementations.iter().enumerate() {
+            let impl_start = Instant::now();
+            eprintln!("⏱️  [PERF]   Starting impl block {}/{}...", impl_idx + 1, hir.implementations.len());
             if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);
@@ -443,13 +511,15 @@ impl<'hir> HirToMir<'hir> {
 
                     // Convert continuous assignments (may expand to multiple for structs)
                     eprintln!(
-                        "[DEBUG] Processing {} assignments from impl block",
+                        "⏱️  [PERF]     Processing {} assignments from impl block",
                         impl_block.assignments.len()
                     );
                     for (idx, hir_assign) in impl_block.assignments.iter().enumerate() {
+                        let assignment_start = Instant::now();
                         eprintln!(
-                            "[DEBUG] Assignment {}: LHS={:?}, RHS={:?}",
-                            idx,
+                            "⏱️  [PERF]       Starting assignment {}/{}: LHS={:?}, RHS={:?}",
+                            idx + 1,
+                            impl_block.assignments.len(),
                             std::mem::discriminant(&hir_assign.lhs),
                             std::mem::discriminant(&hir_assign.rhs)
                         );
@@ -458,6 +528,7 @@ impl<'hir> HirToMir<'hir> {
 
                         // Convert the assignment (may generate pending statements from block expressions)
                         let assigns = self.convert_continuous_assignment_expanded(hir_assign);
+                        eprintln!("⏱️  [PERF]       Finished assignment {}/{} in {:?}", idx + 1, impl_block.assignments.len(), assignment_start.elapsed());
 
                         // BUG #71 DEBUG: Check variable_map size after assignment conversion
                         eprintln!(
@@ -663,6 +734,9 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
 
+                        // Drain pending module instances (from complex function calls)
+                        self.drain_pending_module_instances(module);
+
                         // Then emit the main assignment
                         module.assignments.extend(assigns);
                     }
@@ -680,6 +754,22 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
             }
+            eprintln!("⏱️  [PERF]   Finished impl block {}/{} in {:?}", impl_idx + 1, hir.implementations.len(), impl_start.elapsed());
+        }
+
+        eprintln!("⏱️  [PERF] HIR→MIR transform complete in {:?}", transform_start.elapsed());
+
+        // Add all synthesized function modules to the MIR
+        let num_synthesized = self.synthesized_modules.len();
+        if num_synthesized > 0 {
+            eprintln!("📦 Adding {} synthesized function modules to MIR...", num_synthesized);
+            for module in self.synthesized_modules.drain(..) {
+                eprintln!("  ✓ Adding synthesized module: {}", module.name);
+                mir.add_module(module);
+            }
+            eprintln!("  ✅ All synthesized modules added to MIR");
+        } else {
+            eprintln!("  ℹ️  No synthesized modules to add (all functions were inlined)");
         }
 
         mir
@@ -930,6 +1020,14 @@ impl<'hir> HirToMir<'hir> {
 
                 let is_simple_function_call = matches!(let_stmt.value, hir::HirExpression::Call(_));
 
+                // DEBUG: Track ALL function calls in match context
+                if is_simple_function_call && self.match_arm_prefix.is_some() {
+                    if let hir::HirExpression::Call(ref call) = let_stmt.value {
+                        println!("🔍 FUNC_CALL_IN_MATCH: name='{}', function='{}', match_prefix={:?}",
+                            let_stmt.name, call.function, self.match_arm_prefix);
+                    }
+                }
+
                 // Check if this is tuple element extraction from a function call
                 // Pattern: let rx = <tuple_tmp>.0 where <tuple_tmp> was from a function call
                 // BUT: Exclude cases where the base is a Block, because Blocks may reference
@@ -967,12 +1065,18 @@ impl<'hir> HirToMir<'hir> {
                 // Bug #67: Cast expressions should convert first to get proper type from the cast
                 let is_cast_expression = matches!(let_stmt.value, hir::HirExpression::Cast(_));
 
-                // BUG FIX: Don't convert first when in match arm context during function inlining
-                // because the RHS might reference variables that haven't been created yet (circular dependency)
+                // BUG FIX: Convert simple function calls even in match arms, but avoid circular deps for complex expressions
+                // - Simple function calls should ALWAYS be inlined (Bug #QUADRATIC fix)
+                // - Tuple element extraction and casts should avoid match context (circular dependency risk)
                 let in_match_context = self.match_arm_prefix.is_some();
                 let should_convert_first =
-                    (is_simple_function_call || is_tuple_element_extraction || is_cast_expression)
-                        && !in_match_context; // Always register variable first in match arms
+                    is_simple_function_call
+                        || (is_tuple_element_extraction && !in_match_context)
+                        || (is_cast_expression && !in_match_context);
+
+                if is_simple_function_call && in_match_context {
+                    println!("🟢🟢🟢 BUG FIX ACTIVE: Function call in match arm, WILL convert: {} 🟢🟢🟢", let_stmt.name);
+                }
 
                 if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
                     eprintln!("[DEBUG] Let 'rw' (70): is_tuple_element_extraction={}, in_match_context={}, should_convert_first={}",
@@ -988,6 +1092,12 @@ impl<'hir> HirToMir<'hir> {
                     }
                     if let_stmt.name == "_tuple_tmp_66" {
                         eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=true, converting RHS now");
+                    }
+                    if let_stmt.name.contains("_tuple_tmp_76") {
+                        println!("🎯🎯🎯 _tuple_tmp_76: Converting RHS, type={:?} 🎯🎯🎯", std::mem::discriminant(&let_stmt.value));
+                        if let hir::HirExpression::Call(ref c) = let_stmt.value {
+                            println!("🎯🎯🎯 _tuple_tmp_76: IS a Call to '{}' 🎯🎯🎯", c.function);
+                        }
                     }
                     (self.convert_expression(&let_stmt.value, 0)?, true)
                 } else {
@@ -1241,6 +1351,13 @@ impl<'hir> HirToMir<'hir> {
                     "[MIR_LET_FINAL] Creating assignment: {:?} = {:?}",
                     lhs, final_rhs
                 );
+
+                // Store RHS for module instance argument expansion
+                // This allows expanding variable references to their actual values when used as module args
+                eprintln!("[HYBRID_RHS] Storing RHS for var {:?} ({})", var_id,
+                    self.mir_variable_names.get(&var_id).unwrap_or(&"unknown".to_string()));
+                self.dynamic_variable_rhs.insert(var_id, final_rhs.clone());
+
                 Some(Statement::Assignment(Assignment {
                     lhs,
                     rhs: final_rhs,
@@ -1365,8 +1482,28 @@ impl<'hir> HirToMir<'hir> {
     }
 
     fn convert_assignment(&mut self, assign: &hir::HirAssignment) -> Option<Assignment> {
-        let lhs = self.convert_lvalue(&assign.lhs)?;
-        let rhs = self.convert_expression(&assign.rhs, 0)?;
+        eprintln!("[CONVERT_ASSIGNMENT] Converting assignment: lhs={:?}", assign.lhs);
+        let lhs = match self.convert_lvalue(&assign.lhs) {
+            Some(l) => {
+                eprintln!("[CONVERT_ASSIGNMENT] ✓ convert_lvalue succeeded");
+                l
+            }
+            None => {
+                eprintln!("[CONVERT_ASSIGNMENT] ❌ convert_lvalue FAILED - assignment will be dropped!");
+                return None;
+            }
+        };
+        eprintln!("[CONVERT_ASSIGNMENT] Converting rhs: {:?}", std::mem::discriminant(&assign.rhs));
+        let rhs = match self.convert_expression(&assign.rhs, 0) {
+            Some(r) => {
+                eprintln!("[CONVERT_ASSIGNMENT] ✓ convert_expression succeeded");
+                r
+            }
+            None => {
+                eprintln!("[CONVERT_ASSIGNMENT] ❌ convert_expression FAILED - assignment will be dropped!");
+                return None;
+            }
+        };
         let kind = match assign.assignment_type {
             hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
             hir::HirAssignmentType::Blocking => AssignmentKind::Blocking,
@@ -2014,33 +2151,44 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Vec<ContinuousAssign> {
+        eprintln!(
+            "[CONVERT_EXPANDED] Called with LHS={:?}, RHS={:?}",
+            std::mem::discriminant(&assign.lhs),
+            std::mem::discriminant(&assign.rhs)
+        );
+
         // Only combinational assignments become continuous assigns
         if !matches!(
             assign.assignment_type,
             hir::HirAssignmentType::Combinational
         ) {
+            eprintln!("[CONVERT_EXPANDED] Skipping: not combinational");
             return vec![];
         }
 
         // CRITICAL FIX for Bug #9: Try to expand array index read assignments first
         // This handles cases like: rd_data = mem[index]
         // This is the RHS counterpart to Bug #8 (array index writes)
+        eprintln!("[CONVERT_EXPANDED] Trying array index read expansion...");
         if let Some(assigns) = self.try_expand_array_index_read_assignment(assign) {
             eprintln!(
-                "[DEBUG] Array index read expansion returned Some with {} assigns",
+                "[CONVERT_EXPANDED] ✓ Array index read expansion returned Some with {} assigns",
                 assigns.len()
             );
             return assigns;
         }
+        eprintln!("[CONVERT_EXPANDED] Array index read expansion returned None");
 
         // Try to expand struct-to-struct assignments
+        eprintln!("[CONVERT_EXPANDED] Trying struct expansion...");
         if let Some(assigns) = self.try_expand_struct_continuous_assignment(assign) {
             eprintln!(
-                "[DEBUG] Struct expansion returned Some with {} assigns",
+                "[CONVERT_EXPANDED] ✓ Struct expansion returned Some with {} assigns",
                 assigns.len()
             );
             return assigns;
         }
+        eprintln!("[CONVERT_EXPANDED] Struct expansion returned None");
 
         eprintln!(
             "[DEBUG] Trying to convert continuous assignment, RHS type: {:?}",
@@ -2051,7 +2199,44 @@ impl<'hir> HirToMir<'hir> {
         if let Some(single) = self.convert_continuous_assignment(assign) {
             vec![single]
         } else {
-            vec![]
+            // BUG #85 FIX: NEVER silently drop assignments!
+            // If conversion failed, this is a fatal compilation error.
+            let lhs_name = match &assign.lhs {
+                hir::HirLValue::Signal(id) => {
+                    format!("signal_{}", id.0)
+                }
+                hir::HirLValue::Port(id) => {
+                    format!("port_{}", id.0)
+                }
+                _ => format!("unknown_lhs")
+            };
+
+            let rhs_desc = match &assign.rhs {
+                hir::HirExpression::Call(call) => {
+                    format!("function call to '{}' with {} arguments", call.function, call.args.len())
+                }
+                _ => format!("expression of type {:?}", std::mem::discriminant(&assign.rhs))
+            };
+
+            panic!(
+                "\n\n❌❌❌ COMPILATION ERROR: Assignment conversion failed! ❌❌❌\n\
+                 \n\
+                 Assignment: {} = {}\n\
+                 \n\
+                 This assignment could not be converted to MIR. Common causes:\n\
+                 1. Function inlining failed due to excessive complexity or recursion depth\n\
+                 2. Match expression with too many nested function calls\n\
+                 3. Expression type not supported in continuous assignments\n\
+                 \n\
+                 For function calls, try:\n\
+                 - Breaking the function into smaller pieces\n\
+                 - Reducing match expression nesting depth\n\
+                 - Using intermediate variables for complex sub-expressions\n\
+                 \n\
+                 This is Bug #85: Assignments must never be silently dropped!\n\
+                 ❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n",
+                lhs_name, rhs_desc
+            );
         }
     }
 
@@ -2059,6 +2244,7 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<ContinuousAssign> {
+        println!("🚨🚨🚨 CONTINUOUS ASSIGN CONVERSION STARTING 🚨🚨🚨");
         // Only combinational assignments become continuous assigns
         if !matches!(
             assign.assignment_type,
@@ -2084,9 +2270,18 @@ impl<'hir> HirToMir<'hir> {
         let rhs = self.convert_expression(&assign.rhs, 0);
         if rhs.is_none() {
             eprintln!(
-                "[DEBUG] convert_expression returned None for RHS: {:?}",
+                "❌ [BUG #85 - ASSIGNMENT DROPPED] convert_expression returned None for RHS: {:?}",
                 std::mem::discriminant(&assign.rhs)
             );
+            // BUG #85: Provide detailed error for function call failures
+            if let hir::HirExpression::Call(call) = &assign.rhs {
+                eprintln!(
+                    "❌ [BUG #85] Assignment RHS is function call to '{}' with {} args",
+                    call.function, call.args.len()
+                );
+                eprintln!("❌ [BUG #85] This assignment will be DROPPED, leaving signal without driver!");
+                eprintln!("❌ [BUG #85] LHS type: {:?}", std::mem::discriminant(&assign.lhs));
+            }
             return None;
         }
         let rhs = rhs?;
@@ -2218,6 +2413,12 @@ impl<'hir> HirToMir<'hir> {
                 lhs: lhs_lval,
                 rhs: rhs_expr,
             });
+        }
+
+        // BUGFIX: If assignments is empty, this isn't actually a struct expansion - return None
+        // to allow fallback to normal single assignment conversion
+        if assignments.is_empty() {
+            return None;
         }
 
         Some(assignments)
@@ -2573,6 +2774,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR expression to MIR
     fn convert_expression(&mut self, expr: &hir::HirExpression, depth: usize) -> Option<Expression> {
+        println!("🚨🚨🚨 CONVERT_EXPRESSION CALLED: {:?} 🚨🚨🚨", std::mem::discriminant(expr));
         // Guard against stack overflow on deeply nested expressions
         if depth > MAX_EXPRESSION_RECURSION_DEPTH {
             panic!(
@@ -2587,6 +2789,7 @@ impl<'hir> HirToMir<'hir> {
         let ty = self.infer_hir_expression_type(expr, depth);
         eprintln!("[BUG #76] Inferred type for expr: {:?}", ty);
 
+        println!("🔷🔷🔷 ENTERING MATCH FOR EXPR: {:?} 🔷🔷🔷", std::mem::discriminant(expr));
         match expr {
             hir::HirExpression::Literal(lit) => self.convert_literal(lit).map(|v| Expression::new(ExpressionKind::Literal(v), ty)),
             hir::HirExpression::Signal(id) => {
@@ -2776,39 +2979,49 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::new(ExpressionKind::Unary { op, operand }, ty))
             }
             hir::HirExpression::Call(call) => {
+                println!("🔥🔥🔥 CALL ARM MATCHED: function='{}' 🔥🔥🔥", call.function);
                 eprintln!(
                     "[MIR_CALL] Converting Call expression: function='{}', args={}",
                     call.function,
                     call.args.len()
                 );
-                // Check if this is a built-in FP method call (e.g., a_fp32.add(b_fp32))
-                // FP methods are transformed to method(receiver, args) by HIR builder
-                // So args[0] is the receiver for FP methods
-                // Try to detect FP method calls by checking if any argument has an FP type
-                // This handles cases where after function inlining, the receiver variable
-                // doesn't exist in HIR's variable list, causing type inference to fail
-                let mut is_fp_method = false;
-                if !call.args.is_empty() {
-                    // First try the receiver (args[0])
-                    if let Some(receiver_type) = self.infer_hir_type(&call.args[0]) {
-                        if self.is_float_type(&receiver_type) {
-                            is_fp_method = true;
-                        }
-                    }
 
-                    // If receiver type inference failed, try other arguments
-                    // This handles inlined function bodies where variables aren't in HIR
-                    if !is_fp_method {
-                        for arg in call.args.iter() {
-                            if let Some(arg_type) = self.infer_hir_type(arg) {
-                                if self.is_float_type(&arg_type) {
-                                    is_fp_method = true;
-                                    break;
+                // TIER 1: Check if this is a PRIMITIVE FP operation
+                // Primitives like fp_mul, fp_add, etc. should ALWAYS be inlined as Binary ops
+                // User-defined functions like quadratic_solve should go through HYBRID logic
+                let is_primitive = self.is_primitive_fp_operation(&call.function);
+                println!("🔍🔍🔍 PRIMITIVE CHECK: '{}' -> {} 🔍🔍🔍", call.function, is_primitive);
+                if is_primitive {
+                    println!("📍📍📍 INSIDE FP PRIMITIVE BLOCK for '{}' 📍📍📍", call.function);
+                    eprintln!(
+                        "[FP_PRIMITIVE] '{}' is primitive FP operation, using FP shortcut path",
+                        call.function
+                    );
+
+                    // This is a primitive FP operation - apply FP type detection
+                    // Check if arguments have FP types to confirm it's a valid FP method call
+                    let mut is_fp_method = false;
+                    if !call.args.is_empty() {
+                        // First try the receiver (args[0])
+                        if let Some(receiver_type) = self.infer_hir_type(&call.args[0]) {
+                            if self.is_float_type(&receiver_type) {
+                                is_fp_method = true;
+                            }
+                        }
+
+                        // If receiver type inference failed, try other arguments
+                        // This handles inlined function bodies where variables aren't in HIR
+                        if !is_fp_method {
+                            for arg in call.args.iter() {
+                                if let Some(arg_type) = self.infer_hir_type(arg) {
+                                    if self.is_float_type(&arg_type) {
+                                        is_fp_method = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
                 if is_fp_method {
                     // This is a method call on a float type
@@ -3029,19 +3242,247 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
                 }
+                } // End of FP primitive check
+                println!("🌟🌟🌟 AFTER FP PRIMITIVE CHECK for '{}' 🌟🌟🌟", call.function);
 
-                // Not an FP method or intrinsic - inline the function call
+                // TIER 2: USER-DEFINED FUNCTION - Apply hybrid inlining strategy
+                // This is NOT a primitive FP operation (like fp_mul, fp_add)
+                // User-defined functions like quadratic_solve reach here
+                // Apply heuristic: inline small functions (≤5 calls), synthesize modules for complex functions (>5 calls)
+                println!("🚀🚀🚀 [HYBRID] Call '{}' is user-defined function 🚀🚀🚀", call.function);
                 eprintln!(
-                    "[MIR_CALL] Call '{}' is not FP method/intrinsic, will inline",
+                    "[HYBRID] Call '{}' is user-defined function, applying hybrid inlining decision",
                     call.function
                 );
-                let result = self.inline_function_call(call);
-                if result.is_none() {
-                    eprintln!("[MIR_CALL] Call '{}' inlining FAILED", call.function);
-                } else {
-                    eprintln!("[MIR_CALL] Call '{}' inlining succeeded", call.function);
+
+                // File logging for debugging (works even when eprintln! is suppressed)
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                if let Ok(mut file) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/hybrid_decisions.log")
+                {
+                    let _ = writeln!(file, "[HYBRID] Processing user-defined function: {}", call.function);
                 }
-                result
+
+                // Look up function in HIR to count calls
+                let should_inline = if let Some(hir) = self.hir {
+                    let mut func_body = None;
+
+                    println!("🔎🔎🔎 [HYBRID] Looking up '{}' in HIR... 🔎🔎🔎", call.function);
+
+                    // Search in implementations
+                    for impl_block in &hir.implementations {
+                        if let Some(func) = impl_block.functions.iter().find(|f| f.name == call.function) {
+                            func_body = Some(&func.body);
+                            println!("🔎🔎🔎 [HYBRID] Found '{}' in implementations 🔎🔎🔎", call.function);
+                            break;
+                        }
+                    }
+
+                    // Search in top-level functions if not found
+                    if func_body.is_none() {
+                        if let Some(func) = hir.functions.iter().find(|f| f.name == call.function) {
+                            func_body = Some(&func.body);
+                            println!("🔎🔎🔎 [HYBRID] Found '{}' in top-level functions 🔎🔎🔎", call.function);
+                        }
+                    }
+
+                    if func_body.is_none() {
+                        println!("🔎🔎🔎 [HYBRID] '{}' NOT FOUND in HIR! 🔎🔎🔎", call.function);
+                    }
+
+                    if let Some(body) = func_body {
+                        println!("📊📊📊 [HYBRID] '{}': body has {} statements 📊📊📊", call.function, body.len());
+                        // Count calls across all statements in the function body
+                        let call_count: usize = body.iter()
+                            .map(|stmt| self.count_calls_in_statement(stmt))
+                            .sum();
+                        println!(
+                            "📊📊📊 [HYBRID] Function '{}' contains {} nested calls (threshold={}) 📊📊📊",
+                            call.function, call_count, MAX_INLINE_CALL_COUNT
+                        );
+                        eprintln!(
+                            "[HYBRID] Function '{}' contains {} nested calls (threshold={})",
+                            call.function, call_count, MAX_INLINE_CALL_COUNT
+                        );
+
+                        // File logging
+                        if let Ok(mut file) = OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open("/tmp/hybrid_decisions.log")
+                        {
+                            let _ = writeln!(file, "  Call count for '{}': {} (threshold: {})",
+                                call.function, call_count, MAX_INLINE_CALL_COUNT);
+                        }
+
+                        // Decision: inline if ≤ threshold, synthesize if > threshold
+                        // NOTE: Threshold has been increased to 20 to work around stubbed module synthesis
+                        let should = call_count <= MAX_INLINE_CALL_COUNT;
+                        println!("🎲🎲🎲 [HYBRID] Decision for '{}': {} <= {}? {} (should_inline={}) 🎲🎲🎲",
+                            call.function, call_count, MAX_INLINE_CALL_COUNT, should, should);
+                        should
+                    } else {
+                        eprintln!("[HYBRID] Function '{}' not found in HIR, defaulting to inline", call.function);
+                        true // Default to inline if function not found
+                    }
+                } else {
+                    eprintln!("[HYBRID] No HIR available, defaulting to inline");
+                    true // Default to inline if no HIR
+                };
+
+                println!("🎲🎲🎲 [HYBRID] Final should_inline={} for '{}' 🎲🎲🎲", should_inline, call.function);
+                if should_inline {
+                    // Path 1: INLINE the function (simple functions with ≤5 nested calls)
+                    eprintln!(
+                        "[HYBRID] ✓ Decision: INLINE function '{}' (within threshold)",
+                        call.function
+                    );
+
+                    // BUG FIX #IMPORT_MATCH: Save and clear match_arm_prefix before inlining
+                    // When a function is called from within a match arm, the match_arm_prefix must NOT
+                    // contaminate the function's local variables.
+                    let saved_match_arm_prefix = self.match_arm_prefix.take();
+                    eprintln!(
+                        "[BUG #IMPORT_MATCH] Before inlining '{}': saved match_arm_prefix={:?}",
+                        call.function, saved_match_arm_prefix
+                    );
+
+                    let result = self.inline_function_call(call);
+
+                    // BUG FIX #IMPORT_MATCH: Restore match_arm_prefix after inlining
+                    self.match_arm_prefix = saved_match_arm_prefix;
+                    eprintln!(
+                        "[BUG #IMPORT_MATCH] After inlining '{}': restored match_arm_prefix={:?}",
+                        call.function, self.match_arm_prefix
+                    );
+
+                    if result.is_none() {
+                        eprintln!("❌ [BUG #85] Call '{}' inlining FAILED - returning None to caller!", call.function);
+                        eprintln!("❌ [BUG #85] This will cause any assignment with this call as RHS to be DROPPED!");
+                    } else {
+                        eprintln!("[MIR_CALL] Call '{}' inlining succeeded", call.function);
+                    }
+                    result
+                } else {
+                    // Path 2: SYNTHESIZE MODULE (complex functions with >5 nested calls)
+                    println!("⚙️⚙️⚙️ [HYBRID] SYNTHESIZE MODULE PATH for '{}' ⚙️⚙️⚙️", call.function);
+                    eprintln!(
+                        "[HYBRID] ⚙️  Decision: SYNTHESIZE MODULE for function '{}' (exceeds threshold)",
+                        call.function
+                    );
+
+                    // Step 1: Ensure the function has been synthesized as a module
+                    let module_id = if let Some(&existing_module_id) = self.function_map.get(&call.function) {
+                        println!("✅✅✅ [HYBRID] Module for '{}' already synthesized (module_id={}) ✅✅✅",
+                                  call.function, existing_module_id.0);
+                        eprintln!("[HYBRID] ✓ Module for '{}' already synthesized (module_id={})",
+                                  call.function, existing_module_id.0);
+                        existing_module_id
+                    } else {
+                        println!("🔧🔧🔧 [HYBRID] Need to synthesize module for '{}' 🔧🔧🔧", call.function);
+                        eprintln!("[HYBRID] ⚙️  Synthesizing module for '{}' (first instantiation)",
+                                  call.function);
+
+                        // Look up function in HIR to synthesize it
+                        let func = self.hir.and_then(|hir| {
+                            // Search in implementations
+                            for impl_block in &hir.implementations {
+                                if let Some(f) = impl_block.functions.iter().find(|f| f.name == call.function) {
+                                    return Some(f);
+                                }
+                            }
+                            // Search in top-level functions
+                            hir.functions.iter().find(|f| f.name == call.function)
+                        });
+
+                        if let Some(func) = func {
+                            self.synthesize_function_as_module(func)
+                        } else {
+                            eprintln!("❌ [HYBRID ERROR] Cannot synthesize '{}' - function not found in HIR!",
+                                      call.function);
+                            return None;
+                        }
+                    };
+
+                    // Get HIR return type for signal creation (look up function again)
+                    let hir_return_type = if let Some(hir) = self.hir {
+                        let mut found_return_type = None;
+                        // Search in implementations
+                        for impl_block in &hir.implementations {
+                            if let Some(f) = impl_block.functions.iter().find(|f| f.name == call.function) {
+                                found_return_type = Some(f.return_type.clone());
+                                break;
+                            }
+                        }
+                        // If not found, search in top-level functions
+                        if found_return_type.is_none() {
+                            if let Some(f) = hir.functions.iter().find(|f| f.name == call.function) {
+                                found_return_type = Some(f.return_type.clone());
+                            }
+                        }
+                        found_return_type.unwrap_or_else(|| {
+                            eprintln!("❌ [HYBRID ERROR] Cannot find function '{}' to get return type!", call.function);
+                            None  // No return type
+                        })
+                    } else {
+                        eprintln!("❌ [HYBRID ERROR] No HIR available!");
+                        None  // Fallback
+                    };
+
+                    // Step 2: Pre-allocate a SignalId for the result
+                    let result_signal_id = self.next_signal_id();
+                    eprintln!("[HYBRID] Pre-allocated result signal {} for call to '{}'",
+                              result_signal_id.0, call.function);
+
+                    // Step 3: Convert arguments to MIR expressions
+                    // For variable references, expand to their RHS expressions to ensure
+                    // module instance connections have actual signal drivers
+                    let mut arg_exprs = Vec::new();
+                    for arg in &call.args {
+                        if let Some(mut arg_expr) = self.convert_expression(arg, depth + 1) {
+                            // If the argument is a variable reference, try to expand it to the RHS
+                            // This ensures module instance connections use actual signal expressions
+                            // instead of variable references that may not have continuous drivers
+                            if let ExpressionKind::Ref(LValue::Variable(var_id)) = &arg_expr.kind {
+                                eprintln!("[HYBRID_RHS] Looking up RHS for var {:?} ({})",
+                                    var_id, self.mir_variable_names.get(var_id).unwrap_or(&"unknown".to_string()));
+                                eprintln!("[HYBRID_RHS] Available RHS entries: {:?}",
+                                    self.dynamic_variable_rhs.keys().collect::<Vec<_>>());
+                                if let Some(rhs_expr) = self.dynamic_variable_rhs.get(var_id) {
+                                    eprintln!("[HYBRID] Expanding variable {:?} to its RHS expression for module arg", var_id);
+                                    arg_expr = rhs_expr.clone();
+                                } else {
+                                    eprintln!("[HYBRID_RHS] No RHS found for var {:?}!", var_id);
+                                }
+                            }
+                            arg_exprs.push(arg_expr);
+                        } else {
+                            eprintln!("❌ [HYBRID ERROR] Failed to convert argument for call to '{}'",
+                                      call.function);
+                            return None;
+                        }
+                    }
+
+                    // Step 4: Record pending module instance (will be added to module later)
+                    self.pending_module_instances.push((
+                        result_signal_id,
+                        call.function.clone(),
+                        module_id,
+                        arg_exprs,
+                        hir_return_type,
+                        ty.clone(),
+                    ));
+                    eprintln!("[HYBRID] ✓ Recorded pending module instance for '{}'", call.function);
+
+                    // Step 5: Return an Expression that references the pre-allocated result signal
+                    Some(Expression::new(
+                        ExpressionKind::Ref(LValue::Signal(result_signal_id)),
+                        ty
+                    ))
+                }
             }
             hir::HirExpression::Index(base, index) => {
                 // BUG #27 FIX: Check if this is a constant index into a flattened array
@@ -3962,10 +4403,6 @@ impl<'hir> HirToMir<'hir> {
         // Work backwards through the arms (excluding the last one which is the default)
         for (arm_idx, arm) in arms[..arms.len() - 1].iter().enumerate().rev() {
             // Build condition: match_value == pattern
-            eprintln!(
-                "[DEBUG] Match: processing arm with pattern {:?}",
-                std::mem::discriminant(&arm.pattern)
-            );
             let condition = match &arm.pattern {
                 hir::HirPattern::Literal(lit) => {
                     // Compare match_value with literal
@@ -4051,31 +4488,125 @@ impl<'hir> HirToMir<'hir> {
             let arm_prefix = format!("match_{}_{}", match_id, arm_idx);
             self.match_arm_prefix = Some(arm_prefix.clone());
 
-            eprintln!("[BUG #IMPORT_MATCH] Before converting arm {} expr (type: {:?}), match_arm_prefix={:?}",
-                arm_idx, std::mem::discriminant(&arm.expr), self.match_arm_prefix);
-
             let arm_expr = self.convert_expression(&arm.expr, 0);
-
-            eprintln!("[BUG #IMPORT_MATCH] After converting arm {} expr, result is_some={}, match_arm_prefix={:?}",
-                arm_idx, arm_expr.is_some(), self.match_arm_prefix);
 
             // Clear the prefix after processing this arm
             self.match_arm_prefix = None;
 
-            if arm_expr.is_none() {
-                eprintln!(
-                    "[DEBUG] Match: FAILED to convert arm expression, type: {:?}",
-                    std::mem::discriminant(&arm.expr)
-                );
-                return None;
-            }
+            // If arm conversion fails, abort the entire match (returning None will trigger error handling upstream)
+            let arm_expr = arm_expr?;
             result = Expression::with_unknown_type(ExpressionKind::Conditional {
                 cond: Box::new(final_condition),
-                then_expr: Box::new(arm_expr.unwrap()),
+                then_expr: Box::new(arm_expr),
                 else_expr: Box::new(result),
             });
         }
 
+        Some(result)
+    }
+
+    /// BUG FIX #85: Convert match expression to conditionals while staying in module context
+    /// This prevents duplicate module instances by NOT using the regular convert_expression path
+    /// which triggers the HYBRID mechanism for function calls inside match arms.
+    fn convert_match_to_conditionals_for_module(
+        &mut self,
+        match_value: &hir::HirExpression,
+        arms: &[hir::HirMatchArmExpr],
+        ctx: &ModuleSynthesisContext,
+        depth: usize,
+    ) -> Option<Expression> {
+        if arms.is_empty() {
+            return None;
+        }
+
+        println!("🎯 MODULE_MATCH: Processing {} arms in module context", arms.len());
+
+        // Convert the match value expression in module context
+        let match_value_expr = self.convert_hir_expr_for_module(match_value, ctx, depth)?;
+
+        // Build nested conditionals from right to left
+        // Start with the last arm as the default (usually wildcard)
+        let last_arm = arms.last()?;
+        println!("🎯 MODULE_MATCH: Converting last arm (default) body");
+        let mut result = self.convert_hir_expr_for_module(&last_arm.expr, ctx, depth)?;
+
+        // Work backwards through the arms (excluding the last one which is the default)
+        for (arm_idx, arm) in arms[..arms.len() - 1].iter().enumerate().rev() {
+            println!("🎯 MODULE_MATCH: Converting arm {} pattern: {:?}", arm_idx, arm.pattern);
+
+            // Build condition: match_value == pattern
+            let condition = match &arm.pattern {
+                hir::HirPattern::Literal(lit) => {
+                    let left = Box::new(match_value_expr.clone());
+                    let right = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(self.convert_literal(lit)?)));
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left,
+                        right,
+                    }))
+                }
+                hir::HirPattern::Wildcard => None, // Wildcard always matches - shouldn't appear except as last arm
+                hir::HirPattern::Path(enum_name, variant) => {
+                    if enum_name == "__CONST__" {
+                        if let Some(const_value) = self.resolve_constant_value(variant) {
+                            let left = Box::new(match_value_expr.clone());
+                            let right = Box::new(const_value);
+                            Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::Equal,
+                                left,
+                                right,
+                            }))
+                        } else {
+                            None
+                        }
+                    } else {
+                        if let Some(variant_value) = self.resolve_enum_variant_value(enum_name, variant) {
+                            let left = Box::new(match_value_expr.clone());
+                            let right = Box::new(variant_value);
+                            Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::Equal,
+                                left,
+                                right,
+                            }))
+                        } else {
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+
+            // Skip if we couldn't build a condition
+            let condition = match condition {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Apply guard if present (convert in module context)
+            let final_condition = if let Some(guard) = &arm.guard {
+                let guard_expr = Box::new(self.convert_hir_expr_for_module(guard, ctx, depth)?);
+                let cond_expr = Box::new(condition);
+                Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::LogicalAnd,
+                    left: cond_expr,
+                    right: guard_expr,
+                })
+            } else {
+                condition
+            };
+
+            // Convert arm body in module context (NOT using convert_expression!)
+            println!("🎯 MODULE_MATCH: Converting arm {} body in module context", arm_idx);
+            let arm_expr = self.convert_hir_expr_for_module(&arm.expr, ctx, depth)?;
+
+            result = Expression::with_unknown_type(ExpressionKind::Conditional {
+                cond: Box::new(final_condition),
+                then_expr: Box::new(arm_expr),
+                else_expr: Box::new(result),
+            });
+        }
+
+        println!("🎯 MODULE_MATCH: Successfully converted match to nested conditionals");
         Some(result)
     }
 
@@ -4128,6 +4659,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Find a function by name in the current implementation or top-level functions
     fn find_function(&self, function_name: &str) -> Option<&hir::HirFunction> {
+        println!("🚨🚨🚨 FIND_FUNCTION: {} 🚨🚨🚨", function_name);
         let hir = self.hir?;
 
         // BUG #21 FIX: Handle module-qualified function names (e.g., "imported_funcs::process_data")
@@ -6048,7 +6580,8 @@ impl<'hir> HirToMir<'hir> {
     }
 
     fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
-        eprintln!(
+        println!("🚨🚨🚨 INLINE_FUNCTION_CALL: {} 🚨🚨🚨", call.function);
+        println!(
             "[DEBUG] inline_function_call: {} with {} args",
             call.function,
             call.args.len()
@@ -6078,7 +6611,21 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Step 1: Find the function and clone its body to avoid borrow checker issues
-        let func = self.find_function(&call.function)?;
+        let func = match self.find_function(&call.function) {
+            Some(f) => {
+                eprintln!("[DEBUG] ✓ Found function '{}'", call.function);
+                f
+            }
+            None => {
+                eprintln!("❌❌❌ ERROR: Function '{}' NOT FOUND during inlining! ❌❌❌", call.function);
+                eprintln!("[DEBUG] Available functions in HIR:");
+                let hir = self.hir?;
+                for (idx, f) in hir.functions.iter().enumerate() {
+                    eprintln!("  {}. {}", idx + 1, f.name);
+                }
+                return None;
+            }
+        };
         eprintln!(
             "[DEBUG] inline_function_call: found function {}, body has {} stmts",
             call.function,
@@ -6567,6 +7114,26 @@ impl<'hir> HirToMir<'hir> {
         )
     }
 
+    /// Check if a function name is a primitive FP operation that should always be inlined.
+    /// Primitive operations are converted directly to MIR Binary operations.
+    /// User-defined functions (like quadratic_solve) should NOT match this.
+    fn is_primitive_fp_operation(&self, name: &str) -> bool {
+        matches!(
+            name,
+            // Explicit fp_* primitives
+            "fp_add" | "fp_sub" | "fp_mul" | "fp_div" |
+            "fp_sqrt" | "fp_neg" | "fp_abs" |
+            "fp_lt" | "fp_le" | "fp_gt" | "fp_ge" | "fp_eq" | "fp_ne" |
+            "fp_min" | "fp_max" | "fp_floor" | "fp_ceil" | "fp_round" |
+            "fp_trunc" | "fp_fma" | "fp_copysign" |
+            // Method-style calls on FP types (receiver.method())
+            "add" | "sub" | "mul" | "div" |
+            "sqrt" | "neg" | "abs" |
+            "lt" | "le" | "gt" | "ge" | "eq" | "ne" |
+            "min" | "max" | "floor" | "ceil" | "round" | "trunc"
+        )
+    }
+
     fn convert_binary_op(&self, op: &hir::HirBinaryOp, left_expr: &hir::HirExpression) -> BinaryOp {
         // Infer type from left operand to determine if we need FP operators
         let is_fp = if let Some(ty) = self.infer_hir_type(left_expr) {
@@ -7045,6 +7612,16 @@ impl<'hir> HirToMir<'hir> {
             ExpressionKind::Concat(_) => DataType::Nat(32),
             ExpressionKind::Replicate { .. } => DataType::Nat(32),
             ExpressionKind::Cast { target_type, .. } => target_type.clone(),
+            // BUG FIX #85: Handle tuple/field access
+            ExpressionKind::TupleFieldAccess { base, index } => {
+                // For tuple element access, try to infer element type
+                // For now, assume 32-bit elements
+                DataType::Nat(32)
+            }
+            ExpressionKind::FieldAccess { base, .. } => {
+                // For struct field access, fall back to base type inference
+                self.infer_expression_type_internal(base, module_opt)
+            }
         }
     }
 
@@ -7594,7 +8171,27 @@ impl<'hir> HirToMir<'hir> {
                     // then extract the field at HIR level where tuples still exist
 
                     // Inline at HIR level with full let binding resolution
-                    let inlined_hir_expr = self.inline_function_call_to_hir_with_lets(call)?;
+                    // BUG #85 INVESTIGATION: Add clear error message if inlining fails
+                    let inlined_hir_expr = match self.inline_function_call_to_hir_with_lets(call) {
+                        Some(expr) => expr,
+                        None => {
+                            eprintln!(
+                                "\n❌❌❌ BUG #85 ROOT CAUSE IDENTIFIED ❌❌❌\n\
+                                 FieldAccess inlining failed for function: '{}'\n\
+                                 Field being accessed: '{}'\n\
+                                 Function has {} arguments\n\
+                                 \n\
+                                 This function was called from within another function's inlined code,\n\
+                                 and now we need to access field '{}' on its result.\n\
+                                 However, the function '{}' itself failed to inline.\n\
+                                 \n\
+                                 This is the EXACT function that's blocking the entire assignment conversion!\n\
+                                 ❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n",
+                                call.function, field_name, call.args.len(), field_name, call.function
+                            );
+                            return None;
+                        }
+                    };
 
                     eprintln!("[BUG #74 CALL IN FIELD_ACCESS] Function inlined to HIR expression: {:?}", std::mem::discriminant(&inlined_hir_expr));
 
@@ -8253,6 +8850,1348 @@ impl<'hir> HirToMir<'hir> {
         let id = ModuleId(self.next_module_id);
         self.next_module_id += 1;
         id
+    }
+
+    /// Count the number of function calls in a HIR expression (recursively)
+    /// This is used by the hybrid inlining/module-instantiation heuristic to decide
+    /// whether a function is "simple" (inline it) or "complex" (synthesize as module)
+    fn count_function_calls(&self, expr: &hir::HirExpression) -> usize {
+        match expr {
+            hir::HirExpression::Call(_) => {
+                // This is a function call - count it as 1, plus any calls in arguments
+                1 + self.count_calls_in_call_expr(expr)
+            }
+            hir::HirExpression::Binary(bin) => {
+                self.count_function_calls(&bin.left) + self.count_function_calls(&bin.right)
+            }
+            hir::HirExpression::Unary(un) => {
+                self.count_function_calls(&un.operand)
+            }
+            hir::HirExpression::Index(base, index) => {
+                self.count_function_calls(base) + self.count_function_calls(index)
+            }
+            hir::HirExpression::Range(start, end, step) => {
+                self.count_function_calls(start)
+                + self.count_function_calls(end)
+                + self.count_function_calls(step)
+            }
+            hir::HirExpression::FieldAccess { base, .. } => {
+                self.count_function_calls(base)
+            }
+            hir::HirExpression::If(if_expr) => {
+                self.count_function_calls(&if_expr.condition)
+                + self.count_function_calls(&if_expr.then_expr)
+                + self.count_function_calls(&if_expr.else_expr)
+            }
+            hir::HirExpression::Match(match_expr) => {
+                let scrutinee_calls = self.count_function_calls(&match_expr.expr);
+                let arm_calls: usize = match_expr.arms.iter()
+                    .map(|arm| self.count_function_calls(&arm.expr))
+                    .sum();
+                scrutinee_calls + arm_calls
+            }
+            hir::HirExpression::Block { statements, result_expr } => {
+                let stmt_calls: usize = statements.iter()
+                    .map(|stmt| self.count_calls_in_statement(stmt))
+                    .sum();
+                let result_calls = self.count_function_calls(&result_expr);
+                stmt_calls + result_calls
+            }
+            hir::HirExpression::TupleLiteral(elements) => {
+                elements.iter().map(|e| self.count_function_calls(e)).sum()
+            }
+            hir::HirExpression::ArrayLiteral(elements) => {
+                elements.iter().map(|e| self.count_function_calls(e)).sum()
+            }
+            hir::HirExpression::StructLiteral(struct_lit) => {
+                struct_lit.fields.iter().map(|f| self.count_function_calls(&f.value)).sum()
+            }
+            hir::HirExpression::Cast(cast_expr) => {
+                self.count_function_calls(&cast_expr.expr)
+            }
+            hir::HirExpression::Concat(exprs) => {
+                exprs.iter().map(|e| self.count_function_calls(e)).sum()
+            }
+            hir::HirExpression::ArrayRepeat { count, value } => {
+                self.count_function_calls(count) + self.count_function_calls(value)
+            }
+            // Leaf nodes - no function calls
+            hir::HirExpression::Literal(_) |
+            hir::HirExpression::Signal(_) |
+            hir::HirExpression::Port(_) |
+            hir::HirExpression::Variable(_) |
+            hir::HirExpression::Constant(_) |
+            hir::HirExpression::GenericParam(_) |
+            hir::HirExpression::EnumVariant { .. } => 0,
+            hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+                self.count_function_calls(condition) + self.count_function_calls(true_expr) + self.count_function_calls(false_expr)
+            }
+            hir::HirExpression::AssociatedConstant { .. } => 0,
+        }
+    }
+
+    /// Helper to count calls in a Call expression's arguments
+    fn count_calls_in_call_expr(&self, expr: &hir::HirExpression) -> usize {
+        if let hir::HirExpression::Call(call) = expr {
+            call.args.iter().map(|arg| self.count_function_calls(arg)).sum()
+        } else {
+            0
+        }
+    }
+
+    /// Helper to count calls in a statement
+    fn count_calls_in_statement(&self, stmt: &hir::HirStatement) -> usize {
+        match stmt {
+            hir::HirStatement::Let(let_stmt) => {
+                self.count_function_calls(&let_stmt.value)
+            }
+            hir::HirStatement::Assignment(assign) => {
+                self.count_function_calls(&assign.rhs)
+            }
+            hir::HirStatement::Expression(expr) => {
+                self.count_function_calls(expr)
+            }
+            hir::HirStatement::If(if_stmt) => {
+                let cond_calls = self.count_function_calls(&if_stmt.condition);
+                let then_calls: usize = if_stmt.then_statements.iter()
+                    .map(|s| self.count_calls_in_statement(s))
+                    .sum();
+                let else_calls: usize = if_stmt.else_statements.as_ref()
+                    .map(|stmts| stmts.iter().map(|s| self.count_calls_in_statement(s)).sum())
+                    .unwrap_or(0);
+                cond_calls + then_calls + else_calls
+            }
+            hir::HirStatement::Match(match_stmt) => {
+                let scrut_calls = self.count_function_calls(&match_stmt.expr);
+                let arm_calls: usize = match_stmt.arms.iter()
+                    .flat_map(|arm| &arm.statements)
+                    .map(|stmt| self.count_calls_in_statement(stmt))
+                    .sum();
+                scrut_calls + arm_calls
+            }
+            hir::HirStatement::Return(value_opt) => {
+                value_opt.as_ref().map(|e| self.count_function_calls(e)).unwrap_or(0)
+            }
+            _ => 0, // For loops, breaks, continues, etc.
+        }
+    }
+
+    /// BUG FIX #85: Extract let bindings from an HIR expression recursively
+    /// This handles match expressions where let bindings are inside match arms
+    fn extract_let_bindings_from_expression(expr: &hir::HirExpression) -> Vec<hir::HirLetStatement> {
+        let mut result = Vec::new();
+
+        match expr {
+            // Match expression - extract let bindings from each arm
+            hir::HirExpression::Match(match_expr) => {
+                for arm in &match_expr.arms {
+                    // Each arm's expression might be a Block or another Match
+                    result.extend(Self::extract_let_bindings_from_expression(&arm.expr));
+                }
+            }
+
+            // Block expression - contains statements including Let bindings
+            hir::HirExpression::Block { statements, result_expr } => {
+                // Extract let bindings from statements
+                for stmt in statements {
+                    if let hir::HirStatement::Let(let_stmt) = stmt {
+                        result.push(let_stmt.clone());
+                    }
+                    // Could also recurse into if statements etc. if needed
+                }
+                // Recurse into the result expression (might be another match or block)
+                result.extend(Self::extract_let_bindings_from_expression(result_expr));
+            }
+
+            // If expression - check both branches
+            hir::HirExpression::If(if_expr) => {
+                result.extend(Self::extract_let_bindings_from_expression(&if_expr.then_expr));
+                result.extend(Self::extract_let_bindings_from_expression(&if_expr.else_expr));
+            }
+
+            // Other expression types don't contain let bindings
+            _ => {}
+        }
+
+        result
+    }
+
+    /// Convert an HIR expression to MIR in the context of module synthesis
+    /// This is a simplified converter that primarily handles variable lookups in module context
+    /// and delegates most expression types to the main converter
+    fn convert_hir_expr_for_module(
+        &mut self,
+        expr: &hir::HirExpression,
+        ctx: &ModuleSynthesisContext,
+        depth: usize,
+    ) -> Option<Expression> {
+        // Guard against infinite recursion
+        if depth > 100 {
+            eprintln!("    ⚠️  Module expr conversion depth exceeded 100");
+            return None;
+        }
+
+        println!("🧩🧩🧩 MODULE_EXPR: Converting {:?} at depth {} 🧩🧩🧩", std::mem::discriminant(expr), depth);
+
+        match expr {
+            // Literal values - direct conversion
+            hir::HirExpression::Literal(lit) => {
+                Some(Expression::with_unknown_type(ExpressionKind::Literal(
+                    self.convert_literal(lit)?,
+                )))
+            }
+
+            // Variable reference - lookup in context (params or let bindings)
+            // This is the key case we need to handle specially for module synthesis
+            hir::HirExpression::Variable(var) => {
+                // Get the variable name from our var_id_to_name map
+                println!("🔗🔗🔗 MODULE VAR: Looking up Variable({}) 🔗🔗🔗", var.0);
+                let name = ctx.var_id_to_name.get(var).cloned();
+                if let Some(ref n) = name {
+                    println!("🔗🔗🔗 MODULE VAR: Variable({}) -> '{}' 🔗🔗🔗", var.0, n);
+                    eprintln!("    📌 Resolved Variable({}) -> '{}'", var.0, n);
+
+                    // Check if it's a parameter (maps to input port)
+                    if let Some(&port_id) = ctx.param_to_port.get(n) {
+                        println!("🔗🔗🔗 MODULE VAR: '{}' → Input port (id={}) 🔗🔗🔗", n, port_id.0);
+                        return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                            LValue::Port(port_id),
+                        )));
+                    }
+                }
+
+                // BUG FIX #85: Look up by VariableId, not by name (avoids collisions)
+                if let Some(&signal_id) = ctx.var_to_signal.get(var) {
+                    let name_str = name.as_deref().unwrap_or("?");
+                    println!("🔗🔗🔗 MODULE VAR: Variable({}) '{}' → Internal signal (id={}) 🔗🔗🔗", var.0, name_str, signal_id.0);
+                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                        LValue::Signal(signal_id),
+                    )));
+                }
+
+                let name_str = name.as_deref().unwrap_or("?");
+                println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable({}) '{}' not found in param_to_port or var_to_signal! 🔗🔗🔗", var.0, name_str);
+
+                // Fallback: try to use the main expression converter
+                println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable not found in module context - using fallback 🔗🔗🔗");
+                self.convert_expression(expr, depth)
+            }
+
+            // BUG FIX #85: Handle GenericParam (how the HIR represents function parameter references)
+            hir::HirExpression::GenericParam(param_name) => {
+                println!("🔗🔗🔗 MODULE GENERIC_PARAM: Looking up '{}' 🔗🔗🔗", param_name);
+
+                // GenericParam is how HIR represents function parameter references
+                // Map directly to the input port for this parameter
+                if let Some(&port_id) = ctx.param_to_port.get(param_name) {
+                    println!("🔗🔗🔗 MODULE GENERIC_PARAM: '{}' → Input port (id={}) 🔗🔗🔗", param_name, port_id.0);
+                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                        LValue::Port(port_id),
+                    )));
+                }
+
+                // Note: GenericParam should only be function parameters, not let bindings
+                // Let bindings are accessed via Variable(VariableId), not GenericParam(name)
+                println!("🔗🔗🔗 MODULE GENERIC_PARAM: ⚠️ '{}' not found in param_to_port! Using fallback. 🔗🔗🔗", param_name);
+                self.convert_expression(expr, depth)
+            }
+
+            // Function calls - check for primitive FP operations
+            hir::HirExpression::Call(call) => {
+                eprintln!("    📞 Module synthesis: Converting call to '{}'", call.function);
+
+                // Debug: Print what arguments look like
+                for (arg_idx, arg) in call.args.iter().enumerate() {
+                    eprintln!("    📞 Call '{}' arg[{}]: {:?}", call.function, arg_idx, std::mem::discriminant(arg));
+                    if let hir::HirExpression::Variable(var_id) = arg {
+                        eprintln!("    📞 Call '{}' arg[{}]: Variable({})", call.function, arg_idx, var_id.0);
+                        if let Some(name) = ctx.var_id_to_name.get(var_id) {
+                            eprintln!("    📞 Call '{}' arg[{}]: Variable({}) → '{}'", call.function, arg_idx, var_id.0, name);
+                        } else {
+                            eprintln!("    📞 Call '{}' arg[{}]: Variable({}) → NOT FOUND IN var_id_to_name!", call.function, arg_idx, var_id.0);
+                            eprintln!("    📞 Available var_id_to_name: {:?}", ctx.var_id_to_name.iter().map(|(k,v)| (k.0, v.as_str())).collect::<Vec<_>>());
+                        }
+                    }
+                }
+
+                // Check if this is a primitive FP operation (Two-Tier TIER 1)
+                if self.is_primitive_fp_operation(&call.function) {
+                    // Convert arguments in module context
+                    let mut converted_args = Vec::new();
+                    for arg in &call.args {
+                        match self.convert_hir_expr_for_module(arg, ctx, depth + 1) {
+                            Some(converted) => converted_args.push(converted),
+                            None => {
+                                eprintln!("    ⚠️  Failed to convert argument for call '{}'", call.function);
+                                return None;
+                            }
+                        }
+                    }
+                    // Convert to binary/unary operation directly
+                    return self.convert_primitive_fp_call_for_module(&call.function, converted_args);
+                }
+
+                // For non-primitive functions, convert arguments with module context
+                // BUG FIX #85: The old fallback to convert_expression created new VariableIds
+                // that didn't match the module's let binding VariableIds. Now we convert
+                // arguments using the module context to preserve correct Variable references.
+                println!("    🔧 Non-primitive call '{}' in module synthesis - using context-aware conversion", call.function);
+
+                // Convert arguments using the module synthesis context
+                let mut arg_exprs = Vec::new();
+                for (arg_idx, arg) in call.args.iter().enumerate() {
+                    match self.convert_hir_expr_for_module(arg, ctx, depth + 1) {
+                        Some(converted) => {
+                            println!("    📞 Converted arg[{}] for '{}' with context -> {:?}", arg_idx, call.function, converted.kind);
+                            arg_exprs.push(converted);
+                        }
+                        None => {
+                            eprintln!("    ❌ Failed to convert arg[{}] for '{}'", arg_idx, call.function);
+                            return None;
+                        }
+                    }
+                }
+
+                // BUG FIX #85: Check if this function should be synthesized as a module
+                // If so, synthesize it first (if not already done), then create pending instance
+                let module_id = if let Some(&existing_id) = self.function_map.get(&call.function) {
+                    // Already synthesized
+                    println!("    🏗️ Using existing module for '{}' (module_id={})", call.function, existing_id.0);
+                    Some(existing_id)
+                } else {
+                    // Check if this function should be synthesized as a module
+                    if let Some(hir) = &self.hir.clone() {
+                        if let Some(func) = hir.functions.iter().find(|f| f.name == call.function) {
+                            // Count nested calls to determine if this should be a module
+                            let call_count: usize = func.body.iter()
+                                .map(|stmt| self.count_calls_in_statement(stmt))
+                                .sum();
+                            println!("    📊 Function '{}' has {} nested calls (threshold={})", call.function, call_count, MAX_INLINE_CALL_COUNT);
+
+                            if call_count > MAX_INLINE_CALL_COUNT {
+                                // Synthesize as a module
+                                println!("    🔧 Synthesizing '{}' as module (exceeds call threshold)", call.function);
+                                let new_module_id = self.synthesize_function_as_module(func);
+                                Some(new_module_id)
+                            } else {
+                                None // Should be inlined, not module
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(module_id) = module_id {
+                    // Get return type from HIR
+                    let return_type = if let Some(hir) = &self.hir {
+                        hir.functions.iter()
+                            .find(|f| f.name == call.function)
+                            .and_then(|f| f.return_type.clone())
+                    } else {
+                        None
+                    };
+
+                    let result_signal_id = self.next_signal_id();
+                    let ty = skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(32)); // Placeholder
+
+                    self.pending_module_instances.push((
+                        result_signal_id,
+                        call.function.clone(),
+                        module_id,
+                        arg_exprs,
+                        return_type,
+                        ty.clone(),
+                    ));
+
+                    return Some(Expression::new(
+                        ExpressionKind::Ref(LValue::Signal(result_signal_id)),
+                        ty,
+                    ));
+                }
+
+                // If not a module synthesis case, fall back to regular conversion
+                eprintln!("    ⚠️ Falling back to regular convert_expression for '{}'", call.function);
+                self.convert_expression(expr, depth)
+            }
+
+            // Cast expressions - handle type conversions
+            hir::HirExpression::Cast(cast) => {
+                let inner = self.convert_hir_expr_for_module(&cast.expr, ctx, depth + 1)?;
+                // For now, pass through casts (hardware synthesis handles bit widths)
+                Some(inner)
+            }
+
+            // If expressions - convert to conditional (mux)
+            hir::HirExpression::If(if_expr) => {
+                let cond = self.convert_hir_expr_for_module(&if_expr.condition, ctx, depth + 1)?;
+                let then_result = self.convert_hir_expr_for_module(&if_expr.then_expr, ctx, depth + 1)?;
+                let else_result = self.convert_hir_expr_for_module(&if_expr.else_expr, ctx, depth + 1)?;
+
+                Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                    cond: Box::new(cond),
+                    then_expr: Box::new(then_result),
+                    else_expr: Box::new(else_result),
+                }))
+            }
+
+            // Binary operations - convert operands in module context
+            hir::HirExpression::Binary(bin_expr) => {
+                let left = self.convert_hir_expr_for_module(&bin_expr.left, ctx, depth + 1)?;
+                let right = self.convert_hir_expr_for_module(&bin_expr.right, ctx, depth + 1)?;
+                let op = self.convert_binary_op(&bin_expr.op, &bin_expr.left);
+                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }))
+            }
+
+            // Tuple literals - convert to concatenation
+            hir::HirExpression::TupleLiteral(elements) => {
+                let mut converted = Vec::new();
+                for elem in elements {
+                    converted.push(self.convert_hir_expr_for_module(elem, ctx, depth + 1)?);
+                }
+                Some(Expression::with_unknown_type(ExpressionKind::Concat(converted)))
+            }
+
+            // Concatenation
+            hir::HirExpression::Concat(parts) => {
+                let mut converted = Vec::new();
+                for part in parts {
+                    converted.push(self.convert_hir_expr_for_module(part, ctx, depth + 1)?);
+                }
+                Some(Expression::with_unknown_type(ExpressionKind::Concat(converted)))
+            }
+
+            // BUG FIX #85: Handle Match expressions in module context to prevent duplicate instances
+            // Without this, Match falls back to convert_expression -> convert_match_to_conditionals
+            // which triggers HYBRID mechanism and creates duplicate module instances
+            hir::HirExpression::Match(match_expr) => {
+                println!("🎯🎯🎯 MODULE_MATCH: Converting Match with {} arms in module context 🎯🎯🎯", match_expr.arms.len());
+
+                // Convert match to nested conditionals, staying in module context
+                self.convert_match_to_conditionals_for_module(&match_expr.expr, &match_expr.arms, ctx, depth + 1)
+            }
+
+            // BUG FIX #85: Handle Block expressions in module context
+            hir::HirExpression::Block { statements, result_expr } => {
+                println!("🧱🧱🧱 MODULE_BLOCK: Converting Block with {} statements in module context 🧱🧱🧱", statements.len());
+
+                // Process statements - but since we've already extracted let bindings,
+                // we just need to convert the result expression
+                // The let binding signals are already created - we don't need to create them again
+
+                // Convert and return the result expression in module context
+                self.convert_hir_expr_for_module(result_expr, ctx, depth + 1)
+            }
+
+            // BUG FIX #85: Handle FieldAccess for tuple destructuring in module context
+            // This is critical for `let (valid, x1, x2) = quadratic_solve(a, b, c);`
+            // Each let binding becomes FieldAccess { base: Call, field: "0"/"1"/"2" }
+            hir::HirExpression::FieldAccess { base, field } => {
+                println!("📎📎📎 MODULE_FIELD_ACCESS: field='{}' on base {:?} 📎📎📎",
+                         field, std::mem::discriminant(&**base));
+
+                // Convert the base expression in module context
+                let base_converted = self.convert_hir_expr_for_module(base, ctx, depth + 1)?;
+
+                // For numeric fields (tuple element access), extract the element
+                if let Ok(index) = field.parse::<usize>() {
+                    println!("📎📎📎 MODULE_FIELD_ACCESS: Tuple element {} extraction 📎📎📎", index);
+
+                    // Create a Select expression to extract the tuple element
+                    // The base signal is a pending module instance result that will be a tuple
+                    return Some(Expression::with_unknown_type(ExpressionKind::TupleFieldAccess {
+                        base: Box::new(base_converted),
+                        index,
+                    }));
+                }
+
+                // For named fields (struct access), use field selection
+                // Fall back to creating a FieldAccess node
+                eprintln!("    📎 FieldAccess on non-tuple field '{}' - creating FieldAccess expression", field);
+                Some(Expression::with_unknown_type(ExpressionKind::FieldAccess {
+                    base: Box::new(base_converted),
+                    field: field.clone(),
+                }))
+            }
+
+            // BUG FIX #85: Handle Index (single bit select) in module context
+            hir::HirExpression::Index(base, index) => {
+                println!("📐📐📐 MODULE_INDEX: bit select on base {:?} 📐📐📐",
+                         std::mem::discriminant(&**base));
+
+                // Convert base expression (e.g., data1) in module context
+                let base_converted = self.convert_hir_expr_for_module(base, ctx, depth + 1)?;
+
+                // Extract index as integer
+                let bit_idx = match &**index {
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(n)) => *n as i64,
+                    _ => 0,
+                };
+                println!("📐📐📐 MODULE_INDEX: Bit select [{}] 📐📐📐", bit_idx);
+
+                if let ExpressionKind::Ref(base_lval) = base_converted.kind {
+                    Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::BitSelect {
+                        base: Box::new(base_lval),
+                        index: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(bit_idx)))),
+                    })))
+                } else {
+                    eprintln!("    📐 BitSelect on non-Ref base - using fallback");
+                    self.convert_expression(expr, depth)
+                }
+            }
+
+            // BUG FIX #85: Handle Range (range select) in module context
+            // This is critical for `let a = data1[31:0];` patterns in match arms
+            hir::HirExpression::Range(base, high, low) => {
+                println!("📐📐📐 MODULE_RANGE: range select on base {:?} 📐📐📐",
+                         std::mem::discriminant(&**base));
+
+                // Convert base expression in module context
+                let base_converted = self.convert_hir_expr_for_module(base, ctx, depth + 1)?;
+
+                // Extract high and low bounds as integers
+                let high_val = match &**high {
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(n)) => *n as i64,
+                    _ => 0,
+                };
+                let low_val = match &**low {
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(n)) => *n as i64,
+                    _ => 0,
+                };
+                println!("📐📐📐 MODULE_RANGE: Range select [{}:{}] 📐📐📐", high_val, low_val);
+
+                if let ExpressionKind::Ref(base_lval) = base_converted.kind {
+                    Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::RangeSelect {
+                        base: Box::new(base_lval),
+                        high: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(high_val)))),
+                        low: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(low_val)))),
+                    })))
+                } else {
+                    eprintln!("    📐 RangeSelect on non-Ref base - using fallback");
+                    self.convert_expression(expr, depth)
+                }
+            }
+
+            // For other expression types, fall back to the main converter
+            _ => {
+                eprintln!("    ⚠️  Expression type {:?} - using fallback",
+                         std::mem::discriminant(expr));
+                self.convert_expression(expr, depth)
+            }
+        }
+    }
+
+    /// Convert primitive FP function calls to binary/unary operations in module context
+    fn convert_primitive_fp_call_for_module(
+        &self,
+        func_name: &str,
+        args: Vec<Expression>,
+    ) -> Option<Expression> {
+        match func_name {
+            // Binary FP operations
+            "fp_add" | "add" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FAdd,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_sub" | "sub" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FSub,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_mul" | "mul" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FMul,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_div" | "div" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FDiv,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            // Comparison operations
+            "fp_lt" | "lt" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FLess,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_le" | "le" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FLessEqual,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_gt" | "gt" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FGreater,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_ge" | "ge" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FGreaterEqual,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_eq" | "eq" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FEqual,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_ne" | "ne" => {
+                if args.len() == 2 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FNotEqual,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(args[1].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            // Unary FP operations
+            "fp_sqrt" | "sqrt" => {
+                if args.len() == 1 {
+                    Some(Expression::with_unknown_type(ExpressionKind::Unary {
+                        op: UnaryOp::FSqrt,
+                        operand: Box::new(args[0].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_neg" | "neg" => {
+                if args.len() == 1 {
+                    // FP negate is just regular negate
+                    Some(Expression::with_unknown_type(ExpressionKind::Unary {
+                        op: UnaryOp::Negate,
+                        operand: Box::new(args[0].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            "fp_abs" | "abs" => {
+                if args.len() == 1 {
+                    // FP abs: x < 0 ? -x : x
+                    let zero = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)));
+                    let is_negative = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FLess,
+                        left: Box::new(args[0].clone()),
+                        right: Box::new(zero),
+                    });
+                    let negated = Expression::with_unknown_type(ExpressionKind::Unary {
+                        op: UnaryOp::Negate,
+                        operand: Box::new(args[0].clone()),
+                    });
+                    Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                        cond: Box::new(is_negative),
+                        then_expr: Box::new(negated),
+                        else_expr: Box::new(args[0].clone()),
+                    }))
+                } else {
+                    None
+                }
+            }
+            _ => {
+                eprintln!("    ⚠️  Unknown primitive FP operation: {}", func_name);
+                None
+            }
+        }
+    }
+
+    /// Helper to assign an expression to output ports (handles tuples by splitting into elements)
+    fn assign_to_output_ports(
+        &self,
+        expr: &Expression,
+        output_port_ids: &[PortId],
+        module: &mut Module,
+    ) {
+        // If there's only one output port, assign directly
+        if output_port_ids.len() == 1 {
+            let assignment = ContinuousAssign {
+                lhs: LValue::Port(output_port_ids[0]),
+                rhs: expr.clone(),
+            };
+            module.assignments.push(assignment);
+            eprintln!("    ✓ Assigned to single output port (id={})", output_port_ids[0].0);
+        } else if let ExpressionKind::Concat(elements) = &expr.kind {
+            // Tuple return - assign each element to corresponding port
+            for (idx, (port_id, elem)) in output_port_ids.iter().zip(elements.iter()).enumerate() {
+                let assignment = ContinuousAssign {
+                    lhs: LValue::Port(*port_id),
+                    rhs: elem.clone(),
+                };
+                module.assignments.push(assignment);
+                eprintln!("    ✓ Assigned tuple element {} to output port (id={})", idx, port_id.0);
+            }
+        } else if let ExpressionKind::Conditional { cond, then_expr, else_expr } = &expr.kind {
+            // Handle conditional expressions where both branches are tuples (early return pattern)
+            // Convert: cond ? (a0, a1, a2) : (b0, b1, b2)
+            // Into:    result_0 = cond ? a0 : b0
+            //          result_1 = cond ? a1 : b1
+            //          result_2 = cond ? a2 : b2
+            if let (ExpressionKind::Concat(then_elements), ExpressionKind::Concat(else_elements)) =
+                (&then_expr.kind, &else_expr.kind) {
+                if then_elements.len() == output_port_ids.len() && else_elements.len() == output_port_ids.len() {
+                    eprintln!("    🔧 Expanding conditional tuple return to per-element conditionals");
+                    for (idx, ((port_id, then_elem), else_elem)) in output_port_ids.iter()
+                        .zip(then_elements.iter())
+                        .zip(else_elements.iter())
+                        .enumerate()
+                    {
+                        // Create per-element conditional: cond ? then_elem : else_elem
+                        let elem_conditional = Expression::with_unknown_type(ExpressionKind::Conditional {
+                            cond: cond.clone(),
+                            then_expr: Box::new(then_elem.clone()),
+                            else_expr: Box::new(else_elem.clone()),
+                        });
+                        let assignment = ContinuousAssign {
+                            lhs: LValue::Port(*port_id),
+                            rhs: elem_conditional,
+                        };
+                        module.assignments.push(assignment);
+                        eprintln!("    ✓ Assigned conditional tuple element {} to output port (id={})", idx, port_id.0);
+                    }
+                } else {
+                    // Mismatched tuple sizes - fall back to assigning whole conditional to first port
+                    eprintln!("    ⚠️  Conditional tuple size mismatch - assigning to first port");
+                    let assignment = ContinuousAssign {
+                        lhs: LValue::Port(output_port_ids[0]),
+                        rhs: expr.clone(),
+                    };
+                    module.assignments.push(assignment);
+                }
+            } else {
+                // Branches aren't both tuples - assign whole conditional to first port
+                eprintln!("    ⚠️  Conditional with non-tuple branches - assigning to first port");
+                let assignment = ContinuousAssign {
+                    lhs: LValue::Port(output_port_ids[0]),
+                    rhs: expr.clone(),
+                };
+                module.assignments.push(assignment);
+            }
+        } else {
+            // For non-tuple expressions with multiple ports, assign to first port
+            eprintln!("    ⚠️  Multiple output ports but non-tuple expression (kind={:?}) - assigning to first port",
+                     std::mem::discriminant(&expr.kind));
+            let assignment = ContinuousAssign {
+                lhs: LValue::Port(output_port_ids[0]),
+                rhs: expr.clone(),
+            };
+            module.assignments.push(assignment);
+        }
+    }
+
+    /// Helper to convert a return expression and assign to output ports
+    fn convert_return_to_output(
+        &mut self,
+        ret_expr: &hir::HirExpression,
+        ctx: &ModuleSynthesisContext,
+        output_port_ids: &[PortId],
+        module: &mut Module,
+        conversion_errors: &mut usize,
+    ) {
+        match self.convert_hir_expr_for_module(ret_expr, ctx, 0) {
+            Some(converted) => {
+                self.assign_to_output_ports(&converted, output_port_ids, module);
+                eprintln!("    ✓ Return expression converted and assigned to output ports");
+            }
+            None => {
+                eprintln!("    ❌ Failed to convert return expression - using placeholder zeros");
+                *conversion_errors += 1;
+                // Create placeholder assignments for all output ports
+                for port_id in output_port_ids {
+                    let assignment = ContinuousAssign {
+                        lhs: LValue::Port(*port_id),
+                        rhs: Expression {
+                            kind: ExpressionKind::Literal(Value::Integer(0)),
+                            ty: skalp_frontend::types::Type::Bit(Width::Fixed(32)),
+                        },
+                    };
+                    module.assignments.push(assignment);
+                }
+            }
+        }
+    }
+
+    /// Synthesize a function as a hardware module (instead of inlining)
+    /// This is the core of the hybrid inlining/module-instantiation strategy.
+    ///
+    /// For a function like:
+    /// ```skalp
+    /// pub fn quadratic_solve(a: bit[32], b: bit[32], c: bit[32]) -> (bit, bit[32], bit[32]) {
+    ///     // function body
+    ///     return (valid, x1, x2)
+    /// }
+    /// ```
+    ///
+    /// Creates a Module with:
+    /// - Input ports: param_a, param_b, param_c
+    /// - Output ports: result_0 (bit), result_1 (bit[32]), result_2 (bit[32])
+    /// - Internal signals for local variables
+    /// - Continuous assignment or combinational process for function body
+    ///
+    /// Returns the ModuleId which can be used to instantiate the module at call sites.
+    fn synthesize_function_as_module(&mut self, func: &hir::HirFunction) -> ModuleId {
+        println!("🏗️🏗️🏗️ SYNTHESIZE_FUNCTION_AS_MODULE: '{}' 🏗️🏗️🏗️", func.name);
+        eprintln!("🔧 Synthesizing function '{}' as hardware module (>{} calls detected)",
+                  func.name, MAX_INLINE_CALL_COUNT);
+
+        // Save the current pending instance count - we'll only drain instances added AFTER this point
+        // This is critical for nested module synthesis (e.g., exec_l4_l5 -> quadratic_solve)
+        let pending_start_idx = self.pending_module_instances.len();
+        println!("📌📌📌 SYNTHESIS START: '{}' pending_start_idx={} 📌📌📌", func.name, pending_start_idx);
+
+        let module_id = self.next_module_id();
+        let module_name = format!("func_{}", func.name);
+        let mut module = Module::new(module_id, module_name);
+
+        // Phase 1: Convert function parameters to input ports
+        // IMPORTANT: Use index-based naming (param_0, param_1, etc.) to match instance connections
+        for (param_idx, param) in func.params.iter().enumerate() {
+            let port_id = self.next_port_id();
+            let port_name = format!("param_{}", param_idx);
+            let port_type = self.convert_type(&param.param_type);
+
+            let port = Port {
+                id: port_id,
+                name: port_name,
+                direction: PortDirection::Input,
+                port_type,
+                physical_constraints: None,
+            };
+
+            module.ports.push(port);
+
+            eprintln!("  ✓ Input port {}: {} ({})", param_idx, param.name,
+                     self.type_to_string(&param.param_type));
+        }
+
+        // Phase 2: Convert return type to output port(s)
+        // Handle tuples by creating multiple output ports (result_0, result_1, ...)
+        match &func.return_type {
+            Some(hir::HirType::Tuple(elements)) => {
+                // Tuple return: create multiple output ports
+                for (idx, elem_type) in elements.iter().enumerate() {
+                    let port_id = self.next_port_id();
+                    let port_name = format!("result_{}", idx);
+                    let port_type = self.convert_type(elem_type);
+
+                    let port = Port {
+                        id: port_id,
+                        name: port_name,
+                        direction: PortDirection::Output,
+                        port_type,
+                        physical_constraints: None,
+                    };
+
+                    module.ports.push(port);
+                    eprintln!("  ✓ Output port {}: result_{}", idx, idx);
+                }
+            }
+            Some(return_type) => {
+                // Single return value
+                let port_id = self.next_port_id();
+                let port_type = self.convert_type(return_type);
+
+                let port = Port {
+                    id: port_id,
+                    name: "result".to_string(),
+                    direction: PortDirection::Output,
+                    port_type,
+                    physical_constraints: None,
+                };
+
+                module.ports.push(port);
+                eprintln!("  ✓ Output port: result");
+            }
+            None => {
+                // No return type - function doesn't return anything
+                eprintln!("  ⓘ No return type - no output ports");
+            }
+        }
+
+        // Phase 3: Convert function body to module logic
+        // This is where we convert the HIR function body (statements) into MIR module logic
+        eprintln!("  🔄 Converting function body ({} statements)", func.body.len());
+
+        // Build ModuleSynthesisContext with parameter→port mappings
+        let mut ctx = ModuleSynthesisContext::new();
+        for (param_idx, param) in func.params.iter().enumerate() {
+            // Find the corresponding input port we created in Phase 1
+            let port = &module.ports[param_idx];
+            ctx.param_to_port.insert(param.name.clone(), port.id);
+            ctx.name_to_type.insert(param.name.clone(), param.param_type.clone());
+            // Map VariableId to name - parameters get sequential IDs starting from 0
+            ctx.var_id_to_name.insert(hir::VariableId(param_idx as u32), param.name.clone());
+            eprintln!("    • Mapped param '{}' → port '{}' (id={}), VariableId({})", param.name, port.name, port.id.0, param_idx);
+        }
+
+        // Convert function body statements to module logic
+        // Handle: let bindings, if statements with early returns, final return
+        // BUG FIX #85: Store full let statements to use their actual VariableIds, not sequential assumptions
+        // BUG FIX #85 (continued): Extract let bindings from match arms, not just top-level
+        let mut let_bindings: Vec<hir::HirLetStatement> = Vec::new();
+        let mut return_expr: Option<hir::HirExpression> = None;
+        let mut if_return_statements: Vec<&hir::HirIfStatement> = Vec::new();
+
+        // First pass: identify let bindings, if statements, and return statement
+        for stmt in &func.body {
+            match stmt {
+                hir::HirStatement::Let(let_stmt) => {
+                    eprintln!("    • Found top-level let binding: {} (actual VariableId={})", let_stmt.name, let_stmt.id.0);
+                    let_bindings.push(let_stmt.clone());
+                }
+                hir::HirStatement::Return(value) => {
+                    if let Some(val) = value {
+                        return_expr = Some(val.clone());
+                        eprintln!("    • Found return expression");
+                    }
+                }
+                hir::HirStatement::If(if_stmt) => {
+                    // Check if this is an early return pattern (if condition { return ... })
+                    if_return_statements.push(if_stmt);
+                    eprintln!("    • Found if statement (may contain early return)");
+                }
+                _ => {
+                    eprintln!("    ⚠️  Skipping unsupported statement type: {:?}",
+                             std::mem::discriminant(stmt));
+                }
+            }
+        }
+
+        // BUG FIX #85: If return expression is a Match, extract let bindings from match arms
+        // This handles functions like exec_l4_l5 that have: return match opcode { ... }
+        // where the let bindings are inside the match arms
+        if let Some(ref ret_expr) = return_expr {
+            println!("🔍🔍🔍 CHECKING return expression for let bindings: {:?}", std::mem::discriminant(ret_expr));
+            let extracted = Self::extract_let_bindings_from_expression(ret_expr);
+            println!("🔍🔍🔍 EXTRACTED {} let bindings from expression", extracted.len());
+            if !extracted.is_empty() {
+                println!("    📦 Extracted {} let bindings from return expression (match arms)", extracted.len());
+                for let_stmt in &extracted {
+                    println!("      • {} (VariableId={})", let_stmt.name, let_stmt.id.0);
+                }
+                let_bindings.extend(extracted);
+            }
+        }
+
+        // Create internal signals for let bindings
+        // These will hold intermediate computation results
+        // BUG FIX #85: Use actual VariableIds from HIR let statements, not sequential assumptions
+        // BUG FIX #85 (continued): Also create Variable entries so lookups work during elaboration
+        for let_stmt in &let_bindings {
+            let signal_id = self.next_signal_id();
+            // Type inference would go here - for now use bit[32] as placeholder
+            // BUG FIX #85: Include VariableId in signal name to avoid collisions between match arms
+            // Different match arms can have variables with the same name but different IDs
+            let unique_signal_name = format!("{}_{}", let_stmt.name, let_stmt.id.0);
+            let signal = Signal {
+                id: signal_id,
+                name: unique_signal_name.clone(),
+                signal_type: DataType::Bit(32),  // Placeholder - should infer from expression
+                initial: None,
+                clock_domain: None,
+            };
+            module.signals.push(signal);
+
+            // BUG FIX #85: Also create a Variable entry so that Variable references can be resolved
+            // When call sites reference let bindings, they use Variable(var_id), but we created Signals
+            // This Variable entry enables get_signal_name_from_expression_with_context to find the name
+            let variable = Variable {
+                id: VariableId(let_stmt.id.0),  // Use the HIR VariableId
+                name: unique_signal_name.clone(),  // Use unique name here too
+                var_type: DataType::Bit(32),  // Match the signal type
+                initial: None,
+            };
+            module.variables.push(variable);
+
+            // BUG FIX #85: Map by VariableId (not name) to avoid collisions between match arms
+            ctx.var_to_signal.insert(let_stmt.id, signal_id);
+            // Also store name mapping for debugging (use original name for readability)
+            ctx.var_id_to_name.insert(let_stmt.id, let_stmt.name.clone());
+            eprintln!("    ✓ Created signal+variable for let binding: {} -> {} (signal_id={}, var_id={})",
+                      let_stmt.name, unique_signal_name, signal_id.0, let_stmt.id.0);
+        }
+
+        // Phase 3b: Convert let binding expressions to continuous assignments
+        eprintln!("  🔧 Phase 3b: Converting {} let bindings to assignments", let_bindings.len());
+
+        let mut conversion_errors = 0;
+        for let_stmt in &let_bindings {
+            // Get the signal we created for this let binding (lookup by VariableId)
+            let signal_id = ctx.var_to_signal[&let_stmt.id];
+
+            // Convert HIR expression to MIR using the module context
+            match self.convert_hir_expr_for_module(&let_stmt.value, &ctx, 0) {
+                Some(converted_expr) => {
+                    let assignment = ContinuousAssign {
+                        lhs: LValue::Signal(signal_id),
+                        rhs: converted_expr,
+                    };
+                    module.assignments.push(assignment);
+                    eprintln!("    ✓ Created assignment for '{}' (signal_id={})", let_stmt.name, signal_id.0);
+                }
+                None => {
+                    eprintln!("    ❌ Failed to convert expression for '{}' - using placeholder", let_stmt.name);
+                    conversion_errors += 1;
+                    // Create a placeholder assignment with zero
+                    let assignment = ContinuousAssign {
+                        lhs: LValue::Signal(signal_id),
+                        rhs: Expression {
+                            kind: ExpressionKind::Literal(Value::Integer(0)),
+                            ty: skalp_frontend::types::Type::Bit(Width::Fixed(32)),
+                        },
+                    };
+                    module.assignments.push(assignment);
+                }
+            }
+        }
+
+        // Phase 3c: Convert return expression to output port assignments
+        // Handle early returns by converting if statements with returns to conditional expressions
+        let input_count = func.params.len();
+        let output_port_ids: Vec<PortId> = module.ports[input_count..].iter().map(|p| p.id).collect();
+
+        if let Some(ref ret_expr) = return_expr {
+            eprintln!("  🔧 Phase 3c: Converting return expression to output assignment");
+
+            // Check if we need to handle early returns (if statements that return)
+            if !if_return_statements.is_empty() {
+                eprintln!("    • Detected {} if statements with potential early returns", if_return_statements.len());
+                // For now, we handle the common pattern:
+                // if (condition) { return early_value; }
+                // return normal_value;
+                //
+                // This becomes: output = condition ? early_value : normal_value
+
+                if if_return_statements.len() == 1 {
+                    let if_stmt = if_return_statements[0];
+                    // Check if the then branch contains a return
+                    let early_return = if_stmt.then_statements.iter().find_map(|s| {
+                        if let hir::HirStatement::Return(Some(e)) = s {
+                            Some(e)
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some(early_ret_expr) = early_return {
+                        // Convert condition, early return value, and normal return value
+                        let cond = self.convert_hir_expr_for_module(&if_stmt.condition, &ctx, 0);
+                        let early_val = self.convert_hir_expr_for_module(early_ret_expr, &ctx, 0);
+                        let normal_val = self.convert_hir_expr_for_module(ret_expr, &ctx, 0);
+
+                        if let (Some(cond_mir), Some(early_mir), Some(normal_mir)) = (cond, early_val, normal_val) {
+                            // Create conditional: condition ? early_value : normal_value
+                            let conditional = Expression::with_unknown_type(ExpressionKind::Conditional {
+                                cond: Box::new(cond_mir),
+                                then_expr: Box::new(early_mir),
+                                else_expr: Box::new(normal_mir),
+                            });
+
+                            // Assign to output port(s)
+                            self.assign_to_output_ports(&conditional, &output_port_ids, &mut module);
+                            eprintln!("    ✓ Created conditional output assignment (early return pattern)");
+                        } else {
+                            eprintln!("    ❌ Failed to convert conditional return expression");
+                            conversion_errors += 1;
+                        }
+                    } else {
+                        // If statement doesn't contain a return - just convert the normal return
+                        self.convert_return_to_output(&ret_expr, &ctx, &output_port_ids, &mut module, &mut conversion_errors);
+                    }
+                } else {
+                    // Multiple if statements - for now, just use the final return
+                    eprintln!("    ⚠️  Multiple if statements not fully supported - using final return only");
+                    self.convert_return_to_output(&ret_expr, &ctx, &output_port_ids, &mut module, &mut conversion_errors);
+                }
+            } else {
+                // No early returns - just convert the return expression
+                self.convert_return_to_output(&ret_expr, &ctx, &output_port_ids, &mut module, &mut conversion_errors);
+            }
+        }
+
+        if conversion_errors > 0 {
+            eprintln!("  ⚠️  Phase 3 completed with {} conversion errors (using placeholders)", conversion_errors);
+        } else {
+            eprintln!("  ✅ Phase 3 completed successfully - all expressions converted");
+        }
+
+        // Drain pending module instances created during THIS function's body conversion
+        // Only drain instances added AFTER pending_start_idx to avoid stealing instances
+        // that belong to our caller in the recursion stack
+        self.drain_pending_module_instances_from(&mut module, pending_start_idx);
+
+        // Register the module in our function map
+        self.function_map.insert(func.name.clone(), module_id);
+
+        eprintln!("✅ Module created: {} (id={}, {} input ports, {} output ports)",
+                  module.name, module_id.0,
+                  module.ports.iter().filter(|p| p.direction == PortDirection::Input).count(),
+                  module.ports.iter().filter(|p| p.direction == PortDirection::Output).count());
+
+        println!("📋📋📋 MODULE '{}' has {} assignments 📋📋📋", func.name, module.assignments.len());
+        for (idx, assign) in module.assignments.iter().enumerate() {
+            println!("    Assignment {}: {:?} <= <expr>", idx, assign.lhs);
+        }
+
+        // Store the module for later addition to MIR
+        // This will be added to the MIR at the end of the transform() method
+        self.synthesized_modules.push(module);
+        eprintln!("  ✓ Module stored in synthesized_modules (will be added to MIR at end of transform)");
+
+        module_id
+    }
+
+    /// Drain pending module instances and add them to the specified module
+    ///
+    /// This method is called after expression conversion to materialize module instances
+    /// that were recorded during complex function call conversion.
+    /// Drain pending module instances starting from a specific index
+    /// This is used for nested module synthesis to avoid stealing instances from callers
+    fn drain_pending_module_instances_from(&mut self, module: &mut Module, start_idx: usize) {
+        let total_pending = self.pending_module_instances.len();
+        let instances_to_drain = total_pending.saturating_sub(start_idx);
+
+        println!("🚿🚿🚿 DRAIN_FROM: {} total, start_idx={}, draining {} for module '{}' (id={}) 🚿🚿🚿",
+                 total_pending, start_idx, instances_to_drain, module.name, module.id.0);
+
+        if instances_to_drain == 0 {
+            return;
+        }
+
+        println!("🚿🚿🚿 DRAIN_FROM: Processing {} instances for module '{}' 🚿🚿🚿",
+                 instances_to_drain, module.name);
+        eprintln!("[HYBRID] Draining {} pending module instances (from idx {})...",
+                  instances_to_drain, start_idx);
+
+        // Extract only the instances that belong to this module (from start_idx onwards)
+        let pending: Vec<_> = self.pending_module_instances.drain(start_idx..).collect();
+
+        // Convert HIR types to DataTypes
+        let instances_with_types: Vec<_> = pending
+            .into_iter()
+            .map(|(signal_id, name, mod_id, args, hir_type, frontend_type)| {
+                let data_type = if let Some(ht) = hir_type {
+                    self.convert_type(&ht)
+                } else {
+                    DataType::Bit(32)  // Fallback
+                };
+                (signal_id, name, mod_id, args, data_type, frontend_type)
+            })
+            .collect();
+
+        self.process_pending_instances(instances_with_types, module);
+    }
+
+    ///
+    /// For each pending instance:
+    /// 1. Create a Signal with the pre-allocated SignalId
+    /// 2. Create a ModuleInstance that connects arguments to module inputs and signal to output
+    /// 3. Add both to the module
+    fn drain_pending_module_instances(&mut self, module: &mut Module) {
+        println!("🚿🚿🚿 DRAIN_PENDING: {} instances in queue for module '{}' (id={}) 🚿🚿🚿",
+                 self.pending_module_instances.len(), module.name, module.id.0);
+        if self.pending_module_instances.is_empty() {
+            return;
+        }
+
+        println!("🚿🚿🚿 DRAIN_PENDING: Processing {} instances for module '{}' 🚿🚿🚿",
+                 self.pending_module_instances.len(), module.name);
+        eprintln!("[HYBRID] Draining {} pending module instances...", self.pending_module_instances.len());
+
+        // Extract pending instances (to avoid borrow checker issues)
+        let pending = std::mem::take(&mut self.pending_module_instances);
+
+        // Convert HIR types to DataTypes
+        let instances_with_types: Vec<_> = pending
+            .into_iter()
+            .map(|(signal_id, name, mod_id, args, hir_type, frontend_type)| {
+                let data_type = if let Some(ht) = hir_type {
+                    self.convert_type(&ht)
+                } else {
+                    DataType::Bit(32)  // Fallback
+                };
+                (signal_id, name, mod_id, args, data_type, frontend_type)
+            })
+            .collect();
+
+        self.process_pending_instances(instances_with_types, module);
+    }
+
+    /// Process a list of pending instances and add them to the module
+    fn process_pending_instances(
+        &mut self,
+        instances_with_types: Vec<(SignalId, String, ModuleId, Vec<Expression>, DataType, Type)>,
+        module: &mut Module,
+    ) {
+        for (result_signal_id, function_name, module_id, arg_exprs, data_type, frontend_type) in instances_with_types {
+            println!("🎯🎯🎯 DRAIN: Creating instance of '{}' (module_id={}) with result signal {} 🎯🎯🎯",
+                      function_name, module_id.0, result_signal_id.0);
+            eprintln!("[HYBRID]   Creating instance of '{}' (module_id={}) with result signal {}",
+                      function_name, module_id.0, result_signal_id.0);
+
+            // Step 1: Determine if this is a tuple return by checking the data type
+            let is_tuple = matches!(&data_type, DataType::Struct(_) | DataType::Array { .. });
+
+            // BUG FIX #85: Also derive tuple width from data_type, not just frontend_type
+            // The frontend_type is often a placeholder Type::Bit(32), but data_type has the real type info
+            let tuple_width = if let Type::Tuple(elements) = &frontend_type {
+                Some(elements.len())
+            } else if let DataType::Struct(struct_type) = &data_type {
+                // Check if this is a tuple struct (name starts with "__tuple_")
+                if struct_type.name.starts_with("__tuple_") {
+                    Some(struct_type.fields.len())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let instance_name = format!("{}_inst_{}", function_name, result_signal_id.0);
+            let mut connections = HashMap::new();
+
+            // Connect arguments to input ports (param_0, param_1, ...)
+            for (arg_idx, arg_expr) in arg_exprs.iter().enumerate() {
+                let port_name = format!("param_{}", arg_idx);
+                connections.insert(port_name.clone(), arg_expr.clone());
+                eprintln!("[HYBRID]       ✓ Connected argument {} to port '{}'", arg_idx, port_name);
+            }
+
+            // Handle tuple returns vs single returns
+            if let Some(num_elements) = tuple_width {
+                // Tuple return: Create multiple signals and connect to result_0, result_1, etc.
+                eprintln!("[HYBRID]     Creating {} output signals for tuple return", num_elements);
+
+                for elem_idx in 0..num_elements {
+                    let elem_signal_id = if elem_idx == 0 {
+                        // Use the pre-allocated ID for the first element
+                        result_signal_id
+                    } else {
+                        // Allocate new IDs for additional elements
+                        self.next_signal_id()
+                    };
+
+                    let signal_name = format!("{}_inst_{}_result_{}", function_name, result_signal_id.0, elem_idx);
+                    let signal = Signal {
+                        id: elem_signal_id,
+                        name: signal_name.clone(),
+                        signal_type: DataType::Bit(32), // Placeholder - should extract element type
+                        initial: None,
+                        clock_domain: None,
+                    };
+                    module.signals.push(signal);
+                    println!("🎯🎯🎯 DRAIN: Created tuple result signal '{}' (id={}) 🎯🎯🎯", signal_name, elem_signal_id.0);
+                    eprintln!("[HYBRID]       ✓ Created result signal '{}' (id={})", signal_name, elem_signal_id.0);
+
+                    // Connect to output port result_N
+                    let result_port_name = format!("result_{}", elem_idx);
+                    connections.insert(
+                        result_port_name.clone(),
+                        Expression::new(ExpressionKind::Ref(LValue::Signal(elem_signal_id)), frontend_type.clone())
+                    );
+                    eprintln!("[HYBRID]       ✓ Connected to output port '{}'", result_port_name);
+                }
+            } else {
+                // Single return: Create one signal and connect to "result"
+                let signal_name = format!("{}_result_{}", function_name, result_signal_id.0);
+                let signal = Signal {
+                    id: result_signal_id,
+                    name: signal_name.clone(),
+                    signal_type: data_type.clone(),
+                    initial: None,
+                    clock_domain: None,
+                };
+                module.signals.push(signal);
+                eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
+
+                // Connect result signal to output port
+                let result_port_name = "result".to_string();
+                connections.insert(
+                    result_port_name.clone(),
+                    Expression::new(ExpressionKind::Ref(LValue::Signal(result_signal_id)), frontend_type)
+                );
+                eprintln!("[HYBRID]       ✓ Connected result to output port '{}'", result_port_name);
+            }
+
+            // Create the instance
+            let instance = ModuleInstance {
+                name: instance_name.clone(),
+                module: module_id,
+                connections,
+                parameters: HashMap::new(),
+            };
+
+            module.instances.push(instance);
+            eprintln!("[HYBRID]     ✓ Created module instance '{}'", instance_name);
+        }
+
+        eprintln!("[HYBRID] ✅ All pending module instances materialized");
+    }
+
+    /// Helper to convert HIR type to string for debugging
+    fn type_to_string(&self, ty: &hir::HirType) -> String {
+        format!("{:?}", ty) // Simplified for now
     }
 
     fn next_port_id(&mut self) -> PortId {

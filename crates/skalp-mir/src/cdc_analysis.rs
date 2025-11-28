@@ -448,6 +448,13 @@ impl CdcAnalyzer {
                 // Cast is a no-op, propagate domains from inner expression
                 domains.extend(self.get_expression_clock_domains(expr));
             }
+            // BUG FIX #85: Handle tuple/field access
+            ExpressionKind::TupleFieldAccess { base, .. } => {
+                domains.extend(self.get_expression_clock_domains(base));
+            }
+            ExpressionKind::FieldAccess { base, .. } => {
+                domains.extend(self.get_expression_clock_domains(base));
+            }
         }
 
         domains

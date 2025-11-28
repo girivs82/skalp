@@ -1,7 +1,7 @@
 use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, SimulationState};
 use async_trait::async_trait;
 use skalp_sir::SirModule;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 pub struct CpuRuntime {
     module: Option<SirModule>,
@@ -59,6 +59,91 @@ impl CpuRuntime {
         result
     }
 
+    /// Topologically sort combinational nodes for correct evaluation order.
+    /// Nodes that produce signals must be evaluated before nodes that consume them.
+    fn topological_sort_nodes(nodes: &[skalp_sir::SirNode]) -> Vec<skalp_sir::SirNode> {
+        use std::collections::HashSet;
+
+        // Build dependency graph: for each node, track which other nodes must be evaluated first
+        let mut dependencies: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+
+        // Build a map from output signal_id to node_id
+        let mut signal_to_producer: HashMap<String, usize> = HashMap::new();
+        for node in nodes {
+            for output in &node.outputs {
+                signal_to_producer.insert(output.signal_id.clone(), node.id);
+            }
+        }
+
+        // Initialize all nodes
+        for node in nodes {
+            dependencies.insert(node.id, HashSet::new());
+            in_degree.insert(node.id, 0);
+        }
+
+        // Build dependency relationships
+        for node in nodes {
+            for input in &node.inputs {
+                // Find which node produces this input signal
+                if let Some(&producer_id) = signal_to_producer.get(&input.signal_id) {
+                    if producer_id != node.id {
+                        // producer_id -> node.id dependency
+                        if let Some(deps) = dependencies.get_mut(&producer_id) {
+                            if deps.insert(node.id) {
+                                *in_degree.get_mut(&node.id).unwrap() += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        let mut queue = VecDeque::new();
+        let mut sorted_ids = Vec::new();
+
+        // Start with nodes that have no dependencies
+        for (&id, &degree) in &in_degree {
+            if degree == 0 {
+                queue.push_back(id);
+            }
+        }
+
+        while let Some(node_id) = queue.pop_front() {
+            sorted_ids.push(node_id);
+
+            if let Some(deps) = dependencies.get(&node_id) {
+                for &dep in deps {
+                    if let Some(degree) = in_degree.get_mut(&dep) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            queue.push_back(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build sorted node list
+        // If topological sort didn't include all nodes (cycle detected), fall back to original order
+        // Note: This shouldn't happen with BUG FIX #86 (unique signal names)
+        if sorted_ids.len() != nodes.len() {
+            eprintln!("⚠️ CPU: Combinational cycle detected ({} of {} nodes sorted) - using original order",
+                sorted_ids.len(), nodes.len());
+            return nodes.to_vec();
+        }
+
+        // Create a map from node_id to node for efficient lookup
+        let node_map: HashMap<usize, &skalp_sir::SirNode> =
+            nodes.iter().map(|n| (n.id, n)).collect();
+
+        sorted_ids
+            .into_iter()
+            .filter_map(|id| node_map.get(&id).map(|&n| n.clone()))
+            .collect()
+    }
+
     fn evaluate_combinational(&mut self) -> Result<(), SimulationError> {
         // Clone combinational nodes and outputs to avoid borrow checker issues
         let nodes = if let Some(module) = &self.module {
@@ -73,8 +158,12 @@ impl CpuRuntime {
             return Ok(());
         };
 
+        // Topologically sort nodes to ensure correct evaluation order
+        // (producers must be evaluated before consumers)
+        let sorted_nodes = Self::topological_sort_nodes(&nodes);
+
         // Evaluate all combinational nodes in topological order
-        for node in &nodes {
+        for node in &sorted_nodes {
             self.evaluate_node(node)?;
         }
 

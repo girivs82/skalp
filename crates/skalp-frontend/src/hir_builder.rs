@@ -1300,8 +1300,12 @@ impl HirBuilderContext {
                 SyntaxKind::AssignmentStmt => {
                     // Determine assignment type from operator
                     let assignment_type = self.determine_assignment_type(&child);
+                    eprintln!("[HIR_COLLECT] Found AssignmentStmt, calling build_assignment");
                     if let Some(assignment) = self.build_assignment(&child, assignment_type) {
+                        eprintln!("[HIR_COLLECT] ✓ build_assignment succeeded, added to statements");
                         statements.push(HirStatement::Assignment(assignment));
+                    } else {
+                        eprintln!("[HIR_COLLECT] ❌ build_assignment returned None, assignment DROPPED!");
                     }
                 }
                 SyntaxKind::IfStmt => {

@@ -2,7 +2,6 @@ use crate::sir::*;
 use std::fmt::Write;
 
 pub fn generate_metal_shader(sir_module: &SirModule) -> String {
-    println!(">>> GENERATE_METAL_SHADER CALLED <<<");
     let mut shader = String::new();
     let mut generator = MetalShaderGenerator::new(&mut shader);
 
@@ -11,7 +10,10 @@ pub fn generate_metal_shader(sir_module: &SirModule) -> String {
     generator.generate_combinational_kernels(sir_module);
     generator.generate_sequential_kernel(sir_module);
 
-    println!(">>> METAL SHADER GENERATION COMPLETE <<<");
+    eprintln!(
+        "\n========== GENERATED METAL SHADER ==========\n{}\n========== END SHADER ==========\n",
+        shader
+    );
     shader
 }
 
@@ -295,76 +297,54 @@ impl<'a> MetalShaderGenerator<'a> {
 
         self.write_indented("// Combinational logic evaluation\n");
 
-        // BUG FIX #85: Combine cone nodes with missing nodes and sort ALL together
-        // This ensures correct dependency order when missing nodes are dependencies of cone nodes
+        // Sort nodes in dependency order
+        let sorted_nodes = self.topological_sort_nodes(sir, &cone.nodes);
+
+        eprintln!("🔍 Cone {} has {} nodes", index, sorted_nodes.len());
+
+        // WORKAROUND: Include ALL combinational nodes, not just those in the cone
+        // This ensures Concat nodes (which may not be properly traced) are generated
         let all_comb_ids: std::collections::HashSet<usize> =
             sir.combinational_nodes.iter().map(|n| n.id).collect();
-        let cone_ids: std::collections::HashSet<usize> = cone.nodes.iter().copied().collect();
+        let cone_ids: std::collections::HashSet<usize> = sorted_nodes.iter().copied().collect();
         let missing_ids: Vec<usize> = all_comb_ids.difference(&cone_ids).copied().collect();
 
-        // In cone 0, include all missing nodes alongside cone nodes
-        let nodes_to_process: Vec<usize> = if index == 0 {
-            if !missing_ids.is_empty() {
-                eprintln!(
-                    "⚠️  {} combinational nodes NOT in any cone (adding to cone 0)",
-                    missing_ids.len()
-                );
-            }
-            // Combine cone nodes + missing nodes, then sort together
-            let mut all_nodes = cone.nodes.clone();
-            all_nodes.extend(missing_ids);
-            all_nodes
-        } else {
-            cone.nodes.clone()
-        };
-
-        // Sort all nodes together for correct topological order
-        println!("XYZZY DEBUG: About to sort {} nodes for cone {}", nodes_to_process.len(), index);
-        let sorted_nodes = self.topological_sort_nodes(sir, &nodes_to_process);
-        println!("XYZZY DEBUG: Sorted {} nodes for cone {}", sorted_nodes.len(), index);
-
-        // Debug: check first few nodes in sorted result
-        if index == 0 {
-            println!("IMMEDIATE AFTER SORT: first 5 = {:?}", &sorted_nodes[..5.min(sorted_nodes.len())]);
-            // Find position of tracked nodes
-            for &target in &[1768usize, 1738, 1762, 1761] {
-                if let Some(pos) = sorted_nodes.iter().position(|&x| x == target) {
-                    println!("  FIND: node {} at position {}", target, pos);
+        if !missing_ids.is_empty() && index == 0 {
+            eprintln!(
+                "⚠️  {} combinational nodes NOT in any cone (will add to cone 0)",
+                missing_ids.len()
+            );
+            for &id in &missing_ids {
+                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == id) {
+                    if matches!(node.kind, SirNodeKind::Concat) {
+                        eprintln!("    - Concat node {}", id);
+                    }
                 }
             }
         }
 
-        // Debug: check if quadratic_solve nodes are in this cone
-        let qs_nodes = [186usize, 191, 194, 196, 197, 199, 200];
-        for &qn in &qs_nodes {
-            if nodes_to_process.contains(&qn) {
-                if let Some(pos) = sorted_nodes.iter().position(|&x| x == qn) {
-                    eprintln!("  📍 quadratic node {} at position {} in sorted order", qn, pos);
-                }
-            }
-        }
-
-        // Process all nodes in topological order
-        // Debug: print node order for cone 0
-        if index == 0 && sorted_nodes.len() > 10 {
-            println!("TOPO DEBUG cone {}: first 10 nodes: {:?}", index, &sorted_nodes[..10]);
-            println!("TOPO DEBUG cone {}: last 10 nodes: {:?}", index, &sorted_nodes[sorted_nodes.len()-10..]);
-
-            // Print details of first 5 nodes
-            for &node_id in sorted_nodes.iter().take(5) {
-                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                    let inputs: Vec<_> = node.inputs.iter().map(|i| i.signal_id.clone()).collect();
-                    let outputs: Vec<_> = node.outputs.iter().map(|o| o.signal_id.clone()).collect();
-                    println!("  Node {}: kind={:?}, inputs={:?}, outputs={:?}", node_id, std::mem::discriminant(&node.kind), inputs, outputs);
-                }
-            }
-        }
-        for node_id in &sorted_nodes {
-            if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == *node_id) {
+        // Process cone nodes
+        for node_id in sorted_nodes {
+            if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
                 if matches!(node.kind, SirNodeKind::Concat) {
-                    eprintln!("  ✅ Processing Concat node {}", node_id);
+                    eprintln!("  ✅ Processing Concat node {} (in cone)", node_id);
                 }
                 self.generate_node_computation_v2(sir, node);
+            }
+        }
+
+        // WORKAROUND: In cone 0, also process nodes that weren't in any cone
+        if index == 0 {
+            for node_id in missing_ids {
+                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
+                    if matches!(node.kind, SirNodeKind::Concat) {
+                        eprintln!(
+                            "  ✅ Processing Concat node {} (MISSING from cones)",
+                            node_id
+                        );
+                    }
+                    self.generate_node_computation_v2(sir, node);
+                }
             }
         }
 
@@ -1162,49 +1142,39 @@ impl<'a> MetalShaderGenerator<'a> {
             };
 
             if let Some(size) = array_size {
-                // FIX: Metal requires array brackets AFTER variable name, not before type
-                // Correct syntax: "uint temp[8]" not "uint[8] temp"
-                // Also, Metal does NOT support direct array assignment
+                // For arrays, initialize element by element
                 eprintln!(
                     "🔢 Metal codegen: node {} = {}[{}] with value {}",
                     node.id, base_type, size, value
                 );
                 self.write_indented(&format!(
-                    "{} temp_const_{}[{}] = {{",
+                    "{}[{}] temp_const_{} = {{",
                     base_type,
-                    self.sanitize_name(output),
-                    size
+                    size,
+                    self.sanitize_name(output)
                 ));
                 for i in 0..size {
                     if i > 0 {
                         write!(self.output, ", ").unwrap();
                     }
                     // Extract the appropriate 32 bits from the value
-                    let elem_val = if i == 0 {
-                        value as u32
-                    } else if width <= 64 {
-                        0
-                    } else {
-                        // For 256-bit, extract bits [i*32..(i+1)*32]
-                        if i == 1 {
-                            (value >> 32) as u32
+                    let elem_val = if width <= 64 {
+                        if i == 0 {
+                            value as u32
                         } else {
                             0
                         }
+                    } else {
+                        0 // For 256-bit, value is typically 0
                     };
                     write!(self.output, "{}", elem_val).unwrap();
                 }
                 writeln!(self.output, "}};").unwrap();
-                // FIX: Metal doesn't support array assignment, copy element-by-element
-                for i in 0..size {
-                    self.write_indented(&format!(
-                        "signals->{}[{}] = temp_const_{}[{}];\n",
-                        self.sanitize_name(output),
-                        i,
-                        self.sanitize_name(output),
-                        i
-                    ));
-                }
+                self.write_indented(&format!(
+                    "signals->{} = temp_const_{};\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(output)
+                ));
             } else {
                 eprintln!(
                     "🔢 Metal codegen: node {} = {}({})",
@@ -3610,151 +3580,62 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
-    /// Helper to find cycles in the dependency graph
-    fn find_cycle(
-        &self,
-        nodes: &std::collections::HashSet<usize>,
-        deps: &std::collections::HashMap<usize, std::collections::HashSet<usize>>,
-        current: usize,
-        visited: &mut std::collections::HashSet<usize>,
-        path: &mut Vec<usize>,
-    ) -> bool {
-        if path.contains(&current) {
-            // Found a cycle - trim path to just the cycle
-            let pos = path.iter().position(|&x| x == current).unwrap();
-            path.drain(0..pos);
-            path.push(current);
-            return true;
-        }
-        if visited.contains(&current) {
-            return false;
-        }
-        visited.insert(current);
-        path.push(current);
-
-        // Follow dependencies (nodes that this node depends on)
-        if let Some(consumers) = deps.get(&current) {
-            for &consumer in consumers {
-                if nodes.contains(&consumer) {
-                    // Reverse direction - follow from consumer back to producer
-                    // Actually we want to find who PRODUCES for current, not who CONSUMES current
-                }
-            }
-        }
-
-        // To find cycles, we need to follow: current depends on X, then X depends on Y, etc.
-        // But our deps map is: deps[X] = {nodes that depend on X}
-        // So we need to find all X where current is in deps[X]
-        for (&producer, consumers) in deps {
-            if consumers.contains(&current) && nodes.contains(&producer) {
-                if self.find_cycle(nodes, deps, producer, visited, path) {
-                    return true;
-                }
-            }
-        }
-
-        path.pop();
-        false
-    }
-
     fn topological_sort_nodes(&self, sir: &SirModule, node_ids: &[usize]) -> Vec<usize> {
-        use std::collections::{HashMap, HashSet, VecDeque};
+        use std::collections::{HashMap, VecDeque};
 
-        // Build a map from output signal_id to node_id (which node produces each signal)
-        let mut signal_to_producer: HashMap<String, usize> = HashMap::new();
-        let node_id_set: HashSet<usize> = node_ids.iter().copied().collect();
-
-        for &node_id in node_ids {
-            if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                for output in &node.outputs {
-                    signal_to_producer.insert(output.signal_id.clone(), node_id);
-                }
-            }
-        }
-
-        // Build dependency graph: for each node, track which nodes depend on it
-        let mut dependencies: HashMap<usize, HashSet<usize>> = HashMap::new();
+        // Build dependency graph
+        let mut dependencies: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut in_degree: HashMap<usize, usize> = HashMap::new();
 
-        // Initialize all nodes
+        // Initialize all nodes with 0 in-degree
         for &id in node_ids {
-            dependencies.insert(id, HashSet::new());
             in_degree.insert(id, 0);
+            dependencies.insert(id, Vec::new());
         }
 
         // Build dependency relationships
-        let debug_nodes: HashSet<usize> = [1738usize, 1762, 1768, 1761].iter().copied().collect();
         for &node_id in node_ids {
             if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
                 for input in &node.inputs {
                     // Find which node produces this input signal
-                    if let Some(&producer_id) = signal_to_producer.get(&input.signal_id) {
-                        if producer_id != node_id && node_id_set.contains(&producer_id) {
-                            // producer_id -> node_id dependency (producer must come first)
-                            if let Some(deps) = dependencies.get_mut(&producer_id) {
-                                if deps.insert(node_id) {
-                                    // Only increment if this is a new dependency
-                                    *in_degree.get_mut(&node_id).unwrap() += 1;
-                                    // Debug: log dependencies for specific nodes
-                                    if debug_nodes.contains(&node_id) || debug_nodes.contains(&producer_id) {
-                                        println!("  🔗 DEP: producer {} -> consumer {} (via {})", producer_id, node_id, input.signal_id);
+                    for &other_id in node_ids {
+                        if other_id != node_id {
+                            if let Some(other_node) =
+                                sir.combinational_nodes.iter().find(|n| n.id == other_id)
+                            {
+                                for output in &other_node.outputs {
+                                    if output.signal_id == input.signal_id {
+                                        // other_node -> node dependency
+                                        dependencies.get_mut(&other_id).unwrap().push(node_id);
+                                        *in_degree.get_mut(&node_id).unwrap() += 1;
                                     }
                                 }
                             }
-                        }
-                    } else {
-                        // Debug: log unresolved dependencies
-                        if debug_nodes.contains(&node_id) {
-                            println!("  ⚠️ Node {} input {} has no producer in node set", node_id, input.signal_id);
                         }
                     }
                 }
             }
         }
 
-        // Kahn's algorithm for topological sort
+        // Topological sort using Kahn's algorithm
         let mut queue = VecDeque::new();
         let mut sorted = Vec::new();
 
-        // Debug: show in_degrees for tracked nodes
-        for &node_id in &debug_nodes {
-            if let Some(&degree) = in_degree.get(&node_id) {
-                println!("  📊 in_degree[{}] = {}", node_id, degree);
-            }
-        }
-
-        // Start with nodes that have no dependencies (in_degree == 0)
-        for &id in node_ids {
-            if in_degree.get(&id) == Some(&0) {
+        // Start with nodes that have no dependencies
+        for (&id, &degree) in &in_degree {
+            if degree == 0 {
                 queue.push_back(id);
             }
         }
 
-        // Debug: show initial queue
-        let queue_vec: Vec<_> = queue.iter().copied().collect();
-        if queue_vec.iter().any(|&id| debug_nodes.contains(&id)) {
-            println!("  🚀 Initial queue contains tracked nodes: {:?}",
-                queue_vec.iter().filter(|&&id| debug_nodes.contains(&id)).collect::<Vec<_>>());
-        }
-
         while let Some(node_id) = queue.pop_front() {
-            // Debug: track when key nodes are popped
-            if debug_nodes.contains(&node_id) {
-                println!("  ▶️ Popped node {} from queue, adding to sorted at position {}", node_id, sorted.len());
-            }
             sorted.push(node_id);
 
             if let Some(deps) = dependencies.get(&node_id) {
                 for &dep in deps {
                     if let Some(degree) = in_degree.get_mut(&dep) {
                         *degree -= 1;
-                        if debug_nodes.contains(&dep) {
-                            println!("    📉 Decremented in_degree of {} to {}", dep, *degree);
-                        }
                         if *degree == 0 {
-                            if debug_nodes.contains(&dep) {
-                                println!("    ➕ Added {} to queue (in_degree became 0)", dep);
-                            }
                             queue.push_back(dep);
                         }
                     }
@@ -3762,62 +3643,10 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
-        // If topological sort didn't include all nodes (cycle detected), append unsorted nodes
+        // If we couldn't sort all nodes, just return them in original order
         if sorted.len() != node_ids.len() {
-            let sorted_set: HashSet<usize> = sorted.iter().copied().collect();
-            let unsorted: Vec<usize> = node_ids.iter()
-                .filter(|id| !sorted_set.contains(*id))
-                .copied()
-                .collect();
-            println!(
-                "⚠️ TOPO PARTIAL: {} of {} nodes sorted, appending {} unsorted nodes",
-                sorted.len(),
-                node_ids.len(),
-                unsorted.len()
-            );
-
-            // Combinational cycle detected - this is a bug in the SIR generation
-            // Print diagnostic information
-            println!("🔴 COMBINATIONAL CYCLE DETECTED: {} of {} nodes sorted", sorted.len(), node_ids.len());
-            println!("   This indicates a signal name collision in the generated hardware.");
-
-            // Build a map from node to what it's waiting on (its unsorted producers)
-            let unsorted_set: HashSet<usize> = unsorted.iter().copied().collect();
-            for &node_id in unsorted.iter().take(10) {  // Show first 10 stuck nodes
-                let remaining_in_degree = in_degree.get(&node_id).copied().unwrap_or(999);
-                let waiting_on: Vec<usize> = node_ids.iter()
-                    .filter(|&&other_id| {
-                        if let Some(deps) = dependencies.get(&other_id) {
-                            deps.contains(&node_id) && unsorted_set.contains(&other_id)
-                        } else {
-                            false
-                        }
-                    })
-                    .copied()
-                    .collect();
-                // Find the node details
-                if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == node_id) {
-                    let inputs: Vec<_> = node.inputs.iter().map(|i| &i.signal_id).collect();
-                    let outputs: Vec<_> = node.outputs.iter().map(|o| &o.signal_id).collect();
-                    println!("  Node {} ({:?}): in={:?}, out={:?}, waiting_on={:?}",
-                        node_id, std::mem::discriminant(&node.kind), inputs, outputs, waiting_on);
-                }
-            }
-
-            // Fall back to node ID order as a last resort
-            // (This shouldn't happen with BUG FIX #86 for unique signal names)
-            println!("⚠️ Falling back to node ID order - results may be incorrect");
-            let mut id_sorted: Vec<usize> = node_ids.to_vec();
-            id_sorted.sort();
-            id_sorted
+            node_ids.to_vec()
         } else {
-            // Debug: verify sorted order
-            println!("TOPO INTERNAL: first 5 = {:?}", sorted.iter().take(5).collect::<Vec<_>>());
-            for &node_id in &debug_nodes {
-                if let Some(pos) = sorted.iter().position(|&x| x == node_id) {
-                    println!("  TOPO INTERNAL: node {} at pos {}", node_id, pos);
-                }
-            }
             sorted
         }
     }

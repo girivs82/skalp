@@ -78,18 +78,34 @@ enum SimulatorCommand {
 
 impl Simulator {
     pub async fn new(config: SimulationConfig) -> SimulationResult<Self> {
+        println!("🔧 Simulator::new called with use_gpu = {}", config.use_gpu);
+        println!("🔧 target_os = macos: {}", cfg!(target_os = "macos"));
+
         let runtime: Box<dyn SimulationRuntime> = if config.use_gpu {
+            println!("🔧 Attempting to create GPU runtime...");
             #[cfg(target_os = "macos")]
             {
-                Box::new(crate::gpu_runtime::GpuRuntime::new().await?)
+                println!("🔧 Creating GpuRuntime (macOS)...");
+                match crate::gpu_runtime::GpuRuntime::new().await {
+                    Ok(rt) => {
+                        println!("✅ GpuRuntime created successfully!");
+                        Box::new(rt)
+                    }
+                    Err(e) => {
+                        println!("❌ GpuRuntime creation FAILED: {:?}", e);
+                        return Err(e);
+                    }
+                }
             }
             #[cfg(not(target_os = "macos"))]
             {
+                println!("❌ Not on macOS, GPU not available");
                 return Err(SimulationError::GpuError(
                     "GPU simulation only available on macOS".into(),
                 ));
             }
         } else {
+            println!("🔧 Creating CpuRuntime (use_gpu = false)...");
             Box::new(crate::cpu_runtime::CpuRuntime::new())
         };
 
@@ -105,7 +121,10 @@ impl Simulator {
     }
 
     pub async fn load_module(&mut self, module: &SirModule) -> SimulationResult<()> {
-        self.runtime.initialize(module).await
+        eprintln!("🔧 Simulator::load_module calling runtime.initialize()...");
+        let result = self.runtime.initialize(module).await;
+        eprintln!("🔧 Simulator::load_module result: {:?}", result.is_ok());
+        result
     }
 
     pub async fn run_simulation(&mut self) -> SimulationResult<()> {
