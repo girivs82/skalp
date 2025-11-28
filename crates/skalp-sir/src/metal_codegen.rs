@@ -2469,12 +2469,16 @@ impl<'a> MetalShaderGenerator<'a> {
                 bit_offset += width;
             }
 
-            // REVERSE components: SystemVerilog MSB-first → Metal LSB-first
+            // BUG FIX #90: Correct uint2 component order
+            // After iterating with .rev(), components[0] = LSB, components[1] = MSB
+            // Metal uint2(x, y) stores x at [0] and y at [1]
+            // We want [0] = LSB, [1] = MSB, so:
+            // uint2(components[0], components[1]) → [0]=LSB, [1]=MSB ✓
             self.write_indented(&format!(
                 "signals->{} = uint2({}, {});\n",
                 self.sanitize_name(output),
-                components[1],
-                components[0]
+                components[0],  // LSB goes to [0]
+                components[1]   // MSB goes to [1]
             ));
         } else {
             // Output is 1-32 bits -> uint

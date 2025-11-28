@@ -5784,15 +5784,27 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Build final combined map for result expression
-                let mut combined_map: std::collections::HashMap<String, &hir::HirExpression> =
-                    param_map.clone();
-                for (name, expr) in &local_var_map {
-                    combined_map.insert(name.clone(), expr);
-                }
+                //
+                // BUG FIX #89: Do NOT include local_var_map when substituting result_expr
+                //
+                // PROBLEM: When result_expr is `Variable(result_32)` and local_var_map contains
+                // `"result_32" -> Match{...}`, the substitution replaces the variable with the
+                // ENTIRE match expression. This causes the match to be computed twice:
+                //   - Once for the `let result_32 = match...` statement
+                //   - Again for the result_expr (now the match itself, not a variable reference)
+                //
+                // SOLUTION: Only substitute PARAMETERS in result_expr, not local let bindings.
+                // Local let bindings (like `result_32`) should remain as Variable references
+                // that will be resolved during convert_expression by looking up in dynamic_variables.
+                //
+                // The local_var_map is still useful for intra-block substitution (e.g., when one
+                // let binding references a previous let binding), but the result_expr should NOT
+                // have local variables substituted - it should reference the computed values via
+                // the Variable mechanism.
 
                 let substituted_result = Box::new(self.substitute_expression_with_var_map(
                     result_expr,
-                    &combined_map,
+                    param_map,  // Only params, NOT combined_map with local vars
                     var_id_to_name,
                 )?);
 
