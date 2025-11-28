@@ -20,6 +20,7 @@ pub mod mir;
 pub mod mir_validation;
 pub mod monomorphize;
 pub mod optimize;
+pub mod ssa_conversion;
 pub mod timing;
 pub mod transform;
 
@@ -43,6 +44,7 @@ pub use mir::{
 pub use mir_validation::{validate_mir, ValidationError};
 pub use monomorphize::Monomorphizer;
 pub use optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
+pub use ssa_conversion::apply_ssa_conversion;
 
 use anyhow::Result;
 use skalp_frontend::Hir;

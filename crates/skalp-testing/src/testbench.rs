@@ -43,10 +43,8 @@ impl Testbench {
     /// Create a new testbench from a SKALP source file
     pub async fn new(source_path: &str) -> Result<Self> {
         let config = SimulationConfig {
-            // Force CPU mode until SSA conversion is implemented
-            // GPU mode fails on mutable variable reassignment (x = f(x)) which creates
-            // combinational cycles. The CPU works despite cycles because signals persist.
-            // TODO: Implement SSA conversion to fix GPU mode
+            // SSA conversion is now implemented in skalp-mir to eliminate combinational cycles
+            // from mutable variable reassignment (x = f(x) -> x_0 = value, x_1 = f(x_0), etc.)
             use_gpu: false,
             max_cycles: 1_000_000,
             timeout_ms: 60_000,

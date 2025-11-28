@@ -6,6 +6,7 @@ use crate::cdc_analysis::{CdcAnalyzer, CdcSeverity, CdcViolation};
 use crate::hir_to_mir::HirToMir;
 use crate::mir::Mir;
 use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
+use crate::ssa_conversion::apply_ssa_conversion;
 use anyhow::Result;
 use skalp_frontend::hir::Hir;
 use std::collections::HashMap;
@@ -100,10 +101,18 @@ impl MirCompiler {
             }
         }
 
-        // Step 3: Apply optimizations
+        // Step 3: Apply SSA conversion
+        // This eliminates combinational cycles from mutable variable reassignment (x = f(x))
+        // by transforming to unique variables (x_0 = value, x_1 = f(x_0), etc.)
+        if self.verbose {
+            println!("Phase 3: SSA conversion");
+        }
+        apply_ssa_conversion(&mut mir);
+
+        // Step 4: Apply optimizations
         if self.verbose {
             println!(
-                "Phase 3: Applying optimizations (level: {:?})",
+                "Phase 4: Applying optimizations (level: {:?})",
                 self.opt_level
             );
         }

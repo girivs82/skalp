@@ -2684,9 +2684,21 @@ impl<'a> MirToSirConverter<'a> {
 
     fn create_unary_op_node(&mut self, op: &skalp_mir::UnaryOp, operand: usize) -> usize {
         let node_id = self.next_node_id();
-        let unary_op = self.convert_unary_op(op);
-
         let operand_signal = self.node_to_signal_ref(operand);
+
+        // BUG FIX #87: For Negate operation, check operand type to use FNeg for floats
+        // Without this, FP negation like fp_neg(b) would generate integer negation
+        // instead of proper floating-point negation (as_type<uint>(-as_type<float>(...)))
+        let unary_op = if matches!(op, skalp_mir::UnaryOp::Negate) {
+            let operand_type = self.get_signal_type(&operand_signal.signal_id);
+            if operand_type.is_float() {
+                UnaryOperation::FNeg
+            } else {
+                self.convert_unary_op(op)
+            }
+        } else {
+            self.convert_unary_op(op)
+        };
 
         // Get type from operand - unary ops preserve type
         let sir_type = self.get_signal_type(&operand_signal.signal_id);

@@ -9519,10 +9519,13 @@ impl<'hir> HirToMir<'hir> {
             }
             "fp_neg" | "neg" => {
                 if args.len() == 1 {
-                    // FP negate is just regular negate
-                    Some(Expression::with_unknown_type(ExpressionKind::Unary {
-                        op: UnaryOp::Negate,
-                        operand: Box::new(args[0].clone()),
+                    // BUG FIX #87: FP negate must use FSub(0.0 - x) not integer Negate
+                    // Using integer Negate generates wrong Metal shader code
+                    let zero = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Float(0.0))));
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::FSub,
+                        left: zero,
+                        right: Box::new(args[0].clone()),
                     }))
                 } else {
                     None
