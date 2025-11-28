@@ -1468,6 +1468,12 @@ impl<'hir> HirToMir<'hir> {
             return assignments;
         }
 
+        // BUG FIX #91: Try to expand tuple signal = function call assignments
+        // This handles: result = quadratic_solve(a, b, c) where result is a tuple signal
+        if let Some(assignments) = self.try_expand_tuple_call_assignment(assign) {
+            return assignments;
+        }
+
         // Try to expand struct-to-struct assignments
         if let Some(assignments) = self.try_expand_struct_assignment(assign) {
             return assignments;
@@ -1511,6 +1517,125 @@ impl<'hir> HirToMir<'hir> {
         };
 
         Some(Assignment { lhs, rhs, kind })
+    }
+
+    /// BUG FIX #91: Try to expand tuple signal = function call assignment
+    /// This handles: result = quadratic_solve(a, b, c) where result is a tuple signal
+    /// and quadratic_solve returns a tuple. The assignment is expanded to:
+    /// result__0 = module_inst_result_0
+    /// result__1 = module_inst_result_1
+    /// etc.
+    fn try_expand_tuple_call_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<Assignment>> {
+        // Debug: Check what LHS we have
+        let is_call_rhs = matches!(&assign.rhs, hir::HirExpression::Call(_));
+        if is_call_rhs {
+            println!("🔍🔍🔍 BUG91_CHECK: LHS type={:?}, is_call=true 🔍🔍🔍",
+                     std::mem::discriminant(&assign.lhs));
+            if let hir::HirLValue::Signal(id) = &assign.lhs {
+                println!("🔍🔍🔍 BUG91_CHECK: Signal id={}, flattened_signals contains={}  🔍🔍🔍",
+                         id.0, self.flattened_signals.contains_key(id));
+                if let Some(flattened) = self.flattened_signals.get(id) {
+                    println!("🔍🔍🔍 BUG91_CHECK: Signal has {} flattened fields 🔍🔍🔍", flattened.len());
+                }
+            }
+        }
+
+        // Check if LHS is a tuple signal (has flattened fields)
+        let (_lhs_sig_id, lhs_flattened) = match &assign.lhs {
+            hir::HirLValue::Signal(id) => {
+                if let Some(flattened) = self.flattened_signals.get(id) {
+                    if flattened.len() > 1 {
+                        // Multiple flattened fields = tuple signal
+                        (*id, flattened.clone())
+                    } else {
+                        return None;  // Single field, not a tuple
+                    }
+                } else {
+                    return None;  // Not flattened
+                }
+            }
+            _ => return None,  // Not a signal LHS
+        };
+
+        // Check if RHS is a Call expression
+        let call = match &assign.rhs {
+            hir::HirExpression::Call(c) => c,
+            _ => return None,  // Not a call RHS
+        };
+
+        println!("🔧🔧🔧 BUG91_TUPLE_CALL: Expanding tuple = {}(...) with {} flattened fields 🔧🔧🔧",
+                 call.function, lhs_flattened.len());
+
+        // Get assignment kind
+        let kind = match assign.assignment_type {
+            hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
+            hir::HirAssignmentType::Blocking => AssignmentKind::Blocking,
+            hir::HirAssignmentType::Combinational => AssignmentKind::Blocking,
+        };
+
+        // Convert the call expression - this triggers HYBRID and creates module instance
+        let rhs_expr = self.convert_expression(&assign.rhs, 0)?;
+
+        // The call conversion should have created pending module instances
+        // Find the one we just created by checking the most recent entry
+        let pending_count = self.pending_module_instances.len();
+        if pending_count == 0 {
+            println!("🔧🔧🔧 BUG91_TUPLE_CALL: No pending instances - call may have been inlined 🔧🔧🔧");
+            // If no pending instance, the call was inlined and returns a Concat
+            // We can still expand it
+            if let ExpressionKind::Concat(elements) = &rhs_expr.kind {
+                if elements.len() == lhs_flattened.len() {
+                    let mut assignments = Vec::new();
+                    // Reverse elements to match tuple field order (BUG #91 fix)
+                    let elements_rev: Vec<_> = elements.iter().rev().collect();
+                    for (flat_field, elem) in lhs_flattened.iter().zip(elements_rev.iter()) {
+                        let assign = Assignment {
+                            lhs: LValue::Signal(SignalId(flat_field.id)),
+                            rhs: (*elem).clone(),
+                            kind,
+                        };
+                        assignments.push(assign);
+                        println!("🔧🔧🔧 BUG91_TUPLE_CALL: field_{} = <inlined concat element> 🔧🔧🔧",
+                                 flat_field.id);
+                    }
+                    return Some(assignments);
+                }
+            }
+            return None;
+        }
+
+        // Get the result_signal_id from the pending instance (first element)
+        let (result_signal_id, _, _, _, _, _) = &self.pending_module_instances[pending_count - 1];
+        let base_signal_id = result_signal_id.0;
+
+        println!("🔧🔧🔧 BUG91_TUPLE_CALL: Module instance result_0 signal id={} 🔧🔧🔧", base_signal_id);
+
+        // Create assignments for each flattened field
+        let mut assignments = Vec::new();
+        for (idx, flat_field) in lhs_flattened.iter().enumerate() {
+            // The module instance creates signals: func_inst_N_result_0, func_inst_N_result_1, etc.
+            // We need to reference those signals
+            let result_sig_id = if idx == 0 {
+                SignalId(base_signal_id)
+            } else {
+                // Result signals are allocated sequentially after the first one
+                SignalId(base_signal_id + idx as u32)
+            };
+
+            let assign = Assignment {
+                lhs: LValue::Signal(SignalId(flat_field.id)),
+                rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(result_sig_id))),
+                kind,
+            };
+            assignments.push(assign);
+            println!("🔧🔧🔧 BUG91_TUPLE_CALL: field_{} = result_{} (sig_id={}) 🔧🔧🔧",
+                     flat_field.id, idx, result_sig_id.0);
+        }
+
+        Some(assignments)
     }
 
     /// Try to expand a struct assignment into multiple field assignments
@@ -2179,6 +2304,17 @@ impl<'hir> HirToMir<'hir> {
         }
         eprintln!("[CONVERT_EXPANDED] Array index read expansion returned None");
 
+        // BUG FIX #91: Try to expand tuple signal = function call assignments
+        eprintln!("[CONVERT_EXPANDED] Trying tuple call expansion...");
+        if let Some(assigns) = self.try_expand_tuple_call_continuous_assignment(assign) {
+            eprintln!(
+                "[CONVERT_EXPANDED] ✓ Tuple call expansion returned Some with {} assigns",
+                assigns.len()
+            );
+            return assigns;
+        }
+        eprintln!("[CONVERT_EXPANDED] Tuple call expansion returned None");
+
         // Try to expand struct-to-struct assignments
         eprintln!("[CONVERT_EXPANDED] Trying struct expansion...");
         if let Some(assigns) = self.try_expand_struct_continuous_assignment(assign) {
@@ -2288,6 +2424,97 @@ impl<'hir> HirToMir<'hir> {
 
         eprintln!("[DEBUG] Continuous assignment successful!");
         Some(ContinuousAssign { lhs, rhs })
+    }
+
+    /// BUG FIX #91: Try to expand tuple signal = function call continuous assignment
+    /// This handles: result = quadratic_solve(a, b, c) where result is a tuple signal
+    fn try_expand_tuple_call_continuous_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<ContinuousAssign>> {
+        // Debug: Check what we're looking at
+        let is_call_rhs = matches!(&assign.rhs, hir::HirExpression::Call(_));
+        if is_call_rhs {
+            println!("🔍🔍🔍 BUG91_CONT_CHECK: LHS type={:?}, is_call=true 🔍🔍🔍",
+                     std::mem::discriminant(&assign.lhs));
+            if let hir::HirLValue::Signal(id) = &assign.lhs {
+                println!("🔍🔍🔍 BUG91_CONT_CHECK: Signal id={}, flattened_signals.len={}, contains={}  🔍🔍🔍",
+                         id.0, self.flattened_signals.len(), self.flattened_signals.contains_key(id));
+            }
+        }
+
+        // Check if LHS is a tuple signal (has multiple flattened fields)
+        let lhs_flattened = match &assign.lhs {
+            hir::HirLValue::Signal(id) => {
+                if let Some(flattened) = self.flattened_signals.get(id) {
+                    if flattened.len() > 1 {
+                        flattened.clone()
+                    } else {
+                        return None;  // Single field, not a tuple
+                    }
+                } else {
+                    return None;  // Not flattened
+                }
+            }
+            _ => return None,  // Not a signal LHS
+        };
+
+        // Check if RHS is a Call expression
+        let call = match &assign.rhs {
+            hir::HirExpression::Call(c) => c,
+            _ => return None,  // Not a call RHS
+        };
+
+        println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: Expanding tuple = {}(...) with {} flattened fields 🔧🔧🔧",
+                 call.function, lhs_flattened.len());
+
+        // Convert the call expression - this triggers HYBRID and creates module instance
+        let rhs_expr = self.convert_expression(&assign.rhs, 0)?;
+
+        // The call conversion should have created pending module instances
+        let pending_count = self.pending_module_instances.len();
+        if pending_count == 0 {
+            println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: No pending instances - call may have been inlined 🔧🔧🔧");
+            // Handle inlined call that returns Concat
+            if let ExpressionKind::Concat(elements) = &rhs_expr.kind {
+                if elements.len() == lhs_flattened.len() {
+                    let mut assigns = Vec::new();
+                    let elements_rev: Vec<_> = elements.iter().rev().collect();
+                    for (flat_field, elem) in lhs_flattened.iter().zip(elements_rev.iter()) {
+                        assigns.push(ContinuousAssign {
+                            lhs: LValue::Signal(SignalId(flat_field.id)),
+                            rhs: (*elem).clone(),
+                        });
+                    }
+                    return Some(assigns);
+                }
+            }
+            return None;
+        }
+
+        // Get the result_signal_id from the pending instance
+        let (result_signal_id, _, _, _, _, _) = &self.pending_module_instances[pending_count - 1];
+        let base_signal_id = result_signal_id.0;
+
+        println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: Module instance result_0 signal id={} 🔧🔧🔧", base_signal_id);
+
+        // Create continuous assignments for each flattened field
+        let mut assigns = Vec::new();
+        for (idx, flat_field) in lhs_flattened.iter().enumerate() {
+            let result_sig_id = if idx == 0 {
+                SignalId(base_signal_id)
+            } else {
+                SignalId(base_signal_id + idx as u32)
+            };
+
+            assigns.push(ContinuousAssign {
+                lhs: LValue::Signal(SignalId(flat_field.id)),
+                rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(result_sig_id))),
+            });
+            println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: field_{} = result_{} 🔧🔧🔧", flat_field.id, idx);
+        }
+
+        Some(assigns)
     }
 
     /// Try to expand a struct continuous assignment into multiple field assignments
@@ -5785,26 +6012,54 @@ impl<'hir> HirToMir<'hir> {
 
                 // Build final combined map for result expression
                 //
-                // BUG FIX #89: Do NOT include local_var_map when substituting result_expr
+                // BUG FIX #89 + #91: Selective substitution of local_var_map in result_expr
                 //
-                // PROBLEM: When result_expr is `Variable(result_32)` and local_var_map contains
+                // PROBLEM #89: When result_expr is `Variable(result_32)` and local_var_map contains
                 // `"result_32" -> Match{...}`, the substitution replaces the variable with the
-                // ENTIRE match expression. This causes the match to be computed twice:
-                //   - Once for the `let result_32 = match...` statement
-                //   - Again for the result_expr (now the match itself, not a variable reference)
+                // ENTIRE match expression. This causes the match to be computed twice.
                 //
-                // SOLUTION: Only substitute PARAMETERS in result_expr, not local let bindings.
-                // Local let bindings (like `result_32`) should remain as Variable references
-                // that will be resolved during convert_expression by looking up in dynamic_variables.
+                // PROBLEM #91: When result_expr is `TupleLiteral(rx, ry, rz)` and local_var_map
+                // contains `"rx" -> Call(fp_add)`, NOT substituting causes the variables to be
+                // unresolved, resulting in constants (0) being generated instead of the actual values.
                 //
-                // The local_var_map is still useful for intra-block substitution (e.g., when one
-                // let binding references a previous let binding), but the result_expr should NOT
-                // have local variables substituted - it should reference the computed values via
-                // the Variable mechanism.
+                // SOLUTION: Create a filtered local_var_map that EXCLUDES complex expressions
+                // (like Match) but INCLUDES simple expressions (like Call, Literal, Variable).
+                // This allows tuple returns with function call results to work correctly,
+                // while preventing duplication of complex match expressions.
+                eprintln!("[BUG #91] Building filtered_local_map from {} entries", local_var_map.len());
+                for (name, expr) in &local_var_map {
+                    eprintln!("[BUG #91]   local_var_map['{}'] = {:?}", name, std::mem::discriminant(expr));
+                }
+                let mut filtered_local_map = local_var_map
+                    .iter()
+                    .filter(|(name, expr)| {
+                        // Exclude Match expressions to prevent BUG #89
+                        let should_include = !matches!(expr, hir::HirExpression::Match(_));
+                        if !should_include {
+                            eprintln!(
+                                "[BUG #91] Excluding '{}' from result_expr substitution (is Match)",
+                                name
+                            );
+                        } else {
+                            eprintln!(
+                                "[BUG #91] Including '{}' in result_expr substitution ({:?})",
+                                name, std::mem::discriminant(expr)
+                            );
+                        }
+                        should_include
+                    })
+                    .map(|(k, v)| (k.clone(), v))
+                    .collect::<HashMap<_, _>>();
+                eprintln!("[BUG #91] filtered_local_map has {} entries (after filtering)", filtered_local_map.len());
+
+                // Merge with param_map (params take precedence)
+                for (k, v) in param_map {
+                    filtered_local_map.insert(k.clone(), *v);
+                }
 
                 let substituted_result = Box::new(self.substitute_expression_with_var_map(
                     result_expr,
-                    param_map,  // Only params, NOT combined_map with local vars
+                    &filtered_local_map,  // BUG #91: Include filtered local vars
                     var_id_to_name,
                 )?);
 
@@ -6872,6 +7127,218 @@ impl<'hir> HirToMir<'hir> {
 
             // For literals and other leaf nodes, return as-is
             _ => Some(expr.clone()),
+        }
+    }
+
+    /// BUG FIX #91: Simple name-based expression substitution for module synthesis
+    /// Substitutes variable references (by name from GenericParam) with expressions from the map
+    fn substitute_hir_expr_with_map(
+        &self,
+        expr: &hir::HirExpression,
+        name_map: &HashMap<String, hir::HirExpression>,
+    ) -> hir::HirExpression {
+        match expr {
+            // GenericParam - used for function parameters and some variable references
+            hir::HirExpression::GenericParam(name) => {
+                if let Some(replacement) = name_map.get(name) {
+                    println!("[BUG #91 SUBST] Replacing GenericParam '{}' with {:?}",
+                             name, std::mem::discriminant(replacement));
+                    replacement.clone()
+                } else {
+                    expr.clone()
+                }
+            }
+
+            // Variable - look up by name if we can find it
+            // BUG FIX #91: First check if this variable's name exists in name_map directly
+            // This handles the case where Block's let bindings created Variables that
+            // we need to substitute (e.g., rx/ry/rz in vec3_add_op)
+            hir::HirExpression::Variable(var_id) => {
+                // First, try to find the variable name in dynamic_variables and check name_map
+                if let Some((_, name, _)) = self.dynamic_variables.get(var_id) {
+                    if let Some(replacement) = name_map.get(name) {
+                        println!("[BUG #91 SUBST] Replacing Variable '{}' (id={}) with {:?}",
+                                 name, var_id.0, std::mem::discriminant(replacement));
+                        return replacement.clone();
+                    }
+                }
+
+                // Fallback: For Block's local Variables that might not be in dynamic_variables,
+                // we can't resolve the name. Return as-is and let convert_hir_expr_for_module handle it.
+                expr.clone()
+            }
+
+            // TupleLiteral - substitute in each element
+            hir::HirExpression::TupleLiteral(elements) => {
+                let substituted: Vec<_> = elements.iter()
+                    .map(|elem| self.substitute_hir_expr_with_map(elem, name_map))
+                    .collect();
+                hir::HirExpression::TupleLiteral(substituted)
+            }
+
+            // Call - substitute in arguments
+            hir::HirExpression::Call(call_expr) => {
+                let substituted_args: Vec<_> = call_expr.args.iter()
+                    .map(|arg| self.substitute_hir_expr_with_map(arg, name_map))
+                    .collect();
+                hir::HirExpression::Call(hir::HirCallExpr {
+                    function: call_expr.function.clone(),
+                    args: substituted_args,
+                    type_args: call_expr.type_args.clone(),
+                })
+            }
+
+            // Binary - substitute in both operands
+            hir::HirExpression::Binary(bin_expr) => {
+                let left_sub = self.substitute_hir_expr_with_map(&bin_expr.left, name_map);
+                let right_sub = self.substitute_hir_expr_with_map(&bin_expr.right, name_map);
+                hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    op: bin_expr.op.clone(),
+                    left: Box::new(left_sub),
+                    right: Box::new(right_sub),
+                })
+            }
+
+            // If - substitute in all branches
+            hir::HirExpression::If(if_expr) => {
+                let cond_sub = self.substitute_hir_expr_with_map(&if_expr.condition, name_map);
+                let then_sub = self.substitute_hir_expr_with_map(&if_expr.then_expr, name_map);
+                let else_sub = self.substitute_hir_expr_with_map(&if_expr.else_expr, name_map);
+                hir::HirExpression::If(hir::HirIfExpr {
+                    condition: Box::new(cond_sub),
+                    then_expr: Box::new(then_sub),
+                    else_expr: Box::new(else_sub),
+                })
+            }
+
+            // Block - process nested let bindings
+            // BUG FIX #91: When processing Block's result_expr, we need to replace Variables
+            // that reference the let bindings. Since Variables use VariableId (not name),
+            // we need to substitute them here directly rather than relying on the Variable handler.
+            hir::HirExpression::Block { statements, result_expr } => {
+                let mut nested_map = name_map.clone();
+
+                // Build a var_id-to-substituted_value map for let bindings in this Block
+                let mut var_id_to_value: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
+
+                for stmt in statements {
+                    if let hir::HirStatement::Let(let_stmt) = stmt {
+                        // Substitute in the let binding's value
+                        let mut sub_value = self.substitute_hir_expr_with_map(&let_stmt.value, &nested_map);
+
+                        // Also substitute any references to previous let bindings (by VariableId)
+                        sub_value = self.substitute_var_ids_in_expr(&sub_value, &var_id_to_value);
+
+                        // Store for name-based lookup
+                        nested_map.insert(let_stmt.name.clone(), sub_value.clone());
+                        // Store for VariableId-based lookup
+                        var_id_to_value.insert(let_stmt.id, sub_value);
+                    }
+                }
+
+                // Substitute in result_expr - first by name (for GenericParams etc)
+                let partially_substituted = self.substitute_hir_expr_with_map(result_expr, &nested_map);
+                // Then by VariableId (for Block's local Variables)
+                self.substitute_var_ids_in_expr(&partially_substituted, &var_id_to_value)
+            }
+
+            // Cast - substitute in the inner expression
+            hir::HirExpression::Cast(cast_expr) => {
+                let sub_expr = self.substitute_hir_expr_with_map(&cast_expr.expr, name_map);
+                hir::HirExpression::Cast(hir::HirCastExpr {
+                    expr: Box::new(sub_expr),
+                    target_type: cast_expr.target_type.clone(),
+                })
+            }
+
+            // Concat - substitute in all parts
+            hir::HirExpression::Concat(parts) => {
+                let substituted: Vec<_> = parts.iter()
+                    .map(|part| self.substitute_hir_expr_with_map(part, name_map))
+                    .collect();
+                hir::HirExpression::Concat(substituted)
+            }
+
+            // Everything else - return as-is
+            _ => expr.clone(),
+        }
+    }
+
+    /// BUG FIX #91: Substitute Variables by VariableId with expressions from the map
+    /// This handles the case where Block's result_expr contains Variables referencing
+    /// let bindings that were defined in the same Block.
+    fn substitute_var_ids_in_expr(
+        &self,
+        expr: &hir::HirExpression,
+        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+    ) -> hir::HirExpression {
+        match expr {
+            hir::HirExpression::Variable(var_id) => {
+                if let Some(replacement) = var_id_map.get(var_id) {
+                    println!("[BUG #91 VAR_ID] Replacing Variable({}) with {:?}",
+                             var_id.0, std::mem::discriminant(replacement));
+                    replacement.clone()
+                } else {
+                    expr.clone()
+                }
+            }
+
+            hir::HirExpression::TupleLiteral(elements) => {
+                let substituted: Vec<_> = elements.iter()
+                    .map(|elem| self.substitute_var_ids_in_expr(elem, var_id_map))
+                    .collect();
+                hir::HirExpression::TupleLiteral(substituted)
+            }
+
+            hir::HirExpression::Call(call_expr) => {
+                let substituted_args: Vec<_> = call_expr.args.iter()
+                    .map(|arg| self.substitute_var_ids_in_expr(arg, var_id_map))
+                    .collect();
+                hir::HirExpression::Call(hir::HirCallExpr {
+                    function: call_expr.function.clone(),
+                    args: substituted_args,
+                    type_args: call_expr.type_args.clone(),
+                })
+            }
+
+            hir::HirExpression::Binary(bin_expr) => {
+                let left_sub = self.substitute_var_ids_in_expr(&bin_expr.left, var_id_map);
+                let right_sub = self.substitute_var_ids_in_expr(&bin_expr.right, var_id_map);
+                hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    op: bin_expr.op.clone(),
+                    left: Box::new(left_sub),
+                    right: Box::new(right_sub),
+                })
+            }
+
+            hir::HirExpression::If(if_expr) => {
+                let cond_sub = self.substitute_var_ids_in_expr(&if_expr.condition, var_id_map);
+                let then_sub = self.substitute_var_ids_in_expr(&if_expr.then_expr, var_id_map);
+                let else_sub = self.substitute_var_ids_in_expr(&if_expr.else_expr, var_id_map);
+                hir::HirExpression::If(hir::HirIfExpr {
+                    condition: Box::new(cond_sub),
+                    then_expr: Box::new(then_sub),
+                    else_expr: Box::new(else_sub),
+                })
+            }
+
+            hir::HirExpression::Concat(parts) => {
+                let substituted: Vec<_> = parts.iter()
+                    .map(|part| self.substitute_var_ids_in_expr(part, var_id_map))
+                    .collect();
+                hir::HirExpression::Concat(substituted)
+            }
+
+            hir::HirExpression::Cast(cast_expr) => {
+                let sub_expr = self.substitute_var_ids_in_expr(&cast_expr.expr, var_id_map);
+                hir::HirExpression::Cast(hir::HirCastExpr {
+                    expr: Box::new(sub_expr),
+                    target_type: cast_expr.target_type.clone(),
+                })
+            }
+
+            // Everything else - return as-is
+            _ => expr.clone(),
         }
     }
 
@@ -9480,6 +9947,8 @@ impl<'hir> HirToMir<'hir> {
                     }
                 };
 
+                println!("    📌 Function '{}': module_id = {:?}", call.function, module_id.map(|m| m.0));
+
                 if let Some(module_id) = module_id {
                     // Get return type from HIR
                     let return_type = if let Some(hir) = &self.hir {
@@ -9508,8 +9977,45 @@ impl<'hir> HirToMir<'hir> {
                     ));
                 }
 
-                // If not a module synthesis case, fall back to regular conversion
-                eprintln!("    ⚠️ Falling back to regular convert_expression for '{}'", call.function);
+                // BUG FIX #91: If not a module synthesis case, INLINE within module context
+                // Previously we fell back to convert_expression which lost the module context.
+                // Now we inline the function body and convert it within the module context.
+                println!("    🔄🔄🔄 BUG91_INLINE: Inlining '{}' within module context 🔄🔄🔄", call.function);
+
+                // Get the function body and parameters
+                if let Some(hir) = self.hir.clone() {
+                    if let Some(func) = hir.functions.iter().find(|f| f.name == call.function) {
+                        // Build parameter substitution map: param_name -> argument expression
+                        let mut param_substitutions: HashMap<String, hir::HirExpression> = HashMap::new();
+                        for (param, arg_mir) in func.params.iter().zip(&arg_exprs) {
+                            // We need to keep the argument as HIR expression for substitution
+                            // Get the original HIR argument from the call
+                            if let Some(arg_hir) = call.args.get(func.params.iter().position(|p| p.name == param.name).unwrap_or(0)) {
+                                param_substitutions.insert(param.name.clone(), arg_hir.clone());
+                            }
+                        }
+                        println!("    🔄🔄🔄 BUG91_INLINE: Built param substitutions for {} parameters", param_substitutions.len());
+
+                        // Get the function body as an expression
+                        if let Some(body_expr) = self.convert_body_to_expression(&func.body.clone()) {
+                            // Substitute parameters in the body expression
+                            let substituted_body = self.substitute_hir_expr_with_map(&body_expr, &param_substitutions);
+                            println!("    🔄🔄🔄 BUG91_INLINE: Substituted body, type: {:?}", std::mem::discriminant(&substituted_body));
+
+                            // Convert the substituted body within module context
+                            return self.convert_hir_expr_for_module(&substituted_body, ctx, depth + 1);
+                        } else {
+                            println!("    🔄🔄🔄 BUG91_INLINE: convert_body_to_expression FAILED!");
+                        }
+                    } else {
+                        println!("    🔄🔄🔄 BUG91_INLINE: function '{}' not found in HIR!", call.function);
+                    }
+                } else {
+                    println!("    🔄🔄🔄 BUG91_INLINE: no HIR available!");
+                }
+
+                // Last resort fallback if inlining fails
+                println!("    ⚠️ BUG91_INLINE: Falling back to regular convert_expression for '{}'", call.function);
                 self.convert_expression(expr, depth)
             }
 
@@ -9546,11 +10052,15 @@ impl<'hir> HirToMir<'hir> {
             }
 
             // Tuple literals - convert to concatenation
+            // BUG FIX #91: Reverse element order so first element is at LSB position.
+            // Tests expect little-endian tuple layout: bytes[0..4]=elem0, bytes[4..8]=elem1, etc.
+            // Concat puts first element at MSB, so we reverse to get elem0 at LSB.
             hir::HirExpression::TupleLiteral(elements) => {
                 let mut converted = Vec::new();
                 for elem in elements {
                     converted.push(self.convert_hir_expr_for_module(elem, ctx, depth + 1)?);
                 }
+                converted.reverse();  // Reverse so elem[0] ends up at LSB
                 Some(Expression::with_unknown_type(ExpressionKind::Concat(converted)))
             }
 
@@ -9584,16 +10094,54 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
 
-            // BUG FIX #85: Handle Block expressions in module context
+            // BUG FIX #85 + #91: Handle Block expressions in module context
+            // BUG FIX #91: When a Block comes from an inlined function (e.g., vec3_add_op),
+            // its let statements define variables that result_expr references.
+            // We need to substitute the let binding values directly into result_expr
+            // before converting, since we can't easily add new signals from here.
             hir::HirExpression::Block { statements, result_expr } => {
                 println!("🧱🧱🧱 MODULE_BLOCK: Converting Block with {} statements in module context 🧱🧱🧱", statements.len());
 
-                // Process statements - but since we've already extracted let bindings,
-                // we just need to convert the result expression
-                // The let binding signals are already created - we don't need to create them again
+                // Build a map from variable names to their substituted values
+                // Process let statements in order so each can reference previous ones
+                let mut let_substitutions: HashMap<String, hir::HirExpression> = HashMap::new();
 
-                // Convert and return the result expression in module context
-                self.convert_hir_expr_for_module(result_expr, ctx, depth + 1)
+                for stmt in statements {
+                    if let hir::HirStatement::Let(let_stmt) = stmt {
+                        println!("🧱🧱🧱 MODULE_BLOCK: Processing let '{}' (id={}) 🧱🧱🧱",
+                                 let_stmt.name, let_stmt.id.0);
+
+                        // Substitute any previous let bindings in this value
+                        let substituted_value = self.substitute_hir_expr_with_map(
+                            &let_stmt.value, &let_substitutions);
+
+                        let_substitutions.insert(let_stmt.name.clone(), substituted_value);
+                        println!("🧱🧱🧱 MODULE_BLOCK: Added '{}' to substitution map 🧱🧱🧱",
+                                 let_stmt.name);
+                    }
+                }
+
+                // Substitute all let bindings in the result expression
+                println!("🧱🧱🧱 MODULE_BLOCK: result_expr type before subst: {:?} 🧱🧱🧱",
+                         std::mem::discriminant(&**result_expr));
+                if let hir::HirExpression::TupleLiteral(elems) = &**result_expr {
+                    for (i, elem) in elems.iter().enumerate() {
+                        println!("🧱🧱🧱 MODULE_BLOCK: TupleLiteral[{}] = {:?} 🧱🧱🧱",
+                                 i, std::mem::discriminant(elem));
+                        if let hir::HirExpression::Variable(var_id) = elem {
+                            println!("🧱🧱🧱 MODULE_BLOCK: TupleLiteral[{}] is Variable({}) 🧱🧱🧱", i, var_id.0);
+                        }
+                    }
+                }
+                let substituted_result = self.substitute_hir_expr_with_map(
+                    result_expr, &let_substitutions);
+
+                println!("🧱🧱🧱 MODULE_BLOCK: Substituted result_expr, converting... 🧱🧱🧱");
+                println!("🧱🧱🧱 MODULE_BLOCK: result_expr type after subst: {:?} 🧱🧱🧱",
+                         std::mem::discriminant(&substituted_result));
+
+                // Now convert the substituted result expression
+                self.convert_hir_expr_for_module(&substituted_result, ctx, depth + 1)
             }
 
             // BUG FIX #85: Handle FieldAccess for tuple destructuring in module context
@@ -9921,10 +10469,13 @@ impl<'hir> HirToMir<'hir> {
             eprintln!("    ✓ Assigned to single output port (id={})", output_port_ids[0].0);
         } else if let ExpressionKind::Concat(elements) = &expr.kind {
             // Tuple return - assign each element to corresponding port
-            for (idx, (port_id, elem)) in output_port_ids.iter().zip(elements.iter()).enumerate() {
+            // BUG FIX #91: TupleLiteral elements are reversed in convert_hir_expr_for_module
+            // for correct byte layout. Reverse back to get logical order for port assignment.
+            let elements_reversed: Vec<_> = elements.iter().rev().collect();
+            for (idx, (port_id, elem)) in output_port_ids.iter().zip(elements_reversed.iter()).enumerate() {
                 let assignment = ContinuousAssign {
                     lhs: LValue::Port(*port_id),
-                    rhs: elem.clone(),
+                    rhs: (*elem).clone(),
                 };
                 module.assignments.push(assignment);
                 eprintln!("    ✓ Assigned tuple element {} to output port (id={})", idx, port_id.0);
@@ -9939,16 +10490,19 @@ impl<'hir> HirToMir<'hir> {
                 (&then_expr.kind, &else_expr.kind) {
                 if then_elements.len() == output_port_ids.len() && else_elements.len() == output_port_ids.len() {
                     eprintln!("    🔧 Expanding conditional tuple return to per-element conditionals");
+                    // BUG FIX #91: Reverse elements to match logical order (same as Concat case above)
+                    let then_reversed: Vec<_> = then_elements.iter().rev().collect();
+                    let else_reversed: Vec<_> = else_elements.iter().rev().collect();
                     for (idx, ((port_id, then_elem), else_elem)) in output_port_ids.iter()
-                        .zip(then_elements.iter())
-                        .zip(else_elements.iter())
+                        .zip(then_reversed.iter())
+                        .zip(else_reversed.iter())
                         .enumerate()
                     {
                         // Create per-element conditional: cond ? then_elem : else_elem
                         let elem_conditional = Expression::with_unknown_type(ExpressionKind::Conditional {
                             cond: cond.clone(),
-                            then_expr: Box::new(then_elem.clone()),
-                            else_expr: Box::new(else_elem.clone()),
+                            then_expr: Box::new((*then_elem).clone()),
+                            else_expr: Box::new((*else_elem).clone()),
                         });
                         let assignment = ContinuousAssign {
                             lhs: LValue::Port(*port_id),
