@@ -4161,10 +4161,24 @@ impl HirBuilderContext {
                 }
 
                 // We have a flattened expression like: first_operand BinaryExpr(op operand) BinaryExpr(op operand) ...
+                // Or all BinaryExprs where the first one contains both operands
                 // Build it left-associatively
                 let mut result_expr = None;
 
-                for (idx, child) in expr_children.iter().enumerate() {
+                // BUGFIX: Check if all children are BinaryExprs (no separate first operand)
+                // In this case, the first BinaryExpr contains both operands, not just op + right
+                let non_binary_count = expr_children.iter()
+                    .filter(|n| n.kind() != SyntaxKind::BinaryExpr)
+                    .count();
+
+                let mut start_idx = 0;
+                if non_binary_count == 0 && !expr_children.is_empty() && expr_children[0].kind() == SyntaxKind::BinaryExpr {
+                    // All children are BinaryExprs - first one is a complete binary expr
+                    result_expr = self.build_binary_expr(&expr_children[0]);
+                    start_idx = 1; // Start chaining from second BinaryExpr
+                }
+
+                for (idx, child) in expr_children.iter().enumerate().skip(start_idx) {
                     // Skip IdentExprs that are part of IndexExprs
                     if indices_to_skip.contains(&idx) {
                         continue;
