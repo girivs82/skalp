@@ -4636,6 +4636,151 @@ impl<'hir> HirToMir<'hir> {
         Some(result)
     }
 
+    /// Convert match expression to parallel one-hot mux (OR-of-ANDs) in module synthesis context
+    /// This is the module context version of convert_match_to_parallel_mux
+    fn convert_match_to_parallel_mux_for_module(
+        &mut self,
+        match_value: &hir::HirExpression,
+        arms: &[hir::HirMatchArmExpr],
+        ctx: &ModuleSynthesisContext,
+        depth: usize,
+    ) -> Option<Expression> {
+        if arms.is_empty() {
+            return None;
+        }
+
+        eprintln!("[PARALLEL_MUX_MODULE] Converting {} arms to OR-of-ANDs (module context)", arms.len());
+
+        // Convert the match value expression in module context
+        let match_value_expr = self.convert_hir_expr_for_module(match_value, ctx, depth)?;
+
+        // Find the default arm (wildcard pattern)
+        let mut default_value: Option<Expression> = None;
+        let non_default_arms: Vec<_> = arms
+            .iter()
+            .filter(|arm| {
+                if matches!(arm.pattern, hir::HirPattern::Wildcard) {
+                    default_value = self.convert_hir_expr_for_module(&arm.expr, ctx, depth);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // If no non-default arms, just return the default
+        if non_default_arms.is_empty() {
+            return default_value;
+        }
+
+        // Build OR-of-ANDs: (c1 ? v1 : 0) | (c2 ? v2 : 0) | ...
+        // Each arm becomes: condition ? value : 0
+        let zero = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)));
+
+        let mut result: Option<Expression> = None;
+
+        for arm in &non_default_arms {
+            // Build condition: match_value == pattern
+            let condition = match &arm.pattern {
+                hir::HirPattern::Literal(lit) => {
+                    let left = Box::new(match_value_expr.clone());
+                    let right = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                        self.convert_literal(lit)?,
+                    )));
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left,
+                        right,
+                    }))
+                }
+                hir::HirPattern::Path(enum_name, variant) => {
+                    if enum_name == "__CONST__" {
+                        if let Some(const_value) = self.resolve_constant_value(variant) {
+                            let left = Box::new(match_value_expr.clone());
+                            let right = Box::new(const_value);
+                            Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::Equal,
+                                left,
+                                right,
+                            }))
+                        } else {
+                            None
+                        }
+                    } else if let Some(variant_value) = self.resolve_enum_variant_value(enum_name, variant) {
+                        let left = Box::new(match_value_expr.clone());
+                        let right = Box::new(variant_value);
+                        Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::Equal,
+                            left,
+                            right,
+                        }))
+                    } else {
+                        None
+                    }
+                }
+                hir::HirPattern::Wildcard => None, // Shouldn't happen - filtered out
+                _ => None,
+            };
+
+            // Skip if we couldn't build a condition
+            let condition = match condition {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Apply guard if present
+            let final_condition = if let Some(guard) = &arm.guard {
+                let guard_expr = Box::new(self.convert_hir_expr_for_module(guard, ctx, depth)?);
+                let cond_expr = Box::new(condition);
+                Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::LogicalAnd,
+                    left: cond_expr,
+                    right: guard_expr,
+                })
+            } else {
+                condition
+            };
+
+            // Convert arm body in module context
+            let arm_value = self.convert_hir_expr_for_module(&arm.expr, ctx, depth)?;
+
+            // Create: condition ? value : 0
+            let masked_value = Expression::with_unknown_type(ExpressionKind::Conditional {
+                cond: Box::new(final_condition),
+                then_expr: Box::new(arm_value),
+                else_expr: Box::new(zero.clone()),
+            });
+
+            // OR with accumulated result
+            match result {
+                None => result = Some(masked_value),
+                Some(prev) => {
+                    result = Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Or,
+                        left: Box::new(prev),
+                        right: Box::new(masked_value),
+                    }));
+                }
+            }
+        }
+
+        // If there's a default, OR it in
+        if let Some(default) = default_value {
+            if let Some(prev) = result {
+                result = Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::Or,
+                    left: Box::new(prev),
+                    right: Box::new(default),
+                }));
+            } else {
+                result = Some(default);
+            }
+        }
+
+        eprintln!("[PARALLEL_MUX_MODULE] Generated OR-of-ANDs expression (module context)");
+        result
+    }
+
     /// BUG FIX #85: Convert match expression to conditionals while staying in module context
     /// This prevents duplicate module instances by NOT using the regular convert_expression path
     /// which triggers the HYBRID mechanism for function calls inside match arms.
@@ -9410,10 +9555,21 @@ impl<'hir> HirToMir<'hir> {
             // Without this, Match falls back to convert_expression -> convert_match_to_conditionals
             // which triggers HYBRID mechanism and creates duplicate module instances
             hir::HirExpression::Match(match_expr) => {
-                println!("🎯🎯🎯 MODULE_MATCH: Converting Match with {} arms in module context 🎯🎯🎯", match_expr.arms.len());
+                println!("🎯🎯🎯 MODULE_MATCH: Converting Match with {} arms in module context, mux_style={:?} 🎯🎯🎯",
+                         match_expr.arms.len(), match_expr.mux_style);
 
-                // Convert match to nested conditionals, staying in module context
-                self.convert_match_to_conditionals_for_module(&match_expr.expr, &match_expr.arms, ctx, depth + 1)
+                // Choose mux generation strategy based on intent/attribute
+                match match_expr.mux_style {
+                    hir::MuxStyle::Parallel => {
+                        eprintln!("[PARALLEL_MUX_MODULE] Converting {} arms to OR-of-ANDs (module context)", match_expr.arms.len());
+                        // Generate OR-of-ANDs in module context
+                        self.convert_match_to_parallel_mux_for_module(&match_expr.expr, &match_expr.arms, ctx, depth + 1)
+                    }
+                    hir::MuxStyle::Priority | hir::MuxStyle::Auto => {
+                        // Convert match to nested conditionals, staying in module context
+                        self.convert_match_to_conditionals_for_module(&match_expr.expr, &match_expr.arms, ctx, depth + 1)
+                    }
+                }
             }
 
             // BUG FIX #85: Handle Block expressions in module context

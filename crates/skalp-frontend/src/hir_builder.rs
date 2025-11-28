@@ -1369,6 +1369,10 @@ impl HirBuilderContext {
                         statements.push(stmt);
                     }
                 }
+                SyntaxKind::Attribute => {
+                    // Process attribute and set pending_mux_style for next statement
+                    self.process_attribute(&child);
+                }
                 _ => {}
             }
         }
@@ -4999,6 +5003,10 @@ impl HirBuilderContext {
                     if let Some(stmt) = self.build_statement(&child) {
                         statements.push(stmt);
                     }
+                }
+                SyntaxKind::Attribute => {
+                    // Process attribute and set pending_mux_style for next statement/expression
+                    self.process_attribute(&child);
                 }
                 // Expressions - the last one becomes the result
                 _ if matches!(

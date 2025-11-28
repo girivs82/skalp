@@ -5893,4 +5893,18 @@ mod tests {
         );
         assert_eq!(tree.kind(), SyntaxKind::SourceFile);
     }
+
+    #[test]
+    fn test_parse_intent_without_leading_whitespace() {
+        // This mimics a file that starts directly with intent declaration (no leading whitespace)
+        let source = "intent parallel = mux_style::parallel;\n\nintent priority = mux_style::priority;\n";
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Intent declarations without leading whitespace should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
 }
