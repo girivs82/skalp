@@ -129,6 +129,20 @@ pub struct HirToMir<'hir> {
     /// Format: (result_signal_ids, function_name, module_id, argument_expressions, hir_return_type, frontend_type)
     /// BUG FIX #92: Changed from SignalId to Vec<SignalId> to support tuple-returning functions
     pending_module_instances: Vec<(Vec<SignalId>, String, ModuleId, Vec<Expression>, Option<hir::HirType>, Type)>,
+    /// Entity instance output signals for hierarchical elaboration (Bug #13-16, #21-23 fix)
+    /// Maps HIR VariableId (from let binding) to a map of port name -> SignalId
+    /// Example: let inner = Inner { data }; -> inner maps to {"result" -> SignalId(5)}
+    entity_instance_outputs: HashMap<hir::VariableId, HashMap<String, SignalId>>,
+    /// Entity instance names for hierarchical elaboration
+    /// Maps HIR VariableId to (instance_name, ModuleId)
+    entity_instance_info: HashMap<hir::VariableId, (String, ModuleId)>,
+    /// Pending entity instances from let bindings (Bug #13-16, #21-23 fix)
+    /// Format: (ModuleInstance, Vec<(SignalId, signal_name, DataType)>)
+    pending_entity_instances: Vec<(ModuleInstance, Vec<(SignalId, String, DataType)>)>,
+    /// Instance output signals by name for hierarchical elaboration (Bug #13-16, #21-23 fix)
+    /// Maps instance name (String) -> port name -> SignalId
+    /// This is used when FieldAccess has GenericParam("instance_name") as base
+    instance_outputs_by_name: HashMap<String, HashMap<String, SignalId>>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -198,6 +212,10 @@ impl<'hir> HirToMir<'hir> {
             next_inlining_context_id: 0,
             synthesized_modules: Vec::new(),
             pending_module_instances: Vec::new(),
+            entity_instance_outputs: HashMap::new(),
+            entity_instance_info: HashMap::new(),
+            pending_entity_instances: Vec::new(),
+            instance_outputs_by_name: HashMap::new(),
         }
     }
 
@@ -347,6 +365,9 @@ impl<'hir> HirToMir<'hir> {
 
                 // Drain pending module instances (from complex function calls)
                 self.drain_pending_module_instances(&mut module);
+
+                // Drain pending entity instances (from let bindings with entity instantiation)
+                self.drain_pending_entity_instances(&mut module);
 
                 // Add the main assignments
                 module.assignments.extend(mir_assigns);
@@ -509,6 +530,41 @@ impl<'hir> HirToMir<'hir> {
                     }
                     // Clear dynamic variables for next impl block
                     self.dynamic_variables.clear();
+
+                    // BUG FIX #13-16, #21-23: Pre-process instances BEFORE assignments
+                    // This creates signals for instance output ports so FieldAccess can resolve them
+                    self.instance_outputs_by_name.clear();
+                    for hir_instance in &impl_block.instances {
+                        // Find the entity to get its output ports
+                        if let Some(entity) = self.hir.as_ref()
+                            .and_then(|h| h.entities.iter().find(|e| e.id == hir_instance.entity))
+                        {
+                            let mut output_ports: HashMap<String, SignalId> = HashMap::new();
+
+                            // Create signals for each output port
+                            for port in &entity.ports {
+                                if matches!(port.direction, hir::HirPortDirection::Output) {
+                                    let signal_id = self.next_signal_id();
+                                    let signal_name = format!("{}_{}", hir_instance.name, port.name);
+                                    let signal_type = self.convert_type(&port.port_type);
+
+                                    // Create the signal and add to module
+                                    let signal = Signal {
+                                        id: signal_id,
+                                        name: signal_name.clone(),
+                                        signal_type: signal_type.clone(),
+                                        initial: None,
+                                        clock_domain: None,
+                                    };
+                                    module.signals.push(signal);
+
+                                    output_ports.insert(port.name.clone(), signal_id);
+                                }
+                            }
+
+                            self.instance_outputs_by_name.insert(hir_instance.name.clone(), output_ports);
+                        }
+                    }
 
                     // Convert continuous assignments (may expand to multiple for structs)
                     eprintln!(
@@ -738,6 +794,9 @@ impl<'hir> HirToMir<'hir> {
                         // Drain pending module instances (from complex function calls)
                         self.drain_pending_module_instances(module);
 
+                        // Drain pending entity instances (from let bindings with entity instantiation)
+                        self.drain_pending_entity_instances(module);
+
                         // Then emit the main assignment
                         module.assignments.extend(assigns);
                     }
@@ -938,6 +997,106 @@ impl<'hir> HirToMir<'hir> {
                 if let_stmt.name == "_tuple_tmp_66" {
                     eprintln!("[MIR_LET_TRACE] *** Processing _tuple_tmp_66 - will trace through entire function ***");
                 }
+
+                // BUG FIX #13-16, #21-23: Detect entity instantiation via struct literal syntax
+                // Pattern: let inner = Inner { data };
+                // If the RHS is a StructLiteral and the type_name matches an entity, create a module instance
+                if let hir::HirExpression::StructLiteral(struct_lit) = &let_stmt.value {
+                    // Check if this type_name matches an entity
+                    let hir = self.hir.as_ref();
+                    if let Some(hir) = hir {
+                        if let Some(entity) = hir.entities.iter().find(|e| e.name == struct_lit.type_name) {
+                            eprintln!(
+                                "[HIERARCHICAL] Detected entity instantiation: let {} = {} {{ ... }}",
+                                let_stmt.name, struct_lit.type_name
+                            );
+
+                            // Get the module ID for this entity
+                            if let Some(&module_id) = self.entity_map.get(&entity.id) {
+                                // Create module instance
+                                let instance_name = let_stmt.name.clone();
+
+                                // Convert connections from the struct literal fields
+                                let mut connections = std::collections::HashMap::new();
+                                for field_init in &struct_lit.fields {
+                                    if let Some(expr) = self.convert_expression(&field_init.value, 0) {
+                                        connections.insert(field_init.name.clone(), expr);
+                                    }
+                                }
+
+                                // Create signals for output ports and track them
+                                let mut output_ports = HashMap::new();
+                                for port in &entity.ports {
+                                    if matches!(port.direction, hir::HirPortDirection::Output) {
+                                        // Create a signal to hold this output
+                                        let signal_id = self.next_signal_id();
+                                        let signal_name = format!("{}_{}", instance_name, port.name);
+                                        let signal_type = self.convert_type(&port.port_type);
+
+                                        eprintln!(
+                                            "[HIERARCHICAL] Creating output signal '{}' (type {:?}) for instance '{}' port '{}'",
+                                            signal_name, signal_type, instance_name, port.name
+                                        );
+
+                                        // Track this output port
+                                        output_ports.insert(port.name.clone(), signal_id);
+
+                                        // Add connection from instance output to signal
+                                        connections.insert(
+                                            port.name.clone(),
+                                            Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(signal_id))),
+                                        );
+
+                                        // The signal will be created by the module
+                                        // We need to return a statement that adds both the signal and the instance
+                                        // For now, store for later processing
+                                    }
+                                }
+
+                                // Store the output port mappings for field access resolution
+                                self.entity_instance_outputs.insert(let_stmt.id, output_ports.clone());
+                                self.entity_instance_info.insert(let_stmt.id, (instance_name.clone(), module_id));
+
+                                eprintln!(
+                                    "[HIERARCHICAL] Stored entity instance '{}' (var {:?}) with {} output ports",
+                                    instance_name, let_stmt.id, self.entity_instance_outputs.get(&let_stmt.id).map(|m| m.len()).unwrap_or(0)
+                                );
+
+                                // Create the module instance
+                                let instance = ModuleInstance {
+                                    name: instance_name.clone(),
+                                    module: module_id,
+                                    connections,
+                                    parameters: std::collections::HashMap::new(),
+                                };
+
+                                // Collect output signals for the module
+                                let mut output_signals = Vec::new();
+                                for port in &entity.ports {
+                                    if matches!(port.direction, hir::HirPortDirection::Output) {
+                                        if let Some(&signal_id) = output_ports.get(&port.name) {
+                                            let signal_name = format!("{}_{}", instance_name, port.name);
+                                            let signal_type = self.convert_type(&port.port_type);
+                                            output_signals.push((signal_id, signal_name, signal_type));
+                                        }
+                                    }
+                                }
+
+                                // Push to pending list - will be drained when processing module
+                                self.pending_entity_instances.push((instance, output_signals));
+
+                                eprintln!(
+                                    "[HIERARCHICAL] Added entity instance to pending list (total: {})",
+                                    self.pending_entity_instances.len()
+                                );
+
+                                // Return None - the instance will be added during drain
+                                return None;
+                            }
+                        }
+                    }
+                }
+
                 // Convert let statement to assignment
                 // Let bindings are local variables that need to be treated as blocking assignments
 
@@ -2289,6 +2448,94 @@ impl<'hir> HirToMir<'hir> {
         ) {
             eprintln!("[CONVERT_EXPANDED] Skipping: not combinational");
             return vec![];
+        }
+
+        // BUG FIX #13-16, #21-23: Detect entity instantiation via struct literal assignment
+        // Pattern: variable = EntityName { ... }
+        // If LHS is a Variable and RHS is a StructLiteral matching an entity, create module instance
+        println!(
+            "🔍🔍🔍 [HIERARCHICAL_CHECK] LHS type: {:?}, RHS type: {:?} 🔍🔍🔍",
+            std::mem::discriminant(&assign.lhs),
+            std::mem::discriminant(&assign.rhs)
+        );
+        if let (hir::HirLValue::Variable(var_id), hir::HirExpression::StructLiteral(struct_lit)) = (&assign.lhs, &assign.rhs) {
+            eprintln!("[HIERARCHICAL_CHECK] LHS is Variable({:?}), RHS is StructLiteral({})", var_id, struct_lit.type_name);
+            // Check if this type_name matches an entity
+            if let Some(hir) = self.hir.as_ref() {
+                if let Some(entity) = hir.entities.iter().find(|e| e.name == struct_lit.type_name) {
+                    eprintln!(
+                        "[HIERARCHICAL] Detected entity instantiation in assignment: {} = {} {{ ... }}",
+                        var_id.0, struct_lit.type_name
+                    );
+
+                    // Get the module ID for this entity
+                    if let Some(&module_id) = self.entity_map.get(&entity.id) {
+                        // Get the variable name from dynamic_variables or create one
+                        let instance_name = self.dynamic_variables
+                            .get(var_id)
+                            .map(|(_, name, _)| name.clone())
+                            .unwrap_or_else(|| format!("inst_{}", var_id.0));
+
+                        // Convert connections from the struct literal fields
+                        let mut connections = std::collections::HashMap::new();
+                        for field_init in &struct_lit.fields {
+                            if let Some(expr) = self.convert_expression(&field_init.value, 0) {
+                                connections.insert(field_init.name.clone(), expr);
+                            }
+                        }
+
+                        // Create signals for output ports and track them
+                        let mut output_ports = HashMap::new();
+                        let mut output_signals = Vec::new();
+                        for port in &entity.ports {
+                            if matches!(port.direction, hir::HirPortDirection::Output) {
+                                // Create a signal to hold this output
+                                let signal_id = self.next_signal_id();
+                                let signal_name = format!("{}_{}", instance_name, port.name);
+                                let signal_type = self.convert_type(&port.port_type);
+
+                                eprintln!(
+                                    "[HIERARCHICAL] Creating output signal '{}' (id={}) for port '{}'",
+                                    signal_name, signal_id.0, port.name
+                                );
+
+                                // Track this output port
+                                output_ports.insert(port.name.clone(), signal_id);
+                                output_signals.push((signal_id, signal_name, signal_type));
+
+                                // Add connection from instance output to signal
+                                connections.insert(
+                                    port.name.clone(),
+                                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(signal_id))),
+                                );
+                            }
+                        }
+
+                        // Store the output port mappings for field access resolution
+                        self.entity_instance_outputs.insert(*var_id, output_ports);
+                        self.entity_instance_info.insert(*var_id, (instance_name.clone(), module_id));
+
+                        eprintln!(
+                            "[HIERARCHICAL] Stored entity instance '{}' (var {:?}) with {} output ports",
+                            instance_name, var_id, self.entity_instance_outputs.get(var_id).map(|m| m.len()).unwrap_or(0)
+                        );
+
+                        // Create the module instance
+                        let instance = ModuleInstance {
+                            name: instance_name,
+                            module: module_id,
+                            connections,
+                            parameters: std::collections::HashMap::new(),
+                        };
+
+                        // Push to pending list - will be drained when processing module
+                        self.pending_entity_instances.push((instance, output_signals));
+
+                        // Return empty - no assignment needed, the instance handles it
+                        return vec![];
+                    }
+                }
+            }
         }
 
         // CRITICAL FIX for Bug #9: Try to expand array index read assignments first
@@ -8838,6 +9085,39 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 hir::HirExpression::Variable(var_id) => {
+                    // BUG FIX #13-16, #21-23: Check if this variable is an entity instance
+                    // Entity instances are created via let bindings like: let inner = Inner { data };
+                    // Accessing inner.result should return the output port signal of the instance
+                    if let Some(output_ports) = self.entity_instance_outputs.get(var_id) {
+                        // This variable is an entity instance - look up the output port
+                        if let Some(&signal_id) = output_ports.get(&normalized_field_name) {
+                            eprintln!(
+                                "[DEBUG] Field access on entity instance: var {:?}, field '{}' -> signal {:?}",
+                                var_id, normalized_field_name, signal_id
+                            );
+                            return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Signal(signal_id),
+                            )));
+                        } else {
+                            // Field not found - might be accessing original field_name (without normalization)
+                            if let Some(&signal_id) = output_ports.get(field_name) {
+                                eprintln!(
+                                    "[DEBUG] Field access on entity instance: var {:?}, field '{}' (original) -> signal {:?}",
+                                    var_id, field_name, signal_id
+                                );
+                                return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                    LValue::Signal(signal_id),
+                                )));
+                            }
+                            eprintln!(
+                                "[DEBUG] Entity instance field '{}' not found. Available: {:?}",
+                                field_name,
+                                output_ports.keys().collect::<Vec<_>>()
+                            );
+                            return None;
+                        }
+                    }
+
                     // Variables don't get flattened the same way, use bit range approach
                     // CRITICAL FIX #IMPORT_MATCH: Use context-aware lookup for field access too
                     // This matches the fix applied to regular variable lookups
@@ -8941,6 +9221,16 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 hir::HirExpression::GenericParam(param_name) => {
+                    // BUG FIX #13-16, #21-23: First check if this is an instance output access
+                    // Example: inner.result where inner is an instance of entity Inner
+                    if let Some(output_ports) = self.instance_outputs_by_name.get(param_name) {
+                        if let Some(&signal_id) = output_ports.get(&normalized_field_name) {
+                            return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Signal(signal_id),
+                            )));
+                        }
+                    }
+
                     // BUG FIX #70 Part 2: Handle field access on GenericParam (unsubstituted parameter)
                     // This occurs when parameter substitution fails or is incomplete during function inlining
                     // Try to look up the parameter in dynamic_variables
@@ -8963,7 +9253,7 @@ impl<'hir> HirToMir<'hir> {
                         })));
                     }
                     eprintln!(
-                        "[DEBUG] FieldAccess on GenericParam '{}': not found in dynamic_variables",
+                        "[DEBUG] FieldAccess on GenericParam '{}': not found in instance_outputs_by_name or dynamic_variables",
                         param_name
                     );
                     return None;
@@ -11359,6 +11649,50 @@ impl<'hir> HirToMir<'hir> {
         match hir_type {
             Some(hir::HirType::Tuple(elements)) => elements.len(),
             _ => 0,
+        }
+    }
+
+    /// Drain pending entity instances (from let bindings with entity instantiation)
+    /// BUG FIX #13-16, #21-23: Hierarchical elaboration support
+    fn drain_pending_entity_instances(&mut self, module: &mut Module) {
+        if self.pending_entity_instances.is_empty() {
+            return;
+        }
+
+        eprintln!(
+            "[HIERARCHICAL] Draining {} pending entity instances for module '{}'",
+            self.pending_entity_instances.len(),
+            module.name
+        );
+
+        // Take ownership of pending instances
+        let pending = std::mem::take(&mut self.pending_entity_instances);
+
+        for (instance, output_signals) in pending {
+            eprintln!(
+                "[HIERARCHICAL] Adding instance '{}' with {} output signals",
+                instance.name,
+                output_signals.len()
+            );
+
+            // Create output signals for this instance
+            for (signal_id, signal_name, signal_type) in output_signals {
+                let signal = Signal {
+                    id: signal_id,
+                    name: signal_name.clone(),
+                    signal_type,
+                    initial: None,
+                    clock_domain: None,
+                };
+                eprintln!(
+                    "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output",
+                    signal_name, signal_id.0
+                );
+                module.signals.push(signal);
+            }
+
+            // Add the module instance
+            module.instances.push(instance);
         }
     }
 
