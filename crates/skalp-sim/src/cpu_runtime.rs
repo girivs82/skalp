@@ -527,9 +527,12 @@ impl CpuRuntime {
 
     fn u64_to_bytes(value: u64, byte_count: usize) -> Vec<u8> {
         let mut bytes = vec![0u8; byte_count];
-        for (i, byte) in bytes.iter_mut().enumerate().take(byte_count) {
-            *byte = ((value >> (i * 8)) & 0xFF) as u8;
+        // Only extract up to 8 bytes (64 bits) from the u64 value
+        let extract_count = byte_count.min(8);
+        for i in 0..extract_count {
+            bytes[i] = ((value >> (i * 8)) & 0xFF) as u8;
         }
+        // Remaining bytes (if byte_count > 8) stay as 0
         bytes
     }
 

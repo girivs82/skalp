@@ -42,16 +42,21 @@ pub struct Testbench {
 impl Testbench {
     /// Create a new testbench from a SKALP source file
     pub async fn new(source_path: &str) -> Result<Self> {
+        // Check SKALP_SIM_MODE environment variable - "cpu" disables GPU
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);  // Default to GPU if not set
+
         let config = SimulationConfig {
             // SSA conversion is now implemented in skalp-mir to eliminate combinational cycles
             // from mutable variable reassignment (x = f(x) -> x_0 = value, x_1 = f(x_0), etc.)
-            use_gpu: true,
+            use_gpu,
             max_cycles: 1_000_000,
             timeout_ms: 60_000,
             capture_waveforms: true,
             parallel_threads: 4,
         };
-        eprintln!("🚨 DEBUG: use_gpu = {}", config.use_gpu);
+        eprintln!("🚨 DEBUG: use_gpu = {} (SKALP_SIM_MODE={:?})", config.use_gpu, std::env::var("SKALP_SIM_MODE").ok());
         Self::with_config(source_path, config).await
     }
 
