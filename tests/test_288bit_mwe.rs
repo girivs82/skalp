@@ -1,7 +1,9 @@
 // Test for 288-bit Metal backend limitation MWE
+// NOTE: This test requires manual setup of /tmp/skalp_bug_288bit_mwe.sk
 use skalp_testing::testbench::*;
 
 #[tokio::test]
+#[ignore = "requires manual setup of /tmp/skalp_bug_288bit_mwe.sk"]
 async fn test_288bit_metal_limitation() {
     println!("\n🔍 Testing 288-bit Metal Backend Limitation");
 

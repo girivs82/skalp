@@ -1,7 +1,9 @@
 // Test for Bug #67: Testing with 7 match arms to see if that triggers the bug
+// NOTE: This test requires manual setup of /tmp/bug67_mwe_7arms.sk
 
 #[cfg(all(test, target_os = "macos"))]
 #[tokio::test]
+#[ignore = "requires manual setup of /tmp/bug67_mwe_7arms.sk"]
 async fn test_bug67_7arms_metal() {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};

@@ -231,6 +231,7 @@ mod gpu_simulation_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires manual setup of /tmp/test_256bit_ops.sk"]
     async fn test_256bit_operations_gpu() {
         // Read simple 256-bit adder design
         let source = fs::read_to_string("/tmp/test_256bit_ops.sk")
@@ -562,6 +563,7 @@ mod gpu_simulation_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires manual setup of /tmp/test_bug67_fp16_type.sk"]
     async fn test_bug67_fp16_type_metal() {
         println!(
             "\n🧪 Testing Bug #67: FP16 type inference in tuple destructuring with match arms"

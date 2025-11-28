@@ -1,7 +1,9 @@
 // Test for Bug #67: Testing if nested if-else calling exec_l3 triggers the bug
+// NOTE: This test requires manual setup of /tmp/bug67_mwe_nested.sk
 
 #[cfg(all(test, target_os = "macos"))]
 #[tokio::test]
+#[ignore = "requires manual setup of /tmp/bug67_mwe_nested.sk"]
 async fn test_bug67_nested_metal() {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};

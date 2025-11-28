@@ -1,7 +1,9 @@
 // Test for 288-bit Metal backend issue with match expressions
+// NOTE: This test requires manual setup of /tmp/skalp_bug_288bit_match.sk
 use skalp_testing::testbench::*;
 
 #[tokio::test]
+#[ignore = "requires manual setup of /tmp/skalp_bug_288bit_match.sk"]
 async fn test_288bit_match_metal() {
     println!("\n🔍 Testing 288-bit Match Expression Metal Backend Issue");
 

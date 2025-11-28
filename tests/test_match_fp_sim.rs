@@ -7,6 +7,7 @@ mod test_match_fp {
     use std::fs;
 
     #[tokio::test]
+    #[ignore = "requires manual setup of /tmp/test_match_fp.sk"]
     async fn test_match_fp_addition() {
         // Read test design
         let source = fs::read_to_string("/tmp/test_match_fp.sk").expect("Failed to read test file");

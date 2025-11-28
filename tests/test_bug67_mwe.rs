@@ -1,7 +1,9 @@
 // Test for Bug #67 MWE: Does it reproduce the FP16 type error?
+// NOTE: This test requires manual setup of /tmp/bug67_mwe_entity.sk
 
 #[cfg(all(test, target_os = "macos"))]
 #[tokio::test]
+#[ignore = "requires manual setup of /tmp/bug67_mwe_entity.sk"]
 async fn test_bug67_mwe_metal() {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
