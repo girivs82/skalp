@@ -12,6 +12,11 @@ pub fn generate_metal_shader(sir_module: &SirModule) -> String {
     generator.generate_sequential_kernel(sir_module);
 
     println!(">>> METAL SHADER GENERATION COMPLETE <<<");
+
+    // DEBUG: Write shader to temp file for inspection
+    let _ = std::fs::write("/tmp/skalp_shader.metal", &shader);
+    eprintln!(">>> Shader written to /tmp/skalp_shader.metal ({} bytes) <<<", shader.len());
+
     shader
 }
 

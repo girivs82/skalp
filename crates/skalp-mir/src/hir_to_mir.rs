@@ -126,8 +126,9 @@ pub struct HirToMir<'hir> {
     synthesized_modules: Vec<Module>,
     /// Pending module instances from complex function calls
     /// These are created during expression conversion and added to the module after
-    /// Format: (result_signal_id, function_name, module_id, argument_expressions, hir_return_type, frontend_type)
-    pending_module_instances: Vec<(SignalId, String, ModuleId, Vec<Expression>, Option<hir::HirType>, Type)>,
+    /// Format: (result_signal_ids, function_name, module_id, argument_expressions, hir_return_type, frontend_type)
+    /// BUG FIX #92: Changed from SignalId to Vec<SignalId> to support tuple-returning functions
+    pending_module_instances: Vec<(Vec<SignalId>, String, ModuleId, Vec<Expression>, Option<hir::HirType>, Type)>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -1607,22 +1608,21 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
-        // Get the result_signal_id from the pending instance (first element)
-        let (result_signal_id, _, _, _, _, _) = &self.pending_module_instances[pending_count - 1];
-        let base_signal_id = result_signal_id.0;
+        // BUG FIX #92: Get all result_signal_ids from the pending instance (now a Vec)
+        let (result_signal_ids, _, _, _, _, _) = &self.pending_module_instances[pending_count - 1];
 
-        println!("🔧🔧🔧 BUG91_TUPLE_CALL: Module instance result_0 signal id={} 🔧🔧🔧", base_signal_id);
+        println!("🔧🔧🔧 BUG91_TUPLE_CALL: Module instance has {} result signals 🔧🔧🔧", result_signal_ids.len());
 
         // Create assignments for each flattened field
         let mut assignments = Vec::new();
         for (idx, flat_field) in lhs_flattened.iter().enumerate() {
-            // The module instance creates signals: func_inst_N_result_0, func_inst_N_result_1, etc.
-            // We need to reference those signals
-            let result_sig_id = if idx == 0 {
-                SignalId(base_signal_id)
+            // BUG FIX #92: Use pre-allocated signal IDs from result_signal_ids
+            let result_sig_id = if idx < result_signal_ids.len() {
+                result_signal_ids[idx]
             } else {
-                // Result signals are allocated sequentially after the first one
-                SignalId(base_signal_id + idx as u32)
+                // Fallback - should not happen if types match
+                eprintln!("    ⚠️ BUG91_TUPLE_CALL: idx {} exceeds result_signal_ids len {}", idx, result_signal_ids.len());
+                result_signal_ids[0]
             };
 
             let assign = Assignment {
@@ -2492,19 +2492,20 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
-        // Get the result_signal_id from the pending instance
-        let (result_signal_id, _, _, _, _, _) = &self.pending_module_instances[pending_count - 1];
-        let base_signal_id = result_signal_id.0;
+        // BUG FIX #92: Get all result_signal_ids from the pending instance (now a Vec)
+        let (result_signal_ids, _, _, _, _, _) = &self.pending_module_instances[pending_count - 1];
 
-        println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: Module instance result_0 signal id={} 🔧🔧🔧", base_signal_id);
+        println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: Module instance has {} result signals 🔧🔧🔧", result_signal_ids.len());
 
         // Create continuous assignments for each flattened field
         let mut assigns = Vec::new();
         for (idx, flat_field) in lhs_flattened.iter().enumerate() {
-            let result_sig_id = if idx == 0 {
-                SignalId(base_signal_id)
+            // BUG FIX #92: Use pre-allocated signal IDs from result_signal_ids
+            let result_sig_id = if idx < result_signal_ids.len() {
+                result_signal_ids[idx]
             } else {
-                SignalId(base_signal_id + idx as u32)
+                eprintln!("    ⚠️ BUG91_TUPLE_CALL_CONT: idx {} exceeds result_signal_ids len {}", idx, result_signal_ids.len());
+                result_signal_ids[0]
             };
 
             assigns.push(ContinuousAssign {
@@ -3659,10 +3660,19 @@ impl<'hir> HirToMir<'hir> {
                         None  // Fallback
                     };
 
-                    // Step 2: Pre-allocate a SignalId for the result
-                    let result_signal_id = self.next_signal_id();
-                    eprintln!("[HYBRID] Pre-allocated result signal {} for call to '{}'",
-                              result_signal_id.0, call.function);
+                    // Step 2: Pre-allocate SignalIds for the result
+                    // BUG FIX #92: For tuple returns, pre-allocate signal IDs for ALL elements
+                    let tuple_size = Self::get_tuple_size_from_hir_type(&hir_return_type);
+                    let num_result_signals = if tuple_size > 0 { tuple_size } else { 1 };
+
+                    let mut result_signal_ids = Vec::with_capacity(num_result_signals);
+                    for _ in 0..num_result_signals {
+                        result_signal_ids.push(self.next_signal_id());
+                    }
+
+                    eprintln!("[HYBRID] Pre-allocated {} result signal(s) {:?} for call to '{}' (tuple_size={})",
+                              num_result_signals, result_signal_ids.iter().map(|s| s.0).collect::<Vec<_>>(),
+                              call.function, tuple_size);
 
                     // Step 3: Convert arguments to MIR expressions
                     // For variable references, expand to their RHS expressions to ensure
@@ -3694,8 +3704,9 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Step 4: Record pending module instance (will be added to module later)
+                    // BUG FIX #92: Now storing Vec<SignalId> for tuple support
                     self.pending_module_instances.push((
-                        result_signal_id,
+                        result_signal_ids.clone(),
                         call.function.clone(),
                         module_id,
                         arg_exprs,
@@ -3704,11 +3715,26 @@ impl<'hir> HirToMir<'hir> {
                     ));
                     eprintln!("[HYBRID] ✓ Recorded pending module instance for '{}'", call.function);
 
-                    // Step 5: Return an Expression that references the pre-allocated result signal
-                    Some(Expression::new(
-                        ExpressionKind::Ref(LValue::Signal(result_signal_id)),
-                        ty
-                    ))
+                    // Step 5: Return an Expression that references the pre-allocated result signal(s)
+                    // BUG FIX #92: For tuple returns, return a Concat of all result signals
+                    if result_signal_ids.len() > 1 {
+                        // Tuple return: create Concat of all result signals
+                        // BUG FIX #92: Use forward order (result_0 at MSB) to match TupleLiteral
+                        // which packs elements MSB-first: (a, b, c) -> {a, b, c}
+                        let concat_elements: Vec<Expression> = result_signal_ids.iter()
+                            .map(|sig_id| Expression::with_unknown_type(
+                                ExpressionKind::Ref(LValue::Signal(*sig_id))
+                            ))
+                            .collect();
+                        eprintln!("[HYBRID] ✓ Returning Concat of {} result signals for tuple (forward order)", concat_elements.len());
+                        Some(Expression::with_unknown_type(ExpressionKind::Concat(concat_elements)))
+                    } else {
+                        // Single return
+                        Some(Expression::new(
+                            ExpressionKind::Ref(LValue::Signal(result_signal_ids[0])),
+                            ty
+                        ))
+                    }
                 }
             }
             hir::HirExpression::Index(base, index) => {
@@ -7259,6 +7285,16 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Concat(substituted)
             }
 
+            // BUG FIX #92: FieldAccess - substitute in base expression
+            // This is critical for tuple destructuring like `let valid = _tuple_tmp.0`
+            hir::HirExpression::FieldAccess { base, field } => {
+                let sub_base = self.substitute_hir_expr_with_map(base, name_map);
+                hir::HirExpression::FieldAccess {
+                    base: Box::new(sub_base),
+                    field: field.clone(),
+                }
+            }
+
             // Everything else - return as-is
             _ => expr.clone(),
         }
@@ -7335,6 +7371,16 @@ impl<'hir> HirToMir<'hir> {
                     expr: Box::new(sub_expr),
                     target_type: cast_expr.target_type.clone(),
                 })
+            }
+
+            // BUG FIX #92: FieldAccess - substitute in base expression
+            // This is critical for tuple destructuring like `let valid = _tuple_tmp.0`
+            hir::HirExpression::FieldAccess { base, field } => {
+                let sub_base = self.substitute_var_ids_in_expr(base, var_id_map);
+                hir::HirExpression::FieldAccess {
+                    base: Box::new(sub_base),
+                    field: field.clone(),
+                }
             }
 
             // Everything else - return as-is
@@ -9171,15 +9217,23 @@ impl<'hir> HirToMir<'hir> {
             .all(|(name, _)| name.starts_with('_') && name[1..].parse::<usize>().is_ok());
 
         if is_tuple {
-            // For tuples: calculate offset from MSB downward
-            let mut current_offset_from_msb = total_width;
-            for (field_name_in_struct, field_type) in fields {
-                let field_width = self.get_hir_type_width(&field_type);
-                current_offset_from_msb -= field_width;
-                if field_name_in_struct == field_name {
-                    // Found the field - bits are [current_offset_from_msb + width - 1 : current_offset_from_msb]
-                    let high_bit = current_offset_from_msb + field_width - 1;
-                    let low_bit = current_offset_from_msb;
+            // BUG FIX #92: For tuples, ALL elements are 32 bits in hardware
+            // because module result signals are always 32 bits regardless of logical type.
+            // Layout is MSB-first: element 0 at MSB, element N-1 at LSB
+            // This matches TupleLiteral concat order: (a, b, c) -> {a, b, c}
+            let num_fields = fields.len();
+            for (i, (field_name_in_struct, _field_type)) in fields.iter().enumerate() {
+                if *field_name_in_struct == field_name {
+                    // Extract field index from name (e.g., "_0" -> 0)
+                    let index: usize = field_name[1..].parse().unwrap_or(i);
+                    // Tuple elements are packed MSB-first with 32-bit widths:
+                    // Element 0 at bits [(N)*32-1 : (N-1)*32], element N-1 at bits [31:0]
+                    let element_width = 32;
+                    let total_width = num_fields * element_width;
+                    let high_bit = total_width - index * element_width - 1;
+                    let low_bit = total_width - (index + 1) * element_width;
+                    eprintln!("[BUG #92] Tuple field '{}' (index {}/{}) -> bits [{}:{}] (MSB-first)",
+                             field_name, index, num_fields, high_bit, low_bit);
                     return Some((high_bit, low_bit));
                 }
             }
@@ -9959,11 +10013,23 @@ impl<'hir> HirToMir<'hir> {
                         None
                     };
 
-                    let result_signal_id = self.next_signal_id();
+                    // BUG FIX #92: Pre-allocate signal IDs for ALL tuple elements
+                    let tuple_size = Self::get_tuple_size_from_hir_type(&return_type);
+                    let num_result_signals = if tuple_size > 0 { tuple_size } else { 1 };
+
+                    let mut result_signal_ids = Vec::with_capacity(num_result_signals);
+                    for _ in 0..num_result_signals {
+                        result_signal_ids.push(self.next_signal_id());
+                    }
+
+                    println!("    📌 Pre-allocated {} result signal(s) {:?} for module '{}'",
+                             num_result_signals, result_signal_ids.iter().map(|s| s.0).collect::<Vec<_>>(),
+                             call.function);
+
                     let ty = skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(32)); // Placeholder
 
                     self.pending_module_instances.push((
-                        result_signal_id,
+                        result_signal_ids.clone(),
                         call.function.clone(),
                         module_id,
                         arg_exprs,
@@ -9971,10 +10037,23 @@ impl<'hir> HirToMir<'hir> {
                         ty.clone(),
                     ));
 
-                    return Some(Expression::new(
-                        ExpressionKind::Ref(LValue::Signal(result_signal_id)),
-                        ty,
-                    ));
+                    // BUG FIX #92: For tuple returns, return a Concat of all result signals
+                    if result_signal_ids.len() > 1 {
+                        // BUG FIX #92: Use forward order (result_0 at MSB) to match TupleLiteral
+                        // which packs elements MSB-first: (a, b, c) -> {a, b, c}
+                        let concat_elements: Vec<Expression> = result_signal_ids.iter()
+                            .map(|sig_id| Expression::with_unknown_type(
+                                ExpressionKind::Ref(LValue::Signal(*sig_id))
+                            ))
+                            .collect();
+                        println!("    📌 Returning Concat of {} result signals for tuple (forward order)", concat_elements.len());
+                        return Some(Expression::with_unknown_type(ExpressionKind::Concat(concat_elements)));
+                    } else {
+                        return Some(Expression::new(
+                            ExpressionKind::Ref(LValue::Signal(result_signal_ids[0])),
+                            ty,
+                        ));
+                    }
                 }
 
                 // BUG FIX #91: If not a module synthesis case, INLINE within module context
@@ -10099,12 +10178,14 @@ impl<'hir> HirToMir<'hir> {
             // its let statements define variables that result_expr references.
             // We need to substitute the let binding values directly into result_expr
             // before converting, since we can't easily add new signals from here.
+            // BUG FIX #92: Also track by VariableId for proper substitution
             hir::HirExpression::Block { statements, result_expr } => {
                 println!("🧱🧱🧱 MODULE_BLOCK: Converting Block with {} statements in module context 🧱🧱🧱", statements.len());
 
-                // Build a map from variable names to their substituted values
-                // Process let statements in order so each can reference previous ones
+                // Build maps from both name and VariableId to substituted values
+                // BUG FIX #92: Need both maps because Variables use var_id, not name
                 let mut let_substitutions: HashMap<String, hir::HirExpression> = HashMap::new();
+                let mut var_id_to_value: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
 
                 for stmt in statements {
                     if let hir::HirStatement::Let(let_stmt) = stmt {
@@ -10112,12 +10193,16 @@ impl<'hir> HirToMir<'hir> {
                                  let_stmt.name, let_stmt.id.0);
 
                         // Substitute any previous let bindings in this value
-                        let substituted_value = self.substitute_hir_expr_with_map(
+                        let mut substituted_value = self.substitute_hir_expr_with_map(
                             &let_stmt.value, &let_substitutions);
 
-                        let_substitutions.insert(let_stmt.name.clone(), substituted_value);
-                        println!("🧱🧱🧱 MODULE_BLOCK: Added '{}' to substitution map 🧱🧱🧱",
-                                 let_stmt.name);
+                        // BUG FIX #92: Also substitute by VariableId for nested references
+                        substituted_value = self.substitute_var_ids_in_expr(&substituted_value, &var_id_to_value);
+
+                        let_substitutions.insert(let_stmt.name.clone(), substituted_value.clone());
+                        var_id_to_value.insert(let_stmt.id, substituted_value);
+                        println!("🧱🧱🧱 MODULE_BLOCK: Added '{}' (id={}) to both substitution maps 🧱🧱🧱",
+                                 let_stmt.name, let_stmt.id.0);
                     }
                 }
 
@@ -10133,8 +10218,11 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
                 }
-                let substituted_result = self.substitute_hir_expr_with_map(
+                // BUG FIX #92: First substitute by name, then by VariableId
+                let partially_substituted = self.substitute_hir_expr_with_map(
                     result_expr, &let_substitutions);
+                let substituted_result = self.substitute_var_ids_in_expr(
+                    &partially_substituted, &var_id_to_value);
 
                 println!("🧱🧱🧱 MODULE_BLOCK: Substituted result_expr, converting... 🧱🧱🧱");
                 println!("🧱🧱🧱 MODULE_BLOCK: result_expr type after subst: {:?} 🧱🧱🧱",
@@ -11090,15 +11178,16 @@ impl<'hir> HirToMir<'hir> {
         let pending: Vec<_> = self.pending_module_instances.drain(start_idx..).collect();
 
         // Convert HIR types to DataTypes
+        // BUG FIX #92: Now using Vec<SignalId> for tuple support
         let instances_with_types: Vec<_> = pending
             .into_iter()
-            .map(|(signal_id, name, mod_id, args, hir_type, frontend_type)| {
+            .map(|(signal_ids, name, mod_id, args, hir_type, frontend_type)| {
                 let data_type = if let Some(ht) = hir_type {
                     self.convert_type(&ht)
                 } else {
                     DataType::Bit(32)  // Fallback
                 };
-                (signal_id, name, mod_id, args, data_type, frontend_type)
+                (signal_ids, name, mod_id, args, data_type, frontend_type)
             })
             .collect();
 
@@ -11125,15 +11214,16 @@ impl<'hir> HirToMir<'hir> {
         let pending = std::mem::take(&mut self.pending_module_instances);
 
         // Convert HIR types to DataTypes
+        // BUG FIX #92: Now using Vec<SignalId> for tuple support
         let instances_with_types: Vec<_> = pending
             .into_iter()
-            .map(|(signal_id, name, mod_id, args, hir_type, frontend_type)| {
+            .map(|(signal_ids, name, mod_id, args, hir_type, frontend_type)| {
                 let data_type = if let Some(ht) = hir_type {
                     self.convert_type(&ht)
                 } else {
                     DataType::Bit(32)  // Fallback
                 };
-                (signal_id, name, mod_id, args, data_type, frontend_type)
+                (signal_ids, name, mod_id, args, data_type, frontend_type)
             })
             .collect();
 
@@ -11141,23 +11231,27 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Process a list of pending instances and add them to the module
+    /// BUG FIX #92: Changed from SignalId to Vec<SignalId> for tuple support
     fn process_pending_instances(
         &mut self,
-        instances_with_types: Vec<(SignalId, String, ModuleId, Vec<Expression>, DataType, Type)>,
+        instances_with_types: Vec<(Vec<SignalId>, String, ModuleId, Vec<Expression>, DataType, Type)>,
         module: &mut Module,
     ) {
-        for (result_signal_id, function_name, module_id, arg_exprs, data_type, frontend_type) in instances_with_types {
-            println!("🎯🎯🎯 DRAIN: Creating instance of '{}' (module_id={}) with result signal {} 🎯🎯🎯",
-                      function_name, module_id.0, result_signal_id.0);
-            eprintln!("[HYBRID]   Creating instance of '{}' (module_id={}) with result signal {}",
-                      function_name, module_id.0, result_signal_id.0);
+        for (result_signal_ids, function_name, module_id, arg_exprs, data_type, frontend_type) in instances_with_types {
+            let first_signal_id = result_signal_ids.first().copied().unwrap_or(SignalId(0));
+            println!("🎯🎯🎯 DRAIN: Creating instance of '{}' (module_id={}) with {} result signal(s), first={} 🎯🎯🎯",
+                      function_name, module_id.0, result_signal_ids.len(), first_signal_id.0);
+            eprintln!("[HYBRID]   Creating instance of '{}' (module_id={}) with {} result signal(s)",
+                      function_name, module_id.0, result_signal_ids.len());
 
             // Step 1: Determine if this is a tuple return by checking the data type
             let is_tuple = matches!(&data_type, DataType::Struct(_) | DataType::Array { .. });
 
-            // BUG FIX #85: Also derive tuple width from data_type, not just frontend_type
-            // The frontend_type is often a placeholder Type::Bit(32), but data_type has the real type info
-            let tuple_width = if let Type::Tuple(elements) = &frontend_type {
+            // BUG FIX #92: Use pre-allocated signal IDs count to determine tuple width
+            // This is more reliable than trying to derive from data_type
+            let tuple_width = if result_signal_ids.len() > 1 {
+                Some(result_signal_ids.len())
+            } else if let Type::Tuple(elements) = &frontend_type {
                 Some(elements.len())
             } else if let DataType::Struct(struct_type) = &data_type {
                 // Check if this is a tuple struct (name starts with "__tuple_")
@@ -11170,7 +11264,7 @@ impl<'hir> HirToMir<'hir> {
                 None
             };
 
-            let instance_name = format!("{}_inst_{}", function_name, result_signal_id.0);
+            let instance_name = format!("{}_inst_{}", function_name, first_signal_id.0);
             let mut connections = HashMap::new();
 
             // Connect arguments to input ports (param_0, param_1, ...)
@@ -11183,18 +11277,21 @@ impl<'hir> HirToMir<'hir> {
             // Handle tuple returns vs single returns
             if let Some(num_elements) = tuple_width {
                 // Tuple return: Create multiple signals and connect to result_0, result_1, etc.
-                eprintln!("[HYBRID]     Creating {} output signals for tuple return", num_elements);
+                eprintln!("[HYBRID]     Creating {} output signals for tuple return (pre-allocated: {})",
+                         num_elements, result_signal_ids.len());
 
                 for elem_idx in 0..num_elements {
-                    let elem_signal_id = if elem_idx == 0 {
-                        // Use the pre-allocated ID for the first element
-                        result_signal_id
+                    // BUG FIX #92: Use pre-allocated signal IDs from result_signal_ids
+                    let elem_signal_id = if elem_idx < result_signal_ids.len() {
+                        result_signal_ids[elem_idx]
                     } else {
-                        // Allocate new IDs for additional elements
+                        // Fallback: allocate new ID (should not happen if tuple size was correctly determined)
+                        eprintln!("    ⚠️ elem_idx {} exceeds pre-allocated IDs ({}), allocating new",
+                                 elem_idx, result_signal_ids.len());
                         self.next_signal_id()
                     };
 
-                    let signal_name = format!("{}_inst_{}_result_{}", function_name, result_signal_id.0, elem_idx);
+                    let signal_name = format!("{}_inst_{}_result_{}", function_name, first_signal_id.0, elem_idx);
                     let signal = Signal {
                         id: elem_signal_id,
                         name: signal_name.clone(),
@@ -11216,9 +11313,9 @@ impl<'hir> HirToMir<'hir> {
                 }
             } else {
                 // Single return: Create one signal and connect to "result"
-                let signal_name = format!("{}_result_{}", function_name, result_signal_id.0);
+                let signal_name = format!("{}_result_{}", function_name, first_signal_id.0);
                 let signal = Signal {
-                    id: result_signal_id,
+                    id: first_signal_id,
                     name: signal_name.clone(),
                     signal_type: data_type.clone(),
                     initial: None,
@@ -11231,7 +11328,7 @@ impl<'hir> HirToMir<'hir> {
                 let result_port_name = "result".to_string();
                 connections.insert(
                     result_port_name.clone(),
-                    Expression::new(ExpressionKind::Ref(LValue::Signal(result_signal_id)), frontend_type)
+                    Expression::new(ExpressionKind::Ref(LValue::Signal(first_signal_id)), frontend_type)
                 );
                 eprintln!("[HYBRID]       ✓ Connected result to output port '{}'", result_port_name);
             }
@@ -11254,6 +11351,15 @@ impl<'hir> HirToMir<'hir> {
     /// Helper to convert HIR type to string for debugging
     fn type_to_string(&self, ty: &hir::HirType) -> String {
         format!("{:?}", ty) // Simplified for now
+    }
+
+    /// BUG FIX #92: Helper to get tuple size from HIR type
+    /// Returns 0 if not a tuple, otherwise returns the number of tuple elements
+    fn get_tuple_size_from_hir_type(hir_type: &Option<hir::HirType>) -> usize {
+        match hir_type {
+            Some(hir::HirType::Tuple(elements)) => elements.len(),
+            _ => 0,
+        }
     }
 
     fn next_port_id(&mut self) -> PortId {

@@ -23,12 +23,14 @@ thread_local! {
 /// BUG FIX #85: Build a mapping of signal IDs to their module instance source
 /// This is used to correctly resolve TupleFieldAccess expressions when the base
 /// signal is assigned from a module instance result (e.g., `_tuple_tmp_76 = inst_result_0`)
+/// BUG FIX #92: Also handles Concat expressions containing module instance result signals
 fn build_tuple_source_mapping(module: &Module) -> HashMap<SignalId, String> {
     let mut mapping = HashMap::new();
 
     for assign in &module.assignments {
-        // Check if LHS is a signal and RHS is a reference to another signal
+        // Check if LHS is a signal
         if let skalp_mir::LValue::Signal(lhs_id) = &assign.lhs {
+            // Case 1: RHS is a reference to another signal
             if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(rhs_id)) = &assign.rhs.kind {
                 // Check if RHS signal name contains "_inst_" and "_result_"
                 // This indicates it's a module instance result signal
@@ -38,6 +40,26 @@ fn build_tuple_source_mapping(module: &Module) -> HashMap<SignalId, String> {
                         if let Some(pos) = rhs_signal.name.rfind("_result_") {
                             let prefix = &rhs_signal.name[..pos];
                             mapping.insert(*lhs_id, prefix.to_string());
+                        }
+                    }
+                }
+            }
+            // BUG FIX #92: Case 2: RHS is a Concat of result signals
+            // This happens when a tuple-returning function is called and the result is
+            // assigned to a temporary signal as a Concat of all result signals
+            else if let skalp_mir::ExpressionKind::Concat(elements) = &assign.rhs.kind {
+                // Look for any signal reference in the Concat that looks like a module result
+                for elem in elements {
+                    if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(elem_id)) = &elem.kind {
+                        if let Some(elem_signal) = module.signals.iter().find(|s| s.id == *elem_id) {
+                            if elem_signal.name.contains("_inst_") && elem_signal.name.contains("_result_") {
+                                // Extract the prefix (everything before "_result_N")
+                                if let Some(pos) = elem_signal.name.rfind("_result_") {
+                                    let prefix = &elem_signal.name[..pos];
+                                    mapping.insert(*lhs_id, prefix.to_string());
+                                    break; // Found a matching signal, no need to check others
+                                }
+                            }
                         }
                     }
                 }
@@ -1160,6 +1182,19 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                 if let Some(inst_prefix) = prefix {
                     // Found in mapping - use the module instance result signal directly
                     return format!("{}_result_{}", inst_prefix, index);
+                }
+            }
+
+            // BUG FIX #92: Handle case where base is a Concat expression
+            // This happens when tuple destructuring is substituted inline (Block handling)
+            // Concat elements are in reversed order: {result_N-1, ..., result_1, result_0}
+            // So to get element at logical index I, we need element at position (N - 1 - I)
+            if let skalp_mir::ExpressionKind::Concat(elements) = &base.kind {
+                let num_elements = elements.len();
+                // Calculate reversed position: index 0 is at the end of the Concat (LSB)
+                let reversed_idx = num_elements.saturating_sub(1).saturating_sub(*index);
+                if reversed_idx < num_elements {
+                    return format_expression_with_context(&elements[reversed_idx], module);
                 }
             }
 

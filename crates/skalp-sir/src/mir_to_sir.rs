@@ -2036,9 +2036,10 @@ impl<'a> MirToSirConverter<'a> {
                 // Create a slice to extract the specified element
                 // For now, assume 32-bit elements and extract accordingly
                 let element_width = 32;
-                let start_bit = (*index) * element_width;
-                let end_bit = start_bit + element_width - 1;
-                self.create_slice_node(base_node, start_bit, end_bit)
+                let low_bit = (*index) * element_width;
+                let high_bit = low_bit + element_width - 1;
+                // BUG FIX #92: create_slice_node expects (high, low) for HDL [high:low] notation
+                self.create_slice_node(base_node, high_bit, low_bit)
             }
             ExpressionKind::FieldAccess { base, field } => {
                 // For named field access, fall back to base expression
@@ -2055,7 +2056,8 @@ impl<'a> MirToSirConverter<'a> {
                 // Create a range select node that operates on the computed base value
                 let high_val = self.evaluate_const_expr(high);
                 let low_val = self.evaluate_const_expr(low);
-                self.create_slice_node(base_node, low_val, high_val)
+                // BUG FIX #92: create_slice_node expects (high, low) for HDL [high:low] notation
+                self.create_slice_node(base_node, high_val, low_val)
             }
             LValue::BitSelect { index, .. } => {
                 // Create a bit select node that operates on the computed base value
@@ -2559,9 +2561,10 @@ impl<'a> MirToSirConverter<'a> {
                 println!("🔍🔍🔍   -> Fallback to bit slicing for index={}", index);
                 let base_node = self.create_expression_node_with_width(base, None);
                 let element_width = 32;
-                let start_bit = (*index) * element_width;
-                let end_bit = start_bit + element_width - 1;
-                self.create_slice_node(base_node, start_bit, end_bit)
+                let low_bit = (*index) * element_width;
+                let high_bit = low_bit + element_width - 1;
+                // BUG FIX #92: create_slice_node expects (high, low) for HDL [high:low] notation
+                self.create_slice_node(base_node, high_bit, low_bit)
             }
             ExpressionKind::FieldAccess { base, field } => {
                 // For named field access, fall back to base expression
@@ -2717,17 +2720,13 @@ impl<'a> MirToSirConverter<'a> {
                                                 let high_val = self.evaluate_constant_expression(high).unwrap_or(0) as usize;
                                                 let low_val = self.evaluate_constant_expression(low).unwrap_or(0) as usize;
 
-                                                // For a tuple (bool, f32, f32) with layout:
-                                                //   - result_0 (bool) at bit 64
-                                                //   - result_1 (f32) at bits 63:32
-                                                //   - result_2 (f32) at bits 31:0
-                                                let index = if low_val >= 64 {
-                                                    0  // valid bit
-                                                } else if low_val >= 32 {
-                                                    1  // x1
-                                                } else {
-                                                    2  // x2
-                                                };
+                                                // BUG FIX #92: Tuple elements are packed LSB-first
+                                                // For a tuple (bool, f32, f32) with 32-bit elements:
+                                                //   - result_0 at bits 31:0 (element 0 at LSB)
+                                                //   - result_1 at bits 63:32
+                                                //   - result_2 at bits 95:64 (element 2 at MSB)
+                                                // Map bit range to element index: index = low_val / 32
+                                                let index = low_val / 32;
 
                                                 if let Some(pos) = rhs_sig.name.rfind("_result_") {
                                                     let base_name = &rhs_sig.name[..pos];
@@ -3014,7 +3013,14 @@ impl<'a> MirToSirConverter<'a> {
             .map(|s| self.get_signal_width(&s.signal_id))
             .sum();
 
-        eprintln!("  Sum width: {}", sum_width);
+        // BUG FIX #92: Check if this is a tuple concat before we move part_signals
+        // Tuple concats have multiple 32-bit elements and should NOT be sliced
+        let is_tuple_concat = parts.len() >= 2 && part_signals.iter().all(|s| {
+            let width = self.get_signal_width(&s.signal_id);
+            width == 32 // All elements are 32-bit (typical tuple element width)
+        });
+
+        eprintln!("  Sum width: {}, is_tuple_concat: {}", sum_width, is_tuple_concat);
 
         // BUG FIX #49/#71e/#73: Handle target width mismatch and Metal width limitations
         // If target < sum: Create Concat with full width, then Slice to extract target bits
@@ -3075,7 +3081,11 @@ impl<'a> MirToSirConverter<'a> {
         self.sir.combinational_nodes.push(node);
 
         // BUG FIX #71e/#73: If target < sum, create a Slice to extract the target bits
-        if needs_slice {
+        // BUG FIX #92: SKIP slicing for tuple concatenations - the target_width is from
+        // the tuple TYPE (e.g., 65 bits for (bit, bit[32], bit[32])) but the actual concat
+        // uses 32-bit signals for ALL elements (96 bits). Slicing would corrupt the layout.
+        // TupleFieldAccess will extract elements correctly from the full concat.
+        if needs_slice && !is_tuple_concat {
             if let Some(target) = target_width {
                 // Explicit target width provided - slice to that width
                 eprintln!(
