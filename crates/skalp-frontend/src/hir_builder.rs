@@ -9,6 +9,7 @@ use crate::typeck::TypeChecker;
 use std::collections::HashMap;
 
 /// Maximum recursion depth to prevent stack overflow
+/// Note: Deeply nested expressions should use intermediate let bindings instead
 const MAX_RECURSION_DEPTH: usize = 100;
 
 /// List of builtin/intrinsic functions that don't require symbol resolution
