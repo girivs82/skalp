@@ -69,6 +69,14 @@ pub struct HirBuilderContext {
 
     /// Recursion depth counter to prevent infinite loops
     recursion_depth: usize,
+
+    /// Intent definitions: maps intent name to its MuxStyle constraint
+    /// Built from `intent parallel = mux_style::parallel;` declarations
+    intent_mux_styles: HashMap<String, MuxStyle>,
+
+    /// Pending MuxStyle hint from most recent attribute
+    /// Set when we see `#[parallel]` before a statement
+    pending_mux_style: Option<MuxStyle>,
 }
 
 /// Symbol table for name resolution
@@ -147,6 +155,8 @@ impl HirBuilderContext {
             errors: Vec::new(),
             built_entities: HashMap::new(),
             recursion_depth: 0,
+            intent_mux_styles: HashMap::new(),
+            pending_mux_style: None,
         }
     }
 
@@ -1383,6 +1393,12 @@ impl HirBuilderContext {
 
         self.recursion_depth += 1;
         let result = match node.kind() {
+            SyntaxKind::Attribute => {
+                // Process attribute and set pending_mux_style
+                self.process_attribute(node);
+                // Attributes themselves don't produce statements
+                None
+            }
             SyntaxKind::AssignmentStmt => {
                 let assignment_type = self.determine_assignment_type(node);
                 self.build_assignment(node, assignment_type)
@@ -2129,11 +2145,14 @@ impl HirBuilderContext {
             })
         };
 
+        // Use pending mux_style from attribute, then clear it
+        let mux_style = self.pending_mux_style.take().unwrap_or_default();
+
         Some(HirIfStatement {
             condition,
             then_statements,
             else_statements,
-            mux_style: MuxStyle::default(),
+            mux_style,
         })
     }
 
@@ -2561,10 +2580,13 @@ impl HirBuilderContext {
             }
         }
 
+        // Use pending mux_style from attribute, then clear it
+        let mux_style = self.pending_mux_style.take().unwrap_or_default();
+
         Some(HirMatchStatement {
             expr,
             arms,
-            mux_style: MuxStyle::default(),
+            mux_style,
         })
     }
 
@@ -5059,10 +5081,13 @@ impl HirBuilderContext {
             }
         }
 
+        // Use pending mux_style from attribute, then clear it
+        let mux_style = self.pending_mux_style.take().unwrap_or_default();
+
         Some(HirExpression::Match(HirMatchExpr {
             expr: Box::new(expr),
             arms,
-            mux_style: MuxStyle::default(),
+            mux_style,
         }))
     }
 
@@ -5365,7 +5390,25 @@ impl HirBuilderContext {
         let id = self.next_intent_id();
         let name = self.extract_name(node)?;
 
-        // Parse intent constraints
+        // Check for single-line intent syntax: `intent parallel = mux_style::parallel;`
+        // This creates an IntentValue node containing the value expression
+        if let Some(intent_value) = node.first_child_of_kind(SyntaxKind::IntentValue) {
+            // Extract the intent value path (e.g., "mux_style::parallel")
+            if let Some(mux_style) = self.extract_mux_style_from_intent_value(&intent_value) {
+                // Store this intent's mux_style for later lookup
+                self.intent_mux_styles.insert(name.clone(), mux_style);
+            }
+
+            // Single-line intents don't have traditional constraints
+            return Some(HirIntent {
+                id,
+                name,
+                description: String::new(),
+                constraints: Vec::new(),
+            });
+        }
+
+        // Parse intent constraints (block form)
         let mut constraints = Vec::new();
         if let Some(constraint_list) = node.first_child_of_kind(SyntaxKind::IntentConstraintList) {
             for constraint_node in constraint_list.children() {
@@ -5383,6 +5426,65 @@ impl HirBuilderContext {
             description: String::new(),
             constraints,
         })
+    }
+
+    /// Extract MuxStyle from single-line intent value like `mux_style::parallel`
+    fn extract_mux_style_from_intent_value(&self, node: &SyntaxNode) -> Option<MuxStyle> {
+        // Collect all identifier tokens from the intent value
+        let tokens: Vec<String> = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .map(|token| token.text().to_string())
+            .collect();
+
+        // Check for mux_style::parallel or mux_style::priority patterns
+        if tokens.len() >= 2 && tokens[0] == "mux_style" {
+            match tokens[1].as_str() {
+                "parallel" => return Some(MuxStyle::Parallel),
+                "priority" => return Some(MuxStyle::Priority),
+                "auto" => return Some(MuxStyle::Auto),
+                _ => {}
+            }
+        }
+
+        // Also check for direct intent name references (e.g., `parallel` alone)
+        // This supports composition: `intent fast = parallel + critical;`
+        if tokens.len() == 1 {
+            if let Some(&style) = self.intent_mux_styles.get(&tokens[0]) {
+                return Some(style);
+            }
+        }
+
+        None
+    }
+
+    /// Process an Attribute node and set pending_mux_style if applicable
+    /// Called when we see `#[parallel]` or `#[mux_style::parallel]` before a statement
+    fn process_attribute(&mut self, node: &SyntaxNode) {
+        // Extract the intent/attribute name from the Attribute node
+        // Attribute contains IntentValue which contains identifiers
+        if let Some(intent_value) = node.first_child_of_kind(SyntaxKind::IntentValue) {
+            // First try to extract mux_style directly (e.g., #[mux_style::parallel])
+            if let Some(style) = self.extract_mux_style_from_intent_value(&intent_value) {
+                self.pending_mux_style = Some(style);
+                return;
+            }
+
+            // Otherwise, look up the intent by name (e.g., #[parallel])
+            let tokens: Vec<String> = intent_value
+                .children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .filter(|token| token.kind() == SyntaxKind::Ident)
+                .map(|token| token.text().to_string())
+                .collect();
+
+            if let Some(intent_name) = tokens.first() {
+                if let Some(&style) = self.intent_mux_styles.get(intent_name) {
+                    self.pending_mux_style = Some(style);
+                }
+            }
+        }
     }
 
     /// Build intent constraint from syntax node
