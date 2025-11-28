@@ -4164,6 +4164,86 @@ impl<'hir> HirToMir<'hir> {
                     return Some(expr);
                 }
 
+                // BUG FIX #34: Handle constant array indexing
+                // Example: const TABLE: nat[8][16] = [...]; value = TABLE[index];
+                // Build a MUX tree over the constant array values
+                let mut try_constant_array_index = || -> Option<Expression> {
+                    // Check if base is a Constant
+                    let const_id = match base.as_ref() {
+                        hir::HirExpression::Constant(id) => *id,
+                        _ => return None,
+                    };
+
+                    // Look up the constant definition
+                    let hir = self.hir.as_ref()?;
+                    let mut const_value_expr = None;
+
+                    for implementation in &hir.implementations {
+                        for constant in &implementation.constants {
+                            if constant.id == const_id {
+                                const_value_expr = Some(&constant.value);
+                                break;
+                            }
+                        }
+                    }
+
+                    let const_value_expr = const_value_expr?;
+
+                    // Check if the constant value is an array literal
+                    let array_elements = match const_value_expr {
+                        hir::HirExpression::ArrayLiteral(elements) => elements,
+                        _ => return None,
+                    };
+
+                    if array_elements.is_empty() {
+                        return None;
+                    }
+
+                    // Convert index expression to MIR
+                    let mir_index = self.convert_expression(index, depth + 1)?;
+
+                    // Convert all array elements to MIR expressions
+                    let mut mir_elements: Vec<Expression> = Vec::new();
+                    for elem in array_elements {
+                        let mir_elem = self.convert_expression(elem, depth + 1)?;
+                        mir_elements.push(mir_elem);
+                    }
+
+                    // Build MUX tree: (index == 0) ? elem_0 : ((index == 1) ? elem_1 : ...)
+                    let mut mux_expr = None;
+
+                    // Build from last to first (nested ternaries)
+                    for (i, elem_expr) in mir_elements.iter().enumerate().rev() {
+                        if let Some(else_expr) = mux_expr {
+                            // Build condition: index == i
+                            let index_literal =
+                                Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(i as i64)));
+                            let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::Equal,
+                                left: Box::new(mir_index.clone()),
+                                right: Box::new(index_literal),
+                            });
+
+                            // Build ternary: condition ? elem_expr : else_expr
+                            mux_expr = Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                                cond: Box::new(condition),
+                                then_expr: Box::new(elem_expr.clone()),
+                                else_expr: Box::new(else_expr),
+                            }));
+                        } else {
+                            // Last element (no else branch) - this is the default case
+                            mux_expr = Some(elem_expr.clone());
+                        }
+                    }
+
+                    mux_expr
+                };
+
+                // Try constant array index expansion
+                if let Some(expr) = try_constant_array_index() {
+                    return Some(expr);
+                }
+
                 // Fall back to bit select
                 let base_lval = self.expr_to_lvalue(base)?;
                 let index_expr = self.convert_expression(index, depth + 1)?;
