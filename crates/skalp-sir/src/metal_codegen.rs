@@ -373,7 +373,9 @@ impl<'a> MetalShaderGenerator<'a> {
                 } else {
                     // Output is driven by combinational logic
                     // Find the driver node for this output signal
+                    eprintln!("🔍 [BUG #87] Looking for signal '{}' in sir.signals (output_width={})", output.name, output_width);
                     if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
+                        eprintln!("🔍 [BUG #87] Found signal '{}', driver_node={:?}", output.name, signal.driver_node);
                         if let Some(driver_node_id) = signal.driver_node {
                             // Find the driver node and connect its output to this signal
                             for comb_node in &sir.combinational_nodes {
@@ -382,7 +384,9 @@ impl<'a> MetalShaderGenerator<'a> {
                                         // Check BOTH output width AND source width
                                         let source_width = self
                                             .get_signal_width_from_sir(sir, &node_output.signal_id);
+                                        eprintln!("🔍 [BUG #87] Driver node {} output '{}' has width {}", driver_node_id, node_output.signal_id, source_width);
                                         let both_wide = output_width > 128 && source_width > 128;
+                                        eprintln!("🔍 [BUG #87] both_wide = {} (output_width={} > 128 && source_width={} > 128)", both_wide, output_width, source_width);
 
                                         if both_wide {
                                             // Both are wide bit types - use element-wise copy
@@ -616,11 +620,40 @@ impl<'a> MetalShaderGenerator<'a> {
                                                 }
                                             } else {
                                                 // Same type - direct assignment
-                                                self.write_indented(&format!(
-                                                    "signals->{} = signals->{};\n",
-                                                    self.sanitize_name(&output.name),
-                                                    self.sanitize_name(&node_output.signal_id)
-                                                ));
+                                                // BUG #87 CHECK: Both may be wide types - need element-wise copy
+                                                let output_width_check = output_width;
+                                                let source_width_check = self.get_signal_width_from_sir(sir, &node_output.signal_id);
+                                                eprintln!(
+                                                    "🔍 [BUG #87 OUTPUT] Direct assign path: output='{}' ({}bits) = source='{}' ({}bits)",
+                                                    output.name, output_width_check, node_output.signal_id, source_width_check
+                                                );
+                                                if output_width_check > 128 && source_width_check > 128 {
+                                                    // BUG FIX #87: Both are wide - use element-wise copy
+                                                    let array_size = output_width_check.div_ceil(32);
+                                                    eprintln!(
+                                                        "   ⚠️ [BUG #87] Fixing direct assignment of {}-bit arrays - using element-wise copy",
+                                                        output_width_check
+                                                    );
+                                                    self.write_indented(&format!(
+                                                        "// BUG FIX #87: Element-wise copy for {}-bit output\n",
+                                                        output_width_check
+                                                    ));
+                                                    self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
+                                                    self.indent += 1;
+                                                    self.write_indented(&format!(
+                                                        "signals->{}[i] = signals->{}[i];\n",
+                                                        self.sanitize_name(&output.name),
+                                                        self.sanitize_name(&node_output.signal_id)
+                                                    ));
+                                                    self.indent -= 1;
+                                                    self.write_indented("}\n");
+                                                } else {
+                                                    self.write_indented(&format!(
+                                                        "signals->{} = signals->{};\n",
+                                                        self.sanitize_name(&output.name),
+                                                        self.sanitize_name(&node_output.signal_id)
+                                                    ));
+                                                }
                                             }
                                         }
                                         eprintln!(
@@ -1287,8 +1320,25 @@ impl<'a> MetalShaderGenerator<'a> {
             let false_val = &node.inputs[2].signal_id;
             let output = &node.outputs[0].signal_id;
 
-            // Check if we need element-wise mux for wide bit types (> 128 bits)
-            let output_width = self.get_signal_width_from_sir(sir, output);
+            // BUG FIX #87: Check ALL outputs of this node to find the correct width.
+            // Intermediate signals like node_XXXX_out may not be registered in sir.signals,
+            // but if this mux drives a module output (like 'result'), that output IS registered.
+            // Use the maximum width found among all outputs.
+            let mut output_width = self.get_signal_width_from_sir(sir, output);
+            // BUG FIX #87: Check ALL outputs to find correct width (removed debug output)
+            if output_width == 32 && node.outputs.len() > 1 {
+                // First output defaulted to 32 - check other outputs
+                for other_output in &node.outputs[1..] {
+                    let other_width = self.get_signal_width_from_sir(sir, &other_output.signal_id);
+                    if other_width > output_width {
+                        eprintln!(
+                            "🔧 [BUG #87 MUX] Node {} output '{}' width defaulted to 32, using width {} from '{}'",
+                            node.id, output, other_width, other_output.signal_id
+                        );
+                        output_width = other_width;
+                    }
+                }
+            }
             let true_val_width = self.get_signal_width_from_sir(sir, true_val);
             let false_val_width = self.get_signal_width_from_sir(sir, false_val);
 
@@ -2007,17 +2057,20 @@ impl<'a> MetalShaderGenerator<'a> {
         // Previously only handled Bits explicitly, causing Float16/Float32 to fall back
         // to sig.width field which might not be correctly set
 
-        // Check signals - use sir_type.width() for all types
-        if let Some(sig) = sir.signals.iter().find(|s| s.name == signal_name) {
-            return sig.sir_type.width();
+        // BUG FIX #87: Check outputs FIRST before signals!
+        // Output ports have explicit type declarations from the entity definition.
+        // Internal signals may have inferred types that could be wrong (e.g., mux output
+        // typed as 64-bit when connected to 256-bit output).
+        if let Some(output) = sir.outputs.iter().find(|o| o.name == signal_name) {
+            return output.sir_type.width();
         }
         // Check inputs
         if let Some(input) = sir.inputs.iter().find(|i| i.name == signal_name) {
             return input.sir_type.width();
         }
-        // Check outputs
-        if let Some(output) = sir.outputs.iter().find(|o| o.name == signal_name) {
-            return output.sir_type.width();
+        // Check signals - use sir_type.width() for all types
+        if let Some(sig) = sir.signals.iter().find(|s| s.name == signal_name) {
+            return sig.sir_type.width();
         }
         // Check state elements
         if let Some(state) = sir.state_elements.get(signal_name) {
@@ -2448,27 +2501,54 @@ impl<'a> MetalShaderGenerator<'a> {
             // So we iterate in reverse: last input (low bits) at bit_offset=0
             for (input_name, width) in input_widths.iter().rev() {
                 let component_idx = bit_offset / 32;
+                let bit_in_component = bit_offset % 32;
+
                 if component_idx < 2 {
                     // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
                     let component_str = self.format_signal_for_bitwise_op(sir, input_name);
 
                     // BUG FIX #12: uint2 constructor requires all arguments to be exactly 'unsigned int'
                     // Note: format_signal_for_bitwise_op may already have done extraction for wide signals
-                    if component_str == "0u" || component_str.contains("as_type") {
-                        components[component_idx] = component_str;
+                    let new_value = if component_str == "0u" || component_str.contains("as_type") {
+                        component_str
                     } else if component_str.contains(".x") || component_str.contains("[0]") {
                         // Already has component extraction - just cast to uint if needed
-                        components[component_idx] = format!("(uint)({})", component_str);
+                        format!("(uint)({})", component_str)
                     } else if *width <= 32 {
-                        components[component_idx] = format!("(uint)({})", component_str);
+                        format!("(uint)({})", component_str)
                     } else {
                         // Wider than 32 bits - extract first 32-bit component
                         let (_, metal_array_size) = self.get_metal_type_for_wide_bits(*width);
                         if metal_array_size.is_some() {
-                            components[component_idx] = format!("{}[0]", component_str);
+                            format!("{}[0]", component_str)
                         } else {
-                            components[component_idx] = format!("{}.x", component_str);
+                            format!("{}.x", component_str)
                         }
+                    };
+
+                    // BUG FIX #88: Handle multiple inputs mapping to the same component
+                    // When bit_in_component > 0, we need to shift and OR with existing value
+                    if bit_in_component > 0 && components[component_idx] != "0u" {
+                        // Need to combine with existing value using OR and shift
+                        // The new value goes at bit_in_component position
+                        if new_value == "0u" {
+                            // Shifting 0 by any amount is still 0, no change needed
+                        } else {
+                            components[component_idx] = format!(
+                                "({} | ({} << {}))",
+                                components[component_idx], new_value, bit_in_component
+                            );
+                        }
+                    } else if bit_in_component > 0 && components[component_idx] == "0u" {
+                        // Component was zero, just shift the new value
+                        if new_value == "0u" {
+                            // 0 << n = 0, keep as 0u
+                        } else {
+                            components[component_idx] = format!("({} << {})", new_value, bit_in_component);
+                        }
+                    } else {
+                        // bit_in_component == 0, simple assignment (no shift needed)
+                        components[component_idx] = new_value;
                     }
                 }
                 bit_offset += width;
@@ -3075,7 +3155,27 @@ impl<'a> MetalShaderGenerator<'a> {
                 let output_width =
                     self.get_signal_width_from_sir(sir, &additional_output.signal_id);
                 let source_width = self.get_signal_width_from_sir(sir, first_output);
+
+                // BUG FIX #87: Debug removed - multi-output node handling
+
+                // BUG FIX #87: If source width defaults to 32 (not found), try to get width from the output type
+                // Intermediate signals like node_XXXX_out may not be registered in sir.signals yet
+                let source_width = if source_width == 32 && first_output.starts_with("node_") && first_output.ends_with("_out") {
+                    // Use output_width as fallback - for mux nodes, input and output have same width
+                    eprintln!(
+                        "⚠️ [BUG #87] Source '{}' width defaulted to 32, using output width {} instead",
+                        first_output, output_width
+                    );
+                    output_width
+                } else {
+                    source_width
+                };
+
                 let both_wide = output_width > 128 && source_width > 128;
+                eprintln!(
+                    "🔍 [DEBUG #87] both_wide={} (source_width={} > 128 && output_width={} > 128)",
+                    both_wide, source_width, output_width
+                );
 
                 if both_wide {
                     // Both are wide bit types - use element-wise copy
