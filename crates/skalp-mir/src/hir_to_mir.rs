@@ -3771,6 +3771,10 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(body) = func_body {
                         println!("📊📊📊 [HYBRID] '{}': body has {} statements 📊📊📊", call.function, body.len());
                         // Count calls across all statements in the function body
+                        // DEBUG: Print each statement type
+                        for (i, stmt) in body.iter().enumerate() {
+                            println!("[HYBRID_DEBUG] Statement {}: {:?}", i, std::mem::discriminant(stmt));
+                        }
                         let call_count: usize = body.iter()
                             .map(|stmt| self.count_calls_in_statement(stmt))
                             .sum();
@@ -10869,8 +10873,9 @@ impl<'hir> HirToMir<'hir> {
     /// whether a function is "simple" (inline it) or "complex" (synthesize as module)
     fn count_function_calls(&self, expr: &hir::HirExpression) -> usize {
         match expr {
-            hir::HirExpression::Call(_) => {
+            hir::HirExpression::Call(call_expr) => {
                 // This is a function call - count it as 1, plus any calls in arguments
+                println!("[COUNT_CALLS] Found Call to '{}' with {} args", call_expr.function, call_expr.args.len());
                 1 + self.count_calls_in_call_expr(expr)
             }
             hir::HirExpression::Binary(bin) => {
@@ -10896,10 +10901,18 @@ impl<'hir> HirToMir<'hir> {
                 + self.count_function_calls(&if_expr.else_expr)
             }
             hir::HirExpression::Match(match_expr) => {
+                println!("[COUNT_CALLS] Match expression with {} arms", match_expr.arms.len());
                 let scrutinee_calls = self.count_function_calls(&match_expr.expr);
+                println!("[COUNT_CALLS] Match scrutinee calls: {}", scrutinee_calls);
+                for (i, arm) in match_expr.arms.iter().enumerate() {
+                    println!("[COUNT_CALLS] Arm {} expr type: {:?}", i, std::mem::discriminant(&arm.expr));
+                    let arm_count = self.count_function_calls(&arm.expr);
+                    println!("[COUNT_CALLS] Arm {} count: {}", i, arm_count);
+                }
                 let arm_calls: usize = match_expr.arms.iter()
                     .map(|arm| self.count_function_calls(&arm.expr))
                     .sum();
+                println!("[COUNT_CALLS] Total arm calls: {}", arm_calls);
                 scrutinee_calls + arm_calls
             }
             hir::HirExpression::Block { statements, result_expr } => {
@@ -10919,7 +10932,10 @@ impl<'hir> HirToMir<'hir> {
                 struct_lit.fields.iter().map(|f| self.count_function_calls(&f.value)).sum()
             }
             hir::HirExpression::Cast(cast_expr) => {
-                self.count_function_calls(&cast_expr.expr)
+                println!("[COUNT_CALLS] Cast inner expr type: {:?}", std::mem::discriminant(&*cast_expr.expr));
+                let inner_count = self.count_function_calls(&cast_expr.expr);
+                println!("[COUNT_CALLS] Cast inner count: {}", inner_count);
+                inner_count
             }
             hir::HirExpression::Concat(exprs) => {
                 exprs.iter().map(|e| self.count_function_calls(e)).sum()
@@ -10933,8 +10949,11 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Port(_) |
             hir::HirExpression::Variable(_) |
             hir::HirExpression::Constant(_) |
-            hir::HirExpression::GenericParam(_) |
             hir::HirExpression::EnumVariant { .. } => 0,
+            hir::HirExpression::GenericParam(param_name) => {
+                println!("[COUNT_CALLS] GenericParam: '{}'", param_name);
+                0
+            }
             hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
                 self.count_function_calls(condition) + self.count_function_calls(true_expr) + self.count_function_calls(false_expr)
             }
@@ -10953,17 +10972,21 @@ impl<'hir> HirToMir<'hir> {
 
     /// Helper to count calls in a statement
     fn count_calls_in_statement(&self, stmt: &hir::HirStatement) -> usize {
-        match stmt {
+        let result = match stmt {
             hir::HirStatement::Let(let_stmt) => {
+                println!("[COUNT_CALLS_STMT] Let statement: {}", let_stmt.name);
                 self.count_function_calls(&let_stmt.value)
             }
             hir::HirStatement::Assignment(assign) => {
+                println!("[COUNT_CALLS_STMT] Assignment statement");
                 self.count_function_calls(&assign.rhs)
             }
             hir::HirStatement::Expression(expr) => {
+                println!("[COUNT_CALLS_STMT] Expression statement: {:?}", std::mem::discriminant(expr));
                 self.count_function_calls(expr)
             }
             hir::HirStatement::If(if_stmt) => {
+                println!("[COUNT_CALLS_STMT] If statement");
                 let cond_calls = self.count_function_calls(&if_stmt.condition);
                 let then_calls: usize = if_stmt.then_statements.iter()
                     .map(|s| self.count_calls_in_statement(s))
@@ -10974,6 +10997,7 @@ impl<'hir> HirToMir<'hir> {
                 cond_calls + then_calls + else_calls
             }
             hir::HirStatement::Match(match_stmt) => {
+                println!("[COUNT_CALLS_STMT] Match statement");
                 let scrut_calls = self.count_function_calls(&match_stmt.expr);
                 let arm_calls: usize = match_stmt.arms.iter()
                     .flat_map(|arm| &arm.statements)
@@ -10982,10 +11006,19 @@ impl<'hir> HirToMir<'hir> {
                 scrut_calls + arm_calls
             }
             hir::HirStatement::Return(value_opt) => {
+                println!("[COUNT_CALLS_STMT] Return statement: value_opt.is_some()={}", value_opt.is_some());
+                if let Some(e) = value_opt.as_ref() {
+                    println!("[COUNT_CALLS_STMT] Return value expr type: {:?}", std::mem::discriminant(e));
+                }
                 value_opt.as_ref().map(|e| self.count_function_calls(e)).unwrap_or(0)
             }
-            _ => 0, // For loops, breaks, continues, etc.
-        }
+            _ => {
+                println!("[COUNT_CALLS_STMT] Other statement type: {:?}", std::mem::discriminant(stmt));
+                0
+            }
+        };
+        println!("[COUNT_CALLS_STMT] Result: {}", result);
+        result
     }
 
     /// BUG FIX #85: Extract let bindings from an HIR expression recursively

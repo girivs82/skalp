@@ -542,21 +542,38 @@ impl<'a> MetalShaderGenerator<'a> {
                                                     &node_output.signal_id,
                                                 );
 
-                                                let dest_metal_type = if dest_is_float {
+                                                // BUG FIX #96 PART 4: Use Metal struct type to get correct type
+                                                // Structs use forced 4-byte alignment - Bits(16) becomes uint, but Float16 stays half
+                                                let dest_metal_type = if let Some(ref dt) = dest_type {
+                                                    let (base, _) = self.get_metal_type_parts_for_struct(dt);
+                                                    base
+                                                } else if dest_is_float {
                                                     match output_width {
-                                                        16 => "half",
-                                                        32 => "float",
-                                                        64 => "double",
-                                                        _ => "float",
+                                                        16 => "half".to_string(),
+                                                        32 => "float".to_string(),
+                                                        64 => "double".to_string(),
+                                                        _ => "float".to_string(),
                                                     }
                                                 } else {
-                                                    match output_width {
-                                                        8 => "uchar",
-                                                        16 => "ushort",
-                                                        32 => "uint",
-                                                        64 => "ulong",
-                                                        _ => "uint",
-                                                    }
+                                                    // With forced 4-byte alignment, Bits <= 32 becomes uint
+                                                    "uint".to_string()
+                                                };
+
+                                                // BUG FIX #96 PART 4: Calculate Metal storage widths for comparison
+                                                // Structs use forced 4-byte alignment for Bits types
+                                                let source_metal_storage = if source_is_float {
+                                                    source_width // Float types keep their natural width
+                                                } else if source_width <= 32 {
+                                                    32 // Bits(w) with w<=32 stored as uint in struct
+                                                } else {
+                                                    source_width
+                                                };
+                                                let output_metal_storage = if dest_is_float {
+                                                    output_width // Float types keep their natural width (half=16)
+                                                } else if output_width <= 32 {
+                                                    32 // Bits(w) with w<=32 stored as uint in struct
+                                                } else {
+                                                    output_width
                                                 };
 
                                                 // Metal as_type<> requires exact width match
@@ -571,11 +588,11 @@ impl<'a> MetalShaderGenerator<'a> {
                                                     || output.name.contains("a_fp16")
                                                     || output.name.contains("b_fp16")
                                                 {
-                                                    eprintln!("[OUTPUT ASSIGN] {} = {} | src_width={}, dst_width={}, src_float={}, dst_float={}",
-                                                        output.name, node_output.signal_id, source_width, output_width, source_is_float, dest_is_float);
+                                                    eprintln!("[OUTPUT ASSIGN] {} = {} | src_width={} (storage={}), dst_width={} (storage={}), src_float={}, dst_float={}",
+                                                        output.name, node_output.signal_id, source_width, source_metal_storage, output_width, output_metal_storage, source_is_float, dest_is_float);
                                                 }
 
-                                                match source_width.cmp(&output_width) {
+                                                match source_metal_storage.cmp(&output_metal_storage) {
                                                     Ordering::Equal => {
                                                         // Same width - direct as_type<>
                                                         self.write_indented(&format!(
@@ -934,9 +951,26 @@ impl<'a> MetalShaderGenerator<'a> {
                         .unwrap_or(false);
 
                     // Convert inputs to float type if they're stored as bits
-                    // BUG FIX: Check width matching for as_type<> casts
-                    let left_actual_width = self.get_signal_width_from_sir(sir, left);
-                    let right_actual_width = self.get_signal_width_from_sir(sir, right);
+                    // BUG FIX #96: Get actual Metal storage width, not logical width
+                    // SirType::Bits signals with width <= 32 are stored as uint (32-bit) due to alignment
+                    let left_logical_width = self.get_signal_width_from_sir(sir, left);
+                    let right_logical_width = self.get_signal_width_from_sir(sir, right);
+
+                    // For Bits type signals, Metal storage is always at least 32 bits (uint)
+                    let left_metal_storage = if left_is_float {
+                        left_logical_width // Float types keep their natural width
+                    } else if left_logical_width <= 32 {
+                        32 // Bits(w) with w<=32 stored as uint
+                    } else {
+                        left_logical_width
+                    };
+                    let right_metal_storage = if right_is_float {
+                        right_logical_width
+                    } else if right_logical_width <= 32 {
+                        32
+                    } else {
+                        right_logical_width
+                    };
 
                     // BUG FIX #71b: Use format_signal_reference to handle vec3/vec4 extraction
                     let left_signal_ref = self.format_signal_reference(sir, left, Some(0));
@@ -946,11 +980,12 @@ impl<'a> MetalShaderGenerator<'a> {
                         left_signal_ref
                     } else {
                         // Need to cast from bits to float
-                        if left_actual_width == fp_precision {
-                            // Widths match - direct as_type cast
+                        // BUG FIX #96: Compare Metal storage width, not logical width
+                        if left_metal_storage == fp_precision {
+                            // Storage widths match - direct as_type cast
                             format!("as_type<{}>({})", float_type, left_signal_ref)
                         } else {
-                            // Widths don't match - need intermediate cast
+                            // Storage widths don't match - need intermediate cast
                             let intermediate_type = match fp_precision {
                                 16 => "ushort",
                                 64 => "ulong",
@@ -967,11 +1002,12 @@ impl<'a> MetalShaderGenerator<'a> {
                         right_signal_ref
                     } else {
                         // Need to cast from bits to float
-                        if right_actual_width == fp_precision {
-                            // Widths match - direct as_type cast
+                        // BUG FIX #96: Compare Metal storage width, not logical width
+                        if right_metal_storage == fp_precision {
+                            // Storage widths match - direct as_type cast
                             format!("as_type<{}>({})", float_type, right_signal_ref)
                         } else {
-                            // Widths don't match - need intermediate cast
+                            // Storage widths don't match - need intermediate cast
                             let intermediate_type = match fp_precision {
                                 16 => "ushort",
                                 64 => "ulong",
@@ -1116,24 +1152,48 @@ impl<'a> MetalShaderGenerator<'a> {
                 let input_type = self.get_signal_type_from_sir(sir, input);
                 let output_type = self.get_signal_type_from_sir(sir, output);
 
-                let needs_input_conversion = !matches!(
+                let input_is_float = matches!(
                     input_type,
                     Some(SirType::Float16) | Some(SirType::Float32) | Some(SirType::Float64)
                 );
+                let needs_input_conversion = !input_is_float;
                 let needs_output_conversion = !matches!(
                     output_type,
                     Some(SirType::Float16) | Some(SirType::Float32) | Some(SirType::Float64)
                 );
 
-                if is_function {
-                    let input_expr = if needs_input_conversion {
-                        format!(
-                            "as_type<{}>(signals->{})",
-                            float_type,
-                            self.sanitize_name(input)
-                        )
+                // BUG FIX #96: Get actual Metal storage width for proper as_type casts
+                // Bits signals with width <= 32 are stored as uint (32-bit) due to alignment
+                let input_metal_storage = if input_is_float {
+                    input_width // Float types keep their natural width
+                } else if input_width <= 32 {
+                    32 // Bits(w) with w<=32 stored as uint
+                } else {
+                    input_width
+                };
+
+                // Helper to create input expression with proper width handling
+                let create_input_expr = |float_type: &str, fp_precision: usize, signal_ref: String, metal_storage: usize| -> String {
+                    if metal_storage == fp_precision {
+                        // Storage widths match - direct as_type cast
+                        format!("as_type<{}>({})", float_type, signal_ref)
                     } else {
-                        format!("signals->{}", self.sanitize_name(input))
+                        // Storage widths don't match - need intermediate cast
+                        let intermediate_type = match fp_precision {
+                            16 => "ushort",
+                            64 => "ulong",
+                            _ => "uint",
+                        };
+                        format!("as_type<{}>(({}){})", float_type, intermediate_type, signal_ref)
+                    }
+                };
+
+                if is_function {
+                    let signal_ref = format!("signals->{}", self.sanitize_name(input));
+                    let input_expr = if needs_input_conversion {
+                        create_input_expr(float_type, fp_precision, signal_ref, input_metal_storage)
+                    } else {
+                        signal_ref
                     };
 
                     let op_expr = format!("{}({})", op_str, input_expr);
@@ -1150,14 +1210,11 @@ impl<'a> MetalShaderGenerator<'a> {
                         output_expr
                     ));
                 } else {
+                    let signal_ref = format!("signals->{}", self.sanitize_name(input));
                     let input_expr = if needs_input_conversion {
-                        format!(
-                            "as_type<{}>(signals->{})",
-                            float_type,
-                            self.sanitize_name(input)
-                        )
+                        create_input_expr(float_type, fp_precision, signal_ref, input_metal_storage)
                     } else {
-                        format!("signals->{}", self.sanitize_name(input))
+                        signal_ref
                     };
 
                     let op_expr = format!("{}{}", op_str, input_expr);
@@ -1443,8 +1500,22 @@ impl<'a> MetalShaderGenerator<'a> {
                             "({})(as_type<uint>({}))",
                             output_metal_type, true_signal_ref
                         )
+                    } else if !true_is_float && output_is_float && true_width != output_width {
+                        // BUG FIX #96: Integer to different-width float: narrow/widen integer first
+                        // Metal as_type<> requires exact bit-width match
+                        // e.g., uint(32) -> half(16): as_type<half>((ushort)source)
+                        let intermediate = match output_width {
+                            16 => "ushort",
+                            32 => "uint",
+                            64 => "ulong",
+                            _ => "uint",
+                        };
+                        format!(
+                            "as_type<{}>(({}){}))",
+                            output_metal_type, intermediate, true_signal_ref
+                        )
                     } else {
-                        // Same width or integer-to-float: direct as_type
+                        // Same width: direct as_type
                         format!("as_type<{}>({})", output_metal_type, true_signal_ref)
                     }
                 } else {
@@ -1459,8 +1530,22 @@ impl<'a> MetalShaderGenerator<'a> {
                             "({})(as_type<uint>({}))",
                             output_metal_type, false_signal_ref
                         )
+                    } else if !false_is_float && output_is_float && false_width != output_width {
+                        // BUG FIX #96: Integer to different-width float: narrow/widen integer first
+                        // Metal as_type<> requires exact bit-width match
+                        // e.g., uint(32) -> half(16): as_type<half>((ushort)source)
+                        let intermediate = match output_width {
+                            16 => "ushort",
+                            32 => "uint",
+                            64 => "ulong",
+                            _ => "uint",
+                        };
+                        format!(
+                            "as_type<{}>(({}){}))",
+                            output_metal_type, intermediate, false_signal_ref
+                        )
                     } else {
-                        // Same width or integer-to-float: direct as_type
+                        // Same width: direct as_type
                         format!("as_type<{}>({})", output_metal_type, false_signal_ref)
                     }
                 } else {
@@ -2954,8 +3039,10 @@ impl<'a> MetalShaderGenerator<'a> {
                             let dest_is_float = dest_type.as_ref().is_some_and(|dt| dt.is_float());
 
                             // Metal Backend Fix: Get actual Metal type names to detect float4 <-> uint4 mismatches
+                            // BUG FIX #96 PART 2: Use get_metal_type_parts_for_struct to match how structs are declared
+                            // Both Signals and Registers structs use forced 4-byte alignment (uint for small ints)
                             let source_metal_type = if let Some(ref st) = source_type {
-                                let (base, _) = self.get_metal_type_parts(st);
+                                let (base, _) = self.get_metal_type_parts_for_struct(st);
                                 base
                             } else {
                                 // Fallback for unknown types based on width
@@ -2968,7 +3055,7 @@ impl<'a> MetalShaderGenerator<'a> {
                             };
 
                             let dest_metal_type = if let Some(ref dt) = dest_type {
-                                let (base, _) = self.get_metal_type_parts(dt);
+                                let (base, _) = self.get_metal_type_parts_for_struct(dt);
                                 base
                             } else {
                                 // Fallback for unknown types based on width
@@ -2998,6 +3085,22 @@ impl<'a> MetalShaderGenerator<'a> {
 
                                 // BUG FIX #59: Check width matching for as_type<> validity
                                 // Metal's as_type<> requires EXACT size match
+                                // BUG FIX #96: Account for Metal storage alignment
+                                // Bits signals with width <= 32 are stored as uint (32-bit)
+                                let source_metal_storage = if source_is_float {
+                                    source_width // Float types keep their natural width
+                                } else if source_width <= 32 {
+                                    32 // Bits(w) with w<=32 stored as uint
+                                } else {
+                                    source_width
+                                };
+                                let output_metal_storage = if dest_is_float {
+                                    output_width
+                                } else if output_width <= 32 {
+                                    32
+                                } else {
+                                    output_width
+                                };
 
                                 // Debug for specific problematic signals
                                 if output.contains("_fp16")
@@ -3005,15 +3108,16 @@ impl<'a> MetalShaderGenerator<'a> {
                                     || output.contains("b_fp16")
                                 {
                                     eprintln!(
-                                        "[NODE ASSIGN] {} = {} | src_width={}, dst_width={}",
-                                        output, signal, source_width, output_width
+                                        "[NODE ASSIGN] {} = {} | src_width={} (storage={}), dst_width={} (storage={})",
+                                        output, signal, source_width, source_metal_storage, output_width, output_metal_storage
                                     );
                                 }
 
                                 use std::cmp::Ordering;
-                                match source_width.cmp(&output_width) {
+                                // BUG FIX #96: Compare Metal storage widths, not logical widths
+                                match source_metal_storage.cmp(&output_metal_storage) {
                                     Ordering::Equal => {
-                                        // Same width, can use as_type<> directly
+                                        // Same Metal storage width, can use as_type<> directly
                                         eprintln!(
                                             "   🔄 Type reinterpretation: {} -> {} (as_type<{}>)",
                                             signal, output, dest_type_name
@@ -3397,35 +3501,53 @@ impl<'a> MetalShaderGenerator<'a> {
                         // BUG FIX: Check width matching for as_type<> validity
                         let source_width = self.get_signal_width_from_sir(sir, first_output);
 
-                        let dest_metal_type = if dest_is_float {
+                        // BUG FIX #96 PART 6: Use Metal struct type for dest_metal_type
+                        let dest_metal_type = if let Some(ref dt) = dest_type {
+                            let (base, _) = self.get_metal_type_parts_for_struct(dt);
+                            base
+                        } else if dest_is_float {
                             match output_width {
-                                16 => "half",
-                                32 => "float",
-                                64 => "double",
-                                _ => "float",
+                                16 => "half".to_string(),
+                                32 => "float".to_string(),
+                                64 => "double".to_string(),
+                                _ => "float".to_string(),
                             }
                         } else {
-                            match output_width {
-                                8 => "uchar",
-                                16 => "ushort",
-                                32 => "uint",
-                                64 => "ulong",
-                                _ => "uint",
-                            }
+                            "uint".to_string() // With forced 4-byte alignment
                         };
+
+                        // BUG FIX #96 PART 6: Calculate Metal storage widths for comparison
+                        // Structs use forced 4-byte alignment for Bits types
+                        let source_metal_storage = if source_is_float {
+                            source_width // Float types keep their natural width
+                        } else if source_width <= 32 {
+                            32 // Bits(w) with w<=32 stored as uint in struct
+                        } else {
+                            source_width
+                        };
+                        let output_metal_storage = if dest_is_float {
+                            output_width // Float types keep their natural width (half=16)
+                        } else if output_width <= 32 {
+                            32 // Bits(w) with w<=32 stored as uint in struct
+                        } else {
+                            output_width
+                        };
+
                         eprintln!(
-                            "   🔄 Additional output reinterpretation: {} ({}) -> {} ({})",
+                            "   🔄 Additional output reinterpretation: {} ({}, width={}, storage={}) -> {} ({}, width={}, storage={})",
                             first_output,
                             if source_is_float { "float" } else { "bits" },
+                            source_width, source_metal_storage,
                             additional_output.signal_id,
-                            if dest_is_float { "float" } else { "bits" }
+                            if dest_is_float { "float" } else { "bits" },
+                            output_width, output_metal_storage
                         );
 
                         // Metal as_type<> requires exact width match
                         use std::cmp::Ordering;
                         let source_location =
                             format!("signals->{}", self.sanitize_name(first_output));
-                        match source_width.cmp(&output_width) {
+                        match source_metal_storage.cmp(&output_metal_storage) {
                             Ordering::Equal => {
                                 // Same width - direct as_type<>
                                 self.write_indented(&format!(
@@ -3452,20 +3574,50 @@ impl<'a> MetalShaderGenerator<'a> {
                                 ));
                             }
                             Ordering::Less => {
-                                // Source narrower: widen first, then reinterpret
-                                let intermediate_type = match output_width {
-                                    16 => "ushort",
-                                    32 => "uint",
-                                    64 => "ulong",
-                                    _ => "uint",
-                                };
-                                self.write_indented(&format!(
-                                    "signals->{} = as_type<{}>(({}){}); \n",
-                                    self.sanitize_name(&additional_output.signal_id),
-                                    dest_metal_type,
-                                    intermediate_type,
-                                    source_location
-                                ));
+                                // BUG FIX #96 PART 7: Source narrower than dest
+                                // For float→int: first reinterpret to same-width int, then widen
+                                // e.g., half(16) → uint(32): (uint)as_type<ushort>(half_source)
+                                // For int→float: widen first, then reinterpret
+                                // e.g., ushort(16) → float(32): as_type<float>((uint)int_source)
+                                if source_is_float && !dest_is_float {
+                                    // Float → wider Int: as_type first, then widen
+                                    let source_int_type = match source_width {
+                                        16 => "ushort",
+                                        32 => "uint",
+                                        64 => "ulong",
+                                        _ => "uint",
+                                    };
+                                    self.write_indented(&format!(
+                                        "signals->{} = ({})as_type<{}>({});\n",
+                                        self.sanitize_name(&additional_output.signal_id),
+                                        dest_metal_type,
+                                        source_int_type,
+                                        source_location
+                                    ));
+                                } else if !source_is_float && dest_is_float {
+                                    // Int → wider Float: widen first, then as_type
+                                    let dest_int_type = match output_width {
+                                        16 => "ushort",
+                                        32 => "uint",
+                                        64 => "ulong",
+                                        _ => "uint",
+                                    };
+                                    self.write_indented(&format!(
+                                        "signals->{} = as_type<{}>(({}){}); \n",
+                                        self.sanitize_name(&additional_output.signal_id),
+                                        dest_metal_type,
+                                        dest_int_type,
+                                        source_location
+                                    ));
+                                } else {
+                                    // Same category (both float or both int): widen then cast
+                                    self.write_indented(&format!(
+                                        "signals->{} = ({}){};\n",
+                                        self.sanitize_name(&additional_output.signal_id),
+                                        dest_metal_type,
+                                        source_location
+                                    ));
+                                }
                             }
                         }
                     } else {
@@ -3475,27 +3627,96 @@ impl<'a> MetalShaderGenerator<'a> {
                             self.get_signal_sir_type(sir, &additional_output.signal_id);
                         let source_type = self.get_signal_sir_type(sir, first_output);
 
+                        // BUG FIX #96 PART 3: Use get_metal_type_parts_for_struct to match struct declarations
                         let output_metal =
-                            output_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
+                            output_type.as_ref().map(|t| self.get_metal_type_parts_for_struct(t).0);
                         let source_metal =
-                            source_type.as_ref().map(|t| self.get_metal_type_parts(t).0);
+                            source_type.as_ref().map(|t| self.get_metal_type_parts_for_struct(t).0);
 
                         let needs_cast = output_metal.is_some()
                             && source_metal.is_some()
                             && output_metal != source_metal;
 
                         if needs_cast {
+                            // BUG FIX #96 PART 5: Check Metal storage widths, not logical widths
+                            // Metal as_type<> requires exact bit-width match
+                            let source_width = source_type.as_ref().map(|t| t.width()).unwrap_or(32);
+                            let output_width = output_type.as_ref().map(|t| t.width()).unwrap_or(32);
+                            let output_metal_str = output_metal.unwrap();
+
+                            // Check if source/dest are float types (they keep their natural width)
+                            let source_is_float = source_type.as_ref().is_some_and(|t| t.is_float());
+                            let output_is_float = output_type.as_ref().is_some_and(|t| t.is_float());
+
+                            // BUG FIX #96: Calculate Metal storage widths
+                            // Structs use forced 4-byte alignment for Bits types
+                            let source_metal_storage = if source_is_float {
+                                source_width // Float types keep their natural width
+                            } else if source_width <= 32 {
+                                32 // Bits(w) with w<=32 stored as uint in struct
+                            } else {
+                                source_width
+                            };
+                            let output_metal_storage = if output_is_float {
+                                output_width // Float types keep their natural width (half=16)
+                            } else if output_width <= 32 {
+                                32 // Bits(w) with w<=32 stored as uint in struct
+                            } else {
+                                output_width
+                            };
+
                             eprintln!(
-                                "   🔄 Additional output Metal type mismatch: {} ({}) -> {} ({}), adding as_type cast",
-                                first_output, source_metal.as_ref().unwrap(),
-                                additional_output.signal_id, output_metal.as_ref().unwrap()
+                                "   🔄 Additional output Metal type mismatch: {} ({}, {}bits, storage={}) -> {} ({}, {}bits, storage={}), adding as_type cast",
+                                first_output, source_metal.as_ref().unwrap(), source_width, source_metal_storage,
+                                additional_output.signal_id, output_metal_str, output_width, output_metal_storage
                             );
-                            self.write_indented(&format!(
-                                "signals->{} = as_type<{}>(signals->{});\n",
-                                self.sanitize_name(&additional_output.signal_id),
-                                output_metal.unwrap(),
-                                self.sanitize_name(first_output)
-                            ));
+
+                            use std::cmp::Ordering;
+                            match source_metal_storage.cmp(&output_metal_storage) {
+                                Ordering::Equal => {
+                                    // Same width - direct as_type<>
+                                    self.write_indented(&format!(
+                                        "signals->{} = as_type<{}>(signals->{});\n",
+                                        self.sanitize_name(&additional_output.signal_id),
+                                        output_metal_str,
+                                        self.sanitize_name(first_output)
+                                    ));
+                                }
+                                Ordering::Greater => {
+                                    // Source wider: narrow first, then as_type
+                                    // e.g., uint(32) -> half(16): as_type<half>((ushort)source)
+                                    let intermediate_type = match output_width {
+                                        16 => "ushort",
+                                        32 => "uint",
+                                        64 => "ulong",
+                                        _ => "uint",
+                                    };
+                                    self.write_indented(&format!(
+                                        "signals->{} = as_type<{}>(({})signals->{});\n",
+                                        self.sanitize_name(&additional_output.signal_id),
+                                        output_metal_str,
+                                        intermediate_type,
+                                        self.sanitize_name(first_output)
+                                    ));
+                                }
+                                Ordering::Less => {
+                                    // Source narrower: widen first, then as_type
+                                    // e.g., ushort(16) -> float(32): as_type<float>((uint)source)
+                                    let intermediate_type = match output_width {
+                                        16 => "ushort",
+                                        32 => "uint",
+                                        64 => "ulong",
+                                        _ => "uint",
+                                    };
+                                    self.write_indented(&format!(
+                                        "signals->{} = as_type<{}>(({})signals->{});\n",
+                                        self.sanitize_name(&additional_output.signal_id),
+                                        output_metal_str,
+                                        intermediate_type,
+                                        self.sanitize_name(first_output)
+                                    ));
+                                }
+                            }
                         } else {
                             // Same Metal type - direct assignment
                             self.write_indented(&format!(

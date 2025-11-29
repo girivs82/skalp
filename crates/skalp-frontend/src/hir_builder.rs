@@ -5187,9 +5187,12 @@ impl HirBuilderContext {
                 field: field_name.to_string(),
             })
         } else {
-            // Normal case: find single expression child
+            // Normal case: find expression child
+            // BUG #95 FIX: Use .last() instead of .find() because the parser may create
+            // sibling nodes (e.g., IdentExpr + CallExpr for "func(args) as Type")
+            // We want the outermost/last expression node, not the first sub-expression
             node.children()
-                .find(|n| {
+                .filter(|n| {
                     matches!(
                         n.kind(),
                         SyntaxKind::LiteralExpr
@@ -5203,8 +5206,10 @@ impl HirBuilderContext {
                             | SyntaxKind::ParenExpr
                             | SyntaxKind::IfExpr
                             | SyntaxKind::MatchExpr
+                            | SyntaxKind::CastExpr // BUG #95: Support nested casts
                     )
                 })
+                .last()
                 .and_then(|n| self.build_expression(&n))
         }?;
 
@@ -5302,6 +5307,7 @@ impl HirBuilderContext {
                                 | SyntaxKind::MatchExpr
                                 | SyntaxKind::BlockExpr // FIX: Support block expressions in match arms
                                 | SyntaxKind::ConcatExpr // FIX: Support concat expressions in match arms
+                                | SyntaxKind::CastExpr // BUG #94 FIX: Support cast expressions in match arms (e.g., clz32(x) as bit[32])
                         )
                     })
                     .cloned()
