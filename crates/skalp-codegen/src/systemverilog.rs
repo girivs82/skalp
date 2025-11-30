@@ -1404,6 +1404,8 @@ fn format_unary_op(op: &skalp_mir::UnaryOp) -> &'static str {
         },
         // FSqrt is handled specially in format_expression_with_context as $sqrt()
         skalp_mir::UnaryOp::FSqrt => "$sqrt",
+        // BUG FIX #102: FNegate for FP negation - uses same symbol, but semantics differ
+        skalp_mir::UnaryOp::FNegate => "-",
     }
 }
 

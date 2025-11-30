@@ -5245,10 +5245,12 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
+        println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] ENTERED: Converting {} arms to OR-of-ANDs 🔴🔴🔴", arms.len());
         eprintln!("[PARALLEL_MUX_MODULE] Converting {} arms to OR-of-ANDs (module context)", arms.len());
 
         // Convert the match value expression in module context
         let match_value_expr = self.convert_hir_expr_for_module(match_value, ctx, depth)?;
+        println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] match_value_expr converted 🔴🔴🔴");
 
         // Find the default arm (wildcard pattern)
         let mut default_value: Option<Expression> = None;
@@ -5275,7 +5277,8 @@ impl<'hir> HirToMir<'hir> {
 
         let mut result: Option<Expression> = None;
 
-        for arm in &non_default_arms {
+        for (arm_idx, arm) in non_default_arms.iter().enumerate() {
+            println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] Processing arm {} pattern={:?} 🔴🔴🔴", arm_idx, arm.pattern);
             // Build condition: match_value == pattern
             let condition = match &arm.pattern {
                 hir::HirPattern::Literal(lit) => {
@@ -5338,7 +5341,9 @@ impl<'hir> HirToMir<'hir> {
             };
 
             // Convert arm body in module context
+            println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] Arm {} body type={:?} 🔴🔴🔴", arm_idx, std::mem::discriminant(&arm.expr));
             let arm_value = self.convert_hir_expr_for_module(&arm.expr, ctx, depth)?;
+            println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] Arm {} body converted OK 🔴🔴🔴", arm_idx);
 
             // Create: condition ? value : 0
             let masked_value = Expression::with_unknown_type(ExpressionKind::Conditional {
@@ -8234,6 +8239,50 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
 
+            // BUG FIX #98: Match - substitute in match value and arm expressions
+            // This is critical for inlining functions that contain match expressions (like clz32)
+            // When clz32 is inlined with value=data1[31:0], the match needs to substitute
+            // GenericParam("value") with the actual argument expression
+            hir::HirExpression::Match(match_expr) => {
+                // Substitute in the match value expression
+                let sub_expr = self.substitute_hir_expr_with_map(&match_expr.expr, name_map);
+
+                // Substitute in each arm body expression
+                let sub_arms: Vec<_> = match_expr.arms.iter().map(|arm| {
+                    let sub_arm_expr = self.substitute_hir_expr_with_map(&arm.expr, name_map);
+                    // Also substitute in guard if present
+                    let sub_guard = arm.guard.as_ref().map(|g| self.substitute_hir_expr_with_map(g, name_map));
+                    hir::HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: sub_guard,
+                        expr: sub_arm_expr,
+                    }
+                }).collect();
+
+                hir::HirExpression::Match(hir::HirMatchExpr {
+                    expr: Box::new(sub_expr),
+                    arms: sub_arms,
+                    mux_style: match_expr.mux_style.clone(),
+                })
+            }
+
+            // BUG FIX #99: Unary - substitute in the operand
+            // This is critical for expressions like -a_fp where a_fp needs substitution
+            hir::HirExpression::Unary(unary_expr) => {
+                let sub_operand = self.substitute_hir_expr_with_map(&unary_expr.operand, name_map);
+                hir::HirExpression::Unary(hir::HirUnaryExpr {
+                    op: unary_expr.op.clone(),
+                    operand: Box::new(sub_operand),
+                })
+            }
+
+            // BUG FIX #99: Index (bit slice) - substitute in base and index expressions
+            hir::HirExpression::Index(base, index) => {
+                let sub_base = self.substitute_hir_expr_with_map(base, name_map);
+                let sub_index = self.substitute_hir_expr_with_map(index, name_map);
+                hir::HirExpression::Index(Box::new(sub_base), Box::new(sub_index))
+            }
+
             // Everything else - return as-is
             _ => expr.clone(),
         }
@@ -8320,6 +8369,29 @@ impl<'hir> HirToMir<'hir> {
                     base: Box::new(sub_base),
                     field: field.clone(),
                 }
+            }
+
+            // BUG FIX #101: Unary - substitute in the operand
+            // This is CRITICAL for expressions like -a_fp where a_fp is Variable(14)
+            // Without this, Unary(Negate, Variable(14)) is returned as-is and the
+            // Variable(14) inside is never resolved, causing fp_neg to return 0!
+            hir::HirExpression::Unary(unary_expr) => {
+                let sub_operand = self.substitute_var_ids_in_expr(&unary_expr.operand, var_id_map);
+                println!("[BUG #101 VAR_ID] Substituting Unary operand: {:?} -> {:?}",
+                         std::mem::discriminant(&*unary_expr.operand),
+                         std::mem::discriminant(&sub_operand));
+                hir::HirExpression::Unary(hir::HirUnaryExpr {
+                    op: unary_expr.op.clone(),
+                    operand: Box::new(sub_operand),
+                })
+            }
+
+            // BUG FIX #101: Index - substitute in base and index expressions
+            // This handles expressions like value[31:0] where value is a Variable
+            hir::HirExpression::Index(base, index) => {
+                let sub_base = self.substitute_var_ids_in_expr(base, var_id_map);
+                let sub_index = self.substitute_var_ids_in_expr(index, var_id_map);
+                hir::HirExpression::Index(Box::new(sub_base), Box::new(sub_index))
             }
 
             // Everything else - return as-is
@@ -11160,7 +11232,17 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Check if this is a primitive FP operation (Two-Tier TIER 1)
-                if self.is_primitive_fp_operation(&call.function) {
+                // BUG FIX #97: User-defined functions with primitive names (like fp_mul in shared_fp_ops.sk)
+                // must NOT be treated as primitives. These functions perform bit[32] to fp32 conversions
+                // that are essential for correct operation. Only treat as primitive if there's no
+                // user-defined function with this name in the HIR.
+                let is_user_defined = if let Some(hir) = &self.hir {
+                    hir.functions.iter().any(|f| f.name == call.function)
+                } else {
+                    false
+                };
+
+                if self.is_primitive_fp_operation(&call.function) && !is_user_defined {
                     // Convert arguments in module context
                     let mut converted_args = Vec::new();
                     for arg in &call.args {
@@ -11174,6 +11256,8 @@ impl<'hir> HirToMir<'hir> {
                     }
                     // Convert to binary/unary operation directly
                     return self.convert_primitive_fp_call_for_module(&call.function, converted_args);
+                } else if is_user_defined && self.is_primitive_fp_operation(&call.function) {
+                    eprintln!("    🔧 BUG FIX #97: '{}' is user-defined, NOT treating as primitive", call.function);
                 }
 
                 // For non-primitive functions, convert arguments with module context
@@ -11328,11 +11412,24 @@ impl<'hir> HirToMir<'hir> {
                 self.convert_expression(expr, depth)
             }
 
-            // Cast expressions - handle type conversions
+            // Cast expressions - pass through (hardware synthesis handles bit reinterpretation)
+            // Note: The Cast's target_type (e.g., fp32) is important for type inference
+            // in later stages. We preserve Casts as-is when needed for floating-point ops.
             hir::HirExpression::Cast(cast) => {
-                let inner = self.convert_hir_expr_for_module(&cast.expr, ctx, depth + 1)?;
-                // For now, pass through casts (hardware synthesis handles bit widths)
-                Some(inner)
+                // Check if this is an fp32/fp16 cast - these are important for FP operations
+                let target_type = self.convert_type(&cast.target_type);
+                if matches!(target_type, DataType::Float32 | DataType::Float16) {
+                    println!("🎭🎭🎭 MODULE_CAST: FP Cast to {:?} - preserving 🎭🎭🎭", target_type);
+                    // For FP casts, we need to preserve the cast for proper type inference
+                    // But since Cast isn't handled in mir_to_sir, just pass through the inner
+                    // The BUG FIX #87 in mir_to_sir needs another approach
+                    let inner = self.convert_hir_expr_for_module(&cast.expr, ctx, depth + 1)?;
+                    Some(inner)
+                } else {
+                    // For non-FP casts, just pass through
+                    let inner = self.convert_hir_expr_for_module(&cast.expr, ctx, depth + 1)?;
+                    Some(inner)
+                }
             }
 
             // If expressions - convert to conditional (mux)
@@ -11357,6 +11454,38 @@ impl<'hir> HirToMir<'hir> {
                     op,
                     left: Box::new(left),
                     right: Box::new(right),
+                }))
+            }
+
+            // BUG FIX #100: Unary operations - convert operand in module context
+            // Without this, Unary falls back to convert_expression which loses module context
+            // and causes GenericParams to resolve to 0 instead of port references.
+            // BUG FIX #102: For Negate operations, check if the operand is a Cast to fp32/fp16.
+            // If so, use FNeg instead of Negate for proper floating-point negation.
+            hir::HirExpression::Unary(unary_expr) => {
+                println!("🔢🔢🔢 MODULE_UNARY: Converting Unary op {:?} in module context 🔢🔢🔢", unary_expr.op);
+
+                // BUG FIX #102: Check if this is a Negate on a floating-point value
+                let is_fp_negate = matches!(&unary_expr.op, hir::HirUnaryOp::Negate) &&
+                    matches!(&*unary_expr.operand, hir::HirExpression::Cast(cast)
+                        if matches!(cast.target_type, hir::HirType::Float32 | hir::HirType::Float16));
+
+                if is_fp_negate {
+                    println!("🔢🔢🔢 MODULE_UNARY: Detected FP Negate (cast to fp32/fp16) - using FNeg 🔢🔢🔢");
+                }
+
+                let operand = self.convert_hir_expr_for_module(&unary_expr.operand, ctx, depth + 1)?;
+
+                // Use FNeg for floating-point negation, regular Negate otherwise
+                let op = if is_fp_negate {
+                    UnaryOp::FNegate
+                } else {
+                    self.convert_unary_op(&unary_expr.op)
+                };
+
+                Some(Expression::with_unknown_type(ExpressionKind::Unary {
+                    op,
+                    operand: Box::new(operand),
                 }))
             }
 

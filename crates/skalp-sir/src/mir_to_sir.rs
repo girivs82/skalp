@@ -3696,6 +3696,8 @@ impl<'a> MirToSirConverter<'a> {
             Negate => UnaryOperation::Neg,
             Reduce(_) => UnaryOperation::Not, // Map reduction to NOT for now
             FSqrt => UnaryOperation::FSqrt,   // FP square root intrinsic
+            // BUG FIX #102: FNegate is explicitly FP negation (set during HIR->MIR conversion)
+            FNegate => UnaryOperation::FNeg,
         }
     }
 
