@@ -8111,8 +8111,44 @@ impl<'hir> HirToMir<'hir> {
             // that reference the let bindings. Since Variables use VariableId (not name),
             // we need to substitute them here directly rather than relying on the Variable handler.
             // BUG FIX #86: Preserve If statements! Previous code dropped all non-Let statements.
+            // BUG FIX #103: Collect LOCAL VariableIds first to avoid incorrect substitution when
+            // Variables from outer scope collide with local VariableIds.
             hir::HirExpression::Block { statements, result_expr } => {
                 let mut nested_map = name_map.clone();
+
+                // BUG FIX #103: Collect VariableIds from the parameter substitution arguments
+                // These are Variables from the OUTER scope that should NOT be substituted
+                let mut param_var_ids: std::collections::HashSet<hir::VariableId> = std::collections::HashSet::new();
+                for (_, arg_expr) in name_map {
+                    Self::collect_variable_ids_from_expr(arg_expr, &mut param_var_ids);
+                }
+                if !param_var_ids.is_empty() {
+                    println!("[BUG #103] Parameter arguments contain {} VariableIds from outer scope: {:?}",
+                             param_var_ids.len(),
+                             param_var_ids.iter().map(|v| v.0).collect::<Vec<_>>());
+                }
+
+                // BUG FIX #103: Collect LOCAL VariableIds from let statements
+                // But EXCLUDE any that collide with parameter argument VariableIds
+                let local_var_ids: std::collections::HashSet<hir::VariableId> = statements.iter()
+                    .filter_map(|stmt| {
+                        if let hir::HirStatement::Let(let_stmt) = stmt {
+                            // Exclude VariableIds that collide with parameter arguments
+                            if param_var_ids.contains(&let_stmt.id) {
+                                println!("[BUG #103] Excluding local Variable({}) from substitution - collides with param arg",
+                                         let_stmt.id.0);
+                                None
+                            } else {
+                                Some(let_stmt.id)
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                println!("[BUG #103] Block has {} substitutable local VariableIds: {:?}",
+                         local_var_ids.len(),
+                         local_var_ids.iter().map(|v| v.0).collect::<Vec<_>>());
 
                 // Build a var_id-to-substituted_value map for let bindings in this Block
                 let mut var_id_to_value: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
@@ -8129,8 +8165,9 @@ impl<'hir> HirToMir<'hir> {
                             // Substitute in the let binding's value
                             let mut sub_value = self.substitute_hir_expr_with_map(&let_stmt.value, &nested_map);
 
-                            // Also substitute any references to previous let bindings (by VariableId)
-                            sub_value = self.substitute_var_ids_in_expr(&sub_value, &var_id_to_value);
+                            // BUG FIX #103: Use filtered substitution to ONLY replace LOCAL Variables
+                            // This prevents outer scope Variable(6) from being replaced with local Variable(6)'s value
+                            sub_value = self.substitute_var_ids_in_expr_filtered(&sub_value, &var_id_to_value, &local_var_ids);
 
                             // BUG FIX #86: Only add IMMUTABLE variables to substitution maps.
                             // Mutable variables should NOT be substituted because their values
@@ -8156,7 +8193,8 @@ impl<'hir> HirToMir<'hir> {
                         hir::HirStatement::If(if_stmt) => {
                             // Substitute in If statement condition and body
                             let sub_cond = self.substitute_hir_expr_with_map(&if_stmt.condition, &nested_map);
-                            let sub_cond = self.substitute_var_ids_in_expr(&sub_cond, &var_id_to_value);
+                            // BUG FIX #103: Use filtered version to avoid outer scope collision
+                            let sub_cond = self.substitute_var_ids_in_expr_filtered(&sub_cond, &var_id_to_value, &local_var_ids);
 
                             let sub_then: Vec<_> = if_stmt.then_statements.iter().map(|s| {
                                 self.substitute_hir_stmt_with_maps(s, &nested_map, &var_id_to_value)
@@ -8178,7 +8216,8 @@ impl<'hir> HirToMir<'hir> {
                         hir::HirStatement::Assignment(assign_stmt) => {
                             // Substitute in Assignment statement
                             let sub_rhs = self.substitute_hir_expr_with_map(&assign_stmt.rhs, &nested_map);
-                            let sub_rhs = self.substitute_var_ids_in_expr(&sub_rhs, &var_id_to_value);
+                            // BUG FIX #103: Use filtered version to avoid outer scope collision
+                            let sub_rhs = self.substitute_var_ids_in_expr_filtered(&sub_rhs, &var_id_to_value, &local_var_ids);
 
                             substituted_stmts.push(hir::HirStatement::Assignment(hir::HirAssignment {
                                 id: assign_stmt.id,
@@ -8196,7 +8235,11 @@ impl<'hir> HirToMir<'hir> {
 
                 // Substitute in result_expr - first by name (for GenericParams etc)
                 let partially_substituted = self.substitute_hir_expr_with_map(result_expr, &nested_map);
-                // Then by VariableId (for Block's local Variables)
+                // BUG FIX #105: Use non-filtered version for result_expr substitution
+                // The filtered version (BUG #103 fix) excludes Variables with IDs that collide
+                // with param_var_ids, but those still need substitution in the result_expr.
+                // This is safe because var_id_to_value only contains THIS Block's local let
+                // bindings - outer-scope Variables won't be in the map and won't be touched.
                 let sub_result = self.substitute_var_ids_in_expr(&partially_substituted, &var_id_to_value);
 
                 // If there are non-Let statements, preserve the Block structure
@@ -8299,8 +8342,9 @@ impl<'hir> HirToMir<'hir> {
         match expr {
             hir::HirExpression::Variable(var_id) => {
                 if let Some(replacement) = var_id_map.get(var_id) {
-                    println!("[BUG #91 VAR_ID] Replacing Variable({}) with {:?}",
-                             var_id.0, std::mem::discriminant(replacement));
+                    // BUG FIX #107: Return the replacement, but DON'T recursively substitute
+                    // here to avoid stack overflow. Instead, we substitute iteratively at
+                    // the call sites using substitute_var_ids_until_fixed_point().
                     replacement.clone()
                 } else {
                     expr.clone()
@@ -8394,8 +8438,343 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Index(Box::new(sub_base), Box::new(sub_index))
             }
 
+            // BUG FIX #106: Block - recursively process statements and result_expr
+            // This is CRITICAL for nested inlined functions! When fp_div is inlined
+            // and its body contains Call(fp_sub, ...), the fp_sub gets inlined too,
+            // producing a nested Block. Without this, Variables inside nested Blocks
+            // won't be substituted, causing sqrt_disc to be missing from x1/x2 calculation.
+            hir::HirExpression::Block { statements, result_expr } => {
+                // Note: We need to substitute Variables in let VALUES, not create new bindings
+                // The Block's let bindings define THEIR OWN Variables which should NOT be
+                // substituted from var_id_map (that would be wrong). But Variables in the
+                // VALUES that reference OUTER scope should be substituted.
+                let mut substituted_stmts = Vec::new();
+                for stmt in statements {
+                    match stmt {
+                        hir::HirStatement::Let(let_stmt) => {
+                            // Substitute in the let value, but NOT the variable being defined
+                            let sub_value = self.substitute_var_ids_in_expr(&let_stmt.value, var_id_map);
+                            substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
+                                id: let_stmt.id,
+                                name: let_stmt.name.clone(),
+                                var_type: let_stmt.var_type.clone(),
+                                mutable: let_stmt.mutable,
+                                value: sub_value,
+                            }));
+                        }
+                        hir::HirStatement::Assignment(assign_stmt) => {
+                            let sub_rhs = self.substitute_var_ids_in_expr(&assign_stmt.rhs, var_id_map);
+                            substituted_stmts.push(hir::HirStatement::Assignment(hir::HirAssignment {
+                                id: assign_stmt.id,
+                                lhs: assign_stmt.lhs.clone(),
+                                assignment_type: assign_stmt.assignment_type.clone(),
+                                rhs: sub_rhs,
+                            }));
+                        }
+                        _ => substituted_stmts.push(stmt.clone()),
+                    }
+                }
+                let sub_result = self.substitute_var_ids_in_expr(result_expr, var_id_map);
+                hir::HirExpression::Block {
+                    statements: substituted_stmts,
+                    result_expr: Box::new(sub_result),
+                }
+            }
+
+            // BUG FIX #106: Match - recursively process match value and arm expressions
+            hir::HirExpression::Match(match_expr) => {
+                let sub_expr = self.substitute_var_ids_in_expr(&match_expr.expr, var_id_map);
+                let sub_arms: Vec<_> = match_expr.arms.iter().map(|arm| {
+                    let sub_guard = arm.guard.as_ref().map(|g|
+                        self.substitute_var_ids_in_expr(g, var_id_map));
+                    let sub_arm_expr = self.substitute_var_ids_in_expr(&arm.expr, var_id_map);
+                    hir::HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: sub_guard,
+                        expr: sub_arm_expr,
+                    }
+                }).collect();
+                hir::HirExpression::Match(hir::HirMatchExpr {
+                    expr: Box::new(sub_expr),
+                    arms: sub_arms,
+                    mux_style: match_expr.mux_style.clone(),
+                })
+            }
+
             // Everything else - return as-is
             _ => expr.clone(),
+        }
+    }
+
+    /// BUG FIX #107: Substitute Variables iteratively until no more substitutions happen.
+    /// This is needed because when Variable(X) is replaced with its value, that value
+    /// might contain other Variables (Variable(Y), Variable(Z)) that also need substitution.
+    /// A single pass of substitute_var_ids_in_expr only replaces the top-level Variables;
+    /// nested Variables in the replacement values need additional passes.
+    ///
+    /// Uses proper fixed-point detection by counting Variables from var_id_map in the expression.
+    fn substitute_var_ids_until_fixed_point(
+        &self,
+        expr: &hir::HirExpression,
+        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+    ) -> hir::HirExpression {
+        if var_id_map.is_empty() {
+            return expr.clone();
+        }
+
+        let var_ids: std::collections::HashSet<hir::VariableId> = var_id_map.keys().cloned().collect();
+        let mut current = expr.clone();
+        let max_iterations = 100; // Safety limit
+
+        for iteration in 0..max_iterations {
+            let count_before = Self::count_variables_from_set(&current, &var_ids);
+            if count_before == 0 {
+                // No Variables from var_id_map left, we're done
+                return current;
+            }
+
+            let next = self.substitute_var_ids_in_expr(&current, var_id_map);
+            let count_after = Self::count_variables_from_set(&next, &var_ids);
+
+            if count_after == 0 {
+                // All Variables substituted
+                return next;
+            }
+
+            // Early termination: if substitution didn't reduce variable count, we're done
+            // This handles the case where remaining variables are not in var_id_map
+            if count_after >= count_before {
+                return next;
+            }
+
+            current = next;
+        }
+
+        println!("[BUG #109 WARNING] substitute_var_ids_until_fixed_point: hit max iterations ({}), returning current state", max_iterations);
+        current
+    }
+
+    /// Count how many Variables from the given set appear in the expression
+    fn count_variables_from_set(expr: &hir::HirExpression, var_ids: &std::collections::HashSet<hir::VariableId>) -> usize {
+        match expr {
+            hir::HirExpression::Variable(var_id) => {
+                if var_ids.contains(var_id) { 1 } else { 0 }
+            }
+            hir::HirExpression::TupleLiteral(elements) => {
+                elements.iter().map(|e| Self::count_variables_from_set(e, var_ids)).sum()
+            }
+            hir::HirExpression::Call(call) => {
+                call.args.iter().map(|a| Self::count_variables_from_set(a, var_ids)).sum()
+            }
+            hir::HirExpression::Binary(bin) => {
+                Self::count_variables_from_set(&bin.left, var_ids) +
+                Self::count_variables_from_set(&bin.right, var_ids)
+            }
+            hir::HirExpression::Unary(unary) => {
+                Self::count_variables_from_set(&unary.operand, var_ids)
+            }
+            hir::HirExpression::If(if_expr) => {
+                Self::count_variables_from_set(&if_expr.condition, var_ids) +
+                Self::count_variables_from_set(&if_expr.then_expr, var_ids) +
+                Self::count_variables_from_set(&if_expr.else_expr, var_ids)
+            }
+            hir::HirExpression::Cast(cast) => {
+                Self::count_variables_from_set(&cast.expr, var_ids)
+            }
+            hir::HirExpression::Concat(parts) => {
+                parts.iter().map(|p| Self::count_variables_from_set(p, var_ids)).sum()
+            }
+            hir::HirExpression::FieldAccess { base, .. } => {
+                Self::count_variables_from_set(base, var_ids)
+            }
+            hir::HirExpression::Index(base, index) => {
+                Self::count_variables_from_set(base, var_ids) +
+                Self::count_variables_from_set(index, var_ids)
+            }
+            hir::HirExpression::Block { statements, result_expr } => {
+                let stmt_count: usize = statements.iter().map(|s| {
+                    match s {
+                        hir::HirStatement::Let(let_stmt) => Self::count_variables_from_set(&let_stmt.value, var_ids),
+                        hir::HirStatement::Assignment(assign) => Self::count_variables_from_set(&assign.rhs, var_ids),
+                        _ => 0,
+                    }
+                }).sum();
+                stmt_count + Self::count_variables_from_set(result_expr, var_ids)
+            }
+            hir::HirExpression::Match(match_expr) => {
+                let expr_count = Self::count_variables_from_set(&match_expr.expr, var_ids);
+                let arm_count: usize = match_expr.arms.iter().map(|arm| {
+                    let guard_count = arm.guard.as_ref().map(|g| Self::count_variables_from_set(g, var_ids)).unwrap_or(0);
+                    guard_count + Self::count_variables_from_set(&arm.expr, var_ids)
+                }).sum();
+                expr_count + arm_count
+            }
+            // Literals and GenericParams don't contain Variables
+            _ => 0,
+        }
+    }
+
+    /// BUG FIX #103: Substitute Variables by VariableId, but ONLY if the VariableId is in the
+    /// allowed set (local_var_ids). This prevents incorrect substitution when a Variable from
+    /// an outer scope (e.g., caller function) collides with a local Block Variable.
+    ///
+    /// Example: When fp_sub(neg_b, sqrt_disc) is inlined into quadratic_solve:
+    /// - fp_sub's Block has local Variable(6)=a_fp
+    /// - quadratic_solve's sqrt_disc is also Variable(6)
+    /// - Without filtering, sqrt_disc would incorrectly get replaced with a_fp's value
+    fn substitute_var_ids_in_expr_filtered(
+        &self,
+        expr: &hir::HirExpression,
+        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+        local_var_ids: &std::collections::HashSet<hir::VariableId>,
+    ) -> hir::HirExpression {
+        match expr {
+            hir::HirExpression::Variable(var_id) => {
+                // BUG FIX #103: Only substitute if this is a LOCAL variable (defined in this Block)
+                if local_var_ids.contains(var_id) {
+                    if let Some(replacement) = var_id_map.get(var_id) {
+                        println!("[BUG #103 VAR_ID_FILTERED] Replacing local Variable({}) with {:?}",
+                                 var_id.0, std::mem::discriminant(replacement));
+                        return replacement.clone();
+                    }
+                } else {
+                    // This is a Variable from outer scope - do NOT substitute
+                    println!("[BUG #103 VAR_ID_FILTERED] Preserving outer-scope Variable({}) (not in local_var_ids)",
+                             var_id.0);
+                }
+                expr.clone()
+            }
+
+            hir::HirExpression::TupleLiteral(elements) => {
+                let substituted: Vec<_> = elements.iter()
+                    .map(|elem| self.substitute_var_ids_in_expr_filtered(elem, var_id_map, local_var_ids))
+                    .collect();
+                hir::HirExpression::TupleLiteral(substituted)
+            }
+
+            hir::HirExpression::Call(call_expr) => {
+                let substituted_args: Vec<_> = call_expr.args.iter()
+                    .map(|arg| self.substitute_var_ids_in_expr_filtered(arg, var_id_map, local_var_ids))
+                    .collect();
+                hir::HirExpression::Call(hir::HirCallExpr {
+                    function: call_expr.function.clone(),
+                    args: substituted_args,
+                    type_args: call_expr.type_args.clone(),
+                })
+            }
+
+            hir::HirExpression::Binary(bin_expr) => {
+                let left_sub = self.substitute_var_ids_in_expr_filtered(&bin_expr.left, var_id_map, local_var_ids);
+                let right_sub = self.substitute_var_ids_in_expr_filtered(&bin_expr.right, var_id_map, local_var_ids);
+                hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    op: bin_expr.op.clone(),
+                    left: Box::new(left_sub),
+                    right: Box::new(right_sub),
+                })
+            }
+
+            hir::HirExpression::If(if_expr) => {
+                let cond_sub = self.substitute_var_ids_in_expr_filtered(&if_expr.condition, var_id_map, local_var_ids);
+                let then_sub = self.substitute_var_ids_in_expr_filtered(&if_expr.then_expr, var_id_map, local_var_ids);
+                let else_sub = self.substitute_var_ids_in_expr_filtered(&if_expr.else_expr, var_id_map, local_var_ids);
+                hir::HirExpression::If(hir::HirIfExpr {
+                    condition: Box::new(cond_sub),
+                    then_expr: Box::new(then_sub),
+                    else_expr: Box::new(else_sub),
+                })
+            }
+
+            hir::HirExpression::Concat(parts) => {
+                let substituted: Vec<_> = parts.iter()
+                    .map(|part| self.substitute_var_ids_in_expr_filtered(part, var_id_map, local_var_ids))
+                    .collect();
+                hir::HirExpression::Concat(substituted)
+            }
+
+            hir::HirExpression::Cast(cast_expr) => {
+                let sub_expr = self.substitute_var_ids_in_expr_filtered(&cast_expr.expr, var_id_map, local_var_ids);
+                hir::HirExpression::Cast(hir::HirCastExpr {
+                    expr: Box::new(sub_expr),
+                    target_type: cast_expr.target_type.clone(),
+                })
+            }
+
+            hir::HirExpression::FieldAccess { base, field } => {
+                let sub_base = self.substitute_var_ids_in_expr_filtered(base, var_id_map, local_var_ids);
+                hir::HirExpression::FieldAccess {
+                    base: Box::new(sub_base),
+                    field: field.clone(),
+                }
+            }
+
+            hir::HirExpression::Unary(unary_expr) => {
+                let sub_operand = self.substitute_var_ids_in_expr_filtered(&unary_expr.operand, var_id_map, local_var_ids);
+                hir::HirExpression::Unary(hir::HirUnaryExpr {
+                    op: unary_expr.op.clone(),
+                    operand: Box::new(sub_operand),
+                })
+            }
+
+            hir::HirExpression::Index(base, index) => {
+                let sub_base = self.substitute_var_ids_in_expr_filtered(base, var_id_map, local_var_ids);
+                let sub_index = self.substitute_var_ids_in_expr_filtered(index, var_id_map, local_var_ids);
+                hir::HirExpression::Index(Box::new(sub_base), Box::new(sub_index))
+            }
+
+            // Everything else - return as-is
+            _ => expr.clone(),
+        }
+    }
+
+    /// BUG FIX #103: Collect all VariableIds from an expression
+    /// This is used to identify Variables from the outer scope (parameter arguments)
+    /// that should NOT be subject to var_id_to_value substitution in inlined function bodies.
+    fn collect_variable_ids_from_expr(
+        expr: &hir::HirExpression,
+        var_ids: &mut std::collections::HashSet<hir::VariableId>,
+    ) {
+        match expr {
+            hir::HirExpression::Variable(var_id) => {
+                var_ids.insert(*var_id);
+            }
+            hir::HirExpression::TupleLiteral(elements) => {
+                for elem in elements {
+                    Self::collect_variable_ids_from_expr(elem, var_ids);
+                }
+            }
+            hir::HirExpression::Call(call) => {
+                for arg in &call.args {
+                    Self::collect_variable_ids_from_expr(arg, var_ids);
+                }
+            }
+            hir::HirExpression::Binary(bin) => {
+                Self::collect_variable_ids_from_expr(&bin.left, var_ids);
+                Self::collect_variable_ids_from_expr(&bin.right, var_ids);
+            }
+            hir::HirExpression::If(if_expr) => {
+                Self::collect_variable_ids_from_expr(&if_expr.condition, var_ids);
+                Self::collect_variable_ids_from_expr(&if_expr.then_expr, var_ids);
+                Self::collect_variable_ids_from_expr(&if_expr.else_expr, var_ids);
+            }
+            hir::HirExpression::Concat(parts) => {
+                for part in parts {
+                    Self::collect_variable_ids_from_expr(part, var_ids);
+                }
+            }
+            hir::HirExpression::Cast(cast) => {
+                Self::collect_variable_ids_from_expr(&cast.expr, var_ids);
+            }
+            hir::HirExpression::FieldAccess { base, .. } => {
+                Self::collect_variable_ids_from_expr(base, var_ids);
+            }
+            hir::HirExpression::Unary(unary) => {
+                Self::collect_variable_ids_from_expr(&unary.operand, var_ids);
+            }
+            hir::HirExpression::Index(base, index) => {
+                Self::collect_variable_ids_from_expr(base, var_ids);
+                Self::collect_variable_ids_from_expr(index, var_ids);
+            }
+            _ => {}
         }
     }
 
@@ -10142,18 +10521,80 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 hir::HirExpression::Call(call) => {
-                    // BUG FIX #74 (Updated): Handle field access on function call results
+                    // BUG FIX #74 + #110: Handle field access on function call results
                     // Example: vec_cross(a, b).x where vec_cross returns a struct
                     // Example: quadratic_solve(a, b, c).0 where function returns tuple
 
-                    eprintln!("[BUG #74 CALL IN FIELD_ACCESS] Function: {}, field: {}", call.function, field_name);
+                    eprintln!("[BUG #74/#110 CALL IN FIELD_ACCESS] Function: {}, field: {}", call.function, field_name);
 
-                    // CRITICAL: Cannot convert Call to MIR first because tuples are flattened in MIR
-                    // Instead, inline at HIR level with full let binding resolution,
-                    // then extract the field at HIR level where tuples still exist
+                    // BUG FIX #110: Check if function should be module-synthesized (same logic as HYBRID path)
+                    // If the function has too many nested calls, we can't inline it at HIR level
+                    // Instead, we should use the module synthesis path via convert_expression
+                    let should_use_module_path = if let Some(hir) = self.hir {
+                        let func_opt = hir.functions.iter().find(|f| f.name == call.function)
+                            .or_else(|| {
+                                hir.implementations.iter()
+                                    .flat_map(|impl_block| impl_block.functions.iter())
+                                    .find(|f| f.name == call.function)
+                            });
 
-                    // Inline at HIR level with full let binding resolution
-                    // BUG #85 INVESTIGATION: Add clear error message if inlining fails
+                        if let Some(func) = func_opt {
+                            let call_count: usize = func.body.iter()
+                                .map(|stmt| self.count_calls_in_statement(stmt))
+                                .sum();
+                            let result = call_count > MAX_INLINE_CALL_COUNT;
+                            eprintln!("[BUG #110] Function '{}' has {} nested calls (threshold={}), should_use_module_path={}",
+                                call.function, call_count, MAX_INLINE_CALL_COUNT, result);
+                            result
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if should_use_module_path {
+                        // BUG FIX #110: Use module synthesis path for complex functions
+                        // Convert the Call via convert_expression (uses HYBRID logic)
+                        // which returns a Concat of result signals for tuple-returning functions
+                        eprintln!("[BUG #110] Using module synthesis path for field access on '{}'", call.function);
+
+                        let call_expr = hir::HirExpression::Call(call.clone());
+                        let mir_result = self.convert_expression(&call_expr, 0)?;
+
+                        // Parse field name as tuple index
+                        if let Ok(index) = field_name.parse::<usize>() {
+                            // Extract the specific element from the Concat
+                            if let ExpressionKind::Concat(elements) = &mir_result.kind {
+                                if index < elements.len() {
+                                    eprintln!("[BUG #110] ✅ Extracted element {} from Concat of {} elements",
+                                        index, elements.len());
+                                    return Some(elements[index].clone());
+                                } else {
+                                    eprintln!("[BUG #110] ❌ Index {} out of bounds for Concat with {} elements",
+                                        index, elements.len());
+                                    return None;
+                                }
+                            } else {
+                                // Single result, index 0 should return it directly
+                                if index == 0 {
+                                    eprintln!("[BUG #110] ✅ Returning single result for index 0");
+                                    return Some(mir_result);
+                                } else {
+                                    eprintln!("[BUG #110] ❌ Index {} for non-tuple result", index);
+                                    return None;
+                                }
+                            }
+                        } else {
+                            // Non-numeric field name (struct field) - not supported for module path yet
+                            eprintln!("[BUG #110] ❌ Non-numeric field '{}' not supported for module path", field_name);
+                            return None;
+                        }
+                    }
+
+                    // Original path: Inline at HIR level with full let binding resolution
+                    // This works for simple functions (≤5 nested calls)
+                    eprintln!("[BUG #74] Using inline path for field access on '{}'", call.function);
                     let inlined_hir_expr = match self.inline_function_call_to_hir_with_lets(call) {
                         Some(expr) => expr,
                         None => {
@@ -11189,6 +11630,13 @@ impl<'hir> HirToMir<'hir> {
                 let name_str = name.as_deref().unwrap_or("?");
                 println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable({}) '{}' not found in param_to_port or var_to_signal! 🔗🔗🔗", var.0, name_str);
 
+                // BUG #110: Debug - print what IS in var_to_signal
+                println!("🔗🔗🔗 BUG #110 DEBUG: var_to_signal has {} entries: 🔗🔗🔗", ctx.var_to_signal.len());
+                for (vid, sid) in &ctx.var_to_signal {
+                    let vname = ctx.var_id_to_name.get(vid).map(|s| s.as_str()).unwrap_or("?");
+                    println!("🔗🔗🔗   Variable({}) '{}' -> Signal({}) 🔗🔗🔗", vid.0, vname, sid.0);
+                }
+
                 // Fallback: try to use the main expression converter
                 println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable not found in module context - using fallback 🔗🔗🔗");
                 self.convert_expression(expr, depth)
@@ -11389,13 +11837,38 @@ impl<'hir> HirToMir<'hir> {
                     }
                     println!("    🔄🔄🔄 BUG91_INLINE: Built param substitutions for {} parameters", param_substitutions.len());
 
+                    // BUG FIX #108: Build var_id -> name mapping from ALL let statements
+                    // This is critical for substituting Variables that reference let bindings
+                    // The previous approach used substitute_hir_expr_with_map which relies on
+                    // dynamic_variables, but for inlined functions, those Variables aren't there.
+                    // Now we use substitute_expression_with_var_map like inline_function_call does.
+                    let mut var_id_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+                    self.collect_let_bindings(&func.body.clone(), &mut var_id_to_name);
+                    println!("    🔧🔧🔧 BUG #108: Built var_id_to_name with {} entries", var_id_to_name.len());
+
                     // Get the function body as an expression
                     if let Some(body_expr) = self.convert_body_to_expression(&func.body.clone()) {
                         // Debug: Print body_expr BEFORE substitution
                         println!("    🔍🔍🔍 [BUG #86] body_expr BEFORE substitution: {:?}", &body_expr);
 
-                        // Substitute parameters in the body expression
-                        let substituted_body = self.substitute_hir_expr_with_map(&body_expr, &param_substitutions);
+                        // BUG FIX #108: Use substitute_expression_with_var_map to properly handle
+                        // Variable references in inlined functions. This uses the var_id_to_name
+                        // mapping to find Variable names and substitute them with parameter values.
+                        let param_map: HashMap<String, &hir::HirExpression> = param_substitutions
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v))
+                            .collect();
+                        let substituted_body = match self.substitute_expression_with_var_map(
+                            &body_expr,
+                            &param_map,
+                            &var_id_to_name,
+                        ) {
+                            Some(subst) => subst,
+                            None => {
+                                println!("    🔄🔄🔄 BUG108: substitute_expression_with_var_map FAILED!");
+                                return None;
+                            }
+                        };
                         println!("    🔄🔄🔄 BUG91_INLINE: Substituted body, type: {:?}", std::mem::discriminant(&substituted_body));
 
                         // Convert the substituted body within module context
@@ -11589,9 +12062,14 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 // BUG FIX #92: First substitute by name, then by VariableId
+                // BUG FIX #107: Use fixed-point iteration to fully expand all Variables
+                // When Variable(10) = fp_div(Variable(5), Variable(8)), a single pass only
+                // replaces Variable(10) with the fp_div Call, but Variables 5 and 8 inside
+                // that Call are NOT substituted. We need multiple passes until all Variables
+                // from var_id_to_value are expanded.
                 let partially_substituted = self.substitute_hir_expr_with_map(
                     result_expr, &let_substitutions);
-                let substituted_result = self.substitute_var_ids_in_expr(
+                let substituted_result = self.substitute_var_ids_until_fixed_point(
                     &partially_substituted, &var_id_to_value);
 
                 println!("🧱🧱🧱 MODULE_BLOCK: Substituted result_expr, converting... 🧱🧱🧱");
@@ -12383,6 +12861,8 @@ impl<'hir> HirToMir<'hir> {
             // BUG FIX #86: Handle the case where transform_early_returns moved ALL returns inside the if/else
             // After transform: if (cond) { return A } else { ...let bindings...; return B }
             // Both returns are inside the if statement, so return_expr is None
+            println!("🔵🔵🔵 BUG #110 DEBUG: Entering Phase 3c for early return pattern 🔵🔵🔵");
+            println!("🔵🔵🔵 return_expr.is_none()={}, if_return_statements.len()={} 🔵🔵🔵", return_expr.is_none(), if_return_statements.len());
             eprintln!("  🔧 Phase 3c: No top-level return, but if statement contains returns (transformed early return pattern)");
 
             let if_stmt = if_return_statements[0];
