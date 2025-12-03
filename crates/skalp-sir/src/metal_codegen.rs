@@ -1453,6 +1453,24 @@ impl<'a> MetalShaderGenerator<'a> {
                 ));
                 self.indent -= 1;
                 self.write_indented("}\n");
+            } else if output_width > 32 {
+                // BUG FIX #131: Vector types (33-128 bits = uint2/uint4) need direct vector assignment
+                // NOT component extraction! The previous scalar mux code incorrectly extracted .x
+                // which loses other components (y, z, w).
+                let (metal_type, _) = self.get_metal_type_for_wide_bits(output_width);
+                self.write_indented(&format!(
+                    "// Vector mux for {}-bit operands ({})\n",
+                    output_width, metal_type
+                ));
+                // Use Metal's select() for vectors, or simple ternary if types match
+                // For uint2/uint4, the ternary operator works directly
+                self.write_indented(&format!(
+                    "signals->{} = signals->{} ? signals->{} : signals->{};\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(sel),
+                    self.sanitize_name(true_val),
+                    self.sanitize_name(false_val)
+                ));
             } else {
                 // Scalar mux - check for type reinterpretation
                 // BUG FIX #62: If mux inputs/output have different types, add reinterpretation
@@ -1917,6 +1935,52 @@ impl<'a> MetalShaderGenerator<'a> {
                             component
                         ));
                     }
+                    return;
+                }
+            }
+
+            // BUG #117 FIX: Handle float types specially
+            // Float types cannot be used with bitshift operators in Metal
+            if let Some(ref t) = input_type {
+                if t.is_float() {
+                    let input_width = t.width();
+                    // If extracting full width with no shift, just do a direct copy
+                    if shift == 0 && width == input_width {
+                        eprintln!(
+                            "   🎯 BUG #117 FIX: Float identity slice: {} -> {} (full {} bits)",
+                            input, output, width
+                        );
+                        self.write_indented(&format!(
+                            "signals->{} = {};\n",
+                            self.sanitize_name(output),
+                            input_ref
+                        ));
+                        return;
+                    }
+                    // Otherwise, we need to reinterpret as uint for bit manipulation
+                    let uint_type = match input_width {
+                        16 => "ushort",
+                        32 => "uint",
+                        64 => "ulong",
+                        _ => "uint",
+                    };
+                    eprintln!(
+                        "   🎯 BUG #117 FIX: Float bit slice: as_type<{}>({}) >> {} (width={})",
+                        uint_type, input_ref, shift, width
+                    );
+                    let mask = if width >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    };
+                    self.write_indented(&format!(
+                        "signals->{} = (as_type<{}>({}) >> {}) & 0x{:X};\n",
+                        self.sanitize_name(output),
+                        uint_type,
+                        input_ref,
+                        shift,
+                        mask
+                    ));
                     return;
                 }
             }
@@ -2716,7 +2780,25 @@ impl<'a> MetalShaderGenerator<'a> {
             }
             SirNodeKind::Mux => self.generate_mux(sir, node),
             SirNodeKind::Concat => self.generate_concat(sir, node),
-            SirNodeKind::Slice { start, end } => self.generate_slice(sir, node, *start, *end),
+            SirNodeKind::Slice { start, end } => {
+                println!(">>> SLICE NODE {}: outputs.len()={}", node.id, node.outputs.len());
+                self.generate_slice(sir, node, *start, *end);
+                // BUG #115 FIX: Copy to additional outputs if node has more than one output
+                // This is needed for nested module parameter passing where a slice drives both
+                // a local signal AND a prefixed signal for the nested module
+                if node.outputs.len() > 1 {
+                    let primary_output = &node.outputs[0].signal_id;
+                    for additional_output in node.outputs.iter().skip(1) {
+                        let add_name = &additional_output.signal_id;
+                        println!(">>> BUG #115 FIX: Copying {} -> {}", primary_output, add_name);
+                        self.write_indented(&format!(
+                            "signals->{} = signals->{}; // BUG #115 FIX\n",
+                            self.sanitize_name(add_name),
+                            self.sanitize_name(primary_output)
+                        ));
+                    }
+                }
+            }
             SirNodeKind::SignalRef { signal } => {
                 // Check if it's reading from inputs or registers
                 if !node.outputs.is_empty() {

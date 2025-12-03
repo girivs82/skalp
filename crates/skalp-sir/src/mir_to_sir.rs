@@ -123,6 +123,9 @@ struct MirToSirConverter<'a> {
     // BUG FIX #85: Map tuple temp signal IDs to their module instance prefix
     // This is used to resolve TupleFieldAccess when the base is a _tuple_tmp signal
     tuple_source_map: HashMap<SignalId, String>,
+    // BUG FIX #124: Store port_mapping for each instance by prefix
+    // This allows nested instances to resolve parent port references during expression conversion
+    instance_port_mappings: HashMap<String, HashMap<String, Expression>>,
 }
 
 impl<'a> MirToSirConverter<'a> {
@@ -138,6 +141,7 @@ impl<'a> MirToSirConverter<'a> {
             signal_map: HashMap::new(),
             conditional_contexts: HashMap::new(),
             tuple_source_map,
+            instance_port_mappings: HashMap::new(),
         }
     }
 
@@ -2948,12 +2952,46 @@ impl<'a> MirToSirConverter<'a> {
         // Get type from true/false branches - use the wider type
         let true_type = self.get_signal_type(&true_signal.signal_id);
         let false_type = self.get_signal_type(&false_signal.signal_id);
-        let sir_type = if true_type.width() >= false_type.width() {
+        let true_width = true_type.width();
+        let false_width = false_type.width();
+        let sir_type = if true_width >= false_width {
             true_type
         } else {
             false_type
         };
         let width = sir_type.width();
+
+        // BUG #125 FIX: Handle width mismatch in mux inputs
+        // When one input is narrower than the other, check if it's a zero constant
+        // and replace it with a properly-sized zero to avoid truncation issues
+        let mut actual_true_signal = true_signal;
+        let mut actual_false_signal = false_signal;
+
+        if true_width != false_width {
+            eprintln!("[BUG #125] Mux width mismatch: true={}, false={}, target={}",
+                     true_width, false_width, width);
+
+            // Check if the narrower input is a zero constant that needs widening
+            if false_width < true_width {
+                // false branch is narrower - check if it's a zero constant
+                if let Some(zero_value) = self.is_zero_constant_node(false_val) {
+                    eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
+                             false_width, width);
+                    // Create a new zero constant with the correct width
+                    let wide_zero = self.create_constant_node(zero_value, width);
+                    actual_false_signal = self.node_to_signal_ref(wide_zero);
+                }
+            } else if true_width < false_width {
+                // true branch is narrower - check if it's a zero constant
+                if let Some(zero_value) = self.is_zero_constant_node(true_val) {
+                    eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
+                             true_width, width);
+                    // Create a new zero constant with the correct width
+                    let wide_zero = self.create_constant_node(zero_value, width);
+                    actual_true_signal = self.node_to_signal_ref(wide_zero);
+                }
+            }
+        }
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -2974,13 +3012,30 @@ impl<'a> MirToSirConverter<'a> {
         let node = SirNode {
             id: node_id,
             kind: SirNodeKind::Mux,
-            inputs: vec![sel_signal, true_signal, false_signal],
+            inputs: vec![sel_signal, actual_true_signal, actual_false_signal],
             outputs: vec![output_signal],
             clock_domain: None,
         };
 
         self.sir.combinational_nodes.push(node);
         node_id
+    }
+
+    /// Check if a node is a zero constant and return its value
+    fn is_zero_constant_node(&self, node_id: usize) -> Option<u64> {
+        // Look through all combinational nodes to find this node
+        for node in &self.sir.combinational_nodes {
+            if node.id == node_id {
+                if let SirNodeKind::Constant { value, .. } = &node.kind {
+                    // Return the value if it's zero (or any constant actually,
+                    // since we want to widen constants in general)
+                    if *value == 0 {
+                        return Some(*value);
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn create_concat_node(&mut self, parts: Vec<usize>) -> usize {
@@ -3995,11 +4050,53 @@ impl<'a> MirToSirConverter<'a> {
             });
         }
 
+        // Step 1c: Create signals for INPUT ports of the child module
+        // BUG #124 FIX: Nested instances (e.g., quadratic_solve inside exec_l4_l5) may reference
+        // parent module ports (e.g., exec_l4_l5.param_1). These need to exist as actual SIR signals
+        // so nested instances can read them. Without this, the signal lookup fails and returns 0.
+        for port in &child_module.ports {
+            if matches!(port.direction, skalp_mir::PortDirection::Input) {
+                let full_name = format!("{}.{}", inst_prefix, port.name);
+                let sir_type = self.convert_type(&port.port_type);
+                let width = sir_type.width();
+
+                println!(
+                    "         ├─ Input Port: {} (type={:?}) → SIR signal (width={}) [BUG #124 FIX]",
+                    port.name, port.port_type, width
+                );
+
+                // Check if signal already exists (avoid duplicates)
+                if !self.sir.signals.iter().any(|s| s.name == full_name) {
+                    self.sir.signals.push(SirSignal {
+                        name: full_name.clone(),
+                        width,
+                        sir_type: sir_type.clone(),
+                        driver_node: None,
+                        fanout_nodes: Vec::new(),
+                        is_state: false, // Input ports are not registers
+                    });
+                }
+            }
+        }
+
         eprintln!(
             "         📊 After elaborating '{}': total {} state_elements",
             inst_prefix,
             self.sir.state_elements.len()
         );
+
+        // BUG FIX #124: Store the basic port_mapping BEFORE elaborating nested instances
+        // This ensures nested instances can look up the parent's port_mapping during their elaboration
+        // The full port_mapping (with flattened fields) is built later in elaborate_child_logic_with_context,
+        // but we need the basic mapping available for nested Port resolution now.
+        {
+            let mut basic_port_mapping: HashMap<String, Expression> = HashMap::new();
+            for (port_name, parent_expr) in &instance.connections {
+                basic_port_mapping.insert(port_name.clone(), parent_expr.clone());
+            }
+            println!("🔑🔑🔑 BUG #124 EARLY: Storing basic port_mapping for inst_prefix='{}' with {} entries BEFORE nested elaboration", inst_prefix, basic_port_mapping.len());
+            self.instance_port_mappings.insert(inst_prefix.to_string(), basic_port_mapping);
+        }
 
         // Step 2: FIRST recursively elaborate any instances within the child
         // BUG FIX #85: This MUST happen before Step 3 so that nested module outputs
@@ -4205,6 +4302,11 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
         }
+
+        // BUG FIX #124: Store the port_mapping for this instance so nested instances can look it up
+        // This enables recursive port resolution for 3-level nesting (e.g., CLE → exec_l4_l5 → quadratic_solve)
+        println!("🔑🔑🔑 BUG #124: Storing port_mapping for inst_prefix='{}' with {} entries", inst_prefix, port_mapping.len());
+        self.instance_port_mappings.insert(inst_prefix.to_string(), port_mapping.clone());
 
         // Convert combinational assignments from child module
         for assign in &child_module.assignments {
@@ -5216,6 +5318,178 @@ impl<'a> MirToSirConverter<'a> {
                         println!("🎨🎨🎨   -> Creating BitSelect node [{}] on base_node={}", index_val, base_node);
                         self.create_bit_select_node_on_base(base_node, index_val as usize)
                     }
+                    // BUG FIX #113: Handle Port specially to preserve RangeSelect in port_mapping
+                    // When a port maps to a RangeSelect expression (e.g., param_0 -> data1[31:0]),
+                    // we need to recursively create a node for that expression, not just extract
+                    // the base signal name.
+                    LValue::Port(port_id) => {
+                        println!("🎨🎨🎨   -> LValue::Port({}), checking port_mapping", port_id.0);
+
+                        // Look up the port name in child_module
+                        let port_name = if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
+                            Some(port.name.clone())
+                        } else {
+                            // Try by index (BUG #24 fallback)
+                            let port_index = port_id.0 as usize;
+                            if port_index < child_module.ports.len() {
+                                Some(child_module.ports[port_index].name.clone())
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some(ref name) = port_name {
+                            println!("🎨🎨🎨   -> Port name: '{}', looking in port_mapping", name);
+                            if let Some(parent_expr) = port_mapping.get(name) {
+                                println!("🎨🎨🎨   -> Found mapping for '{}': {:?}", name, std::mem::discriminant(&parent_expr.kind));
+                                // BUG #113: Recursively create node for the mapped expression
+                                // This properly handles RangeSelect in the mapped expression
+                                // IMPORTANT: The mapped expression is in PARENT context.
+                                // CRITICAL: Pass parent_module_for_signals as child_module since the
+                                // expression contains Port references from the PARENT module, not the child.
+                                // BUG #124 FIX: Look up the PARENT's port_mapping from instance_port_mappings
+                                // so we can resolve parent ports (like exec_l4_l5.param_1) to grandparent signals (like CLE.data1).
+                                // Handle key format: parent_prefix may have trailing dot (e.g., "exec_l4_l5_inst_233.")
+                                // but we store without trailing dot (e.g., "exec_l4_l5_inst_233")
+                                let parent_key = parent_prefix.trim_end_matches('.');
+                                let parent_port_mapping = self.instance_port_mappings.get(parent_key).cloned().unwrap_or_default();
+                                if let Some(parent_module) = parent_module_for_signals {
+                                    println!("🎨🎨🎨   -> Recursing with parent_module='{}' as child_module, parent_prefix='{}', parent_port_mapping.len()={}", parent_module.name, parent_prefix, parent_port_mapping.len());
+                                    // BUG #113 FIX: When recursing to resolve parent expressions, we need to
+                                    // provide proper context for nested modules. If the parent module's ports
+                                    // reference the grandparent (top-level module), we need to provide that context.
+                                    // Use self.mir as the grandparent context since it's the top-level module.
+                                    return self.create_expression_node_for_instance_with_context(
+                                        parent_expr,
+                                        parent_prefix,  // Use parent prefix for parent context
+                                        &parent_port_mapping,  // BUG #124: Use parent's port_mapping for proper resolution
+                                        parent_module,   // BUG #113: Use parent module since Port refs are from parent
+                                        Some(&self.mir.clone()),  // Use top-level module as grandparent context
+                                        "",              // Top-level has no prefix
+                                    );
+                                } else {
+                                    // No parent module - we're at top level, look up in self.mir
+                                    // BUG #124: At top level, there's no parent prefix so no stored mapping needed
+                                    let top_level_mapping = HashMap::new();
+                                    println!("🎨🎨🎨   -> No parent_module, using self.mir for context");
+                                    return self.create_expression_node_for_instance_with_context(
+                                        parent_expr,
+                                        "",  // No instance prefix at top level
+                                        &top_level_mapping,
+                                        &self.mir.clone(),  // Use top-level module
+                                        None,
+                                        "",
+                                    );
+                                }
+                            }
+                        }
+
+                        // BUG #113 FIX: If port_mapping is empty, we're in parent context after recursion.
+                        // The key insight is that after recursion, the inst_prefix refers to the PARENT's
+                        // instance, not the current child_module. So we should look up ports in
+                        // parent_module_for_signals FIRST, then self.mir, then child_module as last resort.
+                        if port_mapping.is_empty() {
+                            println!("🎨🎨🎨   -> Empty port_mapping, looking up port {} (inst_prefix='{}', parent_prefix='{}')",
+                                     port_id.0, inst_prefix, parent_prefix);
+
+                            // BUG #114 FIX: We already resolved the port_name from child_module above.
+                            // If we have a port_name, use it directly to look up the signal!
+                            // Don't try to re-lookup by port_id in parent_module/self.mir since those
+                            // have different port IDs. The port_name is the key.
+                            if let Some(ref name) = port_name {
+                                // BUG #118 FIX: ONLY use top-level signals when we're ACTUALLY at top level
+                                // (both prefixes empty). For nested instances, we must NOT fall back to
+                                // top-level signals, as this creates wrong connections.
+                                if inst_prefix.is_empty() && parent_prefix.is_empty() {
+                                    // Try to find this port in self.mir (top-level) by NAME
+                                    if let Some(mir_port) = self.mir.ports.iter().find(|p| p.name == *name) {
+                                        // Found in top-level - use the signal directly (no prefix)
+                                        println!("🎨🎨🎨   -> BUG #118 FIX: At TOP LEVEL, found port '{}' by NAME in self.mir, using signal directly", name);
+                                        return self.get_or_create_signal_driver(&mir_port.name);
+                                    }
+                                    // Try to find as a signal in self.mir by name
+                                    if let Some(_mir_signal) = self.mir.signals.iter().find(|s| s.name == *name) {
+                                        println!("🎨🎨🎨   -> BUG #118 FIX: At TOP LEVEL, found signal '{}' by NAME in self.mir, using it directly", name);
+                                        return self.get_or_create_signal_driver(name);
+                                    }
+                                    // At top-level, just try the name directly
+                                    println!("🎨🎨🎨   -> BUG #118 FIX: At TOP LEVEL, using port name '{}' directly", name);
+                                    return self.get_or_create_signal_driver(name);
+                                }
+                                // For nested instances, continue to the parent_module lookup below
+                                println!("🎨🎨🎨   -> BUG #118 FIX: In NESTED context (inst='{}', parent='{}'), skipping top-level lookup for '{}'",
+                                         inst_prefix, parent_prefix, name);
+                            }
+
+                            // BUG #113 FIX: After recursion, inst_prefix is from the PARENT context.
+                            // The Port reference is from child_module, but we need to look it up using
+                            // parent context. Try parent_module_for_signals FIRST.
+                            if let Some(parent_module) = parent_module_for_signals {
+                                println!("🎨🎨🎨   -> Trying parent_module '{}' first", parent_module.name);
+                                if let Some(port) = parent_module.ports.iter().find(|p| p.id == *port_id) {
+                                    let sig_name = format!("{}{}", parent_prefix, port.name);
+                                    println!("🎨🎨🎨   -> Found port '{}' in parent_module, signal='{}'", port.name, sig_name);
+                                    return self.get_or_create_signal_driver(&sig_name);
+                                }
+                                // BUG #114 FIX: Also try by NAME in parent_module
+                                if let Some(ref name) = port_name {
+                                    if let Some(port) = parent_module.ports.iter().find(|p| p.name == *name) {
+                                        let sig_name = if parent_prefix.is_empty() {
+                                            port.name.clone()
+                                        } else {
+                                            format!("{}{}", parent_prefix, port.name)
+                                        };
+                                        println!("🎨🎨🎨   -> BUG #114 FIX: Found port '{}' by NAME in parent_module, signal='{}'", port.name, sig_name);
+                                        return self.get_or_create_signal_driver(&sig_name);
+                                    }
+                                }
+                                // Try by index in parent_module
+                                let port_index = port_id.0 as usize;
+                                if port_index < parent_module.ports.len() {
+                                    let port = &parent_module.ports[port_index];
+                                    let sig_name = format!("{}{}", parent_prefix, port.name);
+                                    println!("🎨🎨🎨   -> Found port '{}' by index in parent_module, signal='{}'", port.name, sig_name);
+                                    return self.get_or_create_signal_driver(&sig_name);
+                                }
+                            }
+
+                            // Try self.mir (top-level module) - ports here don't need prefix
+                            println!("🎨🎨🎨   -> Trying self.mir '{}'", self.mir.name);
+                            if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
+                                println!("🎨🎨🎨   -> Found port '{}' in self.mir (no prefix)", port.name);
+                                return self.get_or_create_signal_driver(&port.name);
+                            }
+                            let port_index = port_id.0 as usize;
+                            if port_index < self.mir.ports.len() {
+                                let port = &self.mir.ports[port_index];
+                                println!("🎨🎨🎨   -> Found port '{}' by index in self.mir (no prefix)", port.name);
+                                return self.get_or_create_signal_driver(&port.name);
+                            }
+
+                            // BUG #113 FIX: DO NOT try child_module with inst_prefix here!
+                            // After recursion, inst_prefix is from the PARENT context, not current
+                            // child_module. Using child_module.ports with inst_prefix creates
+                            // wrong signal names like "exec_l4_l5_inst_233.param_1".
+                            // Let it fall through to the fallback lookup below instead.
+                            println!("🎨🎨🎨   -> NOT using child_module '{}' with inst_prefix (Bug #113 fix)", child_module.name);
+                        }
+
+                        // Fallback to original behavior
+                        println!("🎨🎨🎨   -> Port not in port_mapping, using fallback lookup");
+                        if let Some(sig_name) = self.get_signal_from_lvalue_with_context(
+                            lvalue,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            parent_module_for_signals,
+                            parent_prefix,
+                        ) {
+                            self.get_or_create_signal_driver(&sig_name)
+                        } else {
+                            eprintln!("🎨🎨🎨   -> FALLBACK: port {:?} not found, creating Constant(0,1)", port_id);
+                            self.create_constant_node(0, 1)
+                        }
+                    }
                     _ => {
                         // Map through ports if needed, using context-aware lookup
                         if let Some(sig_name) = self.get_signal_from_lvalue_with_context(
@@ -5557,7 +5831,16 @@ impl<'a> MirToSirConverter<'a> {
                     .signals
                     .iter()
                     .find(|s| s.id == *sig_id)
-                    .map(|signal| format!("{}.{}", inst_prefix, signal.name))
+                    .map(|signal| {
+                        // BUG FIX #113: Avoid double dots if inst_prefix ends with a dot
+                        if inst_prefix.is_empty() {
+                            signal.name.clone()
+                        } else if inst_prefix.ends_with('.') {
+                            format!("{}{}", inst_prefix, signal.name)
+                        } else {
+                            format!("{}.{}", inst_prefix, signal.name)
+                        }
+                    })
             }
             LValue::Port(port_id) => {
                 // Direct port reference - map to parent signal through port connections
@@ -5582,7 +5865,15 @@ impl<'a> MirToSirConverter<'a> {
                     } else {
                         println!("🔌🔌🔌 PORT LOOKUP: NO mapping for '{}' - using fallback", port.name);
                         // No mapping - use prefixed port name as fallback
-                        Some(format!("{}.{}", inst_prefix, port.name))
+                        // BUG FIX #113: Avoid double dots if inst_prefix ends with a dot
+                        let prefixed = if inst_prefix.is_empty() {
+                            port.name.clone()
+                        } else if inst_prefix.ends_with('.') {
+                            format!("{}{}", inst_prefix, port.name)
+                        } else {
+                            format!("{}.{}", inst_prefix, port.name)
+                        };
+                        Some(prefixed)
                     }
                 } else {
                     println!("🔌🔌🔌 PORT LOOKUP: Port id={} NOT FOUND by direct lookup, trying index", port_id.0);
@@ -5601,12 +5892,67 @@ impl<'a> MirToSirConverter<'a> {
                             );
                             Some(mapped_name)
                         } else {
-                            Some(format!("{}.{}", inst_prefix, port.name))
+                            // BUG FIX #113: Avoid double dots if inst_prefix ends with a dot
+                            let prefixed = if inst_prefix.is_empty() {
+                                port.name.clone()
+                            } else if inst_prefix.ends_with('.') {
+                                format!("{}{}", inst_prefix, port.name)
+                            } else {
+                                format!("{}.{}", inst_prefix, port.name)
+                            };
+                            Some(prefixed)
                         }
                     } else {
                         None
                     }
                 }
+            }
+            // BUG #116 FIX: Handle Variable references in nested module contexts
+            // Variables can appear in port mappings for nested instances. We need to look up
+            // the variable in the parent module (for nested instances) or self.mir (for top-level).
+            LValue::Variable(var_id) => {
+                println!("🔧🔧🔧 BUG #116 FIX: LValue::Variable({}) in get_signal_from_lvalue_with_context", var_id.0);
+                println!("🔧🔧🔧   inst_prefix='{}', parent_prefix='{}'", inst_prefix, parent_prefix);
+
+                // First try child_module (the current module context)
+                if let Some(var) = child_module.variables.iter().find(|v| v.id == *var_id) {
+                    let var_name = format!("{}_{}", var.name, var_id.0);
+                    let prefixed = if inst_prefix.is_empty() {
+                        var_name
+                    } else if inst_prefix.ends_with('.') {
+                        format!("{}{}", inst_prefix, var_name)
+                    } else {
+                        format!("{}.{}", inst_prefix, var_name)
+                    };
+                    println!("🔧🔧🔧   -> Found in child_module '{}', signal='{}'", child_module.name, prefixed);
+                    return Some(prefixed);
+                }
+
+                // Try parent_module_for_signals if provided (for nested instances)
+                if let Some(parent) = parent_module_for_signals {
+                    if let Some(var) = parent.variables.iter().find(|v| v.id == *var_id) {
+                        let var_name = format!("{}_{}", var.name, var_id.0);
+                        let prefixed = if parent_prefix.is_empty() {
+                            var_name
+                        } else if parent_prefix.ends_with('.') {
+                            format!("{}{}", parent_prefix, var_name)
+                        } else {
+                            format!("{}.{}", parent_prefix, var_name)
+                        };
+                        println!("🔧🔧🔧   -> Found in parent_module '{}', signal='{}'", parent.name, prefixed);
+                        return Some(prefixed);
+                    }
+                }
+
+                // Fallback to self.mir (top-level module)
+                if let Some(var) = self.mir.variables.iter().find(|v| v.id == *var_id) {
+                    let var_name = format!("{}_{}", var.name, var_id.0);
+                    println!("🔧🔧🔧   -> Found in self.mir '{}', signal='{}' (no prefix)", self.mir.name, var_name);
+                    return Some(var_name);
+                }
+
+                println!("🔧🔧🔧   -> Variable {} NOT FOUND in any module!", var_id.0);
+                None
             }
             _ => None,
         }
