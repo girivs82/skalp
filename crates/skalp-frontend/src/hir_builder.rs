@@ -1625,16 +1625,7 @@ impl HirBuilderContext {
             })
             .collect();
 
-        eprintln!(
-            "[HIR_ASSIGN_DEBUG] build_assignment found {} expressions",
-            exprs.len()
-        );
-        for (i, expr) in exprs.iter().enumerate() {
-            eprintln!("  [{}] {:?}", i, expr.kind());
-        }
-
         if exprs.len() < 2 {
-            eprintln!("[HIR_ASSIGN_DEBUG] Not enough expressions, returning None");
             return None;
         }
 
@@ -1734,29 +1725,14 @@ impl HirBuilderContext {
 
             current_lval
         } else {
-            eprintln!("[HIR_ASSIGN_DEBUG] Building LHS from exprs[0]");
-            let lhs_result = self.build_lvalue(&exprs[0]);
-            if lhs_result.is_none() {
-                eprintln!("[HIR_ASSIGN_DEBUG] build_lvalue returned None!");
-            }
-            lhs_result?
+            self.build_lvalue(&exprs[0])?
         };
-
-        eprintln!(
-            "[HIR_ASSIGN_DEBUG] LHS built successfully, rhs_start_idx={}",
-            rhs_start_idx
-        );
 
         // Handle RHS - if there are multiple expressions, we need to combine them
         let rhs = if rhs_start_idx >= exprs.len() {
-            eprintln!("[HIR_ASSIGN_DEBUG] rhs_start_idx >= exprs.len(), returning None");
             return None;
         } else if rhs_start_idx == exprs.len() - 1 {
             // Simple case: single RHS expression
-            eprintln!(
-                "[HIR_ASSIGN_DEBUG] Building single RHS from exprs[{}]",
-                rhs_start_idx
-            );
             self.build_expression(&exprs[rhs_start_idx])?
         } else if exprs.len() == 3 && rhs_start_idx == 1 {
             // Special case for old 3-expression patterns (not nested field access)
@@ -1794,6 +1770,13 @@ impl HirBuilderContext {
                 // This happens with range/index access like "decode_opcode <= fetch_instruction[15:12]"
                 // EXPR1 is the base (fetch_instruction), EXPR2 is the index expression ([15:12])
                 self.build_index_access_from_parts(&exprs[1], &exprs[2])?
+            } else if third_expr.kind() == SyntaxKind::CastExpr {
+                // BUG #127 FIX: Case: LHS = EXPR CAST_EXPR
+                // This happens with cast expressions like "direct_result = ((a as fp32) / c as fp32) as bit[32]"
+                // The parser splits EXPR and the trailing "as Type" into separate nodes
+                // EXPR1 is the base expression, EXPR2 is the cast (just the "as Type" part)
+                // We need to combine them into a proper Cast expression
+                self.build_cast_from_parts(&exprs[1], &exprs[2])?
             } else {
                 // Fallback to last expression
                 self.build_expression(exprs.last().unwrap())?
@@ -3667,6 +3650,20 @@ impl HirBuilderContext {
                 continue;
             }
 
+            // BUG #112 FIX: Skip IdentExpr/FieldExpr/PathExpr if followed by IndexExpr (slice as argument)
+            // Example: fp_add(data[31:0], data[63:32]) creates:
+            //   [IdentExpr("data"), IndexExpr([31:0]), IdentExpr("data"), IndexExpr([63:32])]
+            // We should skip the IdentExpr and process only the IndexExpr which contains the full expression
+            if matches!(
+                child.kind(),
+                SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
+            ) && i + 1 < call_children.len()
+                && call_children[i + 1].kind() == SyntaxKind::IndexExpr
+            {
+                i += 1;
+                continue;
+            }
+
             // Process as argument
             if let Some(expr) = self.build_expression(&child) {
                 args.push(expr);
@@ -4108,6 +4105,7 @@ impl HirBuilderContext {
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::CallExpr
                         | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::CastExpr // BUG #127: Include CastExpr as valid operand
                 )
             })
             .collect();
@@ -5215,6 +5213,29 @@ impl HirBuilderContext {
 
         // Find the target type from TypeAnnotation
         let target_type = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
+            .map(|type_node| self.build_hir_type(&type_node))?;
+
+        Some(HirExpression::Cast(HirCastExpr {
+            expr: Box::new(expr),
+            target_type,
+        }))
+    }
+
+    /// BUG #127 FIX: Build a Cast expression from separate expression and cast nodes
+    /// This handles cases where the parser splits "expr as Type" into sibling nodes
+    /// rather than nesting the expression inside the CastExpr
+    fn build_cast_from_parts(
+        &mut self,
+        expr_node: &SyntaxNode,
+        cast_node: &SyntaxNode,
+    ) -> Option<HirExpression> {
+        // Build the expression from expr_node
+        let expr = self.build_expression(expr_node)?;
+
+        // Find the target type from the TypeAnnotation in cast_node
+        let target_type = cast_node
             .children()
             .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
             .map(|type_node| self.build_hir_type(&type_node))?;
