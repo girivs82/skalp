@@ -5855,11 +5855,55 @@ impl<'hir> HirToMir<'hir> {
         // Collect all let bindings
         let mut let_bindings = Vec::new();
         let mut remaining_stmts = body;
+        let mut seen_var_ids: std::collections::HashSet<hir::VariableId> = std::collections::HashSet::new();
 
-        // Extract leading let statements
-        while let Some(hir::HirStatement::Let(let_stmt)) = remaining_stmts.first() {
-            let_bindings.push(let_stmt.clone());
-            remaining_stmts = &remaining_stmts[1..];
+        // Extract leading let statements AND assignment-based initializations (BUG #135 FIX)
+        loop {
+            println!("[BUG #135 TRACE] remaining_stmts.len()={}, seen_var_ids={:?}", remaining_stmts.len(), seen_var_ids);
+            match remaining_stmts.first() {
+                Some(hir::HirStatement::Let(let_stmt)) => {
+                    println!("[BUG #135 TRACE] Found Let for '{}'  id={:?}", let_stmt.name, let_stmt.id);
+                    seen_var_ids.insert(let_stmt.id);
+                    let_bindings.push(let_stmt.clone());
+                    remaining_stmts = &remaining_stmts[1..];
+                }
+                // BUG #135 FIX: Also extract Assignments that initialize new variables
+                // These appear when `let mut val = x;` is converted to Assignment(val, x) during compilation
+                Some(hir::HirStatement::Assignment(assign)) => {
+                    println!("[BUG #135 TRACE] Found Assignment to {:?}", assign.lhs);
+                    if let hir::HirLValue::Variable(var_id) = &assign.lhs {
+                        println!("[BUG #135 TRACE]   -> Variable {:?}, in_seen={}", var_id, seen_var_ids.contains(var_id));
+                        if !seen_var_ids.contains(var_id) {
+                            // This is a new variable being initialized via assignment
+                            // Convert it to a pseudo-let binding
+                            println!("[BUG #135 FIX] Converting Assignment to init Let for var {:?}", var_id);
+                            seen_var_ids.insert(*var_id);
+                            // Use a placeholder type - typically bit[32] for bit operations
+                            // The actual type will be inferred from usage during downstream processing
+                            let_bindings.push(hir::HirLetStatement {
+                                id: *var_id,
+                                name: format!("__init_var_{}", var_id.0),
+                                mutable: true,  // Assume mutable since it was an assignment
+                                var_type: hir::HirType::Bit(32),  // Placeholder type
+                                value: assign.rhs.clone(),
+                            });
+                            remaining_stmts = &remaining_stmts[1..];
+                            continue;
+                        }
+                    }
+                    // Assignment to existing variable - stop extraction
+                    println!("[BUG #135 TRACE] Breaking: Assignment to existing var");
+                    break;
+                }
+                Some(other) => {
+                    println!("[BUG #135 TRACE] Found Other: {:?}", std::mem::discriminant(other));
+                    break;
+                }
+                None => {
+                    println!("[BUG #135 TRACE] No more statements");
+                    break;
+                }
+            }
         }
 
         eprintln!(
@@ -5867,6 +5911,27 @@ impl<'hir> HirToMir<'hir> {
             let_bindings.len(),
             remaining_stmts.len()
         );
+
+        // BUG #135 DEBUG: Print what stopped the let extraction
+        if !remaining_stmts.is_empty() && let_bindings.len() < 3 {
+            let first_non_let = &remaining_stmts[0];
+            eprintln!("[BUG #135 DEBUG] After {} lets extracted, first non-let statement type: {:?}",
+                      let_bindings.len(), std::mem::discriminant(first_non_let));
+            match first_non_let {
+                hir::HirStatement::Assignment(assign) => {
+                    eprintln!("[BUG #135 DEBUG]   -> Assignment to {:?}", assign.lhs);
+                }
+                hir::HirStatement::Let(let_stmt) => {
+                    eprintln!("[BUG #135 DEBUG]   -> Let '{}' (WHY NOT EXTRACTED??)", let_stmt.name);
+                }
+                hir::HirStatement::If(_) => {
+                    eprintln!("[BUG #135 DEBUG]   -> If statement");
+                }
+                _ => {
+                    eprintln!("[BUG #135 DEBUG]   -> Other statement type");
+                }
+            }
+        }
 
         if remaining_stmts.is_empty() {
             // All statements are let bindings - check for implicit return
@@ -5924,8 +5989,20 @@ impl<'hir> HirToMir<'hir> {
             // Multiple statements - need to convert to block expression
             // This happens when function has statements followed by return
             stmts if stmts.len() > 1 => {
+                println!("🟢🟢🟢 [MULTI_STMT] {} stmts, {} let bindings, trying mutable var pattern 🟢🟢🟢", stmts.len(), let_bindings.len());
+                // BUG #135 DEBUG: Print first statement to understand why let extraction stopped
+                if let_bindings.len() == 1 && !stmts.is_empty() {
+                    println!("[BUG #135] First stmt after 1 let: {:?}", std::mem::discriminant(&stmts[0]));
+                    match &stmts[0] {
+                        hir::HirStatement::Let(ls) => println!("[BUG #135]   -> Let '{}' - why wasn't it extracted?", ls.name),
+                        hir::HirStatement::If(_) => println!("[BUG #135]   -> If statement"),
+                        hir::HirStatement::Assignment(a) => println!("[BUG #135]   -> Assignment to {:?}", a.lhs),
+                        _ => println!("[BUG #135]   -> Other"),
+                    }
+                }
                 // Check if last statement is a return
                 if let Some(hir::HirStatement::Return(Some(return_expr))) = stmts.last() {
+                    println!("🟢🟢🟢 [MULTI_STMT] Last is Return, return_expr type: {:?} 🟢🟢🟢", std::mem::discriminant(return_expr));
                     // BUG #86 FIX: Handle mutable variable pattern
                     // Pattern: if (cond) { var = new_value; } return var
                     // Transform to: if cond { new_value } else { initial_value }
@@ -5934,10 +6011,11 @@ impl<'hir> HirToMir<'hir> {
                         return_expr,
                         &let_bindings,
                     ) {
-                        eprintln!("[BUG #86] Successfully converted mutable variable pattern to if-expression");
+                        println!("🟢🟢🟢 [MULTI_STMT] SUCCESS! Converted mutable variable pattern 🟢🟢🟢");
                         return Some(mutable_var_expr);
                     }
 
+                    println!("🟢🟢🟢 [MULTI_STMT] FALLBACK! Creating Block expression 🟢🟢🟢");
                     // Build block with all statements except the last, then use return expr as result
                     let block_stmts: Vec<_> = stmts[..stmts.len() - 1].to_vec();
                     Some(hir::HirExpression::Block {
@@ -6040,11 +6118,25 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<hir::HirExpression> {
         use std::collections::HashMap;
 
-        eprintln!("[BUG #86] try_convert_mutable_var_pattern: {} stmts before return", stmts_before_return.len());
+        println!("🔵🔵🔵 [BUG #86] try_convert_mutable_var_pattern: {} stmts before return, {} let bindings 🔵🔵🔵",
+                 stmts_before_return.len(), let_bindings.len());
+        println!("🔵🔵🔵 [BUG #86] return_expr type: {:?} 🔵🔵🔵", std::mem::discriminant(return_expr));
 
-        // Check if return expression is a variable reference
-        let returned_var_id = match return_expr {
-            hir::HirExpression::Variable(var_id) => *var_id,
+        // BUG #134 FIX: Check if return expression is a variable reference
+        // Also handle Cast(Variable) which can happen after early return transformation
+        let (returned_var_id, outer_cast) = match return_expr {
+            hir::HirExpression::Variable(var_id) => (*var_id, None),
+            hir::HirExpression::Cast(cast_expr) => {
+                // Check if Cast wraps a Variable
+                if let hir::HirExpression::Variable(var_id) = cast_expr.expr.as_ref() {
+                    eprintln!("[BUG #134] return_expr is Cast(Variable), extracting inner variable");
+                    (*var_id, Some(cast_expr.target_type.clone()))
+                } else {
+                    eprintln!("[BUG #134] return_expr is Cast but not Variable inside, type: {:?}",
+                              std::mem::discriminant(cast_expr.expr.as_ref()));
+                    return None;
+                }
+            }
             _ => return None,
         };
 
@@ -6057,6 +6149,37 @@ impl<'hir> HirToMir<'hir> {
                 eprintln!("[BUG #86] Tracking mutable variable '{}' (id={:?})", let_stmt.name, let_stmt.id);
                 var_exprs.insert(let_stmt.id, let_stmt.value.clone());
             }
+        }
+
+        // BUG #135 FIX: Also extract leading Assignment statements as mutable variable initializations
+        // These may appear when let statements are converted to assignments during compilation
+        let mut init_assignment_count = 0;
+        for stmt in stmts_before_return {
+            match stmt {
+                hir::HirStatement::Assignment(assign) => {
+                    // Check if this is initializing a variable (simple Variable LHS)
+                    if let hir::HirLValue::Variable(var_id) = &assign.lhs {
+                        eprintln!("[BUG #135 FIX] Checking Assignment to {:?}, var_exprs has {} entries", var_id, var_exprs.len());
+                        // If we haven't seen this variable yet, it's an initialization
+                        if !var_exprs.contains_key(var_id) {
+                            eprintln!("[BUG #135 FIX] Found initialization assignment for var {:?}", var_id);
+                            var_exprs.insert(*var_id, assign.rhs.clone());
+                            init_assignment_count += 1;
+                            continue;
+                        } else {
+                            eprintln!("[BUG #135 FIX] Variable {:?} already in var_exprs, stopping scan", var_id);
+                        }
+                    }
+                    // Non-initialization assignment, stop scanning
+                    break;
+                }
+                _ => break, // Non-assignment statement, stop scanning
+            }
+        }
+        let actual_stmts_before_return = &stmts_before_return[init_assignment_count..];
+        if init_assignment_count > 0 {
+            eprintln!("[BUG #135 FIX] Extracted {} init assignments, {} stmts remaining",
+                     init_assignment_count, actual_stmts_before_return.len());
         }
 
         // If no mutable variables, this isn't our pattern
@@ -6073,8 +6196,8 @@ impl<'hir> HirToMir<'hir> {
 
         let mut modified = false;
 
-        // Process each if statement
-        for stmt in stmts_before_return {
+        // Process each if statement (use actual_stmts_before_return which excludes init assignments)
+        for stmt in actual_stmts_before_return {
             if let hir::HirStatement::If(if_stmt) = stmt {
                 // Get all assignments in the then-block
                 let assignments = self.collect_assignments_in_block(&if_stmt.then_statements);
@@ -6112,9 +6235,21 @@ impl<'hir> HirToMir<'hir> {
 
         if modified {
             // Return the final expression for the returned variable
-            let result = var_exprs.get(&returned_var_id).cloned();
+            let inner_result = var_exprs.get(&returned_var_id).cloned();
             eprintln!("[BUG #86] Successfully converted mutable variable pattern");
-            result
+
+            // BUG #134 FIX: If original return was Cast(Variable), wrap result in Cast
+            match (inner_result, outer_cast) {
+                (Some(expr), Some(target_type)) => {
+                    eprintln!("[BUG #134] Wrapping result in Cast to {:?}", target_type);
+                    Some(hir::HirExpression::Cast(hir::HirCastExpr {
+                        expr: Box::new(expr),
+                        target_type,
+                    }))
+                }
+                (Some(expr), None) => Some(expr),
+                (None, _) => None,
+            }
         } else {
             eprintln!("[BUG #86] No if statements modified any variables");
             None
@@ -8143,24 +8278,89 @@ impl<'hir> HirToMir<'hir> {
 
         // Build let binding substitution map by walking through the function body
         // and collecting all let bindings with their RHS expressions
+        // BUG #136 FIX: After transform_early_returns, let bindings may be nested inside if/else branches
+        // We need to recursively collect let bindings from all branches
         let mut let_bindings = HashMap::new();
-        for stmt in &body {
-            if let hir::HirStatement::Let(let_stmt) = stmt {
-                // Substitute any previously-defined let bindings and parameters in this RHS
-                let rhs_substituted = self.substitute_hir_expr_recursively(
-                    &let_stmt.value,
-                    &substitution_map,
-                    &let_bindings,
-                    &var_id_to_name,
-                );
-                if let Some(rhs) = rhs_substituted {
-                    let_bindings.insert(let_stmt.name.clone(), rhs);
-                    eprintln!("[BUG #74 INLINE_WITH_LETS] Collected let binding: {}", let_stmt.name);
+
+        // Helper to recursively collect let statements with mutability info
+        fn collect_let_stmts_recursive(
+            stmts: &[hir::HirStatement],
+            collected: &mut Vec<(String, hir::HirExpression, bool)>,  // (name, value, is_mutable)
+        ) {
+            for stmt in stmts {
+                match stmt {
+                    hir::HirStatement::Let(let_stmt) => {
+                        collected.push((let_stmt.name.clone(), let_stmt.value.clone(), let_stmt.mutable));
+                    }
+                    hir::HirStatement::If(if_stmt) => {
+                        // Recursively collect from then-branch
+                        collect_let_stmts_recursive(&if_stmt.then_statements, collected);
+                        // Recursively collect from else-branch if present
+                        if let Some(else_stmts) = &if_stmt.else_statements {
+                            collect_let_stmts_recursive(else_stmts, collected);
+                        }
+                    }
+                    hir::HirStatement::Block(stmts) => {
+                        collect_let_stmts_recursive(stmts, collected);
+                    }
+                    hir::HirStatement::Match(match_stmt) => {
+                        // BUG #137 FIX: Also collect let bindings from Match arms
+                        // (transform_early_returns may create Match statements)
+                        for arm in &match_stmt.arms {
+                            collect_let_stmts_recursive(&arm.statements, collected);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        eprintln!("[BUG #74 INLINE_WITH_LETS] Collected {} let bindings", let_bindings.len());
+        // Collect all let statements from the body (including nested in if/else branches)
+        let mut collected_lets = Vec::new();
+
+        // BUG #137 DEBUG: Show body structure before collecting
+        eprintln!("[BUG #137 DEBUG] Body after transform_early_returns has {} statements:", body.len());
+        for (i, stmt) in body.iter().enumerate() {
+            eprintln!("[BUG #137 DEBUG]   body[{}]: {:?}", i, std::mem::discriminant(stmt));
+        }
+
+        collect_let_stmts_recursive(&body, &mut collected_lets);
+
+        eprintln!("[BUG #137 DEBUG] collect_let_stmts_recursive found {} let bindings", collected_lets.len());
+        for (name, _value, is_mutable) in &collected_lets {
+            eprintln!("[BUG #137 DEBUG]   found let: '{}' mutable={}", name, is_mutable);
+        }
+
+        // BUG #137 FIX: Track mutable variable names - we should NOT substitute these in the return expression
+        // because the mutable var pattern handler needs to see Variable references, not initial values
+        let mut mutable_var_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Now process them in order, substituting as we go
+        for (name, value, is_mutable) in collected_lets {
+            if is_mutable {
+                eprintln!("[BUG #137 INLINE_WITH_LETS] Found MUTABLE let binding: {} - will NOT substitute in return expr", name);
+                mutable_var_names.insert(name.clone());
+            }
+            let rhs_substituted = self.substitute_hir_expr_recursively(
+                &value,
+                &substitution_map,
+                &let_bindings,
+                &var_id_to_name,
+            );
+            if let Some(rhs) = rhs_substituted {
+                eprintln!("[BUG #136 INLINE_WITH_LETS] Collected let binding: {} (from recursive search, mutable={})", name, is_mutable);
+                // BUG #137 FIX: Only add IMMUTABLE variables to let_bindings.
+                // Mutable variables should NOT be substituted - we need to preserve the Variable references
+                // so that the mutable var pattern handler can see them and convert to SSA form.
+                if !is_mutable {
+                    let_bindings.insert(name, rhs);
+                } else {
+                    eprintln!("[BUG #137 FIX] NOT adding mutable var '{}' to let_bindings - preserving Variable reference", name);
+                }
+            }
+        }
+
+        eprintln!("[BUG #136 INLINE_WITH_LETS] Collected {} let bindings (with recursive search)", let_bindings.len());
 
         // Convert body to expression (extracts the return value)
         let body_expr = self.convert_body_to_expression(&body)?;
@@ -8292,6 +8492,84 @@ impl<'hir> HirToMir<'hir> {
                 // For Block expressions, we need to handle nested let bindings
                 // Collect let bindings from the block
                 eprintln!("[BUG #74 BLOCK] Processing Block with {} statements", statements.len());
+
+                // BUG FIX #133: Check if this Block contains If statements with assignments.
+                // If so, we must PRESERVE the Block structure so it can be properly transformed
+                // by try_transform_block_mutable_vars in convert_hir_expr_for_module.
+                // Without this, Blocks like clz32's body:
+                //   { let mut count = 0; let mut temp = value; if (cond) { count = count + 16; } count }
+                // would be flattened to just "0" (the initial value of count), losing the if statements.
+                let has_if_with_assignments = statements.iter().any(|stmt| {
+                    matches!(stmt, hir::HirStatement::If(_))
+                });
+
+                if has_if_with_assignments {
+                    eprintln!("[BUG #133 FIX] Block has if statements - preserving Block structure");
+
+                    // Substitute in statements (let bindings and if statements)
+                    let mut substituted_stmts = Vec::new();
+                    let mut local_var_id_to_name = var_id_to_name.clone();
+                    let mut nested_lets = lets.clone();
+
+                    for stmt in statements {
+                        match stmt {
+                            hir::HirStatement::Let(let_stmt) => {
+                                local_var_id_to_name.insert(let_stmt.id, let_stmt.name.clone());
+                                let rhs_sub = self.substitute_hir_expr_recursively(&let_stmt.value, params, &nested_lets, &local_var_id_to_name)?;
+                                nested_lets.insert(let_stmt.name.clone(), rhs_sub.clone());
+                                substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
+                                    name: let_stmt.name.clone(),
+                                    id: let_stmt.id,
+                                    var_type: let_stmt.var_type.clone(),
+                                    mutable: let_stmt.mutable,
+                                    value: rhs_sub,
+                                }));
+                            }
+                            hir::HirStatement::If(if_stmt) => {
+                                // Substitute in all parts of the if statement
+                                let cond_sub = self.substitute_hir_expr_recursively(&if_stmt.condition, params, &nested_lets, &local_var_id_to_name)?;
+                                let then_stmts_sub = self.substitute_statements_recursively(&if_stmt.then_statements, params, &nested_lets, &local_var_id_to_name)?;
+                                let else_stmts_sub = if let Some(else_stmts) = &if_stmt.else_statements {
+                                    Some(self.substitute_statements_recursively(else_stmts, params, &nested_lets, &local_var_id_to_name)?)
+                                } else {
+                                    None
+                                };
+                                substituted_stmts.push(hir::HirStatement::If(hir::HirIfStatement {
+                                    condition: cond_sub,
+                                    then_statements: then_stmts_sub,
+                                    else_statements: else_stmts_sub,
+                                    mux_style: if_stmt.mux_style.clone(),
+                                }));
+                            }
+                            hir::HirStatement::Assignment(assign_stmt) => {
+                                let rhs_sub = self.substitute_hir_expr_recursively(&assign_stmt.rhs, params, &nested_lets, &local_var_id_to_name)?;
+                                substituted_stmts.push(hir::HirStatement::Assignment(hir::HirAssignment {
+                                    id: assign_stmt.id,
+                                    lhs: assign_stmt.lhs.clone(),
+                                    assignment_type: assign_stmt.assignment_type.clone(),
+                                    rhs: rhs_sub,
+                                }));
+                            }
+                            other => {
+                                // Keep other statement types as-is for now
+                                substituted_stmts.push(other.clone());
+                            }
+                        }
+                    }
+
+                    // Substitute in result expression
+                    let result_sub = self.substitute_hir_expr_recursively(&result_expr, params, &nested_lets, &local_var_id_to_name)?;
+
+                    eprintln!("[BUG #133 FIX] Preserved Block with {} statements, result_expr: {:?}",
+                             substituted_stmts.len(), std::mem::discriminant(&result_sub));
+
+                    return Some(hir::HirExpression::Block {
+                        statements: substituted_stmts,
+                        result_expr: Box::new(result_sub),
+                    });
+                }
+
+                // Original path for Blocks without if statements: flatten to just result expression
                 let mut nested_lets = lets.clone();
                 // BUG FIX #132: Clone var_id_to_name so we can extend it with local let bindings.
                 // Without this, Variables referencing let bindings inside the Block (like `count` in clz32)
@@ -8408,6 +8686,67 @@ impl<'hir> HirToMir<'hir> {
             // For literals and other leaf nodes, return as-is
             _ => Some(expr.clone()),
         }
+    }
+
+    /// BUG FIX #133: Helper function to recursively substitute in a list of HirStatements.
+    /// Used when preserving Block structure in substitute_hir_expr_recursively for blocks
+    /// containing If statements with mutable variable assignments (like clz32, ctz32, popcount32).
+    fn substitute_statements_recursively(
+        &self,
+        statements: &[hir::HirStatement],
+        params: &HashMap<String, hir::HirExpression>,
+        lets: &HashMap<String, hir::HirExpression>,
+        var_id_to_name: &HashMap<hir::VariableId, String>,
+    ) -> Option<Vec<hir::HirStatement>> {
+        let mut result = Vec::new();
+        let mut local_lets = lets.clone();
+        let mut local_var_id_to_name = var_id_to_name.clone();
+
+        for stmt in statements {
+            match stmt {
+                hir::HirStatement::Let(let_stmt) => {
+                    local_var_id_to_name.insert(let_stmt.id, let_stmt.name.clone());
+                    let rhs_sub = self.substitute_hir_expr_recursively(&let_stmt.value, params, &local_lets, &local_var_id_to_name)?;
+                    local_lets.insert(let_stmt.name.clone(), rhs_sub.clone());
+                    result.push(hir::HirStatement::Let(hir::HirLetStatement {
+                        name: let_stmt.name.clone(),
+                        id: let_stmt.id,
+                        var_type: let_stmt.var_type.clone(),
+                        mutable: let_stmt.mutable,
+                        value: rhs_sub,
+                    }));
+                }
+                hir::HirStatement::If(if_stmt) => {
+                    let cond_sub = self.substitute_hir_expr_recursively(&if_stmt.condition, params, &local_lets, &local_var_id_to_name)?;
+                    let then_stmts_sub = self.substitute_statements_recursively(&if_stmt.then_statements, params, &local_lets, &local_var_id_to_name)?;
+                    let else_stmts_sub = if let Some(else_stmts) = &if_stmt.else_statements {
+                        Some(self.substitute_statements_recursively(else_stmts, params, &local_lets, &local_var_id_to_name)?)
+                    } else {
+                        None
+                    };
+                    result.push(hir::HirStatement::If(hir::HirIfStatement {
+                        condition: cond_sub,
+                        then_statements: then_stmts_sub,
+                        else_statements: else_stmts_sub,
+                        mux_style: if_stmt.mux_style.clone(),
+                    }));
+                }
+                hir::HirStatement::Assignment(assign_stmt) => {
+                    let rhs_sub = self.substitute_hir_expr_recursively(&assign_stmt.rhs, params, &local_lets, &local_var_id_to_name)?;
+                    result.push(hir::HirStatement::Assignment(hir::HirAssignment {
+                        id: assign_stmt.id,
+                        lhs: assign_stmt.lhs.clone(),
+                        assignment_type: assign_stmt.assignment_type.clone(),
+                        rhs: rhs_sub,
+                    }));
+                }
+                other => {
+                    result.push(other.clone());
+                }
+            }
+        }
+
+        Some(result)
     }
 
     /// BUG FIX #91: Simple name-based expression substitution for module synthesis
