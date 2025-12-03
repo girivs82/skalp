@@ -8293,18 +8293,24 @@ impl<'hir> HirToMir<'hir> {
                 // Collect let bindings from the block
                 eprintln!("[BUG #74 BLOCK] Processing Block with {} statements", statements.len());
                 let mut nested_lets = lets.clone();
+                // BUG FIX #132: Clone var_id_to_name so we can extend it with local let bindings.
+                // Without this, Variables referencing let bindings inside the Block (like `count` in clz32)
+                // cannot be looked up and are returned as-is, causing match arms to return wrong values.
+                let mut local_var_id_to_name = var_id_to_name.clone();
                 for stmt in statements {
                     if let hir::HirStatement::Let(let_stmt) = stmt {
-                        eprintln!("[BUG #74 BLOCK] Found nested let binding: {}", let_stmt.name);
+                        eprintln!("[BUG #74 BLOCK] Found nested let binding: {} (id={})", let_stmt.name, let_stmt.id.0);
+                        // BUG FIX #132: Add this let binding's VariableId to name mapping
+                        local_var_id_to_name.insert(let_stmt.id, let_stmt.name.clone());
                         // Substitute in the RHS of this let binding
-                        let rhs_sub = self.substitute_hir_expr_recursively(&let_stmt.value, params, &nested_lets, var_id_to_name)?;
+                        let rhs_sub = self.substitute_hir_expr_recursively(&let_stmt.value, params, &nested_lets, &local_var_id_to_name)?;
                         nested_lets.insert(let_stmt.name.clone(), rhs_sub);
                         eprintln!("[BUG #74 BLOCK] Collected nested let: {} (total: {})", let_stmt.name, nested_lets.len());
                     }
                 }
                 eprintln!("[BUG #74 BLOCK] Total nested lets: {}, result_expr type: {:?}", nested_lets.len(), std::mem::discriminant(&**result_expr));
-                // Substitute in the result expression with all nested lets
-                let result_sub = self.substitute_hir_expr_recursively(&result_expr, params, &nested_lets, var_id_to_name)?;
+                // Substitute in the result expression with all nested lets AND the extended var_id_to_name
+                let result_sub = self.substitute_hir_expr_recursively(&result_expr, params, &nested_lets, &local_var_id_to_name)?;
                 eprintln!("[BUG #74 BLOCK] Result after substitution: {:?}", std::mem::discriminant(&result_sub));
                 // Return the result directly (no need to keep the Block wrapper since lets are substituted)
                 Some(result_sub)
