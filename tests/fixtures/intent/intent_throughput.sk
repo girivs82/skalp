@@ -1,0 +1,12 @@
+// Test fixture for is_throughput_optimized() intent helper
+// Expected: is_throughput_optimized() returns false (1'b0) by default
+
+entity IntentThroughput {
+    in selector: bit[1]
+    out is_tput_opt: bit[1]
+}
+
+impl IntentThroughput {
+    // Direct call to intent helper - should compile to constant false
+    is_tput_opt = is_throughput_optimized()
+}

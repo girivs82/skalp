@@ -1,0 +1,18 @@
+// Test fixture for basic fp32 arithmetic operations
+// Tests addition, subtraction, multiplication, division
+
+entity FpArithmetic {
+    in a: fp32
+    in b: fp32
+    out add_result: fp32
+    out sub_result: fp32
+    out mul_result: fp32
+    out div_result: fp32
+}
+
+impl FpArithmetic {
+    add_result = a + b
+    sub_result = a - b
+    mul_result = a * b
+    div_result = a / b
+}

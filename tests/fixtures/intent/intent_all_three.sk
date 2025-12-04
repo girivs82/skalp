@@ -1,0 +1,15 @@
+// Test fixture for all three intent helpers used together
+// Verifies correct compile-time evaluation of all three
+
+entity IntentAllThree {
+    in selector: bit[2]
+    out is_lat: bit[1]
+    out is_area: bit[1]
+    out is_tput: bit[1]
+}
+
+impl IntentAllThree {
+    is_lat = is_latency_optimized()
+    is_area = is_area_optimized()
+    is_tput = is_throughput_optimized()
+}

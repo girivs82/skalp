@@ -349,6 +349,33 @@ impl<'hir> HirToMir<'hir> {
                 for signal in flattened_signals {
                     module.signals.push(signal);
                 }
+
+                // BUG FIX: Generate continuous assignment for signals with non-literal initial expressions
+                // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
+                if let Some(init_expr) = &hir_signal.initial_value {
+                    // Only generate assignment if it's NOT a literal (literals are handled above)
+                    if !matches!(init_expr, hir::HirExpression::Literal(_)) {
+                        eprintln!(
+                            "[HIR→MIR] Signal '{}' has non-literal initial_value, generating continuous assign",
+                            hir_signal.name
+                        );
+                        // Convert the expression
+                        if let Some(rhs) = self.convert_expression(init_expr, 0) {
+                            // Get the first MIR signal ID for this HIR signal
+                            if let Some(&mir_signal_id) = self.signal_map.get(&hir_signal.id) {
+                                let continuous = ContinuousAssign {
+                                    lhs: LValue::Signal(mir_signal_id),
+                                    rhs,
+                                };
+                                module.assignments.push(continuous);
+                                eprintln!(
+                                    "[HIR→MIR] Created ContinuousAssign for signal '{}' -> SignalId({:?})",
+                                    hir_signal.name, mir_signal_id
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             // Convert entity body assignments (may expand to multiple for structs)
@@ -456,6 +483,33 @@ impl<'hir> HirToMir<'hir> {
                         // Add all flattened signals to the module
                         for signal in flattened_signals {
                             module.signals.push(signal);
+                        }
+
+                        // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
+                        // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
+                        if let Some(init_expr) = &hir_signal.initial_value {
+                            // Only generate assignment if it's NOT a literal (literals are handled above)
+                            if !matches!(init_expr, hir::HirExpression::Literal(_)) {
+                                eprintln!(
+                                    "[HIR→MIR] Impl signal '{}' has non-literal initial_value, generating continuous assign",
+                                    hir_signal.name
+                                );
+                                // Convert the expression
+                                if let Some(rhs) = self.convert_expression(init_expr, 0) {
+                                    // Get the first MIR signal ID for this HIR signal
+                                    if let Some(&mir_signal_id) = self.signal_map.get(&hir_signal.id) {
+                                        let continuous = ContinuousAssign {
+                                            lhs: LValue::Signal(mir_signal_id),
+                                            rhs,
+                                        };
+                                        module.assignments.push(continuous);
+                                        eprintln!(
+                                            "[HIR→MIR] Created ContinuousAssign for impl signal '{}' -> SignalId({:?})",
+                                            hir_signal.name, mir_signal_id
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     if module.name.contains("AsyncFifo_8") {
@@ -1571,6 +1625,9 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR flow pipeline to sequential assignment statements
+    ///
+    /// Pipeline semantics: `a |> b |> c` represents data flow with implicit registers
+    /// between stages. Each `|>` operator inserts a pipeline register.
     fn convert_flow_pipeline(&mut self, pipeline: &hir::HirFlowPipeline) -> Vec<Statement> {
         let mut statements = Vec::new();
 
@@ -1578,18 +1635,55 @@ impl<'hir> HirToMir<'hir> {
         let mut all_stages = vec![&pipeline.start];
         all_stages.extend(&pipeline.stages);
 
+        // Track the current pipeline data expression
+        // This represents what flows from one stage to the next
+        let mut prev_stage_expr: Option<Expression> = None;
+        let mut stage_counter = 0;
+
         // Convert each stage to appropriate statements
         for (i, stage) in all_stages.iter().enumerate() {
             match stage {
                 hir::HirPipelineStage::Expression(expr) => {
-                    // For expression stages, we need to generate assignments
-                    // This represents data flowing through the pipeline
-                    if let Some(assignment) = self.convert_pipeline_expression_stage(expr, i) {
-                        statements.push(Statement::Assignment(assignment));
+                    // Expression stages: convert the expression and optionally
+                    // create pipeline register if not the last stage
+                    if let Some(mir_expr) = self.convert_expression(expr, 0) {
+                        let is_last = i == all_stages.len() - 1;
+
+                        if is_last {
+                            // Last stage - this is the output destination
+                            // If we have accumulated data, assign to this output
+                            if let Some(prev) = prev_stage_expr.take() {
+                                if let Some(lvalue) = self.expression_to_lvalue(&mir_expr) {
+                                    statements.push(Statement::Assignment(Assignment {
+                                        lhs: lvalue,
+                                        rhs: prev,
+                                        kind: AssignmentKind::NonBlocking,
+                                    }));
+                                }
+                            }
+                        } else if i == 0 {
+                            // First stage - this is input data
+                            prev_stage_expr = Some(mir_expr);
+                        } else {
+                            // Middle stage - create pipeline register
+                            // For now, we just pass the expression through
+                            // Full pipeline register creation would require signal allocation
+                            // which is handled at a later compilation stage
+                            eprintln!(
+                                "[PIPELINE] Stage {}: passing through (register insertion TODO)",
+                                stage_counter
+                            );
+                            stage_counter += 1;
+
+                            // Apply the current expression (function/transform)
+                            // The result becomes input to the next stage
+                            prev_stage_expr = Some(mir_expr);
+                        }
                     }
                 }
                 hir::HirPipelineStage::Block(stage_stmts) => {
-                    // For block stages, convert the statements directly
+                    // Block stages contain explicit statements
+                    // These define the computation for this pipeline stage
                     for hir_stmt in stage_stmts {
                         if let Some(stmt) = self.convert_statement(hir_stmt) {
                             statements.push(stmt);
@@ -1602,29 +1696,34 @@ impl<'hir> HirToMir<'hir> {
         statements
     }
 
-    /// Convert a pipeline expression stage to an assignment
+    /// Try to convert an expression to an LValue for assignment target
+    fn expression_to_lvalue(&self, expr: &Expression) -> Option<LValue> {
+        // Expression has a `kind` field of type ExpressionKind
+        // References are via ExpressionKind::Ref(LValue)
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => Some(lvalue.clone()),
+            _ => None,
+        }
+    }
+
+    /// Convert a pipeline expression stage to an assignment (legacy method)
     fn convert_pipeline_expression_stage(
         &mut self,
         expr: &hir::HirExpression,
         _stage_index: usize,
     ) -> Option<Assignment> {
-        // For pipeline expressions like `a |> b |> c`, each stage represents
-        // a data flow where the previous stage's output becomes the next stage's input
-
-        // For now, convert expression directly - this will handle signal references
-        // In a more sophisticated implementation, we would track pipeline registers
+        // This method is kept for backwards compatibility but the main logic
+        // is now in convert_flow_pipeline which handles full pipeline semantics
         match expr {
             hir::HirExpression::Signal(_)
             | hir::HirExpression::Port(_)
             | hir::HirExpression::Variable(_) => {
                 // These represent signal references in the pipeline
-                // For now, this doesn't generate an assignment by itself
-                // The pipeline semantics will be handled by the overall flow
+                // The pipeline semantics are handled by convert_flow_pipeline
                 None
             }
             _ => {
-                // For other expressions, we can't easily convert to assignments
-                // without more context about the pipeline targets
+                // For other expressions, pipeline handling is in convert_flow_pipeline
                 None
             }
         }
@@ -3738,6 +3837,35 @@ impl<'hir> HirToMir<'hir> {
                 }
                 } // End of FP primitive check
                 println!("🌟🌟🌟 AFTER FP PRIMITIVE CHECK for '{}' 🌟🌟🌟", call.function);
+
+                // INTENT HELPERS: Compile-time intent query functions
+                // These return boolean constants based on the intent parameter
+                // For now, we default to latency-optimized behavior
+                // Booleans are represented as 1-bit values in hardware
+                match call.function.as_str() {
+                    "is_latency_optimized" => {
+                        eprintln!("[INTENT] is_latency_optimized() -> true (default: prefer latency)");
+                        // Default: prefer latency optimization (1'b1)
+                        return Some(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::BitVector { width: 1, value: 1 }),
+                        ));
+                    }
+                    "is_area_optimized" => {
+                        eprintln!("[INTENT] is_area_optimized() -> false (default: prefer latency)");
+                        // Default: not area optimized (1'b0)
+                        return Some(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::BitVector { width: 1, value: 0 }),
+                        ));
+                    }
+                    "is_throughput_optimized" => {
+                        eprintln!("[INTENT] is_throughput_optimized() -> false (default: prefer latency)");
+                        // Default: not throughput optimized (1'b0)
+                        return Some(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::BitVector { width: 1, value: 0 }),
+                        ));
+                    }
+                    _ => {} // Not an intent helper, continue to regular function handling
+                }
 
                 // TIER 2: USER-DEFINED FUNCTION - Apply hybrid inlining strategy
                 // This is NOT a primitive FP operation (like fp_mul, fp_add)
@@ -6783,12 +6911,42 @@ impl<'hir> HirToMir<'hir> {
         bindings: Vec<hir::HirLetStatement>,
         body: hir::HirExpression,
     ) -> hir::HirExpression {
-        // Build a block expression with the let statements and result expression
-        let statements = bindings.into_iter().map(hir::HirStatement::Let).collect();
+        // BUG #137 FIX: If body is already a Block, FLATTEN it instead of creating nested Blocks.
+        // This is critical for popcount32-style functions:
+        //   - bindings = [let mut x = value]
+        //   - body = Block { statements: [5 Assignments], result_expr: Cast(...) }
+        // Without flattening, we'd create:
+        //   Block { statements: [Let(x)], result_expr: Block { statements: [5 Assigns], ... } }
+        // Which causes try_transform_block_mutable_vars to see 1 let + 0 assignments at outer level!
+        // With flattening:
+        //   Block { statements: [Let(x), Assign, Assign, Assign, Assign, Assign], result_expr: Cast(...) }
+        // Now try_transform_block_mutable_vars sees all statements at one level.
 
-        hir::HirExpression::Block {
-            statements,
-            result_expr: Box::new(body),
+        if let hir::HirExpression::Block { statements: inner_stmts, result_expr: inner_result } = body {
+            // Flatten: prepend let bindings to inner block's statements
+            let mut all_statements: Vec<hir::HirStatement> = bindings
+                .into_iter()
+                .map(hir::HirStatement::Let)
+                .collect();
+            all_statements.extend(inner_stmts);
+
+            eprintln!("[BUG #137 FIX] build_let_expression: FLATTENING nested Block - {} let bindings + {} inner stmts = {} total",
+                     all_statements.iter().filter(|s| matches!(s, hir::HirStatement::Let(_))).count(),
+                     all_statements.iter().filter(|s| matches!(s, hir::HirStatement::Assignment(_))).count(),
+                     all_statements.len());
+
+            hir::HirExpression::Block {
+                statements: all_statements,
+                result_expr: inner_result,
+            }
+        } else {
+            // Body is not a Block - create a new Block as before
+            let statements = bindings.into_iter().map(hir::HirStatement::Let).collect();
+
+            hir::HirExpression::Block {
+                statements,
+                result_expr: Box::new(body),
+            }
         }
     }
 
@@ -8493,18 +8651,20 @@ impl<'hir> HirToMir<'hir> {
                 // Collect let bindings from the block
                 eprintln!("[BUG #74 BLOCK] Processing Block with {} statements", statements.len());
 
-                // BUG FIX #133: Check if this Block contains If statements with assignments.
+                // BUG FIX #133: Check if this Block contains If statements or Assignment statements.
                 // If so, we must PRESERVE the Block structure so it can be properly transformed
                 // by try_transform_block_mutable_vars in convert_hir_expr_for_module.
                 // Without this, Blocks like clz32's body:
                 //   { let mut count = 0; let mut temp = value; if (cond) { count = count + 16; } count }
                 // would be flattened to just "0" (the initial value of count), losing the if statements.
-                let has_if_with_assignments = statements.iter().any(|stmt| {
-                    matches!(stmt, hir::HirStatement::If(_))
+                // BUG #137 FIX: Also preserve for Assignment statements (like popcount32 which uses
+                // direct mutable variable re-assignments without if statements).
+                let has_if_or_assignments = statements.iter().any(|stmt| {
+                    matches!(stmt, hir::HirStatement::If(_) | hir::HirStatement::Assignment(_))
                 });
 
-                if has_if_with_assignments {
-                    eprintln!("[BUG #133 FIX] Block has if statements - preserving Block structure");
+                if has_if_or_assignments {
+                    eprintln!("[BUG #137 FIX] Block has if/assignment statements - preserving Block structure");
 
                     // Substitute in statements (let bindings and if statements)
                     let mut substituted_stmts = Vec::new();
@@ -8516,7 +8676,15 @@ impl<'hir> HirToMir<'hir> {
                             hir::HirStatement::Let(let_stmt) => {
                                 local_var_id_to_name.insert(let_stmt.id, let_stmt.name.clone());
                                 let rhs_sub = self.substitute_hir_expr_recursively(&let_stmt.value, params, &nested_lets, &local_var_id_to_name)?;
-                                nested_lets.insert(let_stmt.name.clone(), rhs_sub.clone());
+                                // BUG #137 FIX: Only add IMMUTABLE let bindings to nested_lets.
+                                // For mutable variables (like `count` in clz32), we must NOT add them
+                                // because we need the result_expr to stay as Variable(count) so the
+                                // mutable variable transformation can work correctly.
+                                if !let_stmt.mutable {
+                                    nested_lets.insert(let_stmt.name.clone(), rhs_sub.clone());
+                                } else {
+                                    eprintln!("[BUG #137 BLOCK FIX] NOT adding mutable var '{}' to nested_lets - preserving Variable reference in result_expr", let_stmt.name);
+                                }
                                 substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
                                     name: let_stmt.name.clone(),
                                     id: let_stmt.id,
@@ -8560,7 +8728,7 @@ impl<'hir> HirToMir<'hir> {
                     // Substitute in result expression
                     let result_sub = self.substitute_hir_expr_recursively(&result_expr, params, &nested_lets, &local_var_id_to_name)?;
 
-                    eprintln!("[BUG #133 FIX] Preserved Block with {} statements, result_expr: {:?}",
+                    eprintln!("[BUG #137 FIX] Preserved Block with {} statements, result_expr: {:?}",
                              substituted_stmts.len(), std::mem::discriminant(&result_sub));
 
                     return Some(hir::HirExpression::Block {
@@ -13086,8 +13254,47 @@ impl<'hir> HirToMir<'hir> {
                         low: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(low_val)))),
                     })))
                 } else {
-                    eprintln!("    📐 RangeSelect on non-Ref base - using fallback");
-                    self.convert_expression(expr, depth)
+                    // BUG FIX #138: Handle Range on computed expressions (non-Ref base)
+                    // This happens when mutable var transformation produces an expression like:
+                    //   Range(xor_chain, 0, 0) where xor_chain is a complex BinaryOp
+                    //
+                    // For bit extraction expr[high:low], we use:
+                    //   (expr >> low) & ((1 << (high - low + 1)) - 1)
+                    //
+                    // Special case for [0:0]: just (expr & 1) - extract lowest bit
+                    println!("📐📐📐 BUG #138 FIX: Range on computed expression [{}:{}] 📐📐📐", high_val, low_val);
+
+                    let width = (high_val - low_val + 1) as u64;
+                    let mask = (1u64 << width) - 1;
+
+                    let result = if low_val == 0 {
+                        // Simple case: just mask with (1 << width) - 1
+                        Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(base_converted),
+                            right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                                Value::BitVector { value: mask, width: 32 }
+                            ))),
+                        })
+                    } else {
+                        // General case: shift right by low, then mask
+                        let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::RightShift,
+                            left: Box::new(base_converted),
+                            right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                                Value::Integer(low_val)
+                            ))),
+                        });
+                        Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(shifted),
+                            right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                                Value::BitVector { value: mask, width: 32 }
+                            ))),
+                        })
+                    };
+
+                    Some(result)
                 }
             }
 

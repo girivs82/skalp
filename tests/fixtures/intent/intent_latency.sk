@@ -1,0 +1,12 @@
+// Test fixture for is_latency_optimized() intent helper
+// Expected: is_latency_optimized() returns true (1'b1) by default
+
+entity IntentLatency {
+    in selector: bit[1]
+    out is_lat_opt: bit[1]
+}
+
+impl IntentLatency {
+    // Direct call to intent helper - should compile to constant true
+    is_lat_opt = is_latency_optimized()
+}

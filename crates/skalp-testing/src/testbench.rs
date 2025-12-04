@@ -412,6 +412,59 @@ impl Testbench {
 
         self
     }
+
+    /// Expect an fp32 (float) output signal with a tolerance for comparison
+    ///
+    /// This method is useful for floating-point signals where exact bit-level
+    /// comparison may fail due to rounding differences.
+    ///
+    /// # Parameters
+    /// - `signal`: Name of the output signal
+    /// - `expected`: Expected fp32 value
+    /// - `tolerance`: Maximum allowed difference between expected and actual
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// tb.expect_fp32("result", 3.14159, 0.001).await;
+    /// ```
+    pub async fn expect_fp32(
+        &mut self,
+        signal: &str,
+        expected: f32,
+        tolerance: f32,
+    ) -> &mut Self {
+        let actual_bytes = self.sim.get_output(signal).await.unwrap();
+
+        // Convert bytes to f32 (assuming little-endian IEEE 754)
+        let actual = if actual_bytes.len() >= 4 {
+            f32::from_le_bytes([
+                actual_bytes[0],
+                actual_bytes[1],
+                actual_bytes[2],
+                actual_bytes[3],
+            ])
+        } else {
+            panic!(
+                "Signal '{}' has {} bytes, expected at least 4 for fp32",
+                signal,
+                actual_bytes.len()
+            );
+        };
+
+        let diff = (actual - expected).abs();
+        assert!(
+            diff <= tolerance,
+            "Signal '{}' fp32 mismatch at cycle {}: expected {}, got {} (diff: {}, tolerance: {})",
+            signal,
+            self.cycle_count,
+            expected,
+            actual,
+            diff,
+            tolerance
+        );
+
+        self
+    }
 }
 
 /// Trait for converting Rust types to signal byte values
@@ -455,6 +508,18 @@ impl IntoSignalValue for &[u8] {
     }
 }
 
+impl IntoSignalValue for f32 {
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl IntoSignalValue for f64 {
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
 /// Trait for converting signal byte values to Rust types
 pub trait FromSignalValue {
     fn from_bytes(bytes: &[u8]) -> Self;
@@ -489,6 +554,20 @@ impl FromSignalValue for u64 {
 impl FromSignalValue for Vec<u8> {
     fn from_bytes(bytes: &[u8]) -> Self {
         bytes.to_vec()
+    }
+}
+
+impl FromSignalValue for f32 {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+}
+
+impl FromSignalValue for f64 {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        f64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
     }
 }
 

@@ -1,0 +1,19 @@
+// Test fixture for 2D distance calculation using fp32
+// Tests: distance = sqrt(dx^2 + dy^2)
+
+entity FpDistance {
+    in x1: fp32
+    in y1: fp32
+    in x2: fp32
+    in y2: fp32
+    out distance: fp32
+}
+
+impl FpDistance {
+    signal dx: fp32 = x2 - x1
+    signal dy: fp32 = y2 - y1
+    signal dx_sq: fp32 = dx * dx
+    signal dy_sq: fp32 = dy * dy
+    signal sum_sq: fp32 = dx_sq + dy_sq
+    distance = sqrt(sum_sq)
+}

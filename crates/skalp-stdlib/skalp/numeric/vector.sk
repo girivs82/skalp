@@ -4,7 +4,8 @@
 // All operations work with the Numeric trait for maximum flexibility.
 
 use crate::numeric::traits::Numeric;
-use crate::numeric::fp::{fp, FpMul, FpAdd, FpDiv, FpSqrt};
+use crate::numeric::fp::{fp, fp32, FpMul, FpAdd, FpDiv, FpSqrt};
+use crate::numeric::trig::{sin as trig_sin, cos as trig_cos, acos as trig_acos};
 
 // ============================================================================
 // Type Definitions
@@ -638,15 +639,20 @@ fn abs<T: Numeric>(x: T) -> T {
     x.abs()
 }
 
-/// Trigonometric functions
+/// Trigonometric functions using CORDIC implementations
+/// Note: Currently implemented for fp32 only
 fn sin<T>(x: T) -> T {
-    intrinsic_sin(x)
+    // Use CORDIC-based implementation for fp32
+    // For other types, this would need specialized implementations
+    trig_sin(x as fp32) as T
 }
 
 fn cos<T>(x: T) -> T {
-    intrinsic_cos(x)
+    // Use CORDIC-based implementation for fp32
+    trig_cos(x as fp32) as T
 }
 
 fn acos<T>(x: T) -> T {
-    intrinsic_acos(x)
+    // Use CORDIC-based implementation for fp32
+    trig_acos(x as fp32) as T
 }

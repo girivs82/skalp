@@ -592,6 +592,37 @@ impl<'a> MetalShaderGenerator<'a> {
                                                         output.name, node_output.signal_id, source_width, source_metal_storage, output_width, output_metal_storage, source_is_float, dest_is_float);
                                                 }
 
+                                                // BUG FIX: Check if the source node is a boolean-producing operation
+                                                // Comparison and Not operations return boolean (0.0/1.0) in float representation
+                                                // When converting to uint, we need numeric conversion, not bit reinterpretation
+                                                // as_type<uint>(1.0f) = 0x3f800000, but (uint)(1.0f) = 1
+                                                let is_boolean_result = matches!(
+                                                    &comb_node.kind,
+                                                    SirNodeKind::BinaryOp(BinaryOperation::FEq)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::FNeq)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::FLt)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::FLte)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::FGt)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::FGte)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::Eq)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::Neq)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::Lt)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::Lte)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::Gt)
+                                                        | SirNodeKind::BinaryOp(BinaryOperation::Gte)
+                                                        | SirNodeKind::UnaryOp(UnaryOperation::Not)
+                                                );
+
+                                                // If this is a boolean result and we're converting from float to uint,
+                                                // use numeric conversion (uint) instead of bit reinterpret as_type<uint>
+                                                if is_boolean_result && source_is_float && !dest_is_float {
+                                                    self.write_indented(&format!(
+                                                        "signals->{} = ({}){};\n",
+                                                        self.sanitize_name(&output.name),
+                                                        dest_metal_type,
+                                                        source_location
+                                                    ));
+                                                } else {
                                                 match source_metal_storage.cmp(&output_metal_storage) {
                                                     Ordering::Equal => {
                                                         // Same width - direct as_type<>
@@ -635,6 +666,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                                         ));
                                                     }
                                                 }
+                                                } // end else (not comparison result)
                                             } else {
                                                 // Same type - direct assignment
                                                 // BUG #87 CHECK: Both may be wide types - need element-wise copy
@@ -785,7 +817,13 @@ impl<'a> MetalShaderGenerator<'a> {
             // Check if both inputs are 1-bit (boolean) to determine if we need logical vs bitwise ops
             let left_width = self.get_signal_width_from_sir(sir, left);
             let right_width = self.get_signal_width_from_sir(sir, right);
-            let is_boolean_context = left_width == 1 && right_width == 1;
+            // BUG FIX: Also check for float types - float booleans (from comparisons) are 0.0/1.0 floats
+            // and cannot use bitwise operators in Metal
+            let left_type = self.get_signal_type_from_sir(sir, left);
+            let right_type = self.get_signal_type_from_sir(sir, right);
+            let left_is_float = left_type.as_ref().is_some_and(|t| t.is_float());
+            let right_is_float = right_type.as_ref().is_some_and(|t| t.is_float());
+            let is_boolean_context = (left_width == 1 && right_width == 1) || left_is_float || right_is_float;
 
             let op_str = match op {
                 BinaryOperation::Add => "+",
@@ -1023,10 +1061,27 @@ impl<'a> MetalShaderGenerator<'a> {
                     // Perform the FP operation
                     let op_expr = format!("{} {} {}", left_expr, op_str, right_expr);
 
+                    // BUG FIX: Check if this is a comparison operation
+                    // Comparison operations (FEq, FNeq, FLt, FLte, FGt, FGte) return bool, not float
+                    // For these, use numeric conversion (uint) instead of bit reinterpret as_type<uint>
+                    let is_comparison_op = matches!(
+                        op,
+                        BinaryOperation::FEq
+                            | BinaryOperation::FNeq
+                            | BinaryOperation::FLt
+                            | BinaryOperation::FLte
+                            | BinaryOperation::FGt
+                            | BinaryOperation::FGte
+                    );
+
                     // Convert output to bits if output signal is Bits-typed
                     let result_expr = if output_is_float {
                         op_expr
+                    } else if is_comparison_op {
+                        // Comparison returns bool (0 or 1) - use numeric conversion
+                        format!("({})({})", bit_type, op_expr)
                     } else {
+                        // Arithmetic returns float - use bit reinterpretation
                         format!("as_type<{}>({})", bit_type, op_expr)
                     };
 
@@ -1054,8 +1109,18 @@ impl<'a> MetalShaderGenerator<'a> {
             let input = &node.inputs[0].signal_id;
             let output = &node.outputs[0].signal_id;
 
+            // BUG FIX: Check if input is float type - floats can't use bitwise NOT (~)
+            let input_type = self.get_signal_type_from_sir(sir, input);
+            let input_is_float = input_type.as_ref().is_some_and(|t| t.is_float());
+
             let op_str = match op {
-                UnaryOperation::Not => "~",
+                UnaryOperation::Not => {
+                    if input_is_float {
+                        "!" // Logical NOT for floats (0.0/1.0 boolean values)
+                    } else {
+                        "~" // Bitwise NOT for integers
+                    }
+                }
                 UnaryOperation::Neg => "-",
                 UnaryOperation::RedAnd => "&",
                 UnaryOperation::RedOr => "|",

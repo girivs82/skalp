@@ -1,0 +1,22 @@
+// Test fixture for fp32 comparison operations
+// Tests all comparison operators
+
+entity FpComparison {
+    in a: fp32
+    in b: fp32
+    out is_lt: bit[1]
+    out is_le: bit[1]
+    out is_gt: bit[1]
+    out is_ge: bit[1]
+    out is_eq: bit[1]
+    out is_ne: bit[1]
+}
+
+impl FpComparison {
+    is_lt = (a < b)
+    is_le = (a < b) || (a == b)
+    is_gt = (a > b)
+    is_ge = (a > b) || (a == b)
+    is_eq = (a == b)
+    is_ne = !(a == b)
+}

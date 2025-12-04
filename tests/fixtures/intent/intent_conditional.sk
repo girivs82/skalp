@@ -1,0 +1,19 @@
+// Test fixture for conditional behavior based on intent helpers
+// This tests using intent helpers in if expressions
+
+entity IntentConditional {
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[8]
+}
+
+impl IntentConditional {
+    // Use intent helper in conditional - should resolve at compile time
+    // If latency-optimized (default), use faster parallel operation
+    // Otherwise, use more area-efficient sequential approach
+    result = if is_latency_optimized() {
+        a + b  // Fast parallel add
+    } else {
+        a | b  // Simpler bitwise op
+    }
+}

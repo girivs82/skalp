@@ -1,0 +1,12 @@
+// Test fixture for fp32 sqrt operation
+// Tests basic square root computation using FP hardware
+
+entity FpSqrtSimple {
+    in x: fp32
+    out result: fp32
+}
+
+impl FpSqrtSimple {
+    // Direct sqrt call - uses fp32 sqrt intrinsic
+    result = sqrt(x)
+}

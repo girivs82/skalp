@@ -1,0 +1,12 @@
+// Test fixture for is_area_optimized() intent helper
+// Expected: is_area_optimized() returns false (1'b0) by default
+
+entity IntentArea {
+    in selector: bit[1]
+    out is_area_opt: bit[1]
+}
+
+impl IntentArea {
+    // Direct call to intent helper - should compile to constant false
+    is_area_opt = is_area_optimized()
+}

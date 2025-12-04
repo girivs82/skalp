@@ -1,0 +1,24 @@
+// Test fixture for quadratic formula using fp32
+// Tests: x = (-b + sqrt(b^2 - 4ac)) / (2a)
+
+entity FpQuadratic {
+    in a: fp32
+    in b: fp32
+    in c: fp32
+    out discriminant: fp32
+    out x1: fp32
+}
+
+impl FpQuadratic {
+    // b^2 - 4ac
+    signal b_squared: fp32 = b * b
+    signal four_ac: fp32 = 4.0fp32 * a * c
+    discriminant = b_squared - four_ac
+
+    // (-b + sqrt(discriminant)) / (2a)
+    signal sqrt_disc: fp32 = sqrt(discriminant)
+    signal neg_b: fp32 = -b
+    signal numerator: fp32 = neg_b + sqrt_disc
+    signal two_a: fp32 = 2.0fp32 * a
+    x1 = numerator / two_a
+}

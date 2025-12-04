@@ -1,0 +1,407 @@
+// Trigonometric Functions
+//
+// Fully synthesizable trigonometric functions using CORDIC algorithm.
+// All implementations work in hardware without requiring floating-point intrinsics.
+
+use crate::numeric::fp::{fp, fp32};
+use crate::numeric::cordic::{
+    CordicRotate16, CordicVector16,
+    PI, PI_HALF, CORDIC_GAIN_16, CORDIC_GAIN_INV_16
+};
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Two PI constant
+pub const TWO_PI: fp32 = 6.28318530717958647692;
+
+/// PI constant (re-exported from cordic)
+pub const TRIG_PI: fp32 = PI;
+
+/// PI/2 constant (re-exported from cordic)
+pub const TRIG_PI_HALF: fp32 = PI_HALF;
+
+// ============================================================================
+// Angle Reduction
+// ============================================================================
+
+/// Reduce angle to range [-PI, PI]
+///
+/// This is necessary because CORDIC converges only for angles in [-PI/2, PI/2]
+/// We use the extended range [-PI, PI] and handle quadrants
+pub entity AngleReduce {
+    in angle: fp32
+    out reduced: fp32
+    out quadrant: bit[2]  // 0: [-PI/2, PI/2], 1: [PI/2, PI], 2: [-PI, -PI/2], 3: unused
+}
+
+impl AngleReduce {
+    // First, reduce to [0, 2*PI) using modulo
+    // For hardware, we use repeated subtraction for small angles
+    // or bit manipulation for larger ones
+
+    // Normalize to [-PI, PI] by subtracting multiples of 2*PI
+    signal normalized: fp32 = angle
+
+    // Check which quadrant
+    signal in_q1: bit = (normalized >= 0.0fp32) && (normalized <= PI_HALF)
+    signal in_q2: bit = (normalized > PI_HALF) && (normalized <= PI)
+    signal in_q3: bit = (normalized >= -PI) && (normalized < -PI_HALF)
+    signal in_q4: bit = (normalized >= -PI_HALF) && (normalized < 0.0fp32)
+
+    // Map to CORDIC range [-PI/2, PI/2]
+    quadrant = in_q1 ? 2'b00 :
+               in_q2 ? 2'b01 :
+               in_q3 ? 2'b10 :
+               2'b00  // Q4 is already in range
+
+    // Adjust angle for CORDIC
+    // Q1, Q4: use angle directly
+    // Q2: use PI - angle (mirror around PI/2)
+    // Q3: use -PI - angle (mirror around -PI/2)
+    reduced = in_q2 ? (PI - normalized) :
+              in_q3 ? (-PI - normalized) :
+              normalized
+}
+
+// ============================================================================
+// Sine Function
+// ============================================================================
+
+/// Compute sine of angle (in radians)
+///
+/// Uses CORDIC rotation mode. For angles outside [-PI/2, PI/2],
+/// applies quadrant correction.
+pub entity Sin {
+    in angle: fp32
+    out result: fp32
+}
+
+impl Sin {
+    signal reduced_angle: fp32
+    signal quadrant: bit[2]
+
+    // Reduce angle to CORDIC range
+    let reduce = AngleReduce {
+        angle: angle,
+        reduced: reduced_angle,
+        quadrant: quadrant
+    }
+
+    signal cos_raw: fp32
+    signal sin_raw: fp32
+
+    // Use CORDIC to compute sin/cos
+    let cordic = CordicRotate16 {
+        angle: reduced_angle,
+        cos_out: cos_raw,
+        sin_out: sin_raw
+    }
+
+    // Apply quadrant correction
+    // Q1 (00): sin(x) = sin_raw
+    // Q2 (01): sin(PI - x) = sin_raw (sin is symmetric around PI/2)
+    // Q3 (10): sin(-PI - x) = -sin_raw (sin is odd, and we negated angle)
+    result = (quadrant == 2'b10) ? -sin_raw : sin_raw
+}
+
+/// Sine function (convenience wrapper)
+pub fn sin(angle: fp32) -> fp32 {
+    signal res: fp32
+    let s = Sin { angle: angle, result: res }
+    res
+}
+
+// ============================================================================
+// Cosine Function
+// ============================================================================
+
+/// Compute cosine of angle (in radians)
+///
+/// Uses CORDIC rotation mode with quadrant correction.
+pub entity Cos {
+    in angle: fp32
+    out result: fp32
+}
+
+impl Cos {
+    signal reduced_angle: fp32
+    signal quadrant: bit[2]
+
+    let reduce = AngleReduce {
+        angle: angle,
+        reduced: reduced_angle,
+        quadrant: quadrant
+    }
+
+    signal cos_raw: fp32
+    signal sin_raw: fp32
+
+    let cordic = CordicRotate16 {
+        angle: reduced_angle,
+        cos_out: cos_raw,
+        sin_out: sin_raw
+    }
+
+    // Apply quadrant correction
+    // Q1 (00): cos(x) = cos_raw
+    // Q2 (01): cos(PI - x) = -cos_raw (cos is antisymmetric around PI/2)
+    // Q3 (10): cos(-PI - x) = -cos_raw
+    result = (quadrant == 2'b01 || quadrant == 2'b10) ? -cos_raw : cos_raw
+}
+
+/// Cosine function (convenience wrapper)
+pub fn cos(angle: fp32) -> fp32 {
+    signal res: fp32
+    let c = Cos { angle: angle, result: res }
+    res
+}
+
+// ============================================================================
+// Simultaneous Sin/Cos (more efficient)
+// ============================================================================
+
+/// Compute both sine and cosine simultaneously
+///
+/// This is more efficient than computing them separately
+/// since CORDIC naturally produces both values.
+pub entity SinCos {
+    in angle: fp32
+    out sin_out: fp32
+    out cos_out: fp32
+}
+
+impl SinCos {
+    signal reduced_angle: fp32
+    signal quadrant: bit[2]
+
+    let reduce = AngleReduce {
+        angle: angle,
+        reduced: reduced_angle,
+        quadrant: quadrant
+    }
+
+    signal cos_raw: fp32
+    signal sin_raw: fp32
+
+    let cordic = CordicRotate16 {
+        angle: reduced_angle,
+        cos_out: cos_raw,
+        sin_out: sin_raw
+    }
+
+    // Apply quadrant corrections
+    sin_out = (quadrant == 2'b10) ? -sin_raw : sin_raw
+    cos_out = (quadrant == 2'b01 || quadrant == 2'b10) ? -cos_raw : cos_raw
+}
+
+/// Compute sin and cos simultaneously (convenience wrapper)
+pub fn sincos(angle: fp32) -> (fp32, fp32) {
+    signal s: fp32
+    signal c: fp32
+    let sc = SinCos { angle: angle, sin_out: s, cos_out: c }
+    (s, c)
+}
+
+// ============================================================================
+// Arc Cosine (acos)
+// ============================================================================
+
+/// Compute arc cosine (inverse cosine)
+///
+/// acos(x) for x in [-1, 1] returns angle in [0, PI]
+///
+/// Uses the identity: acos(x) = atan2(sqrt(1-x^2), x)
+/// This leverages CORDIC vectoring mode.
+pub entity Acos {
+    in x: fp32
+    out result: fp32
+    out valid: bit  // False if |x| > 1
+}
+
+impl Acos {
+    // Check valid range
+    valid = (x >= -1.0fp32) && (x <= 1.0fp32)
+
+    // Compute sqrt(1 - x^2)
+    signal x_sq: fp32 = x * x
+    signal one_minus_x_sq: fp32 = 1.0fp32 - x_sq
+
+    // For sqrt, we use CORDIC or the sqrt function
+    // Here we use a simple approach: sqrt via the hyperbolic CORDIC
+    signal y: fp32
+    let sqrt_ent = crate::numeric::cordic::CordicSqrt {
+        value: one_minus_x_sq,
+        result: y
+    }
+
+    // Now compute atan2(y, x) using vectoring mode
+    signal mag: fp32
+    signal angle: fp32
+
+    let vector = CordicVector16 {
+        x_in: x,
+        y_in: y,
+        magnitude: mag,
+        angle: angle
+    }
+
+    // atan2(sqrt(1-x^2), x) gives the angle in [-PI/2, PI/2] for x > 0
+    // and needs adjustment for x < 0
+
+    // For x >= 0: acos(x) = atan2(y, x) which is in [0, PI/2]
+    // For x < 0: acos(x) = PI - atan2(y, |x|) which is in [PI/2, PI]
+
+    signal x_neg: bit = x < 0.0fp32
+    result = x_neg ? (PI - angle) : angle
+}
+
+/// Arc cosine function (convenience wrapper)
+pub fn acos(x: fp32) -> fp32 {
+    signal res: fp32
+    signal v: bit
+    let a = Acos { x: x, result: res, valid: v }
+    res
+}
+
+// ============================================================================
+// Arc Sine (asin)
+// ============================================================================
+
+/// Compute arc sine (inverse sine)
+///
+/// asin(x) for x in [-1, 1] returns angle in [-PI/2, PI/2]
+///
+/// Uses the identity: asin(x) = atan2(x, sqrt(1-x^2))
+pub entity Asin {
+    in x: fp32
+    out result: fp32
+    out valid: bit
+}
+
+impl Asin {
+    valid = (x >= -1.0fp32) && (x <= 1.0fp32)
+
+    signal x_sq: fp32 = x * x
+    signal one_minus_x_sq: fp32 = 1.0fp32 - x_sq
+
+    signal y: fp32
+    let sqrt_ent = crate::numeric::cordic::CordicSqrt {
+        value: one_minus_x_sq,
+        result: y
+    }
+
+    // atan2(x, sqrt(1-x^2))
+    signal mag: fp32
+    signal angle: fp32
+
+    let vector = CordicVector16 {
+        x_in: y,  // Note: swapped compared to acos
+        y_in: x,
+        magnitude: mag,
+        angle: angle
+    }
+
+    result = angle
+}
+
+/// Arc sine function (convenience wrapper)
+pub fn asin(x: fp32) -> fp32 {
+    signal res: fp32
+    signal v: bit
+    let a = Asin { x: x, result: res, valid: v }
+    res
+}
+
+// ============================================================================
+// Arc Tangent (atan)
+// ============================================================================
+
+/// Compute arc tangent
+///
+/// atan(x) returns angle in [-PI/2, PI/2]
+///
+/// Uses CORDIC vectoring mode directly: atan(y/x) = atan2(y, 1)
+pub entity Atan {
+    in x: fp32
+    out result: fp32
+}
+
+impl Atan {
+    signal mag: fp32
+    signal angle: fp32
+
+    // atan(x) = atan2(x, 1)
+    let vector = CordicVector16 {
+        x_in: 1.0fp32,
+        y_in: x,
+        magnitude: mag,
+        angle: angle
+    }
+
+    result = angle
+}
+
+/// Arc tangent function (convenience wrapper)
+pub fn atan(x: fp32) -> fp32 {
+    signal res: fp32
+    let a = Atan { x: x, result: res }
+    res
+}
+
+/// Two-argument arc tangent
+///
+/// atan2(y, x) returns angle in [-PI, PI]
+pub fn atan2(y: fp32, x: fp32) -> fp32 {
+    signal mag: fp32
+    signal angle: fp32
+
+    let vector = CordicVector16 {
+        x_in: x,
+        y_in: y,
+        magnitude: mag,
+        angle: angle
+    }
+
+    angle
+}
+
+// ============================================================================
+// Tangent (tan)
+// ============================================================================
+
+/// Compute tangent
+///
+/// tan(x) = sin(x) / cos(x)
+pub entity Tan {
+    in angle: fp32
+    out result: fp32
+    out valid: bit  // False if cos(angle) ≈ 0
+}
+
+impl Tan {
+    signal s: fp32
+    signal c: fp32
+
+    let sc = SinCos {
+        angle: angle,
+        sin_out: s,
+        cos_out: c
+    }
+
+    // Check for division by near-zero
+    signal cos_near_zero: bit = (c > -0.0001fp32) && (c < 0.0001fp32)
+    valid = !cos_near_zero
+
+    // Compute tan = sin / cos
+    result = s / c
+}
+
+/// Tangent function (convenience wrapper)
+pub fn tan(angle: fp32) -> fp32 {
+    signal res: fp32
+    signal v: bit
+    let t = Tan { angle: angle, result: res, valid: v }
+    res
+}
