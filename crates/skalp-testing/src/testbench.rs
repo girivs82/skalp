@@ -23,6 +23,7 @@
 //! }
 //! ```
 
+use crate::cache::{collect_dependencies, CompilationCache};
 use anyhow::Result;
 use skalp_frontend::{parse_and_build_hir, parse_and_build_hir_from_file};
 use skalp_mir::{MirCompiler, OptimizationLevel};
@@ -66,10 +67,54 @@ impl Testbench {
         let start_total = Instant::now();
         eprintln!("⏱️  [TESTBENCH] Starting compilation of '{}'", source_path);
 
+        let path = Path::new(source_path);
+
+        // Initialize cache (defaults to target/skalp-cache/, override with SKALP_CACHE_DIR)
+        let cache = CompilationCache::new();
+        let dependencies = collect_dependencies(path).unwrap_or_default();
+        let cache_key = cache.compute_cache_key(path, &dependencies).ok();
+
+        // Try to load from cache
+        let sir = if let Some(ref key) = cache_key {
+            if let Ok(Some(cached_sir)) = cache.load(key) {
+                eprintln!("⏱️  [TESTBENCH] Using cached SIR (skipped HIR→MIR→SIR)");
+                cached_sir
+            } else {
+                // Cache miss - compile from source
+                Self::compile_to_sir(path, &cache, Some(key))?
+            }
+        } else {
+            // No cache key - compile without caching
+            Self::compile_to_sir(path, &cache, None)?
+        };
+
+        // Create simulator and load design
+        let start_sim = Instant::now();
+        eprintln!("⏱️  [TESTBENCH] Creating simulator and loading design...");
+        let mut sim = Simulator::new(config).await?;
+        sim.load_module(&sir).await?;
+        eprintln!("⏱️  [TESTBENCH] Simulator initialization completed in {:?}", start_sim.elapsed());
+
+        eprintln!("⏱️  [TESTBENCH] ✅ Total testbench creation time: {:?}", start_total.elapsed());
+
+        Ok(Self {
+            sim,
+            pending_inputs: HashMap::new(),
+            cycle_count: 0,
+        })
+    }
+
+    /// Compile source to SIR (HIR → MIR → SIR), optionally caching the result
+    fn compile_to_sir(
+        path: &Path,
+        cache: &CompilationCache,
+        cache_key: Option<&String>,
+    ) -> Result<skalp_sir::SirModule> {
+        use std::time::Instant;
+
         // Parse and build HIR with full module resolution support (Bug #84 fix)
         // This handles imports like "mod async_fifo; use async_fifo::AsyncFifo"
         let start_hir = Instant::now();
-        let path = Path::new(source_path);
         let context = skalp_frontend::parse_and_build_compilation_context(path)?;
         eprintln!("⏱️  [TESTBENCH] HIR parsing completed in {:?}", start_hir.elapsed());
 
@@ -155,20 +200,14 @@ impl Testbench {
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
         eprintln!("⏱️  [TESTBENCH] SIR conversion completed in {:?}", start_sir.elapsed());
 
-        // Create simulator and load design
-        let start_sim = Instant::now();
-        eprintln!("⏱️  [TESTBENCH] Creating simulator and loading design...");
-        let mut sim = Simulator::new(config).await?;
-        sim.load_module(&sir).await?;
-        eprintln!("⏱️  [TESTBENCH] Simulator initialization completed in {:?}", start_sim.elapsed());
+        // Store in cache if we have a key
+        if let Some(key) = cache_key {
+            if let Err(e) = cache.store(key, &sir) {
+                eprintln!("⚠️  [CACHE] Failed to store in cache: {}", e);
+            }
+        }
 
-        eprintln!("⏱️  [TESTBENCH] ✅ Total testbench creation time: {:?}", start_total.elapsed());
-
-        Ok(Self {
-            sim,
-            pending_inputs: HashMap::new(),
-            cycle_count: 0,
-        })
+        Ok(sir)
     }
 
     /// Set an input signal value (chainable)

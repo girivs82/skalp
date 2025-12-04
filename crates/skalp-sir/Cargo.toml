@@ -7,6 +7,7 @@ edition = "2021"
 skalp-mir = { path = "../skalp-mir" }
 skalp-frontend = { path = "../skalp-frontend" }
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 
 # Metal GPU support (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]

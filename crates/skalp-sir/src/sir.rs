@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SirModule {
     pub name: String,
     pub inputs: Vec<SirPort>,
@@ -16,7 +17,7 @@ pub struct SirModule {
 }
 
 /// Type information for SIR signals and ports
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SirType {
     /// Bit vector with fixed width
     Bits(usize),
@@ -81,7 +82,7 @@ impl SirType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SirPort {
     pub name: String,
     pub width: usize,
@@ -90,13 +91,13 @@ pub struct SirPort {
     pub clock_domain: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PortDirection {
     Input,
     Output,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SirSignal {
     pub name: String,
     pub width: usize,
@@ -106,7 +107,7 @@ pub struct SirSignal {
     pub is_state: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SirNode {
     pub id: usize,
     pub kind: SirNodeKind,
@@ -115,7 +116,7 @@ pub struct SirNode {
     pub clock_domain: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SirNodeKind {
     // Combinational operations
     BinaryOp(BinaryOperation),
@@ -151,7 +152,7 @@ pub enum SirNodeKind {
     Reset,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BinaryOperation {
     // Integer arithmetic
     Add,
@@ -208,7 +209,7 @@ impl BinaryOperation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UnaryOperation {
     // Bitwise operations
     Not,
@@ -232,13 +233,13 @@ impl UnaryOperation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalRef {
     pub signal_id: String,
     pub bit_range: Option<(usize, usize)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateElement {
     pub name: String,
     pub width: usize,
@@ -247,7 +248,7 @@ pub struct StateElement {
     pub reset: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClockDomain {
     pub name: String,
     pub frequency_hz: Option<u64>,
@@ -255,7 +256,7 @@ pub struct ClockDomain {
     pub state_elements: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClockEdge {
     Rising,
     Falling,
@@ -557,7 +558,7 @@ impl SirModule {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombinationalCone {
     /// Unsorted node IDs in this cone
     pub nodes: Vec<usize>,

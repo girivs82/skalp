@@ -8,11 +8,9 @@
 //! - Constrained random testing
 //! - Hardware-specific generators
 
-// GLOBAL: Disable all debug output for performance
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{}};
-}
+// Cache status messages can be controlled via SKALP_CACHE_VERBOSE env var
 
+pub mod cache;
 pub mod constraints;
 pub mod coverage;
 pub mod generators;
