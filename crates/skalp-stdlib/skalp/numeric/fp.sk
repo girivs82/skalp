@@ -658,3 +658,57 @@ fn clz<const W: nat>(x: bit[W]) -> nat {
     // Hardware implementation
     intrinsic_clz(x)
 }
+
+// ============================================================================
+// Absolute Value and Negation
+// ============================================================================
+
+/// Floating-point absolute value
+/// Simply clears the sign bit (IEEE 754 sign-magnitude representation)
+pub entity FpAbs<const F: FloatFormat> {
+    in x: fp<F>
+    out result: fp<F>
+}
+
+impl FpAbs<const F: FloatFormat> {
+    const W: nat = F.total_bits
+    // Clear sign bit (bit W-1)
+    result = {1'b0, x[W-2:0]}
+}
+
+/// Floating-point negation
+/// Simply flips the sign bit (IEEE 754 sign-magnitude representation)
+pub entity FpNeg<const F: FloatFormat> {
+    in x: fp<F>
+    out result: fp<F>
+}
+
+impl FpNeg<const F: FloatFormat> {
+    const W: nat = F.total_bits
+    // Flip sign bit (bit W-1)
+    result = {!x[W-1], x[W-2:0]}
+}
+
+// ============================================================================
+// Convenient fp32 Function Wrappers
+// ============================================================================
+
+/// Absolute value of fp32: abs(x) = |x|
+pub fn abs(x: fp32) -> fp32 {
+    signal res: fp32
+    let op = FpAbs<IEEE754_SINGLE> {
+        x: x,
+        result: res
+    }
+    res
+}
+
+/// Square root of fp32 using CORDIC: sqrt(x)
+pub fn sqrt(x: fp32) -> fp32 {
+    signal res: fp32
+    let op = CordicSqrt {
+        value: x,
+        result: res
+    }
+    res
+}

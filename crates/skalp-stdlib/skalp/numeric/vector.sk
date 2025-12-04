@@ -656,3 +656,93 @@ fn acos<T>(x: T) -> T {
     // Use CORDIC-based implementation for fp32
     trig_acos(x as fp32) as T
 }
+
+// ============================================================================
+// Synthesizable Vec3 Function Wrappers (for fp32)
+// ============================================================================
+// These function wrappers use the entity-based implementations internally,
+// providing a convenient functional interface for synthesizable hardware.
+
+/// Subtract two 3D vectors (synthesizable)
+///
+/// result = a - b (component-wise)
+pub fn vec3_sub(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
+    signal res: vec3<fp32>
+    let sub = VecSub<fp32, 3> {
+        a: a,
+        b: b,
+        result: res
+    }
+    res
+}
+
+/// Dot product of two 3D vectors (synthesizable)
+///
+/// result = a.x*b.x + a.y*b.y + a.z*b.z
+pub fn vec3_dot(a: vec3<fp32>, b: vec3<fp32>) -> fp32 {
+    signal res: fp32
+    let dot = VecDot<fp32, 3> {
+        a: a,
+        b: b,
+        result: res
+    }
+    res
+}
+
+/// Cross product of two 3D vectors (synthesizable)
+///
+/// result = a × b
+pub fn vec3_cross(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
+    signal res: vec3<fp32>
+    let cross = Vec3Cross<fp32> {
+        a: a,
+        b: b,
+        result: res
+    }
+    res
+}
+
+/// Add two 3D vectors (synthesizable)
+///
+/// result = a + b (component-wise)
+pub fn vec3_add(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
+    signal res: vec3<fp32>
+    let add = VecAdd<fp32, 3> {
+        a: a,
+        b: b,
+        result: res
+    }
+    res
+}
+
+/// Multiply 3D vector by scalar (synthesizable)
+///
+/// result = v * scalar (component-wise)
+pub fn vec3_scale(v: vec3<fp32>, scalar: fp32) -> vec3<fp32> {
+    signal res: vec3<fp32>
+    let scale = VecScale<fp32, 3> {
+        v: v,
+        scalar: scalar,
+        result: res
+    }
+    res
+}
+
+/// Compute length (magnitude) of 3D vector (synthesizable)
+///
+/// Uses CORDIC for sqrt internally
+pub fn vec3_length(v: vec3<fp32>) -> fp32 {
+    signal dot_res: fp32
+    let dot = VecDot<fp32, 3> {
+        a: v,
+        b: v,
+        result: dot_res
+    }
+    // Use CORDIC sqrt for synthesizable hardware
+    signal sqrt_res: fp32
+    let sqrt = crate::numeric::cordic::CordicSqrt {
+        value: dot_res,
+        result: sqrt_res
+    }
+    sqrt_res
+}
