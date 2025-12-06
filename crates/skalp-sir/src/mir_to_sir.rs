@@ -2301,6 +2301,7 @@ impl<'a> MirToSirConverter<'a> {
                 bit_range: None,
             }],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(sir_node);
@@ -2630,6 +2631,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(node);
@@ -2886,6 +2888,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![left_signal, right_signal],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(node);
@@ -2936,6 +2939,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![operand_signal],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3015,6 +3019,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![sel_signal, actual_true_signal, actual_false_signal],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3131,6 +3136,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: part_signals,
             outputs: vec![concat_output],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3200,6 +3206,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![base_signal],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         eprintln!("   🔗 Adding slice node {} to combinational_nodes", node_id);
@@ -3253,6 +3260,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![array_signal, index_signal],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         eprintln!(
@@ -3300,6 +3308,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![old_array_signal, index_signal, value_signal],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         eprintln!(
@@ -3344,6 +3353,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![clock_signal, input_signal],
             outputs: vec![output_signal],
             clock_domain: Some(clock.to_string()),
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.sequential_nodes.push(node);
@@ -3629,6 +3639,7 @@ impl<'a> MirToSirConverter<'a> {
             inputs: vec![],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3700,6 +3711,7 @@ impl<'a> MirToSirConverter<'a> {
             }],
             outputs: vec![output_signal],
             clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
         };
 
         self.sir.combinational_nodes.push(node);
@@ -4574,6 +4586,7 @@ impl<'a> MirToSirConverter<'a> {
                                     bit_range: None,
                                 }],
                                 clock_domain: Some(clock_signal.clone()),
+                                impl_style_hint: ImplStyleHint::default(),
                             };
 
                             self.sir.sequential_nodes.push(ff_node);

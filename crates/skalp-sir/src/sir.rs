@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Implementation style hint for RTL synthesis
+/// Passed through from intent system to guide backend code generation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ImplStyleHint {
+    /// Let the tool decide the implementation style
+    #[default]
+    Auto,
+    /// Parallel implementation (e.g., carry-lookahead adder, parallel prefix)
+    Parallel,
+    /// Tree implementation (e.g., Wallace tree multiplier, reduction tree)
+    Tree,
+    /// Sequential implementation (e.g., ripple-carry adder, serial multiplier)
+    Sequential,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SirModule {
     pub name: String,
@@ -114,6 +129,10 @@ pub struct SirNode {
     pub inputs: Vec<SignalRef>,
     pub outputs: Vec<SignalRef>,
     pub clock_domain: Option<String>,
+    /// Implementation style hint from intent system
+    /// Used by RTL backends to select implementation architecture
+    #[serde(default)]
+    pub impl_style_hint: ImplStyleHint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
