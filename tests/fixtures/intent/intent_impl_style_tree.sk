@@ -1,0 +1,12 @@
+// Test impl_style::tree intent
+entity TestImplStyleTree {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleTree {
+    #[impl_style::tree]
+    let tmp = a * b;
+    result = tmp
+}

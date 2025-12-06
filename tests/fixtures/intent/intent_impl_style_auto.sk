@@ -1,0 +1,12 @@
+// Test impl_style::auto intent (default behavior)
+entity TestImplStyleAuto {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleAuto {
+    #[impl_style::auto]
+    let tmp = a | b;
+    result = tmp
+}

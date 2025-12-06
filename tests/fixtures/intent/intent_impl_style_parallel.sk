@@ -1,0 +1,12 @@
+// Test impl_style::parallel intent
+entity TestImplStyleParallel {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleParallel {
+    #[impl_style::parallel]
+    let tmp = a + b;
+    result = tmp
+}

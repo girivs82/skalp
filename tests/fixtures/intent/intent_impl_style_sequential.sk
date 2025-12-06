@@ -1,0 +1,12 @@
+// Test impl_style::sequential intent
+entity TestImplStyleSequential {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleSequential {
+    #[impl_style::sequential]
+    let tmp = a - b;
+    result = tmp
+}

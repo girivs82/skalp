@@ -424,3 +424,83 @@ async fn test_fp32_distance_irrational() {
 
     tb.expect_fp32("distance", 1.41421356, 0.001).await;
 }
+
+// ============================================================================
+// ImplStyle Attribute Tests
+// ============================================================================
+
+/// Test #[impl_style::parallel] attribute on let statement
+/// Verifies that the attribute is parsed and computation works correctly
+#[tokio::test]
+async fn test_impl_style_parallel() {
+    let mut tb = Testbench::new("tests/fixtures/intent/intent_impl_style_parallel.sk")
+        .await
+        .unwrap();
+
+    // Test with entity TestImplStyleParallel: a + b
+    tb.set("a", 10u32).set("b", 5u32);
+    tb.step().await;
+    tb.expect("result", 15u32).await;
+
+    // Test with larger values
+    tb.set("a", 1000u32).set("b", 500u32);
+    tb.step().await;
+    tb.expect("result", 1500u32).await;
+}
+
+/// Test #[impl_style::tree] attribute on let statement
+/// Verifies that the attribute is parsed and computation works correctly
+#[tokio::test]
+async fn test_impl_style_tree() {
+    let mut tb = Testbench::new("tests/fixtures/intent/intent_impl_style_tree.sk")
+        .await
+        .unwrap();
+
+    // Test with entity TestImplStyleTree: a * b
+    tb.set("a", 6u32).set("b", 7u32);
+    tb.step().await;
+    tb.expect("result", 42u32).await;
+
+    // Test with other values
+    tb.set("a", 100u32).set("b", 20u32);
+    tb.step().await;
+    tb.expect("result", 2000u32).await;
+}
+
+/// Test #[impl_style::sequential] attribute on let statement
+/// Verifies that the attribute is parsed and computation works correctly
+#[tokio::test]
+async fn test_impl_style_sequential() {
+    let mut tb = Testbench::new("tests/fixtures/intent/intent_impl_style_sequential.sk")
+        .await
+        .unwrap();
+
+    // Test with entity TestImplStyleSequential: a - b
+    tb.set("a", 20u32).set("b", 7u32);
+    tb.step().await;
+    tb.expect("result", 13u32).await;
+
+    // Test with other values
+    tb.set("a", 1000u32).set("b", 300u32);
+    tb.step().await;
+    tb.expect("result", 700u32).await;
+}
+
+/// Test #[impl_style::auto] attribute on let statement (default behavior)
+/// Verifies that the attribute is parsed and computation works correctly
+#[tokio::test]
+async fn test_impl_style_auto() {
+    let mut tb = Testbench::new("tests/fixtures/intent/intent_impl_style_auto.sk")
+        .await
+        .unwrap();
+
+    // Test with entity TestImplStyleAuto: a | b (bitwise OR)
+    tb.set("a", 0b1100u32).set("b", 0b0011u32);
+    tb.step().await;
+    tb.expect("result", 0b1111u32).await;
+
+    // Test with other values
+    tb.set("a", 0xFF00u32).set("b", 0x00FFu32);
+    tb.step().await;
+    tb.expect("result", 0xFFFFu32).await;
+}
