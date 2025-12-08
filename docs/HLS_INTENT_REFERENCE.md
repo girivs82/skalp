@@ -880,6 +880,51 @@ impl SharedResources {
 entity TargetSpecific { }
 ```
 
+### 10.5 Pipeline Style Control
+
+Control how pipelining is handled at the module or flow block level:
+
+```skalp
+@intent(pipeline_style: auto)         // Compiler decides based on timing analysis
+@intent(pipeline_style: combinational) // Fully combinational - no pipeline registers
+@intent(pipeline_style: manual)       // Explicit manual stages via |> operator
+@intent(pipeline_style: retimed)      // Auto-retiming - compiler inserts registers
+```
+
+**Pipeline Style Options:**
+
+| Style | Description | Use Case |
+|-------|-------------|----------|
+| `auto` | Compiler decides based on timing analysis | General purpose, let tools optimize |
+| `combinational` | Fully combinational, no pipeline registers | Single-cycle operations, low latency |
+| `manual` | Explicit pipeline stages via `\|>` operator | Precise control over pipeline structure |
+| `retimed` | Automatic register insertion for target frequency | High-frequency designs, complex logic |
+
+**Example: Manual Pipeline with Flow Blocks**
+```skalp
+@intent(pipeline_style: manual)
+impl DataProcessor {
+    on(clk.rise) {
+        flow {
+            input_data
+            |> stage1_compute()   // Pipeline register inserted after stage1
+            |> stage2_compute()   // Pipeline register inserted after stage2
+            |> output
+        }
+    }
+}
+```
+
+**Example: Auto-Retiming for High Frequency**
+```skalp
+@intent(pipeline_style: retimed)
+@intent(optimize: {constraints: {frequency: > 500MHz}})
+impl HighSpeedALU {
+    // Compiler automatically inserts pipeline stages to meet timing
+    result = (a * b) + (c * d)
+}
+```
+
 ---
 
 ## 11. Complete Examples

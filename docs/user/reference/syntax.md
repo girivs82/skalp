@@ -374,6 +374,51 @@ result = match selector {
 - Wildcards: `_`
 - Enum variants: `State::Idle`
 
+### For Loops
+
+For loops iterate over a bounded range. SKALP only supports compile-time bounded loops (no `while` or unbounded iteration).
+
+**Basic syntax:**
+```skalp
+for <iterator> in <start>..<end> {
+    <body>
+}
+```
+
+**Examples:**
+
+**Simple for loop:**
+```skalp
+for i in 0..8 {
+    result = result ^ ((input >> i) & 1);
+}
+```
+
+**Inclusive range (`..=`):**
+```skalp
+for i in 0..=7 {  // Includes 7
+    data[i] = 0;
+}
+```
+
+**With unroll attribute (full unroll):**
+```skalp
+#[unroll]
+for i in 0..8 {
+    result[i] = input[7 - i];  // Bit reversal
+}
+```
+
+**With partial unroll:**
+```skalp
+#[unroll(4)]
+for i in 0..32 {
+    acc = acc + data[i];
+}
+```
+
+**Note:** Unrolled loops are expanded at compile time, generating parallel hardware for each iteration. Use `#[unroll]` for full unrolling or `#[unroll(N)]` to unroll by factor N.
+
 ---
 
 ## Pattern Matching
@@ -604,6 +649,9 @@ impl FIFO {
 | **If (stmt)** | `if (cond) { } else { }` | `if (rst) { r <= 0 }` |
 | **If (expr)** | `if cond { a } else { b }` | `out = if sel { 1 } else { 0 }` |
 | **Match** | `match x { p => v }` | `match op { 0 => a, _ => b }` |
+| **For loop** | `for i in 0..N { body }` | `for i in 0..8 { acc ^= x[i] }` |
+| **Unroll** | `#[unroll] for ...` | `#[unroll] for i in 0..4 { ... }` |
+| **Unroll(N)** | `#[unroll(N)] for ...` | `#[unroll(4)] for i in 0..16 { ... }` |
 | **Struct** | `struct Name { fields }` | `struct Pkt { addr: bit[32] }` |
 | **Enum** | `enum Name { variants }` | `enum State { Idle, Run }` |
 | **Array** | `[type; size]` | `[bit[8]; 16]` |

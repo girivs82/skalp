@@ -36,11 +36,12 @@ pub use hir_to_mir::HirToMir;
 pub use mir::{
     Assignment, AssignmentKind, BinaryOp, Block, CaseStatement, ConditionalCase,
     ContinuousAssign, DataType, EdgeSensitivity, EdgeType, EnumType, EnumVariant, Expression,
-    ExpressionKind, GenericParameter, GenericParameterType, IfStatement, LValue, LoopStatement,
-    Mir, Module, ModuleId, ModuleInstance, MuxTree, ParallelCase, ParallelMux, Port,
-    PortDirection, PortId, PriorityMux, Process, ProcessId, ProcessKind, ReduceOp,
-    SensitivityList, Signal, SignalId, Statement, StructField, StructType, UnaryOp, UnionType,
-    Value, Variable, VariableId,
+    ExpressionKind, GenerateBlock, GenerateBlockId, GenerateBlockKind, GenerateBody,
+    GenerateCase, GenerateCaseArm, GenerateFor, GenerateIf, GenericParameter,
+    GenericParameterType, IfStatement, LValue, LoopStatement, Mir, Module, ModuleId,
+    ModuleInstance, MuxTree, ParallelCase, ParallelMux, Port, PortDirection, PortId, PriorityMux,
+    Process, ProcessId, ProcessKind, ReduceOp, SensitivityList, Signal, SignalId, Statement,
+    StructField, StructType, UnaryOp, UnionType, Value, Variable, VariableId,
 };
 pub use mir_validation::{validate_mir, ValidationError};
 pub use monomorphize::Monomorphizer;

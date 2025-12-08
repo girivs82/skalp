@@ -283,6 +283,72 @@ resource::bram        // Map to block RAM
 resource::share       // Enable resource sharing
 ```
 
+### 7.6 `pipeline_style`
+```skalp
+pipeline_style::auto          // Compiler decides based on timing analysis
+pipeline_style::combinational // Fully combinational - no pipeline registers
+pipeline_style::manual        // Explicit manual stages via |> operator
+pipeline_style::retimed       // Auto-retiming - compiler inserts registers for target frequency
+```
+
+### 7.7 `unroll` (Loop Attribute)
+
+The `#[unroll]` attribute controls compile-time loop expansion. Unlike namespace-based intents, `unroll` is used directly as an attribute on for loops.
+
+```skalp
+// Full unroll - completely expand the loop
+#[unroll]
+for i in 0..8 {
+    result[i] = input[7 - i];  // Generates 8 parallel assignments
+}
+
+// Partial unroll - unroll by factor N
+#[unroll(4)]
+for i in 0..32 {
+    acc = acc + data[i];  // Unrolls 4 iterations, loops 8 times
+}
+```
+
+**Unroll behavior:**
+- `#[unroll]` - Full unroll: expands all iterations at compile time
+- `#[unroll(N)]` - Partial unroll: expands N iterations per loop iteration
+
+### 7.8 `impl_style` (Implementation Selection)
+
+Controls which implementation variant is selected for functions that have multiple valid implementations with different area/performance tradeoffs:
+
+```skalp
+impl_style::parallel      // Fully unrolled single-cycle (more area, lower latency)
+impl_style::tree          // Parallel prefix tree (balanced area/latency) [default]
+impl_style::sequential    // Multi-cycle iterative (minimal area, higher latency)
+impl_style::auto          // Compiler decides based on context and timing constraints
+```
+
+**Usage:**
+
+```skalp
+// Force single-cycle parallel implementation
+#[impl_style::parallel]
+let count = popcount32(value);  // Generates 32-input OR tree
+
+// Use compact tree implementation (default)
+#[impl_style::tree]
+let count = popcount32(value);  // Generates parallel prefix adder tree
+
+// Allow multi-cycle for area-constrained designs
+#[impl_style::sequential]
+let count = popcount32(value);  // Generates FSM with counter
+```
+
+**Key insight:** The same function call should select different implementations based on intent, rather than requiring explicit function name variants like `popcount32_unrolled()`. This keeps user code clean while allowing the compiler to optimize based on design constraints.
+
+**Applies to:** Standard library functions with multiple implementation strategies:
+- `clz32`, `ctz32` - Leading/trailing zero count
+- `popcount32` - Population count (Hamming weight)
+- `bitreverse32` - Bit reversal
+- `parity32` - XOR fold
+- Other functions where area/latency tradeoffs exist
+
 ---
 
 ## 8. Complete Examples
@@ -366,6 +432,49 @@ module decoder {
 }
 ```
 
+### 8.4 Unrolled Bit Reversal
+
+```skalp
+/// Reverse bits using fully unrolled loop
+pub fn bit_reverse_8(input: bit[8]) -> bit[8] {
+    let mut result = 0 as bit[8];
+    #[unroll]
+    for i in 0..8 {
+        // Each iteration becomes a parallel assignment
+        result = result | ((input >> i) & 1) << (7 - i);
+    }
+    return result;
+}
+```
+
+### 8.5 Pipelined Flow with Manual Stages
+
+```skalp
+intent pipelined = pipeline_style::manual;
+
+#[pipelined]
+flow {
+    input_data
+    |> stage1_compute()   // Pipeline register inserted
+    |> stage2_compute()   // Pipeline register inserted
+    |> output
+}
+```
+
+### 8.6 XOR Reduction with Unroll
+
+```skalp
+/// Compute parity (XOR fold) of 8-bit input
+pub fn parity8(input: bit[8]) -> bit[1] {
+    let mut result = 0 as bit[1];
+    #[unroll]
+    for i in 0..8 {
+        result = result ^ ((input >> i) & 1) as bit[1];
+    }
+    return result;
+}
+```
+
 ---
 
 ## 9. Error Messages
@@ -441,5 +550,12 @@ warning[W0312]: conflicting intent values for 'mux_style'
 | `#[foo, bar]` | Apply multiple intents |
 | `#[foo + bar]` | Compose intents |
 | `intent x { ..y, a: z }` | Extend intent with override |
+| `#[unroll]` | Full loop unroll (expand all iterations) |
+| `#[unroll(N)]` | Partial loop unroll (expand N iterations) |
+| `pipeline_style::manual` | Explicit pipeline stages via `\|>` |
+| `pipeline_style::retimed` | Auto-retiming for target frequency |
+| `impl_style::parallel` | Force single-cycle unrolled implementation |
+| `impl_style::tree` | Use parallel prefix tree (default) |
+| `impl_style::sequential` | Use multi-cycle iterative (minimal area) |
 
 The key insight: **attributes are not a separate feature—they're ergonomic syntax for the intent system.**

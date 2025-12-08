@@ -205,6 +205,7 @@ impl TypeSubstitution {
                 function: call.function.clone(),
                 type_args: call.type_args.iter().map(|t| self.substitute_type(t)).collect(),
                 args: call.args.iter().map(|a| self.substitute_expression(a)).collect(),
+                impl_style: call.impl_style.clone(),
             }),
             hir::HirExpression::Binary(binary) => {
                 hir::HirExpression::Binary(hir::HirBinaryExpr {
@@ -881,6 +882,7 @@ impl Monomorphizer {
                 .iter()
                 .map(|stmt| substitution.substitute_statement(stmt))
                 .collect(),
+            span: generic_func.span.clone(), // Preserve source span from generic function
         };
 
         eprintln!(
@@ -1126,6 +1128,7 @@ impl Monomorphizer {
             params: specialized_params,
             return_type: specialized_return_type,
             body: method_info.body.clone(), // TODO: May need to substitute Self in body too
+            span: None, // Specialized functions don't have source spans
         };
 
         eprintln!(
@@ -1398,6 +1401,7 @@ impl Monomorphizer {
                                     .iter()
                                     .map(|a| self.replace_calls_in_expression(a, ctx))
                                     .collect(),
+                                impl_style: call.impl_style.clone(),
                             });
                         }
                     }
@@ -1418,6 +1422,7 @@ impl Monomorphizer {
                             .iter()
                             .map(|a| self.replace_calls_in_expression(a, ctx))
                             .collect(),
+                        impl_style: call.impl_style.clone(),
                     });
                 }
 
@@ -1430,6 +1435,7 @@ impl Monomorphizer {
                         .iter()
                         .map(|a| self.replace_calls_in_expression(a, ctx))
                         .collect(),
+                    impl_style: call.impl_style.clone(),
                 })
             }
             hir::HirExpression::Binary(binary) => {

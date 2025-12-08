@@ -20,6 +20,7 @@ pub mod monomorphization;
 pub mod parse;
 pub mod parser;
 pub mod semantic;
+pub mod span;
 pub mod syntax;
 pub mod typeck;
 pub mod types;
@@ -30,6 +31,7 @@ mod stream_test;
 pub use hir::Hir;
 pub use lexer::Lexer;
 pub use parser::Parser;
+pub use span::{LineIndex, SourceSpan};
 
 use anyhow::{Context, Result};
 use module_resolver::ModuleResolver;
@@ -112,7 +114,7 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     }
 
     // Build HIR (first pass - will have incomplete instances for imported entities)
-    let mut builder = hir_builder::HirBuilderContext::new();
+    let mut builder = hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
     let mut hir = builder.build(&syntax_tree).map_err(|errors| {
         anyhow::anyhow!(
             "HIR build failed: {}",
@@ -172,7 +174,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     let (syntax_tree, _) = parse::parse_with_errors(&source);
 
     // Create a new builder with all entities pre-registered
-    let mut builder = hir_builder::HirBuilderContext::new();
+    let mut builder = hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
 
     // Pre-register all entities in the symbol table
     for entity in &hir.entities {
@@ -473,6 +475,7 @@ fn remap_expr_ports(
                 function: call.function.clone(),
                 type_args: call.type_args.clone(), // Preserve type args during port remapping
                 args: new_args,
+                impl_style: call.impl_style.clone(),
             })
         }
         hir::HirExpression::If(if_expr) => {
@@ -1008,8 +1011,8 @@ pub fn parse_and_build_hir(source: &str) -> Result<Hir> {
         ));
     }
 
-    // Build HIR from syntax tree
-    let mut builder = hir_builder::HirBuilderContext::new();
+    // Build HIR from syntax tree with source tracking for spans
+    let mut builder = hir_builder::HirBuilderContext::with_source(source, None);
     let hir = match builder.build(&syntax_tree) {
         Ok(hir) => hir,
         Err(errors) => {

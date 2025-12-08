@@ -2853,6 +2853,7 @@ dependencies = [
  "serde_json",
  "skalp-frontend",
  "skalp-lir",
+ "skalp-mir",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

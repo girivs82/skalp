@@ -223,3 +223,19 @@ pub fn sign_extend32(value: bit[32], from_width: nat[5]) -> bit[32] {
     };
     return value | mask
 }
+
+/// Binary to Gray code conversion
+pub fn binary_to_gray32(value: bit[32]) -> bit[32] {
+    return value ^ (value >> 1)
+}
+
+/// Gray code to binary conversion
+pub fn gray_to_binary32(gray: bit[32]) -> bit[32] {
+    let mut binary = gray;
+    binary = binary ^ (binary >> 16);
+    binary = binary ^ (binary >> 8);
+    binary = binary ^ (binary >> 4);
+    binary = binary ^ (binary >> 2);
+    binary = binary ^ (binary >> 1);
+    return binary
+}

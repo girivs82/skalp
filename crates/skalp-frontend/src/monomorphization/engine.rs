@@ -298,6 +298,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             clock_domains: entity.clock_domains.clone(),
             signals: entity.signals.clone(),
             assignments: entity.assignments.clone(),
+            span: entity.span.clone(), // Preserve source span from original entity
         };
 
         (specialized_entity, port_id_map)
@@ -1125,6 +1126,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     function: call.function.clone(),
                     type_args: call.type_args.clone(), // Preserve type args during port remapping
                     args: new_args,
+                    impl_style: call.impl_style.clone(),
                 })
             }
             HirExpression::If(if_expr) => {

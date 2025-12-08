@@ -132,6 +132,21 @@ mod flow_block_tests {
                     skalp_frontend::hir::HirStatement::Expression(_) => {
                         println!("    Statement {}: Expression", j);
                     }
+                    skalp_frontend::hir::HirStatement::For(_) => {
+                        println!("    Statement {}: For", j);
+                    }
+                    skalp_frontend::hir::HirStatement::Assume(_) => {
+                        println!("    Statement {}: Assume", j);
+                    }
+                    skalp_frontend::hir::HirStatement::GenerateFor(_) => {
+                        println!("    Statement {}: GenerateFor", j);
+                    }
+                    skalp_frontend::hir::HirStatement::GenerateIf(_) => {
+                        println!("    Statement {}: GenerateIf", j);
+                    }
+                    skalp_frontend::hir::HirStatement::GenerateMatch(_) => {
+                        println!("    Statement {}: GenerateMatch", j);
+                    }
                 }
             }
         }
