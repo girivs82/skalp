@@ -231,6 +231,7 @@ impl TypeFlattener {
                 lhs: lhs_field,
                 rhs: rhs_field,
                 kind,
+                span: None,
             });
         }
 
@@ -407,6 +408,7 @@ impl TypeFlattener {
             direction,
             port_type: port_type.clone(),
             physical_constraints: physical_constraints.cloned(),
+            span: None,
         };
         ports.push(port);
 
@@ -582,6 +584,7 @@ impl TypeFlattener {
             signal_type: signal_type.clone(),
             initial,
             clock_domain,
+            span: None,
         };
         signals.push(signal);
 

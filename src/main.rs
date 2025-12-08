@@ -470,6 +470,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: signal.is_register,
+                span: None,
             });
         }
 
@@ -483,6 +484,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
             state_elements: HashMap::new(),
             clock_domains: HashMap::new(),
             sorted_combinational_node_ids: Vec::new(), // Empty for LIR (no combinational nodes)
+            span: None,
         }
     } else if design_file.extension() == Some(std::ffi::OsStr::new("mir")) {
         // Load MIR and convert to SIR

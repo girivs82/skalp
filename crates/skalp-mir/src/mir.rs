@@ -9,6 +9,7 @@
 
 use crate::Type;
 use serde::{Deserialize, Serialize};
+use skalp_frontend::SourceSpan;
 use std::collections::HashMap;
 
 /// Mid-level Intermediate Representation for a design
@@ -45,6 +46,9 @@ pub struct Module {
     pub clock_domains: Vec<ClockDomain>,
     /// Generate blocks (for #[preserve_generate] mode)
     pub generate_blocks: Vec<GenerateBlock>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Module identifier
@@ -65,6 +69,9 @@ pub struct Port {
     /// Physical constraints (from HIR)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Port identifier
@@ -92,6 +99,9 @@ pub struct Signal {
     pub initial: Option<Value>,
     /// Clock domain this signal belongs to (for CDC analysis)
     pub clock_domain: Option<ClockDomainId>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Signal identifier
@@ -109,6 +119,9 @@ pub struct Variable {
     pub var_type: DataType,
     /// Initial value
     pub initial: Option<Value>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Variable identifier
@@ -284,6 +297,9 @@ pub struct Process {
     pub sensitivity: SensitivityList,
     /// Process body
     pub body: Block,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Process identifier
@@ -364,6 +380,9 @@ pub struct Assignment {
     pub rhs: Expression,
     /// Assignment kind
     pub kind: AssignmentKind,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Assignment kind
@@ -407,6 +426,9 @@ pub struct Expression {
     /// The type of this expression
     #[serde(skip, default = "default_unknown_type")]
     pub ty: Type,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Default function for serde deserialization of Type field
@@ -468,7 +490,12 @@ pub enum ExpressionKind {
 impl Expression {
     /// Create a new expression with the given kind and type
     pub fn new(kind: ExpressionKind, ty: Type) -> Self {
-        Self { kind, ty }
+        Self { kind, ty, span: None }
+    }
+
+    /// Create a new expression with the given kind, type, and span
+    pub fn new_with_span(kind: ExpressionKind, ty: Type, span: Option<SourceSpan>) -> Self {
+        Self { kind, ty, span }
     }
 
     /// Create an expression with Unknown type (TEMPORARY: for migration to typed expressions)
@@ -477,6 +504,7 @@ impl Expression {
         Self {
             kind,
             ty: Type::Unknown,
+            span: None,
         }
     }
 
@@ -672,6 +700,9 @@ pub struct IfStatement {
     pub then_block: Block,
     /// Else branch (optional)
     pub else_block: Option<Block>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Case statement
@@ -683,6 +714,9 @@ pub struct CaseStatement {
     pub items: Vec<CaseItem>,
     /// Default case
     pub default: Option<Block>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Case item
@@ -715,6 +749,9 @@ pub struct ContinuousAssign {
     pub lhs: LValue,
     /// Right-hand side
     pub rhs: Expression,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Generic parameter definition in MIR
@@ -805,6 +842,9 @@ pub struct ModuleInstance {
     pub connections: HashMap<String, Expression>,
     /// Generic/parameter overrides
     pub parameters: HashMap<String, Value>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Synthesis-resolved conditional assignment
@@ -892,6 +932,9 @@ pub struct GenerateBlock {
     pub label: Option<String>,
     /// The kind of generate block
     pub kind: GenerateBlockKind,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Kind of generate block
@@ -1015,6 +1058,7 @@ impl Module {
             instances: Vec::new(),
             clock_domains: Vec::new(),
             generate_blocks: Vec::new(),
+            span: None,
         }
     }
 }

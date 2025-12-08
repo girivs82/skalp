@@ -1,0 +1,19 @@
+// Test for loop syntax and basic conversion
+
+/// Simple for loop - bit reversal pattern
+pub fn bit_reverse_4(input: bit[4]) -> bit[4] {
+    let mut result = 0 as bit[4];
+    for i in 0..4 {
+        result = result | ((input >> i) & 1) << (3 - i);
+    }
+    return result;
+}
+
+/// For loop with range operations
+pub fn sum_range(start: bit[8], count: bit[8]) -> bit[16] {
+    let mut sum = 0 as bit[16];
+    for i in 0..4 {
+        sum = sum + (start + (i as bit[8])) as bit[16];
+    }
+    return sum;
+}

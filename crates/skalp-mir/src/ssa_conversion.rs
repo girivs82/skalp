@@ -248,6 +248,7 @@ impl SsaConverter {
                 name: format!("{}_ssa{}", orig_var.name, new_id.0),
                 var_type: orig_var.var_type.clone(),
                 initial: None, // SSA versions don't have initial values
+                span: None,
             };
             self.new_variables.push(new_var);
         }

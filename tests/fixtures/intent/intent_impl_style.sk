@@ -1,0 +1,55 @@
+// Test impl_style intent for let statements
+// Verifies that #[impl_style::parallel] and similar attributes are parsed correctly
+// Uses simple expressions to avoid function inlining issues
+
+/// Test impl_style::parallel via attribute
+entity TestImplStyleParallel {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleParallel {
+    #[impl_style::parallel]
+    let tmp = a + b;
+    result = tmp
+}
+
+/// Test impl_style::tree via attribute
+entity TestImplStyleTree {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleTree {
+    #[impl_style::tree]
+    let tmp = a * b;
+    result = tmp
+}
+
+/// Test impl_style::sequential via attribute
+entity TestImplStyleSequential {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleSequential {
+    #[impl_style::sequential]
+    let tmp = a - b;
+    result = tmp
+}
+
+/// Test impl_style::auto via attribute (default behavior)
+entity TestImplStyleAuto {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl TestImplStyleAuto {
+    #[impl_style::auto]
+    let tmp = a | b;
+    result = tmp
+}

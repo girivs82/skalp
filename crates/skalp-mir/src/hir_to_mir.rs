@@ -383,6 +383,7 @@ impl<'hir> HirToMir<'hir> {
                                 let continuous = ContinuousAssign {
                                     lhs: LValue::Signal(mir_signal_id),
                                     rhs,
+                                    span: None,
                                 };
                                 module.assignments.push(continuous);
                                 eprintln!(
@@ -416,6 +417,7 @@ impl<'hir> HirToMir<'hir> {
                         let continuous = ContinuousAssign {
                             lhs: assign.lhs,
                             rhs: assign.rhs,
+                            span: None,
                         };
                         module.assignments.push(continuous);
                     }
@@ -518,6 +520,7 @@ impl<'hir> HirToMir<'hir> {
                                         let continuous = ContinuousAssign {
                                             lhs: LValue::Signal(mir_signal_id),
                                             rhs,
+                                            span: None,
                                         };
                                         module.assignments.push(continuous);
                                         eprintln!(
@@ -549,6 +552,7 @@ impl<'hir> HirToMir<'hir> {
                                 .initial_value
                                 .as_ref()
                                 .and_then(|expr| self.convert_literal_expr(expr)),
+                            span: None,
                         };
                         eprintln!(
                             "[BUG #71 PUSH LOC1] Pushing variable: id={:?}, name={}",
@@ -606,6 +610,7 @@ impl<'hir> HirToMir<'hir> {
                             name: name.clone(),
                             var_type: mir_type,
                             initial: None,
+                            span: None,
                         };
                         eprintln!(
                             "[BUG #71 PUSH LOC2] Pushing dynamic variable: id={:?}, name={}",
@@ -640,6 +645,7 @@ impl<'hir> HirToMir<'hir> {
                                         signal_type: signal_type.clone(),
                                         initial: None,
                                         clock_domain: None,
+                                        span: None,
                                     };
                                     module.signals.push(signal);
 
@@ -830,6 +836,7 @@ impl<'hir> HirToMir<'hir> {
                                             name: var_name.clone(),
                                             var_type,
                                             initial: None,
+                                            span: None,
                                         };
                                         eprintln!("[BUG #71 PUSH LOC3] Pushing pending variable: id={:?}, name={}", var_id, var_name);
                                         module.variables.push(variable);
@@ -863,6 +870,7 @@ impl<'hir> HirToMir<'hir> {
                                     name: name.clone(),
                                     var_type: mir_type,
                                     initial: None,
+                                    span: None,
                                 };
                                 eprintln!("[BUG #71 PUSH LOC4] Pushing assignment-dynamic variable: id={:?}, name={}", mir_var_id, name);
                                 module.variables.push(variable);
@@ -876,6 +884,7 @@ impl<'hir> HirToMir<'hir> {
                                 let continuous = ContinuousAssign {
                                     lhs: assign.lhs,
                                     rhs: assign.rhs,
+                                    span: None,
                                 };
                                 module.assignments.push(continuous);
                             }
@@ -940,6 +949,7 @@ impl<'hir> HirToMir<'hir> {
             kind,
             sensitivity,
             body,
+            span: None,
         }
     }
 
@@ -1164,6 +1174,7 @@ impl<'hir> HirToMir<'hir> {
                                     module: module_id,
                                     connections,
                                     parameters: std::collections::HashMap::new(),
+                                    span: None,
                                 };
 
                                 // Collect output signals for the module
@@ -1618,6 +1629,7 @@ impl<'hir> HirToMir<'hir> {
                     lhs,
                     rhs: final_rhs,
                     kind: AssignmentKind::Blocking,
+                    span: None,
                 }))
             }
             hir::HirStatement::For(for_stmt) => {
@@ -1734,6 +1746,7 @@ impl<'hir> HirToMir<'hir> {
                                         lhs: lvalue,
                                         rhs: prev,
                                         kind: AssignmentKind::Blocking, // Combinational = blocking
+                                        span: None,
                                     }));
                                 }
                             }
@@ -1787,6 +1800,7 @@ impl<'hir> HirToMir<'hir> {
                                         lhs: lvalue,
                                         rhs: prev,
                                         kind: AssignmentKind::NonBlocking, // Register output
+                                        span: None,
                                     }));
                                 }
                             }
@@ -1946,7 +1960,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirAssignmentType::Combinational => AssignmentKind::Blocking,
         };
 
-        Some(Assignment { lhs, rhs, kind })
+        Some(Assignment { lhs, rhs, kind, span: None })
     }
 
     /// BUG FIX #91: Try to expand tuple signal = function call assignment
@@ -2026,6 +2040,7 @@ impl<'hir> HirToMir<'hir> {
                             lhs: LValue::Signal(SignalId(flat_field.id)),
                             rhs: (*elem).clone(),
                             kind,
+                            span: None,
                         };
                         assignments.push(assign);
                         println!("🔧🔧🔧 BUG91_TUPLE_CALL: field_{} = <inlined concat element> 🔧🔧🔧",
@@ -2058,6 +2073,7 @@ impl<'hir> HirToMir<'hir> {
                 lhs: LValue::Signal(SignalId(flat_field.id)),
                 rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(result_sig_id))),
                 kind,
+                span: None,
             };
             assignments.push(assign);
             println!("🔧🔧🔧 BUG91_TUPLE_CALL: field_{} = result_{} (sig_id={}) 🔧🔧🔧",
@@ -2197,6 +2213,7 @@ impl<'hir> HirToMir<'hir> {
                 lhs: lhs_lval,
                 rhs: rhs_expr,
                 kind,
+                span: None,
             });
         }
 
@@ -2276,6 +2293,7 @@ impl<'hir> HirToMir<'hir> {
                     lhs: lhs_lval,
                     rhs: rhs_expr,
                     kind,
+                    span: None,
                 }]);
             }
         }
@@ -2411,6 +2429,7 @@ impl<'hir> HirToMir<'hir> {
                     lhs: lhs_lval,
                     rhs: conditional_rhs,
                     kind,
+                    span: None,
                 });
             }
         }
@@ -2592,6 +2611,7 @@ impl<'hir> HirToMir<'hir> {
             assignments.push(ContinuousAssign {
                 lhs: lhs_lval,
                 rhs: mux_expr?,
+                span: None,
             });
         }
 
@@ -2796,6 +2816,7 @@ impl<'hir> HirToMir<'hir> {
                             module: module_id,
                             connections,
                             parameters: std::collections::HashMap::new(),
+                            span: None,
                         };
 
                         // Push to pending list - will be drained when processing module
@@ -2940,7 +2961,7 @@ impl<'hir> HirToMir<'hir> {
         let rhs = rhs?;
 
         eprintln!("[DEBUG] Continuous assignment successful!");
-        Some(ContinuousAssign { lhs, rhs })
+        Some(ContinuousAssign { lhs, rhs, span: None })
     }
 
     /// BUG FIX #91: Try to expand tuple signal = function call continuous assignment
@@ -3001,6 +3022,7 @@ impl<'hir> HirToMir<'hir> {
                         assigns.push(ContinuousAssign {
                             lhs: LValue::Signal(SignalId(flat_field.id)),
                             rhs: (*elem).clone(),
+                            span: None,
                         });
                     }
                     return Some(assigns);
@@ -3028,6 +3050,7 @@ impl<'hir> HirToMir<'hir> {
             assigns.push(ContinuousAssign {
                 lhs: LValue::Signal(SignalId(flat_field.id)),
                 rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(result_sig_id))),
+                span: None,
             });
             println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: field_{} = result_{} 🔧🔧🔧", flat_field.id, idx);
         }
@@ -3157,6 +3180,7 @@ impl<'hir> HirToMir<'hir> {
             assignments.push(ContinuousAssign {
                 lhs: lhs_lval,
                 rhs: rhs_expr,
+                span: None,
             });
         }
 
@@ -3242,6 +3266,7 @@ impl<'hir> HirToMir<'hir> {
             module: module_id,
             connections,
             parameters,
+            span: None,
         })
     }
 
@@ -3318,6 +3343,7 @@ impl<'hir> HirToMir<'hir> {
             condition,
             then_block,
             else_block,
+            span: None,
         })
     }
 
@@ -3341,6 +3367,7 @@ impl<'hir> HirToMir<'hir> {
             lhs: iterator_lvalue.clone(),
             rhs: start_expr,
             kind: AssignmentKind::Blocking,
+            span: None,
         };
 
         // Condition: iterator < end (or <= for inclusive)
@@ -3355,16 +3382,19 @@ impl<'hir> HirToMir<'hir> {
                 left: Box::new(Expression {
                     kind: ExpressionKind::Ref(iterator_lvalue.clone()),
                     ty: Type::Unknown,
+                    span: None,
                 }),
                 right: Box::new(end_expr),
             },
             ty: Type::Bool,
+            span: None,
         };
 
         // Update: iterator = iterator + 1
         let one = Expression {
             kind: ExpressionKind::Literal(Value::Integer(1)),
             ty: Type::Unknown,
+            span: None,
         };
         let update = Assignment {
             lhs: iterator_lvalue.clone(),
@@ -3374,12 +3404,15 @@ impl<'hir> HirToMir<'hir> {
                     left: Box::new(Expression {
                         kind: ExpressionKind::Ref(iterator_lvalue),
                         ty: Type::Unknown,
+                        span: None,
                     }),
                     right: Box::new(one),
                 },
                 ty: Type::Unknown,
+                span: None,
             },
             kind: AssignmentKind::Blocking,
+            span: None,
         };
 
         // Convert body statements
@@ -3514,6 +3547,7 @@ impl<'hir> HirToMir<'hir> {
                     condition: guard_condition,
                     then_block: block,
                     else_block: None,
+                    span: None,
                 });
                 Block {
                     statements: vec![if_stmt],
@@ -3541,6 +3575,7 @@ impl<'hir> HirToMir<'hir> {
             expr,
             items,
             default,
+            span: None,
         })
     }
 
@@ -8336,6 +8371,7 @@ impl<'hir> HirToMir<'hir> {
                         let result = Expression {
                             kind: ExpressionKind::Concat(annotated_parts),
                             ty: ty.clone(),
+                            span: None,
                         };
                         eprintln!("[BUG #76 ANNOTATE]   Returning annotated Concat with type: {:?}", result.ty);
                         return result;
@@ -8358,6 +8394,7 @@ impl<'hir> HirToMir<'hir> {
                         else_expr: annotated_else,
                     },
                     ty: ty.clone(),
+                    span: None,
                 };
                 eprintln!("[BUG #76 ANNOTATE]   Returning annotated Conditional with type: {:?}", result.ty);
                 return result;
@@ -8370,6 +8407,7 @@ impl<'hir> HirToMir<'hir> {
         let result = Expression {
             kind: expr.kind,
             ty: ty.clone(),
+            span: None,
         };
         eprintln!("[BUG #76 ANNOTATE]   Returning expression with updated type: {:?}", result.ty);
         result
@@ -13880,6 +13918,7 @@ impl<'hir> HirToMir<'hir> {
             let assignment = ContinuousAssign {
                 lhs: LValue::Port(output_port_ids[0]),
                 rhs: expr.clone(),
+                span: None,
             };
             module.assignments.push(assignment);
             eprintln!("    ✓ Assigned to single output port (id={})", output_port_ids[0].0);
@@ -13892,6 +13931,7 @@ impl<'hir> HirToMir<'hir> {
                 let assignment = ContinuousAssign {
                     lhs: LValue::Port(*port_id),
                     rhs: (*elem).clone(),
+                    span: None,
                 };
                 module.assignments.push(assignment);
                 eprintln!("    ✓ Assigned tuple element {} to output port (id={})", idx, port_id.0);
@@ -13923,6 +13963,7 @@ impl<'hir> HirToMir<'hir> {
                         let assignment = ContinuousAssign {
                             lhs: LValue::Port(*port_id),
                             rhs: elem_conditional,
+                            span: None,
                         };
                         module.assignments.push(assignment);
                         eprintln!("    ✓ Assigned conditional tuple element {} to output port (id={})", idx, port_id.0);
@@ -13933,6 +13974,7 @@ impl<'hir> HirToMir<'hir> {
                     let assignment = ContinuousAssign {
                         lhs: LValue::Port(output_port_ids[0]),
                         rhs: expr.clone(),
+                        span: None,
                     };
                     module.assignments.push(assignment);
                 }
@@ -13942,6 +13984,7 @@ impl<'hir> HirToMir<'hir> {
                 let assignment = ContinuousAssign {
                     lhs: LValue::Port(output_port_ids[0]),
                     rhs: expr.clone(),
+                    span: None,
                 };
                 module.assignments.push(assignment);
             }
@@ -13952,6 +13995,7 @@ impl<'hir> HirToMir<'hir> {
             let assignment = ContinuousAssign {
                 lhs: LValue::Port(output_port_ids[0]),
                 rhs: expr.clone(),
+                span: None,
             };
             module.assignments.push(assignment);
         }
@@ -13981,7 +14025,9 @@ impl<'hir> HirToMir<'hir> {
                         rhs: Expression {
                             kind: ExpressionKind::Literal(Value::Integer(0)),
                             ty: skalp_frontend::types::Type::Bit(Width::Fixed(32)),
+                            span: None,
                         },
+                        span: None,
                     };
                     module.assignments.push(assignment);
                 }
@@ -14035,6 +14081,7 @@ impl<'hir> HirToMir<'hir> {
                 direction: PortDirection::Input,
                 port_type,
                 physical_constraints: None,
+                span: None,
             };
 
             module.ports.push(port);
@@ -14059,6 +14106,7 @@ impl<'hir> HirToMir<'hir> {
                         direction: PortDirection::Output,
                         port_type,
                         physical_constraints: None,
+                        span: None,
                     };
 
                     module.ports.push(port);
@@ -14076,6 +14124,7 @@ impl<'hir> HirToMir<'hir> {
                     direction: PortDirection::Output,
                     port_type,
                     physical_constraints: None,
+                    span: None,
                 };
 
                 module.ports.push(port);
@@ -14247,6 +14296,7 @@ impl<'hir> HirToMir<'hir> {
                 signal_type: DataType::Bit(32),  // Placeholder - should infer from expression
                 initial: None,
                 clock_domain: None,
+                span: None,
             };
             module.signals.push(signal);
 
@@ -14258,6 +14308,7 @@ impl<'hir> HirToMir<'hir> {
                 name: unique_signal_name.clone(),  // Use unique name here too
                 var_type: DataType::Bit(32),  // Match the signal type
                 initial: None,
+                span: None,
             };
             module.variables.push(variable);
 
@@ -14289,6 +14340,7 @@ impl<'hir> HirToMir<'hir> {
                     let assignment = ContinuousAssign {
                         lhs: LValue::Signal(signal_id),
                         rhs: converted_expr,
+                        span: None,
                     };
                     module.assignments.push(assignment);
                     eprintln!("    ✓ Created assignment for '{}' (signal_id={})", let_stmt.name, signal_id.0);
@@ -14302,7 +14354,9 @@ impl<'hir> HirToMir<'hir> {
                         rhs: Expression {
                             kind: ExpressionKind::Literal(Value::Integer(0)),
                             ty: skalp_frontend::types::Type::Bit(Width::Fixed(32)),
+                            span: None,
                         },
+                        span: None,
                     };
                     module.assignments.push(assignment);
                 }
@@ -14428,6 +14482,7 @@ impl<'hir> HirToMir<'hir> {
                                 signal_type: DataType::Bit(32),
                                 initial: None,
                                 clock_domain: None,
+                                span: None,
                             };
                             module.signals.push(signal);
 
@@ -14437,6 +14492,7 @@ impl<'hir> HirToMir<'hir> {
                                 name: unique_signal_name.clone(),
                                 var_type: DataType::Bit(32),
                                 initial: None,
+                                span: None,
                             };
                             module.variables.push(variable);
 
@@ -14450,6 +14506,7 @@ impl<'hir> HirToMir<'hir> {
                                 let assignment = ContinuousAssign {
                                     lhs: LValue::Signal(signal_id),
                                     rhs: converted_expr,
+                                    span: None,
                                 };
                                 module.assignments.push(assignment);
                             }
@@ -14663,6 +14720,7 @@ impl<'hir> HirToMir<'hir> {
                         signal_type: DataType::Bit(32), // Placeholder - should extract element type
                         initial: None,
                         clock_domain: None,
+                        span: None,
                     };
                     module.signals.push(signal);
                     println!("🎯🎯🎯 DRAIN: Created tuple result signal '{}' (id={}) 🎯🎯🎯", signal_name, elem_signal_id.0);
@@ -14685,6 +14743,7 @@ impl<'hir> HirToMir<'hir> {
                     signal_type: data_type.clone(),
                     initial: None,
                     clock_domain: None,
+                    span: None,
                 };
                 module.signals.push(signal);
                 eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
@@ -14704,6 +14763,7 @@ impl<'hir> HirToMir<'hir> {
                 module: module_id,
                 connections,
                 parameters: HashMap::new(),
+                span: None,
             };
 
             module.instances.push(instance);
@@ -14758,6 +14818,7 @@ impl<'hir> HirToMir<'hir> {
                     signal_type,
                     initial: None,
                     clock_domain: None,
+                    span: None,
                 };
                 eprintln!(
                     "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output",
@@ -14845,6 +14906,7 @@ impl<'hir> HirToMir<'hir> {
                     .else_statements
                     .as_ref()
                     .map(|stmts| self.convert_statements(stmts)),
+                span: None,
             };
 
             // Build priority mux from if-else-if chain

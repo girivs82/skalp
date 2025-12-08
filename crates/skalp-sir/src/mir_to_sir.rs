@@ -245,6 +245,7 @@ impl<'a> MirToSirConverter<'a> {
                 sir_type: sir_type.clone(),
                 direction: direction.clone(),
                 clock_domain: None,
+                span: None,
             };
 
             if matches!(direction, PortDirection::Input) {
@@ -264,6 +265,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: is_sequential_port,
+                span: None,
             });
 
             // Create state element for sequential output ports
@@ -276,6 +278,7 @@ impl<'a> MirToSirConverter<'a> {
                         reset_value: None,
                         clock: String::new(),
                         reset: None,
+                        span: None,
                     },
                 );
             }
@@ -302,6 +305,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: is_register,
+                span: None,
             });
 
             if is_register {
@@ -313,6 +317,7 @@ impl<'a> MirToSirConverter<'a> {
                         reset_value: None,
                         clock: String::new(),
                         reset: None,
+                        span: None,
                     },
                 );
             }
@@ -338,6 +343,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: false, // Variables are never state elements
+                span: None,
             });
         }
     }
@@ -2302,6 +2308,7 @@ impl<'a> MirToSirConverter<'a> {
             }],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(sir_node);
@@ -2313,6 +2320,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: vec![],
+            span: None,
         });
 
         node_id
@@ -2623,6 +2631,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -2632,6 +2641,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(node);
@@ -2880,6 +2890,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -2889,6 +2900,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(node);
@@ -2931,6 +2943,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -2940,6 +2953,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3011,6 +3025,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -3020,6 +3035,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3128,6 +3144,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -3137,6 +3154,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![concat_output],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3198,6 +3216,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -3207,6 +3226,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         eprintln!("   🔗 Adding slice node {} to combinational_nodes", node_id);
@@ -3252,6 +3272,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -3261,6 +3282,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         eprintln!(
@@ -3300,6 +3322,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -3309,6 +3332,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         eprintln!(
@@ -3345,6 +3369,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false, // This is just a temporary signal, not a state element
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         let node = SirNode {
@@ -3354,6 +3379,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: Some(clock.to_string()),
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.sequential_nodes.push(node);
@@ -3373,6 +3399,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: Some(node_id),
                 fanout_nodes: Vec::new(),
                 is_state: false,
+                span: None,
             });
         }
 
@@ -3628,6 +3655,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         // Create a SignalRef node that directly references the input port
@@ -3640,6 +3668,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(node);
@@ -3697,6 +3726,7 @@ impl<'a> MirToSirConverter<'a> {
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
+            span: None,
         });
 
         // Create a signal reader node
@@ -3712,6 +3742,7 @@ impl<'a> MirToSirConverter<'a> {
             outputs: vec![output_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
+            span: None,
         };
 
         self.sir.combinational_nodes.push(node);
@@ -4022,6 +4053,7 @@ impl<'a> MirToSirConverter<'a> {
                     driver_node: None,
                     fanout_nodes: Vec::new(),
                     is_state: is_register,
+                    span: None,
                 });
 
                 if is_register {
@@ -4034,6 +4066,7 @@ impl<'a> MirToSirConverter<'a> {
                             reset_value: None,
                             clock: String::new(),
                             reset: None,
+                            span: None,
                         },
                     );
                 }
@@ -4059,6 +4092,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: false, // Variables are not registers
+                span: None,
             });
         }
 
@@ -4086,6 +4120,7 @@ impl<'a> MirToSirConverter<'a> {
                         driver_node: None,
                         fanout_nodes: Vec::new(),
                         is_state: false, // Input ports are not registers
+                        span: None,
                     });
                 }
             }
@@ -4587,6 +4622,7 @@ impl<'a> MirToSirConverter<'a> {
                                 }],
                                 clock_domain: Some(clock_signal.clone()),
                                 impl_style_hint: ImplStyleHint::default(),
+                                span: None,
                             };
 
                             self.sir.sequential_nodes.push(ff_node);
@@ -6383,6 +6419,7 @@ impl<'a> MirToSirConverter<'a> {
                                 frequency_hz: None,
                                 phase_offset: 0.0,
                                 state_elements: Vec::new(),
+                                span: None,
                             });
                     }
                 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use skalp_frontend::SourceSpan;
 use std::collections::{HashMap, HashSet};
 
 /// Implementation style hint for RTL synthesis
@@ -29,6 +30,9 @@ pub struct SirModule {
     /// Pre-computed topological order for all combinational nodes.
     /// This is computed once and stored for efficient simulation.
     pub sorted_combinational_node_ids: Vec<usize>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// Type information for SIR signals and ports
@@ -104,6 +108,9 @@ pub struct SirPort {
     pub sir_type: SirType,
     pub direction: PortDirection,
     pub clock_domain: Option<String>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +127,9 @@ pub struct SirSignal {
     pub driver_node: Option<usize>,
     pub fanout_nodes: Vec<usize>,
     pub is_state: bool,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +143,9 @@ pub struct SirNode {
     /// Used by RTL backends to select implementation architecture
     #[serde(default)]
     pub impl_style_hint: ImplStyleHint,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +278,9 @@ pub struct StateElement {
     pub reset_value: Option<u64>,
     pub clock: String,
     pub reset: Option<String>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,6 +289,9 @@ pub struct ClockDomain {
     pub frequency_hz: Option<u64>,
     pub phase_offset: f32,
     pub state_elements: Vec<String>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -294,6 +313,7 @@ impl SirModule {
             state_elements: HashMap::new(),
             clock_domains: HashMap::new(),
             sorted_combinational_node_ids: Vec::new(),
+            span: None,
         }
     }
 
