@@ -18,6 +18,7 @@ use crate::mir::{
     Assignment, AssignmentKind, ClockDomainId, DataType, Expression, ExpressionKind, LValue, Port,
     PortDirection, PortId, Signal, SignalId, StructType, Value,
 };
+use skalp_frontend::span::SourceSpan;
 
 /// Information about a flattened field
 #[derive(Debug, Clone)]
@@ -101,6 +102,29 @@ impl TypeFlattener {
         direction: PortDirection,
         physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
     ) -> (Vec<Port>, Vec<FlattenedField>) {
+        self.flatten_port_with_span(base_name, port_type, direction, physical_constraints, None)
+    }
+
+    /// Flatten a port with composite type into multiple scalar ports, with source span
+    ///
+    /// # Arguments
+    /// * `base_name` - Base name for the port (e.g., "vertex")
+    /// * `port_type` - Type to flatten (may be composite or scalar)
+    /// * `direction` - Port direction (Input/Output/InOut)
+    /// * `physical_constraints` - Optional physical constraints
+    /// * `span` - Optional source span (propagated to all flattened ports)
+    ///
+    /// # Returns
+    /// * Vector of flattened ports (all scalar types)
+    /// * Vector of flattened field metadata
+    pub fn flatten_port_with_span(
+        &mut self,
+        base_name: &str,
+        port_type: &DataType,
+        direction: PortDirection,
+        physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
+        span: Option<SourceSpan>,
+    ) -> (Vec<Port>, Vec<FlattenedField>) {
         let mut ports = Vec::new();
         let mut fields = Vec::new();
         self.flatten_port_recursive(
@@ -108,6 +132,7 @@ impl TypeFlattener {
             port_type,
             direction,
             physical_constraints.as_ref(),
+            span,
             vec![],
             &mut ports,
             &mut fields,
@@ -122,6 +147,7 @@ impl TypeFlattener {
     /// * `signal_type` - Type to flatten
     /// * `initial` - Optional initial value
     /// * `clock_domain` - Optional clock domain
+    /// * `span` - Optional source span (propagated to all flattened signals)
     ///
     /// # Returns
     /// * Vector of flattened signals (all scalar types)
@@ -133,6 +159,29 @@ impl TypeFlattener {
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
+        self.flatten_signal_with_span(base_name, signal_type, initial, clock_domain, None)
+    }
+
+    /// Flatten a signal with composite type into multiple scalar signals, with source span
+    ///
+    /// # Arguments
+    /// * `base_name` - Base name for the signal
+    /// * `signal_type` - Type to flatten
+    /// * `initial` - Optional initial value
+    /// * `clock_domain` - Optional clock domain
+    /// * `span` - Optional source span (propagated to all flattened signals)
+    ///
+    /// # Returns
+    /// * Vector of flattened signals (all scalar types)
+    /// * Vector of flattened field metadata
+    pub fn flatten_signal_with_span(
+        &mut self,
+        base_name: &str,
+        signal_type: &DataType,
+        initial: Option<Value>,
+        clock_domain: Option<ClockDomainId>,
+        span: Option<SourceSpan>,
+    ) -> (Vec<Signal>, Vec<FlattenedField>) {
         let mut signals = Vec::new();
         let mut fields = Vec::new();
         self.flatten_signal_recursive(
@@ -140,6 +189,7 @@ impl TypeFlattener {
             signal_type,
             initial,
             clock_domain,
+            span,
             vec![],
             &mut signals,
             &mut fields,
@@ -250,6 +300,7 @@ impl TypeFlattener {
         port_type: &DataType,
         direction: PortDirection,
         physical_constraints: Option<&skalp_frontend::hir::PhysicalConstraints>,
+        span: Option<SourceSpan>,
         field_path: Vec<String>,
         ports: &mut Vec<Port>,
         fields: &mut Vec<FlattenedField>,
@@ -266,6 +317,7 @@ impl TypeFlattener {
                         &field.field_type,
                         direction,
                         physical_constraints,
+                        span.clone(),
                         new_path,
                         ports,
                         fields,
@@ -292,6 +344,7 @@ impl TypeFlattener {
                         element_type,
                         direction,
                         physical_constraints,
+                        span.clone(),
                         new_path,
                         ports,
                         fields,
@@ -310,6 +363,7 @@ impl TypeFlattener {
                         port_type,
                         direction,
                         physical_constraints,
+                        span,
                         field_path,
                         ports,
                         fields,
@@ -326,6 +380,7 @@ impl TypeFlattener {
                             element_type,
                             direction,
                             physical_constraints,
+                            span.clone(),
                             new_path,
                             ports,
                             fields,
@@ -340,6 +395,7 @@ impl TypeFlattener {
                     &enum_type.base_type,
                     direction,
                     physical_constraints,
+                    span,
                     field_path,
                     ports,
                     fields,
@@ -355,6 +411,7 @@ impl TypeFlattener {
                         &first_field.field_type,
                         direction,
                         physical_constraints,
+                        span,
                         field_path,
                         ports,
                         fields,
@@ -366,6 +423,7 @@ impl TypeFlattener {
                         &DataType::Bit(1),
                         direction,
                         physical_constraints,
+                        span,
                         field_path,
                         ports,
                         fields,
@@ -379,6 +437,7 @@ impl TypeFlattener {
                     port_type,
                     direction,
                     physical_constraints,
+                    span,
                     field_path,
                     ports,
                     fields,
@@ -395,6 +454,7 @@ impl TypeFlattener {
         port_type: &DataType,
         direction: PortDirection,
         physical_constraints: Option<&skalp_frontend::hir::PhysicalConstraints>,
+        span: Option<SourceSpan>,
         field_path: Vec<String>,
         ports: &mut Vec<Port>,
         fields: &mut Vec<FlattenedField>,
@@ -408,7 +468,7 @@ impl TypeFlattener {
             direction,
             port_type: port_type.clone(),
             physical_constraints: physical_constraints.cloned(),
-            span: None,
+            span,
         };
         ports.push(port);
 
@@ -427,6 +487,7 @@ impl TypeFlattener {
         signal_type: &DataType,
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
+        span: Option<SourceSpan>,
         field_path: Vec<String>,
         signals: &mut Vec<Signal>,
         fields: &mut Vec<FlattenedField>,
@@ -443,6 +504,7 @@ impl TypeFlattener {
                         &field.field_type,
                         None, // Don't propagate initial value for struct fields
                         clock_domain,
+                        span.clone(),
                         new_path,
                         signals,
                         fields,
@@ -469,6 +531,7 @@ impl TypeFlattener {
                         element_type,
                         None,
                         clock_domain,
+                        span.clone(),
                         new_path,
                         signals,
                         fields,
@@ -487,6 +550,7 @@ impl TypeFlattener {
                         signal_type,
                         initial,
                         clock_domain,
+                        span,
                         field_path,
                         signals,
                         fields,
@@ -502,6 +566,7 @@ impl TypeFlattener {
                             element_type,
                             None,
                             clock_domain,
+                            span.clone(),
                             new_path,
                             signals,
                             fields,
@@ -516,6 +581,7 @@ impl TypeFlattener {
                     &enum_type.base_type,
                     initial,
                     clock_domain,
+                    span,
                     field_path,
                     signals,
                     fields,
@@ -531,6 +597,7 @@ impl TypeFlattener {
                         &first_field.field_type,
                         initial,
                         clock_domain,
+                        span,
                         field_path,
                         signals,
                         fields,
@@ -542,6 +609,7 @@ impl TypeFlattener {
                         &DataType::Bit(1),
                         initial,
                         clock_domain,
+                        span,
                         field_path,
                         signals,
                         fields,
@@ -555,6 +623,7 @@ impl TypeFlattener {
                     signal_type,
                     initial,
                     clock_domain,
+                    span,
                     field_path,
                     signals,
                     fields,
@@ -571,6 +640,7 @@ impl TypeFlattener {
         signal_type: &DataType,
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
+        span: Option<SourceSpan>,
         field_path: Vec<String>,
         signals: &mut Vec<Signal>,
         fields: &mut Vec<FlattenedField>,
@@ -584,7 +654,7 @@ impl TypeFlattener {
             signal_type: signal_type.clone(),
             initial,
             clock_domain,
-            span: None,
+            span,
         };
         signals.push(signal);
 

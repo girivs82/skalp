@@ -55,6 +55,9 @@ fn create_simple_entity() -> Hir {
                 physical_constraints: None,
             },
         ],
+        signals: vec![],
+        assignments: vec![],
+        span: None,
     };
 
     hir.entities.push(entity);
@@ -68,6 +71,7 @@ fn create_simple_entity() -> Hir {
             signal_type: HirType::Bit(8),
             initial_value: None,
             clock_domain: None,
+            span: None,
         }],
         variables: vec![],
         constants: vec![],

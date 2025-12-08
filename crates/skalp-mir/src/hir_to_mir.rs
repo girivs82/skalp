@@ -8,6 +8,7 @@ use crate::{ExpressionKind, Type};
 use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{self as hir, Hir};
+use skalp_frontend::span::SourceSpan;
 use skalp_frontend::types::Width;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -296,6 +297,7 @@ impl<'hir> HirToMir<'hir> {
                     &port_type,
                     direction,
                     hir_port.physical_constraints.clone(),
+                    None, // TODO: Add span to HirPort
                 );
 
                 // BUG #29 FIX: Track ALL flattened composite types, not just multi-field ones
@@ -345,6 +347,7 @@ impl<'hir> HirToMir<'hir> {
                     &signal_type,
                     initial,
                     clock_domain,
+                    hir_signal.span.clone(),
                 );
 
                 if !flattened_fields.is_empty() {
@@ -477,6 +480,7 @@ impl<'hir> HirToMir<'hir> {
                             &signal_type,
                             initial,
                             clock_domain,
+                            hir_signal.span.clone(),
                         );
                         // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
                         // Even single-field structs need mapping because field name != signal name
@@ -15120,11 +15124,12 @@ impl<'hir> HirToMir<'hir> {
         port_type: &DataType,
         direction: PortDirection,
         physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
+        span: Option<SourceSpan>,
     ) -> (Vec<Port>, Vec<FlattenedField>) {
         // Use shared TypeFlattener with current port ID counter
         let mut flattener = TypeFlattener::new(self.next_port_id);
         let (ports, type_fields) =
-            flattener.flatten_port(base_name, port_type, direction, physical_constraints);
+            flattener.flatten_port_with_span(base_name, port_type, direction, physical_constraints, span);
 
         // Update our port ID counter based on how many ports were created
         self.next_port_id += ports.len() as u32;
@@ -15152,11 +15157,12 @@ impl<'hir> HirToMir<'hir> {
         signal_type: &DataType,
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
+        span: Option<SourceSpan>,
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
         // Use shared TypeFlattener with current signal ID counter
         let mut flattener = TypeFlattener::new(self.next_signal_id);
         let (signals, type_fields) =
-            flattener.flatten_signal(base_name, signal_type, initial, clock_domain);
+            flattener.flatten_signal_with_span(base_name, signal_type, initial, clock_domain, span);
 
         // Update our signal ID counter based on how many signals were created
         self.next_signal_id += signals.len() as u32;

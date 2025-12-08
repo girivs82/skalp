@@ -15,6 +15,7 @@ fn create_module_with_unused() -> Mir {
         direction: PortDirection::Input,
         port_type: DataType::Logic(8),
         physical_constraints: None,
+        span: None,
     });
     module.ports.push(Port {
         id: PortId(1),
@@ -22,6 +23,7 @@ fn create_module_with_unused() -> Mir {
         direction: PortDirection::Output,
         port_type: DataType::Logic(8),
         physical_constraints: None,
+        span: None,
     });
 
     // Add signals - some used, some unused
@@ -31,6 +33,7 @@ fn create_module_with_unused() -> Mir {
         signal_type: DataType::Logic(8),
         clock_domain: None,
         initial: None,
+        span: None,
     });
     module.signals.push(Signal {
         id: SignalId(1),
@@ -38,6 +41,7 @@ fn create_module_with_unused() -> Mir {
         signal_type: DataType::Logic(8),
         clock_domain: None,
         initial: None,
+        span: None,
     });
 
     // Add variables - some used, some unused
@@ -46,12 +50,14 @@ fn create_module_with_unused() -> Mir {
         name: "used_var".to_string(),
         var_type: DataType::Logic(8),
         initial: None,
+        span: None,
     });
     module.variables.push(Variable {
         id: VariableId(1),
         name: "unused_var".to_string(),
         var_type: DataType::Logic(8),
         initial: None,
+        span: None,
     });
 
     // Create process that only uses some signals/variables
@@ -63,23 +69,27 @@ fn create_module_with_unused() -> Mir {
             statements: vec![
                 Statement::Assignment(Assignment {
                     lhs: LValue::Signal(SignalId(0)),
-                    rhs: Expression::Ref(LValue::Port(PortId(0))),
+                    rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(0)))),
                     kind: AssignmentKind::Blocking,
+                    span: None,
                 }),
                 Statement::Assignment(Assignment {
                     lhs: LValue::Variable(VariableId(0)),
-                    rhs: Expression::Ref(LValue::Signal(SignalId(0))),
+                    rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(0)))),
                     kind: AssignmentKind::Blocking,
+                    span: None,
                 }),
             ],
         },
+        span: None,
     };
     module.processes.push(process);
 
     // Continuous assignment using the used variable
     module.assignments.push(ContinuousAssign {
         lhs: LValue::Port(PortId(1)),
-        rhs: Expression::Ref(LValue::Variable(VariableId(0))),
+        rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Variable(VariableId(0)))),
+        span: None,
     });
 
     mir.add_module(module);
@@ -98,6 +108,7 @@ fn create_module_with_constants() -> Mir {
         direction: PortDirection::Output,
         port_type: DataType::Logic(8),
         physical_constraints: None,
+        span: None,
     });
 
     // Add signal
@@ -107,6 +118,7 @@ fn create_module_with_constants() -> Mir {
         signal_type: DataType::Logic(8),
         clock_domain: None,
         initial: None,
+        span: None,
     });
 
     // Create process with constant expressions
@@ -119,33 +131,38 @@ fn create_module_with_constants() -> Mir {
                 // 2 + 3 = 5
                 Statement::Assignment(Assignment {
                     lhs: LValue::Signal(SignalId(0)),
-                    rhs: Expression::Binary {
+                    rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Add,
-                        left: Box::new(Expression::Literal(Value::Integer(2))),
-                        right: Box::new(Expression::Literal(Value::Integer(3))),
-                    },
+                        left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(2)))),
+                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(3)))),
+                    }),
                     kind: AssignmentKind::Blocking,
+                    span: None,
                 }),
                 // Conditional with constant condition
                 Statement::If(IfStatement {
-                    condition: Expression::Literal(Value::Integer(1)), // Always true
+                    condition: Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(1))), // Always true
                     then_block: Block {
                         statements: vec![Statement::Assignment(Assignment {
                             lhs: LValue::Port(PortId(0)),
-                            rhs: Expression::Literal(Value::Integer(42)),
+                            rhs: Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(42))),
                             kind: AssignmentKind::Blocking,
+                            span: None,
                         })],
                     },
                     else_block: Some(Block {
                         statements: vec![Statement::Assignment(Assignment {
                             lhs: LValue::Port(PortId(0)),
-                            rhs: Expression::Literal(Value::Integer(0)),
+                            rhs: Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))),
                             kind: AssignmentKind::Blocking,
+                            span: None,
                         })],
                     }),
+                    span: None,
                 }),
             ],
         },
+        span: None,
     };
     module.processes.push(process);
 
@@ -184,8 +201,8 @@ fn test_constant_folding() {
 
     // Check that the binary expression was folded
     if let Statement::Assignment(assign) = &mir.modules[0].processes[0].body.statements[0] {
-        match &assign.rhs {
-            Expression::Literal(Value::Integer(n)) => {
+        match &assign.rhs.kind {
+            ExpressionKind::Literal(Value::Integer(n)) => {
                 assert_eq!(*n, 5); // 2 + 3 = 5
             }
             _ => panic!("Expected folded constant"),
@@ -206,6 +223,7 @@ fn test_constant_folding_arithmetic() {
         signal_type: DataType::Logic(8),
         clock_domain: None,
         initial: None,
+        span: None,
     });
 
     // Test various arithmetic operations
@@ -213,32 +231,35 @@ fn test_constant_folding_arithmetic() {
         // Test multiplication: 3 * 4 = 12
         Statement::Assignment(Assignment {
             lhs: LValue::Signal(SignalId(0)),
-            rhs: Expression::Binary {
+            rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                 op: BinaryOp::Mul,
-                left: Box::new(Expression::Literal(Value::Integer(3))),
-                right: Box::new(Expression::Literal(Value::Integer(4))),
-            },
+                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(3)))),
+                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(4)))),
+            }),
             kind: AssignmentKind::Blocking,
+            span: None,
         }),
         // Test division: 20 / 4 = 5
         Statement::Assignment(Assignment {
             lhs: LValue::Signal(SignalId(0)),
-            rhs: Expression::Binary {
+            rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                 op: BinaryOp::Div,
-                left: Box::new(Expression::Literal(Value::Integer(20))),
-                right: Box::new(Expression::Literal(Value::Integer(4))),
-            },
+                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(20)))),
+                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(4)))),
+            }),
             kind: AssignmentKind::Blocking,
+            span: None,
         }),
         // Test subtraction: 10 - 3 = 7
         Statement::Assignment(Assignment {
             lhs: LValue::Signal(SignalId(0)),
-            rhs: Expression::Binary {
+            rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                 op: BinaryOp::Sub,
-                left: Box::new(Expression::Literal(Value::Integer(10))),
-                right: Box::new(Expression::Literal(Value::Integer(3))),
-            },
+                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(10)))),
+                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(3)))),
+            }),
             kind: AssignmentKind::Blocking,
+            span: None,
         }),
     ];
 
@@ -247,6 +268,7 @@ fn test_constant_folding_arithmetic() {
         kind: ProcessKind::Combinational,
         sensitivity: SensitivityList::Always,
         body: Block { statements },
+        span: None,
     };
     module.processes.push(process);
     mir.add_module(module);
@@ -260,7 +282,7 @@ fn test_constant_folding_arithmetic() {
 
     // Check multiplication
     if let Statement::Assignment(assign) = &statements[0] {
-        if let Expression::Literal(Value::Integer(n)) = &assign.rhs {
+        if let ExpressionKind::Literal(Value::Integer(n)) = &assign.rhs.kind {
             assert_eq!(*n, 12);
         } else {
             panic!("Expected folded multiplication");
@@ -269,7 +291,7 @@ fn test_constant_folding_arithmetic() {
 
     // Check division
     if let Statement::Assignment(assign) = &statements[1] {
-        if let Expression::Literal(Value::Integer(n)) = &assign.rhs {
+        if let ExpressionKind::Literal(Value::Integer(n)) = &assign.rhs.kind {
             assert_eq!(*n, 5);
         } else {
             panic!("Expected folded division");
@@ -278,7 +300,7 @@ fn test_constant_folding_arithmetic() {
 
     // Check subtraction
     if let Statement::Assignment(assign) = &statements[2] {
-        if let Expression::Literal(Value::Integer(n)) = &assign.rhs {
+        if let ExpressionKind::Literal(Value::Integer(n)) = &assign.rhs.kind {
             assert_eq!(*n, 7);
         } else {
             panic!("Expected folded subtraction");
@@ -297,14 +319,15 @@ fn test_constant_folding_conditional() {
         signal_type: DataType::Logic(8),
         clock_domain: None,
         initial: None,
+        span: None,
     });
 
     // Test conditional expression with constant condition
-    let cond_expr = Expression::Conditional {
-        cond: Box::new(Expression::Literal(Value::Integer(1))), // true
-        then_expr: Box::new(Expression::Literal(Value::Integer(42))),
-        else_expr: Box::new(Expression::Literal(Value::Integer(0))),
-    };
+    let cond_expr = Expression::with_unknown_type(ExpressionKind::Conditional {
+        cond: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(1)))), // true
+        then_expr: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(42)))),
+        else_expr: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)))),
+    });
 
     let process = Process {
         id: ProcessId(0),
@@ -315,8 +338,10 @@ fn test_constant_folding_conditional() {
                 lhs: LValue::Signal(SignalId(0)),
                 rhs: cond_expr,
                 kind: AssignmentKind::Blocking,
+                span: None,
             })],
         },
+        span: None,
     };
     module.processes.push(process);
     mir.add_module(module);
@@ -327,7 +352,7 @@ fn test_constant_folding_conditional() {
 
     // Check that conditional was folded to the then branch
     if let Statement::Assignment(assign) = &mir.modules[0].processes[0].body.statements[0] {
-        if let Expression::Literal(Value::Integer(n)) = &assign.rhs {
+        if let ExpressionKind::Literal(Value::Integer(n)) = &assign.rhs.kind {
             assert_eq!(*n, 42); // Should select the then branch
         } else {
             panic!("Expected folded conditional");

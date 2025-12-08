@@ -172,6 +172,7 @@ mod tests {
                     port_type: DataType::Clock { domain: None },
                     direction: PortDirection::Input,
                     physical_constraints: None,
+                    span: None,
                 },
                 Port {
                     id: PortId(1),
@@ -179,6 +180,7 @@ mod tests {
                     port_type: DataType::Bit(32),
                     direction: PortDirection::Input,
                     physical_constraints: None,
+                    span: None,
                 },
             ],
             signals: vec![Signal {
@@ -187,12 +189,15 @@ mod tests {
                 signal_type: DataType::Bit(32),
                 initial: None,
                 clock_domain: None,
+                span: None,
             }],
             variables: vec![],
             processes: vec![],
             assignments: vec![],
             instances: vec![],
             clock_domains: vec![],
+            generate_blocks: vec![],
+            span: None,
         };
 
         let mir = Mir {
@@ -232,6 +237,7 @@ mod tests {
                 port_type: DataType::Struct(Box::new(struct_type)),
                 direction: PortDirection::Input,
                 physical_constraints: None,
+                span: None,
             }],
             signals: vec![],
             variables: vec![],
@@ -239,6 +245,8 @@ mod tests {
             assignments: vec![],
             instances: vec![],
             clock_domains: vec![],
+            generate_blocks: vec![],
+            span: None,
         };
 
         let mir = Mir {
@@ -275,12 +283,15 @@ mod tests {
                 signal_type: DataType::Vec3(Box::new(DataType::Float32)),
                 initial: None,
                 clock_domain: None,
+                span: None,
             }],
             variables: vec![],
             processes: vec![],
             assignments: vec![],
             instances: vec![],
             clock_domains: vec![],
+            generate_blocks: vec![],
+            span: None,
         };
 
         let mir = Mir {
@@ -317,6 +328,7 @@ mod tests {
                 port_type: DataType::Array(Box::new(DataType::Bit(8)), 16),
                 direction: PortDirection::Input,
                 physical_constraints: None,
+                span: None,
             }],
             signals: vec![Signal {
                 id: SignalId(0),
@@ -324,12 +336,15 @@ mod tests {
                 signal_type: DataType::Array(Box::new(DataType::Bit(32)), 4),
                 initial: None,
                 clock_domain: None,
+                span: None,
             }],
             variables: vec![],
             processes: vec![],
             assignments: vec![],
             instances: vec![],
             clock_domains: vec![],
+            generate_blocks: vec![],
+            span: None,
         };
 
         let mir = Mir {
@@ -357,6 +372,7 @@ mod tests {
                 ),
                 direction: PortDirection::Input,
                 physical_constraints: None,
+                span: None,
             }],
             signals: vec![],
             variables: vec![],
@@ -364,6 +380,8 @@ mod tests {
             assignments: vec![],
             instances: vec![],
             clock_domains: vec![],
+            generate_blocks: vec![],
+            span: None,
         };
 
         let mir = Mir {

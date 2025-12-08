@@ -245,7 +245,7 @@ impl<'a> MirToSirConverter<'a> {
                 sir_type: sir_type.clone(),
                 direction: direction.clone(),
                 clock_domain: None,
-                span: None,
+                span: port.span.clone(),
             };
 
             if matches!(direction, PortDirection::Input) {
@@ -265,7 +265,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: is_sequential_port,
-                span: None,
+                span: port.span.clone(),
             });
 
             // Create state element for sequential output ports
@@ -278,7 +278,7 @@ impl<'a> MirToSirConverter<'a> {
                         reset_value: None,
                         clock: String::new(),
                         reset: None,
-                        span: None,
+                        span: port.span.clone(),
                     },
                 );
             }
@@ -305,7 +305,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: is_register,
-                span: None,
+                span: signal.span.clone(),
             });
 
             if is_register {
@@ -317,7 +317,7 @@ impl<'a> MirToSirConverter<'a> {
                         reset_value: None,
                         clock: String::new(),
                         reset: None,
-                        span: None,
+                        span: signal.span.clone(),
                     },
                 );
             }
@@ -343,7 +343,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 is_state: false, // Variables are never state elements
-                span: None,
+                span: variable.span.clone(),
             });
         }
     }
