@@ -58,9 +58,11 @@ pub enum SyntaxKind {
     RiseKw,
     FallKw,
 
-    // Control Flow (2)
+    // Control Flow (4)
     MatchKw,
     ForKw,
+    GenerateKw,
+    StepKw,
 
     // Design Intent (3)
     IntentKw,
@@ -292,6 +294,9 @@ pub enum SyntaxKind {
     SequenceStmt,
     AssumeStmt,
     ExpectStmt,
+    GenerateForStmt,
+    GenerateIfStmt,
+    GenerateMatchStmt,
 
     // Temporal logic
     TemporalExpr,
@@ -317,6 +322,8 @@ pub enum SyntaxKind {
     FormalBlock,
     ProveStmt,
     InstanceDecl,
+    SeveritySpec,     // severity: Error/Warning/Info/Fatal specification
+    AssumeMacroStmt,  // Simple assume!(cond) statement (without property keyword)
     ConnectionList,
     Connection,
 
@@ -482,8 +489,8 @@ impl SyntaxKind {
             | TraitKw | ProtocolKw | WhereKw | SelfKw | SelfTypeKw
             // Event Control (2)
             | RiseKw | FallKw
-            // Control Flow (2)
-            | MatchKw | ForKw
+            // Control Flow (4)
+            | MatchKw | ForKw | GenerateKw | StepKw
             // Design Intent (3)
             | IntentKw | FlowKw | RequirementKw
             // Testbench Only (6)
@@ -604,9 +611,11 @@ impl SyntaxKind {
             RiseKw => "'rise'",
             FallKw => "'fall'",
 
-            // Control Flow (2)
+            // Control Flow (4)
             MatchKw => "'match'",
             ForKw => "'for'",
+            GenerateKw => "'generate'",
+            StepKw => "'step'",
 
             // Design Intent (3)
             IntentKw => "'intent'",
@@ -847,9 +856,11 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Rise => RiseKw,
             Token::Fall => FallKw,
 
-            // Control Flow (2)
+            // Control Flow (4)
             Token::Match => MatchKw,
             Token::For => ForKw,
+            Token::Generate => GenerateKw,
+            Token::Step => StepKw,
 
             // Design Intent (3)
             Token::Intent => IntentKw,

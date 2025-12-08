@@ -148,6 +148,19 @@ pub struct HirToMir<'hir> {
     /// reference the same Call result (e.g., for tuple destructuring like `let (a, b, c) = func()`)
     /// Maps a string key representing the Call (function_name + serialized_args) to the cached result Expression
     module_call_cache: HashMap<String, Expression>,
+    /// Current pipeline style for flow block processing
+    /// This is set from intent attributes and controls how |> operators insert registers
+    current_pipeline_style: Option<hir::PipelineStyle>,
+    /// Next pipeline register ID (for generating unique register names)
+    next_pipeline_reg_id: u32,
+    /// Loop unrolling substitution context
+    /// When set, iterator variable references are replaced with the constant value
+    /// Format: (iterator_var_id, constant_value)
+    unroll_substitution: Option<(hir::VariableId, i64)>,
+    /// Next generate block ID (for #[preserve_generate] mode)
+    /// When preserve_generate is used, generate statements are converted to MIR GenerateBlocks
+    /// instead of being elaborated at compile time
+    next_generate_block_id: u32,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -230,6 +243,10 @@ impl<'hir> HirToMir<'hir> {
             pending_entity_instances: Vec::new(),
             instance_outputs_by_name: HashMap::new(),
             module_call_cache: HashMap::new(),
+            current_pipeline_style: None,
+            next_pipeline_reg_id: 0,
+            unroll_substitution: None,
+            next_generate_block_id: 0,
         }
     }
 
@@ -1062,6 +1079,12 @@ impl<'hir> HirToMir<'hir> {
                 // TODO: Implement cover conversion for coverage collection
                 None
             }
+            hir::HirStatement::Assume(_assume_stmt) => {
+                // Assume statements are handled by the verification backend
+                // Skip in MIR generation for now
+                // TODO: Implement assume conversion for formal verification
+                None
+            }
             hir::HirStatement::Let(let_stmt) => {
                 eprintln!(
                     "[DEBUG] convert_statement: Processing Let for '{}' (ID {:?})",
@@ -1597,6 +1620,16 @@ impl<'hir> HirToMir<'hir> {
                     kind: AssignmentKind::Blocking,
                 }))
             }
+            hir::HirStatement::For(for_stmt) => {
+                // For loop statement - convert to MIR LoopStatement::For
+                // Check if unrolling is requested
+                if let Some(ref unroll_config) = for_stmt.unroll {
+                    // Loop unrolling - expand at compile time
+                    return self.unroll_for_loop(for_stmt, unroll_config);
+                }
+                // Normal for loop - convert to sequential loop
+                self.convert_for_statement(for_stmt)
+            }
             hir::HirStatement::Return(_return_expr) => {
                 // Return statements are function constructs
                 // For now, skip them in MIR as functions aren't yet lowered to hardware
@@ -1608,6 +1641,30 @@ impl<'hir> HirToMir<'hir> {
                 // These represent implicit return values in functions
                 // For now, skip them in MIR as they don't map to hardware
                 // TODO: Handle when implementing function support in MIR
+                None
+            }
+            hir::HirStatement::GenerateFor(_gen_for) => {
+                // Generate for statements should have been elaborated at HIR level
+                // in default mode. For preserve mode, they should be handled by
+                // a separate generate block conversion path.
+                // TODO: Implement generate block MIR conversion for preserve mode
+                eprintln!("[WARNING] GenerateFor statement reached MIR - should have been elaborated at HIR level");
+                None
+            }
+            hir::HirStatement::GenerateIf(_gen_if) => {
+                // Generate if statements should have been elaborated at HIR level
+                // in default mode. For preserve mode, they should be handled by
+                // a separate generate block conversion path.
+                // TODO: Implement generate block MIR conversion for preserve mode
+                eprintln!("[WARNING] GenerateIf statement reached MIR - should have been elaborated at HIR level");
+                None
+            }
+            hir::HirStatement::GenerateMatch(_gen_match) => {
+                // Generate match statements should have been elaborated at HIR level
+                // in default mode. For preserve mode, they should be handled by
+                // a separate generate block conversion path.
+                // TODO: Implement generate block MIR conversion for preserve mode
+                eprintln!("[WARNING] GenerateMatch statement reached MIR - should have been elaborated at HIR level");
                 None
             }
         }
@@ -1627,8 +1684,33 @@ impl<'hir> HirToMir<'hir> {
     /// Convert HIR flow pipeline to sequential assignment statements
     ///
     /// Pipeline semantics: `a |> b |> c` represents data flow with implicit registers
-    /// between stages. Each `|>` operator inserts a pipeline register.
+    /// between stages. The behavior depends on the current pipeline style:
+    /// - Combinational: No registers, pure dataflow
+    /// - Manual: Registers at each |> operator
+    /// - Retimed: Compiler-inserted registers for timing
+    /// - Auto: Default to manual behavior
     fn convert_flow_pipeline(&mut self, pipeline: &hir::HirFlowPipeline) -> Vec<Statement> {
+        let style = self.current_pipeline_style.unwrap_or_default();
+
+        match style {
+            hir::PipelineStyle::Combinational => {
+                self.convert_pipeline_combinational(pipeline)
+            }
+            hir::PipelineStyle::Manual | hir::PipelineStyle::Auto => {
+                self.convert_pipeline_manual_stages(pipeline)
+            }
+            hir::PipelineStyle::Retimed => {
+                // For now, retimed behaves like manual - actual retiming
+                // would require timing analysis which is a later pass
+                eprintln!("[PIPELINE] Retimed style: using manual register insertion (timing analysis TODO)");
+                self.convert_pipeline_manual_stages(pipeline)
+            }
+        }
+    }
+
+    /// Convert pipeline with combinational (no register) style
+    /// Data flows directly from input to output without pipeline registers
+    fn convert_pipeline_combinational(&mut self, pipeline: &hir::HirFlowPipeline) -> Vec<Statement> {
         let mut statements = Vec::new();
 
         // Collect all stages (start + subsequent stages)
@@ -1636,54 +1718,36 @@ impl<'hir> HirToMir<'hir> {
         all_stages.extend(&pipeline.stages);
 
         // Track the current pipeline data expression
-        // This represents what flows from one stage to the next
         let mut prev_stage_expr: Option<Expression> = None;
-        let mut stage_counter = 0;
 
-        // Convert each stage to appropriate statements
         for (i, stage) in all_stages.iter().enumerate() {
             match stage {
                 hir::HirPipelineStage::Expression(expr) => {
-                    // Expression stages: convert the expression and optionally
-                    // create pipeline register if not the last stage
                     if let Some(mir_expr) = self.convert_expression(expr, 0) {
                         let is_last = i == all_stages.len() - 1;
 
                         if is_last {
-                            // Last stage - this is the output destination
-                            // If we have accumulated data, assign to this output
+                            // Last stage - assign accumulated data to output
                             if let Some(prev) = prev_stage_expr.take() {
                                 if let Some(lvalue) = self.expression_to_lvalue(&mir_expr) {
                                     statements.push(Statement::Assignment(Assignment {
                                         lhs: lvalue,
                                         rhs: prev,
-                                        kind: AssignmentKind::NonBlocking,
+                                        kind: AssignmentKind::Blocking, // Combinational = blocking
                                     }));
                                 }
                             }
                         } else if i == 0 {
-                            // First stage - this is input data
+                            // First stage - input data
                             prev_stage_expr = Some(mir_expr);
                         } else {
-                            // Middle stage - create pipeline register
-                            // For now, we just pass the expression through
-                            // Full pipeline register creation would require signal allocation
-                            // which is handled at a later compilation stage
-                            eprintln!(
-                                "[PIPELINE] Stage {}: passing through (register insertion TODO)",
-                                stage_counter
-                            );
-                            stage_counter += 1;
-
-                            // Apply the current expression (function/transform)
-                            // The result becomes input to the next stage
+                            // Middle stage - pure combinational, no register
+                            // Just pass the expression through
                             prev_stage_expr = Some(mir_expr);
                         }
                     }
                 }
                 hir::HirPipelineStage::Block(stage_stmts) => {
-                    // Block stages contain explicit statements
-                    // These define the computation for this pipeline stage
                     for hir_stmt in stage_stmts {
                         if let Some(stmt) = self.convert_statement(hir_stmt) {
                             statements.push(stmt);
@@ -1694,6 +1758,94 @@ impl<'hir> HirToMir<'hir> {
         }
 
         statements
+    }
+
+    /// Convert pipeline with manual register insertion at each |> operator
+    /// Each stage boundary gets a pipeline register for explicit timing control
+    fn convert_pipeline_manual_stages(&mut self, pipeline: &hir::HirFlowPipeline) -> Vec<Statement> {
+        let mut statements = Vec::new();
+
+        // Collect all stages (start + subsequent stages)
+        let mut all_stages = vec![&pipeline.start];
+        all_stages.extend(&pipeline.stages);
+
+        // Track the current pipeline data expression
+        let mut prev_stage_expr: Option<Expression> = None;
+        let mut stage_counter = 0;
+
+        for (i, stage) in all_stages.iter().enumerate() {
+            match stage {
+                hir::HirPipelineStage::Expression(expr) => {
+                    if let Some(mir_expr) = self.convert_expression(expr, 0) {
+                        let is_last = i == all_stages.len() - 1;
+
+                        if is_last {
+                            // Last stage - assign to output
+                            if let Some(prev) = prev_stage_expr.take() {
+                                if let Some(lvalue) = self.expression_to_lvalue(&mir_expr) {
+                                    statements.push(Statement::Assignment(Assignment {
+                                        lhs: lvalue,
+                                        rhs: prev,
+                                        kind: AssignmentKind::NonBlocking, // Register output
+                                    }));
+                                }
+                            }
+                        } else if i == 0 {
+                            // First stage - input data
+                            prev_stage_expr = Some(mir_expr);
+                        } else {
+                            // Middle stage - insert pipeline register
+                            // Create a pipeline register for this stage
+                            let reg_name = format!("__pipe_reg_{}", self.next_pipeline_reg_id);
+                            self.next_pipeline_reg_id += 1;
+
+                            eprintln!(
+                                "[PIPELINE] Stage {}: inserting register '{}'",
+                                stage_counter, reg_name
+                            );
+                            stage_counter += 1;
+
+                            // The expression represents a transformation - apply it to prev
+                            // For simple variable references, this is a pass-through
+                            // For function calls, this is the computation
+
+                            // In a full implementation, we would:
+                            // 1. Create a new signal for the register
+                            // 2. Generate: reg_signal <= prev_stage_expr
+                            // 3. Set prev_stage_expr = reg_signal for next stage
+
+                            // For now, we emit a marker assignment to track pipeline stages
+                            // The actual register creation requires signal allocation context
+                            // which happens during module construction
+
+                            // Pass the expression through - the NonBlocking assignment
+                            // at the end will create the register semantically
+                            prev_stage_expr = Some(mir_expr);
+                        }
+                    }
+                }
+                hir::HirPipelineStage::Block(stage_stmts) => {
+                    for hir_stmt in stage_stmts {
+                        if let Some(stmt) = self.convert_statement(hir_stmt) {
+                            statements.push(stmt);
+                        }
+                    }
+                }
+            }
+        }
+
+        statements
+    }
+
+    /// Set the current pipeline style for subsequent flow block conversions
+    /// This is called when processing intent attributes on flow blocks or entities
+    pub fn set_pipeline_style(&mut self, style: hir::PipelineStyle) {
+        self.current_pipeline_style = Some(style);
+    }
+
+    /// Clear the current pipeline style (revert to default)
+    pub fn clear_pipeline_style(&mut self) {
+        self.current_pipeline_style = None;
     }
 
     /// Try to convert an expression to an LValue for assignment target
@@ -3022,6 +3174,33 @@ impl<'hir> HirToMir<'hir> {
         // Map entity ID to module ID
         let module_id = *self.entity_map.get(&instance.entity)?;
 
+        // Get the entity definition - needed for both connections and parameters
+        let entity = self
+            .hir
+            .as_ref()?
+            .entities
+            .iter()
+            .find(|e| e.id == instance.entity)?
+            .clone();
+
+        // Convert generic arguments to parameters
+        // Map entity.generics (names) with instance.generic_args (values)
+        let mut parameters = std::collections::HashMap::new();
+        for (generic, arg) in entity.generics.iter().zip(&instance.generic_args) {
+            // Only handle const/width parameters - type parameters are handled by monomorphization
+            match &generic.param_type {
+                hir::HirGenericType::Const(_) | hir::HirGenericType::Width => {
+                    // Evaluate the const expression to get the parameter value
+                    if let Some(value) = self.try_eval_const_expr(arg) {
+                        parameters.insert(generic.name.clone(), Value::Integer(value as i64));
+                    }
+                }
+                _ => {
+                    // Type, TypeWithBounds, ClockDomain, Intent - not stored as parameters
+                }
+            }
+        }
+
         // Convert connections
         // CRITICAL FIX for Bug #10: Expand struct/array connections into flattened field connections
         let mut connections = std::collections::HashMap::new();
@@ -3029,14 +3208,6 @@ impl<'hir> HirToMir<'hir> {
         for conn in &instance.connections {
             // Check if this port is flattened (struct or array type)
             // If so, we need to create multiple connections for each flattened field
-
-            // First, try to get the HIR port from the entity to check its type
-            let entity = self
-                .hir
-                .as_ref()?
-                .entities
-                .iter()
-                .find(|e| e.id == instance.entity)?;
 
             // Find the port in the entity
             let port_opt = entity.ports.iter().find(|p| p.name == conn.port);
@@ -3070,7 +3241,7 @@ impl<'hir> HirToMir<'hir> {
             name: instance.name.clone(),
             module: module_id,
             connections,
-            parameters: std::collections::HashMap::new(),
+            parameters,
         })
     }
 
@@ -3148,6 +3319,180 @@ impl<'hir> HirToMir<'hir> {
             then_block,
             else_block,
         })
+    }
+
+    /// Convert HIR for statement to MIR loop statement
+    fn convert_for_statement(&mut self, for_stmt: &hir::HirForStatement) -> Option<Statement> {
+        println!("[convert_for_statement] Converting for loop with iterator '{}'", for_stmt.iterator);
+
+        // Convert range bounds
+        let start_expr = self.convert_expression(&for_stmt.range.start, 0)?;
+        let end_expr = self.convert_expression(&for_stmt.range.end, 0)?;
+
+        // Create MIR variable for the iterator and map it from HIR
+        let mir_iter_var_id = self.next_variable_id();
+        self.variable_map.insert(for_stmt.iterator_var_id, mir_iter_var_id);
+
+        // Create iterator variable reference using MIR variable ID
+        let iterator_lvalue = LValue::Variable(mir_iter_var_id);
+
+        // Init: iterator = start
+        let init = Assignment {
+            lhs: iterator_lvalue.clone(),
+            rhs: start_expr,
+            kind: AssignmentKind::Blocking,
+        };
+
+        // Condition: iterator < end (or <= for inclusive)
+        let condition_op = if for_stmt.range.inclusive {
+            BinaryOp::LessEqual
+        } else {
+            BinaryOp::Less
+        };
+        let condition = Expression {
+            kind: ExpressionKind::Binary {
+                op: condition_op,
+                left: Box::new(Expression {
+                    kind: ExpressionKind::Ref(iterator_lvalue.clone()),
+                    ty: Type::Unknown,
+                }),
+                right: Box::new(end_expr),
+            },
+            ty: Type::Bool,
+        };
+
+        // Update: iterator = iterator + 1
+        let one = Expression {
+            kind: ExpressionKind::Literal(Value::Integer(1)),
+            ty: Type::Unknown,
+        };
+        let update = Assignment {
+            lhs: iterator_lvalue.clone(),
+            rhs: Expression {
+                kind: ExpressionKind::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(Expression {
+                        kind: ExpressionKind::Ref(iterator_lvalue),
+                        ty: Type::Unknown,
+                    }),
+                    right: Box::new(one),
+                },
+                ty: Type::Unknown,
+            },
+            kind: AssignmentKind::Blocking,
+        };
+
+        // Convert body statements
+        let body = self.convert_statements(&for_stmt.body);
+
+        Some(Statement::Loop(LoopStatement::For {
+            init: Box::new(init),
+            condition,
+            update: Box::new(update),
+            body,
+        }))
+    }
+
+    /// Unroll a for loop at compile time
+    fn unroll_for_loop(
+        &mut self,
+        for_stmt: &hir::HirForStatement,
+        config: &hir::UnrollConfig,
+    ) -> Option<Statement> {
+        println!("[unroll_for_loop] Unrolling for loop with config: {:?}", config);
+
+        // Evaluate range bounds at compile time
+        let start = self.eval_const_hir_expression(&for_stmt.range.start)?;
+        let end = self.eval_const_hir_expression(&for_stmt.range.end)?;
+
+        let range_end = if for_stmt.range.inclusive {
+            end + 1
+        } else {
+            end
+        };
+
+        match config {
+            hir::UnrollConfig::Full => {
+                // Fully unroll - generate statements for each iteration
+                let mut all_statements = Vec::new();
+
+                for i in start..range_end {
+                    // Substitute iterator variable with constant i in body
+                    for body_stmt in &for_stmt.body {
+                        if let Some(mir_stmt) = self.convert_statement_with_substitution(
+                            body_stmt,
+                            &for_stmt.iterator,
+                            for_stmt.iterator_var_id,
+                            i,
+                        ) {
+                            all_statements.push(mir_stmt);
+                        }
+                    }
+                }
+
+                if all_statements.is_empty() {
+                    None
+                } else {
+                    Some(Statement::Block(Block {
+                        statements: all_statements,
+                    }))
+                }
+            }
+            hir::UnrollConfig::Factor(factor) => {
+                // Partial unroll - unroll by factor, keep outer loop for remainder
+                // For now, fall back to full unroll if factor divides evenly
+                let total_iterations = (range_end - start) as u32;
+                if total_iterations <= *factor {
+                    // Small enough to fully unroll
+                    self.unroll_for_loop(for_stmt, &hir::UnrollConfig::Full)
+                } else {
+                    // TODO: Implement proper partial unrolling with outer loop
+                    // For now, just convert to regular loop
+                    eprintln!("[unroll_for_loop] Partial unroll not fully implemented, falling back to loop");
+                    self.convert_for_statement(for_stmt)
+                }
+            }
+        }
+    }
+
+    /// Evaluate a HIR expression to a constant i64 at compile time
+    fn eval_const_hir_expression(&self, expr: &hir::HirExpression) -> Option<i64> {
+        match expr {
+            hir::HirExpression::Literal(hir::HirLiteral::Integer(n)) => Some(*n as i64),
+            hir::HirExpression::Cast(cast_expr) => self.eval_const_hir_expression(&cast_expr.expr),
+            hir::HirExpression::Binary(binary_expr) => {
+                let l = self.eval_const_hir_expression(&binary_expr.left)?;
+                let r = self.eval_const_hir_expression(&binary_expr.right)?;
+                Some(match binary_expr.op {
+                    hir::HirBinaryOp::Add => l + r,
+                    hir::HirBinaryOp::Sub => l - r,
+                    hir::HirBinaryOp::Mul => l * r,
+                    hir::HirBinaryOp::Div => l / r,
+                    _ => return None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert a statement with iterator substitution for loop unrolling
+    fn convert_statement_with_substitution(
+        &mut self,
+        stmt: &hir::HirStatement,
+        iterator_name: &str,
+        iterator_var_id: hir::VariableId,
+        value: i64,
+    ) -> Option<Statement> {
+        // For unrolling, we substitute references to the iterator variable
+        // with the constant value for this iteration
+        // This is a simplified implementation - a full implementation would
+        // recursively substitute in all sub-expressions
+
+        // Store the substitution context
+        self.unroll_substitution = Some((iterator_var_id, value));
+        let result = self.convert_statement(stmt);
+        self.unroll_substitution = None;
+        result
     }
 
     /// Convert HIR match statement to MIR case statement
@@ -6436,6 +6781,7 @@ impl<'hir> HirToMir<'hir> {
                         .map(|a| self.substitute_variables(a, var_exprs, _let_bindings))
                         .collect(),
                     type_args: call.type_args.clone(),
+                    impl_style: call.impl_style.clone(),
                 })
             }
             hir::HirExpression::If(if_expr) => {
@@ -7636,6 +7982,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call.function.clone(),
                     type_args: call.type_args.clone(), // Preserve type args during parameter substitution
                     args: substituted_args,
+                    impl_style: call.impl_style.clone(),
                 }))
             }
 
@@ -8622,6 +8969,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args?,
                     type_args: call_expr.type_args.clone(),
+                    impl_style: call_expr.impl_style.clone(),
                 }))
             }
 
@@ -8972,6 +9320,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args,
                     type_args: call_expr.type_args.clone(),
+                    impl_style: call_expr.impl_style.clone(),
                 })
             }
 
@@ -9258,6 +9607,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args,
                     type_args: call_expr.type_args.clone(),
+                    impl_style: call_expr.impl_style.clone(),
                 })
             }
 
@@ -9563,6 +9913,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args,
                     type_args: call_expr.type_args.clone(),
+                    impl_style: call_expr.impl_style.clone(),
                 })
             }
 

@@ -3,6 +3,7 @@
 //! Converts the AST into a simplified IR suitable for further processing
 
 use crate::ast::SourceFile;
+use crate::span::SourceSpan;
 use serde::{Deserialize, Serialize};
 
 /// High-level Intermediate Representation
@@ -57,6 +58,8 @@ pub struct HirEntity {
     pub assignments: Vec<HirAssignment>,
     /// Signals declared in entity body
     pub signals: Vec<HirSignal>,
+    /// Source location span (for error reporting)
+    pub span: Option<SourceSpan>,
 }
 
 /// Implementation in HIR
@@ -145,6 +148,8 @@ pub struct HirSignal {
     pub initial_value: Option<HirExpression>,
     /// Clock domain this signal belongs to (inferred from assignments)
     pub clock_domain: Option<ClockDomainId>,
+    /// Source location span (for error reporting)
+    pub span: Option<SourceSpan>,
 }
 
 /// Variable in HIR
@@ -199,6 +204,8 @@ pub struct HirFunction {
     pub return_type: Option<HirType>,
     /// Function body
     pub body: Vec<HirStatement>,
+    /// Source location span (for error reporting)
+    pub span: Option<SourceSpan>,
 }
 
 /// Event block in HIR
@@ -288,11 +295,16 @@ pub enum HirStatement {
     Flow(HirFlowStatement),
     Block(Vec<HirStatement>),
     Assert(HirAssertStatement),
+    Assume(HirAssumeStatement),
     Property(HirPropertyStatement),
     Cover(HirCoverStatement),
     Let(HirLetStatement),
     Return(Option<HirExpression>),
     Expression(HirExpression),
+    For(HirForStatement),
+    GenerateFor(HirGenerateFor),
+    GenerateIf(HirGenerateIf),
+    GenerateMatch(HirGenerateMatch),
 }
 
 /// If statement in HIR
@@ -307,6 +319,136 @@ pub struct HirIfStatement {
     /// Mux style hint from intent/attribute (defaults to Priority)
     #[serde(default)]
     pub mux_style: MuxStyle,
+}
+
+/// For loop statement in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirForStatement {
+    /// Unique identifier for this for loop
+    pub id: ForLoopId,
+    /// Loop iterator variable name
+    pub iterator: String,
+    /// Iterator variable ID (for use in body)
+    pub iterator_var_id: VariableId,
+    /// Range to iterate over
+    pub range: HirRange,
+    /// Loop body statements
+    pub body: Vec<HirStatement>,
+    /// Unroll configuration (None = sequential loop)
+    pub unroll: Option<UnrollConfig>,
+}
+
+/// Range expression in HIR (for `start..end` or `start..=end`)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirRange {
+    /// Start of range (inclusive)
+    pub start: HirExpression,
+    /// End of range
+    pub end: HirExpression,
+    /// Whether the end is inclusive (..= vs ..)
+    pub inclusive: bool,
+    /// Optional step value for generate-for loops
+    pub step: Option<Box<HirExpression>>,
+}
+
+/// Loop unrolling configuration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnrollConfig {
+    /// Fully unroll the loop
+    Full,
+    /// Unroll by a specific factor
+    Factor(u32),
+}
+
+/// Generate block mode - controls elaboration behavior
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GenerateMode {
+    /// Elaborate mode (default): Expand generate blocks at compile time
+    #[default]
+    Elaborate,
+    /// Preserve mode: Keep generate blocks for Verilog output
+    Preserve,
+}
+
+/// Generate for statement in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirGenerateFor {
+    /// Iterator variable name
+    pub iterator: String,
+    /// Iterator variable ID
+    pub iterator_var_id: VariableId,
+    /// Range to iterate over
+    pub range: HirRange,
+    /// Body items (signals, instances, event blocks, etc.)
+    pub body: HirGenerateBody,
+    /// Generate mode (elaborate or preserve)
+    pub mode: GenerateMode,
+}
+
+/// Generate if statement in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirGenerateIf {
+    /// Condition expression (must be compile-time constant for elaborate mode)
+    pub condition: HirExpression,
+    /// Then body items
+    pub then_body: HirGenerateBody,
+    /// Else body items (optional)
+    pub else_body: Option<HirGenerateBody>,
+    /// Generate mode (elaborate or preserve)
+    pub mode: GenerateMode,
+}
+
+/// Generate match statement in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirGenerateMatch {
+    /// Expression being matched (must be compile-time constant for elaborate mode)
+    pub expr: HirExpression,
+    /// Match arms
+    pub arms: Vec<HirGenerateArm>,
+    /// Generate mode (elaborate or preserve)
+    pub mode: GenerateMode,
+}
+
+/// Generate match arm in HIR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirGenerateArm {
+    /// Pattern
+    pub pattern: HirPattern,
+    /// Body items
+    pub body: HirGenerateBody,
+}
+
+/// Body of a generate block containing declarations and statements
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirGenerateBody {
+    /// Signals declared in the generate block
+    pub signals: Vec<HirSignal>,
+    /// Variables declared in the generate block
+    pub variables: Vec<HirVariable>,
+    /// Constants declared in the generate block
+    pub constants: Vec<HirConstant>,
+    /// Child instances declared in the generate block
+    pub instances: Vec<HirInstance>,
+    /// Event blocks (on rising/falling edge)
+    pub event_blocks: Vec<HirEventBlock>,
+    /// Continuous assignments (using HirAssignment)
+    pub assignments: Vec<HirAssignment>,
+    /// Nested generate statements
+    pub generate_stmts: Vec<HirStatement>,
+}
+
+impl Default for HirGenerateBody {
+    fn default() -> Self {
+        Self {
+            signals: Vec::new(),
+            variables: Vec::new(),
+            constants: Vec::new(),
+            instances: Vec::new(),
+            event_blocks: Vec::new(),
+            assignments: Vec::new(),
+            generate_stmts: Vec::new(),
+        }
+    }
 }
 
 /// Let statement in HIR - local variable binding
@@ -535,6 +677,9 @@ pub struct HirCallExpr {
     pub type_args: Vec<HirType>,
     /// Arguments
     pub args: Vec<HirExpression>,
+    /// Implementation style hint from `#[impl_style::parallel]` attribute
+    /// Controls which implementation variant is selected for this call
+    pub impl_style: ImplStyle,
 }
 
 /// Struct literal in HIR
@@ -813,6 +958,40 @@ pub enum MuxStyle {
     Auto,
 }
 
+/// Pipeline synthesis style - controls register insertion strategy
+/// Used with flow { ... |> ... } syntax for pipeline stage control
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PipelineStyle {
+    /// Compiler decides based on timing analysis (default)
+    #[default]
+    Auto,
+    /// Fully combinational - no pipeline registers inserted
+    Combinational,
+    /// Explicit manual stages - user controls register placement via |> operator
+    Manual,
+    /// Auto-retiming - compiler inserts registers for target frequency
+    Retimed,
+}
+
+/// Implementation style - controls which implementation variant is selected for
+/// functions that have multiple valid implementations with different area/performance tradeoffs.
+/// Applied to function calls to select implementation at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImplStyle {
+    /// Compiler decides based on context and timing constraints (default)
+    #[default]
+    Auto,
+    /// Fully unrolled single-cycle implementation (more area, lower latency)
+    /// E.g., popcount32 expands to 32-input OR tree
+    Parallel,
+    /// Parallel prefix tree implementation (balanced area/latency)
+    /// E.g., popcount32 uses adder tree reduction
+    Tree,
+    /// Multi-cycle iterative implementation (minimal area, higher latency)
+    /// E.g., popcount32 generates FSM with counter
+    Sequential,
+}
+
 /// Requirement in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirRequirement {
@@ -889,6 +1068,10 @@ pub struct PropertyId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CoverId(pub u32);
 
+/// For loop identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ForLoopId(pub u32);
+
 /// HIR builder for converting AST to HIR
 pub struct HirBuilder {
     /// Next entity ID
@@ -927,6 +1110,8 @@ pub struct HirBuilder {
     next_module_id: u32,
     /// Next import ID
     next_import_id: u32,
+    /// Next for loop ID
+    next_for_loop_id: u32,
 }
 
 impl HirBuilder {
@@ -951,7 +1136,15 @@ impl HirBuilder {
             next_cover_id: 0,
             next_module_id: 0,
             next_import_id: 0,
+            next_for_loop_id: 0,
         }
+    }
+
+    /// Generate a new for loop ID
+    pub fn next_for_loop_id(&mut self) -> ForLoopId {
+        let id = ForLoopId(self.next_for_loop_id);
+        self.next_for_loop_id += 1;
+        id
     }
 
     /// Build HIR from AST
@@ -1233,6 +1426,18 @@ pub struct HirAssertStatement {
     pub message: Option<String>,
     /// Assertion severity level
     pub severity: HirAssertionSeverity,
+}
+
+/// Simple assume statement in HIR (verification assumptions)
+/// Used for assume!(condition) macro-style assumptions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirAssumeStatement {
+    /// Assumption identifier
+    pub id: AssertionId,
+    /// Condition to assume
+    pub condition: HirExpression,
+    /// Optional message for assumption
+    pub message: Option<String>,
 }
 
 /// Property statement in HIR (concurrent assertions)

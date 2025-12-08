@@ -4,9 +4,11 @@
 
 use crate::hir::*;
 use crate::lexer::{parse_binary, parse_float, parse_hex};
+use crate::span::{LineIndex, SourceSpan};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Maximum recursion depth to prevent stack overflow
 /// Note: Deeply nested expressions should use intermediate let bindings instead
@@ -55,6 +57,7 @@ pub struct HirBuilderContext {
     next_property_id: u32,
     next_cover_id: u32,
     next_import_id: u32,
+    next_for_loop_id: u32,
 
     /// Symbol table for name resolution
     symbols: SymbolTable,
@@ -78,6 +81,36 @@ pub struct HirBuilderContext {
     /// Pending MuxStyle hint from most recent attribute
     /// Set when we see `#[parallel]` before a statement
     pending_mux_style: Option<MuxStyle>,
+
+    /// Intent definitions: maps intent name to its PipelineStyle constraint
+    /// Built from `intent pipelined = pipeline_style::manual;` declarations
+    intent_pipeline_styles: HashMap<String, PipelineStyle>,
+
+    /// Pending PipelineStyle hint from most recent attribute
+    /// Set when we see `#[pipelined]` before a flow block
+    pending_pipeline_style: Option<PipelineStyle>,
+
+    /// Pending unroll config from most recent attribute
+    /// Set when we see `#[unroll]` or `#[unroll(N)]` before a for loop
+    pending_unroll_config: Option<UnrollConfig>,
+
+    /// Intent definitions: maps intent name to its ImplStyle constraint
+    /// Built from `intent fast = impl_style::parallel;` declarations
+    intent_impl_styles: HashMap<String, ImplStyle>,
+
+    /// Pending ImplStyle hint from most recent attribute
+    /// Set when we see `#[impl_style::parallel]` before a let statement with function call
+    pending_impl_style: Option<ImplStyle>,
+
+    /// Pending preserve_generate flag from most recent attribute
+    /// Set when we see `#[preserve_generate]` before a generate statement
+    pending_preserve_generate: Option<bool>,
+
+    /// Line index for converting byte offsets to line:column positions
+    line_index: Option<LineIndex>,
+
+    /// Source file path (for error reporting)
+    source_file: Option<PathBuf>,
 }
 
 /// Symbol table for name resolution
@@ -151,6 +184,7 @@ impl HirBuilderContext {
             next_property_id: 0,
             next_cover_id: 0,
             next_import_id: 0,
+            next_for_loop_id: 0,
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
@@ -158,7 +192,36 @@ impl HirBuilderContext {
             recursion_depth: 0,
             intent_mux_styles: HashMap::new(),
             pending_mux_style: None,
+            intent_pipeline_styles: HashMap::new(),
+            pending_pipeline_style: None,
+            pending_unroll_config: None,
+            intent_impl_styles: HashMap::new(),
+            pending_impl_style: None,
+            pending_preserve_generate: None,
+            line_index: None,
+            source_file: None,
         }
+    }
+
+    /// Create a new HIR builder context with source information for span tracking
+    pub fn with_source(source: &str, file: Option<PathBuf>) -> Self {
+        let mut ctx = Self::new();
+        ctx.line_index = Some(LineIndex::new(source));
+        ctx.source_file = file;
+        ctx
+    }
+
+    /// Create a span from syntax node's text range
+    fn make_span(&self, node: &SyntaxNode) -> Option<SourceSpan> {
+        let line_index = self.line_index.as_ref()?;
+        let range = node.text_range();
+        let start = u32::from(range.start()) as usize;
+        let end = u32::from(range.end()) as usize;
+        let mut span = SourceSpan::from_offset_range(start, end, line_index);
+        if let Some(ref file) = self.source_file {
+            span = span.with_file(file.clone());
+        }
+        Some(span)
     }
 
     /// Pre-register entities from merged HIR (for handling imports)
@@ -491,6 +554,7 @@ impl HirBuilderContext {
                                     function: name,
                                     type_args: vec![],
                                     args,
+                                    impl_style: ImplStyle::default(),
                                 }))
                             } else {
                                 None
@@ -536,6 +600,7 @@ impl HirBuilderContext {
                                     signal_type: let_stmt.var_type.clone(),
                                     initial_value: None,
                                     clock_domain: None,
+                                    span: None,
                                 };
                                 signals.push(signal);
 
@@ -592,6 +657,7 @@ impl HirBuilderContext {
             clock_domains,
             signals,
             assignments,
+            span: self.make_span(node),
         })
     }
 
@@ -956,6 +1022,7 @@ impl HirBuilderContext {
             signal_type,
             initial_value,
             clock_domain: None, // Will be inferred during clock domain analysis
+            span: self.make_span(node),
         })
     }
 
@@ -1091,6 +1158,7 @@ impl HirBuilderContext {
             params,
             return_type,
             body,
+            span: self.make_span(node),
         })
     }
 
@@ -1328,6 +1396,11 @@ impl HirBuilderContext {
                         println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
                     }
                 }
+                SyntaxKind::ForStmt => {
+                    if let Some(for_stmt) = self.build_for_statement(&child) {
+                        statements.push(HirStatement::For(for_stmt));
+                    }
+                }
                 SyntaxKind::MatchStmt => {
                     if let Some(match_stmt) = self.build_match_statement(&child) {
                         statements.push(HirStatement::Match(match_stmt));
@@ -1341,6 +1414,11 @@ impl HirBuilderContext {
                 SyntaxKind::AssertStmt => {
                     if let Some(assert_stmt) = self.build_assert_statement(&child) {
                         statements.push(HirStatement::Assert(assert_stmt));
+                    }
+                }
+                SyntaxKind::AssumeMacroStmt => {
+                    if let Some(assume_stmt) = self.build_assume_macro_statement(&child) {
+                        statements.push(HirStatement::Assume(assume_stmt));
                     }
                 }
                 SyntaxKind::PropertyStmt => {
@@ -1414,9 +1492,13 @@ impl HirBuilderContext {
                     .map(HirStatement::Assignment)
             }
             SyntaxKind::IfStmt => self.build_if_statement(node).map(HirStatement::If),
+            SyntaxKind::ForStmt => self.build_for_statement(node).map(HirStatement::For),
             SyntaxKind::MatchStmt => self.build_match_statement(node).map(HirStatement::Match),
             SyntaxKind::FlowStmt => self.build_flow_statement(node).map(HirStatement::Flow),
             SyntaxKind::AssertStmt => self.build_assert_statement(node).map(HirStatement::Assert),
+            SyntaxKind::AssumeMacroStmt => {
+                self.build_assume_macro_statement(node).map(HirStatement::Assume)
+            }
             SyntaxKind::PropertyStmt => self
                 .build_property_statement(node)
                 .map(HirStatement::Property),
@@ -1527,6 +1609,7 @@ impl HirBuilderContext {
                                                 function: nested_func_name,
                                                 type_args: Vec::new(), // TODO Phase 1: Parse from AST
                                                 args: nested_args,
+                                                impl_style: ImplStyle::default(),
                                             });
                                             args.push(nested_call);
                                             skip_next = true; // Skip the CallExpr in next iteration
@@ -1549,6 +1632,7 @@ impl HirBuilderContext {
                                 function: func_name,
                                 type_args: Vec::new(), // TODO Phase 1: Parse from AST
                                 args,
+                                impl_style: ImplStyle::default(),
                             });
                             return Some(HirStatement::Expression(call_expr));
                         }
@@ -1585,6 +1669,18 @@ impl HirBuilderContext {
             SyntaxKind::BlockStmt => {
                 let block_stmts = self.build_statements(node);
                 Some(HirStatement::Block(block_stmts))
+            }
+            SyntaxKind::GenerateForStmt => {
+                // Generate for statement - elaborates by default, preserves with #[preserve_generate]
+                self.build_generate_for_statement(node)
+            }
+            SyntaxKind::GenerateIfStmt => {
+                // Generate if statement - evaluates condition at compile time by default
+                self.build_generate_if_statement(node)
+            }
+            SyntaxKind::GenerateMatchStmt => {
+                // Generate match statement - evaluates at compile time by default
+                self.build_generate_match_statement(node)
             }
             _ => None,
         };
@@ -1962,6 +2058,7 @@ impl HirBuilderContext {
                             function: method_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
                             args,
+                            impl_style: ImplStyle::default(),
                         });
 
                         // Skip both the FieldExpr and CallExpr
@@ -2164,6 +2261,589 @@ impl HirBuilderContext {
             else_statements,
             mux_style,
         })
+    }
+
+    /// Build a for loop statement from a ForStmt node
+    /// Parser creates: ForStmt -> ForKw -> Ident -> InKw -> RangeExpr -> LBrace -> [body] -> RBrace
+    fn build_for_statement(&mut self, node: &SyntaxNode) -> Option<HirForStatement> {
+        println!("[build_for_statement] Starting - node children:");
+        for child in node.children() {
+            println!("  child: {:?}", child.kind());
+        }
+
+        // Extract the iterator variable name (Ident token that is a direct child)
+        let iterator = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)?
+            .text()
+            .to_string();
+        println!("[build_for_statement] Iterator variable: {}", iterator);
+
+        // Create a variable ID for the iterator
+        let iterator_var_id = self.next_variable_id();
+        // Register the iterator variable in the current scope
+        self.symbols.variables.insert(iterator.clone(), iterator_var_id);
+
+        // Find and build the range expression
+        let range_node = node
+            .children()
+            .find(|c| c.kind() == SyntaxKind::RangeExpr)?;
+        let range = self.build_range_expression(&range_node)?;
+        println!("[build_for_statement] Built range: inclusive={}", range.inclusive);
+
+        // Build the body statements from child statements within the for loop
+        // The body statements are between LBrace and RBrace
+        let mut body = Vec::new();
+        let mut in_body = false;
+        for child in node.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::LBrace => {
+                    in_body = true;
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::RBrace => {
+                    in_body = false;
+                }
+                rowan::NodeOrToken::Node(n) if in_body => {
+                    // Build statement from node
+                    if let Some(stmt) = self.build_statement(n) {
+                        body.push(stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+        println!("[build_for_statement] Built {} body statements", body.len());
+
+        // Check for unroll attribute (will be set by process_attribute if #[unroll] was present)
+        // For now, unroll is None - we'll add attribute handling later
+        let unroll = self.pending_unroll_config.take();
+
+        let id = self.next_for_loop_id();
+
+        Some(HirForStatement {
+            id,
+            iterator,
+            iterator_var_id,
+            range,
+            body,
+            unroll,
+        })
+    }
+
+    /// Build a range expression from a RangeExpr node
+    /// Parser creates: RangeExpr -> expr -> (DotDot | DotDotEq) -> expr
+    fn build_range_expression(&mut self, node: &SyntaxNode) -> Option<HirRange> {
+        // Get all expression children (first is start, second is end)
+        let expr_nodes: Vec<_> = node
+            .children()
+            .filter(|c| {
+                matches!(
+                    c.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::ParenExpr
+                )
+            })
+            .collect();
+
+        if expr_nodes.len() < 2 {
+            println!("[build_range_expression] Expected 2 expressions, found {}", expr_nodes.len());
+            return None;
+        }
+
+        let start = self.build_expression(&expr_nodes[0])?;
+        let end = self.build_expression(&expr_nodes[1])?;
+
+        // Check if inclusive (..= vs ..)
+        let inclusive = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .any(|t| t.kind() == SyntaxKind::DotDotEq);
+
+        Some(HirRange {
+            start,
+            end,
+            inclusive,
+            step: None,
+        })
+    }
+
+    /// Build a range expression with optional step from a parent node (for generate-for)
+    /// The parent_node is the GenerateForStmt, and we look for a StepKw followed by an expression
+    fn build_range_expression_with_step(
+        &mut self,
+        range_node: &SyntaxNode,
+        parent_node: &SyntaxNode,
+    ) -> Option<HirRange> {
+        // Build the basic range first
+        let mut range = self.build_range_expression(range_node)?;
+
+        // Look for step in the parent node (GenerateForStmt)
+        // The parser puts: RangeExpr, optional StepKw, optional step expression, then LBrace
+        let mut found_step_kw = false;
+        for elem in parent_node.children_with_tokens() {
+            match elem {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::StepKw => {
+                    found_step_kw = true;
+                }
+                rowan::NodeOrToken::Node(n) if found_step_kw => {
+                    // This should be the step expression
+                    if matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::ParenExpr
+                    ) {
+                        if let Some(step_expr) = self.build_expression(&n) {
+                            range.step = Some(Box::new(step_expr));
+                        }
+                    }
+                    break; // Only take first expression after step
+                }
+                _ => {}
+            }
+        }
+
+        Some(range)
+    }
+
+    /// Build a generate for statement from a GenerateForStmt node
+    /// In elaboration mode (default), this expands the loop at compile time.
+    /// In preserve mode (#[preserve_generate]), this creates a HirGenerateFor that
+    /// will be emitted as a Verilog generate block.
+    fn build_generate_for_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
+        eprintln!("[build_generate_for_statement] Starting");
+
+        // Check for preserve_generate attribute
+        let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
+
+        // Extract the iterator variable name (Ident token)
+        let iterator = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)?
+            .text()
+            .to_string();
+        eprintln!("[build_generate_for_statement] Iterator variable: {}", iterator);
+
+        // Create a variable ID for the iterator
+        let iterator_var_id = self.next_variable_id();
+        self.symbols.variables.insert(iterator.clone(), iterator_var_id);
+
+        // Find and build the range expression (with optional step)
+        let range_node = node
+            .children()
+            .find(|c| c.kind() == SyntaxKind::RangeExpr)?;
+        let range = self.build_range_expression_with_step(&range_node, node)?;
+        eprintln!("[build_generate_for_statement] Built range: inclusive={}, has_step={}", range.inclusive, range.step.is_some());
+
+        // Build the body statements
+        let mut body_stmts = Vec::new();
+        let mut in_body = false;
+        for child in node.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::LBrace => {
+                    in_body = true;
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::RBrace => {
+                    in_body = false;
+                }
+                rowan::NodeOrToken::Node(n) if in_body => {
+                    if let Some(stmt) = self.build_statement(n) {
+                        body_stmts.push(stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+        eprintln!("[build_generate_for_statement] Built {} body statements", body_stmts.len());
+
+        if preserve_mode {
+            // Preserve mode: return HirGenerateFor for Verilog generate block
+            Some(HirStatement::GenerateFor(HirGenerateFor {
+                iterator,
+                iterator_var_id,
+                range,
+                body: HirGenerateBody {
+                    signals: Vec::new(),
+                    variables: Vec::new(),
+                    constants: Vec::new(),
+                    instances: Vec::new(),
+                    event_blocks: Vec::new(),
+                    assignments: Vec::new(),
+                    generate_stmts: body_stmts,
+                },
+                mode: GenerateMode::Preserve,
+            }))
+        } else {
+            // Elaboration mode: try to expand the loop at compile time
+            self.elaborate_generate_for(&iterator, iterator_var_id, &range, &body_stmts)
+        }
+    }
+
+    /// Elaborate a generate for loop by expanding it at compile time
+    fn elaborate_generate_for(
+        &mut self,
+        _iterator: &str,
+        _iterator_var_id: VariableId,
+        range: &HirRange,
+        body_stmts: &[HirStatement],
+    ) -> Option<HirStatement> {
+        // Try to evaluate the range bounds at compile time
+        let start_val = self.try_eval_const_expr(&range.start)?;
+        let end_val = self.try_eval_const_expr(&range.end)?;
+
+        let mut expanded_stmts = Vec::new();
+        let end_exclusive = if range.inclusive { end_val + 1 } else { end_val };
+
+        for _i in start_val..end_exclusive {
+            // For each iteration, clone the body statements
+            // TODO: Implement proper iterator substitution
+            for stmt in body_stmts {
+                expanded_stmts.push(stmt.clone());
+            }
+        }
+
+        if expanded_stmts.is_empty() {
+            None
+        } else if expanded_stmts.len() == 1 {
+            Some(expanded_stmts.into_iter().next().unwrap())
+        } else {
+            Some(HirStatement::Block(expanded_stmts))
+        }
+    }
+
+    /// Try to evaluate a constant expression at compile time
+    fn try_eval_const_expr(&self, expr: &HirExpression) -> Option<i64> {
+        match expr {
+            HirExpression::Literal(lit) => {
+                match lit {
+                    HirLiteral::Integer(n) => Some(*n as i64),
+                    _ => None,
+                }
+            }
+            HirExpression::Binary(bin) => {
+                let left = self.try_eval_const_expr(&bin.left)?;
+                let right = self.try_eval_const_expr(&bin.right)?;
+                match bin.op {
+                    HirBinaryOp::Add => Some(left + right),
+                    HirBinaryOp::Sub => Some(left - right),
+                    HirBinaryOp::Mul => Some(left * right),
+                    HirBinaryOp::Div => Some(left / right),
+                    _ => None,
+                }
+            }
+            HirExpression::Unary(un) => {
+                let operand = self.try_eval_const_expr(&un.operand)?;
+                match un.op {
+                    HirUnaryOp::Negate => Some(-operand),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a generate if statement from a GenerateIfStmt node
+    fn build_generate_if_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
+        eprintln!("[build_generate_if_statement] Starting");
+
+        let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
+
+        // Find the condition expression
+        let condition_node = node
+            .children()
+            .find(|c| {
+                matches!(
+                    c.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::ParenExpr
+                )
+            })?;
+        let condition = self.build_expression(&condition_node)?;
+
+        // Build then and else branches
+        let mut then_stmts = Vec::new();
+        let mut else_stmts = Vec::new();
+        let mut in_then = false;
+        let mut in_else = false;
+        let mut brace_depth = 0;
+
+        for child in node.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::LBrace => {
+                    brace_depth += 1;
+                    if brace_depth == 1 && !in_else {
+                        in_then = true;
+                    }
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::RBrace => {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
+                        in_then = false;
+                    }
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::ElseKw => {
+                    in_else = true;
+                }
+                rowan::NodeOrToken::Node(n) if in_then && brace_depth == 1 => {
+                    if let Some(stmt) = self.build_statement(n) {
+                        then_stmts.push(stmt);
+                    }
+                }
+                rowan::NodeOrToken::Node(n) if in_else && brace_depth == 1 => {
+                    if let Some(stmt) = self.build_statement(n) {
+                        else_stmts.push(stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if preserve_mode {
+            // Preserve mode: return HirGenerateIf for Verilog generate block
+            Some(HirStatement::GenerateIf(HirGenerateIf {
+                condition,
+                then_body: HirGenerateBody {
+                    signals: Vec::new(),
+                    variables: Vec::new(),
+                    constants: Vec::new(),
+                    instances: Vec::new(),
+                    event_blocks: Vec::new(),
+                    assignments: Vec::new(),
+                    generate_stmts: then_stmts,
+                },
+                else_body: if else_stmts.is_empty() {
+                    None
+                } else {
+                    Some(HirGenerateBody {
+                        signals: Vec::new(),
+                        variables: Vec::new(),
+                        constants: Vec::new(),
+                        instances: Vec::new(),
+                        event_blocks: Vec::new(),
+                        assignments: Vec::new(),
+                        generate_stmts: else_stmts,
+                    })
+                },
+                mode: GenerateMode::Preserve,
+            }))
+        } else {
+            // Elaboration mode: try to evaluate condition at compile time
+            if let Some(cond_val) = self.try_eval_const_bool(&condition) {
+                let selected_stmts = if cond_val { then_stmts } else { else_stmts };
+                if selected_stmts.is_empty() {
+                    None
+                } else if selected_stmts.len() == 1 {
+                    Some(selected_stmts.into_iter().next().unwrap())
+                } else {
+                    Some(HirStatement::Block(selected_stmts))
+                }
+            } else {
+                self.errors.push(HirError {
+                    message: "generate if condition must be evaluable at compile time".to_string(),
+                    location: None,
+                });
+                None
+            }
+        }
+    }
+
+    /// Try to evaluate a boolean expression at compile time
+    fn try_eval_const_bool(&self, expr: &HirExpression) -> Option<bool> {
+        match expr {
+            HirExpression::Literal(HirLiteral::Boolean(b)) => Some(*b),
+            HirExpression::Binary(bin) => {
+                match bin.op {
+                    HirBinaryOp::Equal => {
+                        let left = self.try_eval_const_expr(&bin.left)?;
+                        let right = self.try_eval_const_expr(&bin.right)?;
+                        Some(left == right)
+                    }
+                    HirBinaryOp::NotEqual => {
+                        let left = self.try_eval_const_expr(&bin.left)?;
+                        let right = self.try_eval_const_expr(&bin.right)?;
+                        Some(left != right)
+                    }
+                    HirBinaryOp::Less => {
+                        let left = self.try_eval_const_expr(&bin.left)?;
+                        let right = self.try_eval_const_expr(&bin.right)?;
+                        Some(left < right)
+                    }
+                    HirBinaryOp::LessEqual => {
+                        let left = self.try_eval_const_expr(&bin.left)?;
+                        let right = self.try_eval_const_expr(&bin.right)?;
+                        Some(left <= right)
+                    }
+                    HirBinaryOp::Greater => {
+                        let left = self.try_eval_const_expr(&bin.left)?;
+                        let right = self.try_eval_const_expr(&bin.right)?;
+                        Some(left > right)
+                    }
+                    HirBinaryOp::GreaterEqual => {
+                        let left = self.try_eval_const_expr(&bin.left)?;
+                        let right = self.try_eval_const_expr(&bin.right)?;
+                        Some(left >= right)
+                    }
+                    HirBinaryOp::And => {
+                        let left = self.try_eval_const_bool(&bin.left)?;
+                        let right = self.try_eval_const_bool(&bin.right)?;
+                        Some(left && right)
+                    }
+                    HirBinaryOp::Or => {
+                        let left = self.try_eval_const_bool(&bin.left)?;
+                        let right = self.try_eval_const_bool(&bin.right)?;
+                        Some(left || right)
+                    }
+                    _ => None,
+                }
+            }
+            HirExpression::Unary(un) if matches!(un.op, HirUnaryOp::Not) => {
+                let operand = self.try_eval_const_bool(&un.operand)?;
+                Some(!operand)
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a generate match statement from a GenerateMatchStmt node
+    fn build_generate_match_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
+        eprintln!("[build_generate_match_statement] Starting");
+
+        let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
+
+        // Find the match expression
+        let expr_node = node
+            .children()
+            .find(|c| {
+                matches!(
+                    c.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::ParenExpr
+                )
+            })?;
+        let match_expr = self.build_expression(&expr_node)?;
+
+        // Build match arms
+        let mut arms = Vec::new();
+        for child in node.children() {
+            if child.kind() == SyntaxKind::MatchArm {
+                if let Some(arm) = self.build_generate_match_arm(&child) {
+                    arms.push(arm);
+                }
+            }
+        }
+
+        if preserve_mode {
+            // Preserve mode: return HirGenerateMatch for Verilog generate case
+            Some(HirStatement::GenerateMatch(HirGenerateMatch {
+                expr: match_expr,
+                arms: arms.into_iter().map(|(pattern, stmts)| {
+                    HirGenerateArm {
+                        pattern,
+                        body: HirGenerateBody {
+                            signals: Vec::new(),
+                            variables: Vec::new(),
+                            constants: Vec::new(),
+                            instances: Vec::new(),
+                            event_blocks: Vec::new(),
+                            assignments: Vec::new(),
+                            generate_stmts: stmts,
+                        },
+                    }
+                }).collect(),
+                mode: GenerateMode::Preserve,
+            }))
+        } else {
+            // Elaboration mode: try to evaluate match expression at compile time
+            if let Some(match_val) = self.try_eval_const_expr(&match_expr) {
+                // Find matching arm
+                for (pattern, stmts) in arms {
+                    if self.pattern_matches(&pattern, match_val) {
+                        if stmts.is_empty() {
+                            return None;
+                        } else if stmts.len() == 1 {
+                            return Some(stmts.into_iter().next().unwrap());
+                        } else {
+                            return Some(HirStatement::Block(stmts));
+                        }
+                    }
+                }
+                None
+            } else {
+                self.errors.push(HirError {
+                    message: "generate match expression must be evaluable at compile time".to_string(),
+                    location: None,
+                });
+                None
+            }
+        }
+    }
+
+    /// Build a generate match arm
+    fn build_generate_match_arm(&mut self, node: &SyntaxNode) -> Option<(HirPattern, Vec<HirStatement>)> {
+        // Get the pattern
+        let pattern_node = node
+            .children()
+            .find(|c| {
+                matches!(
+                    c.kind(),
+                    SyntaxKind::LiteralPattern
+                        | SyntaxKind::IdentPattern
+                        | SyntaxKind::WildcardPattern
+                )
+            })?;
+        let pattern = self.build_pattern(&pattern_node)?;
+
+        // Get the arm body statements
+        let mut stmts = Vec::new();
+        let mut in_body = false;
+        for child in node.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::LBrace => {
+                    in_body = true;
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::RBrace => {
+                    in_body = false;
+                }
+                rowan::NodeOrToken::Node(n) if in_body => {
+                    if let Some(stmt) = self.build_statement(n) {
+                        stmts.push(stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Some((pattern, stmts))
+    }
+
+    /// Check if a pattern matches a value (for compile-time evaluation)
+    fn pattern_matches(&self, pattern: &HirPattern, value: i64) -> bool {
+        match pattern {
+            HirPattern::Literal(lit) => {
+                match lit {
+                    HirLiteral::Integer(n) => *n as i64 == value,
+                    _ => false,
+                }
+            }
+            HirPattern::Wildcard => true,
+            HirPattern::Variable(_) => true, // Variable patterns always match
+            _ => false,
+        }
     }
 
     /// Build let statement(s) from a LetStmt node, handling tuple destructuring
@@ -2779,6 +3459,59 @@ impl HirBuilderContext {
             condition,
             message,
             severity: HirAssertionSeverity::Error, // Default severity
+        })
+    }
+
+    /// Build assume macro statement (assume!(condition) or assume!(condition, "message"))
+    fn build_assume_macro_statement(&mut self, node: &SyntaxNode) -> Option<HirAssumeStatement> {
+        let id = self.next_assertion_id();
+
+        // Find the condition expression (first expression)
+        let expressions: Vec<_> = node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::PathExpr
+                )
+            })
+            .collect();
+
+        let condition = if let Some(expr_node) = expressions.first() {
+            self.build_expression(expr_node)?
+        } else {
+            // Default to a literal false if no condition is found
+            HirExpression::Literal(HirLiteral::Boolean(false))
+        };
+
+        // Check for optional message (second expression)
+        let message = if expressions.len() > 1 {
+            if let Some(expr) = self.build_expression(&expressions[1]) {
+                match expr {
+                    HirExpression::Literal(HirLiteral::String(s)) => Some(s),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Some(HirAssumeStatement {
+            id,
+            condition,
+            message,
         })
     }
 
@@ -3555,6 +4288,7 @@ impl HirBuilderContext {
                             function: method_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
                             args,
+                            impl_style: ImplStyle::default(),
                         }));
                     }
                 }
@@ -3672,10 +4406,14 @@ impl HirBuilderContext {
             i += 1;
         }
 
+        // Consume pending impl_style from attribute (e.g., #[impl_style::parallel])
+        let impl_style = self.pending_impl_style.take().unwrap_or_default();
+
         Some(HirExpression::Call(HirCallExpr {
             function,
             type_args, // Phase 1: Extracted from AST
             args,
+            impl_style,
         }))
     }
 
@@ -5042,6 +5780,11 @@ impl HirBuilderContext {
                         println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
                     }
                 }
+                SyntaxKind::ForStmt => {
+                    if let Some(for_stmt) = self.build_for_statement(&child) {
+                        statements.push(HirStatement::For(for_stmt));
+                    }
+                }
                 SyntaxKind::MatchStmt => {
                     if let Some(match_stmt) = self.build_match_statement(&child) {
                         statements.push(HirStatement::Match(match_stmt));
@@ -5477,12 +6220,23 @@ impl HirBuilderContext {
         let name = self.extract_name(node)?;
 
         // Check for single-line intent syntax: `intent parallel = mux_style::parallel;`
+        // or `intent pipelined = pipeline_style::manual;`
         // This creates an IntentValue node containing the value expression
         if let Some(intent_value) = node.first_child_of_kind(SyntaxKind::IntentValue) {
             // Extract the intent value path (e.g., "mux_style::parallel")
             if let Some(mux_style) = self.extract_mux_style_from_intent_value(&intent_value) {
                 // Store this intent's mux_style for later lookup
                 self.intent_mux_styles.insert(name.clone(), mux_style);
+            }
+            // Extract pipeline_style (e.g., "pipeline_style::manual")
+            if let Some(pipeline_style) = self.extract_pipeline_style_from_intent_value(&intent_value) {
+                // Store this intent's pipeline_style for later lookup
+                self.intent_pipeline_styles.insert(name.clone(), pipeline_style);
+            }
+            // Extract impl_style (e.g., "impl_style::parallel")
+            if let Some(impl_style) = self.extract_impl_style_from_intent_value(&intent_value) {
+                // Store this intent's impl_style for later lookup
+                self.intent_impl_styles.insert(name.clone(), impl_style);
             }
 
             // Single-line intents don't have traditional constraints
@@ -5545,19 +6299,101 @@ impl HirBuilderContext {
         None
     }
 
-    /// Process an Attribute node and set pending_mux_style if applicable
-    /// Called when we see `#[parallel]` or `#[mux_style::parallel]` before a statement
+    /// Extract PipelineStyle from single-line intent value like `pipeline_style::manual`
+    fn extract_pipeline_style_from_intent_value(&self, node: &SyntaxNode) -> Option<PipelineStyle> {
+        // Collect all identifier tokens from the intent value
+        let tokens: Vec<String> = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .map(|token| token.text().to_string())
+            .collect();
+
+        // Check for pipeline_style::manual or pipeline_style::combinational patterns
+        if tokens.len() >= 2 && tokens[0] == "pipeline_style" {
+            match tokens[1].as_str() {
+                "auto" => return Some(PipelineStyle::Auto),
+                "combinational" => return Some(PipelineStyle::Combinational),
+                "manual" => return Some(PipelineStyle::Manual),
+                "retimed" => return Some(PipelineStyle::Retimed),
+                _ => {}
+            }
+        }
+
+        // Also check for direct intent name references (e.g., `pipelined` alone)
+        // This supports composition: `intent fast = pipelined + parallel;`
+        if tokens.len() == 1 {
+            if let Some(&style) = self.intent_pipeline_styles.get(&tokens[0]) {
+                return Some(style);
+            }
+        }
+
+        None
+    }
+
+    /// Extract ImplStyle from single-line intent value like `impl_style::parallel`
+    fn extract_impl_style_from_intent_value(&self, node: &SyntaxNode) -> Option<ImplStyle> {
+        // Collect all identifier tokens from the intent value
+        let tokens: Vec<String> = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .map(|token| token.text().to_string())
+            .collect();
+
+        // Check for impl_style::parallel or impl_style::tree patterns
+        if tokens.len() >= 2 && tokens[0] == "impl_style" {
+            match tokens[1].as_str() {
+                "auto" => return Some(ImplStyle::Auto),
+                "parallel" => return Some(ImplStyle::Parallel),
+                "tree" => return Some(ImplStyle::Tree),
+                "sequential" => return Some(ImplStyle::Sequential),
+                _ => {}
+            }
+        }
+
+        // Also check for direct intent name references (e.g., `fast_impl` alone)
+        // This supports composition: `intent fast = impl_style::parallel;`
+        if tokens.len() == 1 {
+            if let Some(&style) = self.intent_impl_styles.get(&tokens[0]) {
+                return Some(style);
+            }
+        }
+
+        None
+    }
+
+    /// Process an Attribute node and set pending_mux_style/pending_pipeline_style/pending_impl_style/pending_unroll_config if applicable
+    /// Called when we see `#[parallel]` or `#[mux_style::parallel]` or `#[pipeline_style::manual]` or `#[impl_style::parallel]` or `#[unroll]` before a statement
     fn process_attribute(&mut self, node: &SyntaxNode) {
         // Extract the intent/attribute name from the Attribute node
         // Attribute contains IntentValue which contains identifiers
         if let Some(intent_value) = node.first_child_of_kind(SyntaxKind::IntentValue) {
-            // First try to extract mux_style directly (e.g., #[mux_style::parallel])
+            // Try to extract unroll config (e.g., #[unroll] or #[unroll(4)])
+            if let Some(config) = self.extract_unroll_config_from_intent_value(&intent_value) {
+                self.pending_unroll_config = Some(config);
+                return;
+            }
+
+            // Try to extract mux_style directly (e.g., #[mux_style::parallel])
             if let Some(style) = self.extract_mux_style_from_intent_value(&intent_value) {
                 self.pending_mux_style = Some(style);
                 return;
             }
 
-            // Otherwise, look up the intent by name (e.g., #[parallel])
+            // Try to extract pipeline_style directly (e.g., #[pipeline_style::manual])
+            if let Some(style) = self.extract_pipeline_style_from_intent_value(&intent_value) {
+                self.pending_pipeline_style = Some(style);
+                return;
+            }
+
+            // Try to extract impl_style directly (e.g., #[impl_style::parallel])
+            if let Some(style) = self.extract_impl_style_from_intent_value(&intent_value) {
+                self.pending_impl_style = Some(style);
+                return;
+            }
+
+            // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
@@ -5566,10 +6402,52 @@ impl HirBuilderContext {
                 .collect();
 
             if let Some(intent_name) = tokens.first() {
+                // Check mux_style intents
                 if let Some(&style) = self.intent_mux_styles.get(intent_name) {
                     self.pending_mux_style = Some(style);
                 }
+                // Check pipeline_style intents
+                if let Some(&style) = self.intent_pipeline_styles.get(intent_name) {
+                    self.pending_pipeline_style = Some(style);
+                }
+                // Check impl_style intents
+                if let Some(&style) = self.intent_impl_styles.get(intent_name) {
+                    self.pending_impl_style = Some(style);
+                }
             }
+        }
+    }
+
+    /// Extract unroll config from an IntentValue node
+    /// Handles: #[unroll] -> Full, #[unroll(4)] -> Factor(4)
+    fn extract_unroll_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<UnrollConfig> {
+        // Get all tokens from the intent value
+        let tokens: Vec<_> = intent_value
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .collect();
+
+        // Look for "unroll" identifier
+        let has_unroll = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "unroll"
+        });
+
+        if !has_unroll {
+            return None;
+        }
+
+        // Look for a number argument (for Factor variant)
+        let factor = tokens.iter().find_map(|t| {
+            if t.kind() == SyntaxKind::IntLiteral {
+                t.text().parse::<u32>().ok()
+            } else {
+                None
+            }
+        });
+
+        match factor {
+            Some(n) => Some(UnrollConfig::Factor(n)),
+            None => Some(UnrollConfig::Full),
         }
     }
 
@@ -6231,6 +7109,7 @@ impl HirBuilderContext {
                             function: func_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
                             args,
+                            impl_style: ImplStyle::default(),
                         });
                         return HirType::NatExpr(Box::new(call_expr));
                     }
@@ -6786,6 +7665,12 @@ impl HirBuilderContext {
     fn next_import_id(&mut self) -> ImportId {
         let id = ImportId(self.next_import_id);
         self.next_import_id += 1;
+        id
+    }
+
+    fn next_for_loop_id(&mut self) -> ForLoopId {
+        let id = ForLoopId(self.next_for_loop_id);
+        self.next_for_loop_id += 1;
         id
     }
 }

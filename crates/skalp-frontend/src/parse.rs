@@ -383,6 +383,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::OnKw) => self.parse_event_block(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
+                Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
                 Some(SyntaxKind::CovergroupKw) => self.parse_covergroup_decl(),
@@ -830,6 +831,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
+                Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::LetKw) => self.parse_let_statement(),
                 Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
@@ -1246,6 +1248,247 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse generate statement: generate for/if/match
+    /// Dispatches to specific generate variant based on next token
+    fn parse_generate_stmt(&mut self) {
+        // Peek at the token after 'generate' to determine the variant
+        let next = self.peek_kind(1);
+        match next {
+            Some(SyntaxKind::ForKw) => self.parse_generate_for_stmt(),
+            Some(SyntaxKind::IfKw) => self.parse_generate_if_stmt(),
+            Some(SyntaxKind::MatchKw) => self.parse_generate_match_stmt(),
+            _ => {
+                // Error: generate must be followed by for, if, or match
+                self.start_node(SyntaxKind::GenerateForStmt);
+                self.expect(SyntaxKind::GenerateKw);
+                self.error("expected 'for', 'if', or 'match' after 'generate'");
+                self.finish_node();
+            }
+        }
+    }
+
+    /// Parse generate for statement: generate for i in 0..N [step S] { ... }
+    fn parse_generate_for_stmt(&mut self) {
+        self.start_node(SyntaxKind::GenerateForStmt);
+
+        self.expect(SyntaxKind::GenerateKw);
+        self.expect(SyntaxKind::ForKw);
+
+        // Parse loop variable identifier
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::InKw);
+
+        // Parse range expression
+        self.parse_range_expr();
+
+        // Parse optional step expression: step N
+        if self.at(SyntaxKind::StepKw) {
+            self.bump(); // consume 'step'
+            self.parse_expression(); // parse step value
+        }
+
+        // Parse loop body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_generate_body();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse generate if statement: generate if COND { ... } else { ... }
+    fn parse_generate_if_stmt(&mut self) {
+        self.start_node(SyntaxKind::GenerateIfStmt);
+
+        self.expect(SyntaxKind::GenerateKw);
+        self.expect(SyntaxKind::IfKw);
+
+        // Parse condition expression
+        self.parse_expression();
+
+        // Parse then block
+        self.expect(SyntaxKind::LBrace);
+        self.parse_generate_body();
+        self.expect(SyntaxKind::RBrace);
+
+        // Parse optional else block
+        if self.at(SyntaxKind::ElseKw) {
+            self.bump(); // consume 'else'
+
+            // Could be 'else if' or 'else { }'
+            if self.at(SyntaxKind::IfKw) {
+                // else if - recursively parse another if
+                self.expect(SyntaxKind::IfKw);
+                self.parse_expression();
+                self.expect(SyntaxKind::LBrace);
+                self.parse_generate_body();
+                self.expect(SyntaxKind::RBrace);
+            } else {
+                // else { }
+                self.expect(SyntaxKind::LBrace);
+                self.parse_generate_body();
+                self.expect(SyntaxKind::RBrace);
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse generate match statement: generate match VALUE { ... }
+    fn parse_generate_match_stmt(&mut self) {
+        self.start_node(SyntaxKind::GenerateMatchStmt);
+
+        self.expect(SyntaxKind::GenerateKw);
+        self.expect(SyntaxKind::MatchKw);
+
+        // Parse the value to match on
+        self.parse_expression();
+
+        // Parse match body
+        self.expect(SyntaxKind::LBrace);
+
+        // Parse match arms
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+            self.parse_generate_match_arm();
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse a generate match arm: pattern => { statements }
+    fn parse_generate_match_arm(&mut self) {
+        self.start_node(SyntaxKind::MatchArm);
+
+        // Parse pattern
+        self.parse_pattern();
+
+        // Expect arrow (-> or =>)
+        if !self.at(SyntaxKind::Arrow) && !self.at(SyntaxKind::FatArrow) {
+            self.error("Expected '->' or '=>' after pattern");
+        } else {
+            self.bump(); // consume arrow
+        }
+
+        // Parse arm body (must be a block for generate match)
+        self.expect(SyntaxKind::LBrace);
+        self.parse_generate_body();
+        self.expect(SyntaxKind::RBrace);
+
+        // Optional comma
+        if self.at(SyntaxKind::Comma) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse the body of a generate block (signals, variables, on blocks, etc.)
+    fn parse_generate_body(&mut self) {
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            // Parse optional attributes before item
+            self.parse_attributes();
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::SignalKw) => {
+                    self.parse_signal_decl();
+                    if self.at(SyntaxKind::Semicolon) {
+                        self.bump();
+                    }
+                }
+                Some(SyntaxKind::VarKw) => {
+                    self.parse_variable_decl();
+                    if self.at(SyntaxKind::Semicolon) {
+                        self.bump();
+                    }
+                }
+                Some(SyntaxKind::ConstKw) => {
+                    if self.peek_kind(1) == Some(SyntaxKind::FnKw) {
+                        self.parse_impl_function()
+                    } else {
+                        self.parse_constant_decl();
+                        if self.at(SyntaxKind::Semicolon) {
+                            self.bump();
+                        }
+                    }
+                }
+                Some(SyntaxKind::FnKw) => self.parse_impl_function(),
+                Some(SyntaxKind::LetKw) => {
+                    // Check for instance declaration pattern
+                    let mut is_instance = false;
+                    if self.peek_kind(1) == Some(SyntaxKind::Ident)
+                        && self.peek_kind(2) == Some(SyntaxKind::Assign)
+                        && self.peek_kind(3) == Some(SyntaxKind::Ident)
+                    {
+                        if self.peek_kind(4) == Some(SyntaxKind::LBrace) {
+                            is_instance = true;
+                        } else if self.peek_kind(4) == Some(SyntaxKind::Lt) {
+                            // Generic instantiation check
+                            let mut depth = 0;
+                            let mut offset = 4;
+                            loop {
+                                match self.peek_kind(offset) {
+                                    Some(SyntaxKind::Lt) => depth += 1,
+                                    Some(SyntaxKind::Gt) => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            if self.peek_kind(offset + 1)
+                                                == Some(SyntaxKind::LBrace)
+                                            {
+                                                is_instance = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    Some(SyntaxKind::Shr) => {
+                                        depth -= 2;
+                                        if depth <= 0 {
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                    _ => {}
+                                }
+                                offset += 1;
+                                if offset > 20 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if is_instance {
+                        self.parse_instance_decl()
+                    } else {
+                        self.parse_let_statement()
+                    }
+                }
+                Some(SyntaxKind::OnKw) => self.parse_event_block(),
+                Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
+                Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
+                Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(), // Nested generate
+                Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
+                Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
+                Some(SyntaxKind::IfKw) => self.parse_if_statement(),
+                Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
+                _ => {
+                    self.error("unexpected token in generate block");
+                    self.bump();
+                }
+            }
+        }
+    }
+
     /// Parse range expression: 0..3 or 0..=10
     fn parse_range_expr(&mut self) {
         self.start_node(SyntaxKind::RangeExpr);
@@ -1551,11 +1794,18 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse assert statement
+    /// Supports: assert(cond), assert!(cond), assert(cond, "msg"),
+    ///           assert!(cond, severity: Error), assert!(cond, severity: Warning, "msg")
     fn parse_assert_statement(&mut self) {
         self.start_node(SyntaxKind::AssertStmt);
 
         // 'assert' keyword
         self.expect(SyntaxKind::AssertKw);
+
+        // Optional '!' for macro-style (assert! vs assert)
+        if self.at(SyntaxKind::Bang) {
+            self.bump(); // consume '!'
+        }
 
         // Expect opening parenthesis
         self.expect(SyntaxKind::LParen);
@@ -1563,10 +1813,27 @@ impl<'a> ParseState<'a> {
         // Parse condition expression
         self.parse_expression();
 
-        // Optional comma and message
-        if self.at(SyntaxKind::Comma) {
+        // Optional arguments: severity and/or message
+        // Format: assert!(cond, severity: Error, "message")
+        // or: assert!(cond, "message")
+        // or: assert!(cond, severity: Warning)
+        while self.at(SyntaxKind::Comma) {
             self.bump(); // consume comma
-            self.parse_expression(); // message (usually string literal)
+
+            // Check for severity: keyword
+            if self.at(SyntaxKind::Ident) && self.current_text() == Some("severity") {
+                self.start_node(SyntaxKind::SeveritySpec);
+                self.bump(); // consume 'severity'
+                self.expect(SyntaxKind::Colon);
+                // Parse severity level (Info, Warning, Error, Fatal)
+                if self.at(SyntaxKind::Ident) {
+                    self.bump(); // consume severity level
+                }
+                self.finish_node();
+            } else {
+                // Message expression
+                self.parse_expression();
+            }
         }
 
         // Expect closing parenthesis
@@ -1642,24 +1909,63 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse assume statement
+    /// Supports:
+    /// - assume property(temporal_expr); -- SVA style
+    /// - assume!(cond); -- simple macro style
+    /// - assume!(cond, "message"); -- with message
     fn parse_assume_statement(&mut self) {
-        self.start_node(SyntaxKind::AssumeStmt);
+        // Check if this is assume! (macro style) or assume property (SVA style)
+        // by peeking ahead
+        let is_macro_style = self.peek_kind(1) == Some(SyntaxKind::Bang);
 
-        // 'assume' keyword
-        self.expect(SyntaxKind::AssumeKw);
+        if is_macro_style {
+            // Simple assume!(cond) form
+            self.start_node(SyntaxKind::AssumeMacroStmt);
 
-        // 'property' keyword
-        self.expect(SyntaxKind::PropertyKw);
+            self.expect(SyntaxKind::AssumeKw);
+            self.expect(SyntaxKind::Bang); // consume '!'
+            self.expect(SyntaxKind::LParen);
 
-        // Property expression in parentheses
-        self.expect(SyntaxKind::LParen);
-        self.parse_temporal_expression();
-        self.expect(SyntaxKind::RParen);
+            // Parse condition expression
+            self.parse_expression();
 
-        // Expect semicolon
-        self.expect(SyntaxKind::Semicolon);
+            // Optional arguments: severity and/or message
+            while self.at(SyntaxKind::Comma) {
+                self.bump(); // consume comma
 
-        self.finish_node();
+                // Check for severity: keyword
+                if self.at(SyntaxKind::Ident) && self.current_text() == Some("severity") {
+                    self.start_node(SyntaxKind::SeveritySpec);
+                    self.bump(); // consume 'severity'
+                    self.expect(SyntaxKind::Colon);
+                    if self.at(SyntaxKind::Ident) {
+                        self.bump(); // consume severity level
+                    }
+                    self.finish_node();
+                } else {
+                    // Message expression
+                    self.parse_expression();
+                }
+            }
+
+            self.expect(SyntaxKind::RParen);
+            self.consume_semicolon();
+            self.finish_node();
+        } else {
+            // SVA-style assume property(...)
+            self.start_node(SyntaxKind::AssumeStmt);
+
+            self.expect(SyntaxKind::AssumeKw);
+            self.expect(SyntaxKind::PropertyKw);
+
+            // Property expression in parentheses
+            self.expect(SyntaxKind::LParen);
+            self.parse_temporal_expression();
+            self.expect(SyntaxKind::RParen);
+
+            self.expect(SyntaxKind::Semicolon);
+            self.finish_node();
+        }
     }
 
     /// Parse expect statement
@@ -2428,7 +2734,8 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
-    /// Parse a single intent term: either a path (mux_style::parallel) or identifier (parallel)
+    /// Parse a single intent term: either a path (mux_style::parallel), identifier (parallel),
+    /// or attribute with argument (unroll(4))
     fn parse_intent_term(&mut self) {
         // Parse identifier (namespace or intent name)
         if self.at(SyntaxKind::Ident) {
@@ -2438,6 +2745,16 @@ impl<'a> ParseState<'a> {
             while self.at(SyntaxKind::ColonColon) {
                 self.bump(); // consume '::'
                 self.expect(SyntaxKind::Ident);
+            }
+
+            // Check for function-call style argument: unroll(4)
+            if self.at(SyntaxKind::LParen) {
+                self.bump(); // consume '('
+                // Parse the argument (could be a number or expression)
+                if self.at(SyntaxKind::IntLiteral) {
+                    self.bump(); // consume the number
+                }
+                self.expect(SyntaxKind::RParen);
             }
         } else {
             self.error("expected intent name or namespace::value");

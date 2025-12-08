@@ -1,0 +1,354 @@
+// Entity-based Bit Manipulation Operations
+// Uses generate blocks for idiomatic hardware implementations
+//
+// These entities complement the functional implementations in bitops.sk,
+// providing clocked versions with explicit pipeline stages.
+
+// ============================================================================
+// Bit Reversal Entity (using generate-for)
+// ============================================================================
+
+/// Reverses the bit order of an 8-bit input using generate-for
+/// This demonstrates compile-time loop unrolling in hardware
+entity BitReverser8 {
+    in clk: clock
+    in data_in: nat[8]
+    out data_out: nat[8]
+}
+
+impl BitReverser8 {
+    signal reversed: nat[8] = 0
+
+    on(clk.rise) {
+        // Generate-for unrolls at compile time to:
+        //   reversed[0] <= data_in[7]
+        //   reversed[1] <= data_in[6]
+        //   ... etc
+        generate for i in 0..8 {
+            reversed[i] <= data_in[7 - i]
+        }
+        data_out <= reversed
+    }
+}
+
+/// 32-bit bit reverser using generate-for
+entity BitReverser32 {
+    in clk: clock
+    in data_in: nat[32]
+    out data_out: nat[32]
+}
+
+impl BitReverser32 {
+    signal reversed: nat[32] = 0
+
+    on(clk.rise) {
+        generate for i in 0..32 {
+            reversed[i] <= data_in[31 - i]
+        }
+        data_out <= reversed
+    }
+}
+
+// ============================================================================
+// Popcount Entity (Parallel Population Count)
+// ============================================================================
+
+/// 8-bit population count using generate-for
+/// Counts the number of 1 bits in the input
+entity Popcount8 {
+    in clk: clock
+    in data_in: nat[8]
+    out count: nat[4]  // Max count is 8, needs 4 bits
+}
+
+impl Popcount8 {
+    signal bit_count: nat[4] = 0
+
+    on(clk.rise) {
+        // Sum all individual bits using generate
+        // This creates parallel hardware: count = data_in[0] + data_in[1] + ... + data_in[7]
+        signal sum: nat[4] = 0
+
+        // First, extract each bit and accumulate
+        generate for i in 0..8 {
+            sum <= sum + data_in[i]
+        }
+
+        bit_count <= sum
+        count <= bit_count
+    }
+}
+
+// ============================================================================
+// Pipeline Stage Generator (using generate-for)
+// ============================================================================
+
+/// Creates a parameterized pipeline delay
+/// Delays input by N clock cycles using generate-for
+entity PipelineDelay4 {
+    in clk: clock
+    in data_in: nat[8]
+    out data_out: nat[8]
+}
+
+impl PipelineDelay4 {
+    // Pipeline registers
+    signal stage0: nat[8] = 0
+    signal stage1: nat[8] = 0
+    signal stage2: nat[8] = 0
+    signal stage3: nat[8] = 0
+
+    on(clk.rise) {
+        // First stage captures input
+        stage0 <= data_in
+
+        // Generate the pipeline chain
+        // This creates: stage1 <= stage0, stage2 <= stage1, stage3 <= stage2
+        stage1 <= stage0
+        stage2 <= stage1
+        stage3 <= stage2
+
+        data_out <= stage3
+    }
+}
+
+// ============================================================================
+// Configurable Width Masking (using generate-if)
+// NOTE: generate-if with const bool conditions has some limitations.
+// For now, use direct conditional logic or runtime conditions.
+// ============================================================================
+
+// Example pattern (not fully supported yet):
+// const USE_8BIT_MODE: bool = false
+// const USE_16BIT_MODE: bool = true
+//
+// generate if USE_16BIT_MODE {
+//     result <= data_in & 0x0000FFFF
+// } else {
+//     result <= data_in
+// }
+
+/// Simple 16-bit mask entity (demonstrates working pattern)
+entity Mask16Bit {
+    in clk: clock
+    in data_in: nat[32]
+    out data_out: nat[32]
+}
+
+impl Mask16Bit {
+    signal result: nat[32] = 0
+
+    on(clk.rise) {
+        result <= data_in & 0x0000FFFF
+        data_out <= result
+    }
+}
+
+// ============================================================================
+// Multi-bit Shift Using Generate
+// ============================================================================
+
+/// Barrel shifter stage using generate
+/// Shifts by 0-7 positions based on shift_amount
+entity BarrelShiftStage8 {
+    in clk: clock
+    in data_in: nat[8]
+    in shift_amount: nat[3]  // 0-7 positions
+    out data_out: nat[8]
+}
+
+impl BarrelShiftStage8 {
+    signal shifted: nat[8] = 0
+
+    on(clk.rise) {
+        // Generate mux tree for each output bit position
+        generate for i in 0..8 {
+            // Each output bit selects from the appropriate input bit
+            // For simplicity, this demonstrates the pattern
+            // Full implementation would use shift_amount to select
+            shifted[i] <= data_in[(i + shift_amount) & 7]
+        }
+        data_out <= shifted
+    }
+}
+
+// ============================================================================
+// Gray Code Converter (using generate-for)
+// ============================================================================
+
+/// Binary to Gray code converter using generate
+entity BinaryToGray8 {
+    in clk: clock
+    in binary: nat[8]
+    out gray: nat[8]
+}
+
+impl BinaryToGray8 {
+    signal gray_code: nat[8] = 0
+
+    on(clk.rise) {
+        // MSB stays the same
+        gray_code[7] <= binary[7]
+
+        // Each other bit is XOR of adjacent binary bits
+        generate for i in 0..7 {
+            gray_code[i] <= binary[i] ^ binary[i + 1]
+        }
+
+        gray <= gray_code
+    }
+}
+
+/// Gray code to Binary converter using generate
+entity GrayToBinary8 {
+    in clk: clock
+    in gray: nat[8]
+    out binary: nat[8]
+}
+
+impl GrayToBinary8 {
+    signal bin: nat[8] = 0
+
+    on(clk.rise) {
+        // MSB stays the same
+        bin[7] <= gray[7]
+
+        // Each bit depends on XOR of all higher gray bits
+        // bin[i] = XOR(gray[7:i])
+        // This is hard to express with generate-for directly
+        // So we compute iteratively from MSB down
+        bin[6] <= gray[7] ^ gray[6]
+        bin[5] <= gray[7] ^ gray[6] ^ gray[5]
+        bin[4] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4]
+        bin[3] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3]
+        bin[2] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2]
+        bin[1] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2] ^ gray[1]
+        bin[0] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2] ^ gray[1] ^ gray[0]
+
+        binary <= bin
+    }
+}
+
+// ============================================================================
+// Priority Encoder (using generate-if within generate-for)
+// ============================================================================
+
+/// 8-bit priority encoder - finds position of highest set bit
+entity PriorityEncoder8 {
+    in clk: clock
+    in data_in: nat[8]
+    out position: nat[3]  // 0-7 position
+    out valid: bit        // Set if any bit is 1
+}
+
+impl PriorityEncoder8 {
+    signal pos: nat[3] = 0
+    signal found: bit = 0
+
+    on(clk.rise) {
+        // Priority encoding: check from MSB to LSB
+        // First match wins
+        pos <= 0
+        found <= 0
+
+        // Check each bit position, higher bits have priority
+        generate if data_in[7] {
+            pos <= 7
+            found <= 1
+        } else {
+            generate if data_in[6] {
+                pos <= 6
+                found <= 1
+            } else {
+                generate if data_in[5] {
+                    pos <= 5
+                    found <= 1
+                } else {
+                    generate if data_in[4] {
+                        pos <= 4
+                        found <= 1
+                    } else {
+                        generate if data_in[3] {
+                            pos <= 3
+                            found <= 1
+                        } else {
+                            generate if data_in[2] {
+                                pos <= 2
+                                found <= 1
+                            } else {
+                                generate if data_in[1] {
+                                    pos <= 1
+                                    found <= 1
+                                } else {
+                                    generate if data_in[0] {
+                                        pos <= 0
+                                        found <= 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        position <= pos
+        valid <= found
+    }
+}
+
+// ============================================================================
+// Parity Calculator (using generate-for with XOR reduction)
+// ============================================================================
+
+/// 8-bit even parity calculator
+entity Parity8 {
+    in clk: clock
+    in data_in: nat[8]
+    out parity: bit  // 1 if odd number of 1s, 0 if even
+}
+
+impl Parity8 {
+    signal p: bit = 0
+
+    on(clk.rise) {
+        // XOR all bits together
+        p <= data_in[0] ^ data_in[1] ^ data_in[2] ^ data_in[3] ^
+             data_in[4] ^ data_in[5] ^ data_in[6] ^ data_in[7]
+        parity <= p
+    }
+}
+
+// ============================================================================
+// Matrix Initialization Pattern (nested generate-for)
+// NOTE: Nested generate-for with const variable bounds has some limitations.
+// For now, use literal bounds for nested generates.
+// ============================================================================
+
+// Example pattern (requires literal bounds for full support):
+// generate for row in 0..4 {
+//     generate for col in 0..4 {
+//         // Matrix initialization
+//     }
+// }
+
+/// Simple 2x2 nested generate example (using literal bounds)
+entity MatrixInit2x2 {
+    in clk: clock
+    in enable: bit
+    out done: bit
+}
+
+impl MatrixInit2x2 {
+    signal initialized: bit = 0
+
+    on(clk.rise) {
+        // Nested generate with literal bounds
+        generate for row in 0..2 {
+            generate for col in 0..2 {
+                initialized <= 1
+            }
+        }
+        done <= initialized
+    }
+}

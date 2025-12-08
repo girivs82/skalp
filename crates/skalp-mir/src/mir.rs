@@ -43,6 +43,8 @@ pub struct Module {
     pub instances: Vec<ModuleInstance>,
     /// Clock domains in this module
     pub clock_domains: Vec<ClockDomain>,
+    /// Generate blocks (for #[preserve_generate] mode)
+    pub generate_blocks: Vec<GenerateBlock>,
 }
 
 /// Module identifier
@@ -869,6 +871,120 @@ pub struct ConditionalCase {
     pub value: Expression,
 }
 
+// ============================================================================
+// Generate Block Types (for #[preserve_generate] mode)
+// ============================================================================
+
+/// Generate block identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GenerateBlockId(pub u32);
+
+/// HDL generate block (preserved for SystemVerilog output)
+///
+/// When `#[preserve_generate]` attribute is used, generate constructs are
+/// preserved in MIR and emitted as SystemVerilog generate blocks rather
+/// than being elaborated at compile time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateBlock {
+    /// Generate block identifier
+    pub id: GenerateBlockId,
+    /// Optional block label (for named generate blocks)
+    pub label: Option<String>,
+    /// The kind of generate block
+    pub kind: GenerateBlockKind,
+}
+
+/// Kind of generate block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GenerateBlockKind {
+    /// For-generate loop: `for (genvar i = 0; i < N; i++)`
+    For(GenerateFor),
+    /// If-generate conditional: `if (CONDITION)`
+    If(GenerateIf),
+    /// Case-generate (from match): `case (EXPR)`
+    Case(GenerateCase),
+}
+
+/// For-generate loop construct
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateFor {
+    /// Genvar name
+    pub genvar: String,
+    /// Start value expression
+    pub start: Expression,
+    /// End value expression (exclusive)
+    pub end: Expression,
+    /// Step value (defaults to 1)
+    pub step: i64,
+    /// Body to replicate
+    pub body: GenerateBody,
+}
+
+/// If-generate conditional construct
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateIf {
+    /// Condition expression (must be constant at elaboration time)
+    pub condition: Expression,
+    /// Then branch
+    pub then_body: GenerateBody,
+    /// Optional else branch
+    pub else_body: Option<GenerateBody>,
+}
+
+/// Case-generate construct (from match expressions)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateCase {
+    /// Selector expression
+    pub selector: Expression,
+    /// Case arms
+    pub arms: Vec<GenerateCaseArm>,
+    /// Default arm (optional)
+    pub default: Option<GenerateBody>,
+}
+
+/// A single arm in a case-generate
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateCaseArm {
+    /// Pattern value(s) to match
+    pub patterns: Vec<Expression>,
+    /// Body for this arm
+    pub body: GenerateBody,
+}
+
+/// Body of a generate block - can contain various module items
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateBody {
+    /// Signals declared in this generate scope
+    pub signals: Vec<Signal>,
+    /// Process blocks
+    pub processes: Vec<Process>,
+    /// Continuous assignments
+    pub assignments: Vec<ContinuousAssign>,
+    /// Module instances
+    pub instances: Vec<ModuleInstance>,
+    /// Nested generate blocks
+    pub nested_generates: Vec<GenerateBlock>,
+}
+
+impl GenerateBody {
+    /// Create an empty generate body
+    pub fn new() -> Self {
+        Self {
+            signals: Vec::new(),
+            processes: Vec::new(),
+            assignments: Vec::new(),
+            instances: Vec::new(),
+            nested_generates: Vec::new(),
+        }
+    }
+}
+
+impl Default for GenerateBody {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Mir {
     /// Create a new MIR
     pub fn new(name: String) -> Self {
@@ -898,6 +1014,7 @@ impl Module {
             assignments: Vec::new(),
             instances: Vec::new(),
             clock_domains: Vec::new(),
+            generate_blocks: Vec::new(),
         }
     }
 }

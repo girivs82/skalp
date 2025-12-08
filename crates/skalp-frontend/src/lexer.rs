@@ -98,11 +98,15 @@ pub enum Token {
     #[token("fall")]
     Fall,
 
-    // Control Flow (2)
+    // Control Flow (4)
     #[token("match")]
     Match,
     #[token("for")]
     For,
+    #[token("generate")]
+    Generate,
+    #[token("step")]
+    Step,
 
     // Design Intent (3)
     #[token("intent")]

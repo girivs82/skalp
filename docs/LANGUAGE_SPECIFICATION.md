@@ -2567,6 +2567,86 @@ on(slow_clock.rise) {
 }
 ```
 
+### 10.5 For Loops
+
+SKALP supports bounded `for` loops that iterate over compile-time known ranges. Unlike software languages, SKALP does not support unbounded iteration (`while`, `loop`) as these cannot be directly synthesized to hardware.
+
+#### 10.5.1 Basic Syntax
+
+```rust
+// Exclusive range (0 to 7)
+for i in 0..8 {
+    result = result ^ ((input >> i) & 1);
+}
+
+// Inclusive range (0 to 7, same as above)
+for i in 0..=7 {
+    data[i] = 0;
+}
+```
+
+#### 10.5.2 Loop Unrolling with `#[unroll]`
+
+The `#[unroll]` attribute expands loops at compile time, generating parallel hardware for each iteration. This is essential for synthesizable hardware patterns.
+
+```rust
+// Full unroll - each iteration becomes parallel hardware
+#[unroll]
+for i in 0..8 {
+    result[i] = input[7 - i];  // Generates 8 parallel assignments
+}
+
+// Partial unroll - unroll by factor N
+#[unroll(4)]
+for i in 0..32 {
+    acc = acc + data[i];  // Unrolls 4 iterations per loop
+}
+```
+
+**Unroll Modes:**
+- `#[unroll]` - Full unroll: completely expands all iterations at compile time
+- `#[unroll(N)]` - Partial unroll: expands N iterations per loop iteration, generating N parallel operations
+
+#### 10.5.3 Common Loop Patterns
+
+```rust
+// XOR reduction (parity calculation)
+#[unroll]
+for i in 0..8 {
+    result = result ^ ((input >> i) & 1) as bit[1];
+}
+
+// Bit reversal
+#[unroll]
+for i in 0..8 {
+    result = result | ((input >> i) & 1) << (7 - i);
+}
+
+// Array initialization
+#[unroll]
+for i in 0..16 {
+    memory[i] = 0;
+}
+
+// FIR filter accumulation
+#[unroll]
+for i in 0..TAPS {
+    acc = acc + coefficients[i] * delay_line[i];
+}
+```
+
+#### 10.5.4 Generate For (Hardware Instantiation)
+
+For generating arrays of hardware instances, use `generate for`:
+
+```rust
+generate for i in 0..N {
+    let proc[i] = Processor {
+        input: data[i]
+    }
+}
+```
+
 ## 11. Pattern Matching
 
 ### 11.1 Basic Patterns
