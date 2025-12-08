@@ -3,6 +3,7 @@
 use skalp_testing::testbench::*;
 
 #[tokio::test]
+#[ignore] // Missing fixture file - requires /tmp/test_vec3_functional.sk
 async fn test_vec3_functional() {
     println!("\n🧪 Testing vec3_add functional correctness after Bug #67 fix");
 

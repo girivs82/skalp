@@ -13296,6 +13296,19 @@ impl<'hir> HirToMir<'hir> {
                     println!("    🔄🔄🔄 BUG118_INLINE: inline_function_call_to_hir_with_lets FAILED for '{}'!", call.function);
                 }
 
+                // BUG FIX #138: For user-defined FP primitive functions (like fp_mul, fp_add),
+                // when inlining fails, we should use the pre-converted arg_exprs (which have
+                // correct port references) instead of falling back to convert_expression
+                // (which would use original HIR Variable references that can't be found).
+                if self.is_primitive_fp_operation(&call.function) {
+                    println!("    🔧 BUG138_FIX: Inlining failed for FP primitive '{}' - using arg_exprs", call.function);
+                    if let Some(result) = self.convert_primitive_fp_call_for_module(&call.function, arg_exprs.clone()) {
+                        // Cache the result for subsequent accesses
+                        self.module_call_cache.insert(cache_key.clone(), result.clone());
+                        return Some(result);
+                    }
+                }
+
                 // Last resort fallback if inlining fails
                 println!("    ⚠️ BUG91_INLINE: Falling back to regular convert_expression for '{}'", call.function);
                 self.convert_expression(expr, depth)
