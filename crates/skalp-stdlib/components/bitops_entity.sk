@@ -114,21 +114,14 @@ impl PipelineDelay4 {
 
 // ============================================================================
 // Configurable Width Masking (using generate-if)
-// NOTE: generate-if with const bool conditions has some limitations.
-// For now, use direct conditional logic or runtime conditions.
+// generate-if with const bool conditions works correctly.
+// The condition is evaluated at compile time, and only the matching branch is generated.
 // ============================================================================
 
-// Example pattern (not fully supported yet):
-// const USE_8BIT_MODE: bool = false
-// const USE_16BIT_MODE: bool = true
-//
-// generate if USE_16BIT_MODE {
-//     result <= data_in & 0x0000FFFF
-// } else {
-//     result <= data_in
-// }
+// Configurable mask with compile-time selection
+const USE_16BIT_MASK: bool = true;
 
-/// Simple 16-bit mask entity (demonstrates working pattern)
+/// Compile-time configurable mask entity using generate-if
 entity Mask16Bit {
     in clk: clock
     in data_in: nat[32]
@@ -139,7 +132,12 @@ impl Mask16Bit {
     signal result: nat[32] = 0
 
     on(clk.rise) {
-        result <= data_in & 0x0000FFFF
+        // generate-if selects masking behavior at compile time
+        generate if USE_16BIT_MASK {
+            result <= data_in & 0x0000FFFF
+        } else {
+            result <= data_in
+        }
         data_out <= result
     }
 }
@@ -321,18 +319,15 @@ impl Parity8 {
 
 // ============================================================================
 // Matrix Initialization Pattern (nested generate-for)
-// NOTE: Nested generate-for with const variable bounds has some limitations.
-// For now, use literal bounds for nested generates.
+// Nested generate-for blocks work correctly with both literal and const bounds.
+// Each level of nesting is expanded at compile time.
 // ============================================================================
 
-// Example pattern (requires literal bounds for full support):
-// generate for row in 0..4 {
-//     generate for col in 0..4 {
-//         // Matrix initialization
-//     }
-// }
+// Const-bounded nested generate example
+const MATRIX_ROWS: nat[8] = 2;
+const MATRIX_COLS: nat[8] = 2;
 
-/// Simple 2x2 nested generate example (using literal bounds)
+/// Nested generate example with const bounds
 entity MatrixInit2x2 {
     in clk: clock
     in enable: bit
@@ -343,9 +338,9 @@ impl MatrixInit2x2 {
     signal initialized: bit = 0
 
     on(clk.rise) {
-        // Nested generate with literal bounds
-        generate for row in 0..2 {
-            generate for col in 0..2 {
+        // Nested generate with const bounds - both levels expand at compile time
+        generate for row in 0..MATRIX_ROWS {
+            generate for col in 0..MATRIX_COLS {
                 initialized <= 1
             }
         }
