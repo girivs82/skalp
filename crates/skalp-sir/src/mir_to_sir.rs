@@ -3947,9 +3947,12 @@ impl<'a> MirToSirConverter<'a> {
                     for m in &self.mir_design.modules {
                         eprintln!("   - {:?}: {}", m.id, m.name);
                     }
+                    let location = instance.span.as_ref()
+                        .map(|s| format!(" at {}", s))
+                        .unwrap_or_default();
                     panic!(
-                        "Module {:?} not found for instance {}",
-                        instance.module, instance.name
+                        "Module {:?} not found for instance {}{}",
+                        instance.module, instance.name, location
                     )
                 });
 
@@ -6391,7 +6394,12 @@ impl<'a> MirToSirConverter<'a> {
                 .modules
                 .iter()
                 .find(|m| m.id == instance.module)
-                .unwrap_or_else(|| panic!("Module {:?} not found", instance.module));
+                .unwrap_or_else(|| {
+                    let location = instance.span.as_ref()
+                        .map(|s| format!(" at {}", s))
+                        .unwrap_or_default();
+                    panic!("Module {:?} not found for instance '{}'{}", instance.module, instance.name, location)
+                });
 
             let inst_prefix = format!("{}{}", instance_prefix, instance.name);
             self.elaborate_instance_with_context(

@@ -2439,7 +2439,10 @@ impl<'a> MetalShaderGenerator<'a> {
         eprintln!("🔧 CONCAT [depth={}]: node {}, {} inputs", self.concat_recursion_depth, node.id, node.inputs.len());
 
         if self.concat_recursion_depth > 100 {
-            panic!("🚨 Bug #76: Concat recursion depth exceeded 100! Infinite loop detected in node {}", node.id);
+            let location = node.span.as_ref()
+                .map(|s| format!(" at {}", s))
+                .unwrap_or_default();
+            panic!("🚨 Bug #76: Concat recursion depth exceeded 100! Infinite loop detected in node {}{}", node.id, location);
         }
 
         if node.outputs.is_empty() {

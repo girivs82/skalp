@@ -91,6 +91,16 @@ impl Default for SourceSpan {
     }
 }
 
+impl std::fmt::Display for SourceSpan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(ref file) = self.file {
+            write!(f, "{}:{}:{}", file.display(), self.line, self.column)
+        } else {
+            write!(f, "line {}:{}", self.line, self.column)
+        }
+    }
+}
+
 /// Index for converting byte offsets to line:column positions
 #[derive(Debug, Clone)]
 pub struct LineIndex {
