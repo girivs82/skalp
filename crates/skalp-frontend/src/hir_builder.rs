@@ -106,6 +106,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[preserve_generate]` before a generate statement
     pending_preserve_generate: Option<bool>,
 
+    /// Pending pipeline config from most recent attribute
+    /// Set when we see `#[pipeline(stages=N)]` before a function declaration
+    pending_pipeline_config: Option<PipelineConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -207,6 +211,7 @@ impl HirBuilderContext {
             intent_pipeline_styles: HashMap::new(),
             pending_pipeline_style: None,
             pending_unroll_config: None,
+            pending_pipeline_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -1164,6 +1169,9 @@ impl HirBuilderContext {
                 .insert(name.clone(), ret_type.clone());
         }
 
+        // Consume pending pipeline config (from #[pipeline(stages=N)] attribute)
+        let pipeline_config = self.pending_pipeline_config.take();
+
         Some(HirFunction {
             id,
             is_const,
@@ -1173,6 +1181,7 @@ impl HirBuilderContext {
             return_type,
             body,
             span: self.make_span(node),
+            pipeline_config,
         })
     }
 
@@ -6407,6 +6416,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract pipeline config (e.g., #[pipeline(stages=3)])
+            if let Some(config) = self.extract_pipeline_config_from_intent_value(&intent_value) {
+                self.pending_pipeline_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -6463,6 +6478,42 @@ impl HirBuilderContext {
             Some(n) => Some(UnrollConfig::Factor(n)),
             None => Some(UnrollConfig::Full),
         }
+    }
+
+    /// Extract pipeline config from an IntentValue node
+    /// Handles: #[pipeline(stages=N)] -> PipelineConfig with N stages
+    fn extract_pipeline_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<PipelineConfig> {
+        // Get all tokens from the intent value
+        let tokens: Vec<_> = intent_value
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .collect();
+
+        // Look for "pipeline" identifier
+        let has_pipeline = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "pipeline"
+        });
+
+        if !has_pipeline {
+            return None;
+        }
+
+        // Look for "stages" identifier followed by "=" and a number
+        // The format is: #[pipeline(stages=N)]
+        let mut stages: Option<u32> = None;
+        let mut found_stages = false;
+
+        for (i, token) in tokens.iter().enumerate() {
+            if token.kind() == SyntaxKind::Ident && token.text() == "stages" {
+                found_stages = true;
+            } else if found_stages && token.kind() == SyntaxKind::IntLiteral {
+                stages = token.text().parse::<u32>().ok();
+                break;
+            }
+        }
+
+        // If we found "pipeline" but no "stages=N", default to 1 stage
+        Some(PipelineConfig::with_stages(stages.unwrap_or(1)))
     }
 
     /// Build intent constraint from syntax node

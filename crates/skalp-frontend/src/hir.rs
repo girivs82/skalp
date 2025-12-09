@@ -209,6 +209,9 @@ pub struct HirFunction {
     pub body: Vec<HirStatement>,
     /// Source location span (for error reporting)
     pub span: Option<SourceSpan>,
+    /// Pipeline configuration from `#[pipeline(stages=N)]` attribute
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_config: Option<PipelineConfig>,
 }
 
 /// Event block in HIR
@@ -361,6 +364,31 @@ pub enum UnrollConfig {
     Full,
     /// Unroll by a specific factor
     Factor(u32),
+}
+
+/// Pipeline configuration for automatic pipeline register insertion
+///
+/// Specifies how a function should be pipelined during synthesis.
+/// Used with `#[pipeline(stages=N)]` attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// Number of pipeline stages to insert
+    pub stages: u32,
+    /// Target clock frequency in Hz (optional)
+    pub target_freq: Option<u64>,
+    /// Enable automatic balancing of pipeline stages
+    pub auto_balance: bool,
+}
+
+impl PipelineConfig {
+    /// Create a pipeline config with specified number of stages
+    pub fn with_stages(stages: u32) -> Self {
+        Self {
+            stages,
+            target_freq: None,
+            auto_balance: false,
+        }
+    }
 }
 
 /// Generate block mode - controls elaboration behavior

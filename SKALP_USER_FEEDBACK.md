@@ -225,7 +225,7 @@ All were fixed during development - the compiler is actively improving.
 
 ### For Skalp Development:
 1. ~~**Priority 1**: Loop unrolling~~ ✅ DONE - `generate for` implemented
-2. **Priority 1**: Better source-level error messages
+2. ~~**Priority 1**: Better source-level error messages~~ ✅ DONE - Added SourceSpan to HIR, improved error formatting
 3. **Priority 2**: Pipeline annotations for timing
 4. **Priority 3**: Parameterized entity instantiation
 
