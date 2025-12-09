@@ -163,6 +163,9 @@ pub struct HirVariable {
     pub var_type: HirType,
     /// Initial value
     pub initial_value: Option<HirExpression>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<crate::SourceSpan>,
 }
 
 /// Constant in HIR

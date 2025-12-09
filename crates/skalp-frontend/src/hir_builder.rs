@@ -807,6 +807,7 @@ impl HirBuilderContext {
                                 name: let_stmt.name.clone(),
                                 var_type: let_stmt.var_type.clone(),
                                 initial_value: None,
+                                span: self.make_span(&child),
                             };
 
                             // Variables are registered in symbol table by build_let_statement()
@@ -1056,6 +1057,7 @@ impl HirBuilderContext {
             name,
             var_type,
             initial_value,
+            span: self.make_span(node),
         })
     }
 
