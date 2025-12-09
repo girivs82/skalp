@@ -484,6 +484,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
             state_elements: HashMap::new(),
             clock_domains: HashMap::new(),
             sorted_combinational_node_ids: Vec::new(), // Empty for LIR (no combinational nodes)
+            pipeline_config: None, // LIR doesn't support pipeline config
             span: None,
         }
     } else if design_file.extension() == Some(std::ffi::OsStr::new("mir")) {

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use skalp_frontend::hir::PipelineConfig;
 use skalp_frontend::SourceSpan;
 use std::collections::{HashMap, HashSet};
 
@@ -30,6 +31,10 @@ pub struct SirModule {
     /// Pre-computed topological order for all combinational nodes.
     /// This is computed once and stored for efficient simulation.
     pub sorted_combinational_node_ids: Vec<usize>,
+    /// Pipeline configuration from `#[pipeline(stages=N)]` attribute
+    /// Used for automatic pipeline register insertion
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_config: Option<PipelineConfig>,
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
@@ -313,6 +318,7 @@ impl SirModule {
             state_elements: HashMap::new(),
             clock_domains: HashMap::new(),
             sorted_combinational_node_ids: Vec::new(),
+            pipeline_config: None,
             span: None,
         }
     }

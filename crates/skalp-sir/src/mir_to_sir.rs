@@ -48,6 +48,13 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
     }
 
     let mut sir = SirModule::new(top_module.name.clone());
+
+    // Propagate pipeline configuration from MIR to SIR
+    sir.pipeline_config = top_module.pipeline_config.clone();
+    if sir.pipeline_config.is_some() {
+        println!("🔧 PIPELINE: Module '{}' has pipeline config: {:?}", top_module.name, sir.pipeline_config);
+    }
+
     let mut converter = MirToSirConverter::new(&mut sir, top_module, mir);
 
     converter.convert_ports();
