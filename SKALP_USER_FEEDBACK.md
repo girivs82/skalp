@@ -86,13 +86,14 @@ let fifo = Fifo<DEPTH: 16, WIDTH: 32> { ... }
 ```
 **Impact**: Self-documenting entity instantiation. Critical for designs with many generic parameters.
 
-**Note**: Named generics are supported for **entity instantiation only**. Function calls still use positional syntax:
+**Note**: Named generics are supported for both **entity instantiation and function calls**:
 ```skalp
-// Entity instantiation - named generics work
+// Entity instantiation
 let adder = GenericAdder<W: 32> { a: x, b: y }
 
-// Function calls - use positional syntax only
-let result = exec_l0_l1::<32>(opcode, data1, data2)
+// Function calls - named generics also work!
+let result = generic_add::<W: 32>(x, y)
+let result2 = exec_l0_l1::<W: 32>(opcode, data1, data2)
 ```
 
 ### 7. GPU-Accelerated Simulation
@@ -129,17 +130,7 @@ Nested if/match with multiple returns works, but:
 
 ## Remaining Pain Points / Future Enhancements
 
-### 1. Named Generics for Function Calls
-```skalp
-// WANTED:
-let result = exec_l0_l1::<W: 32>(opcode, data1, data2)  // Named generic in function call
-
-// CURRENT:
-let result = exec_l0_l1::<32>(opcode, data1, data2)     // Positional only
-```
-**Impact**: Low-Medium. Positional syntax works but named would improve clarity for multi-parameter generic functions.
-
-### 2. No RAM/Memory Inference
+### 1. No RAM/Memory Inference
 ```skalp
 // WANTED:
 #[memory(depth=1024, width=64)]
@@ -233,7 +224,7 @@ entity VendorFifo { ... }
 - 256-bit datapath support was essential for content-addressed model
 - FP32 native support enabled direct implementation of math kernels
 - Const generic functions work well: `exec_l0_l1::<32>()` for parameterized operations
-- Named generics (`<W: 32>`) work for entity instantiation but not yet for function calls
+- Named generics (`<W: 32>`) work for both entity instantiation and function calls
 
 ---
 
@@ -244,7 +235,7 @@ entity VendorFifo { ... }
 2. **Priority 2**: Formal verification integration (SVA assertions → property checking)
 3. **Priority 3**: Debug infrastructure (trace signals, waveform export)
 4. **Priority 4**: CDC helpers (synchronizer inference)
-5. **Priority 5**: Named generics for function calls (extend current entity-only support)
+5. ~~**Priority 5**: Named generics for function calls~~ ✅ **DONE** (Dec 2025)
 
 ### For Skalp Users:
 1. **Use pipeline annotations** on timing-critical functions - the backend handles register insertion
