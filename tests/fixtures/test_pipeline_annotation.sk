@@ -1,0 +1,40 @@
+// Test fixture for pipeline annotation on functions
+// Tests the #[pipeline(stages=N)] attribute
+
+// Simple pipelined function - 2 stage multiply accumulate
+#[pipeline(stages=2)]
+pub fn pipelined_mac(a: bit[32], b: bit[32], c: bit[32]) -> bit[32] {
+    let product = a * b;
+    let result = product + c;
+    return result
+}
+
+// 3-stage pipelined function with more operations
+#[pipeline(stages=3)]
+pub fn pipelined_expr(x: bit[32], y: bit[32], z: bit[32], w: bit[32]) -> bit[32] {
+    // Stage 1: multiplies
+    let xy = x * y;
+    let zw = z * w;
+
+    // Stage 2: add
+    let sum = xy + zw;
+
+    // Stage 3: final result
+    let result = sum >> 4;
+    return result
+}
+
+// Entity that uses the pipelined functions
+entity PipelineTest {
+    in a: bit[32],
+    in b: bit[32],
+    in c: bit[32],
+    in d: bit[32],
+    out mac_result: bit[32],
+    out expr_result: bit[32],
+}
+
+impl PipelineTest {
+    mac_result <= pipelined_mac(a, b, c)
+    expr_result <= pipelined_expr(a, b, c, d)
+}

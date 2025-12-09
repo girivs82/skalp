@@ -204,6 +204,7 @@ impl TypeSubstitution {
             hir::HirExpression::Call(call) => hir::HirExpression::Call(hir::HirCallExpr {
                 function: call.function.clone(),
                 type_args: call.type_args.iter().map(|t| self.substitute_type(t)).collect(),
+                named_type_args: call.named_type_args.iter().map(|(k, v)| (k.clone(), self.substitute_type(v))).collect(),
                 args: call.args.iter().map(|a| self.substitute_expression(a)).collect(),
                 impl_style: call.impl_style.clone(),
             }),
@@ -1398,6 +1399,7 @@ impl Monomorphizer {
                             return hir::HirExpression::Call(hir::HirCallExpr {
                                 function: specialized_name.clone(),
                                 type_args: Vec::new(), // No type args in specialized call
+                                named_type_args: std::collections::HashMap::new(), // No named type args in specialized call
                                 args: call
                                     .args
                                     .iter()
@@ -1419,6 +1421,7 @@ impl Monomorphizer {
                     return hir::HirExpression::Call(hir::HirCallExpr {
                         function: specialized_name,
                         type_args: Vec::new(),
+                        named_type_args: std::collections::HashMap::new(),
                         args: call
                             .args
                             .iter()
@@ -1432,6 +1435,7 @@ impl Monomorphizer {
                 hir::HirExpression::Call(hir::HirCallExpr {
                     function: call.function.clone(),
                     type_args: call.type_args.clone(),
+                    named_type_args: call.named_type_args.clone(),
                     args: call
                         .args
                         .iter()

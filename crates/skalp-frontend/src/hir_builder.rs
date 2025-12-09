@@ -574,6 +574,7 @@ impl HirBuilderContext {
                                 func_name.map(|name| HirExpression::Call(HirCallExpr {
                                     function: name,
                                     type_args: vec![],
+                                    named_type_args: std::collections::HashMap::new(),
                                     args,
                                     impl_style: ImplStyle::default(),
                                 }))
@@ -936,11 +937,42 @@ impl HirBuilderContext {
 
         // Extract generic arguments if present
         let mut generic_args = Vec::new();
+        let mut named_generic_args = std::collections::HashMap::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
             let mut arg_index = 0;
             for arg_node in arg_list.children() {
-                // Each child is an Arg node, which contains the actual expression
-                if arg_node.kind() == SyntaxKind::Arg {
+                // Handle named arguments: `NAME: value`
+                if arg_node.kind() == SyntaxKind::NamedArg {
+                    // First token is the name identifier
+                    let name = arg_node
+                        .first_token_of_kind(SyntaxKind::Ident)
+                        .map(|t| t.text().to_string());
+
+                    // Find the expression (after the colon)
+                    if let Some(name) = name {
+                        if let Some(expr_node) = arg_node.children().next() {
+                            let expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
+                                let ty = self.build_hir_type(&expr_node);
+                                Some(HirExpression::Cast(HirCastExpr {
+                                    expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
+                                    target_type: ty,
+                                }))
+                            } else {
+                                self.build_expression(&expr_node)
+                            };
+
+                            if let Some(mut e) = expr {
+                                // Look up the parameter by name to get its type
+                                if let Some(param) = entity_generics.iter().find(|g| g.name == name) {
+                                    e = self.convert_generic_arg_expr(e, &param.param_type);
+                                }
+                                named_generic_args.insert(name, e);
+                            }
+                        }
+                    }
+                }
+                // Handle positional arguments (existing logic)
+                else if arg_node.kind() == SyntaxKind::Arg {
                     // Find the expression or type inside the Arg node
                     if let Some(expr_node) = arg_node.children().next() {
                         let expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
@@ -983,6 +1015,7 @@ impl HirBuilderContext {
             name,
             entity,
             generic_args,
+            named_generic_args,
             connections,
         })
     }
@@ -1639,6 +1672,7 @@ impl HirBuilderContext {
                                             let nested_call = HirExpression::Call(HirCallExpr {
                                                 function: nested_func_name,
                                                 type_args: Vec::new(), // TODO Phase 1: Parse from AST
+                                                named_type_args: std::collections::HashMap::new(),
                                                 args: nested_args,
                                                 impl_style: ImplStyle::default(),
                                             });
@@ -1662,6 +1696,7 @@ impl HirBuilderContext {
                             let call_expr = HirExpression::Call(HirCallExpr {
                                 function: func_name,
                                 type_args: Vec::new(), // TODO Phase 1: Parse from AST
+                                named_type_args: std::collections::HashMap::new(),
                                 args,
                                 impl_style: ImplStyle::default(),
                             });
@@ -2088,6 +2123,7 @@ impl HirBuilderContext {
                         result = HirExpression::Call(HirCallExpr {
                             function: method_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
+                            named_type_args: std::collections::HashMap::new(),
                             args,
                             impl_style: ImplStyle::default(),
                         });
@@ -4318,6 +4354,7 @@ impl HirBuilderContext {
                         return Some(HirExpression::Call(HirCallExpr {
                             function: method_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
+                            named_type_args: std::collections::HashMap::new(),
                             args,
                             impl_style: ImplStyle::default(),
                         }));
@@ -4376,14 +4413,29 @@ impl HirBuilderContext {
         };
 
         // Extract type arguments (Phase 1: Generic function calls like func::<T>(args))
+        // Also handles named generic arguments like func::<W: 32>(args)
         let mut type_args = Vec::new();
+        let mut named_type_args = std::collections::HashMap::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
             eprintln!("[HIR_TYPE_ARGS] Found ArgList with {} children", arg_list.children().count());
             for arg_node in arg_list.children() {
                 eprintln!("[HIR_TYPE_ARGS] Processing arg_node kind: {:?}", arg_node.kind());
-                let hir_type = self.extract_hir_type(&arg_node);
-                eprintln!("[HIR_TYPE_ARGS] Extracted type: {:?}", hir_type);
-                type_args.push(hir_type);
+
+                // Handle named generic arguments: NAME: value
+                if arg_node.kind() == SyntaxKind::NamedArg {
+                    // Extract name (first Ident token in NamedArg)
+                    if let Some(name_token) = arg_node.first_token_of_kind(SyntaxKind::Ident) {
+                        let name = name_token.text().to_string();
+                        let hir_type = self.extract_hir_type(&arg_node);
+                        eprintln!("[HIR_TYPE_ARGS] Named arg '{}' = {:?}", name, hir_type);
+                        named_type_args.insert(name, hir_type);
+                    }
+                } else {
+                    // Positional argument
+                    let hir_type = self.extract_hir_type(&arg_node);
+                    eprintln!("[HIR_TYPE_ARGS] Extracted type: {:?}", hir_type);
+                    type_args.push(hir_type);
+                }
             }
         }
 
@@ -4442,7 +4494,8 @@ impl HirBuilderContext {
 
         Some(HirExpression::Call(HirCallExpr {
             function,
-            type_args, // Phase 1: Extracted from AST
+            type_args, // Phase 1: Extracted from AST (positional)
+            named_type_args, // Named generic arguments like func::<W: 32>()
             args,
             impl_style,
         }))
@@ -7213,6 +7266,7 @@ impl HirBuilderContext {
                         let call_expr = HirExpression::Call(HirCallExpr {
                             function: func_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
+                            named_type_args: std::collections::HashMap::new(),
                             args,
                             impl_style: ImplStyle::default(),
                         });

@@ -1059,6 +1059,7 @@ mod tests {
         let expr = HirExpression::Call(crate::hir::HirCallExpr {
             function: "clog2".to_string(),
             type_args: vec![],
+            named_type_args: std::collections::HashMap::new(),
             args: vec![HirExpression::Literal(HirLiteral::Integer(1024))],
             impl_style: crate::hir::ImplStyle::default(),
         });
@@ -1068,6 +1069,7 @@ mod tests {
         let expr = HirExpression::Call(crate::hir::HirCallExpr {
             function: "clog2".to_string(),
             type_args: vec![],
+            named_type_args: std::collections::HashMap::new(),
             args: vec![HirExpression::Literal(HirLiteral::Integer(1))],
             impl_style: crate::hir::ImplStyle::default(),
         });

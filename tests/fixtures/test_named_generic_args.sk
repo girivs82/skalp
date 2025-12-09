@@ -1,0 +1,44 @@
+// Test for named generic arguments in entity instantiation
+// Follows same pattern as test_async_fifo_multi_field.sk
+
+// Simple generic entity for testing named args
+entity GenericAdder<const W: nat> {
+    in a: bit[32],
+    in b: bit[32],
+    out sum: bit[32],
+}
+
+impl GenericAdder {
+    sum <= a + b
+}
+
+// Test: positional arg (working baseline)
+entity PositionalTest {
+    in a: bit[32],
+    in b: bit[32],
+    out sum_out: bit[32],
+}
+
+impl PositionalTest {
+    let adder = GenericAdder<16> {
+        a: a,
+        b: b
+    }
+    sum_out <= adder.sum
+}
+
+// Test: named generic arg - new syntax!
+entity NamedArgTest {
+    in a: bit[32],
+    in b: bit[32],
+    out sum_out: bit[32],
+}
+
+impl NamedArgTest {
+    // Named generic argument syntax: W: 32
+    let adder = GenericAdder<W: 32> {
+        a: a,
+        b: b
+    }
+    sum_out <= adder.sum
+}

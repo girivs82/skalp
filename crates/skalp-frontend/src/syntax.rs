@@ -440,6 +440,7 @@ pub enum SyntaxKind {
     // Arguments
     ArgList,
     Arg,
+    NamedArg, // For named generic arguments like `WIDTH: 32`
     Parameter,
     ParameterList,
 

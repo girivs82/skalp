@@ -98,10 +98,23 @@ pub struct HirInstance {
     pub name: String,
     /// Entity to instantiate
     pub entity: EntityId,
-    /// Generic arguments (for monomorphization)
+    /// Positional generic arguments (for monomorphization)
     pub generic_args: Vec<HirExpression>,
+    /// Named generic arguments (parameter_name -> expression)
+    /// Supports syntax like `Entity<WIDTH: 32, DEPTH: 16>`
+    #[serde(default)]
+    pub named_generic_args: std::collections::HashMap<String, HirExpression>,
     /// Port connections
     pub connections: Vec<HirConnection>,
+}
+
+/// Named generic argument (for clearer code)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirNamedGenericArg {
+    /// Parameter name (e.g., "WIDTH", "DEPTH")
+    pub name: String,
+    /// Argument expression (e.g., `32`, `fp32`)
+    pub expr: HirExpression,
 }
 
 /// Port connection in HIR
@@ -731,6 +744,9 @@ pub struct HirCallExpr {
     /// Type arguments for generic functions (Phase 1)
     /// Example: func::<T, U>(args) has type_args = [T, U]
     pub type_args: Vec<HirType>,
+    /// Named type arguments for generic functions
+    /// Example: func::<W: 32>(args) has named_type_args = {"W": Nat(32)}
+    pub named_type_args: std::collections::HashMap<String, HirType>,
     /// Arguments
     pub args: Vec<HirExpression>,
     /// Implementation style hint from `#[impl_style::parallel]` attribute

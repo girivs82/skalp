@@ -6827,6 +6827,7 @@ impl<'hir> HirToMir<'hir> {
                         .map(|a| self.substitute_variables(a, var_exprs, _let_bindings))
                         .collect(),
                     type_args: call.type_args.clone(),
+                    named_type_args: call.named_type_args.clone(),
                     impl_style: call.impl_style.clone(),
                 })
             }
@@ -8027,6 +8028,7 @@ impl<'hir> HirToMir<'hir> {
                 Some(hir::HirExpression::Call(hir::HirCallExpr {
                     function: call.function.clone(),
                     type_args: call.type_args.clone(), // Preserve type args during parameter substitution
+                    named_type_args: call.named_type_args.clone(),
                     args: substituted_args,
                     impl_style: call.impl_style.clone(),
                 }))
@@ -9018,6 +9020,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args?,
                     type_args: call_expr.type_args.clone(),
+                    named_type_args: call_expr.named_type_args.clone(),
                     impl_style: call_expr.impl_style.clone(),
                 }))
             }
@@ -9369,6 +9372,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args,
                     type_args: call_expr.type_args.clone(),
+                    named_type_args: call_expr.named_type_args.clone(),
                     impl_style: call_expr.impl_style.clone(),
                 })
             }
@@ -9656,6 +9660,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args,
                     type_args: call_expr.type_args.clone(),
+                    named_type_args: call_expr.named_type_args.clone(),
                     impl_style: call_expr.impl_style.clone(),
                 })
             }
@@ -9962,6 +9967,7 @@ impl<'hir> HirToMir<'hir> {
                     function: call_expr.function.clone(),
                     args: substituted_args,
                     type_args: call_expr.type_args.clone(),
+                    named_type_args: call_expr.named_type_args.clone(),
                     impl_style: call_expr.impl_style.clone(),
                 })
             }

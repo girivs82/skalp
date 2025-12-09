@@ -1,37 +1,37 @@
 # Skalp User Feedback
 ## From: Claude (LLM) as Karythra User
-## Date: 2025-12-05
+## Date: 2025-12-09 (Updated)
 ## Project: Karythra 256-bit Content-Addressed Processor
 
 ---
 
 ## Executive Summary
 
-Skalp sits in a **sweet spot between RTL and traditional HLS**. It's not trying to be C-to-hardware (which loses architectural control), nor is it raw Verilog (which is verbose and error-prone). It's **"Rust for hardware"** - you think in hardware terms but with modern language ergonomics.
+Skalp has matured significantly. It sits in a **sweet spot between RTL and traditional HLS** - you think in hardware terms but with modern language ergonomics. After the December 2025 feature additions (generate blocks, pipeline annotations, named generics), it's now **feature-complete for most accelerator designs**.
 
-**Overall Rating: 8/10** - Genuinely usable for complex designs, with some rough edges.
+**Overall Rating: 9/10** - Production-ready for accelerator development, with only niche features missing.
 
 ---
 
-## What Works Exceptionally Well
+## Core Strengths
 
 ### 1. Type System and Bit-Width Safety
 ```skalp
-// This is the killer feature - explicit widths, compile-time checks
 let a: bit[32] = ...;
 let b: bit[8] = a[7:0];  // Explicit slice - no implicit truncation bugs
 let c: bit[256] = {a, b, ...};  // Explicit concatenation
 ```
-**Why it matters**: In SystemVerilog, width mismatches are silent bugs that cause simulation/synthesis mismatches. Skalp catches these at compile time.
+**Impact**: Eliminates the #1 source of RTL bugs - width mismatches. Catches at compile time what Verilog finds at simulation.
 
-### 2. First-Class FP32 Support with Operator Syntax
+### 2. First-Class FP32 Support
 ```skalp
-let discriminant = b * b - (4.0 as fp32) * a * c;
-let result = if discriminant < (0.0 as fp32) { ... } else { ... };
+let discriminant = b * b - 4.0fp32 * a * c;
+let sqrt_d = sqrt(discriminant);
+let x1 = (-b + sqrt_d) / (2.0fp32 * a);
 ```
-**Why it matters**: FP arithmetic in Verilog requires manual IEEE 754 bit manipulation or vendor IP instantiation. Skalp makes it natural.
+**Impact**: FP arithmetic that would require manual IEEE 754 manipulation in Verilog is natural in Skalp. Used extensively in Karythra's L4-L5 graphics operations.
 
-### 3. Match Expressions for FSMs and Muxes
+### 3. Match Expressions for Clean Mux Trees
 ```skalp
 return match opcode {
     0 => a + b,
@@ -40,230 +40,240 @@ return match opcode {
     _ => 0
 }
 ```
-**Why it matters**: This compiles to clean mux trees. In Verilog, you'd write verbose case statements with potential latch inference bugs.
+**Impact**: Compiles to clean mux trees without latch inference bugs. Intent declarations can optimize to parallel (one-hot) or priority muxes.
 
-### 4. Struct Types for Bundled Signals
+### 4. Generate Blocks for Metaprogramming
 ```skalp
-pub struct vec3 { x: fp32, y: fp32, z: fp32 }
-let v = vec3 { x: 1.0 as fp32, y: 2.0 as fp32, z: 3.0 as fp32 };
-```
-**Why it matters**: SystemVerilog structs exist but are clunky. Skalp structs feel natural and work well with the type system.
+// Compile-time loop unrolling
+generate for i in 0..32 {
+    result[i] <= input[31-i];  // Bit reversal
+}
 
-### 5. Module System and Imports
+// Conditional generation
+generate if ENABLE_DEBUG {
+    debug_out <= internal_state;
+}
+
+// Parameterized generation
+generate match DATA_WIDTH {
+    8 => { ... }
+    16 => { ... }
+    32 => { ... }
+}
+```
+**Impact**: Full Verilog generate capability with cleaner syntax. Essential for parameterized designs.
+
+### 5. Pipeline Annotations for Timing Control
 ```skalp
-use skalp::numeric::fp::{abs, sqrt};
-use skalp::bitops::{clz32, popcount32};
-```
-**Why it matters**: Code reuse in Verilog is `include-based and fragile. Skalp's module system enables real library development.
+#[pipeline(stages=4)]
+pub fn quadratic_solve(a: bit[32], b: bit[32], c: bit[32]) -> (bit, bit[32], bit[32]) {
+    // Compiler inserts pipeline registers at optimal cut points
+    ...
+}
 
-### 6. GPU-Accelerated Simulation
-The Metal backend for simulation is **genuinely fast** for combinational logic testing. Running 500+ cycles of a complex CLE design takes ~50-100 seconds, which is reasonable for iteration.
+#[pipeline(stages=3, target_freq=100_000_000)]  // With timing hints
+pub fn bezier_eval(...) -> bit[32] { ... }
+```
+**Impact**: Eliminates manual pipeline register insertion. Backend computes logic levels and places FlipFlops automatically.
+
+### 6. Named Generic Arguments for Clarity
+```skalp
+// Positional (existing)
+let fifo = Fifo<16, 32> { ... }
+
+// Named (clearer for complex entities)
+let fifo = Fifo<DEPTH: 16, WIDTH: 32> { ... }
+```
+**Impact**: Self-documenting entity instantiation. Critical for designs with many generic parameters.
+
+**Note**: Named generics are supported for **entity instantiation only**. Function calls still use positional syntax:
+```skalp
+// Entity instantiation - named generics work
+let adder = GenericAdder<W: 32> { a: x, b: y }
+
+// Function calls - use positional syntax only
+let result = exec_l0_l1::<32>(opcode, data1, data2)
+```
+
+### 7. GPU-Accelerated Simulation
+The Metal backend provides fast simulation for combinational logic. 500+ cycles of Karythra's CLE runs in ~50-100 seconds - fast enough for TDD iteration.
 
 ---
 
-## What Works But Has Rough Edges
+## What Works Well But Has Caveats
 
-### 1. Mutable Variables in Functions (Recently Fixed)
+### 1. Mutable Variables in Functions
 ```skalp
-// This now works after Bug #118 fix:
 pub fn parity32(x: bit[32]) -> bit {
-    let mut p = 0 as bit[32];
-    p = p ^ (x >> 16);  // Mutable accumulator pattern
+    let mut p = x;
+    p = p ^ (p >> 16);
+    p = p ^ (p >> 8);
     ...
+    return p[0:0]
 }
 ```
-**Status**: Fixed, but the transformation is complex internally. Edge cases may still exist.
+**Status**: Works after Bug #118 fix. Complex nested mutations may still have edge cases.
 
-### 2. Nested Control Flow
-Complex nested if/match with early returns works, but:
-- Error messages can be cryptic when it fails
-- Sometimes requires restructuring code to help the compiler
-
-### 3. Function Inlining
-Works well for simple functions, but:
-- Large functions with complex control flow can cause codegen issues
-- No explicit `#[inline]` control - compiler decides
-
-### 4. 256-bit Wide Datapaths
+### 2. 256-bit Wide Datapaths
 ```skalp
 pub fn exec_l4_l5(opcode: bit[6], data1: bit[256], data2: bit[256]) -> bit[256]
 ```
-**Status**: Works! But the Metal backend had to decompose into 4×64-bit chunks internally. Wide operations are supported but may have performance implications in simulation.
+**Status**: Fully supported. Backend decomposes to 4x64-bit for Metal. Simulation works, but may be slower than narrower designs.
+
+### 3. Complex Control Flow
+Nested if/match with multiple returns works, but:
+- Very deep nesting may hit edge cases
+- Sometimes requires restructuring code
 
 ---
 
-## Pain Points / Missing Features
+## Remaining Pain Points / Future Enhancements
 
-### 1. ~~No Loop Unrolling Syntax~~ (FIXED - Dec 2025)
-```skalp
-// NOW SUPPORTED via generate blocks:
-generate for i in 0..32 {
-    result[i] <= input[31-i];  // Bit reversal - unrolled at compile time
-}
-
-// Also supports step:
-generate for i in 0..8 step 2 {
-    result[i] <= data_in[i];  // Process every other bit
-}
-```
-**Status**: ✅ Implemented. Generate-for loops provide explicit compile-time unrolling.
-
-### 2. No Parameterized Module Instantiation
+### 1. Named Generics for Function Calls
 ```skalp
 // WANTED:
-entity Fifo<const DEPTH: nat, const WIDTH: nat> { ... }
-let fifo = Fifo::<16, 32>::new();
+let result = exec_l0_l1::<W: 32>(opcode, data1, data2)  // Named generic in function call
 
-// CURRENT: Const generics exist but entity parameterization is limited
+// CURRENT:
+let result = exec_l0_l1::<32>(opcode, data1, data2)     // Positional only
 ```
-**Impact**: Medium. Limits reusable IP creation.
+**Impact**: Low-Medium. Positional syntax works but named would improve clarity for multi-parameter generic functions.
 
-### 3. ~~No Pipeline/Retiming Annotations~~ (IMPLEMENTED - Dec 2025)
+### 2. No RAM/Memory Inference
 ```skalp
-// NOW SUPPORTED:
-#[pipeline(stages=3)]
-pub fn multiplier(a: bit[32], b: bit[32]) -> bit[64] { ... }
+// WANTED:
+#[memory(depth=1024, width=64)]
+signal mem: bit[64][1024];  // Infers BRAM/SRAM
 
-#[pipeline(stages=4, target_freq=100_000_000)]  // With timing hint for LIR
-entity PipelinedMul { ... }
-
-// The attribute is parsed into HIR PipelineConfig with stages, target_freq, auto_balance
-// Backend pipeline register insertion is implemented in SIR (pipeline.rs)
+// CURRENT WORKAROUND:
+// Must instantiate explicit memory entity
+let mem = Memory<1024, 64> { ... }
 ```
-**Status**: ✅ Full implementation complete:
-- Parsing: HIR `PipelineConfig` with stages, target_freq, auto_balance
-- Propagation: HIR → MIR → SIR
-- Backend: `insert_pipeline_registers()` in SIR computes logic levels and inserts FlipFlops at cut points
+**Impact**: Medium. Explicit instantiation works but is verbose for memory-heavy designs.
 
-### 4. Limited Timing/Cycle Awareness
-Skalp is fundamentally **combinational-first**. Sequential logic requires explicit register entities. This is correct but verbose:
-```skalp
-// Must explicitly instantiate Reg entities for state
-entity Counter {
-    reg: Reg<bit[8]>,
-}
-```
-**Impact**: Medium. More explicit is good, but common patterns could use sugar.
-
-### 5. Error Messages Need Work
-When compilation fails deep in the MIR→SIR→Metal pipeline, errors like:
-```
-Variable 'foo_123' not found in context
-```
-...don't map back to source locations well. Debugging requires `SKALP_DUMP_SHADER=1` and reading generated code.
-
-### 6. No Formal Verification Integration
-No built-in assertions, assumptions, or cover statements for formal tools.
+### 2. No Formal Verification Integration
 ```skalp
 // WANTED:
 assert!(result < MAX_VALUE, "Overflow check");
 assume!(input != 0, "Non-zero input");
+cover!(state == IDLE, "Can reach idle");
 ```
+**Impact**: Medium-High. No integration with formal tools (SymbiYosys, Jasper, etc.). Critical for safety-critical designs.
 
-### 7. ~~No Generate Statements~~ (FIXED - Dec 2025)
+### 3. Limited Debug/Trace Infrastructure
 ```skalp
-// NOW SUPPORTED:
-// Conditional generation based on const:
-const ENABLE_PIPELINE: bool = true;
-generate if ENABLE_PIPELINE {
-    stage1 <= data_in;
-    stage2 <= stage1;
-}
+// WANTED:
+#[trace]
+signal debug_bus: bit[32];  // Auto-exported to trace
 
-// Match-based generation:
-const DATA_WIDTH: nat[8] = 16;
-generate match DATA_WIDTH {
-    8 => { result <= data_in & 0xFF; }
-    16 => { result <= data_in & 0xFFFF; }
-    32 => { result <= data_in; }
-}
-
-// Nested generate blocks also work
-generate for row in 0..ROWS {
-    generate for col in 0..COLS {
-        // Matrix initialization logic
-    }
-}
+#[breakpoint(condition = "error_flag == 1")]
 ```
-**Status**: ✅ Implemented. Generate-for, generate-if, generate-if-else, generate-match all work.
+**Impact**: Medium. Currently relies on manual debug signal insertion and `SKALP_DUMP_SHADER=1`.
+
+### 4. No Clock Domain Crossing Helpers
+```skalp
+// WANTED:
+#[cdc(sync_stages=2)]
+signal async_input: bit[8];  // Auto-inserts synchronizers
+```
+**Impact**: Medium. CDC must be handled manually with explicit synchronizer entities.
+
+### 5. No Power Intent Support
+```skalp
+// WANTED:
+#[power_domain("always_on")]
+entity CriticalReg { ... }
+
+#[retention]
+signal saved_state: bit[32];
+```
+**Impact**: Low-Medium. Not critical for FPGA, but needed for ASIC power management.
+
+### 6. No Vendor IP Integration
+```skalp
+// WANTED:
+#[xilinx_ip("xpm_fifo_sync")]
+entity VendorFifo { ... }
+```
+**Impact**: Medium. Currently must wrap vendor IP in Verilog and instantiate as black box.
 
 ---
 
-## Comparison to Alternatives
+## Comparison to Alternatives (Updated Dec 2025)
 
 | Feature | Skalp | SystemVerilog | Chisel | Clash | Bluespec |
 |---------|-------|---------------|--------|-------|----------|
 | Type Safety | ★★★★★ | ★★☆☆☆ | ★★★★☆ | ★★★★★ | ★★★★☆ |
-| Learning Curve | ★★★★☆ | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | ★★☆☆☆ |
-| Simulation Speed | ★★★★☆ | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ |
-| Abstraction Level | Mid-High | Low | Mid-High | High | High |
-| Industry Adoption | ☆☆☆☆☆ | ★★★★★ | ★★★☆☆ | ★☆☆☆☆ | ★★☆☆☆ |
+| Generate/Meta | ★★★★★ | ★★★★☆ | ★★★★★ | ★★★★☆ | ★★★★☆ |
+| Pipeline Control | ★★★★★ | ★★☆☆☆ | ★★★☆☆ | ★★★☆☆ | ★★★★★ |
 | FP32 Native | ★★★★★ | ☆☆☆☆☆ | ★★☆☆☆ | ★★★★☆ | ★★☆☆☆ |
+| Simulation Speed | ★★★★☆ | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ |
+| Learning Curve | ★★★★☆ | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | ★★☆☆☆ |
+| Memory Inference | ★★☆☆☆ | ★★★★★ | ★★★★☆ | ★★★☆☆ | ★★★★☆ |
+| Formal Support | ☆☆☆☆☆ | ★★★★☆ | ★★☆☆☆ | ★★★☆☆ | ★★★★☆ |
 
-**Skalp's niche**: When you need **architectural control** (not C-to-gates HLS) but want **modern language features** (not 1990s Verilog).
+**Skalp's Sweet Spot**: Accelerators with complex arithmetic (FP32, wide datapaths), algorithmic complexity (match expressions, control flow), and timing requirements (pipeline annotations).
 
 ---
 
-## Specific Karythra Experience
+## Karythra Experience Summary
 
-### What Worked Great:
-1. **CLE Function Units (L0-L5)**: Complex match-based opcode dispatch compiled cleanly
-2. **FP32 Quadratic Solver**: `sqrt()`, `abs()`, comparisons all worked
-3. **Bitops Library**: `clz32`, `popcount32`, `parity32` - all synthesizable
-4. **256-bit Datapath**: Wide concat/slice operations worked correctly
-5. **Vector Math**: `vec3_dot`, `vec3_cross` using struct types
+### Features Used Successfully:
+1. **Pipeline Annotations**: Added `#[pipeline(stages=4)]` to `quadratic_solve`, `bezier_eval`, `ray_aabb_intersect`
+2. **FP32 Operations**: Quadratic solver, Bezier curves, ray intersection - all natural to express
+3. **256-bit Datapaths**: Full support for content-addressed processor's wide data model
+4. **Bitops Library**: `clz32`, `popcount32`, `parity32` - all synthesizable
+5. **Match-based Dispatch**: CLE function unit opcode dispatch compiles cleanly
+6. **Mutable Variables**: Accumulator patterns in bitops functions work
+7. **Const Generic Functions**: `exec_l0_l1::<32>(...)` for parameterized width operations
+8. **Generate-for Loops**: Demonstrated in stdlib for bit manipulation entities (BitReverser, Popcount)
 
-### What Required Workarounds:
-1. **Mutable loop patterns**: Had to restructure as chained operations
-2. **Complex nested returns**: Sometimes needed code restructuring
-3. **Debug visibility**: Added explicit debug signals to trace issues
-
-### Bugs Encountered and Fixed:
-- Bug #85: Sign extension in cast operations
-- Bug #86: CLZ implementation issues
-- Bug #110: If-else in function calls
-- Bug #118: Mutable variable transformation
-
-All were fixed during development - the compiler is actively improving.
+### Karythra-Specific Notes:
+- The CLE's L4-L5 graphics operations benefit heavily from pipeline annotations
+- 256-bit datapath support was essential for content-addressed model
+- FP32 native support enabled direct implementation of math kernels
+- Const generic functions work well: `exec_l0_l1::<32>()` for parameterized operations
+- Named generics (`<W: 32>`) work for entity instantiation but not yet for function calls
 
 ---
 
 ## Recommendations
 
-### For Skalp Development:
-1. ~~**Priority 1**: Loop unrolling~~ ✅ DONE - `generate for` implemented
-2. ~~**Priority 1**: Better source-level error messages~~ ✅ DONE - Added SourceSpan to HIR, improved error formatting
-3. ~~**Priority 2**: Pipeline annotations for timing~~ ✅ DONE - Full pipeline insertion backend in SIR
-4. **Priority 3**: Parameterized entity instantiation
+### For Skalp Development (Next Priorities):
+1. **Priority 1**: RAM/Memory inference - most requested missing feature
+2. **Priority 2**: Formal verification integration (SVA assertions → property checking)
+3. **Priority 3**: Debug infrastructure (trace signals, waveform export)
+4. **Priority 4**: CDC helpers (synchronizer inference)
+5. **Priority 5**: Named generics for function calls (extend current entity-only support)
 
 ### For Skalp Users:
-1. **Start with combinational logic** - it's Skalp's strength
-2. **Use the stdlib** - bitops, fp, vector are well-tested
-3. **Keep functions small** - helps compiler optimization
-4. **Use `SKALP_DUMP_SHADER=1`** when debugging codegen issues
-5. **Write tests early** - the GPU simulator is fast enough for TDD
+1. **Use pipeline annotations** on timing-critical functions - the backend handles register insertion
+2. **Use the stdlib** - bitops, fp, vector are battle-tested
+3. **Named generics** improve readability for complex parameterized designs
+4. **Generate blocks** replace manual unrolling - use them
+5. **`SKALP_DUMP_SHADER=1`** for debugging codegen issues
+6. **Keep functions small** - helps inlining decisions
 
 ---
 
 ## Conclusion
 
-Skalp is **production-usable for medium-complexity designs**. It's not ready for tapeout of a full SoC, but for:
-- Algorithm exploration
-- Accelerator prototyping
-- IP block development
-- Teaching hardware design
+Skalp is now **production-ready for accelerator development**. The December 2025 additions addressed the major pain points:
+- Generate blocks enable metaprogramming
+- Pipeline annotations handle timing
+- Named generics improve clarity
+- Error messages have source locations
 
-...it's **genuinely better than Verilog** while maintaining hardware-level control that HLS loses.
-
-The Rust-inspired syntax means LLMs (like me) can write it effectively, which is a real advantage for AI-assisted hardware development.
-
-**Would I use Skalp again?** Yes, for designs where:
-- Bit-level control matters
-- FP32 operations are needed
-- Complex control flow (match/if) is common
-- Rapid iteration is valuable
+**Would I use Skalp again?** Absolutely, for:
+- Arithmetic accelerators (FP32, wide datapaths)
+- Algorithmic hardware (complex control flow)
+- Rapid prototyping (fast simulation)
+- AI-assisted development (Rust-like syntax works well with LLMs)
 
 **Would I avoid Skalp for?**
-- ~~Deeply pipelined designs (no retiming support)~~ Now supported via `#[pipeline(stages=N)]`
 - Memory-heavy designs (no RAM inference yet)
 - Designs requiring formal verification
+- Multi-clock designs with complex CDC
+- ASIC designs needing power intent
+
+**Final Note**: The compiler is actively improving. Bugs encountered during Karythra development (#85, #86, #110, #118) were all fixed. The development velocity is impressive.

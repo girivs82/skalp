@@ -261,9 +261,41 @@ impl<'hir> InstantiationCollector<'hir> {
             }
         }
 
+        // Process named generic arguments (e.g., Entity<WIDTH: 32, DEPTH: 16>)
+        for (param_name, arg) in &instance.named_generic_args {
+            // Find the generic parameter with this name
+            if let Some(generic) = entity.generics.iter().find(|g| &g.name == param_name) {
+                match &generic.param_type {
+                    HirGenericType::Type => {
+                        if let Some(ty) = self.extract_type_from_expr(arg) {
+                            type_args.insert(param_name.clone(), ty);
+                        }
+                    }
+                    HirGenericType::Const(_const_type) => {
+                        if let Ok(value) = self.evaluator.eval(arg) {
+                            const_args.insert(param_name.clone(), value);
+                        }
+                    }
+                    HirGenericType::Intent => {
+                        let intent_name = self.extract_intent_name(arg);
+                        let intent_value = IntentValue {
+                            name: intent_name.clone(),
+                            fields: HashMap::new(),
+                        };
+                        intent_args.insert(param_name.clone(), intent_value);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // For generic parameters without provided arguments, use defaults
+        // Skip if already provided positionally or by name
         for (i, generic) in entity.generics.iter().enumerate() {
-            if i >= instance.generic_args.len() {
+            let provided_positionally = i < instance.generic_args.len();
+            let provided_by_name = instance.named_generic_args.contains_key(&generic.name);
+
+            if !provided_positionally && !provided_by_name {
                 match &generic.param_type {
                     HirGenericType::Const(_const_type) => {
                         if let Some(ref default) = generic.default_value {

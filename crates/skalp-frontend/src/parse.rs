@@ -3592,7 +3592,24 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse a type or const argument
+    /// Supports both positional args (`32`) and named args (`WIDTH: 32`)
     fn parse_type_or_const_arg(&mut self) {
+        // Check for named argument syntax: IDENT `:` VALUE
+        // Look ahead: if we have Ident followed by Colon, it's a named argument
+        if self.current_kind() == Some(SyntaxKind::Ident)
+            && self.peek_kind(1) == Some(SyntaxKind::Colon)
+        {
+            // Named argument: e.g., `WIDTH: 32` or `T: fp32`
+            self.start_node(SyntaxKind::NamedArg);
+            self.bump(); // consume the name identifier
+            self.expect(SyntaxKind::Colon); // consume the colon
+            // Parse the value (can be a literal, identifier, or type)
+            self.parse_named_arg_value();
+            self.finish_node();
+            return;
+        }
+
+        // Positional argument (existing logic)
         self.start_node(SyntaxKind::Arg);
 
         // Check if it's a literal or boolean keyword (const argument)
@@ -3629,6 +3646,39 @@ impl<'a> ParseState<'a> {
         }
 
         self.finish_node();
+    }
+
+    /// Parse the value part of a named argument
+    /// Can be a literal, identifier, or type
+    fn parse_named_arg_value(&mut self) {
+        // Check if it's a literal or boolean keyword
+        if self.current_kind().is_some_and(|k| k.is_literal())
+            || matches!(
+                self.current_kind(),
+                Some(SyntaxKind::TrueKw) | Some(SyntaxKind::FalseKw)
+            )
+        {
+            self.start_node(SyntaxKind::LiteralExpr);
+            self.bump();
+            self.finish_node();
+        }
+        // Check if it's an identifier
+        else if self.current_kind() == Some(SyntaxKind::Ident) {
+            let next = self.peek_kind(1);
+            if matches!(next, Some(SyntaxKind::Lt) | Some(SyntaxKind::LBracket)) {
+                // Looks like a generic type
+                self.parse_type();
+            } else {
+                // Simple identifier
+                self.start_node(SyntaxKind::IdentExpr);
+                self.bump();
+                self.finish_node();
+            }
+        }
+        // Otherwise parse as type
+        else {
+            self.parse_type();
+        }
     }
 
     /// Parse type annotation
