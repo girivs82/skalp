@@ -760,10 +760,8 @@ impl<'a> ParseState<'a> {
         self.parse_expression();
 
         // Check if there's an assignment operator
-        if self.at(SyntaxKind::NonBlockingAssign)
-            || self.at(SyntaxKind::BlockingAssign)
-            || self.at(SyntaxKind::Assign)
-        {
+        // Using unified `=` operator with context-based inference for all assignments
+        if self.at(SyntaxKind::Assign) {
             // It's an assignment statement - wrap in AssignmentStmt
             self.builder.start_node_at(
                 checkpoint,
@@ -800,10 +798,8 @@ impl<'a> ParseState<'a> {
         self.parse_expression();
 
         // Assignment operator
-        if self.at(SyntaxKind::NonBlockingAssign)
-            || self.at(SyntaxKind::BlockingAssign)
-            || self.at(SyntaxKind::Assign)
-        {
+        // Using unified `=` operator with context-based inference for all assignments
+        if self.at(SyntaxKind::Assign) {
             self.bump();
         } else {
             self.error("expected assignment operator");
@@ -1557,9 +1553,8 @@ impl<'a> ParseState<'a> {
                     // Could be assignment or expression
                     // Look ahead to see if there's an assignment operator
                     let next = self.peek_kind(1);
+                    // Using unified `=` operator with context-based inference for all assignments
                     if next == Some(SyntaxKind::Assign)
-                        || next == Some(SyntaxKind::NonBlockingAssign)
-                        || next == Some(SyntaxKind::BlockingAssign)
                         || next == Some(SyntaxKind::LBracket)
                         || next == Some(SyntaxKind::Dot)
                     {

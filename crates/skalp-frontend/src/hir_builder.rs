@@ -7739,28 +7739,13 @@ impl HirBuilderContext {
     }
 
     /// Determine assignment type from operator
-    fn determine_assignment_type(&self, node: &SyntaxNode) -> HirAssignmentType {
-        // Check for explicit operators first (backward compatibility)
-        // These will be deprecated in favor of context-based inference
-        if node
-            .children_with_tokens()
-            .any(|e| e.kind() == SyntaxKind::NonBlockingAssign)
-        {
-            // Explicit <= (non-blocking) - deprecated but still supported
-            HirAssignmentType::NonBlocking
-        } else if node
-            .children_with_tokens()
-            .any(|e| e.kind() == SyntaxKind::BlockingAssign)
-        {
-            // Explicit := (blocking) - deprecated but still supported
-            HirAssignmentType::Blocking
-        } else {
-            // Plain '=' operator - use context-based inference (unified assignment operator)
-            // Inside on() blocks → NonBlocking (generates <=)
-            // Inside functions → Blocking (immediate evaluation)
-            // At impl level → Combinational (generates assign =)
-            self.infer_assignment_type_from_context()
-        }
+    fn determine_assignment_type(&self, _node: &SyntaxNode) -> HirAssignmentType {
+        // All assignments now use unified `=` with context-based inference
+        // Note: NonBlockingAssign (<= for assignment) and BlockingAssign (:=) both removed
+        // - Inside on() blocks → NonBlocking (generates <=)
+        // - Inside functions → Blocking (immediate evaluation)
+        // - At impl level → Combinational (generates assign =)
+        self.infer_assignment_type_from_context()
     }
 
     /// Convert token to binary operator

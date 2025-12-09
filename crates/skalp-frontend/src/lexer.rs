@@ -314,11 +314,9 @@ pub enum Token {
     StringLiteral(String),
 
     // Operators
-    #[token("<=", priority = 2)]
-    NonBlockingAssign,
-
-    #[token(":=")]
-    BlockingAssign,
+    // NOTE: NonBlockingAssign (<= for assignment) and BlockingAssign (:=) both removed
+    // Using unified `=` operator with context-based inference for all assignments
+    // `<=` is now always parsed as LessEqual comparison operator
 
     #[token("=")]
     Assign,
@@ -335,7 +333,7 @@ pub enum Token {
     #[token(">")]
     Greater,
 
-    #[token("<=", priority = 1)]
+    #[token("<=")]
     LessEqual,
 
     #[token(">=")]
@@ -713,15 +711,16 @@ mod tests {
 
     #[test]
     fn test_operators() {
-        let mut lexer = Lexer::new("<= := = |> -> <-");
+        // Note: `<=` is now LessEqual (comparison), not NonBlockingAssign
+        // Using unified `=` operator with context-based inference (no := or <= for assignment)
+        let mut lexer = Lexer::new("<= = |> -> <-");
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
         assert_eq!(
             tokens,
             vec![
-                Token::NonBlockingAssign,
-                Token::BlockingAssign,
-                Token::Assign,
+                Token::LessEqual, // <= is now comparison operator
+                Token::Assign,    // = is the only assignment operator
                 Token::Pipeline,
                 Token::Arrow,
                 Token::LeftArrow,

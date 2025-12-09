@@ -170,8 +170,9 @@ pub enum SyntaxKind {
     Lifetime,
 
     // Operators
-    NonBlockingAssign, // <=
-    BlockingAssign,    // :=
+    // NOTE: NonBlockingAssign (<= for assignment) and BlockingAssign (:=) both removed
+    // Using unified `=` operator with context-based inference for all assignments
+    // `<=` is now always parsed as LessEqual (Le) comparison operator
     Assign,            // =
     Eq,                // ==
     Neq,               // !=
@@ -723,8 +724,7 @@ impl SyntaxKind {
             StringLiteral => "string literal",
             Lifetime => "lifetime",
 
-            NonBlockingAssign => "'<='",
-            BlockingAssign => "':='",
+            // NonBlockingAssign and BlockingAssign removed - using unified `=` operator
             Assign => "'='",
             Eq => "'=='",
             Neq => "'!='",
@@ -921,8 +921,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::StringLiteral(_) => StringLiteral,
             Token::Lifetime(_) => Lifetime,
 
-            Token::NonBlockingAssign => NonBlockingAssign,
-            Token::BlockingAssign => BlockingAssign,
+            // Token::NonBlockingAssign and Token::BlockingAssign removed - using unified `=`
             Token::Assign => Assign,
             Token::Equal => Eq,
             Token::NotEqual => Neq,
