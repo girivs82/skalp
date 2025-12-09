@@ -373,7 +373,12 @@ impl<'hir> HirToMir<'hir> {
                     self.signal_map.insert(hir_signal.id, first_signal.id);
                 }
 
-                for signal in flattened_signals {
+                for mut signal in flattened_signals {
+                    // Propagate memory config from HIR signal to MIR signal
+                    // Memory signals should typically not flatten (they're arrays)
+                    if hir_signal.memory_config.is_some() {
+                        signal.memory_config = hir_signal.memory_config.clone();
+                    }
                     module.signals.push(signal);
                 }
 
@@ -511,7 +516,12 @@ impl<'hir> HirToMir<'hir> {
                         }
 
                         // Add all flattened signals to the module
-                        for signal in flattened_signals {
+                        for mut signal in flattened_signals {
+                            // Propagate memory config from HIR signal to MIR signal
+                            // Memory signals should typically not flatten (they're arrays)
+                            if hir_signal.memory_config.is_some() {
+                                signal.memory_config = hir_signal.memory_config.clone();
+                            }
                             module.signals.push(signal);
                         }
 
@@ -657,6 +667,7 @@ impl<'hir> HirToMir<'hir> {
                                         initial: None,
                                         clock_domain: None,
                                         span: None,
+                                        memory_config: None,
                                     };
                                     module.signals.push(signal);
 
@@ -14334,6 +14345,7 @@ impl<'hir> HirToMir<'hir> {
                 initial: None,
                 clock_domain: None,
                 span: None,
+                memory_config: None,
             };
             module.signals.push(signal);
 
@@ -14520,6 +14532,7 @@ impl<'hir> HirToMir<'hir> {
                                 initial: None,
                                 clock_domain: None,
                                 span: None,
+                                memory_config: None,
                             };
                             module.signals.push(signal);
 
@@ -14758,6 +14771,7 @@ impl<'hir> HirToMir<'hir> {
                         initial: None,
                         clock_domain: None,
                         span: None,
+                        memory_config: None,
                     };
                     module.signals.push(signal);
                     println!("🎯🎯🎯 DRAIN: Created tuple result signal '{}' (id={}) 🎯🎯🎯", signal_name, elem_signal_id.0);
@@ -14781,6 +14795,7 @@ impl<'hir> HirToMir<'hir> {
                     initial: None,
                     clock_domain: None,
                     span: None,
+                    memory_config: None,
                 };
                 module.signals.push(signal);
                 eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
@@ -14856,6 +14871,7 @@ impl<'hir> HirToMir<'hir> {
                     initial: None,
                     clock_domain: None,
                     span: None,
+                    memory_config: None,
                 };
                 eprintln!(
                     "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output",

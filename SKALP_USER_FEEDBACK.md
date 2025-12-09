@@ -130,17 +130,22 @@ Nested if/match with multiple returns works, but:
 
 ## Remaining Pain Points / Future Enhancements
 
-### 1. No RAM/Memory Inference
+### 1. ~~No RAM/Memory Inference~~ ✅ **DONE** (Dec 2025)
 ```skalp
-// WANTED:
-#[memory(depth=1024, width=64)]
-signal mem: bit[64][1024];  // Infers BRAM/SRAM
+// NOW SUPPORTED:
+#[memory(depth=1024, style=block)]
+signal mem: bit[64],  // Infers BRAM
 
-// CURRENT WORKAROUND:
-// Must instantiate explicit memory entity
-let mem = Memory<1024, 64> { ... }
+#[memory(depth=16, style=distributed)]
+signal lutram: bit[16],  // Infers distributed RAM
+
+#[memory(depth=4096, style=ultra)]
+signal ultraram: bit[72],  // Infers UltraRAM
+
+#[memory(depth=8, style=register)]
+signal regfile: bit[16],  // Register file
 ```
-**Impact**: Medium. Explicit instantiation works but is verbose for memory-heavy designs.
+**Status**: Implemented. Parser, HIR, and MIR fully support memory attributes.
 
 ### 2. No Formal Verification Integration
 ```skalp
@@ -200,7 +205,7 @@ entity VendorFifo { ... }
 | FP32 Native | ★★★★★ | ☆☆☆☆☆ | ★★☆☆☆ | ★★★★☆ | ★★☆☆☆ |
 | Simulation Speed | ★★★★☆ | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ |
 | Learning Curve | ★★★★☆ | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | ★★☆☆☆ |
-| Memory Inference | ★★☆☆☆ | ★★★★★ | ★★★★☆ | ★★★☆☆ | ★★★★☆ |
+| Memory Inference | ★★★★☆ | ★★★★★ | ★★★★☆ | ★★★☆☆ | ★★★★☆ |
 | Formal Support | ☆☆☆☆☆ | ★★★★☆ | ★★☆☆☆ | ★★★☆☆ | ★★★★☆ |
 
 **Skalp's Sweet Spot**: Accelerators with complex arithmetic (FP32, wide datapaths), algorithmic complexity (match expressions, control flow), and timing requirements (pipeline annotations).
@@ -231,7 +236,7 @@ entity VendorFifo { ... }
 ## Recommendations
 
 ### For Skalp Development (Next Priorities):
-1. **Priority 1**: RAM/Memory inference - most requested missing feature
+1. ~~**Priority 1**: RAM/Memory inference~~ ✅ **DONE** (Dec 2025)
 2. **Priority 2**: Formal verification integration (SVA assertions → property checking)
 3. **Priority 3**: Debug infrastructure (trace signals, waveform export)
 4. **Priority 4**: CDC helpers (synchronizer inference)
@@ -262,7 +267,6 @@ Skalp is now **production-ready for accelerator development**. The December 2025
 - AI-assisted development (Rust-like syntax works well with LLMs)
 
 **Would I avoid Skalp for?**
-- Memory-heavy designs (no RAM inference yet)
 - Designs requiring formal verification
 - Multi-clock designs with complex CDC
 - ASIC designs needing power intent

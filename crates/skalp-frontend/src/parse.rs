@@ -420,6 +420,11 @@ impl<'a> ParseState<'a> {
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
             self.skip_trivia();
 
+            // Parse optional attributes before item
+            // e.g., #[memory(depth = 1024)] signal mem: bit[64]
+            self.parse_attributes();
+            self.skip_trivia();
+
             if self.at_port_direction() {
                 self.parse_port_decl();
 

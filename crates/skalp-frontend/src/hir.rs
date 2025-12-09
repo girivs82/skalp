@@ -165,6 +165,11 @@ pub struct HirSignal {
     pub clock_domain: Option<ClockDomainId>,
     /// Source location span (for error reporting)
     pub span: Option<SourceSpan>,
+    /// Memory configuration (from #[memory(depth=N)] attribute)
+    /// When present, signal represents a memory array that should be
+    /// synthesized as BRAM/SRAM rather than discrete registers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_config: Option<MemoryConfig>,
 }
 
 /// Variable in HIR
@@ -425,6 +430,88 @@ impl PipelineConfig {
             stages,
             target_freq: None,
             auto_balance: false,
+        }
+    }
+}
+
+/// Memory configuration for RAM/ROM inference
+///
+/// Specifies that a signal should be synthesized as a memory block (BRAM/SRAM/ROM).
+/// Used with `#[memory(...)]` attribute on signal declarations.
+///
+/// # Usage
+///
+/// ```text
+/// #[memory(depth=1024, width=64)]
+/// signal mem: bit[64][1024];  // Infers single-port BRAM
+///
+/// #[memory(depth=256, width=32, ports=2)]
+/// signal dual_mem: bit[32][256];  // Infers dual-port BRAM
+///
+/// #[memory(depth=128, width=16, style=distributed)]
+/// signal small_mem: bit[16][128];  // Infers distributed RAM (LUT-based)
+/// ```
+///
+/// # Memory Types
+///
+/// - `block`: Block RAM (BRAM) - default for larger memories
+/// - `distributed`: Distributed RAM (LUT-based) - for smaller memories
+/// - `ultra`: UltraRAM (Xilinx) - for very large memories
+/// - `register`: Register file - for small, high-port-count memories
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Memory depth (number of entries)
+    pub depth: u32,
+    /// Data width in bits (can be inferred from signal type)
+    pub width: Option<u32>,
+    /// Number of read/write ports (default: 1)
+    pub ports: u32,
+    /// Memory style hint for synthesis
+    pub style: MemoryStyle,
+    /// Read latency in cycles (default: 1 for BRAM)
+    pub read_latency: u32,
+    /// Whether memory is read-only (ROM)
+    pub read_only: bool,
+}
+
+/// Memory implementation style hints for synthesis tools
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MemoryStyle {
+    /// Automatic inference (default) - let synthesis tool decide
+    #[default]
+    Auto,
+    /// Block RAM (BRAM)
+    Block,
+    /// Distributed RAM (LUT-based)
+    Distributed,
+    /// UltraRAM (Xilinx-specific)
+    Ultra,
+    /// Register file
+    Register,
+}
+
+impl MemoryConfig {
+    /// Create a basic memory config with specified depth
+    pub fn with_depth(depth: u32) -> Self {
+        Self {
+            depth,
+            width: None,
+            ports: 1,
+            style: MemoryStyle::Auto,
+            read_latency: 1,
+            read_only: false,
+        }
+    }
+
+    /// Create a memory config with depth and width
+    pub fn with_depth_and_width(depth: u32, width: u32) -> Self {
+        Self {
+            depth,
+            width: Some(width),
+            ports: 1,
+            style: MemoryStyle::Auto,
+            read_latency: 1,
+            read_only: false,
         }
     }
 }

@@ -4,6 +4,7 @@
 //! preserving sequential logic, event blocks, and assignments.
 
 use anyhow::Result;
+use skalp_frontend::hir::MemoryStyle;
 use skalp_lir::LirDesign;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::type_width; // Use shared type width calculations
@@ -435,27 +436,76 @@ fn generate_module(
 
     // Generate internal signal declarations (MIR already has flattened signals)
     for signal in &mir_module.signals {
-        let (element_width, array_dim) = get_type_dimensions(&signal.signal_type);
+        // Check if this is a memory signal with memory_config
+        if let Some(mem_config) = &signal.memory_config {
+            // Generate memory-inferrable SystemVerilog with synthesis attributes
+            // Format: (* ram_style = "block" *) reg [WIDTH-1:0] mem [0:DEPTH-1];
 
-        // Determine if it's a reg or wire based on usage
-        let signal_type = if is_register(signal, mir_module) {
-            "reg"
+            // Determine data width from config or signal type
+            let data_width = mem_config.width.unwrap_or_else(|| {
+                type_width::get_type_width(&signal.signal_type) as u32
+            });
+
+            // Generate synthesis attribute based on memory style
+            let ram_style_attr = match mem_config.style {
+                MemoryStyle::Auto => String::new(), // No attribute for auto
+                MemoryStyle::Block => "    (* ram_style = \"block\" *)\n".to_string(),
+                MemoryStyle::Distributed => "    (* ram_style = \"distributed\" *)\n".to_string(),
+                MemoryStyle::Ultra => "    (* ram_style = \"ultra\" *)\n".to_string(),
+                MemoryStyle::Register => "    (* ram_style = \"registers\" *)\n".to_string(),
+            };
+
+            // Add comment with memory configuration details
+            sv.push_str(&format!(
+                "    // Memory: depth={}, width={}, ports={}, read_latency={}{}\n",
+                mem_config.depth,
+                data_width,
+                mem_config.ports,
+                mem_config.read_latency,
+                if mem_config.read_only { ", read_only" } else { "" }
+            ));
+
+            // Add synthesis attribute if applicable
+            sv.push_str(&ram_style_attr);
+
+            // Generate memory array declaration
+            // Memories are always reg arrays for proper BRAM inference
+            let width_str = if data_width > 1 {
+                format!("[{}:0] ", data_width - 1)
+            } else {
+                String::new()
+            };
+
+            sv.push_str(&format!(
+                "    reg {}{} [0:{}];\n",
+                width_str,
+                signal.name,
+                mem_config.depth - 1
+            ));
         } else {
-            "wire"
-        };
+            // Standard signal declaration (non-memory)
+            let (element_width, array_dim) = get_type_dimensions(&signal.signal_type);
 
-        // Format: wire [element_width] name [array_dim];
-        sv.push_str(&format!(
-            "    {} {}{}{}",
-            signal_type, element_width, signal.name, array_dim
-        ));
+            // Determine if it's a reg or wire based on usage
+            let signal_type = if is_register(signal, mir_module) {
+                "reg"
+            } else {
+                "wire"
+            };
 
-        // Add initial value if present
-        if let Some(init) = &signal.initial {
-            sv.push_str(&format!(" = {}", format_value(init)));
+            // Format: wire [element_width] name [array_dim];
+            sv.push_str(&format!(
+                "    {} {}{}{}",
+                signal_type, element_width, signal.name, array_dim
+            ));
+
+            // Add initial value if present
+            if let Some(init) = &signal.initial {
+                sv.push_str(&format!(" = {}", format_value(init)));
+            }
+
+            sv.push_str(";\n");
         }
-
-        sv.push_str(";\n");
     }
 
     if !mir_module.signals.is_empty() {

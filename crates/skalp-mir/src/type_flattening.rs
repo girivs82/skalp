@@ -655,6 +655,7 @@ impl TypeFlattener {
             initial,
             clock_domain,
             span,
+            memory_config: None,
         };
         signals.push(signal);
 

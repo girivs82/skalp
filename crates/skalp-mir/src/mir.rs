@@ -105,6 +105,11 @@ pub struct Signal {
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+    /// Memory configuration (from #[memory(depth=N)] attribute)
+    /// When present, signal represents a memory array that should be
+    /// synthesized as BRAM/SRAM rather than discrete registers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_config: Option<skalp_frontend::hir::MemoryConfig>,
 }
 
 /// Signal identifier

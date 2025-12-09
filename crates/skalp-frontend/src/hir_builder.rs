@@ -110,6 +110,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[pipeline(stages=N)]` before a function declaration
     pending_pipeline_config: Option<PipelineConfig>,
 
+    /// Pending memory config from most recent attribute
+    /// Set when we see `#[memory(depth=N)]` before a signal declaration
+    pending_memory_config: Option<MemoryConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -212,6 +216,7 @@ impl HirBuilderContext {
             pending_pipeline_style: None,
             pending_unroll_config: None,
             pending_pipeline_config: None,
+            pending_memory_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -513,6 +518,10 @@ impl HirBuilderContext {
             // Second pass: build entity body items (signals, assignments, let bindings)
             for child in port_list.children() {
                 match child.kind() {
+                    SyntaxKind::Attribute => {
+                        // Process attribute to set pending_memory_config (or other pending configs)
+                        self.process_attribute(&child);
+                    }
                     SyntaxKind::SignalDecl => {
                         if let Some(signal) = self.build_signal(&child) {
                             signals.push(signal);
@@ -623,6 +632,7 @@ impl HirBuilderContext {
                                     initial_value: None,
                                     clock_domain: None,
                                     span: self.make_span(&child),
+                                    memory_config: None,
                                 };
                                 signals.push(signal);
 
@@ -1075,6 +1085,9 @@ impl HirBuilderContext {
         self.symbols.signal_types.insert(id, signal_type.clone()); // BUG FIX #5
         self.symbols.add_to_scope(&name, SymbolId::Signal(id));
 
+        // Consume any pending memory config from preceding #[memory(...)] attribute
+        let memory_config = self.pending_memory_config.take();
+
         Some(HirSignal {
             id,
             name,
@@ -1082,6 +1095,7 @@ impl HirBuilderContext {
             initial_value,
             clock_domain: None, // Will be inferred during clock domain analysis
             span: self.make_span(node),
+            memory_config,
         })
     }
 
@@ -6447,8 +6461,8 @@ impl HirBuilderContext {
         None
     }
 
-    /// Process an Attribute node and set pending_mux_style/pending_pipeline_style/pending_impl_style/pending_unroll_config if applicable
-    /// Called when we see `#[parallel]` or `#[mux_style::parallel]` or `#[pipeline_style::manual]` or `#[impl_style::parallel]` or `#[unroll]` before a statement
+    /// Process an Attribute node and set pending_mux_style/pending_pipeline_style/pending_impl_style/pending_unroll_config/pending_memory_config if applicable
+    /// Called when we see `#[parallel]` or `#[mux_style::parallel]` or `#[pipeline_style::manual]` or `#[impl_style::parallel]` or `#[unroll]` or `#[memory(depth=N)]` before a statement
     fn process_attribute(&mut self, node: &SyntaxNode) {
         // Extract the intent/attribute name from the Attribute node
         // Attribute contains IntentValue which contains identifiers
@@ -6480,6 +6494,12 @@ impl HirBuilderContext {
             // Try to extract pipeline config (e.g., #[pipeline(stages=3)])
             if let Some(config) = self.extract_pipeline_config_from_intent_value(&intent_value) {
                 self.pending_pipeline_config = Some(config);
+                return;
+            }
+
+            // Try to extract memory config (e.g., #[memory(depth=1024)])
+            if let Some(config) = self.extract_memory_config_from_intent_value(&intent_value) {
+                self.pending_memory_config = Some(config);
                 return;
             }
 
@@ -6607,6 +6627,119 @@ impl HirBuilderContext {
         };
 
         Some(config)
+    }
+
+    /// Extract memory config from an IntentValue node
+    /// Handles: #[memory(depth=N)] or #[memory(depth=N, width=M, style=block)]
+    fn extract_memory_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<MemoryConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Look for "memory" identifier
+        let has_memory = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "memory"
+        });
+
+        if !has_memory {
+            return None;
+        }
+
+        // Parse key=value pairs
+        let mut depth: Option<u32> = None;
+        let mut width: Option<u32> = None;
+        let mut ports: Option<u32> = None;
+        let mut style: Option<MemoryStyle> = None;
+        let mut read_latency: Option<u32> = None;
+        let mut read_only = false;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            if token.kind() == SyntaxKind::Ident {
+                let text = token.text();
+                match text {
+                    "depth" | "width" | "ports" | "style" | "read_latency" => {
+                        current_key = Some(text);
+                    }
+                    "read_only" | "rom" => {
+                        read_only = true;
+                        current_key = None;
+                    }
+                    "block" => {
+                        if current_key == Some("style") {
+                            style = Some(MemoryStyle::Block);
+                        }
+                        current_key = None;
+                    }
+                    "distributed" => {
+                        if current_key == Some("style") {
+                            style = Some(MemoryStyle::Distributed);
+                        }
+                        current_key = None;
+                    }
+                    "ultra" => {
+                        if current_key == Some("style") {
+                            style = Some(MemoryStyle::Ultra);
+                        }
+                        current_key = None;
+                    }
+                    "register" => {
+                        if current_key == Some("style") {
+                            style = Some(MemoryStyle::Register);
+                        }
+                        current_key = None;
+                    }
+                    "auto" => {
+                        if current_key == Some("style") {
+                            style = Some(MemoryStyle::Auto);
+                        }
+                        current_key = None;
+                    }
+                    _ => {}
+                }
+            } else if token.kind() == SyntaxKind::IntLiteral {
+                // Remove underscores from integer literals like "1_024"
+                let text = token.text().replace('_', "");
+                if let Ok(val) = text.parse::<u32>() {
+                    match current_key {
+                        Some("depth") => depth = Some(val),
+                        Some("width") => width = Some(val),
+                        Some("ports") => ports = Some(val),
+                        Some("read_latency") => read_latency = Some(val),
+                        _ => {
+                            // First number without key is assumed to be depth
+                            if depth.is_none() {
+                                depth = Some(val);
+                            }
+                        }
+                    }
+                    current_key = None;
+                }
+            }
+        }
+
+        // depth is required
+        let depth = depth?;
+
+        Some(MemoryConfig {
+            depth,
+            width,
+            ports: ports.unwrap_or(1),
+            style: style.unwrap_or_default(),
+            read_latency: read_latency.unwrap_or(1),
+            read_only,
+        })
     }
 
     /// Build intent constraint from syntax node
