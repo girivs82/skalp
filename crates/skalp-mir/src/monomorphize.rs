@@ -883,6 +883,7 @@ impl Monomorphizer {
                 .map(|stmt| substitution.substitute_statement(stmt))
                 .collect(),
             span: generic_func.span.clone(), // Preserve source span from generic function
+            pipeline_config: generic_func.pipeline_config.clone(), // Preserve pipeline config
         };
 
         eprintln!(
@@ -1129,6 +1130,7 @@ impl Monomorphizer {
             return_type: specialized_return_type,
             body: method_info.body.clone(), // TODO: May need to substitute Self in body too
             span: None, // Specialized functions don't have source spans
+            pipeline_config: None, // Trait methods don't have pipeline config
         };
 
         eprintln!(

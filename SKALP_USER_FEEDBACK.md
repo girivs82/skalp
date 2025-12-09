@@ -118,15 +118,16 @@ let fifo = Fifo::<16, 32>::new();
 ```
 **Impact**: Medium. Limits reusable IP creation.
 
-### 3. No Pipeline/Retiming Annotations
+### 3. ~~No Pipeline/Retiming Annotations~~ (PARSING IMPLEMENTED - Dec 2025)
 ```skalp
-// WANTED:
+// NOW SUPPORTED (syntax parsing):
 #[pipeline(stages=3)]
 pub fn multiplier(a: bit[32], b: bit[32]) -> bit[64] { ... }
 
-// CURRENT: No automatic pipeline insertion
+// The attribute is parsed into HIR PipelineConfig with stages, target_freq, auto_balance
+// PENDING: Backend pipeline register insertion not yet implemented
 ```
-**Impact**: High for timing closure. Users must manually structure pipeline stages.
+**Status**: Attribute parsing complete. Backend pipelining implementation pending.
 
 ### 4. Limited Timing/Cycle Awareness
 Skalp is fundamentally **combinational-first**. Sequential logic requires explicit register entities. This is correct but verbose:
@@ -226,7 +227,7 @@ All were fixed during development - the compiler is actively improving.
 ### For Skalp Development:
 1. ~~**Priority 1**: Loop unrolling~~ ✅ DONE - `generate for` implemented
 2. ~~**Priority 1**: Better source-level error messages~~ ✅ DONE - Added SourceSpan to HIR, improved error formatting
-3. **Priority 2**: Pipeline annotations for timing
+3. **Priority 2**: Pipeline annotations for timing - ✅ Parsing done, backend pending
 4. **Priority 3**: Parameterized entity instantiation
 
 ### For Skalp Users:

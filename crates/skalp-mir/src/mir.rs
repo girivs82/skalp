@@ -49,6 +49,9 @@ pub struct Module {
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+    /// Pipeline configuration from `#[pipeline(stages=N)]` attribute
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_config: Option<skalp_frontend::hir::PipelineConfig>,
 }
 
 /// Module identifier
@@ -1059,6 +1062,7 @@ impl Module {
             clock_domains: Vec::new(),
             generate_blocks: Vec::new(),
             span: None,
+            pipeline_config: None,
         }
     }
 }
