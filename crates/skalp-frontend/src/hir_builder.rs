@@ -37,6 +37,18 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "gray_decode",
 ];
 
+/// Context for tracking where we are in the HIR building process
+/// Used for context-based assignment type inference (unified assignment operator)
+#[derive(Debug, Clone)]
+enum BuilderContext {
+    /// Inside impl MyEntity { ... } block - continuous assignments
+    ImplBlock,
+    /// Inside on(clk.posedge) { ... } block - sequential/non-blocking assignments
+    EventBlock,
+    /// Inside a function body - blocking assignments
+    FunctionBody,
+}
+
 /// HIR builder context
 pub struct HirBuilderContext {
     /// Next IDs for various HIR elements
@@ -119,6 +131,10 @@ pub struct HirBuilderContext {
 
     /// Source file path (for error reporting)
     source_file: Option<PathBuf>,
+
+    /// Context stack for tracking where we are during HIR building
+    /// Used for context-based assignment type inference (unified = operator)
+    context_stack: Vec<BuilderContext>,
 }
 
 /// Symbol table for name resolution
@@ -222,6 +238,7 @@ impl HirBuilderContext {
             pending_preserve_generate: None,
             line_index: None,
             source_file: None,
+            context_stack: Vec::new(),
         }
     }
 
@@ -244,6 +261,49 @@ impl HirBuilderContext {
             span = span.with_file(file.clone());
         }
         Some(span)
+    }
+
+    // ========== Context Stack Methods (for unified assignment operator) ==========
+
+    /// Push a context onto the stack (e.g., when entering an on() block)
+    fn push_context(&mut self, ctx: BuilderContext) {
+        self.context_stack.push(ctx);
+    }
+
+    /// Pop the top context from the stack (e.g., when exiting an on() block)
+    fn pop_context(&mut self) {
+        self.context_stack.pop();
+    }
+
+    /// Check if we're inside an event block (on() block) - assignments should be non-blocking
+    fn is_inside_event_block(&self) -> bool {
+        self.context_stack.iter().any(|ctx| matches!(ctx, BuilderContext::EventBlock))
+    }
+
+    /// Check if we're inside a function body - assignments should be blocking
+    fn is_inside_function_body(&self) -> bool {
+        self.context_stack.iter().any(|ctx| matches!(ctx, BuilderContext::FunctionBody))
+    }
+
+    /// Check if we're at impl level (not inside on() or function) - assignments should be combinational
+    fn is_at_impl_level(&self) -> bool {
+        // At impl level if context is empty or top is ImplBlock (not inside event/function)
+        !self.is_inside_event_block() && !self.is_inside_function_body()
+    }
+
+    /// Determine assignment type from context (for unified = operator)
+    /// This is the core inference logic for the unified assignment operator
+    fn infer_assignment_type_from_context(&self) -> HirAssignmentType {
+        if self.is_inside_event_block() {
+            // Inside on(clk.posedge) { ... } - sequential, non-blocking
+            HirAssignmentType::NonBlocking
+        } else if self.is_inside_function_body() {
+            // Inside function body - blocking (immediate evaluation)
+            HirAssignmentType::Blocking
+        } else {
+            // At module/impl level - continuous/combinational
+            HirAssignmentType::Combinational
+        }
     }
 
     /// Pre-register entities from merged HIR (for handling imports)
@@ -1200,11 +1260,15 @@ impl HirBuilderContext {
         }
 
         // Build function body (statements from block)
+        // Push FunctionBody context for unified assignment operator
+        // Assignments inside functions should be blocking (immediate evaluation)
+        self.push_context(BuilderContext::FunctionBody);
         let body = if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
             self.build_statements(&block)
         } else {
             Vec::new()
         };
+        self.pop_context();
 
         // Pop the function parameter scope
         self.symbols.exit_scope();
@@ -1254,11 +1318,14 @@ impl HirBuilderContext {
             }
         }
 
-        // Build statements
+        // Build statements - push EventBlock context for unified assignment operator
+        // Assignments inside on() blocks should be non-blocking (generates <=)
+        self.push_context(BuilderContext::EventBlock);
         let mut statements = Vec::new();
         if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
             statements = self.build_statements(&block);
         }
+        self.pop_context();
 
         Some(HirEventBlock {
             id,
@@ -7673,18 +7740,26 @@ impl HirBuilderContext {
 
     /// Determine assignment type from operator
     fn determine_assignment_type(&self, node: &SyntaxNode) -> HirAssignmentType {
+        // Check for explicit operators first (backward compatibility)
+        // These will be deprecated in favor of context-based inference
         if node
             .children_with_tokens()
             .any(|e| e.kind() == SyntaxKind::NonBlockingAssign)
         {
+            // Explicit <= (non-blocking) - deprecated but still supported
             HirAssignmentType::NonBlocking
         } else if node
             .children_with_tokens()
             .any(|e| e.kind() == SyntaxKind::BlockingAssign)
         {
+            // Explicit := (blocking) - deprecated but still supported
             HirAssignmentType::Blocking
         } else {
-            HirAssignmentType::Combinational
+            // Plain '=' operator - use context-based inference (unified assignment operator)
+            // Inside on() blocks → NonBlocking (generates <=)
+            // Inside functions → Blocking (immediate evaluation)
+            // At impl level → Combinational (generates assign =)
+            self.infer_assignment_type_from_context()
         }
     }
 
