@@ -1060,6 +1060,7 @@ mod tests {
             function: "clog2".to_string(),
             type_args: vec![],
             args: vec![HirExpression::Literal(HirLiteral::Integer(1024))],
+            impl_style: crate::hir::ImplStyle::default(),
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
 
@@ -1068,6 +1069,7 @@ mod tests {
             function: "clog2".to_string(),
             type_args: vec![],
             args: vec![HirExpression::Literal(HirLiteral::Integer(1))],
+            impl_style: crate::hir::ImplStyle::default(),
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(0));
     }

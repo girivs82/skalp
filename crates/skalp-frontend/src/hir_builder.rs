@@ -156,12 +156,24 @@ enum SymbolId {
     GenericParam(String), // Generic parameter name (e.g., WIDTH)
 }
 
-/// HIR building errors
+/// HIR building errors with source location for better diagnostics
 #[derive(Debug, Clone)]
 pub struct HirError {
     pub message: String,
-    pub location: Option<usize>,
+    /// Source span for error location (line:column format when available)
+    pub span: Option<SourceSpan>,
 }
+
+impl std::fmt::Display for HirError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.span {
+            Some(span) => write!(f, "{}: {}", span, self.message),
+            None => write!(f, "{}", self.message),
+        }
+    }
+}
+
+impl std::error::Error for HirError {}
 
 impl HirBuilderContext {
     /// Create a new HIR builder context
@@ -600,7 +612,7 @@ impl HirBuilderContext {
                                     signal_type: let_stmt.var_type.clone(),
                                     initial_value: None,
                                     clock_domain: None,
-                                    span: None,
+                                    span: self.make_span(&child),
                                 };
                                 signals.push(signal);
 
@@ -1366,7 +1378,7 @@ impl HirBuilderContext {
                     "Maximum recursion depth ({}) exceeded while building statements",
                     MAX_RECURSION_DEPTH
                 ),
-                location: None,
+                span: self.make_span(node),
             });
             return Vec::new();
         }
@@ -1473,7 +1485,7 @@ impl HirBuilderContext {
                     "Maximum recursion depth ({}) exceeded while building statement",
                     MAX_RECURSION_DEPTH
                 ),
-                location: None,
+                span: self.make_span(node),
             });
             return None;
         }
@@ -2652,7 +2664,7 @@ impl HirBuilderContext {
             } else {
                 self.errors.push(HirError {
                     message: "generate if condition must be evaluable at compile time".to_string(),
-                    location: None,
+                    span: self.make_span(&condition_node),
                 });
                 None
             }
@@ -2786,7 +2798,7 @@ impl HirBuilderContext {
             } else {
                 self.errors.push(HirError {
                     message: "generate match expression must be evaluable at compile time".to_string(),
-                    location: None,
+                    span: self.make_span(&expr_node),
                 });
                 None
             }
@@ -3600,7 +3612,7 @@ impl HirBuilderContext {
                     "Maximum recursion depth ({}) exceeded while building pattern",
                     MAX_RECURSION_DEPTH
                 ),
-                location: None,
+                span: self.make_span(node),
             });
             return None;
         }
@@ -3908,7 +3920,7 @@ impl HirBuilderContext {
                     "Maximum recursion depth ({}) exceeded while building expression",
                     MAX_RECURSION_DEPTH
                 ),
-                location: None,
+                span: self.make_span(node),
             });
             return None;
         }
