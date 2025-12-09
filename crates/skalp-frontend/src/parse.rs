@@ -2747,13 +2747,64 @@ impl<'a> ParseState<'a> {
                 self.expect(SyntaxKind::Ident);
             }
 
-            // Check for function-call style argument: unroll(4)
+            // Check for function-call style argument: unroll(4), pipeline(stages=3), pipeline(stages=3, target_freq=100_000_000)
             if self.at(SyntaxKind::LParen) {
                 self.bump(); // consume '('
-                // Parse the argument (could be a number or expression)
-                if self.at(SyntaxKind::IntLiteral) {
-                    self.bump(); // consume the number
+
+                // Parse arguments which can be:
+                // - Simple value: unroll(4)
+                // - Key-value pair: pipeline(stages=3)
+                // - Multiple key-value pairs: pipeline(stages=3, target_freq=100_000_000)
+                // - Boolean keyword: pipeline(stages=2, auto_balance=true)
+                while !self.at(SyntaxKind::RParen) && !self.is_at_end() {
+                    self.skip_trivia();
+
+                    if self.at(SyntaxKind::RParen) {
+                        break;
+                    }
+
+                    // Parse identifier (could be key name or standalone value)
+                    if self.at(SyntaxKind::Ident) {
+                        self.bump(); // consume identifier
+                        self.skip_trivia();
+
+                        // Check for '=' indicating key-value pair
+                        // Note: '=' is tokenized as Assign, not Eq
+                        if self.at(SyntaxKind::Assign) {
+                            self.bump(); // consume '='
+                            self.skip_trivia();
+
+                            // Parse the value (IntLiteral, Ident like 'true', etc.)
+                            if self.at(SyntaxKind::IntLiteral) {
+                                self.bump();
+                                self.skip_trivia();
+                            } else if self.at(SyntaxKind::Ident) {
+                                // Handle boolean keywords like 'true' or 'false'
+                                self.bump();
+                                self.skip_trivia();
+                            } else if self.at(SyntaxKind::TrueKw) || self.at(SyntaxKind::FalseKw) {
+                                self.bump();
+                                self.skip_trivia();
+                            }
+                        }
+                    } else if self.at(SyntaxKind::IntLiteral) {
+                        // Simple numeric value like unroll(4)
+                        self.bump();
+                        self.skip_trivia();
+                    } else if self.at(SyntaxKind::TrueKw) || self.at(SyntaxKind::FalseKw) {
+                        self.bump();
+                        self.skip_trivia();
+                    }
+
+                    // Handle comma separator for multiple arguments
+                    if self.at(SyntaxKind::Comma) {
+                        self.bump(); // consume ','
+                        self.skip_trivia();
+                    } else if !self.at(SyntaxKind::RParen) {
+                        break; // unexpected token, stop parsing
+                    }
                 }
+
                 self.expect(SyntaxKind::RParen);
             }
         } else {
@@ -4670,8 +4721,6 @@ impl<'a> ParseState<'a> {
 
     /// Parse identifier expression with possible postfix operations
     fn parse_identifier_expression(&mut self) {
-        eprintln!("[PARSER_DEBUG] parse_identifier_expression: current={:?}, peek(1)={:?}",
-                  self.current_kind(), self.peek_kind(1));
         // Check for special patterns that need lookahead:
         // 1. Type::Variant or Type<T>::Variant (path expression)
         // 2. function<T>(args) (generic function call)
@@ -4735,7 +4784,6 @@ impl<'a> ParseState<'a> {
 
         // Handle postfix operations (works for both path and identifier expressions)
         loop {
-            eprintln!("[PARSER_DEBUG] postfix loop: current={:?}", self.current_kind());
             match self.current_kind() {
                 Some(SyntaxKind::Dot) => {
                     // Field access (can be identifier for struct fields or numeric literal for tuple fields)
@@ -4767,7 +4815,6 @@ impl<'a> ParseState<'a> {
                 }
                 Some(SyntaxKind::LParen) => {
                     // Function call
-                    eprintln!("[PARSER_DEBUG] Creating CallExpr for function call");
                     self.finish_node(); // finish current expression
                     self.start_node(SyntaxKind::CallExpr);
                     self.bump(); // consume '('

@@ -282,6 +282,10 @@ impl HirBuilderContext {
         // Build HIR from source file
         for child in root.children() {
             match child.kind() {
+                SyntaxKind::Attribute => {
+                    // Process top-level attributes (like #[pipeline(stages=N)] before entities/functions)
+                    self.process_attribute(&child);
+                }
                 SyntaxKind::EntityDecl => {
                     if let Some(entity) = self.build_entity(&child) {
                         // Store entity for later access by implementations
@@ -665,6 +669,9 @@ impl HirBuilderContext {
 
         eprintln!("[HIR_ENTITY_DEBUG] Built entity '{}' with {} signals and {} assignments", name, signals.len(), assignments.len());
 
+        // Consume pending pipeline config (from #[pipeline(stages=N)] attribute)
+        let pipeline_config = self.pending_pipeline_config.take();
+
         Some(HirEntity {
             id,
             name,
@@ -675,6 +682,7 @@ impl HirBuilderContext {
             signals,
             assignments,
             span: self.make_span(node),
+            pipeline_config,
         })
     }
 
@@ -6483,11 +6491,19 @@ impl HirBuilderContext {
     /// Extract pipeline config from an IntentValue node
     /// Handles: #[pipeline(stages=N)] -> PipelineConfig with N stages
     fn extract_pipeline_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<PipelineConfig> {
-        // Get all tokens from the intent value
-        let tokens: Vec<_> = intent_value
-            .children_with_tokens()
-            .filter_map(|elem| elem.into_token())
-            .collect();
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
 
         // Look for "pipeline" identifier
         let has_pipeline = tokens.iter().any(|t| {
@@ -6501,19 +6517,43 @@ impl HirBuilderContext {
         // Look for "stages" identifier followed by "=" and a number
         // The format is: #[pipeline(stages=N)]
         let mut stages: Option<u32> = None;
+        let mut target_freq: Option<u64> = None;
+        let mut auto_balance = false;
         let mut found_stages = false;
+        let mut found_target_freq = false;
 
-        for (i, token) in tokens.iter().enumerate() {
+        for token in tokens.iter() {
             if token.kind() == SyntaxKind::Ident && token.text() == "stages" {
                 found_stages = true;
+                found_target_freq = false;
+            } else if token.kind() == SyntaxKind::Ident && token.text() == "target_freq" {
+                found_target_freq = true;
+                found_stages = false;
+            } else if token.kind() == SyntaxKind::Ident && token.text() == "auto_balance" {
+                auto_balance = true;
+                found_stages = false;
+                found_target_freq = false;
             } else if found_stages && token.kind() == SyntaxKind::IntLiteral {
-                stages = token.text().parse::<u32>().ok();
-                break;
+                // Remove underscores from integer literals like "100_000_000"
+                let text = token.text().replace('_', "");
+                stages = text.parse::<u32>().ok();
+                found_stages = false;
+            } else if found_target_freq && token.kind() == SyntaxKind::IntLiteral {
+                // Remove underscores from integer literals like "100_000_000"
+                let text = token.text().replace('_', "");
+                target_freq = text.parse::<u64>().ok();
+                found_target_freq = false;
             }
         }
 
         // If we found "pipeline" but no "stages=N", default to 1 stage
-        Some(PipelineConfig::with_stages(stages.unwrap_or(1)))
+        let config = PipelineConfig {
+            stages: stages.unwrap_or(1),
+            target_freq,
+            auto_balance,
+        };
+
+        Some(config)
     }
 
     /// Build intent constraint from syntax node

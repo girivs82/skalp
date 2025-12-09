@@ -274,6 +274,13 @@ impl<'hir> HirToMir<'hir> {
 
             let mut module = Module::new(module_id, entity.name.clone());
 
+            // Propagate pipeline configuration from HIR entity to MIR module
+            if let Some(ref config) = entity.pipeline_config {
+                module.pipeline_config = Some(config.clone());
+                eprintln!("🔧 PIPELINE: Propagating pipeline_config (stages={}) to entity '{}'",
+                         config.stages, entity.name);
+            }
+
             // Convert generic parameters
             for hir_generic in &entity.generics {
                 let parameter = GenericParameter {
@@ -14083,6 +14090,13 @@ impl<'hir> HirToMir<'hir> {
         let module_id = self.next_module_id();
         let module_name = format!("func_{}", func.name);
         let mut module = Module::new(module_id, module_name);
+
+        // Propagate pipeline configuration from HIR function to MIR module
+        if let Some(ref config) = func.pipeline_config {
+            module.pipeline_config = Some(config.clone());
+            println!("🔧 PIPELINE: Propagating pipeline_config (stages={}) to module '{}'",
+                     config.stages, func.name);
+        }
 
         // Phase 1: Convert function parameters to input ports
         // IMPORTANT: Use index-based naming (param_0, param_1, etc.) to match instance connections

@@ -60,6 +60,8 @@ pub struct HirEntity {
     pub signals: Vec<HirSignal>,
     /// Source location span (for error reporting)
     pub span: Option<SourceSpan>,
+    /// Pipeline configuration (from #[pipeline(stages=N)] attribute)
+    pub pipeline_config: Option<PipelineConfig>,
 }
 
 /// Implementation in HIR
@@ -368,15 +370,38 @@ pub enum UnrollConfig {
 
 /// Pipeline configuration for automatic pipeline register insertion
 ///
-/// Specifies how a function should be pipelined during synthesis.
-/// Used with `#[pipeline(stages=N)]` attribute.
+/// Specifies how a function/entity should be pipelined. Used with `#[pipeline(...)]` attribute.
+///
+/// # Compilation Flow
+///
+/// This config propagates through the entire compilation pipeline:
+///
+/// - **HIR/MIR**: `stages` is used to insert pipeline registers at IR level
+/// - **SIR** (simulation): Uses `stages` for accurate cycle-level latency simulation
+/// - **LIR** (synthesis): Uses `target_freq` for timing-driven optimization after
+///   technology mapping, when real timing information is available
+///
+/// # Usage
+///
+/// ```text
+/// #[pipeline(stages=3)]                           // Fixed 3 pipeline stages
+/// #[pipeline(stages=4, target_freq=100_000_000)]  // 4 stages, verify 100MHz target in LIR
+/// #[pipeline(stages=2, auto_balance=true)]        // 2 stages, auto-balance in LIR
+/// ```
+///
+/// # Design Notes
+///
+/// - `stages`: Acted upon at HIR/MIR/SIR level (technology-independent)
+/// - `target_freq`: Deferred to LIR where actual timing is known post-tech-mapping
+/// - `auto_balance`: Hint for LIR retiming passes to optimize stage boundaries
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineConfig {
-    /// Number of pipeline stages to insert
+    /// Number of pipeline stages to insert (used at HIR/MIR/SIR level)
     pub stages: u32,
-    /// Target clock frequency in Hz (optional)
+    /// Target clock frequency in Hz - used by LIR for timing verification/optimization
+    /// after technology mapping when real timing information is available
     pub target_freq: Option<u64>,
-    /// Enable automatic balancing of pipeline stages
+    /// Enable automatic balancing of pipeline stages (hint for LIR retiming)
     pub auto_balance: bool,
 }
 

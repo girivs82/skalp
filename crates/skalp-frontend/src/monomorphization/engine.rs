@@ -299,6 +299,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             signals: entity.signals.clone(),
             assignments: entity.assignments.clone(),
             span: entity.span.clone(), // Preserve source span from original entity
+            pipeline_config: entity.pipeline_config.clone(), // Preserve pipeline config
         };
 
         (specialized_entity, port_id_map)

@@ -662,3 +662,122 @@ impl BitOps {
     assert_eq!(sir.name, "BitOps");
     assert!(!sir.combinational_nodes.is_empty() || !sir.sequential_nodes.is_empty());
 }
+
+// ============================================================================
+// Pipeline Attribute Tests
+// ============================================================================
+
+#[test]
+fn test_pipeline_attribute_on_entity() {
+    let source = r#"
+#[pipeline(stages=3)]
+entity PipelinedAdder {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl PipelinedAdder {
+    result = a + b
+}
+"#;
+    let sir = compile_to_sir(source);
+
+    assert_eq!(sir.name, "PipelinedAdder");
+    // Verify pipeline_config was propagated to SIR
+    assert!(
+        sir.pipeline_config.is_some(),
+        "Pipeline config should be present in SIR"
+    );
+
+    let config = sir.pipeline_config.as_ref().unwrap();
+    assert_eq!(config.stages, 3, "Pipeline should have 3 stages");
+}
+
+#[test]
+fn test_pipeline_attribute_with_target_freq() {
+    let source = r#"
+#[pipeline(stages=4, target_freq=100_000_000)]
+entity PipelinedMul {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[64]
+}
+
+impl PipelinedMul {
+    result = (a as bit[64]) * (b as bit[64])
+}
+"#;
+    let sir = compile_to_sir(source);
+
+    assert!(sir.pipeline_config.is_some());
+    let config = sir.pipeline_config.as_ref().unwrap();
+    assert_eq!(config.stages, 4);
+    assert_eq!(config.target_freq, Some(100_000_000));
+}
+
+#[test]
+fn test_pipeline_attribute_with_auto_balance() {
+    let source = r#"
+#[pipeline(stages=2, auto_balance=true)]
+entity BalancedOp {
+    in x: bit[16]
+    in y: bit[16]
+    out result: bit[16]
+}
+
+impl BalancedOp {
+    result = x ^ y
+}
+"#;
+    let sir = compile_to_sir(source);
+
+    assert!(sir.pipeline_config.is_some());
+    let config = sir.pipeline_config.as_ref().unwrap();
+    assert_eq!(config.stages, 2);
+    assert!(config.auto_balance);
+}
+
+#[test]
+fn test_no_pipeline_attribute_on_entity() {
+    let source = r#"
+entity SimpleAdder {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl SimpleAdder {
+    result = a + b
+}
+"#;
+    let sir = compile_to_sir(source);
+
+    // No pipeline attribute means no pipeline_config
+    assert!(
+        sir.pipeline_config.is_none(),
+        "Pipeline config should be None when no attribute is used"
+    );
+}
+
+#[test]
+fn test_single_stage_pipeline_skipped() {
+    let source = r#"
+#[pipeline(stages=1)]
+entity SingleStage {
+    in a: bit[8]
+    out b: bit[8]
+}
+
+impl SingleStage {
+    b = a
+}
+"#;
+    let sir = compile_to_sir(source);
+
+    // Pipeline config exists but stages=1 means no registers inserted
+    assert!(sir.pipeline_config.is_some());
+    let config = sir.pipeline_config.as_ref().unwrap();
+    assert_eq!(config.stages, 1);
+    // No pipeline registers should be inserted for single stage
+}

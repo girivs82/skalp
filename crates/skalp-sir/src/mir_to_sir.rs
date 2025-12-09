@@ -1,3 +1,4 @@
+use crate::pipeline::insert_pipeline_registers;
 use crate::sir::*;
 use skalp_mir::mir::PortDirection as MirPortDirection;
 use skalp_mir::mir::PriorityMux;
@@ -105,6 +106,15 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
                 .iter()
                 .map(|o| &o.signal_id)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // Run pipeline register insertion pass if configured
+    if let Some(result) = insert_pipeline_registers(&mut sir) {
+        println!(
+            "✅ PIPELINE: Inserted {} stages, {} pipeline registers",
+            result.stages_inserted,
+            result.pipeline_registers.len()
         );
     }
 
