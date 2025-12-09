@@ -1509,6 +1509,11 @@ impl HirBuilderContext {
                         statements.push(HirStatement::Cover(cover_stmt));
                     }
                 }
+                SyntaxKind::CoverMacroStmt => {
+                    if let Some(cover_stmt) = self.build_cover_macro_statement(&child) {
+                        statements.push(HirStatement::Cover(cover_stmt));
+                    }
+                }
                 SyntaxKind::LetStmt => {
                     // Handle both simple let and tuple destructuring
                     let let_stmts = self.build_let_statements_from_node(&child);
@@ -1581,6 +1586,9 @@ impl HirBuilderContext {
                 .build_property_statement(node)
                 .map(HirStatement::Property),
             SyntaxKind::CoverStmt => self.build_cover_statement(node).map(HirStatement::Cover),
+            SyntaxKind::CoverMacroStmt => {
+                self.build_cover_macro_statement(node).map(HirStatement::Cover)
+            }
             SyntaxKind::LetStmt => {
                 // Handle both simple let and tuple destructuring
                 let let_stmts = self.build_let_statements_from_node(node);
@@ -3593,6 +3601,59 @@ impl HirBuilderContext {
             id,
             condition,
             message,
+        })
+    }
+
+    /// Build cover macro statement (cover!(condition) or cover!(condition, "message"))
+    fn build_cover_macro_statement(&mut self, node: &SyntaxNode) -> Option<HirCoverStatement> {
+        let id = self.next_cover_id();
+
+        // Find the condition expression (first expression)
+        let expressions: Vec<_> = node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::PathExpr
+                )
+            })
+            .collect();
+
+        let condition = if let Some(expr_node) = expressions.first() {
+            self.build_expression(expr_node)?
+        } else {
+            // Default to a literal false if no condition is found
+            HirExpression::Literal(HirLiteral::Boolean(false))
+        };
+
+        // Check for optional name/message (second expression)
+        let name = if expressions.len() > 1 {
+            if let Some(expr) = self.build_expression(&expressions[1]) {
+                match expr {
+                    HirExpression::Literal(HirLiteral::String(s)) => Some(s),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Some(HirCoverStatement {
+            id,
+            property: HirProperty::Expression(condition),
+            name,
         })
     }
 

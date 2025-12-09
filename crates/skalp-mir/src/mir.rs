@@ -377,6 +377,12 @@ pub enum Statement {
     Loop(LoopStatement),
     /// Synthesis-resolved conditional assignment (replaces complex if-else-if chains)
     ResolvedConditional(ResolvedConditional),
+    /// Assertion statement (generates SVA assert)
+    Assert(AssertStatement),
+    /// Assume statement (generates SVA assume)
+    Assume(AssumeStatement),
+    /// Cover statement (generates SVA cover)
+    Cover(CoverStatement),
 }
 
 /// Assignment in a process
@@ -917,6 +923,65 @@ pub struct ConditionalCase {
     pub condition: Expression,
     /// Value to select when condition is true
     pub value: Expression,
+}
+
+// ============================================================================
+// Formal Verification Types (SVA Generation)
+// ============================================================================
+
+/// Assertion statement for formal verification
+/// Generates SVA: `assert property (@(posedge clk) condition) else $error("message");`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssertStatement {
+    /// Condition to assert
+    pub condition: Expression,
+    /// Optional message for assertion failure
+    pub message: Option<String>,
+    /// Severity level (maps to $info, $warning, $error, $fatal)
+    pub severity: AssertionSeverity,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// Assume statement for formal verification
+/// Generates SVA: `assume property (@(posedge clk) condition);`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssumeStatement {
+    /// Condition to assume
+    pub condition: Expression,
+    /// Optional message
+    pub message: Option<String>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// Cover statement for formal verification
+/// Generates SVA: `cover property (@(posedge clk) condition);`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverStatement {
+    /// Condition to cover
+    pub condition: Expression,
+    /// Optional label for the cover property
+    pub label: Option<String>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// Assertion severity level
+/// Maps to SystemVerilog severity functions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssertionSeverity {
+    /// $info() - informational message
+    Info,
+    /// $warning() - warning message
+    Warning,
+    /// $error() - error message (default)
+    Error,
+    /// $fatal() - fatal error, stops simulation
+    Fatal,
 }
 
 // ============================================================================

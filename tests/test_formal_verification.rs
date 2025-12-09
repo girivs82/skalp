@@ -441,3 +441,191 @@ mod formal_verification_tests {
         }
     }
 }
+
+/// Tests for SVA (SystemVerilog Assertions) code generation
+/// These tests verify the HIR -> MIR -> SystemVerilog pipeline generates correct SVA
+#[cfg(test)]
+mod sva_generation_tests {
+    use skalp_codegen::generate_systemverilog_from_mir;
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_lir::lower_to_lir;
+    use skalp_mir::{MirCompiler, OptimizationLevel};
+
+    /// Test that assert! statements in event blocks generate immediate assertions
+    #[test]
+    fn test_assert_sva_generation() {
+        let source = r#"
+        entity AssertTest {
+            in clk: clock
+            in data: nat[8]
+            out valid: bool
+        }
+
+        impl AssertTest {
+            signal counter: nat[8] = 0
+
+            on(clk.rise) {
+                counter <= counter + 1;
+                assert!(counter < 255, "Counter must not overflow");
+            }
+
+            assign valid = counter > 0;
+        }
+        "#;
+
+        // Parse and compile
+        let hir = parse_and_build_hir(source).expect("Failed to parse");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
+
+        // Generate SystemVerilog
+        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
+            .expect("Failed to generate SystemVerilog");
+
+        println!("Generated SystemVerilog:\n{}", sv_code);
+
+        // Verify SVA assertion is generated
+        assert!(
+            sv_code.contains("assert(") || sv_code.contains("assert ("),
+            "Should contain assert statement"
+        );
+    }
+
+    /// Test that assume! statements generate SVA assumptions
+    #[test]
+    fn test_assume_sva_generation() {
+        let source = r#"
+        entity AssumeTest {
+            in clk: clock
+            in valid: bool
+            in data: nat[8]
+            out result: nat[8]
+        }
+
+        impl AssumeTest {
+            signal stored: nat[8] = 0
+
+            on(clk.rise) {
+                assume!(valid, "Valid signal assumed true");
+                if valid {
+                    stored <= data;
+                }
+            }
+
+            assign result = stored;
+        }
+        "#;
+
+        // Parse and compile
+        let hir = parse_and_build_hir(source).expect("Failed to parse");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
+
+        // Generate SystemVerilog
+        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
+            .expect("Failed to generate SystemVerilog");
+
+        println!("Generated SystemVerilog:\n{}", sv_code);
+
+        // Verify SVA assumption is generated
+        assert!(
+            sv_code.contains("assume(") || sv_code.contains("assume ("),
+            "Should contain assume statement"
+        );
+    }
+
+    /// Test that cover! statements generate SVA cover points
+    #[test]
+    fn test_cover_sva_generation() {
+        let source = r#"
+        entity CoverTest {
+            in clk: clock
+            in state: nat[2]
+            out active: bool
+        }
+
+        impl CoverTest {
+            on(clk.rise) {
+                cover!(state == 3, "all_bits_set");
+            }
+
+            assign active = state != 0;
+        }
+        "#;
+
+        // Parse and compile
+        let hir = parse_and_build_hir(source).expect("Failed to parse");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
+
+        // Generate SystemVerilog
+        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
+            .expect("Failed to generate SystemVerilog");
+
+        println!("Generated SystemVerilog:\n{}", sv_code);
+
+        // Verify SVA cover is generated
+        assert!(
+            sv_code.contains("cover(") || sv_code.contains("cover ("),
+            "Should contain cover statement"
+        );
+    }
+
+    /// Test assert and assume SVA statement types together
+    #[test]
+    fn test_mixed_sva_generation() {
+        let source = r#"
+        entity MixedSvaTest {
+            in clk: clock
+            in reset: bool
+            in data: nat[8]
+            out result: nat[8]
+        }
+
+        impl MixedSvaTest {
+            signal counter: nat[8] = 0
+
+            on(clk.rise) {
+                // Assumptions about inputs - use < instead of <= to avoid parser ambiguity
+                assume!(data < 100, "Data assumed in range");
+
+                if reset {
+                    counter <= 0;
+                } else {
+                    counter <= counter + data;
+                }
+
+                // Assertions about internal state - use < instead of <=
+                assert!(counter < 255, "Counter bounds check");
+            }
+
+            assign result = counter;
+        }
+        "#;
+
+        // Parse and compile
+        let hir = parse_and_build_hir(source).expect("Failed to parse");
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
+
+        // Generate SystemVerilog
+        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
+            .expect("Failed to generate SystemVerilog");
+
+        println!("Generated SystemVerilog:\n{}", sv_code);
+
+        // Verify assert and assume SVA types are generated
+        let has_assert = sv_code.contains("assert(") || sv_code.contains("assert (");
+        let has_assume = sv_code.contains("assume(") || sv_code.contains("assume (");
+
+        println!("Has assert: {}", has_assert);
+        println!("Has assume: {}", has_assume);
+
+        assert!(has_assert, "Should contain assert statements");
+        assert!(has_assume, "Should contain assume statements");
+    }
+}

@@ -342,6 +342,11 @@ impl CdcAnalyzer {
                     }
                 }
             }
+
+            // Formal verification statements don't involve clock domain crossings
+            Statement::Assert(_) | Statement::Assume(_) | Statement::Cover(_) => {
+                // Assertions and covers don't have CDC implications
+            }
         }
 
         violations

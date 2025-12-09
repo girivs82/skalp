@@ -1093,29 +1093,58 @@ impl<'hir> HirToMir<'hir> {
                 // Convert to sequential assignments between pipeline stages
                 self.convert_flow_statement(flow_stmt)
             }
-            hir::HirStatement::Assert(_assert_stmt) => {
-                // For now, skip assertions in MIR generation
-                // They will be handled by the verification backend
-                // TODO: Implement assertion conversion for simulation and formal verification
-                None
+            hir::HirStatement::Assert(assert_stmt) => {
+                // Convert HIR assertion to MIR for SVA generation
+                if let Some(condition) = self.convert_expression(&assert_stmt.condition, 0) {
+                    let severity = match assert_stmt.severity {
+                        hir::HirAssertionSeverity::Info => AssertionSeverity::Info,
+                        hir::HirAssertionSeverity::Warning => AssertionSeverity::Warning,
+                        hir::HirAssertionSeverity::Error => AssertionSeverity::Error,
+                        hir::HirAssertionSeverity::Fatal => AssertionSeverity::Fatal,
+                    };
+                    Some(Statement::Assert(AssertStatement {
+                        condition,
+                        message: assert_stmt.message.clone(),
+                        severity,
+                        span: None,
+                    }))
+                } else {
+                    eprintln!("[WARN] Failed to convert assert condition, skipping assertion");
+                    None
+                }
             }
             hir::HirStatement::Property(_property_stmt) => {
-                // Properties are handled by the verification backend
-                // Skip in MIR generation for now
-                // TODO: Implement property conversion for formal verification
+                // Property statements are structural - used for named properties
+                // They don't directly become statements but are referenced by assertions
+                // Skip standalone property declarations in MIR generation
                 None
             }
-            hir::HirStatement::Cover(_cover_stmt) => {
-                // Cover statements are handled by the verification backend
-                // Skip in MIR generation for now
-                // TODO: Implement cover conversion for coverage collection
-                None
+            hir::HirStatement::Cover(cover_stmt) => {
+                // Convert HIR cover to MIR for SVA generation
+                // Extract condition from property (only simple expressions supported for now)
+                if let Some(condition) = self.convert_property_to_expression(&cover_stmt.property) {
+                    Some(Statement::Cover(CoverStatement {
+                        condition,
+                        label: cover_stmt.name.clone(),
+                        span: None,
+                    }))
+                } else {
+                    eprintln!("[WARN] Failed to convert cover property, skipping cover statement");
+                    None
+                }
             }
-            hir::HirStatement::Assume(_assume_stmt) => {
-                // Assume statements are handled by the verification backend
-                // Skip in MIR generation for now
-                // TODO: Implement assume conversion for formal verification
-                None
+            hir::HirStatement::Assume(assume_stmt) => {
+                // Convert HIR assume to MIR for SVA generation
+                if let Some(condition) = self.convert_expression(&assume_stmt.condition, 0) {
+                    Some(Statement::Assume(AssumeStatement {
+                        condition,
+                        message: assume_stmt.message.clone(),
+                        span: None,
+                    }))
+                } else {
+                    eprintln!("[WARN] Failed to convert assume condition, skipping assumption");
+                    None
+                }
             }
             hir::HirStatement::Let(let_stmt) => {
                 eprintln!(
@@ -3764,6 +3793,58 @@ impl<'hir> HirToMir<'hir> {
             hir::HirLValue::Variable(id) => Some(hir::HirExpression::Variable(*id)),
             hir::HirLValue::Port(id) => Some(hir::HirExpression::Port(*id)),
             _ => None, // For complex LValues, we can't easily convert back
+        }
+    }
+
+    /// Convert HIR property to MIR expression (for cover statements)
+    /// Only simple Expression properties are currently supported
+    fn convert_property_to_expression(&mut self, property: &hir::HirProperty) -> Option<Expression> {
+        match property {
+            hir::HirProperty::Expression(expr) => self.convert_expression(expr, 0),
+            hir::HirProperty::Sequence(_) => {
+                eprintln!("[WARN] Sequence properties not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Implication { .. } => {
+                eprintln!("[WARN] Implication properties not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::OverlappingImplication { .. } => {
+                eprintln!("[WARN] Overlapping implication properties not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::And(_, _) => {
+                eprintln!("[WARN] And property types not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Or(_, _) => {
+                eprintln!("[WARN] Or property types not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Not(_) => {
+                eprintln!("[WARN] Not property types not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Always(_) => {
+                eprintln!("[WARN] Always property types not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Eventually(_) => {
+                eprintln!("[WARN] Eventually property types not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Until { .. } => {
+                eprintln!("[WARN] Until property types not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Throughout { .. } => {
+                eprintln!("[WARN] Throughout property types not yet supported in SVA generation");
+                None
+            }
+            hir::HirProperty::Clocked { property, .. } => {
+                // For clocked properties, extract the inner property
+                self.convert_property_to_expression(property)
+            }
         }
     }
 

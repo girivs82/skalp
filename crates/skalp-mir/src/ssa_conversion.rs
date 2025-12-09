@@ -120,6 +120,8 @@ impl SsaConverter {
                 }
             },
             Statement::ResolvedConditional(_) => {}
+            // Assertions don't involve variable reassignments
+            Statement::Assert(_) | Statement::Assume(_) | Statement::Cover(_) => {}
         }
     }
 
@@ -232,6 +234,18 @@ impl SsaConverter {
                     self.update_expr_refs(&mut case.value);
                 }
                 self.update_expr_refs(&mut rc.resolved.default);
+            }
+            Statement::Assert(assert_stmt) => {
+                // Update refs in assertion condition
+                self.update_expr_refs(&mut assert_stmt.condition);
+            }
+            Statement::Assume(assume_stmt) => {
+                // Update refs in assumption condition
+                self.update_expr_refs(&mut assume_stmt.condition);
+            }
+            Statement::Cover(cover_stmt) => {
+                // Update refs in cover condition
+                self.update_expr_refs(&mut cover_stmt.condition);
             }
         }
     }

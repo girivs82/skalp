@@ -165,6 +165,18 @@ impl DeadCodeElimination {
                 }
                 self.mark_used_in_expression(&resolved.resolved.default);
             }
+            Statement::Assert(assert_stmt) => {
+                // Mark expressions used in assertion condition
+                self.mark_used_in_expression(&assert_stmt.condition);
+            }
+            Statement::Assume(assume_stmt) => {
+                // Mark expressions used in assumption condition
+                self.mark_used_in_expression(&assume_stmt.condition);
+            }
+            Statement::Cover(cover_stmt) => {
+                // Mark expressions used in cover condition
+                self.mark_used_in_expression(&cover_stmt.condition);
+            }
         }
     }
 

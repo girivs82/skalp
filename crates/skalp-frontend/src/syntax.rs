@@ -324,6 +324,7 @@ pub enum SyntaxKind {
     InstanceDecl,
     SeveritySpec,     // severity: Error/Warning/Info/Fatal specification
     AssumeMacroStmt,  // Simple assume!(cond) statement (without property keyword)
+    CoverMacroStmt,   // Simple cover!(cond) statement (without property keyword)
     ConnectionList,
     Connection,
 

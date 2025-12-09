@@ -1872,24 +1872,68 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse cover statement
+    /// Supports:
+    /// - cover property(temporal_expr); -- SVA style
+    /// - cover!(cond); -- simple macro style
+    /// - cover!(cond, "message"); -- with message
     fn parse_cover_statement(&mut self) {
-        self.start_node(SyntaxKind::CoverStmt);
+        // Check if this is cover! (macro style) or cover property (SVA style)
+        // by peeking ahead
+        let is_macro_style = self.peek_kind(1) == Some(SyntaxKind::Bang);
 
-        // 'cover' keyword
-        self.expect(SyntaxKind::CoverKw);
+        if is_macro_style {
+            // Simple cover!(cond) form
+            self.start_node(SyntaxKind::CoverMacroStmt);
 
-        // 'property' keyword
-        self.expect(SyntaxKind::PropertyKw);
+            self.expect(SyntaxKind::CoverKw);
+            self.expect(SyntaxKind::Bang); // consume '!'
+            self.expect(SyntaxKind::LParen);
 
-        // Property expression in parentheses
-        self.expect(SyntaxKind::LParen);
-        self.parse_expression();
-        self.expect(SyntaxKind::RParen);
+            // Parse condition expression
+            self.parse_expression();
 
-        // Expect semicolon
-        self.expect(SyntaxKind::Semicolon);
+            // Optional arguments: message
+            while self.at(SyntaxKind::Comma) {
+                self.bump(); // consume comma
 
-        self.finish_node();
+                // Check for severity: keyword (for consistency with assert/assume)
+                if self.at(SyntaxKind::Ident) && self.current_text() == Some("severity") {
+                    self.start_node(SyntaxKind::SeveritySpec);
+                    self.bump(); // consume 'severity'
+                    self.expect(SyntaxKind::Colon);
+                    if self.at(SyntaxKind::Ident) {
+                        self.bump(); // consume severity level
+                    }
+                    self.finish_node();
+                } else {
+                    // Message expression
+                    self.parse_expression();
+                }
+            }
+
+            self.expect(SyntaxKind::RParen);
+            self.consume_semicolon();
+            self.finish_node();
+        } else {
+            // SVA-style cover property(...)
+            self.start_node(SyntaxKind::CoverStmt);
+
+            // 'cover' keyword
+            self.expect(SyntaxKind::CoverKw);
+
+            // 'property' keyword
+            self.expect(SyntaxKind::PropertyKw);
+
+            // Property expression in parentheses
+            self.expect(SyntaxKind::LParen);
+            self.parse_expression();
+            self.expect(SyntaxKind::RParen);
+
+            // Expect semicolon
+            self.expect(SyntaxKind::Semicolon);
+
+            self.finish_node();
+        }
     }
 
     /// Parse sequence statement

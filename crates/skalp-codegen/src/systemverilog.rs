@@ -894,6 +894,60 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
                 ternary_expr
             ));
         }
+        // Verification statements: Assert, Assume, Cover
+        // NOTE: The MIR representation is backend-agnostic. Each backend can interpret these
+        // statements as appropriate for its target:
+        //   - SystemVerilog/Verilog: SVA (SystemVerilog Assertions) - this implementation
+        //   - Simulation: Runtime checks with debug output
+        //   - GPU/Metal: Shader assertions or debug printf
+        //   - Formal tools: Property specifications for model checking
+        //   - Synthesis: Ignore or convert to synthesizable checks
+        Statement::Assert(assert_stmt) => {
+            // SystemVerilog: Generate immediate assertion with severity
+            // assert(condition) else $severity("message");
+            let condition = format_expression_with_context(&assert_stmt.condition, module);
+            let severity_call = match assert_stmt.severity {
+                skalp_mir::mir::AssertionSeverity::Info => "$info",
+                skalp_mir::mir::AssertionSeverity::Warning => "$warning",
+                skalp_mir::mir::AssertionSeverity::Error => "$error",
+                skalp_mir::mir::AssertionSeverity::Fatal => "$fatal",
+            };
+            if let Some(msg) = &assert_stmt.message {
+                sv.push_str(&format!(
+                    "{}assert({}) else {}(\"{}\");\n",
+                    indent, condition, severity_call, msg
+                ));
+            } else {
+                sv.push_str(&format!(
+                    "{}assert({}) else {}(\"Assertion failed\");\n",
+                    indent, condition, severity_call
+                ));
+            }
+        }
+        Statement::Assume(assume_stmt) => {
+            // Generate assumption: assume(condition);
+            let condition = format_expression_with_context(&assume_stmt.condition, module);
+            if let Some(msg) = &assume_stmt.message {
+                sv.push_str(&format!(
+                    "{}assume({}); // {}\n",
+                    indent, condition, msg
+                ));
+            } else {
+                sv.push_str(&format!("{}assume({});\n", indent, condition));
+            }
+        }
+        Statement::Cover(cover_stmt) => {
+            // Generate cover point: cover(condition);
+            let condition = format_expression_with_context(&cover_stmt.condition, module);
+            if let Some(lbl) = &cover_stmt.label {
+                sv.push_str(&format!(
+                    "{}{}: cover({});\n",
+                    indent, lbl, condition
+                ));
+            } else {
+                sv.push_str(&format!("{}cover({});\n", indent, condition));
+            }
+        }
     }
 
     Ok(sv)

@@ -454,6 +454,37 @@ impl SvCodegen {
                 }
                 self.emit_line("end");
             }
+            // SVA: SystemVerilog Assertions
+            Statement::Assert(assert_stmt) => {
+                let cond = self.expr_to_sv(&assert_stmt.condition);
+                let severity = match assert_stmt.severity {
+                    skalp_mir::mir::AssertionSeverity::Info => "$info",
+                    skalp_mir::mir::AssertionSeverity::Warning => "$warning",
+                    skalp_mir::mir::AssertionSeverity::Error => "$error",
+                    skalp_mir::mir::AssertionSeverity::Fatal => "$fatal",
+                };
+                if let Some(msg) = &assert_stmt.message {
+                    self.emit_line(&format!("assert({}) else {}(\"{}\");", cond, severity, msg));
+                } else {
+                    self.emit_line(&format!("assert({}) else {}(\"Assertion failed\");", cond, severity));
+                }
+            }
+            Statement::Assume(assume_stmt) => {
+                let cond = self.expr_to_sv(&assume_stmt.condition);
+                if let Some(msg) = &assume_stmt.message {
+                    self.emit_line(&format!("assume({}); // {}", cond, msg));
+                } else {
+                    self.emit_line(&format!("assume({});", cond));
+                }
+            }
+            Statement::Cover(cover_stmt) => {
+                let cond = self.expr_to_sv(&cover_stmt.condition);
+                if let Some(lbl) = &cover_stmt.label {
+                    self.emit_line(&format!("{}: cover({});", lbl, cond));
+                } else {
+                    self.emit_line(&format!("cover({});", cond));
+                }
+            }
         }
         Ok(())
     }
