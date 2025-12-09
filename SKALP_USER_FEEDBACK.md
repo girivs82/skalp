@@ -118,16 +118,22 @@ let fifo = Fifo::<16, 32>::new();
 ```
 **Impact**: Medium. Limits reusable IP creation.
 
-### 3. ~~No Pipeline/Retiming Annotations~~ (PARSING IMPLEMENTED - Dec 2025)
+### 3. ~~No Pipeline/Retiming Annotations~~ (IMPLEMENTED - Dec 2025)
 ```skalp
-// NOW SUPPORTED (syntax parsing):
+// NOW SUPPORTED:
 #[pipeline(stages=3)]
 pub fn multiplier(a: bit[32], b: bit[32]) -> bit[64] { ... }
 
+#[pipeline(stages=4, target_freq=100_000_000)]  // With timing hint for LIR
+entity PipelinedMul { ... }
+
 // The attribute is parsed into HIR PipelineConfig with stages, target_freq, auto_balance
-// PENDING: Backend pipeline register insertion not yet implemented
+// Backend pipeline register insertion is implemented in SIR (pipeline.rs)
 ```
-**Status**: Attribute parsing complete. Backend pipelining implementation pending.
+**Status**: ✅ Full implementation complete:
+- Parsing: HIR `PipelineConfig` with stages, target_freq, auto_balance
+- Propagation: HIR → MIR → SIR
+- Backend: `insert_pipeline_registers()` in SIR computes logic levels and inserts FlipFlops at cut points
 
 ### 4. Limited Timing/Cycle Awareness
 Skalp is fundamentally **combinational-first**. Sequential logic requires explicit register entities. This is correct but verbose:
@@ -227,7 +233,7 @@ All were fixed during development - the compiler is actively improving.
 ### For Skalp Development:
 1. ~~**Priority 1**: Loop unrolling~~ ✅ DONE - `generate for` implemented
 2. ~~**Priority 1**: Better source-level error messages~~ ✅ DONE - Added SourceSpan to HIR, improved error formatting
-3. **Priority 2**: Pipeline annotations for timing - ✅ Parsing done, backend pending
+3. ~~**Priority 2**: Pipeline annotations for timing~~ ✅ DONE - Full pipeline insertion backend in SIR
 4. **Priority 3**: Parameterized entity instantiation
 
 ### For Skalp Users:
@@ -258,6 +264,6 @@ The Rust-inspired syntax means LLMs (like me) can write it effectively, which is
 - Rapid iteration is valuable
 
 **Would I avoid Skalp for?**
-- Deeply pipelined designs (no retiming support)
+- ~~Deeply pipelined designs (no retiming support)~~ Now supported via `#[pipeline(stages=N)]`
 - Memory-heavy designs (no RAM inference yet)
 - Designs requiring formal verification
