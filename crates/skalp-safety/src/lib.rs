@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod analysis;
 pub mod asil;
 pub mod design_resolver;
 pub mod do254;
@@ -16,8 +17,10 @@ pub mod hierarchy;
 pub mod iec61508;
 pub mod mechanisms;
 pub mod metrics;
+pub mod pipeline;
 pub mod power_domains;
 pub mod requirements;
+pub mod traits;
 
 /// Safety-related errors
 #[derive(Error, Debug)]
