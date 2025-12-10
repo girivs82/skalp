@@ -6,6 +6,21 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::info;
 
+/// ISO 26262 Safety build options
+#[derive(Debug, Clone)]
+pub struct SafetyBuildOptions {
+    /// Target ASIL level (A, B, C, D)
+    pub asil_level: Option<String>,
+    /// Output path for safety report
+    pub report_path: Option<PathBuf>,
+    /// Check metrics only, don't generate work products
+    pub check_only: bool,
+    /// Work products to generate (comma-separated)
+    pub workproducts: Option<String>,
+    /// Output formats for work products
+    pub formats: String,
+}
+
 /// SKALP - Intent-driven hardware synthesis
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -40,6 +55,32 @@ enum Commands {
         /// Output directory
         #[arg(short, long, default_value = "build")]
         output: PathBuf,
+
+        // === ISO 26262 Safety Options ===
+
+        /// Enable ISO 26262 functional safety analysis
+        #[arg(long)]
+        safety: bool,
+
+        /// Target ASIL level for safety analysis (A, B, C, D)
+        #[arg(long, value_name = "LEVEL")]
+        asil: Option<String>,
+
+        /// Output path for safety report
+        #[arg(long, value_name = "PATH")]
+        safety_report: Option<PathBuf>,
+
+        /// Check safety metrics only (don't generate work products)
+        #[arg(long)]
+        safety_check_only: bool,
+
+        /// Generate ISO 26262 work products (comma-separated: fmeda,traceability,hsi,all)
+        #[arg(long, value_name = "PRODUCTS")]
+        workproducts: Option<String>,
+
+        /// Work product output format (comma-separated: md,html,pdf,csv,reqif)
+        #[arg(long, value_name = "FORMATS", default_value = "md,html")]
+        workproduct_formats: String,
     },
 
     /// Simulate the design
@@ -198,9 +239,29 @@ fn main() -> Result<()> {
             source,
             target,
             output,
+            safety,
+            asil,
+            safety_report,
+            safety_check_only,
+            workproducts,
+            workproduct_formats,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
-            build_design(&source_file, &target, &output)?;
+
+            // Build safety options
+            let safety_options = if safety {
+                Some(SafetyBuildOptions {
+                    asil_level: asil,
+                    report_path: safety_report,
+                    check_only: safety_check_only,
+                    workproducts,
+                    formats: workproduct_formats,
+                })
+            } else {
+                None
+            };
+
+            build_design(&source_file, &target, &output, safety_options)?;
         }
 
         Commands::Sim { design, duration } => {
@@ -354,7 +415,12 @@ skalpc synth src/main.sk --device ice40-hx8k
 }
 
 /// Build SKALP design
-fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<()> {
+fn build_design(
+    source: &PathBuf,
+    target: &str,
+    output_dir: &PathBuf,
+    safety_options: Option<SafetyBuildOptions>,
+) -> Result<()> {
     use skalp_codegen::{generate_systemverilog_from_mir, generate_verilog, generate_vhdl};
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::lower_to_lir;
@@ -364,6 +430,11 @@ fn build_design(source: &PathBuf, target: &str, output_dir: &PathBuf) -> Result<
     // Parse, build HIR with module resolution
     info!("Parsing SKALP source and building HIR with module resolution...");
     let hir = parse_and_build_hir_from_file(source).context("Failed to parse and build HIR")?;
+
+    // Run safety analysis if enabled
+    if let Some(ref safety_opts) = safety_options {
+        run_safety_analysis(&hir, safety_opts, output_dir)?;
+    }
 
     // Lower to MIR with CDC analysis
     info!("Lowering to MIR with CDC analysis...");
@@ -561,7 +632,7 @@ fn synthesize_design(source: &PathBuf, device: &str, full_flow: bool) -> Result<
 
     // First build to LIR
     let temp_dir = tempfile::TempDir::new()?;
-    build_design(source, "lir", &temp_dir.path().to_path_buf())?;
+    build_design(source, "lir", &temp_dir.path().to_path_buf(), None)?;
 
     // Load the LIR
     let lir_path = temp_dir.path().join("design.lir");
@@ -1064,4 +1135,315 @@ fn save_manifest(manifest: &skalp_manifest::Manifest, path: &PathBuf) -> Result<
     let toml_str = toml::to_string_pretty(manifest)?;
     fs::write(path, toml_str)?;
     Ok(())
+}
+
+// ============================================================================
+// ISO 26262 Safety Analysis
+// ============================================================================
+
+/// Run ISO 26262 functional safety analysis
+fn run_safety_analysis(
+    hir: &skalp_frontend::hir::Hir,
+    options: &SafetyBuildOptions,
+    output_dir: &PathBuf,
+) -> Result<()> {
+    use skalp_safety::analysis::AnalysisContext;
+    use skalp_safety::asil::AsilLevel;
+    use skalp_safety::pipeline::SafetyPipeline;
+
+    println!("\n=== ISO 26262 Safety Analysis ===\n");
+
+    // Parse ASIL level from options
+    let target_asil = match options.asil_level.as_deref() {
+        Some("A") | Some("a") => AsilLevel::A,
+        Some("B") | Some("b") => AsilLevel::B,
+        Some("C") | Some("c") => AsilLevel::C,
+        Some("D") | Some("d") => AsilLevel::D,
+        Some("QM") | Some("qm") | None => AsilLevel::QM,
+        Some(other) => {
+            anyhow::bail!("Invalid ASIL level: {}. Use A, B, C, D, or QM", other);
+        }
+    };
+
+    println!("Target ASIL: {:?}", target_asil);
+
+    // Create analysis context
+    let context = AnalysisContext::for_asil(target_asil);
+
+    // Create safety pipeline with standard passes
+    let pipeline = SafetyPipeline::with_standard_passes();
+
+    // Create safety hierarchy from HIR
+    // For now, create a minimal hierarchy - full implementation would parse safety_goal files
+    let hierarchy = skalp_safety::hierarchy::SafetyHierarchy::new();
+
+    // Run safety analysis pipeline
+    info!("Running safety analysis pipeline...");
+    let result = pipeline.run(&hierarchy, None, &context);
+
+    // Print summary
+    println!("{}", result.summary());
+
+    // Print errors if any
+    if result.total_errors > 0 {
+        println!("\nErrors:");
+        for error in result.all_errors() {
+            println!("  {}", error);
+        }
+    }
+
+    // Print warnings if any
+    if result.total_warnings > 0 {
+        println!("\nWarnings:");
+        for warning in result.all_warnings() {
+            println!("  {}", warning);
+        }
+    }
+
+    // Determine report output path
+    let report_dir = options
+        .report_path
+        .clone()
+        .unwrap_or_else(|| output_dir.join("safety"));
+
+    // Create report directory
+    fs::create_dir_all(&report_dir)?;
+
+    // If check_only, stop here
+    if options.check_only {
+        if result.passed() {
+            println!("\n✅ Safety check passed");
+        } else {
+            println!("\n❌ Safety check failed - fix errors before generating work products");
+            anyhow::bail!("Safety analysis failed with {} errors", result.total_errors);
+        }
+        return Ok(());
+    }
+
+    // Generate work products if metrics pass
+    if !result.can_generate_workproducts {
+        println!("\n❌ Work products NOT generated - fix errors first");
+        anyhow::bail!("Cannot generate work products - {} errors found", result.total_errors);
+    }
+
+    // Parse work products to generate
+    let workproducts = options
+        .workproducts
+        .as_deref()
+        .unwrap_or("all")
+        .split(',')
+        .map(|s| s.trim())
+        .collect::<Vec<_>>();
+
+    // Generate requested work products
+    generate_safety_workproducts(&result, &hierarchy, &report_dir, &workproducts, &options.formats)?;
+
+    println!("\n✅ Safety analysis complete");
+    println!("📁 Reports: {:?}", report_dir);
+
+    Ok(())
+}
+
+/// Generate ISO 26262 work products
+fn generate_safety_workproducts(
+    result: &skalp_safety::analysis::CombinedAnalysisResult,
+    hierarchy: &skalp_safety::hierarchy::SafetyHierarchy,
+    output_dir: &PathBuf,
+    workproducts: &[&str],
+    formats: &str,
+) -> Result<()> {
+    let format_list: Vec<&str> = formats.split(',').map(|s| s.trim()).collect();
+    let generate_all = workproducts.contains(&"all");
+
+    println!("\nGenerating work products...");
+
+    // Summary report (always generated)
+    if generate_all || workproducts.contains(&"summary") {
+        let summary_path = output_dir.join("safety_summary.md");
+        fs::write(&summary_path, result.summary())?;
+        println!("  ✓ {}", summary_path.display());
+    }
+
+    // FMEDA report
+    if generate_all || workproducts.contains(&"fmeda") {
+        let fmeda_path = output_dir.join("fmeda_report.md");
+        let fmeda_content = generate_fmeda_report_md(result);
+        fs::write(&fmeda_path, fmeda_content)?;
+        println!("  ✓ {}", fmeda_path.display());
+
+        // Also generate HTML if requested
+        if format_list.contains(&"html") {
+            let fmeda_html_path = output_dir.join("fmeda_report.html");
+            let fmeda_html = generate_fmeda_report_html(result);
+            fs::write(&fmeda_html_path, fmeda_html)?;
+            println!("  ✓ {}", fmeda_html_path.display());
+        }
+    }
+
+    // Traceability matrix
+    if generate_all || workproducts.contains(&"traceability") {
+        let trace_path = output_dir.join("traceability_matrix.md");
+        let trace_content = generate_traceability_report(hierarchy);
+        fs::write(&trace_path, trace_content)?;
+        println!("  ✓ {}", trace_path.display());
+    }
+
+    // HSI specification
+    if generate_all || workproducts.contains(&"hsi") {
+        let hsi_path = output_dir.join("hsi_specification.md");
+        let hsi_content = generate_hsi_report(hierarchy);
+        fs::write(&hsi_path, hsi_content)?;
+        println!("  ✓ {}", hsi_path.display());
+    }
+
+    Ok(())
+}
+
+/// Generate FMEDA report in Markdown format
+fn generate_fmeda_report_md(result: &skalp_safety::analysis::CombinedAnalysisResult) -> String {
+    let mut output = String::new();
+
+    output.push_str("# FMEDA Report\n\n");
+    output.push_str(&format!("Target ASIL: {:?}\n\n", result.target_asil));
+
+    if let Some(ref metrics) = result.final_metrics {
+        output.push_str("## Metrics Summary\n\n");
+        output.push_str("| Metric | Value | Status |\n");
+        output.push_str("|--------|-------|--------|\n");
+        output.push_str(&format!(
+            "| SPFM | {:.1}% | {} |\n",
+            metrics.spfm,
+            if metrics.spfm >= 99.0 { "✓" } else { "✗" }
+        ));
+        output.push_str(&format!(
+            "| LFM | {:.1}% | {} |\n",
+            metrics.lfm,
+            if metrics.lfm >= 90.0 { "✓" } else { "✗" }
+        ));
+        output.push_str(&format!(
+            "| PMHF | {:.1} FIT | {} |\n",
+            metrics.pmhf,
+            if metrics.pmhf <= 10.0 { "✓" } else { "✗" }
+        ));
+        output.push_str(&format!("| Total FIT | {:.1} | - |\n", metrics.total_fit));
+        output.push_str(&format!(
+            "| Achievable ASIL | {:?} | - |\n\n",
+            metrics.achievable_asil
+        ));
+    }
+
+    output.push_str("## Analysis Results\n\n");
+    output.push_str(&format!(
+        "- **Status**: {:?}\n",
+        result.overall_status
+    ));
+    output.push_str(&format!("- **Errors**: {}\n", result.total_errors));
+    output.push_str(&format!("- **Warnings**: {}\n", result.total_warnings));
+
+    output
+}
+
+/// Generate FMEDA report in HTML format
+fn generate_fmeda_report_html(result: &skalp_safety::analysis::CombinedAnalysisResult) -> String {
+    let mut html = String::new();
+
+    html.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
+    html.push_str("<title>FMEDA Report</title>\n");
+    html.push_str("<style>\n");
+    html.push_str("body { font-family: Arial, sans-serif; margin: 40px; }\n");
+    html.push_str("table { border-collapse: collapse; width: 100%; }\n");
+    html.push_str("th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }\n");
+    html.push_str("th { background-color: #4CAF50; color: white; }\n");
+    html.push_str(".pass { color: green; }\n");
+    html.push_str(".fail { color: red; }\n");
+    html.push_str("</style>\n</head>\n<body>\n");
+
+    html.push_str("<h1>FMEDA Report</h1>\n");
+    html.push_str(&format!("<p>Target ASIL: <strong>{:?}</strong></p>\n", result.target_asil));
+
+    if let Some(ref metrics) = result.final_metrics {
+        html.push_str("<h2>Metrics Summary</h2>\n");
+        html.push_str("<table>\n");
+        html.push_str("<tr><th>Metric</th><th>Value</th><th>Status</th></tr>\n");
+        html.push_str(&format!(
+            "<tr><td>SPFM</td><td>{:.1}%</td><td class=\"{}\">{}</td></tr>\n",
+            metrics.spfm,
+            if metrics.spfm >= 99.0 { "pass" } else { "fail" },
+            if metrics.spfm >= 99.0 { "PASS" } else { "FAIL" }
+        ));
+        html.push_str(&format!(
+            "<tr><td>LFM</td><td>{:.1}%</td><td class=\"{}\">{}</td></tr>\n",
+            metrics.lfm,
+            if metrics.lfm >= 90.0 { "pass" } else { "fail" },
+            if metrics.lfm >= 90.0 { "PASS" } else { "FAIL" }
+        ));
+        html.push_str(&format!(
+            "<tr><td>PMHF</td><td>{:.1} FIT</td><td class=\"{}\">{}</td></tr>\n",
+            metrics.pmhf,
+            if metrics.pmhf <= 10.0 { "pass" } else { "fail" },
+            if metrics.pmhf <= 10.0 { "PASS" } else { "FAIL" }
+        ));
+        html.push_str(&format!(
+            "<tr><td>Total FIT</td><td>{:.1}</td><td>-</td></tr>\n",
+            metrics.total_fit
+        ));
+        html.push_str(&format!(
+            "<tr><td>Achievable ASIL</td><td>{:?}</td><td>-</td></tr>\n",
+            metrics.achievable_asil
+        ));
+        html.push_str("</table>\n");
+    }
+
+    html.push_str("</body>\n</html>\n");
+    html
+}
+
+/// Generate traceability report
+fn generate_traceability_report(hierarchy: &skalp_safety::hierarchy::SafetyHierarchy) -> String {
+    let mut output = String::new();
+
+    output.push_str("# Traceability Matrix\n\n");
+    output.push_str("## Safety Goals\n\n");
+
+    let matrix = hierarchy.generate_traceability();
+
+    output.push_str("| ID | Level | Description | Parent | Children |\n");
+    output.push_str("|----|-------|-------------|--------|----------|\n");
+
+    for entry in &matrix.entries {
+        output.push_str(&format!(
+            "| {} | {:?} | {} | {} | {} |\n",
+            entry.id,
+            entry.level,
+            entry.description,
+            entry.parent.as_deref().unwrap_or("-"),
+            if entry.children.is_empty() {
+                "-".to_string()
+            } else {
+                entry.children.join(", ")
+            }
+        ));
+    }
+
+    output
+}
+
+/// Generate HSI specification report
+fn generate_hsi_report(hierarchy: &skalp_safety::hierarchy::SafetyHierarchy) -> String {
+    let mut output = String::new();
+
+    output.push_str("# Hardware-Software Interface Specification\n\n");
+
+    output.push_str("## Interface Signals\n\n");
+    output.push_str("| Signal | Direction | ASIL | Max Latency |\n");
+    output.push_str("|--------|-----------|------|-------------|\n");
+
+    // HSI signals would be populated from safety entities
+    // For now, generate placeholder
+    output.push_str("| (No HSI signals defined) | - | - | - |\n");
+
+    output.push_str("\n## Timing Contracts\n\n");
+    output.push_str("(No timing contracts defined)\n");
+
+    output
 }

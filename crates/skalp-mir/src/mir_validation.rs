@@ -190,6 +190,11 @@ mod tests {
                 initial: None,
                 clock_domain: None,
                 span: None,
+                memory_config: None,
+                trace_config: None,
+                cdc_config: None,
+                breakpoint_config: None,
+                power_config: None,
             }],
             variables: vec![],
             processes: vec![],
@@ -197,7 +202,11 @@ mod tests {
             instances: vec![],
             clock_domains: vec![],
             generate_blocks: vec![],
+            assertions: vec![],
             span: None,
+            pipeline_config: None,
+            vendor_ip_config: None,
+            power_domains: vec![],
         };
 
         let mir = Mir {
@@ -246,7 +255,11 @@ mod tests {
             instances: vec![],
             clock_domains: vec![],
             generate_blocks: vec![],
+            assertions: vec![],
             span: None,
+            pipeline_config: None,
+            vendor_ip_config: None,
+            power_domains: vec![],
         };
 
         let mir = Mir {
@@ -284,6 +297,11 @@ mod tests {
                 initial: None,
                 clock_domain: None,
                 span: None,
+                memory_config: None,
+                trace_config: None,
+                cdc_config: None,
+                breakpoint_config: None,
+                power_config: None,
             }],
             variables: vec![],
             processes: vec![],
@@ -291,7 +309,11 @@ mod tests {
             instances: vec![],
             clock_domains: vec![],
             generate_blocks: vec![],
+            assertions: vec![],
             span: None,
+            pipeline_config: None,
+            vendor_ip_config: None,
+            power_domains: vec![],
         };
 
         let mir = Mir {
@@ -337,6 +359,11 @@ mod tests {
                 initial: None,
                 clock_domain: None,
                 span: None,
+                memory_config: None,
+                trace_config: None,
+                cdc_config: None,
+                breakpoint_config: None,
+                power_config: None,
             }],
             variables: vec![],
             processes: vec![],
@@ -344,7 +371,11 @@ mod tests {
             instances: vec![],
             clock_domains: vec![],
             generate_blocks: vec![],
+            assertions: vec![],
             span: None,
+            pipeline_config: None,
+            vendor_ip_config: None,
+            power_domains: vec![],
         };
 
         let mir = Mir {
@@ -381,7 +412,11 @@ mod tests {
             instances: vec![],
             clock_domains: vec![],
             generate_blocks: vec![],
+            assertions: vec![],
             span: None,
+            pipeline_config: None,
+            vendor_ip_config: None,
+            power_domains: vec![],
         };
 
         let mir = Mir {
