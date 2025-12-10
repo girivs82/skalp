@@ -57,6 +57,8 @@ pub struct Module {
     /// Vendor IP configuration from `#[xilinx_ip]`, `#[intel_ip]`, etc. attributes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor_ip_config: Option<skalp_frontend::hir::VendorIpConfig>,
+    /// Power domain declarations (mirrors clock_domains pattern)
+    pub power_domains: Vec<skalp_frontend::hir::HirPowerDomain>,
 }
 
 /// Module identifier
@@ -127,6 +129,10 @@ pub struct Signal {
     /// When present, generates SVA assertions for debugging.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakpoint_config: Option<skalp_frontend::hir::BreakpointConfig>,
+    /// Power intent configuration (from #[retention], #[isolation], #[pdc], #[level_shift] attributes)
+    /// When present, specifies power domain crossing, retention, or isolation requirements.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_config: Option<skalp_frontend::hir::PowerConfig>,
 }
 
 /// Signal identifier
@@ -1177,6 +1183,7 @@ impl Module {
             span: None,
             pipeline_config: None,
             vendor_ip_config: None,
+            power_domains: Vec::new(),
         }
     }
 }

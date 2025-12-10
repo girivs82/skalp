@@ -288,6 +288,11 @@ impl<'hir> HirToMir<'hir> {
                          config.ip_name, config.vendor, entity.name);
             }
 
+            // Propagate power domains from HIR entity to MIR module
+            if !entity.power_domains.is_empty() {
+                module.power_domains = entity.power_domains.clone();
+            }
+
             // Convert generic parameters
             for hir_generic in &entity.generics {
                 let parameter = GenericParameter {
@@ -397,6 +402,10 @@ impl<'hir> HirToMir<'hir> {
                     // Propagate breakpoint config from HIR signal to MIR signal
                     if hir_signal.breakpoint_config.is_some() {
                         signal.breakpoint_config = hir_signal.breakpoint_config.clone();
+                    }
+                    // Propagate power config from HIR signal to MIR signal
+                    if hir_signal.power_config.is_some() {
+                        signal.power_config = hir_signal.power_config.clone();
                     }
                     module.signals.push(signal);
                 }
@@ -553,6 +562,10 @@ impl<'hir> HirToMir<'hir> {
                             if hir_signal.breakpoint_config.is_some() {
                                 signal.breakpoint_config = hir_signal.breakpoint_config.clone();
                             }
+                            // Propagate power config from HIR signal to MIR signal
+                            if hir_signal.power_config.is_some() {
+                                signal.power_config = hir_signal.power_config.clone();
+                            }
                             module.signals.push(signal);
                         }
 
@@ -702,6 +715,7 @@ impl<'hir> HirToMir<'hir> {
                                         trace_config: None,
                                         cdc_config: None,
                                         breakpoint_config: None,
+                                        power_config: None,
                                     };
                                     module.signals.push(signal);
 
@@ -14514,6 +14528,7 @@ impl<'hir> HirToMir<'hir> {
                 trace_config: None,
                 cdc_config: None,
                 breakpoint_config: None,
+                power_config: None,
             };
             module.signals.push(signal);
 
@@ -14704,6 +14719,7 @@ impl<'hir> HirToMir<'hir> {
                                 trace_config: None,
                                 cdc_config: None,
                                 breakpoint_config: None,
+                                power_config: None,
                             };
                             module.signals.push(signal);
 
@@ -14946,6 +14962,7 @@ impl<'hir> HirToMir<'hir> {
                         trace_config: None,
                         cdc_config: None,
                         breakpoint_config: None,
+                        power_config: None,
                     };
                     module.signals.push(signal);
                     println!("🎯🎯🎯 DRAIN: Created tuple result signal '{}' (id={}) 🎯🎯🎯", signal_name, elem_signal_id.0);
@@ -14973,6 +14990,7 @@ impl<'hir> HirToMir<'hir> {
                     trace_config: None,
                     cdc_config: None,
                     breakpoint_config: None,
+                    power_config: None,
                 };
                 module.signals.push(signal);
                 eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
@@ -15052,6 +15070,7 @@ impl<'hir> HirToMir<'hir> {
                     trace_config: None,
                     cdc_config: None,
                     breakpoint_config: None,
+                    power_config: None,
                 };
                 eprintln!(
                     "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output",

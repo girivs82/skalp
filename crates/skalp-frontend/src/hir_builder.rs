@@ -142,6 +142,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[breakpoint]` or `#[breakpoint(condition="...")]` before a signal
     pending_breakpoint_config: Option<BreakpointConfig>,
 
+    /// Pending power config from most recent power intent attribute
+    /// Set when we see `#[retention]`, `#[isolation]`, `#[pdc]`, or `#[level_shift]` before a signal
+    pending_power_config: Option<PowerConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -253,6 +257,7 @@ impl HirBuilderContext {
             pending_cdc_config: None,
             pending_vendor_ip_config: None,
             pending_breakpoint_config: None,
+            pending_power_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -717,6 +722,7 @@ impl HirBuilderContext {
                                     trace_config: None,
                                     cdc_config: None,
                                     breakpoint_config: None,
+                                    power_config: None,
                                 };
                                 signals.push(signal);
 
@@ -782,6 +788,7 @@ impl HirBuilderContext {
             span: self.make_span(node),
             pipeline_config,
             vendor_ip_config,
+            power_domains: Vec::new(), // Power domains will be populated later from declarations
         })
     }
 
@@ -1218,6 +1225,9 @@ impl HirBuilderContext {
         // Consume any pending breakpoint config from preceding #[breakpoint] attribute
         let breakpoint_config = self.pending_breakpoint_config.take();
 
+        // Consume any pending power config from preceding #[retention], #[isolation], #[pdc], #[level_shift] attributes
+        let power_config = self.pending_power_config.take();
+
         Some(HirSignal {
             id,
             name,
@@ -1229,6 +1239,7 @@ impl HirBuilderContext {
             trace_config,
             cdc_config,
             breakpoint_config,
+            power_config,
         })
     }
 
@@ -6865,6 +6876,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract power config (e.g., #[retention], #[isolation], #[pdc], #[level_shift])
+            if let Some(config) = self.extract_power_config_from_intent_value(&intent_value) {
+                self.pending_power_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -7589,6 +7606,336 @@ impl HirBuilderContext {
             name,
             message,
             is_error,
+        })
+    }
+
+    // ========================================================================
+    // Power Intent Extractors
+    // ========================================================================
+
+    /// Extract power config from IntentValue
+    ///
+    /// Parses power intent attributes: `#[retention]`, `#[isolation]`, `#[pdc]`, `#[level_shift]`
+    fn extract_power_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<PowerConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Determine which power attribute type this is
+        // Note: 'isolation' is a keyword (IsolationKw), while others are identifiers
+        let has_retention = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "retention"
+        });
+        let has_isolation = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::IsolationKw ||
+            (t.kind() == SyntaxKind::Ident && t.text() == "isolation")
+        });
+        let has_pdc = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "pdc"
+        });
+        let has_level_shift = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "level_shift"
+        });
+
+        // Must have at least one power attribute
+        if !has_retention && !has_isolation && !has_pdc && !has_level_shift {
+            return None;
+        }
+
+        let mut config = PowerConfig::default();
+
+        if has_retention {
+            config.retention = self.extract_retention_from_tokens(&tokens);
+        }
+
+        if has_isolation {
+            config.isolation = self.extract_isolation_from_tokens(&tokens);
+        }
+
+        if has_pdc || has_level_shift {
+            // PDC includes isolation info
+            if let Some(isolation) = self.extract_isolation_from_tokens(&tokens) {
+                config.isolation = Some(isolation);
+            }
+            // Level shift config
+            config.level_shift = self.extract_level_shift_from_tokens(&tokens);
+        }
+
+        Some(config)
+    }
+
+    /// Extract RetentionConfig from tokens
+    ///
+    /// Parses: `#[retention]`, `#[retention(strategy = auto)]`, `#[retention(save = save_sig, restore = restore_sig)]`
+    fn extract_retention_from_tokens(
+        &self,
+        tokens: &[rowan::SyntaxToken<crate::syntax::SkalplLanguage>],
+    ) -> Option<RetentionConfig> {
+        let mut strategy = RetentionStrategy::Auto;
+        let mut save_signal: Option<String> = None;
+        let mut restore_signal: Option<String> = None;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            match token.kind() {
+                SyntaxKind::Ident => {
+                    let text = token.text();
+                    match text {
+                        // Keys
+                        "strategy" => current_key = Some("strategy"),
+                        "save" | "save_signal" => current_key = Some("save"),
+                        "restore" | "restore_signal" => current_key = Some("restore"),
+                        // Strategy values
+                        "auto" | "Auto" => {
+                            if current_key == Some("strategy") {
+                                strategy = RetentionStrategy::Auto;
+                                current_key = None;
+                            }
+                        }
+                        "balloon" | "balloon_latch" | "BalloonLatch" => {
+                            if current_key == Some("strategy") {
+                                strategy = RetentionStrategy::BalloonLatch;
+                                current_key = None;
+                            }
+                        }
+                        "shadow" | "shadow_register" | "ShadowRegister" => {
+                            if current_key == Some("strategy") {
+                                strategy = RetentionStrategy::ShadowRegister;
+                                current_key = None;
+                            }
+                        }
+                        // Signal names as identifiers
+                        _ if text != "retention" => {
+                            match current_key {
+                                Some("save") => {
+                                    save_signal = Some(text.to_string());
+                                    current_key = None;
+                                }
+                                Some("restore") => {
+                                    restore_signal = Some(text.to_string());
+                                    current_key = None;
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                SyntaxKind::StringLiteral => {
+                    let text = token.text();
+                    let value = text[1..text.len() - 1].to_string();
+                    match current_key {
+                        Some("save") => save_signal = Some(value),
+                        Some("restore") => restore_signal = Some(value),
+                        _ => {}
+                    }
+                    current_key = None;
+                }
+                _ => {}
+            }
+        }
+
+        Some(RetentionConfig {
+            strategy,
+            save_signal,
+            restore_signal,
+        })
+    }
+
+    /// Extract IsolationConfig from tokens
+    ///
+    /// Parses: `#[isolation(clamp = low)]`, `#[isolation(clamp = high, enable = iso_en)]`
+    fn extract_isolation_from_tokens(
+        &self,
+        tokens: &[rowan::SyntaxToken<crate::syntax::SkalplLanguage>],
+    ) -> Option<IsolationConfig> {
+        let mut clamp = IsolationClamp::Low;
+        let mut enable_signal: Option<String> = None;
+        let mut active_high = true;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            match token.kind() {
+                SyntaxKind::Ident => {
+                    let text = token.text();
+                    match text {
+                        // Keys
+                        "clamp" => current_key = Some("clamp"),
+                        "enable" | "enable_signal" => current_key = Some("enable"),
+                        "active_high" | "polarity" => current_key = Some("polarity"),
+                        // Clamp values
+                        "low" | "Low" | "clamp_low" => {
+                            if current_key == Some("clamp") || current_key.is_none() {
+                                clamp = IsolationClamp::Low;
+                                current_key = None;
+                            }
+                        }
+                        "high" | "High" | "clamp_high" => {
+                            if current_key == Some("clamp") || current_key.is_none() {
+                                clamp = IsolationClamp::High;
+                                current_key = None;
+                            }
+                        }
+                        "latch" | "Latch" | "hold" => {
+                            if current_key == Some("clamp") || current_key.is_none() {
+                                clamp = IsolationClamp::Latch;
+                                current_key = None;
+                            }
+                        }
+                        // Enable signal name
+                        _ if text != "isolation" && text != "pdc" => {
+                            if current_key == Some("enable") {
+                                enable_signal = Some(text.to_string());
+                                current_key = None;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                SyntaxKind::TrueKw => {
+                    if current_key == Some("polarity") {
+                        active_high = true;
+                    }
+                    current_key = None;
+                }
+                SyntaxKind::FalseKw => {
+                    if current_key == Some("polarity") {
+                        active_high = false;
+                    }
+                    current_key = None;
+                }
+                SyntaxKind::StringLiteral => {
+                    let text = token.text();
+                    let value = text[1..text.len() - 1].to_string();
+                    if current_key == Some("enable") {
+                        enable_signal = Some(value);
+                    }
+                    current_key = None;
+                }
+                _ => {}
+            }
+        }
+
+        Some(IsolationConfig {
+            clamp,
+            enable_signal,
+            active_high,
+        })
+    }
+
+    /// Extract LevelShiftConfig from tokens
+    ///
+    /// Parses: `#[level_shift(from = 'core, to = 'io)]`, `#[pdc(from = 'core, to = 'io, isolation = clamp_low)]`
+    fn extract_level_shift_from_tokens(
+        &self,
+        tokens: &[rowan::SyntaxToken<crate::syntax::SkalplLanguage>],
+    ) -> Option<LevelShiftConfig> {
+        let mut from_domain: Option<String> = None;
+        let mut to_domain: Option<String> = None;
+        let mut shifter_type = LevelShifterType::Auto;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            match token.kind() {
+                SyntaxKind::Ident => {
+                    let text = token.text();
+                    match text {
+                        // Keys (same as CDC)
+                        "from" | "source" | "src" => current_key = Some("from"),
+                        "to" | "destination" | "dst" => current_key = Some("to"),
+                        "shifter" | "shifter_type" | "direction" => current_key = Some("shifter"),
+                        // Shifter type values
+                        "auto" | "Auto" => {
+                            if current_key == Some("shifter") {
+                                shifter_type = LevelShifterType::Auto;
+                                current_key = None;
+                            }
+                        }
+                        "low_to_high" | "LowToHigh" | "up" => {
+                            if current_key == Some("shifter") {
+                                shifter_type = LevelShifterType::LowToHigh;
+                                current_key = None;
+                            }
+                        }
+                        "high_to_low" | "HighToLow" | "down" => {
+                            if current_key == Some("shifter") {
+                                shifter_type = LevelShifterType::HighToLow;
+                                current_key = None;
+                            }
+                        }
+                        // Domain names as identifiers
+                        _ if !["level_shift", "pdc", "isolation", "clamp", "enable"].contains(&text) => {
+                            match current_key {
+                                Some("from") => {
+                                    from_domain = Some(text.to_string());
+                                    current_key = None;
+                                }
+                                Some("to") => {
+                                    to_domain = Some(text.to_string());
+                                    current_key = None;
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Handle lifetime tokens ('domain_name) - same as CDC
+                SyntaxKind::Lifetime => {
+                    let text = token.text();
+                    // Strip leading quote from lifetime (e.g., "'core" -> "core")
+                    let domain_name = if text.starts_with('\'') {
+                        text[1..].to_string()
+                    } else {
+                        text.to_string()
+                    };
+                    match current_key {
+                        Some("from") => {
+                            from_domain = Some(domain_name);
+                            current_key = None;
+                        }
+                        Some("to") => {
+                            to_domain = Some(domain_name);
+                            current_key = None;
+                        }
+                        _ => {}
+                    }
+                }
+                SyntaxKind::StringLiteral => {
+                    let text = token.text();
+                    let value = text[1..text.len() - 1].to_string();
+                    match current_key {
+                        Some("from") => from_domain = Some(value),
+                        Some("to") => to_domain = Some(value),
+                        _ => {}
+                    }
+                    current_key = None;
+                }
+                _ => {}
+            }
+        }
+
+        // Always return a config for #[level_shift] - domains are optional
+        Some(LevelShiftConfig {
+            from_domain,
+            to_domain,
+            shifter_type,
         })
     }
 

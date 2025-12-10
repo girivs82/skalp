@@ -64,6 +64,8 @@ pub struct HirEntity {
     pub pipeline_config: Option<PipelineConfig>,
     /// Vendor IP configuration (from #[xilinx_ip], #[intel_ip], etc. attributes)
     pub vendor_ip_config: Option<VendorIpConfig>,
+    /// Power domain declarations (mirrors clock_domains pattern)
+    pub power_domains: Vec<HirPowerDomain>,
 }
 
 /// Implementation in HIR
@@ -186,6 +188,10 @@ pub struct HirSignal {
     /// When present, generates SVA assertions for debugging.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakpoint_config: Option<BreakpointConfig>,
+    /// Power intent configuration (from #[retention], #[isolation], #[pdc], #[level_shift] attributes)
+    /// When present, specifies power domain crossing, retention, or isolation requirements.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_config: Option<PowerConfig>,
 }
 
 /// Variable in HIR
@@ -823,6 +829,210 @@ impl VendorIpConfig {
             ip_name: ip_name.into(),
             vendor: VendorType::Generic,
             black_box: true,
+            ..Default::default()
+        }
+    }
+}
+
+// ============================================================================
+// Power Intent Configuration
+// ============================================================================
+
+/// Power domain identifier (mirrors ClockDomainId pattern)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PowerDomainId(pub u32);
+
+/// Power domain type - specifies power management characteristics
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PowerDomainType {
+    /// Always-on domain - cannot be power-gated
+    #[default]
+    AlwaysOn,
+    /// Switchable domain - can be fully powered off
+    Switchable,
+    /// Retention domain - retains state during power-down
+    Retention,
+}
+
+/// Power domain in HIR (mirrors HirClockDomain pattern)
+///
+/// Power domains use Rust-style lifetimes like clock domains:
+/// ```text
+/// power_domains {
+///     'always_on: AlwaysOn,
+///     'core: Switchable { supply: VDD_CORE },
+///     'mem: Retention { supply: VDD_MEM },
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirPowerDomain {
+    /// Power domain identifier
+    pub id: PowerDomainId,
+    /// Power domain name (e.g., "core" from lifetime 'core)
+    pub name: String,
+    /// Domain type (AlwaysOn, Switchable, Retention)
+    pub domain_type: PowerDomainType,
+    /// Supply network name (e.g., VDD_CORE)
+    pub supply: Option<String>,
+    /// Voltage in millivolts (e.g., 900 for 0.9V)
+    pub voltage_mv: Option<u32>,
+}
+
+/// Signal power configuration (from #[retention], #[isolation], #[pdc] attributes)
+///
+/// # Usage Examples
+/// ```text
+/// // Retention - state preserved during power-down
+/// #[retention]
+/// signal saved_state<'mem>: bit[32]
+///
+/// // Isolation - explicit clamp value for domain crossing
+/// #[isolation(clamp = low, enable = iso_en)]
+/// signal isolated_data<'io>: bit[32]
+///
+/// // Power domain crossing (mirrors CDC syntax)
+/// #[pdc(from = 'core, to = 'io, isolation = clamp_low)]
+/// signal cross_domain: bit[32]
+///
+/// // Level shifter for voltage domain crossing
+/// #[level_shift(from = 'core, to = 'io)]
+/// signal shifted_signal: bit[16]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PowerConfig {
+    /// Power domain this signal belongs to (resolved from lifetime)
+    pub domain: Option<PowerDomainId>,
+    /// Retention configuration
+    pub retention: Option<RetentionConfig>,
+    /// Isolation configuration
+    pub isolation: Option<IsolationConfig>,
+    /// Level shifter configuration
+    pub level_shift: Option<LevelShiftConfig>,
+}
+
+/// Retention configuration for signals in retention domains
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Retention strategy
+    pub strategy: RetentionStrategy,
+    /// Save signal name (optional, auto-generated if not specified)
+    pub save_signal: Option<String>,
+    /// Restore signal name (optional, auto-generated if not specified)
+    pub restore_signal: Option<String>,
+}
+
+/// Retention strategy for preserving state during power-down
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RetentionStrategy {
+    /// Compiler chooses optimal strategy
+    #[default]
+    Auto,
+    /// Balloon latch technique
+    BalloonLatch,
+    /// Shadow register technique
+    ShadowRegister,
+}
+
+/// Isolation configuration for cross-domain signals
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IsolationConfig {
+    /// Isolation clamp value
+    pub clamp: IsolationClamp,
+    /// Isolation enable signal name (optional)
+    pub enable_signal: Option<String>,
+    /// Isolation enable polarity (true = active high)
+    pub active_high: bool,
+}
+
+/// Isolation clamp type for powered-down domain outputs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum IsolationClamp {
+    /// Clamp output to 0
+    #[default]
+    Low,
+    /// Clamp output to 1
+    High,
+    /// Hold last value (latch)
+    Latch,
+}
+
+/// Level shifter configuration for voltage domain crossings
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LevelShiftConfig {
+    /// Source domain name (from lifetime like 'core)
+    pub from_domain: Option<String>,
+    /// Destination domain name (from lifetime like 'io)
+    pub to_domain: Option<String>,
+    /// Level shifter type
+    pub shifter_type: LevelShifterType,
+}
+
+/// Level shifter type for voltage domain crossings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LevelShifterType {
+    /// Compiler infers direction based on voltage specs
+    #[default]
+    Auto,
+    /// Low voltage to high voltage shifter
+    LowToHigh,
+    /// High voltage to low voltage shifter
+    HighToLow,
+}
+
+impl PowerConfig {
+    /// Create an empty power config
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if this config has any power intent specified
+    pub fn has_power_intent(&self) -> bool {
+        self.domain.is_some()
+            || self.retention.is_some()
+            || self.isolation.is_some()
+            || self.level_shift.is_some()
+    }
+}
+
+impl RetentionConfig {
+    /// Create a basic retention config with auto strategy
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a retention config with specified strategy
+    pub fn with_strategy(strategy: RetentionStrategy) -> Self {
+        Self {
+            strategy,
+            ..Default::default()
+        }
+    }
+}
+
+impl IsolationConfig {
+    /// Create an isolation config with low clamp
+    pub fn clamp_low() -> Self {
+        Self {
+            clamp: IsolationClamp::Low,
+            active_high: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create an isolation config with high clamp
+    pub fn clamp_high() -> Self {
+        Self {
+            clamp: IsolationClamp::High,
+            active_high: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create an isolation config with latch behavior
+    pub fn latch() -> Self {
+        Self {
+            clamp: IsolationClamp::Latch,
+            active_high: true,
             ..Default::default()
         }
     }

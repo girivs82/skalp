@@ -4,7 +4,7 @@
 //! preserving sequential logic, event blocks, and assignments.
 
 use anyhow::Result;
-use skalp_frontend::hir::{CdcConfig, CdcType, MemoryStyle, VendorIpConfig, VendorType};
+use skalp_frontend::hir::{CdcConfig, CdcType, MemoryStyle, VendorIpConfig, VendorType, PowerConfig, IsolationClamp};
 use skalp_lir::LirDesign;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::type_width; // Use shared type width calculations
@@ -513,6 +513,11 @@ fn generate_module(
                 "wire"
             };
 
+            // Generate power intent synthesis attributes if present
+            if let Some(power_config) = &signal.power_config {
+                generate_power_attributes(&mut sv, &signal.name, power_config);
+            }
+
             // Format: wire [element_width] name [array_dim];
             sv.push_str(&format!(
                 "    {} {}{}{}",
@@ -525,6 +530,13 @@ fn generate_module(
             }
 
             sv.push_str(";\n");
+
+            // Generate isolation logic if configured
+            if let Some(power_config) = &signal.power_config {
+                if let Some(isolation) = &power_config.isolation {
+                    generate_isolation_logic(&mut sv, &signal.name, &element_width, &array_dim, isolation);
+                }
+            }
         }
     }
 
@@ -2880,6 +2892,157 @@ fn generate_handshake_synchronizer(
         "    wire {}{}{} = {}_data;\n",
         element_width, signal_name, array_dim, signal_name
     ));
+}
+
+// ============================================================================
+// Power Intent Code Generation
+// ============================================================================
+
+/// Generate power intent synthesis attributes for a signal
+///
+/// This generates vendor-specific synthesis attributes that help EDA tools
+/// recognize signals that require special power handling:
+/// - Retention registers: preserved during power-down
+/// - Isolation cells: clamp outputs when source domain is off
+/// - Level shifters: voltage domain crossings
+fn generate_power_attributes(
+    sv: &mut String,
+    signal_name: &str,
+    power_config: &PowerConfig,
+) {
+    // Track if we generated any power-related comments
+    let mut has_power_comment = false;
+
+    // Generate retention attributes if configured
+    if let Some(retention) = &power_config.retention {
+        if !has_power_comment {
+            sv.push_str(&format!("    // Power Intent: {}\n", signal_name));
+            has_power_comment = true;
+        }
+
+        // Xilinx/AMD: RETAIN attribute for UltraScale+ retention flops
+        sv.push_str("    (* RETAIN = \"TRUE\" *)\n");
+        // Intel/Altera: preserve attribute
+        sv.push_str("    (* preserve = \"true\" *)\n");
+        // Generic: DONT_TOUCH prevents optimization of retention logic
+        sv.push_str("    (* DONT_TOUCH = \"TRUE\" *)\n");
+
+        // Add retention strategy as comment
+        let strategy_str = match retention.strategy {
+            skalp_frontend::hir::RetentionStrategy::Auto => "auto",
+            skalp_frontend::hir::RetentionStrategy::BalloonLatch => "balloon_latch",
+            skalp_frontend::hir::RetentionStrategy::ShadowRegister => "shadow_register",
+        };
+        sv.push_str(&format!("    // Retention strategy: {}\n", strategy_str));
+
+        // Add save/restore signals if specified
+        if let Some(save_sig) = &retention.save_signal {
+            sv.push_str(&format!("    // Save signal: {}\n", save_sig));
+        }
+        if let Some(restore_sig) = &retention.restore_signal {
+            sv.push_str(&format!("    // Restore signal: {}\n", restore_sig));
+        }
+    }
+
+    // Generate isolation attributes if configured (comment header only, logic generated separately)
+    if let Some(isolation) = &power_config.isolation {
+        if !has_power_comment {
+            sv.push_str(&format!("    // Power Intent: {}\n", signal_name));
+            has_power_comment = true;
+        }
+
+        let clamp_str = match isolation.clamp {
+            IsolationClamp::Low => "low (0)",
+            IsolationClamp::High => "high (1)",
+            IsolationClamp::Latch => "latch (hold)",
+        };
+        sv.push_str(&format!("    // Isolation: clamp={}\n", clamp_str));
+
+        if let Some(enable) = &isolation.enable_signal {
+            let polarity = if isolation.active_high { "active-high" } else { "active-low" };
+            sv.push_str(&format!("    // Isolation enable: {} ({})\n", enable, polarity));
+        }
+    }
+
+    // Generate level shifter attributes if configured
+    if let Some(level_shift) = &power_config.level_shift {
+        if !has_power_comment {
+            sv.push_str(&format!("    // Power Intent: {}\n", signal_name));
+            // has_power_comment = true;  // Uncomment if more attributes added after
+        }
+
+        let shift_type = match level_shift.shifter_type {
+            skalp_frontend::hir::LevelShifterType::Auto => "auto",
+            skalp_frontend::hir::LevelShifterType::LowToHigh => "low_to_high",
+            skalp_frontend::hir::LevelShifterType::HighToLow => "high_to_low",
+        };
+        sv.push_str(&format!("    // Level shifter: type={}\n", shift_type));
+
+        if let Some(from) = &level_shift.from_domain {
+            sv.push_str(&format!("    // Level shift from domain: {}\n", from));
+        }
+        if let Some(to) = &level_shift.to_domain {
+            sv.push_str(&format!("    // Level shift to domain: {}\n", to));
+        }
+
+        // Add synthesis hint for level shifter cell insertion
+        sv.push_str("    (* LEVEL_SHIFTER = \"TRUE\" *)\n");
+    }
+}
+
+/// Generate isolation logic for a signal
+///
+/// Isolation cells clamp the output of a powered-down domain to a safe value.
+/// This generates a mux-based isolation cell that can be recognized by synthesis tools.
+fn generate_isolation_logic(
+    sv: &mut String,
+    signal_name: &str,
+    element_width: &str,
+    array_dim: &str,
+    isolation: &skalp_frontend::hir::IsolationConfig,
+) {
+    // Only generate explicit isolation logic if we have an enable signal
+    if let Some(enable) = &isolation.enable_signal {
+        let isolated_name = format!("{}_isolated", signal_name);
+
+        // Determine clamp value based on clamp type
+        let clamp_value = match isolation.clamp {
+            IsolationClamp::Low => "'0".to_string(),  // All zeros
+            IsolationClamp::High => "'1".to_string(), // All ones (SystemVerilog '1 fills width)
+            IsolationClamp::Latch => {
+                // For latch mode, we keep the previous value (no explicit clamp logic)
+                sv.push_str(&format!(
+                    "    // Latch isolation: {} retains value when {} is asserted\n",
+                    signal_name, enable
+                ));
+                return;
+            }
+        };
+
+        // Generate isolation cell with DONT_TOUCH to prevent optimization
+        sv.push_str("    (* DONT_TOUCH = \"TRUE\" *)\n");
+        sv.push_str(&format!(
+            "    wire {}{}_isolated{};\n",
+            element_width, signal_name, array_dim
+        ));
+
+        // Generate the isolation mux
+        // When isolation is active (enable asserted), output clamp value
+        // Otherwise, pass through the signal
+        if isolation.active_high {
+            // Active high: enable=1 means isolate (clamp)
+            sv.push_str(&format!(
+                "    assign {} = {} ? {} : {};\n",
+                isolated_name, enable, clamp_value, signal_name
+            ));
+        } else {
+            // Active low: enable=0 means isolate (clamp)
+            sv.push_str(&format!(
+                "    assign {} = {} ? {} : {};\n",
+                isolated_name, enable, signal_name, clamp_value
+            ));
+        }
+    }
 }
 
 /// Generate SystemVerilog wrapper module for vendor IP

@@ -2785,8 +2785,9 @@ impl<'a> ParseState<'a> {
     /// Parse a single intent term: either a path (mux_style::parallel), identifier (parallel),
     /// or attribute with argument (unroll(4))
     fn parse_intent_term(&mut self) {
-        // Parse identifier (namespace or intent name)
-        if self.at(SyntaxKind::Ident) {
+        // Parse identifier or keyword-as-ident (namespace or intent name)
+        // Keywords like 'isolation' can be used as attribute names
+        if self.at(SyntaxKind::Ident) || self.at_keyword_as_ident() {
             self.bump();
 
             // Check for path separator ::
@@ -5207,6 +5208,8 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::FastKw)
                 | Some(SyntaxKind::SlowKw)
                 | Some(SyntaxKind::MediumKw)
+                // Power intent keywords that can be used as attribute names
+                | Some(SyntaxKind::IsolationKw)
         )
     }
 
