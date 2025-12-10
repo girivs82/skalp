@@ -657,6 +657,7 @@ impl TypeFlattener {
             span,
             memory_config: None,
             trace_config: None,
+            cdc_config: None,
         };
         signals.push(signal);
 

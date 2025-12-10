@@ -176,6 +176,10 @@ pub struct HirSignal {
     /// When present, signal should be auto-exported to simulation traces/waveforms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_config: Option<TraceConfig>,
+    /// CDC configuration (from #[cdc] attribute)
+    /// When present, signal crosses clock domains and needs synchronization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdc_config: Option<CdcConfig>,
 }
 
 /// Variable in HIR
@@ -575,6 +579,69 @@ impl TraceConfig {
     pub fn with_group(group: impl Into<String>) -> Self {
         Self {
             group: Some(group.into()),
+            ..Default::default()
+        }
+    }
+}
+
+/// Clock Domain Crossing (CDC) configuration
+///
+/// Specifies that a signal crosses clock domains and needs synchronization.
+/// Used with `#[cdc(...)]` attribute on signal declarations.
+///
+/// # Usage
+///
+/// ```text
+/// #[cdc(sync_stages = 2)]
+/// signal async_input: bit;  // 2-stage synchronizer (default)
+///
+/// #[cdc(sync_stages = 3)]
+/// signal metastable_input: bit;  // 3-stage for higher MTBF
+///
+/// #[cdc(sync_stages = 2, from = "clk_slow", to = "clk_fast")]
+/// signal cross_domain: bit[8];  // With explicit domain annotation
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CdcConfig {
+    /// Number of synchronizer flip-flop stages (default: 2)
+    pub sync_stages: u32,
+    /// Source clock domain name (optional, for documentation/analysis)
+    pub from_domain: Option<String>,
+    /// Destination clock domain name (optional, for documentation/analysis)
+    pub to_domain: Option<String>,
+    /// CDC type hint for more complex crossing patterns
+    pub cdc_type: CdcType,
+}
+
+/// Type of CDC synchronization pattern
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CdcType {
+    /// Simple 2-FF synchronizer (default) - for single-bit signals
+    #[default]
+    TwoFF,
+    /// Gray code synchronizer - for multi-bit counters
+    Gray,
+    /// Handshake synchronizer - for control signals
+    Handshake,
+    /// Pulse synchronizer - for edge detection across domains
+    Pulse,
+    /// FIFO-based synchronizer - for data buses
+    AsyncFifo,
+}
+
+impl CdcConfig {
+    /// Create a basic CDC config with default 2 stages
+    pub fn new() -> Self {
+        Self {
+            sync_stages: 2,
+            ..Default::default()
+        }
+    }
+
+    /// Create a CDC config with specified stages
+    pub fn with_stages(stages: u32) -> Self {
+        Self {
+            sync_stages: stages,
             ..Default::default()
         }
     }

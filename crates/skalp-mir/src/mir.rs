@@ -116,6 +116,10 @@ pub struct Signal {
     /// When present, signal should be auto-exported to simulation traces/waveforms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_config: Option<skalp_frontend::hir::TraceConfig>,
+    /// CDC configuration (from #[cdc] attribute)
+    /// When present, signal crosses clock domains and needs synchronization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdc_config: Option<skalp_frontend::hir::CdcConfig>,
 }
 
 /// Signal identifier

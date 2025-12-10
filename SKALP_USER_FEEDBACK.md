@@ -175,13 +175,24 @@ signal fsm_state: bit[4];  // Grouped signals in VCD
 
 **Impact**: Low-Medium. Debug workflow improved - can now mark signals for automatic VCD export.
 
-### 4. No Clock Domain Crossing Helpers
+### 4. No Clock Domain Crossing Helpers - Partial ✅ (Dec 2025)
 ```skalp
 // WANTED:
 #[cdc(sync_stages=2)]
 signal async_input: bit[8];  // Auto-inserts synchronizers
 ```
-**Impact**: Medium. CDC must be handled manually with explicit synchronizer entities.
+
+**NOW SUPPORTED:**
+- `#[cdc]` - Basic CDC attribute, defaults to 2-stage synchronizer
+- `#[cdc(sync_stages = 3)]` - Custom number of synchronizer stages
+- `#[cdc(cdc_type = gray)]` - CDC type: `gray`, `pulse`, `handshake`, `async_fifo`, `two_ff`
+- `#[cdc(sync_stages = 2, cdc_type = gray)]` - Combined parameters
+
+**NOT YET IMPLEMENTED:**
+- Automatic synchronizer logic generation in SystemVerilog codegen
+- Clock domain annotation (`from = "clk_a"`, `to = "clk_b"`)
+
+**Impact**: Medium. CDC attribute parsing complete; codegen for synchronizer instantiation pending.
 
 ### 5. No Power Intent Support
 ```skalp

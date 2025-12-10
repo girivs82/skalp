@@ -130,6 +130,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[trace]` or `#[trace(group="...")]` before a signal declaration
     pending_trace_config: Option<TraceConfig>,
 
+    /// Pending CDC config from most recent attribute
+    /// Set when we see `#[cdc(sync_stages=N)]` before a signal declaration
+    pending_cdc_config: Option<CdcConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -238,6 +242,7 @@ impl HirBuilderContext {
             pending_pipeline_config: None,
             pending_memory_config: None,
             pending_trace_config: None,
+            pending_cdc_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -700,6 +705,7 @@ impl HirBuilderContext {
                                     span: self.make_span(&child),
                                     memory_config: None,
                                     trace_config: None,
+                                    cdc_config: None,
                                 };
                                 signals.push(signal);
 
@@ -1191,6 +1197,9 @@ impl HirBuilderContext {
         // Consume any pending trace config from preceding #[trace] attribute
         let trace_config = self.pending_trace_config.take();
 
+        // Consume any pending CDC config from preceding #[cdc] attribute
+        let cdc_config = self.pending_cdc_config.take();
+
         Some(HirSignal {
             id,
             name,
@@ -1200,6 +1209,7 @@ impl HirBuilderContext {
             span: self.make_span(node),
             memory_config,
             trace_config,
+            cdc_config,
         })
     }
 
@@ -6818,6 +6828,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract CDC config (e.g., #[cdc] or #[cdc(sync_stages=3)])
+            if let Some(config) = self.extract_cdc_config_from_intent_value(&intent_value) {
+                self.pending_cdc_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -7148,6 +7164,105 @@ impl HirBuilderContext {
             group,
             radix: radix.unwrap_or_default(),
             display_name,
+        })
+    }
+
+    /// Extract CDC config from an IntentValue node
+    /// Handles: #[cdc] or #[cdc(sync_stages=3)] or #[cdc(sync_stages=2, type=gray)]
+    fn extract_cdc_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<CdcConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Look for "cdc" identifier
+        let has_cdc = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "cdc"
+        });
+
+        if !has_cdc {
+            return None;
+        }
+
+        // Parse key=value pairs
+        let mut sync_stages: Option<u32> = None;
+        let mut cdc_type: Option<CdcType> = None;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            if token.kind() == SyntaxKind::Ident {
+                let text = token.text();
+                match text {
+                    "sync_stages" | "stages" | "type" | "cdc_type" => {
+                        current_key = Some(text);
+                    }
+                    // CDC type values
+                    "two_ff" | "twoFF" | "2ff" => {
+                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                            cdc_type = Some(CdcType::TwoFF);
+                        }
+                        current_key = None;
+                    }
+                    "gray" => {
+                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                            cdc_type = Some(CdcType::Gray);
+                        }
+                        current_key = None;
+                    }
+                    "handshake" => {
+                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                            cdc_type = Some(CdcType::Handshake);
+                        }
+                        current_key = None;
+                    }
+                    "pulse" => {
+                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                            cdc_type = Some(CdcType::Pulse);
+                        }
+                        current_key = None;
+                    }
+                    "async_fifo" | "fifo" => {
+                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                            cdc_type = Some(CdcType::AsyncFifo);
+                        }
+                        current_key = None;
+                    }
+                    _ => {}
+                }
+            } else if token.kind() == SyntaxKind::IntLiteral {
+                // Integer values for sync_stages
+                let text = token.text().replace('_', "");
+                if let Ok(val) = text.parse::<u32>() {
+                    match current_key {
+                        Some("sync_stages") | Some("stages") => sync_stages = Some(val),
+                        _ => {
+                            // First number without key is assumed to be sync_stages
+                            if sync_stages.is_none() {
+                                sync_stages = Some(val);
+                            }
+                        }
+                    }
+                    current_key = None;
+                }
+            }
+        }
+
+        // Return CDC config with defaults for unspecified values
+        Some(CdcConfig {
+            sync_stages: sync_stages.unwrap_or(2), // Default: 2-stage synchronizer
+            from_domain: None,
+            to_domain: None,
+            cdc_type: cdc_type.unwrap_or_default(),
         })
     }
 
