@@ -9,6 +9,7 @@ macro_rules! eprintln {
     ($($arg:tt)*) => {{}};
 }
 
+pub mod breakpoint;
 pub mod clock_manager;
 pub mod cpu_runtime;
 #[cfg(target_os = "macos")]
@@ -17,6 +18,7 @@ pub mod simulator;
 pub mod testbench;
 pub mod waveform;
 
+pub use breakpoint::{BreakpointAction, BreakpointCondition, BreakpointHit, BreakpointManager, SimBreakpoint};
 pub use clock_manager::{ClockEdge, ClockInfo, ClockManager};
 pub use cpu_runtime::CpuRuntime;
 #[cfg(target_os = "macos")]

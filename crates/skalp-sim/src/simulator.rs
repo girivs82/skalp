@@ -5,6 +5,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
 
+use crate::breakpoint::{BreakpointAction, BreakpointHit, BreakpointManager};
+
 #[derive(Debug, Error)]
 pub enum SimulationError {
     #[error("GPU runtime error: {0}")]
@@ -15,6 +17,8 @@ pub enum SimulationError {
     InvalidInput(String),
     #[error("Simulation timeout")]
     Timeout,
+    #[error("Breakpoint hit: {0}")]
+    BreakpointHit(String),
 }
 
 pub type SimulationResult<T> = Result<T, SimulationError>;
@@ -63,6 +67,12 @@ pub struct Simulator {
     state_history: Arc<RwLock<Vec<SimulationState>>>,
     control_tx: mpsc::Sender<SimulatorCommand>,
     control_rx: mpsc::Receiver<SimulatorCommand>,
+    /// Breakpoint manager for simulation debugging
+    breakpoint_manager: BreakpointManager,
+    /// Whether simulation is paused (e.g., at a breakpoint)
+    paused: bool,
+    /// Last breakpoint hits (for inspection)
+    last_breakpoint_hits: Vec<BreakpointHit>,
 }
 
 #[allow(dead_code)]
@@ -117,6 +127,9 @@ impl Simulator {
             state_history: Arc::new(RwLock::new(Vec::new())),
             control_tx,
             control_rx,
+            breakpoint_manager: BreakpointManager::new(),
+            paused: false,
+            last_breakpoint_hits: Vec::new(),
         })
     }
 
@@ -166,6 +179,67 @@ impl Simulator {
     }
 
     pub async fn step_simulation(&mut self) -> SimulationResult<SimulationState> {
+        // Don't step if paused at a breakpoint
+        if self.paused {
+            return Err(SimulationError::BreakpointHit(
+                "Simulation is paused at a breakpoint. Call resume() to continue.".into()
+            ));
+        }
+
+        let state = self.runtime.step().await?;
+
+        if self.config.capture_waveforms {
+            let mut history = self.state_history.write().await;
+            history.push(state.clone());
+        }
+
+        // Check breakpoints after step completes
+        let hits = self.breakpoint_manager.check_cycle(state.cycle, &state.signals);
+
+        if !hits.is_empty() {
+            self.last_breakpoint_hits = hits.clone();
+
+            // Check if any hit requires stopping or pausing
+            for hit in &hits {
+                // Log the breakpoint hit
+                if hit.is_error {
+                    eprintln!(
+                        "🛑 BREAKPOINT ERROR [{}] at cycle {}: {}",
+                        hit.name,
+                        hit.cycle,
+                        hit.message.as_deref().unwrap_or("breakpoint triggered")
+                    );
+                } else {
+                    eprintln!(
+                        "🔴 BREAKPOINT [{}] at cycle {}: {}",
+                        hit.name,
+                        hit.cycle,
+                        hit.message.as_deref().unwrap_or("breakpoint triggered")
+                    );
+                }
+
+                match hit.action {
+                    BreakpointAction::Stop => {
+                        return Err(SimulationError::BreakpointHit(format!(
+                            "Error breakpoint '{}' triggered at cycle {}",
+                            hit.name, hit.cycle
+                        )));
+                    }
+                    BreakpointAction::Pause => {
+                        self.paused = true;
+                    }
+                    BreakpointAction::Log => {
+                        // Already logged above, continue simulation
+                    }
+                }
+            }
+        }
+
+        Ok(state)
+    }
+
+    /// Step simulation ignoring breakpoints (for debugging)
+    pub async fn step_simulation_no_breakpoints(&mut self) -> SimulationResult<SimulationState> {
         let state = self.runtime.step().await?;
 
         if self.config.capture_waveforms {
@@ -203,7 +277,9 @@ impl Simulator {
             .map_err(|_| SimulationError::CpuError("Failed to send pause command".into()))
     }
 
-    pub async fn resume(&self) -> SimulationResult<()> {
+    pub async fn resume(&mut self) -> SimulationResult<()> {
+        self.paused = false;
+        self.last_breakpoint_hits.clear();
         self.control_tx
             .send(SimulatorCommand::Start)
             .await
@@ -215,5 +291,63 @@ impl Simulator {
             .send(SimulatorCommand::Stop)
             .await
             .map_err(|_| SimulationError::CpuError("Failed to send stop command".into()))
+    }
+
+    // ============================================================
+    // Breakpoint Management API
+    // ============================================================
+
+    /// Register a breakpoint from a BreakpointConfig (from HIR/MIR)
+    pub fn register_breakpoint_from_config(
+        &mut self,
+        signal_name: &str,
+        config: &skalp_frontend::hir::BreakpointConfig,
+    ) -> u32 {
+        self.breakpoint_manager.register_from_config(signal_name, config)
+    }
+
+    /// Register a simple breakpoint that triggers when signal is non-zero
+    pub fn register_breakpoint(&mut self, signal_name: &str) -> u32 {
+        self.breakpoint_manager.register_simple(signal_name)
+    }
+
+    /// Enable or disable all breakpoints
+    pub fn set_breakpoints_enabled(&mut self, enabled: bool) {
+        self.breakpoint_manager.set_enabled(enabled);
+    }
+
+    /// Enable or disable a specific breakpoint by ID
+    pub fn set_breakpoint_enabled(&mut self, id: u32, enabled: bool) -> bool {
+        self.breakpoint_manager.set_breakpoint_enabled(id, enabled)
+    }
+
+    /// Remove a breakpoint by ID
+    pub fn remove_breakpoint(&mut self, id: u32) -> bool {
+        self.breakpoint_manager.remove(id)
+    }
+
+    /// Clear all breakpoints
+    pub fn clear_breakpoints(&mut self) {
+        self.breakpoint_manager.clear();
+    }
+
+    /// Get number of registered breakpoints
+    pub fn breakpoint_count(&self) -> usize {
+        self.breakpoint_manager.count()
+    }
+
+    /// Check if simulation is paused at a breakpoint
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Get the breakpoint hits from the last step
+    pub fn last_breakpoint_hits(&self) -> &[BreakpointHit] {
+        &self.last_breakpoint_hits
+    }
+
+    /// Get mutable access to the breakpoint manager for advanced configuration
+    pub fn breakpoint_manager_mut(&mut self) -> &mut BreakpointManager {
+        &mut self.breakpoint_manager
     }
 }
