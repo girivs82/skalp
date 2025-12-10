@@ -21,6 +21,7 @@ pub mod pipeline;
 pub mod power_domains;
 pub mod requirements;
 pub mod traits;
+pub mod workproducts;
 
 /// Safety-related errors
 #[derive(Error, Debug)]
