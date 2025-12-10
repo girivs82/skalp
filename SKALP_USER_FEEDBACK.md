@@ -217,13 +217,32 @@ signal saved_state: bit[32];
 ```
 **Impact**: Low-Medium. Not critical for FPGA, but needed for ASIC power management.
 
-### 6. No Vendor IP Integration
+### 6. Vendor IP Integration ✅ (Dec 2025)
 ```skalp
-// WANTED:
+// ALL NOW SUPPORTED:
 #[xilinx_ip("xpm_fifo_sync")]
-entity VendorFifo { ... }
+entity SyncFifo {
+    in wr_clk: clock,
+    in din: bit[32],
+    out dout: bit[32],
+    ...
+}
+
+#[xilinx_ip(name = "xpm_memory_spram", library = "xpm")]
+entity SinglePortRam { ... }
+
+#[intel_ip("altera_fifo")]
+entity IntelFifo { ... }
+
+#[vendor_ip(name = "custom_ip", vendor = xilinx)]
+entity CustomWrapper { ... }
+
+#[vendor_ip(name = "external", black_box = true)]
+entity BlackBoxIp { ... }
 ```
-**Impact**: Medium. Currently must wrap vendor IP in Verilog and instantiate as black box.
+**Status**: Vendor IP integration fully implemented ✅. Entities marked with vendor IP attributes generate SystemVerilog modules that instantiate the vendor IP core with matching port connections. Supports Xilinx, Intel, Lattice vendors plus generic black-box mode.
+
+**Impact**: Medium. Seamlessly wrap vendor IP cores in Skalp entities.
 
 ---
 
