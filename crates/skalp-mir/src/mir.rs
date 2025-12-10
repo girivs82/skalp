@@ -123,6 +123,10 @@ pub struct Signal {
     /// When present, signal crosses clock domains and needs synchronization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdc_config: Option<skalp_frontend::hir::CdcConfig>,
+    /// Breakpoint configuration (from #[breakpoint] attribute)
+    /// When present, generates SVA assertions for debugging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breakpoint_config: Option<skalp_frontend::hir::BreakpointConfig>,
 }
 
 /// Signal identifier

@@ -394,6 +394,10 @@ impl<'hir> HirToMir<'hir> {
                     if hir_signal.cdc_config.is_some() {
                         signal.cdc_config = hir_signal.cdc_config.clone();
                     }
+                    // Propagate breakpoint config from HIR signal to MIR signal
+                    if hir_signal.breakpoint_config.is_some() {
+                        signal.breakpoint_config = hir_signal.breakpoint_config.clone();
+                    }
                     module.signals.push(signal);
                 }
 
@@ -545,6 +549,10 @@ impl<'hir> HirToMir<'hir> {
                             if hir_signal.cdc_config.is_some() {
                                 signal.cdc_config = hir_signal.cdc_config.clone();
                             }
+                            // Propagate breakpoint config from HIR signal to MIR signal
+                            if hir_signal.breakpoint_config.is_some() {
+                                signal.breakpoint_config = hir_signal.breakpoint_config.clone();
+                            }
                             module.signals.push(signal);
                         }
 
@@ -693,6 +701,7 @@ impl<'hir> HirToMir<'hir> {
                                         memory_config: None,
                                         trace_config: None,
                                         cdc_config: None,
+                                        breakpoint_config: None,
                                     };
                                     module.signals.push(signal);
 
@@ -14504,6 +14513,7 @@ impl<'hir> HirToMir<'hir> {
                 memory_config: None,
                 trace_config: None,
                 cdc_config: None,
+                breakpoint_config: None,
             };
             module.signals.push(signal);
 
@@ -14693,6 +14703,7 @@ impl<'hir> HirToMir<'hir> {
                                 memory_config: None,
                                 trace_config: None,
                                 cdc_config: None,
+                                breakpoint_config: None,
                             };
                             module.signals.push(signal);
 
@@ -14934,6 +14945,7 @@ impl<'hir> HirToMir<'hir> {
                         memory_config: None,
                         trace_config: None,
                         cdc_config: None,
+                        breakpoint_config: None,
                     };
                     module.signals.push(signal);
                     println!("🎯🎯🎯 DRAIN: Created tuple result signal '{}' (id={}) 🎯🎯🎯", signal_name, elem_signal_id.0);
@@ -14960,6 +14972,7 @@ impl<'hir> HirToMir<'hir> {
                     memory_config: None,
                     trace_config: None,
                     cdc_config: None,
+                    breakpoint_config: None,
                 };
                 module.signals.push(signal);
                 eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
@@ -15038,6 +15051,7 @@ impl<'hir> HirToMir<'hir> {
                     memory_config: None,
                     trace_config: None,
                     cdc_config: None,
+                    breakpoint_config: None,
                 };
                 eprintln!(
                     "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output",

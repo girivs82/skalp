@@ -658,6 +658,7 @@ impl TypeFlattener {
             memory_config: None,
             trace_config: None,
             cdc_config: None,
+            breakpoint_config: None,
         };
         signals.push(signal);
 

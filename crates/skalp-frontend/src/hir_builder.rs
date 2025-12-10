@@ -138,6 +138,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[xilinx_ip("...")]` or similar before an entity declaration
     pending_vendor_ip_config: Option<VendorIpConfig>,
 
+    /// Pending breakpoint config from most recent attribute
+    /// Set when we see `#[breakpoint]` or `#[breakpoint(condition="...")]` before a signal
+    pending_breakpoint_config: Option<BreakpointConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -248,6 +252,7 @@ impl HirBuilderContext {
             pending_trace_config: None,
             pending_cdc_config: None,
             pending_vendor_ip_config: None,
+            pending_breakpoint_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -711,6 +716,7 @@ impl HirBuilderContext {
                                     memory_config: None,
                                     trace_config: None,
                                     cdc_config: None,
+                                    breakpoint_config: None,
                                 };
                                 signals.push(signal);
 
@@ -1209,6 +1215,9 @@ impl HirBuilderContext {
         // Consume any pending CDC config from preceding #[cdc] attribute
         let cdc_config = self.pending_cdc_config.take();
 
+        // Consume any pending breakpoint config from preceding #[breakpoint] attribute
+        let breakpoint_config = self.pending_breakpoint_config.take();
+
         Some(HirSignal {
             id,
             name,
@@ -1219,6 +1228,7 @@ impl HirBuilderContext {
             memory_config,
             trace_config,
             cdc_config,
+            breakpoint_config,
         })
     }
 
@@ -6849,6 +6859,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract breakpoint config (e.g., #[breakpoint] or #[breakpoint(condition="...")])
+            if let Some(config) = self.extract_breakpoint_config_from_intent_value(&intent_value) {
+                self.pending_breakpoint_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -7471,6 +7487,108 @@ impl HirBuilderContext {
             version,
             black_box,
             parameters,
+        })
+    }
+
+    /// Extract breakpoint configuration from IntentValue
+    ///
+    /// Parses `#[breakpoint]` or `#[breakpoint(condition = "...", name = "...")]`
+    fn extract_breakpoint_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<BreakpointConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Look for "breakpoint" identifier
+        let has_breakpoint = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "breakpoint"
+        });
+
+        if !has_breakpoint {
+            return None;
+        }
+
+        // Parse key=value pairs
+        let mut condition: Option<String> = None;
+        let mut name: Option<String> = None;
+        let mut message: Option<String> = None;
+        let mut is_error = false;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            match token.kind() {
+                SyntaxKind::Ident => {
+                    let text = token.text();
+                    match text {
+                        // Keys
+                        "condition" | "cond" => current_key = Some("condition"),
+                        "name" => current_key = Some("name"),
+                        "message" | "msg" => current_key = Some("message"),
+                        "error" | "is_error" => current_key = Some("error"),
+                        // Other identifiers as values
+                        _ => {
+                            // Only use as value if we have a pending key
+                            // Skip "breakpoint" itself
+                            if text != "breakpoint" && current_key.is_some() {
+                                current_key = None; // Value was captured elsewhere
+                            }
+                        }
+                    }
+                }
+                // Handle boolean keywords (true/false are keywords, not identifiers)
+                SyntaxKind::TrueKw => {
+                    if current_key == Some("error") {
+                        is_error = true;
+                    }
+                    current_key = None;
+                }
+                SyntaxKind::FalseKw => {
+                    if current_key == Some("error") {
+                        is_error = false;
+                    }
+                    current_key = None;
+                }
+                SyntaxKind::StringLiteral => {
+                    // Remove quotes from string literal
+                    let text = token.text();
+                    let value = text[1..text.len() - 1].to_string();
+                    match current_key {
+                        Some("condition") => condition = Some(value),
+                        Some("name") => name = Some(value),
+                        Some("message") => message = Some(value),
+                        _ => {}
+                    }
+                    current_key = None;
+                }
+                SyntaxKind::IntLiteral => {
+                    let text = token.text();
+                    if current_key == Some("error") {
+                        is_error = text == "1";
+                    }
+                    current_key = None;
+                }
+                _ => {}
+            }
+        }
+
+        Some(BreakpointConfig {
+            condition,
+            name,
+            message,
+            is_error,
         })
     }
 

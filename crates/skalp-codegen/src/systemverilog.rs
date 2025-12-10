@@ -634,6 +634,20 @@ fn generate_module(
         sv.push('\n');
     }
 
+    // Generate breakpoint assertions (SVA)
+    let breakpoint_signals: Vec<_> = mir_module.signals.iter()
+        .filter(|s| s.breakpoint_config.is_some())
+        .collect();
+    if !breakpoint_signals.is_empty() {
+        sv.push_str("\n    // Debug Breakpoint Assertions\n");
+        sv.push_str("    // Synthesized as SVA - use $stop in simulation\n");
+        for signal in breakpoint_signals {
+            if let Some(bp_config) = &signal.breakpoint_config {
+                sv.push_str(&generate_breakpoint_assertion(&signal.name, bp_config));
+            }
+        }
+    }
+
     // Generate formal verification assertions (SVA)
     if !mir_module.assertions.is_empty() {
         sv.push_str("\n    // Formal Verification Assertions\n");
@@ -2537,6 +2551,76 @@ fn generate_assertion(assertion: &Assertion, module: &Module) -> String {
             }
         }
     }
+}
+
+/// Generate a breakpoint assertion for debugging
+///
+/// Generates SystemVerilog Assertions (SVA) that can trigger $stop or $info
+/// in simulation for debugging purposes.
+///
+/// # Examples
+///
+/// Simple breakpoint (triggers on non-zero value):
+/// ```systemverilog
+/// // Breakpoint: error_flag
+/// always @(error_flag) if (error_flag) $stop;
+/// ```
+///
+/// Conditional breakpoint:
+/// ```systemverilog
+/// // Breakpoint: overflow_counter (condition: count > 100)
+/// always @(*) if (count > 100) begin
+///     $display("BREAKPOINT: overflow_counter - count > 100");
+///     $stop;
+/// end
+/// ```
+fn generate_breakpoint_assertion(
+    signal_name: &str,
+    bp_config: &skalp_frontend::hir::BreakpointConfig,
+) -> String {
+    let mut sv = String::new();
+
+    // Get the breakpoint name for display
+    let bp_name = bp_config.name.as_deref().unwrap_or(signal_name);
+
+    // Add comment
+    if let Some(ref condition) = bp_config.condition {
+        sv.push_str(&format!("    // Breakpoint: {} (condition: {})\n", bp_name, condition));
+    } else {
+        sv.push_str(&format!("    // Breakpoint: {}\n", bp_name));
+    }
+
+    // Determine the condition expression
+    let condition_expr = if let Some(ref cond) = bp_config.condition {
+        cond.clone()
+    } else {
+        // Default: trigger when signal is non-zero
+        signal_name.to_string()
+    };
+
+    // Determine the action: $stop for errors, $display + $stop for others
+    let action = if bp_config.is_error {
+        if let Some(ref msg) = bp_config.message {
+            format!("$error(\"BREAKPOINT [{}]: {}\"); $stop;", bp_name, msg)
+        } else {
+            format!("$error(\"BREAKPOINT [{}] triggered\"); $stop;", bp_name)
+        }
+    } else {
+        if let Some(ref msg) = bp_config.message {
+            format!("$display(\"BREAKPOINT [{}]: {}\"); $stop;", bp_name, msg)
+        } else {
+            format!("$display(\"BREAKPOINT [{}] triggered\"); $stop;", bp_name)
+        }
+    };
+
+    // Generate the assertion block
+    // Use always @(*) for combinational checks to ensure condition is evaluated
+    sv.push_str(&format!(
+        "    always @(*) if ({}) begin\n        {}\n    end\n",
+        condition_expr, action
+    ));
+
+    sv
 }
 
 /// Generate CDC synchronizer logic for a signal

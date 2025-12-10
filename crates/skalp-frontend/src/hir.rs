@@ -182,6 +182,10 @@ pub struct HirSignal {
     /// When present, signal crosses clock domains and needs synchronization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdc_config: Option<CdcConfig>,
+    /// Breakpoint configuration (from #[breakpoint] attribute)
+    /// When present, generates SVA assertions for debugging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breakpoint_config: Option<BreakpointConfig>,
 }
 
 /// Variable in HIR
@@ -581,6 +585,66 @@ impl TraceConfig {
     pub fn with_group(group: impl Into<String>) -> Self {
         Self {
             group: Some(group.into()),
+            ..Default::default()
+        }
+    }
+}
+
+/// Breakpoint configuration for debug assertions
+///
+/// Generates SystemVerilog assertions (SVA) that can trigger simulation
+/// breakpoints or coverage events when conditions are met.
+///
+/// # Example
+/// ```skalp
+/// // Simple breakpoint on signal value
+/// #[breakpoint]
+/// signal error_flag: bit;
+///
+/// // Conditional breakpoint with expression
+/// #[breakpoint(condition = "count > 100")]
+/// signal overflow_counter: bit[8];
+///
+/// // Named breakpoint for identification
+/// #[breakpoint(name = "FSM_ERROR", condition = "state == 0xF")]
+/// signal fsm_state: bit[4];
+///
+/// // Breakpoint with message
+/// #[breakpoint(message = "Unexpected reset")]
+/// signal async_reset: bit;
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BreakpointConfig {
+    /// Optional condition expression (Skalp expression syntax)
+    /// If None, breakpoint triggers when signal changes
+    pub condition: Option<String>,
+    /// Optional name for identifying this breakpoint in waveforms/logs
+    pub name: Option<String>,
+    /// Optional message to display when breakpoint triggers
+    pub message: Option<String>,
+    /// Whether this is an error breakpoint (simulation should stop)
+    pub is_error: bool,
+}
+
+impl BreakpointConfig {
+    /// Create a basic breakpoint config (triggers on any change)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a breakpoint with a condition
+    pub fn with_condition(condition: impl Into<String>) -> Self {
+        Self {
+            condition: Some(condition.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create a named breakpoint with a condition
+    pub fn named(name: impl Into<String>, condition: impl Into<String>) -> Self {
+        Self {
+            name: Some(name.into()),
+            condition: Some(condition.into()),
             ..Default::default()
         }
     }
