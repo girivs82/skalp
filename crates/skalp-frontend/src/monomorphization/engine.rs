@@ -302,6 +302,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             pipeline_config: entity.pipeline_config.clone(), // Preserve pipeline config
             vendor_ip_config: entity.vendor_ip_config.clone(), // Preserve vendor IP config
             power_domains: entity.power_domains.clone(), // Preserve power domains
+            safety_mechanism_config: entity.safety_mechanism_config.clone(), // Preserve safety config
         };
 
         (specialized_entity, port_id_map)

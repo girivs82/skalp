@@ -146,6 +146,14 @@ pub struct HirBuilderContext {
     /// Set when we see `#[retention]`, `#[isolation]`, `#[pdc]`, or `#[level_shift]` before a signal
     pending_power_config: Option<PowerConfig>,
 
+    /// Pending safety config from most recent safety attribute
+    /// Set when we see `#[implements(...)]` before a signal or instance declaration
+    pending_safety_config: Option<SafetyConfig>,
+
+    /// Pending safety mechanism config from most recent attribute
+    /// Set when we see `#[safety_mechanism(...)]` before an entity declaration
+    pending_safety_mechanism_config: Option<SafetyMechanismConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -258,6 +266,8 @@ impl HirBuilderContext {
             pending_vendor_ip_config: None,
             pending_breakpoint_config: None,
             pending_power_config: None,
+            pending_safety_config: None,
+            pending_safety_mechanism_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -723,6 +733,7 @@ impl HirBuilderContext {
                                     cdc_config: None,
                                     breakpoint_config: None,
                                     power_config: None,
+                                    safety_config: None,
                                 };
                                 signals.push(signal);
 
@@ -776,6 +787,9 @@ impl HirBuilderContext {
         // Consume pending vendor IP config (from #[xilinx_ip], #[intel_ip], etc. attributes)
         let vendor_ip_config = self.pending_vendor_ip_config.take();
 
+        // Consume pending safety mechanism config (from #[safety_mechanism(...)] attribute)
+        let safety_mechanism_config = self.pending_safety_mechanism_config.take();
+
         Some(HirEntity {
             id,
             name,
@@ -789,6 +803,7 @@ impl HirBuilderContext {
             pipeline_config,
             vendor_ip_config,
             power_domains: Vec::new(), // Power domains will be populated later from declarations
+            safety_mechanism_config,
         })
     }
 
@@ -1148,6 +1163,9 @@ impl HirBuilderContext {
             }
         }
 
+        // Consume any pending safety config from preceding #[implements(...)] attribute
+        let safety_config = self.pending_safety_config.take();
+
         Some(HirInstance {
             id,
             name,
@@ -1155,6 +1173,7 @@ impl HirBuilderContext {
             generic_args,
             named_generic_args,
             connections,
+            safety_config,
         })
     }
 
@@ -1228,6 +1247,9 @@ impl HirBuilderContext {
         // Consume any pending power config from preceding #[retention], #[isolation], #[pdc], #[level_shift] attributes
         let power_config = self.pending_power_config.take();
 
+        // Consume any pending safety config from preceding #[implements(...)] attribute
+        let safety_config = self.pending_safety_config.take();
+
         Some(HirSignal {
             id,
             name,
@@ -1240,6 +1262,7 @@ impl HirBuilderContext {
             cdc_config,
             breakpoint_config,
             power_config,
+            safety_config,
         })
     }
 

@@ -1167,6 +1167,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: vec![],
+            safety_mechanism_config: None,
         };
 
         let result = generator.generate_from_design(&[entity], &[], &[]);

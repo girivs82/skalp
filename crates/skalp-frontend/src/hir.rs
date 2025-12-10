@@ -66,6 +66,51 @@ pub struct HirEntity {
     pub vendor_ip_config: Option<VendorIpConfig>,
     /// Power domain declarations (mirrors clock_domains pattern)
     pub power_domains: Vec<HirPowerDomain>,
+    /// Safety mechanism configuration (from #[safety_mechanism(...)] attribute)
+    /// When present, indicates this entity is a reusable safety mechanism.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_mechanism_config: Option<SafetyMechanismConfig>,
+}
+
+/// Safety mechanism configuration for entities (from #[safety_mechanism(...)] attribute)
+/// Marks an entity as a reusable safety mechanism component in the stdlib.
+///
+/// Example:
+/// ```skalp
+/// #[safety_mechanism(type: crc, dc: 99.0)]
+/// entity Crc8Checker<'clk> { ... }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SafetyMechanismConfig {
+    /// Mechanism type (crc, ecc, tmr, lockstep, watchdog, etc.)
+    pub mechanism_type: Option<String>,
+    /// Default diagnostic coverage (percentage)
+    pub dc: Option<f64>,
+    /// Default latent coverage (percentage)
+    pub lc: Option<f64>,
+    /// Description of the safety mechanism
+    pub description: Option<String>,
+}
+
+impl SafetyMechanismConfig {
+    /// Create an empty safety mechanism config
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a config with type and DC
+    pub fn with_type_and_dc(mechanism_type: &str, dc: f64) -> Self {
+        Self {
+            mechanism_type: Some(mechanism_type.to_string()),
+            dc: Some(dc),
+            ..Default::default()
+        }
+    }
+
+    /// Check if this config is populated
+    pub fn is_populated(&self) -> bool {
+        self.mechanism_type.is_some() || self.dc.is_some() || self.lc.is_some()
+    }
 }
 
 /// Implementation in HIR
@@ -112,6 +157,10 @@ pub struct HirInstance {
     pub named_generic_args: std::collections::HashMap<String, HirExpression>,
     /// Port connections
     pub connections: Vec<HirConnection>,
+    /// Safety configuration (from #[implements(...)] attribute)
+    /// When present, indicates this instance implements a safety mechanism from a safety_goal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_config: Option<SafetyConfig>,
 }
 
 /// Named generic argument (for clearer code)
@@ -192,6 +241,10 @@ pub struct HirSignal {
     /// When present, specifies power domain crossing, retention, or isolation requirements.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub power_config: Option<PowerConfig>,
+    /// Safety configuration (from #[implements(...)] attribute)
+    /// When present, indicates this signal implements a safety mechanism from a safety_goal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_config: Option<SafetyConfig>,
 }
 
 /// Variable in HIR
@@ -1035,6 +1088,71 @@ impl IsolationConfig {
             active_high: true,
             ..Default::default()
         }
+    }
+}
+
+// ============================================================================
+// Safety Configuration (ISO 26262 Support)
+// ============================================================================
+
+/// Safety configuration for signals and instances (from #[implements(...)] attribute)
+/// When present, indicates this element implements a safety mechanism from a safety_goal.
+///
+/// Example:
+/// ```skalp
+/// #[implements(BrakingSafety::SensorVoting)]
+/// signal voted_pressure: bit[12] = median(pressure_a, pressure_b, pressure_c);
+///
+/// #[implements(BrakingSafety::DataIntegrity)]
+/// inst crc: Crc8Checker { ... }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SafetyConfig {
+    /// Safety goal name being implemented (e.g., "BrakingSafety")
+    pub goal: Option<String>,
+    /// Mechanism name within the goal (e.g., "SensorVoting", "DataIntegrity")
+    pub mechanism: Option<String>,
+    /// Full implements path (e.g., "BrakingSafety::SensorVoting")
+    pub implements_path: Option<String>,
+    /// ASIL level override (if specified)
+    pub asil_override: Option<String>,
+    /// Custom diagnostic coverage override (measured value)
+    pub dc_override: Option<f64>,
+    /// Custom latent coverage override (measured value)
+    pub lc_override: Option<f64>,
+}
+
+impl SafetyConfig {
+    /// Create an empty safety config
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a safety config with implements path
+    pub fn implements(path: &str) -> Self {
+        let parts: Vec<&str> = path.split("::").collect();
+        let (goal, mechanism) = if parts.len() >= 2 {
+            (Some(parts[0].to_string()), Some(parts[1..].join("::")))
+        } else {
+            (Some(path.to_string()), None)
+        };
+
+        Self {
+            goal,
+            mechanism,
+            implements_path: Some(path.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Check if this config has any safety annotation
+    pub fn has_safety_annotation(&self) -> bool {
+        self.implements_path.is_some() || self.goal.is_some()
+    }
+
+    /// Get the full implements path
+    pub fn get_implements_path(&self) -> Option<&str> {
+        self.implements_path.as_deref()
     }
 }
 
