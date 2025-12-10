@@ -424,6 +424,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             instances: specialized_instances,
             covergroups: impl_block.covergroups.clone(),
             formal_blocks: impl_block.formal_blocks.clone(),
+            statements: impl_block.statements.clone(), // Copy statements including assertions
         }
     }
 

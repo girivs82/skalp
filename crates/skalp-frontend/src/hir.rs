@@ -87,6 +87,8 @@ pub struct HirImplementation {
     pub covergroups: Vec<HirCovergroup>,
     /// Formal verification blocks
     pub formal_blocks: Vec<HirFormalBlock>,
+    /// Standalone statements (assertions, etc.) in impl blocks
+    pub statements: Vec<HirStatement>,
 }
 
 /// Module instance in HIR

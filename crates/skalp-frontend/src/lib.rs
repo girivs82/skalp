@@ -291,6 +291,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
                 instances: Vec::new(),
                 covergroups: Vec::new(),
                 formal_blocks: Vec::new(),
+                statements: Vec::new(),
             });
         }
     }
@@ -656,6 +657,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                     instances: Vec::new(),
                     covergroups: Vec::new(),
                     formal_blocks: Vec::new(),
+                    statements: Vec::new(),
                 });
             }
             // Add constant to the first implementation (global scope)
@@ -688,6 +690,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                     instances: Vec::new(),
                     covergroups: Vec::new(),
                     formal_blocks: Vec::new(),
+                    statements: Vec::new(),
                 });
             }
             // Add function to the first implementation (global scope)
@@ -837,6 +840,7 @@ fn merge_symbol_with_rename(
                     instances: Vec::new(),
                     covergroups: Vec::new(),
                     formal_blocks: Vec::new(),
+                    statements: Vec::new(),
                 });
             }
             // Add renamed constant to the first implementation (global scope)
@@ -952,6 +956,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                         instances: Vec::new(),
                         covergroups: Vec::new(),
                         formal_blocks: Vec::new(),
+                        statements: Vec::new(),
                     });
                 }
                 // Add constant to the first implementation (global scope)
@@ -985,6 +990,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                         instances: Vec::new(),
                         covergroups: Vec::new(),
                         formal_blocks: Vec::new(),
+                        statements: Vec::new(),
                     });
                 }
                 // Add function to the first implementation (global scope)

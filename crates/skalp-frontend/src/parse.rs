@@ -392,6 +392,10 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::SafetyKw) => self.parse_safety_property(),
                 Some(SyntaxKind::LivenessKw) => self.parse_liveness_property(),
                 Some(SyntaxKind::ProveKw) => self.parse_prove_statement(),
+                // Formal verification statements (assert, assume, cover)
+                Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
+                Some(SyntaxKind::AssumeKw) => self.parse_assume_statement(),
+                Some(SyntaxKind::CoverKw) => self.parse_cover_statement(),
                 Some(SyntaxKind::Ident) => {
                     // Could be an assignment or start of another construct
                     self.parse_assignment_or_statement();

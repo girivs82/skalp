@@ -8,6 +8,7 @@ use skalp_frontend::hir::MemoryStyle;
 use skalp_lir::LirDesign;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::type_width; // Use shared type width calculations
+use skalp_mir::mir::{Assertion, AssertionKind};
 use skalp_mir::{
     Assignment, AssignmentKind, DataType, EdgeType, EnumType, Mir, Module, Process, ProcessKind,
     SignalId, Statement, StructType,
@@ -612,6 +613,14 @@ fn generate_module(
     for process in &mir_module.processes {
         sv.push_str(&generate_process(process, mir_module)?);
         sv.push('\n');
+    }
+
+    // Generate formal verification assertions (SVA)
+    if !mir_module.assertions.is_empty() {
+        sv.push_str("\n    // Formal Verification Assertions\n");
+        for assertion in &mir_module.assertions {
+            sv.push_str(&generate_assertion(assertion, mir_module));
+        }
     }
 
     sv.push_str("endmodule\n");
@@ -2477,6 +2486,36 @@ fn convert_mir_expr_to_sv(expr: &skalp_mir::Expression) -> String {
         _ => {
             // For other expression types (like Ref, Conditional, etc.), use the general formatter
             format_expression(expr)
+        }
+    }
+}
+
+/// Generate a formal verification assertion (SVA)
+/// Outputs SystemVerilog Assertions for assert!, assume!, and cover! statements
+fn generate_assertion(assertion: &Assertion, module: &Module) -> String {
+    let condition = format_expression_with_context(&assertion.condition, module);
+
+    match assertion.kind {
+        AssertionKind::Assert => {
+            if let Some(ref msg) = assertion.message {
+                format!("    assert property ({}) else $error(\"{}\");\n", condition, msg)
+            } else {
+                format!("    assert property ({});\n", condition)
+            }
+        }
+        AssertionKind::Assume => {
+            if let Some(ref msg) = assertion.message {
+                format!("    assume property ({}); // {}\n", condition, msg)
+            } else {
+                format!("    assume property ({});\n", condition)
+            }
+        }
+        AssertionKind::Cover => {
+            if let Some(ref name) = assertion.message {
+                format!("    cover property ({}) $info(\"{}\");\n", condition, name)
+            } else {
+                format!("    cover property ({});\n", condition)
+            }
         }
     }
 }

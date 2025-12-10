@@ -46,6 +46,8 @@ pub struct Module {
     pub clock_domains: Vec<ClockDomain>,
     /// Generate blocks (for #[preserve_generate] mode)
     pub generate_blocks: Vec<GenerateBlock>,
+    /// Formal verification assertions (assert!, assume!, cover!)
+    pub assertions: Vec<Assertion>,
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
@@ -916,6 +918,31 @@ pub enum MuxTree {
     Parallel(ParallelMux),
 }
 
+/// Formal verification assertion (assert!, assume!, cover!)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Assertion {
+    /// Type of assertion
+    pub kind: AssertionKind,
+    /// Condition expression to check
+    pub condition: Expression,
+    /// Optional message for assertion failure
+    pub message: Option<String>,
+    /// Source location for error reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// Kind of formal verification assertion
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssertionKind {
+    /// Assert - property must hold (checked by simulation/formal)
+    Assert,
+    /// Assume - constraint on inputs (for formal verification)
+    Assume,
+    /// Cover - functional coverage point
+    Cover,
+}
+
 /// A single condition-value pair in a priority mux
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConditionalCase {
@@ -1131,6 +1158,7 @@ impl Module {
             instances: Vec::new(),
             clock_domains: Vec::new(),
             generate_blocks: Vec::new(),
+            assertions: Vec::new(),
             span: None,
             pipeline_config: None,
         }
