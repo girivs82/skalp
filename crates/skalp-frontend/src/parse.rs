@@ -87,6 +87,13 @@ impl<'a> ParseState<'a> {
                     // Top-level function
                     self.parse_impl_function()
                 }
+                // Safety Features (ISO 26262) - only parsed with --safety flag
+                Some(SyntaxKind::SafetyGoalKw) => self.parse_safety_goal_decl(),
+                Some(SyntaxKind::SafetyEntityKw) => self.parse_safety_entity_decl(),
+                Some(SyntaxKind::SafetyTraitKw) => self.parse_safety_trait_decl(),
+                Some(SyntaxKind::FmeaTraitKw) => self.parse_fmea_trait_decl(),
+                Some(SyntaxKind::HsiTraitKw) => self.parse_hsi_trait_decl(),
+                Some(SyntaxKind::FmedaLibraryKw) => self.parse_fmeda_library_decl(),
                 Some(SyntaxKind::HashBracket) => {
                     // Stray attribute with no following item - error
                     self.error_and_bump("attribute must precede an item");
@@ -389,7 +396,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::CovergroupKw) => self.parse_covergroup_decl(),
                 Some(SyntaxKind::FormalKw) => self.parse_formal_block(),
                 Some(SyntaxKind::InvariantKw) => self.parse_invariant_decl(),
-                Some(SyntaxKind::SafetyKw) => self.parse_safety_property(),
+                Some(SyntaxKind::SafetyKw) => self.parse_safety_kv_pair(),
                 Some(SyntaxKind::LivenessKw) => self.parse_liveness_property(),
                 Some(SyntaxKind::ProveKw) => self.parse_prove_statement(),
                 // Formal verification statements (assert, assume, cover)
@@ -2499,7 +2506,7 @@ impl<'a> ParseState<'a> {
             self.skip_trivia();
             match self.current_kind() {
                 Some(SyntaxKind::InvariantKw) => self.parse_invariant_decl(),
-                Some(SyntaxKind::SafetyKw) => self.parse_safety_property(),
+                Some(SyntaxKind::SafetyKw) => self.parse_safety_kv_pair(),
                 Some(SyntaxKind::LivenessKw) => self.parse_liveness_property(),
                 Some(SyntaxKind::BoundedKw) => self.parse_bounded_property(),
                 Some(SyntaxKind::AssumeKw) => self.parse_assume_statement(),
@@ -5965,6 +5972,872 @@ impl ParseState<'_> {
 
         self.finish_node();
     }
+
+    // ========================================================================
+    // Safety Features (ISO 26262) Parsing
+    // ========================================================================
+
+    /// Parse safety_goal declaration
+    /// Syntax: safety_goal Name: ASIL_LEVEL { ... }
+    fn parse_safety_goal_decl(&mut self) {
+        self.start_node(SyntaxKind::SafetyGoalDecl);
+
+        // 'safety_goal' keyword
+        self.expect(SyntaxKind::SafetyGoalKw);
+
+        // Goal name
+        self.expect(SyntaxKind::Ident);
+
+        // ':' ASIL level
+        self.expect(SyntaxKind::Colon);
+        self.parse_asil_level();
+
+        // Body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_safety_goal_body();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse ASIL level (ASIL_A, ASIL_B, ASIL_C, ASIL_D, or decomposition like ASIL_B + ASIL_B)
+    fn parse_asil_level(&mut self) {
+        self.skip_trivia();
+        // Parse ASIL level identifier (ASIL_A, ASIL_B, etc.) or QM
+        if self.at(SyntaxKind::Ident) {
+            self.bump();
+            // Check for decomposition (ASIL_B + ASIL_B)
+            self.skip_trivia();
+            if self.at(SyntaxKind::Plus) {
+                self.bump();
+                self.skip_trivia();
+                if self.at(SyntaxKind::Ident) {
+                    self.bump();
+                }
+            }
+        }
+    }
+
+    /// Parse safety goal body
+    fn parse_safety_goal_body(&mut self) {
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::Ident) => {
+                    // id:, description:, ftti:, traces_to:
+                    self.parse_safety_kv_pair();
+                }
+                Some(SyntaxKind::TargetKw) => self.parse_safety_target_block(),
+                Some(SyntaxKind::HsrKw) => self.parse_hsr_decl(),
+                Some(SyntaxKind::LsmKw) => self.parse_lsm_decl(),
+                Some(SyntaxKind::UseKw) => self.parse_safety_trait_usage(),
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected safety goal member");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse safety key-value pair (key: value,)
+    fn parse_safety_kv_pair(&mut self) {
+        self.skip_trivia();
+        // Key - can be identifier or keyword (spfm, lfm, pmhf, dc, lc, etc.)
+        if self.at(SyntaxKind::Ident) || self.current_kind().map(|k| k.is_keyword()).unwrap_or(false) {
+            self.bump();
+        }
+        self.skip_trivia();
+        // Colon
+        if self.at(SyntaxKind::Colon) {
+            self.bump();
+        }
+        self.skip_trivia();
+        // Value - can be string literal, number, or array
+        self.parse_safety_kv_value();
+        self.skip_trivia();
+        // Optional comma
+        if self.at(SyntaxKind::Comma) {
+            self.bump();
+        }
+    }
+
+    /// Parse safety key-value value
+    fn parse_safety_kv_value(&mut self) {
+        self.skip_trivia();
+        match self.current_kind() {
+            Some(SyntaxKind::StringLiteral) => {
+                self.bump();
+            }
+            Some(SyntaxKind::IntLiteral) | Some(SyntaxKind::FloatLiteral) => {
+                self.bump();
+                // Check for unit suffix like _ms, _us, _cycle
+                self.skip_trivia();
+                if self.at(SyntaxKind::Ident) {
+                    self.bump();
+                }
+            }
+            Some(SyntaxKind::LBracket) => {
+                // Array value like ["DOORS:HARA-H001"]
+                self.parse_safety_array_value();
+            }
+            Some(SyntaxKind::Ge) | Some(SyntaxKind::Le) => {
+                // >= 99.0 or <= 10.0
+                self.bump();
+                self.skip_trivia();
+                if self.at(SyntaxKind::FloatLiteral) || self.at(SyntaxKind::IntLiteral) {
+                    self.bump();
+                }
+            }
+            Some(kind) if kind == SyntaxKind::Ident || kind.is_keyword() => {
+                // Identifier or keyword value (e.g., DC for generic parameter)
+                self.bump();
+            }
+            _ => {}
+        }
+    }
+
+    /// Parse array value like ["DOORS:HARA-H001", "item2"]
+    fn parse_safety_array_value(&mut self) {
+        self.expect(SyntaxKind::LBracket);
+        while !self.at(SyntaxKind::RBracket) && !self.is_at_end() {
+            self.skip_trivia();
+            // Parse element
+            self.parse_safety_kv_value();
+            self.skip_trivia();
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+        }
+        self.expect(SyntaxKind::RBracket);
+    }
+
+    /// Parse target { spfm: >= 99.0, lfm: >= 90.0, pmhf: <= 10.0 }
+    fn parse_safety_target_block(&mut self) {
+        self.start_node(SyntaxKind::SafetyTargetBlock);
+        self.expect(SyntaxKind::TargetKw);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            // Parse metric: spfm, lfm, pmhf
+            match self.current_kind() {
+                Some(SyntaxKind::SpfmKw)
+                | Some(SyntaxKind::LfmKw)
+                | Some(SyntaxKind::PmhfKw)
+                | Some(SyntaxKind::Ident) => {
+                    self.parse_safety_kv_pair();
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected metric (spfm, lfm, pmhf)");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse hsr HSR_001 { requirement: "...", verification: [...], psm Name { ... } }
+    fn parse_hsr_decl(&mut self) {
+        self.start_node(SyntaxKind::HsrDecl);
+        self.expect(SyntaxKind::HsrKw);
+
+        // HSR identifier
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::PsmKw) => self.parse_psm_decl(),
+                Some(SyntaxKind::Ident)
+                | Some(SyntaxKind::RequirementKw)
+                | Some(SyntaxKind::VerificationKw) => {
+                    // requirement:, verification:, etc.
+                    self.parse_safety_kv_pair();
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected HSR member");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse psm Name { dc: >= 99.0, dhsr DHSR_001 { ... } }
+    fn parse_psm_decl(&mut self) {
+        self.start_node(SyntaxKind::PsmDecl);
+        self.expect(SyntaxKind::PsmKw);
+
+        // PSM name
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::DhsrKw) => self.parse_dhsr_decl(),
+                Some(SyntaxKind::DcKw) | Some(SyntaxKind::Ident) => {
+                    // dc:, etc.
+                    self.parse_safety_kv_pair();
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected PSM member");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse dhsr DHSR_001 { requirement: "...", detection_time: <= 1_cycle }
+    fn parse_dhsr_decl(&mut self) {
+        self.start_node(SyntaxKind::DhsrDecl);
+        self.expect(SyntaxKind::DhsrKw);
+
+        // DHSR identifier
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            // Properties can be identifiers or keywords like requirement, detection_time
+            let kind = self.current_kind();
+            if kind == Some(SyntaxKind::Ident)
+                || kind == Some(SyntaxKind::RequirementKw)
+                || kind == Some(SyntaxKind::DetectionTimeKw)
+                || kind.map(|k| k.is_keyword()).unwrap_or(false)
+            {
+                self.parse_safety_kv_pair();
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.error_and_bump("expected DHSR property");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse lsm Name { lc: >= 90.0, interval: <= 100_ms }
+    fn parse_lsm_decl(&mut self) {
+        self.start_node(SyntaxKind::LsmDecl);
+        self.expect(SyntaxKind::LsmKw);
+
+        // LSM name
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            match self.current_kind() {
+                Some(SyntaxKind::LcKw) | Some(SyntaxKind::IntervalKw) | Some(SyntaxKind::Ident) => {
+                    self.parse_safety_kv_pair();
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected LSM property");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse safety_entity declaration
+    /// Syntax: safety_entity Name implements GoalName { ... }
+    fn parse_safety_entity_decl(&mut self) {
+        self.start_node(SyntaxKind::SafetyEntityDecl);
+
+        // 'safety_entity' keyword
+        self.expect(SyntaxKind::SafetyEntityKw);
+
+        // Entity name
+        self.expect(SyntaxKind::Ident);
+
+        // 'implements' goal_name
+        self.expect(SyntaxKind::ImplementsKw);
+        self.expect(SyntaxKind::Ident);
+
+        // Body
+        self.expect(SyntaxKind::LBrace);
+        self.parse_safety_entity_body();
+        self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse safety entity body
+    fn parse_safety_entity_body(&mut self) {
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::CoversKw) => self.parse_covers_block(),
+                Some(SyntaxKind::PsmKw) => self.parse_psm_override(),
+                Some(SyntaxKind::LsmKw) => self.parse_lsm_override(),
+                Some(SyntaxKind::HsiKw) => self.parse_hsi_block(),
+                Some(SyntaxKind::FmeaKw) => self.parse_fmea_block(),
+                Some(SyntaxKind::InstancesKw) => self.parse_safety_entity_instance(),
+                Some(SyntaxKind::UseKw) => self.parse_safety_trait_usage(),
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected safety entity member");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse covers { top.brake_main, top.brake_aux }
+    fn parse_covers_block(&mut self) {
+        self.start_node(SyntaxKind::CoversBlock);
+        self.expect(SyntaxKind::CoversKw);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            // Parse instance path (e.g., top.brake_main)
+            self.parse_design_path();
+            self.skip_trivia();
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse design path like top.brake_main::pressure_a
+    fn parse_design_path(&mut self) {
+        self.skip_trivia();
+        // First segment
+        if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::Star) {
+            self.bump();
+        }
+        // Following segments with . or ::
+        loop {
+            self.skip_trivia();
+            if self.at(SyntaxKind::Dot) {
+                self.bump();
+                self.skip_trivia();
+                if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::Star) {
+                    self.bump();
+                }
+            } else if self.at(SyntaxKind::ColonColon) {
+                self.bump();
+                self.skip_trivia();
+                if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::Star) {
+                    self.bump();
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Parse psm override: psm SensorVoting { dc: 99.5 }
+    fn parse_psm_override(&mut self) {
+        self.start_node(SyntaxKind::PsmOverride);
+        self.expect(SyntaxKind::PsmKw);
+        self.expect(SyntaxKind::Ident);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::DcKw) || self.at(SyntaxKind::Ident) {
+                self.parse_safety_kv_pair();
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.error_and_bump("expected PSM override property");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse lsm override: lsm MemoryTest { lc: 90.0 }
+    fn parse_lsm_override(&mut self) {
+        self.start_node(SyntaxKind::LsmOverride);
+        self.expect(SyntaxKind::LsmKw);
+        self.expect(SyntaxKind::Ident);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::LcKw) || self.at(SyntaxKind::Ident) {
+                self.parse_safety_kv_pair();
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.error_and_bump("expected LSM override property");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse hsi { signals, exclude: [...], timing { ... } }
+    fn parse_hsi_block(&mut self) {
+        self.start_node(SyntaxKind::HsiDecl);
+        self.expect(SyntaxKind::HsiKw);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::ExcludeKw) => {
+                    self.bump();
+                    self.expect(SyntaxKind::Colon);
+                    self.parse_safety_array_value();
+                    if self.at(SyntaxKind::Comma) {
+                        self.bump();
+                    }
+                }
+                Some(SyntaxKind::Ident) => {
+                    // Signal path
+                    self.parse_design_path();
+                    if self.at(SyntaxKind::Comma) {
+                        self.bump();
+                    }
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected HSI member");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse fmea { component path { ... } }
+    fn parse_fmea_block(&mut self) {
+        self.start_node(SyntaxKind::FmeaBlock);
+        self.expect(SyntaxKind::FmeaKw);
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::ComponentKw) {
+                self.parse_fmea_component();
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.error_and_bump("expected FMEA component");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse fmea component declaration
+    fn parse_fmea_component(&mut self) {
+        self.start_node(SyntaxKind::FmeaComponentDecl);
+        self.expect(SyntaxKind::ComponentKw);
+
+        // Design path
+        self.parse_design_path();
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::LibraryKw) | Some(SyntaxKind::PartKw) => {
+                    self.bump();
+                    self.expect(SyntaxKind::Colon);
+                    self.parse_safety_kv_value();
+                    if self.at(SyntaxKind::Comma) {
+                        self.bump();
+                    }
+                }
+                Some(SyntaxKind::PsmKw) | Some(SyntaxKind::LsmKw) => {
+                    // psm::MechanismName { failure_modes }
+                    self.parse_fmea_mechanism_group();
+                }
+                Some(SyntaxKind::SafetyKw) => {
+                    // safe { failure_modes }
+                    self.bump();
+                    self.expect(SyntaxKind::LBrace);
+                    while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                        self.skip_trivia();
+                        if self.at(SyntaxKind::FailureModeKw) {
+                            self.parse_failure_mode();
+                        } else if !self.at(SyntaxKind::RBrace) {
+                            self.error_and_bump("expected failure_mode");
+                        }
+                    }
+                    self.expect(SyntaxKind::RBrace);
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected FMEA component member");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse psm::Name or lsm::Name { failure_modes }
+    fn parse_fmea_mechanism_group(&mut self) {
+        // psm or lsm keyword
+        self.bump();
+        self.expect(SyntaxKind::ColonColon);
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::FailureModeKw) {
+                self.parse_failure_mode();
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.error_and_bump("expected failure_mode");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+    }
+
+    /// Parse failure_mode name { severity: S3, dc: 99.5, class: residual }
+    fn parse_failure_mode(&mut self) {
+        self.start_node(SyntaxKind::FailureModeDecl);
+        self.expect(SyntaxKind::FailureModeKw);
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            match self.current_kind() {
+                Some(SyntaxKind::SeverityKw)
+                | Some(SyntaxKind::DcKw)
+                | Some(SyntaxKind::LcKw)
+                | Some(SyntaxKind::Ident) => {
+                    self.parse_safety_kv_pair();
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected failure mode property");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse safety entity instance: inst name: EntityType
+    fn parse_safety_entity_instance(&mut self) {
+        self.start_node(SyntaxKind::SafetyEntityInstance);
+        self.expect(SyntaxKind::InstancesKw);
+        self.expect(SyntaxKind::Ident);
+        self.expect(SyntaxKind::Colon);
+        self.expect(SyntaxKind::Ident);
+
+        // Optional body
+        if self.at(SyntaxKind::LBrace) {
+            self.bump();
+            while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                self.skip_trivia();
+                self.parse_safety_kv_pair();
+            }
+            self.expect(SyntaxKind::RBrace);
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse use TraitName<params> { overrides }
+    fn parse_safety_trait_usage(&mut self) {
+        self.start_node(SyntaxKind::SafetyTraitUsage);
+        self.expect(SyntaxKind::UseKw);
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // Optional override block
+        if self.at(SyntaxKind::LBrace) {
+            self.bump();
+            while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                self.skip_trivia();
+                // Parse overrides
+                match self.current_kind() {
+                    Some(SyntaxKind::PsmKw) => self.parse_psm_override(),
+                    Some(SyntaxKind::LsmKw) => self.parse_lsm_override(),
+                    Some(SyntaxKind::Plus) => {
+                        // Addition: + hsr NEW { ... }
+                        self.bump();
+                        match self.current_kind() {
+                            Some(SyntaxKind::HsrKw) => self.parse_hsr_decl(),
+                            Some(SyntaxKind::LsmKw) => self.parse_lsm_decl(),
+                            _ => self.error_and_bump("expected hsr or lsm"),
+                        }
+                    }
+                    Some(SyntaxKind::Minus) => {
+                        // Removal: - hsr HSR_NAME
+                        self.bump();
+                        self.bump(); // keyword
+                        self.expect(SyntaxKind::Ident);
+                    }
+                    _ => {
+                        if !self.at(SyntaxKind::RBrace) {
+                            self.error_and_bump("expected trait override");
+                        }
+                    }
+                }
+            }
+            self.expect(SyntaxKind::RBrace);
+        }
+
+        // Semicolon
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse safety_trait declaration
+    fn parse_safety_trait_decl(&mut self) {
+        self.start_node(SyntaxKind::SafetyTraitDecl);
+        self.expect(SyntaxKind::SafetyTraitKw);
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::HsrKw) => self.parse_hsr_decl(),
+                Some(SyntaxKind::LsmKw) => self.parse_lsm_decl(),
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected safety trait member");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse fmea_trait declaration
+    fn parse_fmea_trait_decl(&mut self) {
+        self.start_node(SyntaxKind::FmeaTraitDecl);
+        self.expect(SyntaxKind::FmeaTraitKw);
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            // component_pattern *::signal { ... }
+            if self.at(SyntaxKind::Ident) {
+                self.bump(); // component_pattern
+                self.parse_design_path(); // pattern
+                self.expect(SyntaxKind::LBrace);
+
+                while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                    self.skip_trivia();
+                    match self.current_kind() {
+                        Some(SyntaxKind::LibraryKw) | Some(SyntaxKind::PartKw) => {
+                            self.bump();
+                            self.expect(SyntaxKind::Colon);
+                            self.parse_safety_kv_value();
+                            if self.at(SyntaxKind::Comma) {
+                                self.bump();
+                            }
+                        }
+                        Some(SyntaxKind::PsmKw) | Some(SyntaxKind::LsmKw) => {
+                            self.parse_fmea_mechanism_group();
+                        }
+                        _ => {
+                            if !self.at(SyntaxKind::RBrace) {
+                                self.error_and_bump("expected FMEA trait member");
+                            }
+                        }
+                    }
+                }
+
+                self.expect(SyntaxKind::RBrace);
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.error_and_bump("expected component_pattern");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse hsi_trait declaration
+    fn parse_hsi_trait_decl(&mut self) {
+        self.start_node(SyntaxKind::HsiTraitDecl);
+        self.expect(SyntaxKind::HsiTraitKw);
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::Ident) => {
+                    // signals { ... } or timing { ... }
+                    let ident = self.current_text();
+                    self.bump();
+
+                    self.expect(SyntaxKind::LBrace);
+
+                    while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                        self.skip_trivia();
+                        self.parse_design_path();
+                        if self.at(SyntaxKind::LBrace) {
+                            // timing constraints
+                            self.bump();
+                            while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                                self.skip_trivia();
+                                self.parse_safety_kv_pair();
+                            }
+                            self.expect(SyntaxKind::RBrace);
+                        }
+                        if self.at(SyntaxKind::Comma) {
+                            self.bump();
+                        }
+                    }
+
+                    self.expect(SyntaxKind::RBrace);
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected HSI trait member");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse fmeda_library declaration
+    fn parse_fmeda_library_decl(&mut self) {
+        self.start_node(SyntaxKind::FmedaLibraryDecl);
+        self.expect(SyntaxKind::FmedaLibraryKw);
+        self.expect(SyntaxKind::Ident);
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            if self.at(SyntaxKind::ComponentKw) {
+                self.parse_fmeda_library_component();
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.error_and_bump("expected component declaration");
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse fmeda library component
+    fn parse_fmeda_library_component(&mut self) {
+        self.start_node(SyntaxKind::FmedaComponentDecl);
+        self.expect(SyntaxKind::ComponentKw);
+        self.parse_safety_kv_value(); // Component name (string)
+
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+
+            match self.current_kind() {
+                Some(SyntaxKind::Ident) => {
+                    let ident = self.current_text();
+                    if ident == Some("failure_modes") || ident == Some("mechanisms") {
+                        self.bump();
+                        self.expect(SyntaxKind::LBrace);
+
+                        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                            self.skip_trivia();
+                            // failure_mode_name: { fit: 30.0, class: single_point }
+                            if self.at(SyntaxKind::Ident) {
+                                self.bump();
+                                self.expect(SyntaxKind::Colon);
+                                self.expect(SyntaxKind::LBrace);
+
+                                while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+                                    self.skip_trivia();
+                                    self.parse_safety_kv_pair();
+                                }
+
+                                self.expect(SyntaxKind::RBrace);
+
+                                if self.at(SyntaxKind::Comma) {
+                                    self.bump();
+                                }
+                            } else if !self.at(SyntaxKind::RBrace) {
+                                self.error_and_bump("expected failure mode or mechanism");
+                            }
+                        }
+
+                        self.expect(SyntaxKind::RBrace);
+                    } else {
+                        // base_fit: 50.0
+                        self.parse_safety_kv_pair();
+                    }
+                }
+                _ => {
+                    if !self.at(SyntaxKind::RBrace) {
+                        self.error_and_bump("expected library component member");
+                    }
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
 }
 
 #[cfg(test)]
@@ -6402,6 +7275,134 @@ mod tests {
         assert!(
             errors.is_empty(),
             "Intent declarations without leading whitespace should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    // ========================================================================
+    // Safety Features (ISO 26262) Parsing Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_safety_goal() {
+        let source = r#"
+            safety_goal BrakingSafety: ASIL_D {
+                id: "SG-001",
+                description: "Prevent unintended braking",
+
+                target {
+                    spfm: >= 99.0,
+                    lfm: >= 90.0,
+                }
+
+                hsr HSR_001 {
+                    requirement: "Detect sensor faults",
+                    psm SensorVoting {
+                        dc: >= 99.0,
+                        dhsr DHSR_001 {
+                            requirement: "Voting error detected",
+                        }
+                    }
+                }
+
+                lsm MemoryTest {
+                    lc: >= 90.0,
+                }
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Safety goal should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_safety_entity() {
+        let source = r#"
+            safety_entity BrakingControl implements BrakingSafety {
+                covers {
+                    top.brake_main,
+                    top.brake_aux,
+                }
+
+                psm SensorVoting { dc: 99.5 }
+
+                hsi {
+                    top.brake_main::pressure_a,
+                    top.brake_main::fault,
+                }
+
+                fmea {
+                    component top.brake_main::pressure_a {
+                        library: "automotive_sensors",
+                        part: "PRESSURE_SENSOR",
+
+                        psm::SensorVoting {
+                            failure_mode stuck { severity: S3, dc: 99.5 }
+                        }
+                    }
+                }
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Safety entity should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_safety_trait() {
+        let source = r#"
+            safety_trait PecProtection<DC> {
+                hsr HSR_PEC {
+                    requirement: "Commands protected with PEC",
+                    psm CommandIntegrity { dc: >= DC }
+                }
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Safety trait should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_fmeda_library() {
+        let source = r#"
+            fmeda_library automotive_grade {
+                component "ARM_Cortex_M7" {
+                    base_fit: 50.0,
+
+                    failure_modes {
+                        logic_upset: { fit: 30.0, class: single_point },
+                        register_stuck: { fit: 15.0, class: residual },
+                    }
+
+                    mechanisms {
+                        lockstep: { dc: 99.0 },
+                        ecc: { dc: 99.5 },
+                    }
+                }
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "FMEDA library should parse without errors"
         );
         assert_eq!(tree.kind(), SyntaxKind::SourceFile);
     }

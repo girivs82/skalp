@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod asil;
+pub mod design_resolver;
 pub mod do254;
 pub mod fmea;
+pub mod fmeda_library;
+pub mod hierarchy;
 pub mod iec61508;
 pub mod mechanisms;
 pub mod metrics;

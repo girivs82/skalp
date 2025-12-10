@@ -201,20 +201,72 @@ pub enum Token {
     SafetyReq,
     #[token("safety_goal")]
     SafetyGoal,
+    #[token("safety_entity")]
+    SafetyEntity,
+    #[token("safety_trait")]
+    SafetyTrait,
+    #[token("fmea_trait")]
+    FmeaTrait,
+    #[token("hsi_trait")]
+    HsiTrait,
     #[token("fmea")]
     Fmea,
     #[token("fmeda")]
     Fmeda,
+    #[token("fmeda_library")]
+    FmedaLibrary,
     #[token("psm")]
     Psm,
     #[token("lsm")]
     Lsm,
+    #[token("hsr")]
+    Hsr,
+    #[token("dhsr")]
+    Dhsr,
+    #[token("hsi")]
+    Hsi,
+    #[token("covers")]
+    Covers,
+    #[token("ftti")]
+    Ftti,
+    #[token("target")]
+    Target,
+    #[token("traces_to")]
+    TracesTo,
+    #[token("implements")]
+    Implements,
+    #[token("decomposes")]
+    Decomposes,
+    #[token("verification")]
+    Verification,
+    #[token("detection_time")]
+    DetectionTime,
+    #[token("dc")]
+    Dc,
+    #[token("lc")]
+    Lc,
+    #[token("interval")]
+    Interval,
     #[token("spfm")]
     Spfm,
     #[token("lfm")]
     Lfm,
     #[token("pmhf")]
     Pmhf,
+    #[token("failure_mode")]
+    FailureMode,
+    #[token("severity")]
+    Severity,
+    #[token("component")]
+    Component,
+    #[token("library")]
+    Library,
+    #[token("part")]
+    Part,
+    #[token("exclude")]
+    Exclude,
+    #[token("max_latency")]
+    MaxLatency,
     #[token("power_domain")]
     PowerDomain,
     #[token("isolation")]

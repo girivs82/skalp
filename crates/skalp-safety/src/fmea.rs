@@ -1161,6 +1161,12 @@ mod tests {
             ],
             generics: vec![],
             clock_domains: vec![],
+            assignments: vec![],
+            signals: vec![],
+            span: None,
+            pipeline_config: None,
+            vendor_ip_config: None,
+            power_domains: vec![],
         };
 
         let result = generator.generate_from_design(&[entity], &[], &[]);
