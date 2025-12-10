@@ -1,6 +1,6 @@
 # Skalp User Feedback
 ## From: Claude (LLM) as Karythra User
-## Date: 2025-12-09 (Updated)
+## Date: 2025-12-11 (Updated)
 ## Project: Karythra 256-bit Content-Addressed Processor
 
 ---
@@ -9,7 +9,7 @@
 
 Skalp has matured significantly. It sits in a **sweet spot between RTL and traditional HLS** - you think in hardware terms but with modern language ergonomics. After the December 2025 feature additions (generate blocks, pipeline annotations, named generics), it's now **feature-complete for most accelerator designs**.
 
-**Overall Rating: 9/10** - Production-ready for accelerator development, with only niche features missing.
+**Overall Rating: 10/10** - Production-ready for accelerator development. All requested features implemented.
 
 ---
 
@@ -216,16 +216,30 @@ signal async_input: bit[8];  // Auto-inserts synchronizers
 
 **Impact**: Medium. CDC attribute parsing and codegen complete. ✅
 
-### 5. No Power Intent Support
+### 5. ~~No Power Intent Support~~ ✅ **DONE** (Dec 2025)
 ```skalp
-// WANTED:
-#[power_domain("always_on")]
-entity CriticalReg { ... }
-
+// ALL NOW SUPPORTED:
 #[retention]
-signal saved_state: bit[32];
+signal saved_state: bit[32];  // State preserved during power-down
+
+#[retention(strategy = balloon_latch)]
+signal critical_reg: bit[16];  // Explicit retention strategy
+
+#[isolation(clamp = low)]
+signal isolated_output: bit[32];  // Clamp to 0 when domain off
+
+#[isolation(clamp = high, enable = "iso_en")]
+signal active_low_sig: bit;  // Clamp to 1 with enable signal
+
+#[level_shift(from = "VDD_CORE", to = "VDD_IO")]
+signal voltage_crossing: bit[16];  // Voltage domain crossing
+
+#[pdc(from = 'core, to = 'io, isolation = clamp_low)]
+signal power_domain_cross: bit[32];  // Combined power domain crossing
 ```
-**Impact**: Low-Medium. Not critical for FPGA, but needed for ASIC power management.
+**Status**: Fully implemented ✅. Type-safe power intent as first-class language feature - no separate UPF files needed. Generates SystemVerilog synthesis attributes (`RETAIN`, `DONT_TOUCH`, `LEVEL_SHIFTER`) and optional UPF output.
+
+**Impact**: Medium. Eliminates UPF/RTL sync issues for ASIC power management.
 
 ### 6. Vendor IP Integration ✅ (Dec 2025)
 ```skalp
@@ -299,9 +313,13 @@ entity BlackBoxIp { ... }
 ### For Skalp Development (Next Priorities):
 1. ~~**Priority 1**: RAM/Memory inference~~ ✅ **DONE** (Dec 2025)
 2. ~~**Priority 2**: Formal verification integration (SVA assertions → property checking)~~ ✅ **DONE** (Dec 2025)
-3. **Priority 3**: Debug infrastructure (trace signals, waveform export)
-4. **Priority 4**: CDC helpers (synchronizer inference)
+3. ~~**Priority 3**: Debug infrastructure (trace signals, waveform export)~~ ✅ **DONE** (Dec 2025)
+4. ~~**Priority 4**: CDC helpers (synchronizer inference)~~ ✅ **DONE** (Dec 2025)
 5. ~~**Priority 5**: Named generics for function calls~~ ✅ **DONE** (Dec 2025)
+6. ~~**Priority 6**: Power intent (retention, isolation, level shifters)~~ ✅ **DONE** (Dec 2025)
+7. ~~**Priority 7**: Vendor IP integration~~ ✅ **DONE** (Dec 2025)
+
+**ALL USER FEEDBACK ITEMS COMPLETE** 🎉
 
 ### For Skalp Users:
 1. **Use pipeline annotations** on timing-critical functions - the backend handles register insertion
@@ -328,7 +346,9 @@ Skalp is now **production-ready for accelerator development**. The December 2025
 - AI-assisted development (Rust-like syntax works well with LLMs)
 
 **Would I avoid Skalp for?**
-- Multi-clock designs with complex CDC
-- ASIC designs needing power intent
+- ~~Multi-clock designs with complex CDC~~ Now supported with `#[cdc]` attributes
+- ~~ASIC designs needing power intent~~ Now supported with `#[retention]`, `#[isolation]`, `#[level_shift]`
+
+**Updated answer**: Skalp is now suitable for virtually all accelerator designs including multi-clock and ASIC flows.
 
 **Final Note**: The compiler is actively improving. Bugs encountered during Karythra development (#85, #86, #110, #118) were all fixed. The development velocity is impressive.
