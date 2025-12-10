@@ -281,6 +281,13 @@ impl<'hir> HirToMir<'hir> {
                          config.stages, entity.name);
             }
 
+            // Propagate vendor IP configuration from HIR entity to MIR module
+            if let Some(ref config) = entity.vendor_ip_config {
+                module.vendor_ip_config = Some(config.clone());
+                eprintln!("🔧 VENDOR_IP: Propagating vendor_ip_config (ip={}, vendor={:?}) to entity '{}'",
+                         config.ip_name, config.vendor, entity.name);
+            }
+
             // Convert generic parameters
             for hir_generic in &entity.generics {
                 let parameter = GenericParameter {

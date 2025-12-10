@@ -54,6 +54,9 @@ pub struct Module {
     /// Pipeline configuration from `#[pipeline(stages=N)]` attribute
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_config: Option<skalp_frontend::hir::PipelineConfig>,
+    /// Vendor IP configuration from `#[xilinx_ip]`, `#[intel_ip]`, etc. attributes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_ip_config: Option<skalp_frontend::hir::VendorIpConfig>,
 }
 
 /// Module identifier
@@ -1169,6 +1172,7 @@ impl Module {
             assertions: Vec::new(),
             span: None,
             pipeline_config: None,
+            vendor_ip_config: None,
         }
     }
 }

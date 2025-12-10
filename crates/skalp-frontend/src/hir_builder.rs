@@ -134,6 +134,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[cdc(sync_stages=N)]` before a signal declaration
     pending_cdc_config: Option<CdcConfig>,
 
+    /// Pending vendor IP config from most recent attribute
+    /// Set when we see `#[xilinx_ip("...")]` or similar before an entity declaration
+    pending_vendor_ip_config: Option<VendorIpConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -243,6 +247,7 @@ impl HirBuilderContext {
             pending_memory_config: None,
             pending_trace_config: None,
             pending_cdc_config: None,
+            pending_vendor_ip_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -756,6 +761,9 @@ impl HirBuilderContext {
         // Consume pending pipeline config (from #[pipeline(stages=N)] attribute)
         let pipeline_config = self.pending_pipeline_config.take();
 
+        // Consume pending vendor IP config (from #[xilinx_ip], #[intel_ip], etc. attributes)
+        let vendor_ip_config = self.pending_vendor_ip_config.take();
+
         Some(HirEntity {
             id,
             name,
@@ -767,6 +775,7 @@ impl HirBuilderContext {
             assignments,
             span: self.make_span(node),
             pipeline_config,
+            vendor_ip_config,
         })
     }
 
@@ -6834,6 +6843,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract vendor IP config (e.g., #[xilinx_ip("xpm_fifo_sync")])
+            if let Some(config) = self.extract_vendor_ip_config_from_intent_value(&intent_value) {
+                self.pending_vendor_ip_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -7311,6 +7326,151 @@ impl HirBuilderContext {
             from_domain,
             to_domain,
             cdc_type: cdc_type.unwrap_or_default(),
+        })
+    }
+
+    /// Extract vendor IP config from an IntentValue node
+    /// Handles: #[xilinx_ip("name")] or #[intel_ip("name")] or #[vendor_ip(name = "...", library = "...")]
+    ///
+    /// Supported syntax:
+    /// - `#[xilinx_ip("xpm_fifo_sync")]` - Simple Xilinx IP
+    /// - `#[intel_ip("altera_fifo")]` - Simple Intel IP
+    /// - `#[xilinx_ip(name = "xpm_memory_spram", library = "xpm")]` - With parameters
+    /// - `#[vendor_ip(name = "my_ip", vendor = xilinx)]` - Generic with vendor
+    fn extract_vendor_ip_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<VendorIpConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Determine vendor from attribute name
+        let vendor = tokens.iter().find_map(|t| {
+            if t.kind() == SyntaxKind::Ident {
+                match t.text() {
+                    "xilinx_ip" => Some(VendorType::Xilinx),
+                    "intel_ip" | "altera_ip" => Some(VendorType::Intel),
+                    "lattice_ip" => Some(VendorType::Lattice),
+                    "vendor_ip" | "blackbox" | "black_box" => Some(VendorType::Generic),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })?;
+
+        // Parse key=value pairs or simple string argument
+        let mut ip_name: Option<String> = None;
+        let mut library: Option<String> = None;
+        let mut version: Option<String> = None;
+        let mut black_box = matches!(vendor, VendorType::Generic);
+        let mut parameters: Vec<(String, String)> = Vec::new();
+        let mut explicit_vendor: Option<VendorType> = None;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            if token.kind() == SyntaxKind::Ident {
+                let text = token.text();
+                match text {
+                    // Key names
+                    "name" | "ip_name" | "ip" => {
+                        current_key = Some("name");
+                    }
+                    "library" | "lib" => {
+                        current_key = Some("library");
+                    }
+                    "version" | "ver" => {
+                        current_key = Some("version");
+                    }
+                    "vendor" => {
+                        current_key = Some("vendor");
+                    }
+                    "black_box" | "blackbox" => {
+                        current_key = Some("black_box");
+                    }
+                    "param" | "parameter" => {
+                        current_key = Some("param");
+                    }
+                    // Vendor type values
+                    "xilinx" | "amd" => {
+                        if current_key == Some("vendor") {
+                            explicit_vendor = Some(VendorType::Xilinx);
+                        }
+                        current_key = None;
+                    }
+                    "intel" | "altera" => {
+                        if current_key == Some("vendor") {
+                            explicit_vendor = Some(VendorType::Intel);
+                        }
+                        current_key = None;
+                    }
+                    "lattice" => {
+                        if current_key == Some("vendor") {
+                            explicit_vendor = Some(VendorType::Lattice);
+                        }
+                        current_key = None;
+                    }
+                    // Skip attribute name identifiers
+                    "xilinx_ip" | "intel_ip" | "altera_ip" | "lattice_ip" | "vendor_ip" => {}
+                    // Unknown identifier (could be a value for generic vendor_ip)
+                    _ => {}
+                }
+            } else if token.kind() == SyntaxKind::StringLiteral {
+                // String values
+                let text = token.text();
+                let unquoted = text.trim_matches('"').to_string();
+                match current_key {
+                    Some("name") => {
+                        ip_name = Some(unquoted);
+                        current_key = None;
+                    }
+                    Some("library") => {
+                        library = Some(unquoted);
+                        current_key = None;
+                    }
+                    Some("version") => {
+                        version = Some(unquoted);
+                        current_key = None;
+                    }
+                    Some("param") => {
+                        // TODO: Handle parameter key-value pairs
+                        current_key = None;
+                    }
+                    None => {
+                        // First string without key is assumed to be ip_name
+                        if ip_name.is_none() {
+                            ip_name = Some(unquoted);
+                        }
+                    }
+                    _ => {}
+                }
+            } else if token.kind() == SyntaxKind::TrueKw || token.kind() == SyntaxKind::FalseKw {
+                if current_key == Some("black_box") {
+                    black_box = token.kind() == SyntaxKind::TrueKw;
+                    current_key = None;
+                }
+            }
+        }
+
+        // IP name is required
+        let ip_name = ip_name?;
+
+        Some(VendorIpConfig {
+            ip_name,
+            vendor: explicit_vendor.unwrap_or(vendor),
+            library,
+            version,
+            black_box,
+            parameters,
         })
     }
 

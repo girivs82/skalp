@@ -62,6 +62,8 @@ pub struct HirEntity {
     pub span: Option<SourceSpan>,
     /// Pipeline configuration (from #[pipeline(stages=N)] attribute)
     pub pipeline_config: Option<PipelineConfig>,
+    /// Vendor IP configuration (from #[xilinx_ip], #[intel_ip], etc. attributes)
+    pub vendor_ip_config: Option<VendorIpConfig>,
 }
 
 /// Implementation in HIR
@@ -670,6 +672,93 @@ impl CdcConfig {
     pub fn with_stages(stages: u32) -> Self {
         Self {
             sync_stages: stages,
+            ..Default::default()
+        }
+    }
+}
+
+/// Vendor IP configuration for wrapping vendor-specific IP cores
+///
+/// Used to mark an entity as a wrapper for vendor IP (Xilinx, Intel, etc.)
+/// The entity's ports map directly to the IP's ports.
+///
+/// # Example
+/// ```skalp
+/// // Basic Xilinx FIFO wrapper
+/// #[xilinx_ip("xpm_fifo_sync")]
+/// entity SyncFifo<WIDTH: 32, DEPTH: 512> {
+///     in  wr_clk: clock,
+///     in  wr_en: bit,
+///     in  din: bit[WIDTH],
+///     out full: bit,
+///     in  rd_en: bit,
+///     out dout: bit[WIDTH],
+///     out empty: bit,
+/// }
+///
+/// // With custom parameters
+/// #[xilinx_ip(name = "xpm_memory_spram", library = "xpm")]
+/// entity SinglePortRam<WIDTH: 32, DEPTH: 1024> { ... }
+///
+/// // Intel/Altera IP
+/// #[intel_ip("altera_fifo")]
+/// entity AlteraFifo { ... }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VendorIpConfig {
+    /// IP core name (e.g., "xpm_fifo_sync", "altera_fifo")
+    pub ip_name: String,
+    /// Vendor (Xilinx, Intel, Lattice, etc.)
+    pub vendor: VendorType,
+    /// Optional library name (e.g., "xpm" for Xilinx Parameterized Macros)
+    pub library: Option<String>,
+    /// Optional version constraint
+    pub version: Option<String>,
+    /// Whether to generate a black-box module or instantiate directly
+    pub black_box: bool,
+    /// Additional vendor-specific parameters as key-value pairs
+    pub parameters: Vec<(String, String)>,
+}
+
+/// Supported FPGA vendors
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VendorType {
+    /// Xilinx (AMD) FPGAs
+    #[default]
+    Xilinx,
+    /// Intel (Altera) FPGAs
+    Intel,
+    /// Lattice FPGAs
+    Lattice,
+    /// Generic vendor (black-box)
+    Generic,
+}
+
+impl VendorIpConfig {
+    /// Create a Xilinx IP config
+    pub fn xilinx(ip_name: impl Into<String>) -> Self {
+        Self {
+            ip_name: ip_name.into(),
+            vendor: VendorType::Xilinx,
+            ..Default::default()
+        }
+    }
+
+    /// Create an Intel IP config
+    pub fn intel(ip_name: impl Into<String>) -> Self {
+        Self {
+            ip_name: ip_name.into(),
+            vendor: VendorType::Intel,
+            ..Default::default()
+        }
+    }
+
+    /// Create a generic black-box IP config
+    pub fn generic(ip_name: impl Into<String>) -> Self {
+        Self {
+            ip_name: ip_name.into(),
+            vendor: VendorType::Generic,
+            black_box: true,
             ..Default::default()
         }
     }
