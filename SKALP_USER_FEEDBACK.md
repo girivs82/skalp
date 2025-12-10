@@ -174,10 +174,20 @@ signal internal_state: bit[4];  // Custom display name ✅
 #[trace(group = "data_path", radix = hex)]
 signal data_bus: bit[32];  // Combined attributes ✅
 
-// FUTURE:
-#[breakpoint(condition = "error_flag == 1")]  // Not yet implemented
+// DEBUG BREAKPOINTS (✅ IMPLEMENTED Dec 2025):
+#[breakpoint]
+signal error_flag: bit;  // Triggers when signal is non-zero ✅
+
+#[breakpoint(condition = "counter > 100")]
+signal overflow_counter: bit[8];  // Conditional breakpoint ✅
+
+#[breakpoint(name = "FSM_ERROR", message = "Invalid FSM state")]
+signal fsm_state: bit[4];  // Named breakpoint with message ✅
+
+#[breakpoint(error = true)]  // Uses $error instead of $display ✅
+signal critical_error: bit;
 ```
-**Status**: `#[trace]` attribute fully implemented including string literals ✅. Signals marked with `#[trace]` are propagated through HIR/MIR. Supports `group`, `display_name`/`name`, and `radix` parameters.
+**Status**: `#[trace]` attribute fully implemented including string literals ✅. `#[breakpoint]` attribute now implemented ✅. Signals marked with `#[trace]` are propagated through HIR/MIR. Supports `group`, `display_name`/`name`, and `radix` parameters.
 
 **Impact**: Low-Medium. Debug workflow improved - can now mark signals for automatic VCD export.
 
