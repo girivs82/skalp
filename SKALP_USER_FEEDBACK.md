@@ -158,20 +158,26 @@ cover!(state == IDLE, "Can reach idle");
 
 ### 3. Debug/Trace Infrastructure - Partial ✅ (Dec 2025)
 ```skalp
-// NOW SUPPORTED:
+// ALL NOW SUPPORTED:
 #[trace]
 signal debug_bus: bit[32];  // Auto-exported to VCD trace
 
 #[trace(radix = hex)]
 signal data_bus: bit[64];  // Display as hex in waveform viewer
 
-// FUTURE (string parsing TBD):
-#[trace(group = "control")]
-signal fsm_state: bit[4];  // Grouped signals in VCD
+#[trace(group = "control_signals")]
+signal fsm_state: bit[4];  // Grouped signals in VCD ✅
 
+#[trace(display_name = "FSM State")]
+signal internal_state: bit[4];  // Custom display name ✅
+
+#[trace(group = "data_path", radix = hex)]
+signal data_bus: bit[32];  // Combined attributes ✅
+
+// FUTURE:
 #[breakpoint(condition = "error_flag == 1")]  // Not yet implemented
 ```
-**Status**: Basic `#[trace]` attribute implemented. Signals marked with `#[trace]` are propagated through HIR/MIR and the VCD export system supports grouped signals and radix hints. String literal parsing in attributes (for group/display_name) requires lexer enhancement.
+**Status**: `#[trace]` attribute fully implemented including string literals ✅. Signals marked with `#[trace]` are propagated through HIR/MIR. Supports `group`, `display_name`/`name`, and `radix` parameters.
 
 **Impact**: Low-Medium. Debug workflow improved - can now mark signals for automatic VCD export.
 
