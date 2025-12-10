@@ -3,11 +3,15 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+use skalp_frontend::hir::{TraceConfig, TraceRadix};
+
 #[derive(Debug, Clone)]
 pub struct Signal {
     pub name: String,
     pub width: usize,
     pub values: Vec<(u64, Vec<u8>)>, // (cycle, value)
+    /// Trace configuration from #[trace] attribute (if any)
+    pub trace_config: Option<TraceConfig>,
 }
 
 #[derive(Debug)]
@@ -37,6 +41,20 @@ impl Waveform {
                 name,
                 width,
                 values: Vec::new(),
+                trace_config: None,
+            },
+        );
+    }
+
+    /// Add a signal with trace configuration
+    pub fn add_traced_signal(&mut self, name: String, width: usize, trace_config: TraceConfig) {
+        self.signals.insert(
+            name.clone(),
+            Signal {
+                name,
+                width,
+                values: Vec::new(),
+                trace_config: Some(trace_config),
             },
         );
     }
@@ -92,20 +110,59 @@ impl Waveform {
         writeln!(writer, "   1ps")?;
         writeln!(writer, "$end")?;
 
-        // Variable definitions
-        writeln!(writer, "$scope module top $end")?;
-
+        // Variable definitions - organized by trace groups
         let mut identifier = 33u8; // Start with '!'
         let mut signal_map = HashMap::new();
 
+        // Collect signals by group
+        let mut groups: HashMap<Option<String>, Vec<(&String, &Signal)>> = HashMap::new();
         for (name, signal) in &self.signals {
-            let id_char = identifier as char;
-            let id = id_char.to_string();
-            writeln!(writer, "$var wire {} {} {} $end", signal.width, id, name)?;
-            signal_map.insert(name.clone(), id.clone());
-            identifier += 1;
-            if identifier > 126 {
-                identifier = 33; // Wrap around if needed
+            let group = signal.trace_config.as_ref().and_then(|tc| tc.group.clone());
+            groups.entry(group).or_default().push((name, signal));
+        }
+
+        // Write top-level scope
+        writeln!(writer, "$scope module top $end")?;
+
+        // First, write ungrouped signals (those without trace config or no group)
+        if let Some(ungrouped) = groups.get(&None) {
+            for (name, signal) in ungrouped {
+                let id_char = identifier as char;
+                let id = id_char.to_string();
+                // Use display_name if provided in trace config
+                let display_name = signal.trace_config.as_ref()
+                    .and_then(|tc| tc.display_name.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or(name.as_str());
+                writeln!(writer, "$var wire {} {} {} $end", signal.width, id, display_name)?;
+                signal_map.insert((*name).clone(), id.clone());
+                identifier += 1;
+                if identifier > 126 {
+                    identifier = 33;
+                }
+            }
+        }
+
+        // Write grouped signals in their own scopes
+        for (group_name, signals) in groups.iter() {
+            if let Some(gn) = group_name {
+                writeln!(writer, "$scope module {} $end", gn)?;
+                for (name, signal) in signals {
+                    let id_char = identifier as char;
+                    let id = id_char.to_string();
+                    // Use display_name if provided
+                    let display_name = signal.trace_config.as_ref()
+                        .and_then(|tc| tc.display_name.as_ref())
+                        .map(|s| s.as_str())
+                        .unwrap_or(name.as_str());
+                    writeln!(writer, "$var wire {} {} {} $end", signal.width, id, display_name)?;
+                    signal_map.insert((*name).clone(), id.clone());
+                    identifier += 1;
+                    if identifier > 126 {
+                        identifier = 33;
+                    }
+                }
+                writeln!(writer, "$upscope $end")?;
             }
         }
 
@@ -150,12 +207,87 @@ impl Waveform {
         Ok(())
     }
 
+    /// Export only signals marked with #[trace] attribute to VCD
+    pub fn export_traced_vcd(&self, path: &Path) -> std::io::Result<()> {
+        // Filter to only traced signals
+        let traced_waveform = Waveform {
+            signals: self.signals.iter()
+                .filter(|(_, sig)| sig.trace_config.is_some())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            max_cycle: self.max_cycle,
+        };
+        traced_waveform.export_vcd(path)
+    }
+
+    /// Get list of all traced signal names
+    pub fn get_traced_signals(&self) -> Vec<&str> {
+        self.signals.iter()
+            .filter(|(_, sig)| sig.trace_config.is_some())
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Get list of traced signals in a specific group
+    pub fn get_traced_signals_in_group(&self, group: &str) -> Vec<&str> {
+        self.signals.iter()
+            .filter(|(_, sig)| {
+                sig.trace_config.as_ref()
+                    .and_then(|tc| tc.group.as_ref())
+                    .map(|g| g == group)
+                    .unwrap_or(false)
+            })
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
     fn format_binary(&self, bytes: &[u8]) -> String {
         let mut result = String::new();
         for byte in bytes.iter().rev() {
             result.push_str(&format!("{:08b}", byte));
         }
         result
+    }
+
+    /// Format value according to trace config radix
+    #[allow(dead_code)]
+    fn format_value_with_radix(&self, bytes: &[u8], radix: TraceRadix) -> String {
+        match radix {
+            TraceRadix::Binary => self.format_binary(bytes),
+            TraceRadix::Hex => {
+                let mut result = String::new();
+                for byte in bytes.iter().rev() {
+                    result.push_str(&format!("{:02x}", byte));
+                }
+                result
+            }
+            TraceRadix::Unsigned => {
+                // Convert bytes to unsigned integer
+                let mut val: u128 = 0;
+                for byte in bytes.iter().rev() {
+                    val = (val << 8) | (*byte as u128);
+                }
+                val.to_string()
+            }
+            TraceRadix::Signed => {
+                // Convert bytes to signed integer (two's complement)
+                let mut val: i128 = 0;
+                for byte in bytes.iter().rev() {
+                    val = (val << 8) | (*byte as i128);
+                }
+                // Sign extend if necessary
+                let width = bytes.len() * 8;
+                if width < 128 && (val >> (width - 1)) & 1 != 0 {
+                    val |= !((1i128 << width) - 1);
+                }
+                val.to_string()
+            }
+            TraceRadix::Ascii => {
+                bytes.iter()
+                    .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+                    .collect()
+            }
+        }
     }
 
     pub fn get_signal_at_cycle(&self, signal_name: &str, cycle: u64) -> Option<Vec<u8>> {

@@ -112,6 +112,10 @@ pub struct Signal {
     /// synthesized as BRAM/SRAM rather than discrete registers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_config: Option<skalp_frontend::hir::MemoryConfig>,
+    /// Trace configuration (from #[trace] attribute)
+    /// When present, signal should be auto-exported to simulation traces/waveforms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_config: Option<skalp_frontend::hir::TraceConfig>,
 }
 
 /// Signal identifier

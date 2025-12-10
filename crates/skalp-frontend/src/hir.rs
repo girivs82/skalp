@@ -172,6 +172,10 @@ pub struct HirSignal {
     /// synthesized as BRAM/SRAM rather than discrete registers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_config: Option<MemoryConfig>,
+    /// Trace configuration (from #[trace] attribute)
+    /// When present, signal should be auto-exported to simulation traces/waveforms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_config: Option<TraceConfig>,
 }
 
 /// Variable in HIR
@@ -514,6 +518,64 @@ impl MemoryConfig {
             style: MemoryStyle::Auto,
             read_latency: 1,
             read_only: false,
+        }
+    }
+}
+
+/// Trace configuration for debug/waveform export
+///
+/// Specifies that a signal should be automatically included in simulation
+/// traces and waveform dumps. Used with `#[trace]` attribute on signal declarations.
+///
+/// # Usage
+///
+/// ```text
+/// #[trace]
+/// signal debug_state: bit[8];  // Auto-exported to VCD/waveform
+///
+/// #[trace(group = "control")]
+/// signal fsm_state: bit[4];  // Grouped trace signal
+///
+/// #[trace(radix = hex)]
+/// signal data_bus: bit[32];  // Display as hex in waveform viewer
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraceConfig {
+    /// Optional group name for organizing signals in waveform viewers
+    pub group: Option<String>,
+    /// Display radix hint for waveform viewers
+    pub radix: TraceRadix,
+    /// Optional custom display name (defaults to signal name)
+    pub display_name: Option<String>,
+}
+
+/// Display radix for traced signals in waveform viewers
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TraceRadix {
+    /// Binary display (default)
+    #[default]
+    Binary,
+    /// Hexadecimal display
+    Hex,
+    /// Decimal display (unsigned)
+    Unsigned,
+    /// Decimal display (signed)
+    Signed,
+    /// ASCII character display
+    Ascii,
+}
+
+impl TraceConfig {
+    /// Create a basic trace config (all defaults)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a trace config with a group name
+    pub fn with_group(group: impl Into<String>) -> Self {
+        Self {
+            group: Some(group.into()),
+            ..Default::default()
         }
     }
 }

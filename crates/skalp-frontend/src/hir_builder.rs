@@ -126,6 +126,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[memory(depth=N)]` before a signal declaration
     pending_memory_config: Option<MemoryConfig>,
 
+    /// Pending trace config from most recent attribute
+    /// Set when we see `#[trace]` or `#[trace(group="...")]` before a signal declaration
+    pending_trace_config: Option<TraceConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -233,6 +237,7 @@ impl HirBuilderContext {
             pending_unroll_config: None,
             pending_pipeline_config: None,
             pending_memory_config: None,
+            pending_trace_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -694,6 +699,7 @@ impl HirBuilderContext {
                                     clock_domain: None,
                                     span: self.make_span(&child),
                                     memory_config: None,
+                                    trace_config: None,
                                 };
                                 signals.push(signal);
 
@@ -1182,6 +1188,9 @@ impl HirBuilderContext {
         // Consume any pending memory config from preceding #[memory(...)] attribute
         let memory_config = self.pending_memory_config.take();
 
+        // Consume any pending trace config from preceding #[trace] attribute
+        let trace_config = self.pending_trace_config.take();
+
         Some(HirSignal {
             id,
             name,
@@ -1190,6 +1199,7 @@ impl HirBuilderContext {
             clock_domain: None, // Will be inferred during clock domain analysis
             span: self.make_span(node),
             memory_config,
+            trace_config,
         })
     }
 
@@ -6802,6 +6812,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract trace config (e.g., #[trace] or #[trace(group="debug")])
+            if let Some(config) = self.extract_trace_config_from_intent_value(&intent_value) {
+                self.pending_trace_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -7038,6 +7054,100 @@ impl HirBuilderContext {
             style: style.unwrap_or_default(),
             read_latency: read_latency.unwrap_or(1),
             read_only,
+        })
+    }
+
+    /// Extract trace config from an IntentValue node
+    /// Handles: #[trace] or #[trace(group="debug", radix=hex)]
+    fn extract_trace_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<TraceConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Look for "trace" identifier
+        let has_trace = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::Ident && t.text() == "trace"
+        });
+
+        if !has_trace {
+            return None;
+        }
+
+        // Parse key=value pairs
+        let mut group: Option<String> = None;
+        let mut radix: Option<TraceRadix> = None;
+        let mut display_name: Option<String> = None;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            if token.kind() == SyntaxKind::Ident {
+                let text = token.text();
+                match text {
+                    "group" | "radix" | "name" | "display_name" => {
+                        current_key = Some(text);
+                    }
+                    "binary" | "bin" => {
+                        if current_key == Some("radix") {
+                            radix = Some(TraceRadix::Binary);
+                        }
+                        current_key = None;
+                    }
+                    "hex" | "hexadecimal" => {
+                        if current_key == Some("radix") {
+                            radix = Some(TraceRadix::Hex);
+                        }
+                        current_key = None;
+                    }
+                    "unsigned" | "decimal" => {
+                        if current_key == Some("radix") {
+                            radix = Some(TraceRadix::Unsigned);
+                        }
+                        current_key = None;
+                    }
+                    "signed" => {
+                        if current_key == Some("radix") {
+                            radix = Some(TraceRadix::Signed);
+                        }
+                        current_key = None;
+                    }
+                    "ascii" => {
+                        if current_key == Some("radix") {
+                            radix = Some(TraceRadix::Ascii);
+                        }
+                        current_key = None;
+                    }
+                    _ => {}
+                }
+            } else if token.kind() == SyntaxKind::StringLiteral {
+                // String values for group or display_name
+                let text = token.text();
+                // Remove quotes from string literal
+                let unquoted = text.trim_matches('"').to_string();
+                match current_key {
+                    Some("group") => group = Some(unquoted),
+                    Some("name") | Some("display_name") => display_name = Some(unquoted),
+                    _ => {}
+                }
+                current_key = None;
+            }
+        }
+
+        // Return trace config (even with all defaults)
+        Some(TraceConfig {
+            group,
+            radix: radix.unwrap_or_default(),
+            display_name,
         })
     }
 
