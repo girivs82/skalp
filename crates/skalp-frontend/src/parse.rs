@@ -2811,9 +2811,10 @@ impl<'a> ParseState<'a> {
                         break;
                     }
 
-                    // Parse identifier (could be key name or standalone value)
-                    if self.at(SyntaxKind::Ident) {
-                        self.bump(); // consume identifier
+                    // Parse identifier or keyword (could be key name or standalone value)
+                    // Keywords like 'group', 'from', 'type' can be used as attribute keys
+                    if self.at(SyntaxKind::Ident) || self.at_keyword_as_ident() {
+                        self.bump(); // consume identifier/keyword
                         self.skip_trivia();
 
                         // Check for '=' indicating key-value pair
@@ -2822,7 +2823,7 @@ impl<'a> ParseState<'a> {
                             self.bump(); // consume '='
                             self.skip_trivia();
 
-                            // Parse the value (IntLiteral, Ident, Lifetime like 'clk, etc.)
+                            // Parse the value (IntLiteral, Ident, Lifetime, StringLiteral, keyword, etc.)
                             if self.at(SyntaxKind::IntLiteral) {
                                 self.bump();
                                 self.skip_trivia();
@@ -2830,8 +2831,16 @@ impl<'a> ParseState<'a> {
                                 // Handle identifiers like domain names
                                 self.bump();
                                 self.skip_trivia();
+                            } else if self.at_keyword_as_ident() {
+                                // Handle keywords used as values (e.g., cdc_type = gray)
+                                self.bump();
+                                self.skip_trivia();
                             } else if self.at(SyntaxKind::Lifetime) {
                                 // Handle lifetime-style domain references: from = 'clk_fast
+                                self.bump();
+                                self.skip_trivia();
+                            } else if self.at(SyntaxKind::StringLiteral) {
+                                // Handle string literals: group = "control", display_name = "FSM State"
                                 self.bump();
                                 self.skip_trivia();
                             } else if self.at(SyntaxKind::TrueKw) || self.at(SyntaxKind::FalseKw) {
@@ -2841,6 +2850,10 @@ impl<'a> ParseState<'a> {
                         }
                     } else if self.at(SyntaxKind::IntLiteral) {
                         // Simple numeric value like unroll(4)
+                        self.bump();
+                        self.skip_trivia();
+                    } else if self.at(SyntaxKind::StringLiteral) {
+                        // Simple string value
                         self.bump();
                         self.skip_trivia();
                     } else if self.at(SyntaxKind::TrueKw) || self.at(SyntaxKind::FalseKw) {
@@ -5184,9 +5197,17 @@ impl<'a> ParseState<'a> {
     }
 
     /// Check if at a keyword that can be used as an identifier in certain contexts
-    /// (e.g., 'area' as intent constraint name)
+    /// (e.g., 'area' as intent constraint name, 'group' as attribute key)
     fn at_keyword_as_ident(&self) -> bool {
-        matches!(self.current_kind(), Some(SyntaxKind::AreaKw))
+        matches!(
+            self.current_kind(),
+            Some(SyntaxKind::AreaKw)
+                | Some(SyntaxKind::GroupKw)
+                | Some(SyntaxKind::TypeKw)
+                | Some(SyntaxKind::FastKw)
+                | Some(SyntaxKind::SlowKw)
+                | Some(SyntaxKind::MediumKw)
+        )
     }
 
     /// Lookahead to check if the current if statement has no else clause

@@ -7107,7 +7107,11 @@ impl HirBuilderContext {
         let mut current_key: Option<&str> = None;
 
         for token in tokens.iter() {
-            if token.kind() == SyntaxKind::Ident {
+            // Handle both identifiers and keywords (like 'group')
+            let is_ident_or_keyword = token.kind() == SyntaxKind::Ident
+                || token.kind() == SyntaxKind::GroupKw;
+
+            if is_ident_or_keyword {
                 let text = token.text();
                 match text {
                     "group" | "radix" | "name" | "display_name" => {

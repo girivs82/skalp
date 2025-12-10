@@ -260,20 +260,23 @@ impl CombinedTest {
 
 #[test]
 fn test_trace_display_name() {
-    println!("=== Testing #[trace] basic parsing (display_name requires string literal support) ===");
+    println!("=== Testing #[trace] with display_name string literal ===");
 
-    // Note: String literal parsing in attributes may require lexer enhancements.
-    // For now, test basic #[trace] attribute
+    // Test string literal parsing in attributes
     let source = r#"
 entity DisplayNameTest {
     in clk: bit,
 
-    #[trace]
+    #[trace(display_name = "FSM State")]
     signal internal_state: bit[4],
+
+    #[trace(name = "Debug Counter")]
+    signal debug_counter: bit[8],
 }
 
 impl DisplayNameTest {
     internal_state = 0;
+    debug_counter = 0;
 }
 "#;
 
@@ -283,8 +286,64 @@ impl DisplayNameTest {
 
     let entity = hir.entities.iter().find(|e| e.name == "DisplayNameTest").unwrap();
 
+    // Check internal_state has display_name
     let signal = entity.signals.iter().find(|s| s.name == "internal_state").unwrap();
     assert!(signal.trace_config.is_some(), "internal_state should have trace_config");
+    let trace_config = signal.trace_config.as_ref().unwrap();
+    assert_eq!(trace_config.display_name, Some("FSM State".to_string()),
+               "display_name should be 'FSM State'");
+
+    // Check debug_counter has name (alias for display_name)
+    let signal = entity.signals.iter().find(|s| s.name == "debug_counter").unwrap();
+    assert!(signal.trace_config.is_some(), "debug_counter should have trace_config");
+    let trace_config = signal.trace_config.as_ref().unwrap();
+    assert_eq!(trace_config.display_name, Some("Debug Counter".to_string()),
+               "display_name should be 'Debug Counter'");
 
     println!("#[trace] display_name test PASSED!");
+}
+
+#[test]
+fn test_trace_with_group_string() {
+    println!("=== Testing #[trace] with group string literal ===");
+
+    let source = r#"
+entity GroupStringTest {
+    in clk: bit,
+
+    #[trace(group = "control_signals")]
+    signal fsm_state: bit[4],
+
+    #[trace(group = "data_path", radix = hex)]
+    signal data_bus: bit[32],
+}
+
+impl GroupStringTest {
+    fsm_state = 0;
+    data_bus = 0;
+}
+"#;
+
+    // Parse and build HIR
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building should succeed");
+
+    let entity = hir.entities.iter().find(|e| e.name == "GroupStringTest").unwrap();
+
+    // Check fsm_state has group
+    let signal = entity.signals.iter().find(|s| s.name == "fsm_state").unwrap();
+    assert!(signal.trace_config.is_some(), "fsm_state should have trace_config");
+    let trace_config = signal.trace_config.as_ref().unwrap();
+    assert_eq!(trace_config.group, Some("control_signals".to_string()),
+               "group should be 'control_signals'");
+
+    // Check data_bus has group and radix
+    let signal = entity.signals.iter().find(|s| s.name == "data_bus").unwrap();
+    assert!(signal.trace_config.is_some(), "data_bus should have trace_config");
+    let trace_config = signal.trace_config.as_ref().unwrap();
+    assert_eq!(trace_config.group, Some("data_path".to_string()),
+               "group should be 'data_path'");
+    assert_eq!(trace_config.radix, TraceRadix::Hex, "radix should be Hex");
+
+    println!("#[trace] with group string test PASSED!");
 }
