@@ -156,15 +156,24 @@ cover!(state == IDLE, "Can reach idle");
 ```
 **Status**: Implemented. Parser, HIR, MIR, and SystemVerilog codegen fully support formal verification macros. Generates standard SVA (SystemVerilog Assertions) compatible with formal tools like SymbiYosys, Jasper, etc.
 
-### 3. Limited Debug/Trace Infrastructure
+### 3. Debug/Trace Infrastructure - Partial ✅ (Dec 2025)
 ```skalp
-// WANTED:
+// NOW SUPPORTED:
 #[trace]
-signal debug_bus: bit[32];  // Auto-exported to trace
+signal debug_bus: bit[32];  // Auto-exported to VCD trace
 
-#[breakpoint(condition = "error_flag == 1")]
+#[trace(radix = hex)]
+signal data_bus: bit[64];  // Display as hex in waveform viewer
+
+// FUTURE (string parsing TBD):
+#[trace(group = "control")]
+signal fsm_state: bit[4];  // Grouped signals in VCD
+
+#[breakpoint(condition = "error_flag == 1")]  // Not yet implemented
 ```
-**Impact**: Medium. Currently relies on manual debug signal insertion and `SKALP_DUMP_SHADER=1`.
+**Status**: Basic `#[trace]` attribute implemented. Signals marked with `#[trace]` are propagated through HIR/MIR and the VCD export system supports grouped signals and radix hints. String literal parsing in attributes (for group/display_name) requires lexer enhancement.
+
+**Impact**: Low-Medium. Debug workflow improved - can now mark signals for automatic VCD export.
 
 ### 4. No Clock Domain Crossing Helpers
 ```skalp
