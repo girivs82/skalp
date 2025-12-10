@@ -929,6 +929,46 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
 
+                    // Convert formal verification statements (assert!/assume!/cover!)
+                    for stmt in &impl_block.statements {
+                        match stmt {
+                            hir::HirStatement::Assert(assert_stmt) => {
+                                if let Some(condition) = self.convert_expression(&assert_stmt.condition, 0) {
+                                    module.assertions.push(Assertion {
+                                        kind: AssertionKind::Assert,
+                                        condition,
+                                        message: assert_stmt.message.clone(),
+                                        span: None,
+                                    });
+                                }
+                            }
+                            hir::HirStatement::Assume(assume_stmt) => {
+                                if let Some(condition) = self.convert_expression(&assume_stmt.condition, 0) {
+                                    module.assertions.push(Assertion {
+                                        kind: AssertionKind::Assume,
+                                        condition,
+                                        message: assume_stmt.message.clone(),
+                                        span: None,
+                                    });
+                                }
+                            }
+                            hir::HirStatement::Cover(cover_stmt) => {
+                                // For cover, extract the condition from the property
+                                if let hir::HirProperty::Expression(expr) = &cover_stmt.property {
+                                    if let Some(condition) = self.convert_expression(expr, 0) {
+                                        module.assertions.push(Assertion {
+                                            kind: AssertionKind::Cover,
+                                            condition,
+                                            message: cover_stmt.name.clone(),
+                                            span: None,
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {} // Ignore other statement types
+                        }
+                    }
+
                     // Clean up generic parameter bindings for this impl block
                     for name in &bound_generic_names {
                         self.const_evaluator.unbind(name);
@@ -4042,8 +4082,18 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::new(ExpressionKind::Literal(Value::Integer(0)), ty))
             }
             hir::HirExpression::Binary(binary) => {
+                if matches!(binary.op, hir::HirBinaryOp::LogicalAnd | hir::HirBinaryOp::LogicalOr) {
+                    eprintln!("[MIR_LOGICAL_DEBUG] Converting {:?} expression at depth {}", binary.op, depth);
+                    eprintln!("[MIR_LOGICAL_DEBUG]   left: {:?}", binary.left);
+                    eprintln!("[MIR_LOGICAL_DEBUG]   right: {:?}", binary.right);
+                }
                 let left = self.convert_expression(&binary.left, depth + 1)?;
                 let right = self.convert_expression(&binary.right, depth + 1)?;
+                if matches!(binary.op, hir::HirBinaryOp::LogicalAnd | hir::HirBinaryOp::LogicalOr) {
+                    eprintln!("[MIR_LOGICAL_DEBUG] After conversion:");
+                    eprintln!("[MIR_LOGICAL_DEBUG]   left MIR: {:?}", left.kind);
+                    eprintln!("[MIR_LOGICAL_DEBUG]   right MIR: {:?}", right.kind);
+                }
                 let left = Box::new(left);
                 let right = Box::new(right);
                 let op = self.convert_binary_op(&binary.op, &binary.left);

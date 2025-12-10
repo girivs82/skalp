@@ -989,3 +989,121 @@ fn test_all_major_bugs_have_regression_tests() {
         "All fixed bugs should have regression tests"
     );
 }
+
+// =============================================================================
+// LOGICAL OPERATOR BUGS (#145-148)
+// =============================================================================
+
+/// Bug #145-148: Logical && operator handling in chained expressions
+/// Tests that chained logical AND/OR operators compile correctly without
+/// duplication or incorrect operator substitution.
+#[test]
+fn test_bug145_148_logical_and_operator_chaining() {
+    // Test 1: Simple && between two comparisons (Bug #145)
+    let code1 = r#"
+entity TestDoubleAnd {
+    in a: bit[8],
+    in b: bit[8],
+    out result: bit[1],
+}
+
+impl TestDoubleAnd {
+    result = a != 0 && b != 0;
+}
+"#;
+    let sv1 = compile_to_sv(code1).expect("Double && should compile");
+    assert!(sv1.contains("&&"), "Output should contain && operator");
+    assert!(!sv1.contains("!= 0) != "), "Should not have != where && should be");
+
+    // Test 2: Triple-chained && (Bug #148 - no duplication)
+    let code2 = r#"
+entity TestTripleAnd {
+    in a: bit[8],
+    in b: bit[8],
+    in c: bit[8],
+    out result: bit[1],
+}
+
+impl TestTripleAnd {
+    result = a != 0 && b != 0 && c != 0;
+}
+"#;
+    let sv2 = compile_to_sv(code2).expect("Triple && should compile");
+
+    // Count occurrences of "(c != 0)" - should appear exactly once
+    let c_neq_count = sv2.matches("(c != 0)").count();
+    assert_eq!(
+        c_neq_count, 1,
+        "Triple && should have exactly one (c != 0), found {}: {}",
+        c_neq_count, sv2
+    );
+
+    // Test 3: Parenthesized && expressions
+    let code3 = r#"
+entity TestParenAnd {
+    in a: bit[8],
+    in b: bit[8],
+    out result: bit[1],
+}
+
+impl TestParenAnd {
+    result = (a != 0) && (b != 0);
+}
+"#;
+    let sv3 = compile_to_sv(code3).expect("Parenthesized && should compile");
+    assert!(sv3.contains("&&"), "Output should contain && operator");
+
+    // Test 4: Simple a && b (not comparisons)
+    let code4 = r#"
+entity TestSimpleAnd {
+    in a: bit[1],
+    in b: bit[1],
+    out result: bit[1],
+}
+
+impl TestSimpleAnd {
+    result = a && b;
+}
+"#;
+    let sv4 = compile_to_sv(code4).expect("Simple && should compile");
+    assert!(sv4.contains("&&"), "Output should contain && operator");
+
+    // Test 5: Quadruple-chained && to ensure deep chaining works
+    let code5 = r#"
+entity TestQuadAnd {
+    in a: bit[8],
+    in b: bit[8],
+    in c: bit[8],
+    in d: bit[8],
+    out result: bit[1],
+}
+
+impl TestQuadAnd {
+    result = a != 0 && b != 0 && c != 0 && d != 0;
+}
+"#;
+    let sv5 = compile_to_sv(code5).expect("Quadruple && should compile");
+
+    // Each comparison should appear exactly once
+    assert_eq!(sv5.matches("(a != 0)").count(), 1, "Should have exactly one (a != 0)");
+    assert_eq!(sv5.matches("(b != 0)").count(), 1, "Should have exactly one (b != 0)");
+    assert_eq!(sv5.matches("(c != 0)").count(), 1, "Should have exactly one (c != 0)");
+    assert_eq!(sv5.matches("(d != 0)").count(), 1, "Should have exactly one (d != 0)");
+
+    // Test 6: Mixed && and || operators
+    let code6 = r#"
+entity TestMixedLogical {
+    in a: bit[8],
+    in b: bit[8],
+    in c: bit[8],
+    out result: bit[1],
+}
+
+impl TestMixedLogical {
+    result = (a != 0 && b != 0) || c != 0;
+}
+"#;
+    let sv6 = compile_to_sv(code6).expect("Mixed && and || should compile");
+    assert!(sv6.contains("&&"), "Output should contain && operator");
+    assert!(sv6.contains("||"), "Output should contain || operator");
+}

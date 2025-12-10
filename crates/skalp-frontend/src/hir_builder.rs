@@ -493,6 +493,7 @@ impl HirBuilderContext {
                                 instances: Vec::new(),
                                 covergroups: Vec::new(),
                                 formal_blocks: Vec::new(),
+                                statements: Vec::new(),
                             });
                         }
                         // Add constant to the first implementation (global scope)
@@ -834,6 +835,7 @@ impl HirBuilderContext {
         let mut functions = Vec::new();
         let mut event_blocks = Vec::new();
         let mut assignments = Vec::new();
+        let mut statements: Vec<HirStatement> = Vec::new();
 
         // Build implementation items
         for child in node.children() {
@@ -909,6 +911,37 @@ impl HirBuilderContext {
                         }
                     }
                 }
+                // Formal verification statements in impl blocks
+                SyntaxKind::AssertStmt => {
+                    eprintln!("[HIR_IMPL_DEBUG] Processing AssertStmt in impl block");
+                    if let Some(stmt) = self.build_assert_statement(&child) {
+                        statements.push(HirStatement::Assert(stmt));
+                    }
+                }
+                SyntaxKind::AssumeStmt => {
+                    eprintln!("[HIR_IMPL_DEBUG] Processing AssumeStmt in impl block");
+                    if let Some(stmt) = self.build_assume_macro_statement(&child) {
+                        statements.push(HirStatement::Assume(stmt));
+                    }
+                }
+                SyntaxKind::CoverStmt => {
+                    eprintln!("[HIR_IMPL_DEBUG] Processing CoverStmt in impl block");
+                    if let Some(stmt) = self.build_cover_macro_statement(&child) {
+                        statements.push(HirStatement::Cover(stmt));
+                    }
+                }
+                SyntaxKind::AssumeMacroStmt => {
+                    eprintln!("[HIR_IMPL_DEBUG] Processing AssumeMacroStmt in impl block");
+                    if let Some(stmt) = self.build_assume_macro_statement(&child) {
+                        statements.push(HirStatement::Assume(stmt));
+                    }
+                }
+                SyntaxKind::CoverMacroStmt => {
+                    eprintln!("[HIR_IMPL_DEBUG] Processing CoverMacroStmt in impl block");
+                    if let Some(stmt) = self.build_cover_macro_statement(&child) {
+                        statements.push(HirStatement::Cover(stmt));
+                    }
+                }
                 _ => {}
             }
         }
@@ -937,6 +970,7 @@ impl HirBuilderContext {
             covergroups: Vec::new(),   // TODO: Implement covergroup building
             formal_blocks: Vec::new(), // TODO: Implement formal verification building
             instances,
+            statements,
         };
 
         // Infer clock domains for signals based on event block assignments
@@ -1980,6 +2014,10 @@ impl HirBuilderContext {
         };
 
         // Handle RHS - if there are multiple expressions, we need to combine them
+        eprintln!("[BUILD_ASSIGNMENT_DEBUG] rhs_start_idx={}, exprs.len()={}", rhs_start_idx, exprs.len());
+        for (idx, expr) in exprs.iter().enumerate() {
+            eprintln!("[BUILD_ASSIGNMENT_DEBUG]   exprs[{}]: {:?}", idx, expr.kind());
+        }
         let rhs = if rhs_start_idx >= exprs.len() {
             return None;
         } else if rhs_start_idx == exprs.len() - 1 {
@@ -2010,12 +2048,47 @@ impl HirBuilderContext {
                 // Case: LHS op EXPR1 BINARYEXPR
                 // This happens when we have something like "counter <= counter + 1"
                 // We need to combine EXPR1 and BINARYEXPR
-                let first_expr = self.build_expression(&exprs[1])?;
-                let binary_expr = &exprs[2];
+                //
+                // BUG FIX #148: However, if EXPR1 is also a BinaryExpr (chained expression),
+                // and EXPR2 (the third_expr) does NOT start with an operator, then EXPR2 is
+                // a stray duplicate from the parser's flat structure and should be ignored.
+                // Example: "result = a != 0 && b != 0 && c != 0" creates:
+                //   exprs[1] = BinaryExpr(a!=0&&b!=0&&c!=0) - complete chained expression
+                //   exprs[2] = BinaryExpr(c!=0) - stray duplicate (starts with IdentExpr 'c')
+                // We should ONLY use exprs[1] in this case.
+                let first_elem = third_expr.children_with_tokens().next();
+                let third_starts_with_operator = first_elem
+                    .as_ref()
+                    .map(|elem| match elem {
+                        rowan::NodeOrToken::Token(t) => t.kind().is_operator(),
+                        _ => false,
+                    })
+                    .unwrap_or(false);
 
-                // The binary expr should have the operator and second operand
-                // We need to create a new binary expression with first_expr as left operand
-                self.combine_expressions_with_binary(first_expr, binary_expr)?
+                if second_expr.kind() == SyntaxKind::BinaryExpr && third_starts_with_operator {
+                    // BUG FIX #148: EXPR1 is a BinaryExpr, and EXPR2 starts with an operator.
+                    // This means EXPR2 is a continuation sibling that build_binary_expr will
+                    // automatically chain when processing EXPR1. We should NOT combine again
+                    // in build_assignment, or we'll duplicate the last operand.
+                    // Example: "result = a != 0 && b != 0 && c != 0" with parser structure:
+                    //   exprs[1] = BinaryExpr(a!=0...) containing chaining siblings
+                    //   exprs[2] = BinaryExpr(&&c!=0) - starts with operator
+                    // build_binary_expr on exprs[1] will incorporate exprs[2] via sibling chaining.
+                    self.build_expression(&exprs[1])?
+                } else if second_expr.kind() == SyntaxKind::BinaryExpr && !third_starts_with_operator {
+                    // EXPR1 is already a complete BinaryExpr, and EXPR2 doesn't start with
+                    // an operator (so it's a stray duplicate). Just use EXPR1.
+                    self.build_expression(&exprs[1])?
+                } else {
+                    // Normal case: combine EXPR1 (non-BinaryExpr like IdentExpr) with the continuation EXPR2
+                    // Example: "counter <= counter + 1" where exprs[1] = IdentExpr(counter)
+                    let first_expr = self.build_expression(&exprs[1])?;
+                    let binary_expr = &exprs[2];
+
+                    // The binary expr should have the operator and second operand
+                    // We need to create a new binary expression with first_expr as left operand
+                    self.combine_expressions_with_binary(first_expr, binary_expr)?
+                }
             } else if third_expr.kind() == SyntaxKind::IndexExpr {
                 // Case: LHS op BASE_EXPR INDEX_EXPR
                 // This happens with range/index access like "decode_opcode <= fetch_instruction[15:12]"
@@ -2243,9 +2316,28 @@ impl HirBuilderContext {
                     i += 1;
                 }
                 SyntaxKind::BinaryExpr => {
-                    // Combine result with binary operation
-                    result = self.combine_expressions_with_binary(result, current_node)?;
-                    i += 1;
+                    // BUG FIX #148: Check if this BinaryExpr starts with an operator.
+                    // If so, and the first expression was also a BinaryExpr, this sibling
+                    // was already processed by build_binary_expr's sibling chaining logic.
+                    // We should skip it to avoid duplication.
+                    let first_elem = current_node.children_with_tokens().next();
+                    let starts_with_operator = first_elem
+                        .as_ref()
+                        .map(|elem| match elem {
+                            rowan::NodeOrToken::Token(t) => t.kind().is_operator(),
+                            _ => false,
+                        })
+                        .unwrap_or(false);
+
+                    if starts_with_operator && rhs_exprs[0].kind() == SyntaxKind::BinaryExpr {
+                        // BUG FIX #148: This continuation BinaryExpr was already incorporated
+                        // when build_binary_expr processed rhs_exprs[0]. Skip it.
+                        i += 1;
+                    } else {
+                        // Normal case: Combine result with binary operation
+                        result = self.combine_expressions_with_binary(result, current_node)?;
+                        i += 1;
+                    }
                 }
                 SyntaxKind::CallExpr => {
                     // Function call - just build it normally
@@ -5171,6 +5263,31 @@ impl HirBuilderContext {
                     // All children are BinaryExprs - first one is a complete binary expr
                     result_expr = self.build_binary_expr(&expr_children[0]);
                     start_idx = 1; // Start chaining from second BinaryExpr
+
+                    // BUG FIX #148: If the remaining BinaryExpr siblings start with operators,
+                    // they were already processed by build_binary_expr via sibling chaining.
+                    // Skip all such siblings to avoid duplication.
+                    while start_idx < expr_children.len() {
+                        let next = &expr_children[start_idx];
+                        if next.kind() == SyntaxKind::BinaryExpr {
+                            let first_elem = next.children_with_tokens().next();
+                            let starts_with_operator = first_elem
+                                .as_ref()
+                                .map(|elem| match elem {
+                                    rowan::NodeOrToken::Token(t) => t.kind().is_operator(),
+                                    _ => false,
+                                })
+                                .unwrap_or(false);
+                            if starts_with_operator {
+                                // This sibling starts with an operator - it was already consumed
+                                start_idx += 1;
+                            } else {
+                                break; // Not a continuation, stop skipping
+                            }
+                        } else {
+                            break; // Not a BinaryExpr, stop skipping
+                        }
+                    }
                 }
 
                 for (idx, child) in expr_children.iter().enumerate().skip(start_idx) {
@@ -5360,30 +5477,51 @@ impl HirBuilderContext {
 
                 // BUG FIX #66: Check for next siblings (chained operations like "+ c")
                 // If there are more BinaryExpr siblings after us, they represent chained operations
-                for next in siblings.iter().skip(pos + 1) {
-                    if next.kind() == SyntaxKind::BinaryExpr {
-                        // This is a chained operation!
-                        expr_children.push(next.clone());
-                    } else if matches!(
-                        next.kind(),
-                        SyntaxKind::LiteralExpr
-                            | SyntaxKind::IdentExpr
-                            | SyntaxKind::UnaryExpr
-                            | SyntaxKind::FieldExpr
-                            | SyntaxKind::IndexExpr
-                            | SyntaxKind::PathExpr
-                            | SyntaxKind::ParenExpr
-                            | SyntaxKind::IfExpr
-                            | SyntaxKind::MatchExpr
-                            | SyntaxKind::CallExpr
-                            | SyntaxKind::ArrayLiteral
-                    ) {
-                        // Also could be a regular operand
-                        // But break at non-expression nodes
-                        break;
-                    } else {
-                        // Stop at non-expression nodes
-                        break;
+                // BUG FIX #145: BUT only do this if our parent is NOT a BinaryExpr!
+                // If the parent is a BinaryExpr, then our siblings are operands at a DIFFERENT
+                // precedence level and should NOT be treated as chained operations.
+                // For example, in "a != 0 && b != 0":
+                // - Parent BinaryExpr(&&) has children [BinaryExpr(a!=0), BinaryExpr(b!=0)]
+                // - When processing BinaryExpr(a!=0), we should NOT add BinaryExpr(b!=0) as chained
+                //
+                // BUG FIX #146: Additional check - only add sibling BinaryExprs that START with an operator.
+                // For flat parser structures like "a!=0&&b!=0" + "&&c!=0" as siblings under AssignmentStmt,
+                // the continuation BinaryExpr "&&c!=0" starts with the && operator.
+                // But "b!=0" as a sibling of "a!=0" under BinaryExpr parent doesn't start with an operator.
+                if parent.kind() != SyntaxKind::BinaryExpr {
+                    for next in siblings.iter().skip(pos + 1) {
+                        if next.kind() == SyntaxKind::BinaryExpr {
+                            // Only add this sibling if it's a continuation (starts with an operator)
+                            let first_token = next.children_with_tokens()
+                                .filter_map(|e| e.into_token())
+                                .next();
+                            if let Some(tok) = first_token {
+                                if tok.kind().is_operator() {
+                                    // This is a chained operation starting with an operator!
+                                    expr_children.push(next.clone());
+                                }
+                            }
+                        } else if matches!(
+                            next.kind(),
+                            SyntaxKind::LiteralExpr
+                                | SyntaxKind::IdentExpr
+                                | SyntaxKind::UnaryExpr
+                                | SyntaxKind::FieldExpr
+                                | SyntaxKind::IndexExpr
+                                | SyntaxKind::PathExpr
+                                | SyntaxKind::ParenExpr
+                                | SyntaxKind::IfExpr
+                                | SyntaxKind::MatchExpr
+                                | SyntaxKind::CallExpr
+                                | SyntaxKind::ArrayLiteral
+                        ) {
+                            // Also could be a regular operand
+                            // But break at non-expression nodes
+                            break;
+                        } else {
+                            // Stop at non-expression nodes
+                            break;
+                        }
                     }
                 }
             }
@@ -5393,18 +5531,57 @@ impl HirBuilderContext {
             return None;
         }
 
+        let node_tokens: Vec<_> = node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .map(|t| (t.kind(), t.text().to_string()))
+            .collect();
+
+        // BUG FIX #145: For BinaryExprs with exactly 2 expression children and 1 operator token,
+        // use the standard path directly. This is the common case for properly structured ASTs.
+        // Skip the "chained operations" path which is only needed for parser workarounds.
+        if expr_children.len() == 2 && node_tokens.iter().filter(|(k, _)| k.is_operator()).count() == 1 {
+            let left = Box::new(self.build_expression(&expr_children[0])?);
+            let right = Box::new(self.build_expression(&expr_children[1])?);
+
+            let op = node_tokens
+                .iter()
+                .find(|(k, _)| k.is_operator())
+                .and_then(|(k, _)| self.token_to_binary_op(*k));
+
+            let op = op?;
+
+            return Some(HirExpression::Binary(HirBinaryExpr { left, op, right }));
+        }
+
         // BUG FIX #66: Handle chained operations (a + b + c)
         // If we have more than 2 children, the first is the left operand and subsequent
         // children are nested BinaryExprs that need to be combined left-associatively
+        //
+        // BUG FIX #147: Distinguish between:
+        // - Direct RHS operands (don't start with an operator) - use PARENT's operator
+        // - Sibling continuations (start with an operator) - use THEIR OWN operator
         if expr_children.len() > 2 {
             // Build left-associative chain: ((a op b) op c) op d ...
             let mut result = self.build_expression(&expr_children[0])?;
 
+            // Get the parent node's operator for direct RHS children
+            let parent_op_token = node_tokens
+                .iter()
+                .find(|(k, _)| k.is_operator())
+                .and_then(|(k, _)| self.token_to_binary_op(*k));
+
             for child in &expr_children[1..] {
-                // Each subsequent child should be a BinaryExpr with operator + right operand
-                // or just a regular expression (fallback)
-                if child.kind() == SyntaxKind::BinaryExpr {
-                    // Extract operator from this BinaryExpr
+                // Check if this child STARTS with an operator token (continuation) or a node (direct RHS)
+                // Important: we need to check the FIRST element (node or token), not just the first token
+                let first_element = child.children_with_tokens().next();
+
+                let child_starts_with_operator = match &first_element {
+                    Some(rowan::NodeOrToken::Token(t)) => t.kind().is_operator(),
+                    _ => false, // First element is a Node or nothing, so not a continuation
+                };
+
+                if child_starts_with_operator && child.kind() == SyntaxKind::BinaryExpr {
+                    // This is a continuation (like "&&c!=0") - use its own operator
                     let op_token = child
                         .children_with_tokens()
                         .filter_map(|e| e.into_token())
@@ -5446,25 +5623,19 @@ impl HirBuilderContext {
                         }
                     }
                 } else {
-                    // Fallback: treat as a regular operand with the previous operator
-                    // This shouldn't happen in well-formed ASTs but handle it gracefully
-                    let tokens: Vec<_> = node
-                        .children_with_tokens()
-                        .filter_map(|elem| elem.into_token())
-                        .collect();
-
-                    if let Some(op_tok) = tokens.iter().find(|t| t.kind().is_operator()) {
-                        let op = self.token_to_binary_op(op_tok.kind())?;
+                    // This is a direct RHS operand - use the PARENT's operator
+                    if let Some(ref op) = parent_op_token {
                         let right = Box::new(self.build_expression(child)?);
                         result = HirExpression::Binary(HirBinaryExpr {
                             left: Box::new(result),
-                            op,
+                            op: op.clone(),
                             right,
                         });
                     }
                 }
             }
 
+            eprintln!("[HIR_CHAIN_RESULT] Final chained result: {:?}", result);
             return Some(result);
         }
 
