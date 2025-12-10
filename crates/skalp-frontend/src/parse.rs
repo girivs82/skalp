@@ -2822,12 +2822,16 @@ impl<'a> ParseState<'a> {
                             self.bump(); // consume '='
                             self.skip_trivia();
 
-                            // Parse the value (IntLiteral, Ident like 'true', etc.)
+                            // Parse the value (IntLiteral, Ident, Lifetime like 'clk, etc.)
                             if self.at(SyntaxKind::IntLiteral) {
                                 self.bump();
                                 self.skip_trivia();
                             } else if self.at(SyntaxKind::Ident) {
-                                // Handle boolean keywords like 'true' or 'false'
+                                // Handle identifiers like domain names
+                                self.bump();
+                                self.skip_trivia();
+                            } else if self.at(SyntaxKind::Lifetime) {
+                                // Handle lifetime-style domain references: from = 'clk_fast
                                 self.bump();
                                 self.skip_trivia();
                             } else if self.at(SyntaxKind::TrueKw) || self.at(SyntaxKind::FalseKw) {

@@ -369,7 +369,90 @@ impl CdcDomainTest {
     println!("#[cdc] with domain identifiers test PASSED!");
 }
 
-// NOTE: Lifetime-style domains (#[cdc(source = 'fast_clk, ...)]) require
-// parser enhancement to capture lifetime tokens in attribute values.
-// The attribute system is designed to support this; the parser needs updating.
-// For now, use identifier-style domain names: #[cdc(source = fast_clk, ...)]
+/// Test that from/to keywords work in CDC attributes
+#[test]
+fn test_cdc_with_from_to_keywords() {
+    println!("=== Testing #[cdc] with from/to Keywords ===");
+
+    let source = r#"
+entity CdcFromToTest {
+    in data: bit[8],
+    out result: bit[8],
+
+    // CDC with from/to keywords
+    #[cdc(from = fast_domain, to = slow_domain, sync_stages = 3)]
+    signal cross_domain: bit[8],
+}
+
+impl CdcFromToTest {
+    cross_domain = data;
+    result = cross_domain;
+}
+"#;
+
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building should succeed");
+
+    let entity = hir.entities.iter().find(|e| e.name == "CdcFromToTest").unwrap();
+
+    // Check cross_domain has from/to domains
+    let signal = entity.signals.iter().find(|s| s.name == "cross_domain").unwrap();
+    assert!(signal.cdc_config.is_some(), "cross_domain should have cdc_config");
+    let cdc_config = signal.cdc_config.as_ref().unwrap();
+    assert_eq!(cdc_config.from_domain, Some("fast_domain".to_string()), "from_domain should be 'fast_domain'");
+    assert_eq!(cdc_config.to_domain, Some("slow_domain".to_string()), "to_domain should be 'slow_domain'");
+    assert_eq!(cdc_config.sync_stages, 3, "sync_stages should be 3");
+
+    println!("#[cdc] with from/to keywords test PASSED!");
+}
+
+/// Test lifetime-style domain references in CDC attributes
+#[test]
+fn test_cdc_with_lifetime_domains() {
+    println!("=== Testing #[cdc] with Lifetime-Style Domains ===");
+
+    let source = r#"
+entity CdcLifetimeTest {
+    in data: bit[8],
+    out result: bit[8],
+
+    // CDC with lifetime-style domain references (integrates with type system)
+    #[cdc(from = 'fast_clk, to = 'slow_clk, sync_stages = 3)]
+    signal cross_domain: bit[8],
+
+    // Full spec with type and lifetime domains
+    #[cdc(source = 'src_domain, destination = 'dst_domain, cdc_type = gray)]
+    signal gray_cross: bit[8],
+}
+
+impl CdcLifetimeTest {
+    cross_domain = data;
+    gray_cross = data;
+    result = cross_domain;
+}
+"#;
+
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building should succeed");
+
+    let entity = hir.entities.iter().find(|e| e.name == "CdcLifetimeTest").unwrap();
+
+    // Check cross_domain with lifetime domains
+    let signal = entity.signals.iter().find(|s| s.name == "cross_domain").unwrap();
+    assert!(signal.cdc_config.is_some(), "cross_domain should have cdc_config");
+    let cdc_config = signal.cdc_config.as_ref().unwrap();
+    // The lexer captures lifetime as "'name" but stores as "name"
+    assert_eq!(cdc_config.from_domain, Some("'fast_clk".to_string()), "from_domain should be 'fast_clk'");
+    assert_eq!(cdc_config.to_domain, Some("'slow_clk".to_string()), "to_domain should be 'slow_clk'");
+    assert_eq!(cdc_config.sync_stages, 3, "sync_stages should be 3");
+
+    // Check gray_cross with full spec
+    let signal = entity.signals.iter().find(|s| s.name == "gray_cross").unwrap();
+    assert!(signal.cdc_config.is_some(), "gray_cross should have cdc_config");
+    let cdc_config = signal.cdc_config.as_ref().unwrap();
+    assert_eq!(cdc_config.from_domain, Some("'src_domain".to_string()), "from_domain should be 'src_domain'");
+    assert_eq!(cdc_config.to_domain, Some("'dst_domain".to_string()), "to_domain should be 'dst_domain'");
+    assert_eq!(cdc_config.cdc_type, CdcType::Gray, "cdc_type should be Gray");
+
+    println!("#[cdc] with lifetime-style domains test PASSED!");
+}

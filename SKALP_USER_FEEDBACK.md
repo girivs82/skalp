@@ -187,11 +187,11 @@ signal async_input: bit[8];  // Auto-inserts synchronizers
 - `#[cdc(sync_stages = 3)]` - Custom number of synchronizer stages
 - `#[cdc(cdc_type = gray)]` - CDC type: `gray`, `pulse`, `handshake`, `async_fifo`, `two_ff`
 - `#[cdc(sync_stages = 2, cdc_type = gray)]` - Combined parameters
-- `#[cdc(source = clk_a, destination = clk_b)]` - Domain references (integrates with lifetime system)
+- `#[cdc(from = clk_a, to = clk_b)]` - Domain references with from/to keywords
+- `#[cdc(source = 'fast, destination = 'slow)]` - Lifetime-style domain references (integrates with type system)
 
 **NOT YET IMPLEMENTED:**
 - Automatic synchronizer logic generation in SystemVerilog codegen
-- Lifetime-style domain syntax in attributes (`source = 'clk_a`) - parser enhancement needed
 
 **Impact**: Medium. CDC attribute parsing complete; codegen for synchronizer instantiation pending.
 
