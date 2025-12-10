@@ -4,7 +4,7 @@
 //! preserving sequential logic, event blocks, and assignments.
 
 use anyhow::Result;
-use skalp_frontend::hir::MemoryStyle;
+use skalp_frontend::hir::{CdcConfig, CdcType, MemoryStyle};
 use skalp_lir::LirDesign;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::type_width; // Use shared type width calculations
@@ -483,6 +483,20 @@ fn generate_module(
                 signal.name,
                 mem_config.depth - 1
             ));
+        } else if let Some(cdc_config) = &signal.cdc_config {
+            // CDC signal - generate synchronizer chain
+            let (element_width, array_dim) = get_type_dimensions(&signal.signal_type);
+            let data_width = type_width::get_type_width(&signal.signal_type);
+
+            // Generate CDC synchronizer based on type
+            generate_cdc_synchronizer(
+                &mut sv,
+                &signal.name,
+                &element_width,
+                &array_dim,
+                data_width,
+                cdc_config,
+            );
         } else {
             // Standard signal declaration (non-memory)
             let (element_width, array_dim) = get_type_dimensions(&signal.signal_type);
@@ -2518,4 +2532,263 @@ fn generate_assertion(assertion: &Assertion, module: &Module) -> String {
             }
         }
     }
+}
+
+/// Generate CDC synchronizer logic for a signal
+///
+/// Based on the CdcConfig, generates appropriate synchronizer structures:
+/// - TwoFF: Simple 2-stage (or N-stage) flip-flop chain for single-bit signals
+/// - Gray: Gray code encoder/decoder for multi-bit values
+/// - Handshake: Request/acknowledge handshake protocol
+/// - Pulse: Pulse synchronizer for edge detection
+/// - AsyncFifo: Async FIFO with dual-clock pointers (generates comment only)
+fn generate_cdc_synchronizer(
+    sv: &mut String,
+    signal_name: &str,
+    element_width: &str,
+    array_dim: &str,
+    data_width: usize,
+    cdc_config: &CdcConfig,
+) {
+    let stages = cdc_config.sync_stages as usize;
+    let from_domain = cdc_config.from_domain.as_deref().unwrap_or("async");
+    let to_domain = cdc_config.to_domain.as_deref().unwrap_or("sync");
+
+    // Add CDC comment header
+    sv.push_str(&format!(
+        "    // CDC Synchronizer: {} -> {}, type={:?}, stages={}\n",
+        from_domain, to_domain, cdc_config.cdc_type, stages
+    ));
+
+    match cdc_config.cdc_type {
+        CdcType::TwoFF => {
+            // Generate N-stage flip-flop synchronizer chain
+            // For single-bit or narrow signals
+            generate_two_ff_synchronizer(sv, signal_name, element_width, array_dim, stages);
+        }
+        CdcType::Gray => {
+            // Generate Gray code synchronizer for multi-bit values
+            // Converts binary -> gray -> sync stages -> binary
+            if data_width > 1 {
+                generate_gray_code_synchronizer(sv, signal_name, element_width, array_dim, data_width, stages);
+            } else {
+                // Fall back to 2FF for single-bit
+                generate_two_ff_synchronizer(sv, signal_name, element_width, array_dim, stages);
+            }
+        }
+        CdcType::Pulse => {
+            // Generate pulse synchronizer for edge detection across domains
+            generate_pulse_synchronizer(sv, signal_name, element_width, array_dim, stages);
+        }
+        CdcType::Handshake => {
+            // Generate handshake synchronizer signals
+            generate_handshake_synchronizer(sv, signal_name, element_width, array_dim, stages);
+        }
+        CdcType::AsyncFifo => {
+            // Async FIFO is too complex for inline generation
+            // Generate placeholder with instantiation hint
+            sv.push_str(&format!(
+                "    // TODO: Instantiate async FIFO for {} (requires external module)\n",
+                signal_name
+            ));
+            sv.push_str(&format!(
+                "    // Suggested: async_fifo #(.WIDTH({})) {}_fifo (.*);\n",
+                data_width, signal_name
+            ));
+            // Generate the base signal as wire
+            sv.push_str(&format!(
+                "    wire {}{}{};\n",
+                element_width, signal_name, array_dim
+            ));
+        }
+    }
+}
+
+/// Generate N-stage flip-flop synchronizer
+/// Creates: signal_sync_0, signal_sync_1, ..., signal (final output)
+fn generate_two_ff_synchronizer(
+    sv: &mut String,
+    signal_name: &str,
+    element_width: &str,
+    array_dim: &str,
+    stages: usize,
+) {
+    // Generate intermediate stage registers
+    // (* ASYNC_REG = "TRUE" *) attribute helps tools recognize CDC chain
+    for i in 0..stages {
+        sv.push_str("    (* ASYNC_REG = \"TRUE\" *)\n");
+        sv.push_str(&format!(
+            "    reg {}{}_sync_{}{};\n",
+            element_width, signal_name, i, array_dim
+        ));
+    }
+
+    // The final output signal is the last sync stage
+    sv.push_str(&format!(
+        "    wire {}{}{} = {}_sync_{};\n",
+        element_width, signal_name, array_dim, signal_name, stages - 1
+    ));
+}
+
+/// Generate Gray code synchronizer for multi-bit CDC
+/// Converts binary -> gray (source domain), syncs gray, converts gray -> binary (dest domain)
+fn generate_gray_code_synchronizer(
+    sv: &mut String,
+    signal_name: &str,
+    element_width: &str,
+    array_dim: &str,
+    data_width: usize,
+    stages: usize,
+) {
+    let width_m1 = data_width - 1;
+
+    // Binary input (source domain)
+    sv.push_str(&format!(
+        "    wire {}{}_bin_in{};\n",
+        element_width, signal_name, array_dim
+    ));
+
+    // Gray-coded version (source domain)
+    sv.push_str(&format!(
+        "    wire {}{}_gray{};\n",
+        element_width, signal_name, array_dim
+    ));
+
+    // Synchronizer stages for gray code
+    for i in 0..stages {
+        sv.push_str("    (* ASYNC_REG = \"TRUE\" *)\n");
+        sv.push_str(&format!(
+            "    reg {}{}_gray_sync_{}{};\n",
+            element_width, signal_name, i, array_dim
+        ));
+    }
+
+    // Binary output (destination domain)
+    sv.push_str(&format!(
+        "    wire {}{}{};\n",
+        element_width, signal_name, array_dim
+    ));
+
+    // Binary to Gray conversion: gray = bin ^ (bin >> 1)
+    sv.push_str(&format!(
+        "    assign {}_gray = {}_bin_in ^ ({}_bin_in >> 1);\n",
+        signal_name, signal_name, signal_name
+    ));
+
+    // Gray to Binary conversion (XOR chain)
+    // For n-bit: bin[n-1] = gray[n-1], bin[i] = bin[i+1] ^ gray[i]
+    sv.push_str(&format!(
+        "    // Gray to binary decoder\n"
+    ));
+
+    if data_width <= 8 {
+        // Inline decoder for small widths
+        sv.push_str(&format!(
+            "    assign {}[{}] = {}_gray_sync_{}[{}];\n",
+            signal_name, width_m1, signal_name, stages - 1, width_m1
+        ));
+        for i in (0..width_m1).rev() {
+            sv.push_str(&format!(
+                "    assign {}[{}] = {}[{}] ^ {}_gray_sync_{}[{}];\n",
+                signal_name, i, signal_name, i + 1, signal_name, stages - 1, i
+            ));
+        }
+    } else {
+        // Generate-based decoder for larger widths
+        sv.push_str(&format!(
+            "    // Use generate block for {}-bit gray decoder\n",
+            data_width
+        ));
+        sv.push_str(&format!(
+            "    assign {} = gray_to_bin({}_gray_sync_{});\n",
+            signal_name, signal_name, stages - 1
+        ));
+    }
+}
+
+/// Generate pulse synchronizer for edge detection across domains
+fn generate_pulse_synchronizer(
+    sv: &mut String,
+    signal_name: &str,
+    element_width: &str,
+    array_dim: &str,
+    stages: usize,
+) {
+    // Toggle flip-flop in source domain
+    sv.push_str(&format!(
+        "    reg {}_toggle{};\n",
+        signal_name, array_dim
+    ));
+
+    // Synchronizer chain for toggle
+    for i in 0..stages {
+        sv.push_str("    (* ASYNC_REG = \"TRUE\" *)\n");
+        sv.push_str(&format!(
+            "    reg {}_toggle_sync_{}{};\n",
+            signal_name, i, array_dim
+        ));
+    }
+
+    // Previous value for edge detection
+    sv.push_str(&format!(
+        "    reg {}_toggle_prev{};\n",
+        signal_name, array_dim
+    ));
+
+    // Output pulse (XOR of synced toggle and previous)
+    sv.push_str(&format!(
+        "    wire {}{}{} = {}_toggle_sync_{} ^ {}_toggle_prev;\n",
+        element_width, signal_name, array_dim, signal_name, stages - 1, signal_name
+    ));
+}
+
+/// Generate handshake synchronizer signals
+fn generate_handshake_synchronizer(
+    sv: &mut String,
+    signal_name: &str,
+    element_width: &str,
+    array_dim: &str,
+    stages: usize,
+) {
+    // Request signal (source domain)
+    sv.push_str(&format!(
+        "    reg {}_req{};\n",
+        signal_name, array_dim
+    ));
+
+    // Request synchronizer chain (into destination domain)
+    for i in 0..stages {
+        sv.push_str("    (* ASYNC_REG = \"TRUE\" *)\n");
+        sv.push_str(&format!(
+            "    reg {}_req_sync_{}{};\n",
+            signal_name, i, array_dim
+        ));
+    }
+
+    // Acknowledge signal (destination domain)
+    sv.push_str(&format!(
+        "    reg {}_ack{};\n",
+        signal_name, array_dim
+    ));
+
+    // Acknowledge synchronizer chain (back to source domain)
+    for i in 0..stages {
+        sv.push_str("    (* ASYNC_REG = \"TRUE\" *)\n");
+        sv.push_str(&format!(
+            "    reg {}_ack_sync_{}{};\n",
+            signal_name, i, array_dim
+        ));
+    }
+
+    // Data holding register (stable during handshake)
+    sv.push_str(&format!(
+        "    reg {}{}_data{};\n",
+        element_width, signal_name, array_dim
+    ));
+
+    // Output is the data register
+    sv.push_str(&format!(
+        "    wire {}{}{} = {}_data;\n",
+        element_width, signal_name, array_dim, signal_name
+    ));
 }

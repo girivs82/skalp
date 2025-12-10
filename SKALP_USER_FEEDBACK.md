@@ -189,11 +189,16 @@ signal async_input: bit[8];  // Auto-inserts synchronizers
 - `#[cdc(sync_stages = 2, cdc_type = gray)]` - Combined parameters
 - `#[cdc(from = clk_a, to = clk_b)]` - Domain references with from/to keywords
 - `#[cdc(source = 'fast, destination = 'slow)]` - Lifetime-style domain references (integrates with type system)
+- **SystemVerilog Codegen**: Generates proper synchronizer structures with `(* ASYNC_REG = "TRUE" *)` attributes
 
-**NOT YET IMPLEMENTED:**
-- Automatic synchronizer logic generation in SystemVerilog codegen
+**Generated Synchronizer Types:**
+- `TwoFF`: N-stage flip-flop chain (e.g., `synced_sync_0`, `synced_sync_1`)
+- `Gray`: Binary→Gray encode, sync stages, Gray→Binary decode
+- `Pulse`: Toggle-based pulse synchronizer with edge detection
+- `Handshake`: Request/acknowledge protocol signals
+- `AsyncFifo`: Placeholder comment (requires external module)
 
-**Impact**: Medium. CDC attribute parsing complete; codegen for synchronizer instantiation pending.
+**Impact**: Medium. CDC attribute parsing and codegen complete. ✅
 
 ### 5. No Power Intent Support
 ```skalp

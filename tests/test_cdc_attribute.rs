@@ -406,6 +406,100 @@ impl CdcFromToTest {
     println!("#[cdc] with from/to keywords test PASSED!");
 }
 
+/// Test that CDC config generates proper SystemVerilog synchronizers
+#[test]
+fn test_cdc_codegen_two_ff() {
+    println!("=== Testing CDC Codegen: 2-FF Synchronizer ===");
+
+    let source = r#"
+entity CdcCodegenTest {
+    in clk: bit,
+    in async_input: bit,
+    out sync_output: bit,
+
+    // CDC signal with 2-FF synchronizer
+    #[cdc(sync_stages = 2)]
+    signal synced: bit,
+}
+
+impl CdcCodegenTest {
+    synced = async_input;
+    sync_output = synced;
+}
+"#;
+
+    // Use full compilation pipeline
+    use skalp_codegen::generate_systemverilog_from_mir;
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_lir::lower_to_lir;
+    use skalp_mir::{MirCompiler, OptimizationLevel};
+
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
+
+    // Generate SystemVerilog
+    let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
+
+    println!("Generated SystemVerilog:\n{}", sv);
+
+    // Verify CDC synchronizer was generated
+    assert!(sv.contains("CDC Synchronizer"), "Should have CDC comment");
+    assert!(sv.contains("ASYNC_REG"), "Should have ASYNC_REG attribute");
+    assert!(sv.contains("synced_sync_0"), "Should have sync stage 0");
+    assert!(sv.contains("synced_sync_1"), "Should have sync stage 1");
+
+    println!("CDC codegen 2-FF test PASSED!");
+}
+
+/// Test CDC codegen with Gray code synchronizer
+#[test]
+fn test_cdc_codegen_gray() {
+    println!("=== Testing CDC Codegen: Gray Code Synchronizer ===");
+
+    let source = r#"
+entity CdcGrayTest {
+    in clk: bit,
+    in async_counter: bit[4],
+    out sync_counter: bit[4],
+
+    // CDC signal with Gray code synchronizer
+    #[cdc(cdc_type = gray, sync_stages = 2)]
+    signal gray_synced: bit[4],
+}
+
+impl CdcGrayTest {
+    gray_synced = async_counter;
+    sync_counter = gray_synced;
+}
+"#;
+
+    // Use full compilation pipeline
+    use skalp_codegen::generate_systemverilog_from_mir;
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_lir::lower_to_lir;
+    use skalp_mir::{MirCompiler, OptimizationLevel};
+
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
+
+    // Generate SystemVerilog
+    let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
+
+    println!("Generated SystemVerilog:\n{}", sv);
+
+    // Verify Gray code synchronizer was generated
+    assert!(sv.contains("CDC Synchronizer"), "Should have CDC comment");
+    assert!(sv.contains("Gray"), "Should mention Gray type");
+    assert!(sv.contains("gray_synced_gray"), "Should have gray-coded signal");
+    assert!(sv.contains("gray_synced_bin_in"), "Should have binary input");
+
+    println!("CDC codegen Gray test PASSED!");
+}
+
 /// Test lifetime-style domain references in CDC attributes
 #[test]
 fn test_cdc_with_lifetime_domains() {
