@@ -147,14 +147,14 @@ signal regfile: bit[16],  // Register file
 ```
 **Status**: Implemented. Parser, HIR, and MIR fully support memory attributes.
 
-### 2. No Formal Verification Integration
+### 2. ~~No Formal Verification Integration~~ ✅ **DONE** (Dec 2025)
 ```skalp
-// WANTED:
+// NOW SUPPORTED:
 assert!(result < MAX_VALUE, "Overflow check");
 assume!(input != 0, "Non-zero input");
 cover!(state == IDLE, "Can reach idle");
 ```
-**Impact**: Medium-High. No integration with formal tools (SymbiYosys, Jasper, etc.). Critical for safety-critical designs.
+**Status**: Implemented. Parser, HIR, MIR, and SystemVerilog codegen fully support formal verification macros. Generates standard SVA (SystemVerilog Assertions) compatible with formal tools like SymbiYosys, Jasper, etc.
 
 ### 3. Limited Debug/Trace Infrastructure
 ```skalp
@@ -206,7 +206,7 @@ entity VendorFifo { ... }
 | Simulation Speed | ★★★★☆ | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ |
 | Learning Curve | ★★★★☆ | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | ★★☆☆☆ |
 | Memory Inference | ★★★★☆ | ★★★★★ | ★★★★☆ | ★★★☆☆ | ★★★★☆ |
-| Formal Support | ☆☆☆☆☆ | ★★★★☆ | ★★☆☆☆ | ★★★☆☆ | ★★★★☆ |
+| Formal Support | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | ★★★☆☆ | ★★★★☆ |
 
 **Skalp's Sweet Spot**: Accelerators with complex arithmetic (FP32, wide datapaths), algorithmic complexity (match expressions, control flow), and timing requirements (pipeline annotations).
 
@@ -237,7 +237,7 @@ entity VendorFifo { ... }
 
 ### For Skalp Development (Next Priorities):
 1. ~~**Priority 1**: RAM/Memory inference~~ ✅ **DONE** (Dec 2025)
-2. **Priority 2**: Formal verification integration (SVA assertions → property checking)
+2. ~~**Priority 2**: Formal verification integration (SVA assertions → property checking)~~ ✅ **DONE** (Dec 2025)
 3. **Priority 3**: Debug infrastructure (trace signals, waveform export)
 4. **Priority 4**: CDC helpers (synchronizer inference)
 5. ~~**Priority 5**: Named generics for function calls~~ ✅ **DONE** (Dec 2025)
@@ -267,7 +267,6 @@ Skalp is now **production-ready for accelerator development**. The December 2025
 - AI-assisted development (Rust-like syntax works well with LLMs)
 
 **Would I avoid Skalp for?**
-- Designs requiring formal verification
 - Multi-clock designs with complex CDC
 - ASIC designs needing power intent
 
