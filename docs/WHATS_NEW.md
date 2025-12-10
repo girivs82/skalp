@@ -1,6 +1,240 @@
 # What's New in SKALP
 
-**Last Updated:** 2025-11-18
+**Last Updated:** 2025-12-11
+
+---
+
+## 🎉 December 2025 - All User Feedback Complete
+
+SKALP has addressed **all user feedback items** and is now fully production-ready!
+
+### ⚡ Power Intent Attributes (NEW)
+
+**Status:** ✅ Complete
+**Attributes:** `#[retention]`, `#[isolation]`, `#[level_shift]`, `#[pdc]`
+
+Type-safe power intent as a first-class language feature - no separate UPF files needed!
+
+```skalp
+// State preservation during power-down
+#[retention]
+signal saved_state: bit[32]
+
+// Retention with explicit strategy
+#[retention(strategy = balloon_latch)]
+signal critical_reg: bit[16]
+
+// Isolation cells - clamp to known value when domain off
+#[isolation(clamp = low)]
+signal isolated_output: bit[32]
+
+#[isolation(clamp = high, enable = "iso_en")]
+signal active_low_sig: bit
+
+// Level shifters for voltage domain crossing
+#[level_shift(from = "VDD_CORE", to = "VDD_IO")]
+signal voltage_crossing: bit[16]
+
+// Combined power domain crossing
+#[pdc(from = 'core, to = 'io, isolation = clamp_low)]
+signal power_domain_cross: bit[32]
+```
+
+**Generated SystemVerilog:**
+```systemverilog
+// Power Intent: saved_state
+(* RETAIN = "TRUE" *)
+(* preserve = "true" *)
+(* DONT_TOUCH = "TRUE" *)
+reg [31:0] saved_state;
+
+// Isolation cell
+wire [31:0] isolated_output_isolated;
+assign isolated_output_isolated = iso_en ? 32'b0 : isolated_output;
+```
+
+---
+
+### 🔄 Clock Domain Crossing (NEW)
+
+**Status:** ✅ Complete
+**Attribute:** `#[cdc]`
+
+Automatic synchronizer generation with multiple strategies:
+
+```skalp
+// Basic 2-stage synchronizer (default)
+#[cdc]
+signal async_input: bit
+
+// 3-stage for high reliability
+#[cdc(sync_stages = 3)]
+signal critical_sync: bit
+
+// Gray code for multi-bit counters
+#[cdc(cdc_type = gray, sync_stages = 2)]
+signal fifo_ptr: bit[8]
+
+// Pulse synchronizer for single-cycle events
+#[cdc(cdc_type = pulse)]
+signal trigger: bit
+
+// Handshake protocol
+#[cdc(cdc_type = handshake)]
+signal req_sync: bit
+
+// Explicit domain annotation
+#[cdc(from = 'clk_fast, to = 'clk_slow)]
+signal cross_domain: bit[16]
+```
+
+**CDC Types:** `two_ff`, `gray`, `pulse`, `handshake`, `async_fifo`
+
+---
+
+### 🐛 Debug Breakpoints (NEW)
+
+**Status:** ✅ Complete
+**Attribute:** `#[breakpoint]`
+
+Native simulation breakpoints with conditions and error detection:
+
+```skalp
+// Simple breakpoint - triggers on any change
+#[breakpoint]
+signal error_flag: bit
+
+// Conditional breakpoint
+#[breakpoint(condition = "counter > 100")]
+signal overflow_counter: bit[8]
+
+// Named with message
+#[breakpoint(name = "FSM_ERROR", message = "Invalid state transition")]
+signal fsm_state: bit[4]
+
+// Error breakpoint - stops simulation immediately
+#[breakpoint(is_error = true, name = "FATAL")]
+signal critical_error: bit
+```
+
+---
+
+### 📊 Signal Tracing (NEW)
+
+**Status:** ✅ Complete
+**Attribute:** `#[trace]`
+
+Automatic waveform export with grouping and formatting:
+
+```skalp
+// Basic trace
+#[trace]
+signal debug_bus: bit[32]
+
+// Grouped and formatted
+#[trace(group = "pipeline", radix = hex, display_name = "Stage 1 Data")]
+signal pipe1_data: bit[64]
+
+// Multiple groups for organized waveforms
+#[trace(group = "control")]
+signal fsm_state: bit[4]
+
+#[trace(group = "datapath", radix = signed)]
+signal alu_result: bit[32]
+```
+
+**Radix Options:** `hex`, `binary`, `unsigned`, `signed`, `ascii`
+
+---
+
+### �icing Vendor IP Integration (NEW)
+
+**Status:** ✅ Complete
+**Attributes:** `#[xilinx_ip]`, `#[intel_ip]`, `#[vendor_ip]`
+
+Seamlessly wrap vendor IP cores:
+
+```skalp
+#[xilinx_ip(name = "xpm_fifo_sync", library = "xpm")]
+entity SyncFifo<DEPTH: 512, WIDTH: 32> {
+    in wr_clk: clock,
+    in wr_en: bit,
+    in din: bit[WIDTH],
+    out full: bit,
+    out empty: bit,
+}
+
+#[intel_ip("altsyncram")]
+entity DualPortRam { ... }
+
+#[vendor_ip(name = "custom_ip", vendor = generic, black_box = true)]
+entity BlackBoxModule { ... }
+```
+
+---
+
+### 💾 Memory Configuration (ENHANCED)
+
+**Status:** ✅ Complete
+**Attribute:** `#[memory]`
+
+Full control over memory inference:
+
+```skalp
+// Block RAM
+#[memory(depth = 1024, width = 64, style = block)]
+signal bram: bit[64][1024]
+
+// Distributed RAM (LUT-based)
+#[memory(depth = 64, style = distributed)]
+signal lutram: bit[16][64]
+
+// UltraRAM (Xilinx)
+#[memory(depth = 65536, style = ultra)]
+signal uram: bit[72][65536]
+
+// Register file
+#[memory(depth = 32, style = register)]
+signal regfile: bit[64][32]
+
+// Dual-port with read latency
+#[memory(depth = 512, ports = 2, read_latency = 2)]
+signal dual_mem: bit[32][512]
+```
+
+**Styles:** `auto`, `block`, `distributed`, `ultra`, `register`
+
+---
+
+### ✅ Formal Verification (COMPLETE)
+
+**Status:** ✅ Complete
+**Macros:** `assert!()`, `assume!()`, `cover!()`
+
+Native SVA generation for formal tools:
+
+```skalp
+// Assertion - must always be true
+assert!(result < MAX_VALUE, "Overflow check")
+
+// Assumption - constrain inputs
+assume!(input != 0, "Non-zero input")
+
+// Cover - reachability target
+cover!(state == IDLE, "Can reach idle state")
+```
+
+---
+
+## 📚 New Documentation
+
+All new features are fully documented:
+
+- [Attributes Reference](user/reference/attributes.md) - Complete attribute guide
+- [Power Intent Guide](user/guides/power-intent.md) - UPF alternative
+- [CDC Patterns Guide](user/guides/clock-domain-crossing.md) - Synchronizer patterns
+- [Debug Guide](user/guides/debug-simulation.md) - Breakpoints and tracing
+- [Memory Guide](user/guides/memory-synthesis.md) - Memory inference
 
 ---
 

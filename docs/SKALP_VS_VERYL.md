@@ -154,7 +154,7 @@ signal state: State
 **Features:**
 - Full structs with named fields
 - Enums with pattern matching
-- Traits (planned)
+- Traits with trait bounds and methods
 - Strong type safety
 
 **Winner**: **SKALP** - Much richer type system
@@ -369,7 +369,7 @@ impl FIFO {
 - Const expressions in types
 - `clog2()`, arithmetic in widths
 - Generic type parameters
-- Traits (planned)
+- Traits with bounds and methods
 
 **Winner**: **SKALP** - Const expressions in types is powerful
 
@@ -478,7 +478,7 @@ logic<msb:0>  // Instead of [msb:0]
 ```skalp
 struct PacketHeader { ... }
 enum State { Idle, Processing, Done }
-trait Bus { ... }  // Planned
+trait Bus { ... }  // Complete with bounds and methods
 ```
 **Impact**: Very High - Essential for large designs
 
@@ -644,7 +644,7 @@ assign result = ((op == 3'b000) ? (a + b) : ...);
 | Assignment inference | ❌ | ✅ | Veryl |
 | Structs | ✅ | ❌ | SKALP |
 | Enums | ✅ | ❌ | SKALP |
-| Traits | 🚧 Planned | ❌ | SKALP |
+| Traits | ✅ Complete | ❌ | SKALP |
 | Pattern matching | ✅ Full | ⚠️ Basic | SKALP |
 | If expressions | ✅ | ✅ | Draw |
 | Const expressions in types | ✅ | ❌ | SKALP |

@@ -18,6 +18,7 @@
 13. [Verification](#verification)
 14. [Standard Library](#standard-library)
 15. [Examples](#examples)
+16. [Attributes](#attributes)
 
 ## 1. Introduction
 
@@ -3298,6 +3299,191 @@ entity System {
         },
     },
 }
+```
+
+## 16. Attributes
+
+Attributes provide compile-time directives for synthesis, simulation, debug, and design intent. They use the `#[attribute]` syntax similar to Rust.
+
+### 16.1 Debug Attributes
+
+```skalp
+// Breakpoint - pause simulation on signal change
+#[breakpoint]
+signal error_flag: bit
+
+// Conditional breakpoint
+#[breakpoint(condition = "counter > 100")]
+signal overflow_counter: bit[8]
+
+// Error breakpoint - stop simulation immediately
+#[breakpoint(is_error = true, name = "FATAL", message = "Critical error detected")]
+signal critical_error: bit
+
+// Signal tracing - export to waveform
+#[trace]
+signal debug_bus: bit[32]
+
+// Grouped tracing with display options
+#[trace(group = "pipeline", radix = hex, display_name = "Stage 1 Data")]
+signal pipe1_data: bit[64]
+```
+
+### 16.2 Clock Domain Crossing (CDC) Attributes
+
+```skalp
+// Basic 2-stage synchronizer (default)
+#[cdc]
+signal async_input: bit
+
+// Configurable synchronizer
+#[cdc(sync_stages = 3)]
+signal critical_sync: bit
+
+// CDC types: two_ff, gray, pulse, handshake, async_fifo
+#[cdc(cdc_type = gray, sync_stages = 2)]
+signal fifo_ptr: bit[8]
+
+#[cdc(cdc_type = pulse)]
+signal trigger: bit
+
+// Explicit domain crossing
+#[cdc(from = 'clk_fast, to = 'clk_slow)]
+signal cross_domain: bit[16]
+```
+
+### 16.3 Power Intent Attributes
+
+Power intent as a first-class language feature, eliminating separate UPF files.
+
+```skalp
+// Retention - preserve state during power-down
+#[retention]
+signal saved_state: bit[32]
+
+// Retention with explicit strategy
+#[retention(strategy = balloon_latch)]
+signal critical_reg: bit[16]
+
+// Isolation - clamp to known value when domain powered off
+#[isolation(clamp = low)]
+signal isolated_output: bit[32]
+
+#[isolation(clamp = high, enable = "iso_en")]
+signal active_low_sig: bit
+
+// Level shifter for voltage domain crossing
+#[level_shift(from = "VDD_CORE", to = "VDD_IO")]
+signal voltage_crossing: bit[16]
+
+// Combined power domain crossing
+#[pdc(from = 'core, to = 'io, isolation = clamp_low)]
+signal power_domain_cross: bit[32]
+```
+
+**Generated SystemVerilog for retention:**
+```systemverilog
+(* RETAIN = "TRUE" *)
+(* preserve = "true" *)
+(* DONT_TOUCH = "TRUE" *)
+reg [31:0] saved_state;
+```
+
+### 16.4 Memory Attributes
+
+```skalp
+// Block RAM inference
+#[memory(depth = 1024, width = 64, style = block)]
+signal bram: bit[64][1024]
+
+// Distributed RAM (LUT-based)
+#[memory(depth = 64, style = distributed)]
+signal lutram: bit[16][64]
+
+// UltraRAM (Xilinx)
+#[memory(depth = 65536, style = ultra)]
+signal uram: bit[72][65536]
+
+// Register file
+#[memory(depth = 32, style = register)]
+signal regfile: bit[64][32]
+
+// Dual-port with read latency
+#[memory(depth = 512, ports = 2, read_latency = 2)]
+signal dual_mem: bit[32][512]
+
+// ROM inference
+#[memory(depth = 256, read_only = true)]
+signal lut: bit[8][256]
+```
+
+**Memory styles:** `auto`, `block`, `distributed`, `ultra`, `register`
+
+### 16.5 Vendor IP Attributes
+
+```skalp
+// Xilinx IP wrapper
+#[xilinx_ip(name = "xpm_fifo_sync", library = "xpm")]
+entity SyncFifo<DEPTH: 512, WIDTH: 32> {
+    in wr_clk: clock,
+    in wr_en: bit,
+    in din: bit[WIDTH],
+    out full: bit,
+    out empty: bit,
+}
+
+// Intel/Altera IP
+#[intel_ip("altsyncram")]
+entity DualPortRam { ... }
+
+// Generic vendor IP
+#[vendor_ip(name = "custom_dsp", vendor = generic, black_box = true)]
+entity BlackBoxDSP { ... }
+```
+
+### 16.6 Synthesis Hints
+
+```skalp
+// Pipeline insertion
+#[pipeline(stages = 4)]
+entity PipelinedMultiplier { ... }
+
+// Loop unrolling (see Section 10.5.2)
+#[unroll]
+for i in 0..8 { ... }
+
+#[unroll(4)]  // Partial unroll by factor 4
+for i in 0..32 { ... }
+
+// Parallel execution hint
+#[parallel]
+impl ParallelAccumulator { ... }
+```
+
+### 16.7 Attribute Stacking
+
+Multiple attributes can be applied to the same declaration:
+
+```skalp
+// Register file with retention and memory configuration
+#[retention]
+#[memory(depth = 8, width = 256, style = register)]
+signal registers: bit[256][8]
+
+// Signal with both trace and CDC
+#[trace(group = "cdc", radix = hex)]
+#[cdc(sync_stages = 2)]
+signal sync_data: bit[32]
+```
+
+### 16.8 Attribute Grammar
+
+```ebnf
+attribute = "#[" attribute_name [ "(" attribute_params ")" ] "]"
+attribute_name = ident
+attribute_params = attribute_param { "," attribute_param }
+attribute_param = ident "=" value | value
+value = literal | ident | lifetime
 ```
 
 ## Appendix A: Grammar Summary

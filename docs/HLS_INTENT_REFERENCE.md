@@ -611,7 +611,71 @@ impl LargeMemory {
 
 ## 7. Power Optimization Intents
 
-### 7.1 Clock Gating
+SKALP provides two complementary approaches for power intent specification:
+1. **`@intent(power: {...})`** - High-level intent blocks for entity/module-level power configuration
+2. **`#[attribute]`** - Signal-level attributes for fine-grained power control (NEW in Dec 2025)
+
+### 7.1 Signal-Level Power Attributes (NEW)
+
+**Retention** - Preserve state during power-down:
+```skalp
+// Basic retention
+#[retention]
+signal saved_state: bit[32]
+
+// With explicit strategy
+#[retention(strategy = balloon_latch)]
+signal critical_reg: bit[16]
+
+#[retention(strategy = shadow_register)]
+signal config_backup: bit[64]
+```
+
+**Isolation** - Control signals when power domain is off:
+```skalp
+// Clamp output to 0 when domain powered off
+#[isolation(clamp = low)]
+signal isolated_output: bit[32]
+
+// Clamp to 1
+#[isolation(clamp = high, enable = "iso_en")]
+signal active_low_sig: bit
+
+// Hold last value
+#[isolation(clamp = latch)]
+signal hold_signal: bit[16]
+```
+
+**Level Shifters** - Voltage domain crossing:
+```skalp
+#[level_shift(from = "VDD_CORE", to = "VDD_IO")]
+signal voltage_crossing: bit[16]
+
+#[level_shift(shifter_type = low_to_high)]
+signal core_to_io_signal: bit
+```
+
+**Power Domain Crossing**:
+```skalp
+#[pdc(from = 'core, to = 'io, isolation = clamp_low)]
+signal power_domain_cross: bit[32]
+```
+
+**Generated SystemVerilog:**
+```systemverilog
+// From #[retention]
+(* RETAIN = "TRUE" *)
+(* preserve = "true" *)
+(* DONT_TOUCH = "TRUE" *)
+reg [31:0] saved_state;
+
+// From #[isolation(clamp = low)]
+(* DONT_TOUCH = "TRUE" *)
+wire [31:0] isolated_output_isolated;
+assign isolated_output_isolated = iso_en ? 32'b0 : isolated_output;
+```
+
+### 7.2 Clock Gating
 
 ```skalp
 @intent(power: {
@@ -634,7 +698,7 @@ impl PowerAwareProcessor {
 }
 ```
 
-### 7.2 Multi-Voltage Domains
+### 7.3 Multi-Voltage Domains
 
 ```skalp
 @intent(power: {
@@ -652,8 +716,9 @@ impl MixedVoltageDomain {
 }
 ```
 
-### 7.3 Power Gating
+### 7.4 Power Gating (Entity-Level)
 
+For entity-level power gating configuration:
 ```skalp
 @intent(power: {
     power_gating: {
@@ -668,7 +733,23 @@ impl PowerManagedAccelerator {
 }
 ```
 
-### 7.4 Dynamic Frequency Scaling
+Combined with signal-level attributes:
+```skalp
+impl PowerManagedAccelerator {
+    // These signals have retention during power gating
+    #[retention]
+    signal compute_array_state: bit[32]
+
+    #[retention(strategy = shadow_register)]
+    signal memory_bank_ptr: bit[16]
+
+    // Isolation for outputs crossing power domains
+    #[isolation(clamp = low)]
+    signal domain_output: bit[64]
+}
+```
+
+### 7.5 Dynamic Frequency Scaling
 
 ```skalp
 @intent(power: {
@@ -683,6 +764,55 @@ impl PowerManagedAccelerator {
 })
 entity AdaptiveProcessor {
     in perf_mode: PerformanceMode
+}
+```
+
+### 7.6 Complete Power-Aware Design Example
+
+```skalp
+entity PowerAwareSubsystem {
+    in clk: clock
+    in rst: reset
+    in power_enable: bit
+    in data_in: bit[32]
+    out data_out: bit[32]
+}
+
+@intent(power: {
+    clock_gating: auto,
+    power_gating: {
+        retention: true,
+        wakeup_latency: 5_cycles
+    }
+})
+impl PowerAwareSubsystem {
+    // Register file with retention - preserved during power-down
+    #[retention]
+    #[memory(depth = 8, width = 32, style = register)]
+    signal reg_file: bit[32][8]
+
+    // Configuration registers - must survive power cycles
+    #[retention(strategy = balloon_latch)]
+    signal config_active: bit[8]
+
+    // Output isolation - clamp to 0 when domain is off
+    #[isolation(clamp = low, enable = "power_enable")]
+    signal internal_result: bit[32]
+
+    // CDC synchronized input from always-on domain
+    #[cdc(sync_stages = 2)]
+    signal power_enable_sync: bit
+
+    on(clk.rise) {
+        if (rst) {
+            reg_file <= {0, 0, 0, 0, 0, 0, 0, 0}
+        } else if (power_enable_sync) {
+            // Normal operation
+            internal_result <= compute(data_in, reg_file)
+        }
+    }
+
+    data_out = internal_result
 }
 ```
 

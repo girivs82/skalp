@@ -702,8 +702,117 @@ on(clk.rise) {
 
 ---
 
+## Attributes
+
+Attributes provide compile-time directives for synthesis, simulation, and design intent.
+
+### Syntax
+```skalp
+#[attribute_name]
+#[attribute_name(param = value)]
+#[attribute_name(param1 = value1, param2 = value2)]
+```
+
+### Debug Attributes
+
+| Attribute | Target | Description |
+|-----------|--------|-------------|
+| `#[breakpoint]` | signal | Pause simulation on signal change |
+| `#[breakpoint(condition = "expr")]` | signal | Conditional breakpoint |
+| `#[breakpoint(is_error = true)]` | signal | Stop simulation with error |
+| `#[trace]` | signal | Export signal to waveform |
+| `#[trace(group = "name")]` | signal | Group signals in waveform |
+| `#[trace(radix = hex)]` | signal | Display format: hex, binary, signed, unsigned, ascii |
+
+### CDC Attributes
+
+| Attribute | Target | Description |
+|-----------|--------|-------------|
+| `#[cdc]` | signal | 2-stage synchronizer (default) |
+| `#[cdc(sync_stages = N)]` | signal | N-stage synchronizer |
+| `#[cdc(cdc_type = gray)]` | signal | Gray code synchronizer |
+| `#[cdc(cdc_type = pulse)]` | signal | Pulse synchronizer |
+| `#[cdc(cdc_type = handshake)]` | signal | Handshake protocol |
+| `#[cdc(from = 'src, to = 'dst)]` | signal | Explicit domain crossing |
+
+### Power Intent Attributes
+
+| Attribute | Target | Description |
+|-----------|--------|-------------|
+| `#[retention]` | signal | Preserve state during power-down |
+| `#[retention(strategy = balloon_latch)]` | signal | Explicit retention strategy |
+| `#[isolation(clamp = low)]` | signal | Clamp to 0 when isolated |
+| `#[isolation(clamp = high)]` | signal | Clamp to 1 when isolated |
+| `#[isolation(clamp = latch)]` | signal | Hold last value |
+| `#[level_shift]` | signal | Voltage domain crossing |
+| `#[pdc(from = 'src, to = 'dst)]` | signal | Power domain crossing |
+
+### Memory Attributes
+
+| Attribute | Target | Description |
+|-----------|--------|-------------|
+| `#[memory(depth = N)]` | signal | Memory with N entries |
+| `#[memory(style = block)]` | signal | Block RAM inference |
+| `#[memory(style = distributed)]` | signal | LUT-based RAM |
+| `#[memory(style = ultra)]` | signal | UltraRAM (Xilinx) |
+| `#[memory(style = register)]` | signal | Register file |
+| `#[memory(ports = 2)]` | signal | Dual-port memory |
+| `#[memory(read_latency = N)]` | signal | N-cycle read latency |
+| `#[memory(read_only = true)]` | signal | ROM inference |
+
+### Vendor IP Attributes
+
+| Attribute | Target | Description |
+|-----------|--------|-------------|
+| `#[xilinx_ip("name")]` | entity | Wrap Xilinx IP core |
+| `#[intel_ip("name")]` | entity | Wrap Intel/Altera IP |
+| `#[vendor_ip(name = "x", vendor = y)]` | entity | Generic vendor IP |
+| `#[vendor_ip(black_box = true)]` | entity | Black-box module |
+
+### Synthesis Hints
+
+| Attribute | Target | Description |
+|-----------|--------|-------------|
+| `#[pipeline(stages = N)]` | entity/fn | Add N pipeline stages |
+| `#[unroll]` | for loop | Fully unroll loop |
+| `#[unroll(N)]` | for loop | Unroll by factor N |
+| `#[parallel]` | impl | Parallel execution hint |
+
+### Examples
+
+**Debug breakpoint on error:**
+```skalp
+#[breakpoint(is_error = true, name = "OVERFLOW", message = "Counter overflow")]
+signal overflow: bit
+```
+
+**CDC synchronizer:**
+```skalp
+#[cdc(sync_stages = 3, cdc_type = gray)]
+signal fifo_ptr: bit[8]
+```
+
+**Retained register file:**
+```skalp
+#[retention]
+#[memory(depth = 32, style = register)]
+signal regfile: bit[64][32]
+```
+
+**Block RAM with tracing:**
+```skalp
+#[memory(depth = 1024, style = block)]
+#[trace(group = "memory", radix = hex)]
+signal data_mem: bit[32][1024]
+```
+
+For complete attribute documentation, see [Attributes Reference](attributes.md).
+
+---
+
 ## See Also
 
+- [Attributes Reference](attributes.md) - Complete attribute documentation
 - [Type System Reference](types.md) - Detailed type information
 - [Operators Reference](operators.md) - Operator precedence and details
 - [Built-in Functions](builtins.md) - All built-in functions

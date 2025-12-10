@@ -372,7 +372,7 @@ match state {
 signal ptr: nat[clog2(DEPTH)]  // Compiler figures it out
 ```
 
-✅ **Traits & Interfaces** (planned)
+✅ **Traits & Interfaces** (complete)
 ```skalp
 trait Bus {
     fn read(&self, addr: nat[32]) -> bit[32];
@@ -488,7 +488,7 @@ Requires ~200+ lines with:
 **SKALP Advantage**:
 - Compiler verifies CDC safety
 - Cleaner syntax
-- Built-in Gray code utilities (planned)
+- Built-in Gray code utilities with `#[cdc(cdc_type = gray)]`
 - Automatic synchronizer detection
 
 ---
