@@ -316,3 +316,60 @@ impl CdcCombinedTest {
 
     println!("#[cdc] combined attributes test PASSED!");
 }
+
+#[test]
+fn test_cdc_with_domain_identifiers() {
+    println!("=== Testing #[cdc] with Domain Identifiers ===");
+
+    // Test domain references using identifiers
+    // Note: Use source/destination to ensure all tokens are captured
+    let source = r#"
+entity CdcDomainTest {
+    in clk_fast: bit,
+    in clk_slow: bit,
+    in data: bit[8],
+    out result: bit[8],
+
+    // CDC with explicit domain names
+    #[cdc(source = fast_clk, destination = slow_clk, sync_stages = 2)]
+    signal cross_domain: bit[8],
+
+    // Using source/destination aliases
+    #[cdc(source = producer, destination = consumer)]
+    signal async_data: bit[8],
+}
+
+impl CdcDomainTest {
+    cross_domain = data;
+    async_data = data;
+    result = cross_domain;
+}
+"#;
+
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building should succeed");
+
+    let entity = hir.entities.iter().find(|e| e.name == "CdcDomainTest").unwrap();
+
+    // Check cross_domain has from/to domains
+    let signal = entity.signals.iter().find(|s| s.name == "cross_domain").unwrap();
+    assert!(signal.cdc_config.is_some(), "cross_domain should have cdc_config");
+    let cdc_config = signal.cdc_config.as_ref().unwrap();
+    assert_eq!(cdc_config.from_domain, Some("fast_clk".to_string()), "from_domain should be 'fast_clk'");
+    assert_eq!(cdc_config.to_domain, Some("slow_clk".to_string()), "to_domain should be 'slow_clk'");
+    assert_eq!(cdc_config.sync_stages, 2, "sync_stages should be 2");
+
+    // Check async_data with source/destination aliases
+    let signal = entity.signals.iter().find(|s| s.name == "async_data").unwrap();
+    assert!(signal.cdc_config.is_some(), "async_data should have cdc_config");
+    let cdc_config = signal.cdc_config.as_ref().unwrap();
+    assert_eq!(cdc_config.from_domain, Some("producer".to_string()), "from_domain should be 'producer'");
+    assert_eq!(cdc_config.to_domain, Some("consumer".to_string()), "to_domain should be 'consumer'");
+
+    println!("#[cdc] with domain identifiers test PASSED!");
+}
+
+// NOTE: Lifetime-style domains (#[cdc(source = 'fast_clk, ...)]) require
+// parser enhancement to capture lifetime tokens in attribute values.
+// The attribute system is designed to support this; the parser needs updating.
+// For now, use identifier-style domain names: #[cdc(source = fast_clk, ...)]

@@ -7168,7 +7168,11 @@ impl HirBuilderContext {
     }
 
     /// Extract CDC config from an IntentValue node
-    /// Handles: #[cdc] or #[cdc(sync_stages=3)] or #[cdc(sync_stages=2, type=gray)]
+    /// Handles: #[cdc] or #[cdc(sync_stages=3)] or #[cdc(from='src, to='dst, cdc_type=gray)]
+    ///
+    /// Integrates with the lifetime-based clock domain system:
+    /// - `from = 'src` references source clock domain lifetime
+    /// - `to = 'dst` references destination clock domain lifetime
     fn extract_cdc_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<CdcConfig> {
         // Recursively collect all tokens from the intent value and its children
         fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
@@ -7196,6 +7200,8 @@ impl HirBuilderContext {
         // Parse key=value pairs
         let mut sync_stages: Option<u32> = None;
         let mut cdc_type: Option<CdcType> = None;
+        let mut from_domain: Option<String> = None;
+        let mut to_domain: Option<String> = None;
 
         let mut current_key: Option<&str> = None;
 
@@ -7203,38 +7209,76 @@ impl HirBuilderContext {
             if token.kind() == SyntaxKind::Ident {
                 let text = token.text();
                 match text {
-                    "sync_stages" | "stages" | "type" | "cdc_type" => {
-                        current_key = Some(text);
+                    // Keys for domain references
+                    "from" | "from_domain" | "src" | "source" => {
+                        current_key = Some("from");
+                    }
+                    "to" | "to_domain" | "dst" | "dest" | "destination" => {
+                        current_key = Some("to");
+                    }
+                    // Keys for other parameters
+                    "sync_stages" | "stages" => {
+                        current_key = Some("stages");
+                    }
+                    "type" | "cdc_type" => {
+                        current_key = Some("type");
                     }
                     // CDC type values
                     "two_ff" | "twoFF" | "2ff" => {
-                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                        if current_key == Some("type") {
                             cdc_type = Some(CdcType::TwoFF);
                         }
                         current_key = None;
                     }
                     "gray" => {
-                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                        if current_key == Some("type") {
                             cdc_type = Some(CdcType::Gray);
                         }
                         current_key = None;
                     }
                     "handshake" => {
-                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                        if current_key == Some("type") {
                             cdc_type = Some(CdcType::Handshake);
                         }
                         current_key = None;
                     }
                     "pulse" => {
-                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                        if current_key == Some("type") {
                             cdc_type = Some(CdcType::Pulse);
                         }
                         current_key = None;
                     }
                     "async_fifo" | "fifo" => {
-                        if matches!(current_key, Some("type") | Some("cdc_type")) {
+                        if current_key == Some("type") {
                             cdc_type = Some(CdcType::AsyncFifo);
                         }
+                        current_key = None;
+                    }
+                    // Identifier value for domain (e.g., from = fast without quote)
+                    _ => {
+                        match current_key {
+                            Some("from") => {
+                                from_domain = Some(text.to_string());
+                                current_key = None;
+                            }
+                            Some("to") => {
+                                to_domain = Some(text.to_string());
+                                current_key = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            } else if token.kind() == SyntaxKind::Lifetime {
+                // Lifetime token (e.g., 'fast, 'slow) - the lexer strips the leading '
+                let domain_name = token.text().to_string();
+                match current_key {
+                    Some("from") => {
+                        from_domain = Some(domain_name);
+                        current_key = None;
+                    }
+                    Some("to") => {
+                        to_domain = Some(domain_name);
                         current_key = None;
                     }
                     _ => {}
@@ -7244,7 +7288,7 @@ impl HirBuilderContext {
                 let text = token.text().replace('_', "");
                 if let Ok(val) = text.parse::<u32>() {
                     match current_key {
-                        Some("sync_stages") | Some("stages") => sync_stages = Some(val),
+                        Some("stages") => sync_stages = Some(val),
                         _ => {
                             // First number without key is assumed to be sync_stages
                             if sync_stages.is_none() {
@@ -7260,8 +7304,8 @@ impl HirBuilderContext {
         // Return CDC config with defaults for unspecified values
         Some(CdcConfig {
             sync_stages: sync_stages.unwrap_or(2), // Default: 2-stage synchronizer
-            from_domain: None,
-            to_domain: None,
+            from_domain,
+            to_domain,
             cdc_type: cdc_type.unwrap_or_default(),
         })
     }

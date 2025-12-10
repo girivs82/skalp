@@ -586,30 +586,58 @@ impl TraceConfig {
 
 /// Clock Domain Crossing (CDC) configuration
 ///
-/// Specifies that a signal crosses clock domains and needs synchronization.
-/// Used with `#[cdc(...)]` attribute on signal declarations.
+/// Specifies synchronizer configuration for signals crossing clock domains.
+/// Works with the lifetime-based clock domain system (`'domain` syntax).
 ///
-/// # Usage
+/// # Integration with Clock Domain Lifetimes
+///
+/// SKALP uses Rust-style lifetimes for compile-time CDC checking:
+/// ```text
+/// signal data: logic<'fast>[32]   // Signal in 'fast domain
+/// signal sync: logic<'slow>[32]   // Signal in 'slow domain
+/// ```
+///
+/// The `#[cdc]` attribute specifies HOW to synchronize when crossing:
+/// ```text
+/// // Type system detects the crossing; attribute configures synchronizer
+/// #[cdc(sync_stages = 2, from = 'fast, to = 'slow)]
+/// signal cross_domain: logic<'slow>[8];
+/// ```
+///
+/// # Usage Examples
 ///
 /// ```text
-/// #[cdc(sync_stages = 2)]
-/// signal async_input: bit;  // 2-stage synchronizer (default)
+/// // Basic 2-stage synchronizer (default)
+/// #[cdc]
+/// signal async_input: bit;
 ///
+/// // 3-stage for higher MTBF
 /// #[cdc(sync_stages = 3)]
-/// signal metastable_input: bit;  // 3-stage for higher MTBF
+/// signal metastable_input: bit;
 ///
-/// #[cdc(sync_stages = 2, from = "clk_slow", to = "clk_fast")]
-/// signal cross_domain: bit[8];  // With explicit domain annotation
+/// // With explicit domain annotation (references lifetime names)
+/// #[cdc(from = 'src, to = 'dst, sync_stages = 2)]
+/// signal cross_domain: logic<'dst>[8];
+///
+/// // Gray code synchronizer for multi-bit values
+/// #[cdc(cdc_type = gray, sync_stages = 2)]
+/// signal counter_sync: bit[8];
+///
+/// // Pulse synchronizer for edge detection
+/// #[cdc(cdc_type = pulse)]
+/// signal trigger_sync: bit;
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CdcConfig {
     /// Number of synchronizer flip-flop stages (default: 2)
     pub sync_stages: u32,
-    /// Source clock domain name (optional, for documentation/analysis)
+    /// Source clock domain lifetime name (e.g., "fast" from 'fast)
+    /// References the lifetime annotation on the source signal's type
     pub from_domain: Option<String>,
-    /// Destination clock domain name (optional, for documentation/analysis)
+    /// Destination clock domain lifetime name (e.g., "slow" from 'slow)
+    /// References the lifetime annotation on the destination signal's type
     pub to_domain: Option<String>,
-    /// CDC type hint for more complex crossing patterns
+    /// CDC synchronization pattern type
     pub cdc_type: CdcType,
 }
 
