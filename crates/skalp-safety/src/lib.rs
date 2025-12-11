@@ -11,6 +11,7 @@ pub mod analysis;
 pub mod asil;
 pub mod design_resolver;
 pub mod do254;
+pub mod fault_simulation;
 pub mod fmea;
 pub mod fmeda_library;
 pub mod hierarchy;
