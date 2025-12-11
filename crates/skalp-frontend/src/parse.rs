@@ -6047,11 +6047,18 @@ impl ParseState<'_> {
         // Key - can be identifier or keyword (spfm, lfm, pmhf, dc, lc, etc.)
         if self.at(SyntaxKind::Ident) || self.current_kind().map(|k| k.is_keyword()).unwrap_or(false) {
             self.bump();
+        } else {
+            // Not a valid key - error and bump to avoid infinite loop
+            self.error_and_bump("expected identifier or keyword as key");
+            return;
         }
         self.skip_trivia();
         // Colon
         if self.at(SyntaxKind::Colon) {
             self.bump();
+        } else {
+            // Missing colon - error but continue
+            self.error("expected ':'");
         }
         self.skip_trivia();
         // Value - can be string literal, number, or array
@@ -6083,10 +6090,13 @@ impl ParseState<'_> {
                 self.parse_safety_array_value();
             }
             Some(SyntaxKind::Ge) | Some(SyntaxKind::Le) => {
-                // >= 99.0 or <= 10.0
+                // >= 99.0 or <= 10.0 or >= DC (generic parameter)
                 self.bump();
                 self.skip_trivia();
-                if self.at(SyntaxKind::FloatLiteral) || self.at(SyntaxKind::IntLiteral) {
+                if self.at(SyntaxKind::FloatLiteral)
+                    || self.at(SyntaxKind::IntLiteral)
+                    || self.at(SyntaxKind::Ident)
+                {
                     self.bump();
                 }
             }
@@ -6094,7 +6104,13 @@ impl ParseState<'_> {
                 // Identifier or keyword value (e.g., DC for generic parameter)
                 self.bump();
             }
-            _ => {}
+            Some(SyntaxKind::RBrace) | Some(SyntaxKind::Comma) | None => {
+                // End of value - nothing to parse (empty value is allowed)
+            }
+            _ => {
+                // Unexpected token - error and bump to avoid infinite loop
+                self.error_and_bump("unexpected token in safety value");
+            }
         }
     }
 
