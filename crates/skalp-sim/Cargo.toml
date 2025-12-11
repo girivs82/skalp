@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 skalp-sir = { path = "../skalp-sir" }
 skalp-mir = { path = "../skalp-mir" }
+skalp-lir = { path = "../skalp-lir" }
 skalp-frontend = { path = "../skalp-frontend" }
 
 # Async runtime
@@ -16,6 +17,8 @@ async-trait = "0.1"
 # Data handling
 bytemuck = "1.14"
 zerocopy = "0.7"
+bitvec = { version = "1.0", features = ["serde"] }
+petgraph = "0.6"
 
 # Error handling
 thiserror = "1.0"

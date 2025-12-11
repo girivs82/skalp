@@ -10,7 +10,9 @@
 //! - Optimization passes
 //! - Timing analysis
 
+pub mod gate_optimization;
 pub mod lir;
+pub mod mir_to_gate_netlist;
 pub mod mir_to_lir;
 pub mod netlist;
 pub mod optimization;
@@ -20,7 +22,15 @@ pub mod technology;
 pub mod technology_mapping;
 pub mod timing;
 
+pub use gate_optimization::{
+    GateBooleanSimplification, GateBufferRemoval, GateCSE, GateConstantFolding,
+    GateDeadCodeElimination, GateFanoutOptimization, GateMuxOptimization,
+    GateNetlistOptimizationPass, GateOptConfig, GateOptimizationPipeline, GateOptimizationResult,
+    OptTarget,
+};
 pub use lir::{Gate, GateType, Lir, LirDesign, LirModule, LirSignal, Net};
+pub use lir::{GateNet, GateNetlist, HierarchyNode, NetId, NetlistStats, Primitive, PrimitiveId, PrimitiveType, FitOverrides};
+pub use mir_to_gate_netlist::{transform_mir_to_gate_netlist, MirToGateNetlistResult, MirToGateNetlistTransform, TransformStats};
 pub use mir_to_lir::transform_mir_to_lir;
 pub use netlist::Netlist;
 pub use optimization::{OptimizationPipeline, OptimizationResult};
@@ -91,4 +101,37 @@ pub fn lower_to_lir(mir: &Mir) -> Result<LirDesign> {
         name: mir.name.clone(),
         modules: lir_modules,
     })
+}
+
+/// Lower MIR to GateNetlist (new primitive-based representation)
+///
+/// This produces a technology-independent gate-level netlist with:
+/// - Full primitive decomposition (gates, flip-flops, muxes, adders)
+/// - Per-bit net representation for multi-bit signals
+/// - FIT estimation for each primitive
+/// - Hierarchy traceability
+///
+/// # Example
+///
+/// ```ignore
+/// use skalp_mir::Mir;
+/// use skalp_lir::lower_to_gate_netlist;
+///
+/// let mir = compile_to_mir(source)?;
+/// let gate_netlists = lower_to_gate_netlist(&mir)?;
+/// for result in gate_netlists {
+///     println!("Module: {}", result.netlist.name);
+///     println!("Primitives: {}", result.netlist.primitives.len());
+///     println!("Total FIT: {}", result.netlist.stats.total_fit);
+/// }
+/// ```
+pub fn lower_to_gate_netlist(mir: &Mir) -> Result<Vec<MirToGateNetlistResult>> {
+    let mut results = Vec::new();
+
+    for module in &mir.modules {
+        let result = transform_mir_to_gate_netlist(module);
+        results.push(result);
+    }
+
+    Ok(results)
 }

@@ -137,6 +137,36 @@ enum Commands {
         filter: Option<String>,
     },
 
+    /// Gate-level analysis and fault simulation
+    Analyze {
+        /// Source file to analyze
+        source: PathBuf,
+
+        /// Output directory for analysis results
+        #[arg(short, long, default_value = "analysis")]
+        output: PathBuf,
+
+        /// Run fault simulation
+        #[arg(long)]
+        fault_sim: bool,
+
+        /// Number of cycles for fault simulation
+        #[arg(long, default_value = "100")]
+        cycles: u64,
+
+        /// Use GPU acceleration for fault simulation
+        #[arg(long)]
+        gpu: bool,
+
+        /// Maximum faults to test (0 = all)
+        #[arg(long, default_value = "0")]
+        max_faults: usize,
+
+        /// Generate detailed report
+        #[arg(long)]
+        detailed: bool,
+    },
+
     /// Add a dependency to the project
     Add {
         /// Package name
@@ -290,6 +320,18 @@ fn main() -> Result<()> {
 
         Commands::Test { filter } => {
             run_tests(filter.as_deref())?;
+        }
+
+        Commands::Analyze {
+            source,
+            output,
+            fault_sim,
+            cycles,
+            gpu,
+            max_faults,
+            detailed,
+        } => {
+            analyze_design(&source, &output, fault_sim, cycles, gpu, max_faults, detailed)?;
         }
 
         Commands::Add {
@@ -622,6 +664,196 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
     })?;
 
     Ok(())
+}
+
+/// Gate-level analysis and fault simulation
+fn analyze_design(
+    source: &PathBuf,
+    output_dir: &PathBuf,
+    fault_sim: bool,
+    cycles: u64,
+    use_gpu: bool,
+    max_faults: usize,
+    detailed: bool,
+) -> Result<()> {
+    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_lir::lower_to_gate_netlist;
+    use skalp_sim::lir_to_sir::convert_gate_netlist_to_sir;
+    use std::collections::HashMap;
+
+    println!("🔬 Gate-Level Analysis");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Source: {:?}", source);
+
+    // Parse and build HIR with module resolution
+    info!("Parsing SKALP source and building HIR with module resolution...");
+    let hir = parse_and_build_hir_from_file(source).context("Failed to parse and build HIR")?;
+
+    // Lower to MIR
+    info!("Lowering to MIR...");
+    let compiler = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR: {}", e))?;
+
+    // Lower to Gate-Level Netlist
+    info!("Converting to gate-level netlist...");
+    let gate_results = lower_to_gate_netlist(&mir)?;
+
+    println!("\n📊 Gate-Level Analysis Results");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    let mut total_primitives = 0;
+    let mut total_fit = 0.0;
+    let mut all_counts: HashMap<String, usize> = HashMap::new();
+
+    for result in &gate_results {
+        let netlist = &result.netlist;
+        let stats = &result.stats;
+
+        println!("\n📦 Module: {}", netlist.name);
+        println!("   Ports: {}", stats.ports);
+        println!("   Primitives: {}", netlist.primitives.len());
+        println!("   Nets: {}", netlist.nets.len());
+
+        // Count primitives by type
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut module_fit = 0.0;
+
+        for prim in &netlist.primitives {
+            *counts.entry(prim.ptype.short_name().to_string()).or_insert(0) += 1;
+            *all_counts.entry(prim.ptype.short_name().to_string()).or_insert(0) += 1;
+            module_fit += prim.ptype.base_fit();
+        }
+
+        if detailed {
+            println!("\n   Primitive Breakdown:");
+            let mut sorted: Vec<_> = counts.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            for (ptype, count) in &sorted {
+                println!("     {:15} : {:5}", ptype, count);
+            }
+        }
+
+        println!("   Module FIT: {:.2}", module_fit);
+
+        total_primitives += netlist.primitives.len();
+        total_fit += module_fit;
+    }
+
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("📈 Summary");
+    println!("   Total Modules: {}", gate_results.len());
+    println!("   Total Primitives: {}", total_primitives);
+    println!("   Total FIT: {:.2}", total_fit);
+
+    if detailed {
+        println!("\n   Overall Primitive Breakdown:");
+        let mut sorted: Vec<_> = all_counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        for (ptype, count) in &sorted {
+            println!("     {:15} : {:5}", ptype, count);
+        }
+    }
+
+    // Run fault simulation if requested
+    if fault_sim && !gate_results.is_empty() {
+        println!("\n🔥 Fault Simulation");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        for result in &gate_results {
+            let netlist = &result.netlist;
+            println!("\n   Module: {}", netlist.name);
+
+            // Convert to SIR for simulation
+            let sir_result = convert_gate_netlist_to_sir(netlist);
+
+            #[cfg(target_os = "macos")]
+            {
+                use skalp_sim::{GpuFaultCampaignConfig, GpuFaultSimulator};
+                use skalp_sim::sir::FaultType;
+
+                if use_gpu {
+                    match GpuFaultSimulator::new(&sir_result.sir) {
+                        Ok(gpu_sim) => {
+                            println!("   Using GPU: {}", gpu_sim.device_info());
+
+                            let config = GpuFaultCampaignConfig {
+                                cycles_per_fault: cycles,
+                                fault_types: vec![FaultType::StuckAt0, FaultType::StuckAt1],
+                                max_faults,
+                                use_gpu: true,
+                                ..Default::default()
+                            };
+
+                            let results = gpu_sim.run_fault_campaign(&config);
+
+                            println!("   Faults Tested: {}", results.total_faults);
+                            println!("   Detected: {}", results.detected_faults);
+                            println!("   Corruption Faults: {}", results.corruption_faults);
+                            println!("   Diagnostic Coverage: {:.2}%", results.diagnostic_coverage);
+                        }
+                        Err(e) => {
+                            println!("   GPU initialization failed: {}. Using CPU fallback.", e);
+                            run_cpu_fault_sim(&sir_result.sir, cycles, max_faults);
+                        }
+                    }
+                } else {
+                    run_cpu_fault_sim(&sir_result.sir, cycles, max_faults);
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                run_cpu_fault_sim(&sir_result.sir, cycles, max_faults);
+            }
+        }
+    }
+
+    // Create output directory and save results
+    fs::create_dir_all(output_dir)?;
+
+    // Save analysis summary
+    let summary_path = output_dir.join("analysis_summary.txt");
+    let mut summary = String::new();
+    summary.push_str(&format!("Gate-Level Analysis Summary\n"));
+    summary.push_str(&format!("Source: {:?}\n", source));
+    summary.push_str(&format!("Total Modules: {}\n", gate_results.len()));
+    summary.push_str(&format!("Total Primitives: {}\n", total_primitives));
+    summary.push_str(&format!("Total FIT: {:.2}\n", total_fit));
+    fs::write(&summary_path, summary)?;
+
+    println!("\n✅ Analysis complete!");
+    println!("📄 Results saved to: {:?}", output_dir);
+
+    Ok(())
+}
+
+/// Run CPU-based fault simulation
+fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) {
+    use skalp_sim::{FaultCampaignConfig, GateLevelSimulator};
+
+    let mut sim = GateLevelSimulator::new(sir);
+    println!("   Using CPU simulation");
+    println!("   Primitives: {}", sim.primitive_count());
+
+    let config = FaultCampaignConfig {
+        cycles_per_fault: cycles,
+        fault_types: vec![
+            skalp_sim::sir::FaultType::StuckAt0,
+            skalp_sim::sir::FaultType::StuckAt1,
+        ],
+        max_faults,
+        ..Default::default()
+    };
+
+    let results = sim.run_fault_campaign_with_config(&config);
+
+    println!("   Faults Tested: {}", results.total_faults);
+    println!("   Detected: {}", results.detected_faults);
+    println!("   Corruption Faults: {}", results.corruption_faults);
+    println!("   Diagnostic Coverage: {:.2}%", results.diagnostic_coverage);
 }
 
 /// Synthesize design for FPGA/ASIC
