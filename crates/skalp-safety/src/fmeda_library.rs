@@ -354,6 +354,159 @@ impl FmedaLibraryManager {
 }
 
 // ============================================================================
+// Technology Primitive Library (Gate-level FIT data)
+// ============================================================================
+
+/// Technology library with primitive-level FIT data
+/// Based on foundry/process data (gates, flops, muxes, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TechLibrary {
+    /// Technology name (e.g., "tsmc7nm", "intel14nm")
+    pub name: String,
+    /// Process node (nm)
+    pub process_node: u32,
+    /// Library version
+    pub version: String,
+    /// Primitives in this library
+    pub primitives: HashMap<String, TechPrimitive>,
+    /// Default temperature (°C)
+    pub reference_temperature: f64,
+    /// Voltage reference (V)
+    pub reference_voltage: f64,
+}
+
+impl TechLibrary {
+    /// Create a new technology library
+    pub fn new(name: String, process_node: u32) -> Self {
+        Self {
+            name,
+            process_node,
+            version: "1.0.0".to_string(),
+            primitives: HashMap::new(),
+            reference_temperature: 85.0, // Junction temp
+            reference_voltage: 0.75,
+        }
+    }
+
+    /// Add a primitive to the library
+    pub fn add_primitive(&mut self, primitive: TechPrimitive) {
+        self.primitives.insert(primitive.name.clone(), primitive);
+    }
+
+    /// Get a primitive by name
+    pub fn get_primitive(&self, name: &str) -> Option<&TechPrimitive> {
+        self.primitives.get(name)
+    }
+}
+
+/// Technology primitive (gate, flop, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TechPrimitive {
+    /// Primitive name (e.g., "DFF", "NAND2", "MUX2")
+    pub name: String,
+    /// Primitive type
+    pub prim_type: PrimitiveType,
+    /// Base FIT rate per instance
+    pub base_fit: f64,
+    /// Failure modes for this primitive
+    pub failure_modes: Vec<PrimitiveFailureMode>,
+    /// Area in um^2 (for density calculations)
+    pub area: Option<f64>,
+    /// Number of transistors
+    pub transistor_count: Option<u32>,
+}
+
+impl TechPrimitive {
+    /// Create a new primitive
+    pub fn new(name: String, prim_type: PrimitiveType, base_fit: f64) -> Self {
+        Self {
+            name,
+            prim_type,
+            base_fit,
+            failure_modes: Vec::new(),
+            area: None,
+            transistor_count: None,
+        }
+    }
+
+    /// Add a failure mode
+    pub fn add_failure_mode(&mut self, mode: PrimitiveFailureMode) {
+        self.failure_modes.push(mode);
+    }
+
+    /// Get total FIT for this primitive
+    pub fn total_fit(&self) -> f64 {
+        self.failure_modes.iter().map(|m| m.fit).sum()
+    }
+}
+
+/// Primitive types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PrimitiveType {
+    /// D Flip-Flop
+    Dff,
+    /// Latch
+    Latch,
+    /// Inverter
+    Inv,
+    /// NAND gate
+    Nand,
+    /// NOR gate
+    Nor,
+    /// AND gate
+    And,
+    /// OR gate
+    Or,
+    /// XOR gate
+    Xor,
+    /// Multiplexer
+    Mux,
+    /// Buffer
+    Buf,
+    /// Tri-state buffer
+    Tribuf,
+    /// Clock buffer
+    ClkBuf,
+    /// Clock gate
+    ClkGate,
+    /// Memory bit cell
+    MemCell,
+    /// Custom/other
+    Custom,
+}
+
+/// Failure mode for a primitive
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrimitiveFailureMode {
+    /// Failure mode name
+    pub name: String,
+    /// FIT rate for this mode
+    pub fit: f64,
+    /// Failure class
+    pub class: FailureClass,
+    /// Description
+    pub description: String,
+}
+
+impl PrimitiveFailureMode {
+    /// Create a new primitive failure mode
+    pub fn new(name: String, fit: f64, class: FailureClass) -> Self {
+        Self {
+            name,
+            fit,
+            class,
+            description: String::new(),
+        }
+    }
+
+    /// Set description
+    pub fn with_description(mut self, desc: String) -> Self {
+        self.description = desc;
+        self
+    }
+}
+
+// ============================================================================
 // Design Binding Types
 // ============================================================================
 
@@ -370,6 +523,299 @@ pub struct FmedaBinding {
     pub mechanisms: Vec<MechanismType>,
     /// Override values
     pub overrides: FmedaOverrides,
+}
+
+/// Primitive-level binding (maps design instance to tech primitive)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrimitiveBinding {
+    /// Design hierarchy path to the primitive instance
+    pub design_ref: DesignRef,
+    /// Technology library name
+    pub tech_library: String,
+    /// Primitive type name in library
+    pub primitive_name: String,
+    /// Instance count (for arrays/vectors)
+    pub instance_count: u32,
+    /// Mechanisms covering this primitive
+    pub mechanisms: Vec<MechanismType>,
+    /// DC overrides per mechanism
+    pub dc_overrides: HashMap<MechanismType, f64>,
+}
+
+// ============================================================================
+// Multi-Contributor Failure Mode (Primitive-Level)
+// ============================================================================
+
+/// Multi-contributor failure mode referencing primitive instances
+/// Used when a failure mode has contributions from multiple primitives
+/// in the design hierarchy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiContributorFailureMode {
+    /// Unique identifier
+    pub id: String,
+    /// Failure mode name
+    pub name: String,
+    /// Total FIT rate for this failure mode
+    pub total_fit: f64,
+    /// Severity
+    pub severity: Severity,
+    /// Failure class
+    pub class: FailureClass,
+    /// Contributors (primitive instances with weights)
+    pub contributors: Vec<PrimitiveContributor>,
+    /// Detecting mechanism
+    pub detector: Option<DetectorBinding>,
+    /// Description
+    pub description: String,
+}
+
+/// A primitive instance contributing to a failure mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrimitiveContributor {
+    /// Design hierarchy path to the primitive instance
+    pub design_ref: DesignRef,
+    /// Contribution weight (0.0 to 1.0)
+    pub weight: f64,
+    /// Description of how this primitive contributes
+    pub contribution_desc: Option<String>,
+}
+
+impl PrimitiveContributor {
+    /// Create a new primitive contributor
+    pub fn new(design_ref: DesignRef, weight: f64) -> Self {
+        Self {
+            design_ref,
+            weight,
+            contribution_desc: None,
+        }
+    }
+
+    /// Add description
+    pub fn with_description(mut self, desc: String) -> Self {
+        self.contribution_desc = Some(desc);
+        self
+    }
+
+    /// Get FIT contribution given total FIT
+    pub fn get_fit(&self, total_fit: f64) -> f64 {
+        total_fit * self.weight
+    }
+}
+
+/// Detector binding for a failure mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectorBinding {
+    /// Mechanism type (PSM or LSM)
+    pub mechanism_type: DetectorType,
+    /// Mechanism name
+    pub mechanism_name: String,
+    /// Achieved diagnostic coverage
+    pub dc: f64,
+}
+
+/// Type of detector
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DetectorType {
+    /// Primary Safety Mechanism
+    Psm,
+    /// Latent Safety Mechanism
+    Lsm,
+}
+
+impl MultiContributorFailureMode {
+    /// Create a new multi-contributor failure mode
+    pub fn new(
+        id: String,
+        name: String,
+        total_fit: f64,
+        severity: Severity,
+        class: FailureClass,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            total_fit,
+            severity,
+            class,
+            contributors: Vec::new(),
+            detector: None,
+            description: String::new(),
+        }
+    }
+
+    /// Add a contributor
+    pub fn add_contributor(&mut self, contributor: PrimitiveContributor) {
+        self.contributors.push(contributor);
+    }
+
+    /// Set contributors
+    pub fn with_contributors(mut self, contributors: Vec<PrimitiveContributor>) -> Self {
+        self.contributors = contributors;
+        self
+    }
+
+    /// Set detector
+    pub fn with_detector(mut self, detector: DetectorBinding) -> Self {
+        self.detector = Some(detector);
+        self
+    }
+
+    /// Set description
+    pub fn with_description(mut self, desc: String) -> Self {
+        self.description = desc;
+        self
+    }
+
+    /// Validate contributor weights sum to 1.0
+    pub fn validate(&self) -> Result<(), String> {
+        if self.contributors.is_empty() {
+            return Err("Multi-contributor failure mode must have contributors".to_string());
+        }
+
+        let total_weight: f64 = self.contributors.iter().map(|c| c.weight).sum();
+        if (total_weight - 1.0).abs() > 0.01 {
+            return Err(format!(
+                "Contributor weights sum to {:.2}, expected 1.0",
+                total_weight
+            ));
+        }
+
+        for c in &self.contributors {
+            if c.weight < 0.0 {
+                return Err(format!(
+                    "Negative weight {} for contributor {}",
+                    c.weight,
+                    c.design_ref.to_string()
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get FIT contribution for a specific primitive
+    pub fn get_fit_for_primitive(&self, design_ref: &DesignRef) -> Option<f64> {
+        self.contributors
+            .iter()
+            .find(|c| &c.design_ref == design_ref)
+            .map(|c| c.get_fit(self.total_fit))
+    }
+
+    /// Get all primitives involved
+    pub fn get_involved_primitives(&self) -> Vec<&DesignRef> {
+        self.contributors.iter().map(|c| &c.design_ref).collect()
+    }
+}
+
+// ============================================================================
+// FMEDA with Primitive-Level Bindings
+// ============================================================================
+
+/// Complete FMEDA specification with primitive-level data
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PrimitiveFmeda {
+    /// Design name
+    pub design_name: String,
+    /// Technology library used
+    pub tech_library: String,
+    /// Primitive bindings (single-primitive failure modes)
+    pub primitive_bindings: Vec<PrimitiveBinding>,
+    /// Multi-contributor failure modes (cross-primitive)
+    pub multi_contributor_modes: Vec<MultiContributorFailureMode>,
+}
+
+impl PrimitiveFmeda {
+    /// Create a new primitive FMEDA
+    pub fn new(design_name: String, tech_library: String) -> Self {
+        Self {
+            design_name,
+            tech_library,
+            primitive_bindings: Vec::new(),
+            multi_contributor_modes: Vec::new(),
+        }
+    }
+
+    /// Add a primitive binding
+    pub fn add_primitive_binding(&mut self, binding: PrimitiveBinding) {
+        self.primitive_bindings.push(binding);
+    }
+
+    /// Add a multi-contributor failure mode
+    pub fn add_multi_contributor_mode(&mut self, mode: MultiContributorFailureMode) {
+        self.multi_contributor_modes.push(mode);
+    }
+
+    /// Calculate total FIT for a specific primitive instance
+    /// Includes both single-primitive and multi-contributor modes
+    pub fn calculate_primitive_fit(
+        &self,
+        design_ref: &DesignRef,
+        tech_lib: &TechLibrary,
+    ) -> f64 {
+        let mut total_fit = 0.0;
+
+        // FIT from primitive bindings
+        for binding in &self.primitive_bindings {
+            if &binding.design_ref == design_ref {
+                if let Some(prim) = tech_lib.get_primitive(&binding.primitive_name) {
+                    total_fit += prim.base_fit * binding.instance_count as f64;
+                }
+            }
+        }
+
+        // FIT from multi-contributor modes
+        for mode in &self.multi_contributor_modes {
+            if let Some(fit) = mode.get_fit_for_primitive(design_ref) {
+                total_fit += fit;
+            }
+        }
+
+        total_fit
+    }
+
+    /// Calculate total system FIT
+    pub fn calculate_total_fit(&self, tech_lib: &TechLibrary) -> f64 {
+        let mut total_fit = 0.0;
+
+        // Sum primitive bindings
+        for binding in &self.primitive_bindings {
+            if let Some(prim) = tech_lib.get_primitive(&binding.primitive_name) {
+                total_fit += prim.base_fit * binding.instance_count as f64;
+            }
+        }
+
+        // Sum multi-contributor modes (total, not per-contributor)
+        for mode in &self.multi_contributor_modes {
+            total_fit += mode.total_fit;
+        }
+
+        total_fit
+    }
+
+    /// Validate all multi-contributor modes
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        for mode in &self.multi_contributor_modes {
+            if let Err(e) = mode.validate() {
+                errors.push(format!("Mode '{}': {}", mode.id, e));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Get all failure modes affecting a specific primitive
+    pub fn get_modes_for_primitive(&self, design_ref: &DesignRef) -> Vec<&MultiContributorFailureMode> {
+        self.multi_contributor_modes
+            .iter()
+            .filter(|m| m.get_involved_primitives().contains(&design_ref))
+            .collect()
+    }
 }
 
 /// Override values for FMEDA binding
@@ -924,6 +1370,172 @@ fn create_digital_logic_library() -> FmedaLibrary {
     library
 }
 
+/// Create a standard technology primitive library (gate-level)
+pub fn create_tech_primitive_library() -> TechLibrary {
+    let mut library = TechLibrary::new("tech_standard".to_string(), 7);
+    library.version = "1.0.0".to_string();
+
+    // D Flip-Flop
+    let mut dff = TechPrimitive::new("DFF".to_string(), PrimitiveType::Dff, 0.5);
+    dff.area = Some(2.0);
+    dff.transistor_count = Some(20);
+    dff.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_0".to_string(),
+        0.2,
+        FailureClass::SinglePointFault,
+    ).with_description("Output stuck at logic 0".to_string()));
+    dff.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_1".to_string(),
+        0.2,
+        FailureClass::SinglePointFault,
+    ).with_description("Output stuck at logic 1".to_string()));
+    dff.add_failure_mode(PrimitiveFailureMode::new(
+        "setup_violation".to_string(),
+        0.05,
+        FailureClass::Residual,
+    ).with_description("Setup time violation".to_string()));
+    dff.add_failure_mode(PrimitiveFailureMode::new(
+        "hold_violation".to_string(),
+        0.05,
+        FailureClass::Residual,
+    ).with_description("Hold time violation".to_string()));
+    library.add_primitive(dff);
+
+    // Latch
+    let mut latch = TechPrimitive::new("LATCH".to_string(), PrimitiveType::Latch, 0.4);
+    latch.area = Some(1.5);
+    latch.transistor_count = Some(12);
+    latch.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_0".to_string(),
+        0.15,
+        FailureClass::SinglePointFault,
+    ));
+    latch.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_1".to_string(),
+        0.15,
+        FailureClass::SinglePointFault,
+    ));
+    latch.add_failure_mode(PrimitiveFailureMode::new(
+        "transparent_stuck".to_string(),
+        0.1,
+        FailureClass::Residual,
+    ));
+    library.add_primitive(latch);
+
+    // NAND2 gate
+    let mut nand2 = TechPrimitive::new("NAND2".to_string(), PrimitiveType::Nand, 0.1);
+    nand2.area = Some(0.5);
+    nand2.transistor_count = Some(4);
+    nand2.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_0".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ));
+    nand2.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_1".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ));
+    library.add_primitive(nand2);
+
+    // NOR2 gate
+    let mut nor2 = TechPrimitive::new("NOR2".to_string(), PrimitiveType::Nor, 0.1);
+    nor2.area = Some(0.5);
+    nor2.transistor_count = Some(4);
+    nor2.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_0".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ));
+    nor2.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_1".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ));
+    library.add_primitive(nor2);
+
+    // Inverter
+    let mut inv = TechPrimitive::new("INV".to_string(), PrimitiveType::Inv, 0.05);
+    inv.area = Some(0.25);
+    inv.transistor_count = Some(2);
+    inv.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_0".to_string(),
+        0.025,
+        FailureClass::SinglePointFault,
+    ));
+    inv.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_1".to_string(),
+        0.025,
+        FailureClass::SinglePointFault,
+    ));
+    library.add_primitive(inv);
+
+    // 2-to-1 Multiplexer
+    let mut mux2 = TechPrimitive::new("MUX2".to_string(), PrimitiveType::Mux, 0.15);
+    mux2.area = Some(1.0);
+    mux2.transistor_count = Some(8);
+    mux2.add_failure_mode(PrimitiveFailureMode::new(
+        "select_stuck_0".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ).with_description("Select line stuck, always selects input 0".to_string()));
+    mux2.add_failure_mode(PrimitiveFailureMode::new(
+        "select_stuck_1".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ).with_description("Select line stuck, always selects input 1".to_string()));
+    mux2.add_failure_mode(PrimitiveFailureMode::new(
+        "output_stuck".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ));
+    library.add_primitive(mux2);
+
+    // Clock buffer
+    let mut clkbuf = TechPrimitive::new("CLKBUF".to_string(), PrimitiveType::ClkBuf, 0.2);
+    clkbuf.area = Some(1.5);
+    clkbuf.transistor_count = Some(8);
+    clkbuf.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_low".to_string(),
+        0.1,
+        FailureClass::SinglePointFault,
+    ).with_description("Clock output stuck low".to_string()));
+    clkbuf.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_high".to_string(),
+        0.05,
+        FailureClass::SinglePointFault,
+    ).with_description("Clock output stuck high".to_string()));
+    clkbuf.add_failure_mode(PrimitiveFailureMode::new(
+        "jitter".to_string(),
+        0.05,
+        FailureClass::Residual,
+    ).with_description("Excessive clock jitter".to_string()));
+    library.add_primitive(clkbuf);
+
+    // Memory bit cell
+    let mut memcell = TechPrimitive::new("MEMCELL".to_string(), PrimitiveType::MemCell, 0.001);
+    memcell.area = Some(0.1);
+    memcell.transistor_count = Some(6);
+    memcell.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_0".to_string(),
+        0.0004,
+        FailureClass::SinglePointFault,
+    ));
+    memcell.add_failure_mode(PrimitiveFailureMode::new(
+        "stuck_at_1".to_string(),
+        0.0004,
+        FailureClass::SinglePointFault,
+    ));
+    memcell.add_failure_mode(PrimitiveFailureMode::new(
+        "seu".to_string(),
+        0.0002,
+        FailureClass::SinglePointFault,
+    ).with_description("Single event upset (soft error)".to_string()));
+    library.add_primitive(memcell);
+
+    library
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1061,5 +1673,235 @@ mod tests {
         // Combined DC = 1 - (1-0.99)(1-0.99) = 1 - 0.0001 = 99.99%
         let dc = component.get_effective_dc(&[MechanismType::Lockstep, MechanismType::Ecc]);
         assert!((dc - 99.99).abs() < 0.01);
+    }
+
+    // =========================================================================
+    // Technology Primitive Library Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tech_library_creation() {
+        let library = create_tech_primitive_library();
+        assert_eq!(library.name, "tech_standard");
+        assert_eq!(library.process_node, 7);
+        assert!(library.get_primitive("DFF").is_some());
+        assert!(library.get_primitive("NAND2").is_some());
+        assert!(library.get_primitive("MUX2").is_some());
+    }
+
+    #[test]
+    fn test_tech_primitive_fit() {
+        let library = create_tech_primitive_library();
+        let dff = library.get_primitive("DFF").unwrap();
+
+        assert_eq!(dff.base_fit, 0.5);
+        assert_eq!(dff.prim_type, PrimitiveType::Dff);
+
+        // Sum of failure mode FITs should equal base_fit
+        let total: f64 = dff.failure_modes.iter().map(|m| m.fit).sum();
+        assert!((total - dff.base_fit).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_primitive_binding() {
+        let binding = PrimitiveBinding {
+            design_ref: DesignRef::from_str("top.voter.ff_a_reg"),
+            tech_library: "tech_standard".to_string(),
+            primitive_name: "DFF".to_string(),
+            instance_count: 1,
+            mechanisms: vec![MechanismType::Tmr],
+            dc_overrides: HashMap::new(),
+        };
+
+        assert_eq!(binding.instance_count, 1);
+        assert_eq!(binding.primitive_name, "DFF");
+    }
+
+    // =========================================================================
+    // Multi-Contributor Failure Mode Tests (Primitive-Level)
+    // =========================================================================
+
+    #[test]
+    fn test_multi_contributor_mode_creation() {
+        let mode = MultiContributorFailureMode::new(
+            "MCF-001".to_string(),
+            "timing_path_violation".to_string(),
+            1.0,
+            Severity::S2,
+            FailureClass::SinglePointFault,
+        )
+        .with_contributors(vec![
+            PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_a_reg"), 0.3)
+                .with_description("Source flop".to_string()),
+            PrimitiveContributor::new(DesignRef::from_str("top.voter.comb.u1"), 0.2)
+                .with_description("NAND in path".to_string()),
+            PrimitiveContributor::new(DesignRef::from_str("top.voter.comb.u2"), 0.2)
+                .with_description("Another gate".to_string()),
+            PrimitiveContributor::new(DesignRef::from_str("top.voter.mux_sel"), 0.15)
+                .with_description("Mux in path".to_string()),
+            PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_out_reg"), 0.15)
+                .with_description("Dest flop".to_string()),
+        ])
+        .with_detector(DetectorBinding {
+            mechanism_type: DetectorType::Psm,
+            mechanism_name: "TimingMonitor".to_string(),
+            dc: 95.0,
+        })
+        .with_description("Timing path failure across multiple primitives".to_string());
+
+        assert!(mode.validate().is_ok());
+        assert_eq!(mode.contributors.len(), 5);
+
+        // Check FIT contribution
+        let ff_a_ref = DesignRef::from_str("top.voter.ff_a_reg");
+        assert_eq!(mode.get_fit_for_primitive(&ff_a_ref), Some(0.3));
+    }
+
+    #[test]
+    fn test_multi_contributor_validation_error() {
+        // Weights don't sum to 1.0
+        let mode = MultiContributorFailureMode::new(
+            "MCF-BAD".to_string(),
+            "bad_mode".to_string(),
+            1.0,
+            Severity::S1,
+            FailureClass::Safe,
+        )
+        .with_contributors(vec![
+            PrimitiveContributor::new(DesignRef::from_str("top.a"), 0.5),
+            PrimitiveContributor::new(DesignRef::from_str("top.b"), 0.3),
+        ]);
+
+        let result = mode.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("sum to 0.80"));
+    }
+
+    #[test]
+    fn test_primitive_fmeda() {
+        let tech_lib = create_tech_primitive_library();
+        let mut fmeda = PrimitiveFmeda::new(
+            "top.voter".to_string(),
+            "tech_standard".to_string(),
+        );
+
+        // Add primitive bindings
+        fmeda.add_primitive_binding(PrimitiveBinding {
+            design_ref: DesignRef::from_str("top.voter.ff_a_reg"),
+            tech_library: "tech_standard".to_string(),
+            primitive_name: "DFF".to_string(),
+            instance_count: 1,
+            mechanisms: vec![],
+            dc_overrides: HashMap::new(),
+        });
+
+        fmeda.add_primitive_binding(PrimitiveBinding {
+            design_ref: DesignRef::from_str("top.voter.ff_b_reg"),
+            tech_library: "tech_standard".to_string(),
+            primitive_name: "DFF".to_string(),
+            instance_count: 1,
+            mechanisms: vec![],
+            dc_overrides: HashMap::new(),
+        });
+
+        // Add multi-contributor mode (timing path spanning both flops)
+        fmeda.add_multi_contributor_mode(
+            MultiContributorFailureMode::new(
+                "MCF-001".to_string(),
+                "timing_violation".to_string(),
+                0.2, // Total FIT for this mode
+                Severity::S2,
+                FailureClass::SinglePointFault,
+            )
+            .with_contributors(vec![
+                PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_a_reg"), 0.5),
+                PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_b_reg"), 0.5),
+            ])
+        );
+
+        assert!(fmeda.validate().is_ok());
+
+        // Total FIT: 2x DFF (0.5 each) + 1x MCF (0.2) = 1.2
+        let total_fit = fmeda.calculate_total_fit(&tech_lib);
+        assert!((total_fit - 1.2).abs() < 0.001);
+
+        // FIT for ff_a_reg: 0.5 (DFF) + 0.1 (50% of MCF) = 0.6
+        let ff_a_ref = DesignRef::from_str("top.voter.ff_a_reg");
+        let ff_a_fit = fmeda.calculate_primitive_fit(&ff_a_ref, &tech_lib);
+        assert!((ff_a_fit - 0.6).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_get_modes_for_primitive() {
+        let mut fmeda = PrimitiveFmeda::new("design".to_string(), "lib".to_string());
+
+        let ref_a = DesignRef::from_str("top.a");
+        let ref_b = DesignRef::from_str("top.b");
+        let ref_c = DesignRef::from_str("top.c");
+
+        // Mode affecting A and B
+        fmeda.add_multi_contributor_mode(
+            MultiContributorFailureMode::new(
+                "MCF-1".to_string(),
+                "mode1".to_string(),
+                1.0,
+                Severity::S2,
+                FailureClass::SinglePointFault,
+            )
+            .with_contributors(vec![
+                PrimitiveContributor::new(ref_a.clone(), 0.5),
+                PrimitiveContributor::new(ref_b.clone(), 0.5),
+            ])
+        );
+
+        // Mode affecting B and C
+        fmeda.add_multi_contributor_mode(
+            MultiContributorFailureMode::new(
+                "MCF-2".to_string(),
+                "mode2".to_string(),
+                1.0,
+                Severity::S2,
+                FailureClass::Residual,
+            )
+            .with_contributors(vec![
+                PrimitiveContributor::new(ref_b.clone(), 0.6),
+                PrimitiveContributor::new(ref_c.clone(), 0.4),
+            ])
+        );
+
+        // A is in 1 mode
+        let modes_a = fmeda.get_modes_for_primitive(&ref_a);
+        assert_eq!(modes_a.len(), 1);
+
+        // B is in 2 modes
+        let modes_b = fmeda.get_modes_for_primitive(&ref_b);
+        assert_eq!(modes_b.len(), 2);
+
+        // C is in 1 mode
+        let modes_c = fmeda.get_modes_for_primitive(&ref_c);
+        assert_eq!(modes_c.len(), 1);
+    }
+
+    #[test]
+    fn test_primitive_contributor() {
+        let design_ref = DesignRef::from_str("top.voter.ff_out_reg");
+        let contributor = PrimitiveContributor::new(design_ref.clone(), 0.3)
+            .with_description("Output register in timing path".to_string());
+
+        assert_eq!(contributor.weight, 0.3);
+        assert_eq!(contributor.get_fit(100.0), 30.0);
+        assert!(contributor.contribution_desc.is_some());
+    }
+
+    #[test]
+    fn test_detector_binding() {
+        let detector = DetectorBinding {
+            mechanism_type: DetectorType::Psm,
+            mechanism_name: "TimingMonitor".to_string(),
+            dc: 95.0,
+        };
+
+        assert_eq!(detector.mechanism_type, DetectorType::Psm);
+        assert_eq!(detector.dc, 95.0);
     }
 }
