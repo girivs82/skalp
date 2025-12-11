@@ -10,7 +10,7 @@ impl StreamProcessor {
 
     on(clk.rise) {
         // Stream processing logic
-        buffer <= data_in
-        data_out <= buffer  // Implicit width conversion would be caught by type checker
+        buffer = data_in
+        data_out = buffer  // Implicit width conversion would be caught by type checker
     }
 }

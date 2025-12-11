@@ -5,7 +5,7 @@ use crate::property::TemporalFormula;
 use crate::property::{Property, PropertyType};
 use crate::smt::SmtSolver;
 use crate::{Counterexample, FormalError, FormalResult, PropertyStatus, TraceStep};
-use skalp_lir::{LirDesign, LirModule};
+use skalp_lir::Lir;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -60,7 +60,7 @@ impl ModelChecker {
 
     pub async fn check_property(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
     ) -> FormalResult<PropertyStatus> {
         let start = Instant::now();
@@ -83,7 +83,7 @@ impl ModelChecker {
     /// Bounded Model Checking
     async fn check_with_bmc(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
     ) -> FormalResult<PropertyStatus> {
         let bmc = BoundedModelChecker::new(self.max_bound);
@@ -127,7 +127,7 @@ impl ModelChecker {
     /// k-Induction algorithm
     async fn check_with_k_induction(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
     ) -> FormalResult<PropertyStatus> {
         // Base case: Check property holds for first k steps
@@ -149,7 +149,7 @@ impl ModelChecker {
     /// IC3/PDR algorithm
     async fn check_with_ic3(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
     ) -> FormalResult<PropertyStatus> {
         // Initialize frames
@@ -191,7 +191,7 @@ impl ModelChecker {
     /// Symbolic model checking
     async fn check_with_symbolic(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
     ) -> FormalResult<PropertyStatus> {
         // Build symbolic transition system
@@ -214,7 +214,7 @@ impl ModelChecker {
     /// Check base case for k-induction
     async fn check_base_case(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
         k: usize,
     ) -> FormalResult<bool> {
@@ -227,7 +227,7 @@ impl ModelChecker {
     /// Check inductive step for k-induction
     async fn check_inductive_step(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
         k: usize,
     ) -> FormalResult<bool> {
@@ -238,14 +238,14 @@ impl ModelChecker {
     }
 
     /// Get initial states for IC3
-    async fn get_initial_states(&self, design: &LirDesign) -> FormalResult<StateSet> {
+    async fn get_initial_states(&self, design: &Lir) -> FormalResult<StateSet> {
         Ok(StateSet::new())
     }
 
     /// Get bad states (violating property) for IC3
     async fn get_bad_states(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
     ) -> FormalResult<StateSet> {
         Ok(StateSet::new())
@@ -267,7 +267,7 @@ impl ModelChecker {
     }
 
     /// Build transition system for symbolic model checking
-    async fn build_transition_system(&self, design: &LirDesign) -> FormalResult<TransitionSystem> {
+    async fn build_transition_system(&self, design: &Lir) -> FormalResult<TransitionSystem> {
         Ok(TransitionSystem::new())
     }
 

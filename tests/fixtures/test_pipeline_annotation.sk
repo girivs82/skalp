@@ -35,6 +35,6 @@ entity PipelineTest {
 }
 
 impl PipelineTest {
-    mac_result <= pipelined_mac(a, b, c)
-    expr_result <= pipelined_expr(a, b, c, d)
+    mac_result = pipelined_mac(a, b, c)
+    expr_result = pipelined_expr(a, b, c, d)
 }

@@ -13,18 +13,18 @@ impl MultiClockDesign<'clk_a, 'clk_b> {
 
     on(clk_a.rise) {
         if (rst) {
-            reg_a <= 0
+            reg_a = 0
         } else {
-            reg_a <= data
+            reg_a = data
         }
     }
 
     on(clk_b.rise) {
         if (rst) {
-            reg_b <= 0
+            reg_b = 0
         } else {
             // This should trigger a CDC warning when we implement detection!
-            reg_b <= reg_a
+            reg_b = reg_a
         }
     }
 

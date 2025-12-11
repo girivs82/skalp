@@ -22,9 +22,9 @@ impl NestedFieldTest {
     // TESTING: Nested field assignment
     on(clk.rise) {
         if rst {
-            out_vertex.position.x <= 0
+            out_vertex.position.x = 0
         } else {
-            out_vertex.position.x <= input_x  // Nested field access!
+            out_vertex.position.x = input_x  // Nested field access!
         }
     }
 

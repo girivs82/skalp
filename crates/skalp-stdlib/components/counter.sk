@@ -12,25 +12,25 @@ entity std_counter<const WIDTH: usize> {
 
 impl std_counter {
     signal counter_reg: bit<WIDTH>;
-    
+
     on(clk.rise) {
         if rst.active {
-            counter_reg <= 0;
+            counter_reg = 0;
         } else if load {
-            counter_reg <= load_value;
+            counter_reg = load_value;
         } else if enable {
-            counter_reg <= counter_reg + 1;
+            counter_reg = counter_reg + 1;
         }
     }
-    
+
     count = counter_reg;
     overflow = (counter_reg == (1 << WIDTH) - 1) && enable && !load;
     underflow = (counter_reg == 0) && enable && !load;
-    
+
     // Verification properties
     assert property (rst.active |=> count == 0)
         @(posedge clk);
-        
+
     assert property (load |=> count == load_value)
         @(posedge clk);
 }

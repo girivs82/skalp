@@ -262,7 +262,7 @@ impl RaySphereHitTest {
         b = sphere_radius
     }
 
-    // Hit if distance <= radius
+    // Hit if distance = radius
     inst compare: FP32Compare {
         a = distance_sq.result,
         b = radius_sq.result

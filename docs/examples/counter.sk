@@ -9,15 +9,15 @@ entity counter {
 
 impl counter {
     signal counter_reg: bit<32>;
-    
+
     on(clk.rise) {
         if rst.active {
-            counter_reg <= 0;
+            counter_reg = 0;
         } else if enable {
-            counter_reg <= counter_reg + 1;
+            counter_reg = counter_reg + 1;
         }
     }
-    
+
     // Combinational outputs
     count = counter_reg;
     overflow = (counter_reg == 0xFFFFFFFF) && enable;

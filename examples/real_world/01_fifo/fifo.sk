@@ -50,9 +50,9 @@ impl<const WIDTH: nat[16], const DEPTH: nat[16]> Fifo<WIDTH, DEPTH> {
     on(clk.rise) {
         if rst {
             // Reset all pointers
-            wr_ptr <= 0
-            rd_ptr <= 0
-            data_count <= 0
+            wr_ptr = 0
+            rd_ptr = 0
+            data_count = 0
         } else {
             // Handle simultaneous read and write
             match (wr_en, rd_en) {
@@ -72,14 +72,14 @@ impl<const WIDTH: nat[16], const DEPTH: nat[16]> Fifo<WIDTH, DEPTH> {
                     if !wr_full {
                         memory[wr_ptr[15:0]] <= wr_data
                         wr_ptr <= (wr_ptr + 1) % (DEPTH + 1)
-                        data_count <= data_count + 1
+                        data_count = data_count + 1
                     }
                 }
                 (false, true) => {
                     // Read only
                     if !rd_empty {
                         rd_ptr <= (rd_ptr + 1) % (DEPTH + 1)
-                        data_count <= data_count - 1
+                        data_count = data_count - 1
                     }
                 }
                 _ => {

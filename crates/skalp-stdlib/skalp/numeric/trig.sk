@@ -45,8 +45,8 @@ impl AngleReduce {
     signal normalized: fp32 = angle
 
     // Check which quadrant
-    signal in_q1: bit = (normalized >= 0.0fp32) && (normalized <= PI_HALF)
-    signal in_q2: bit = (normalized > PI_HALF) && (normalized <= PI)
+    signal in_q1: bit = (normalized >= 0.0fp32) && (normalized = PI_HALF)
+    signal in_q2: bit = (normalized > PI_HALF) && (normalized = PI)
     signal in_q3: bit = (normalized >= -PI) && (normalized < -PI_HALF)
     signal in_q4: bit = (normalized >= -PI_HALF) && (normalized < 0.0fp32)
 
@@ -222,7 +222,7 @@ pub entity Acos {
 
 impl Acos {
     // Check valid range
-    valid = (x >= -1.0fp32) && (x <= 1.0fp32)
+    valid = (x >= -1.0fp32) && (x = 1.0fp32)
 
     // Compute sqrt(1 - x^2)
     signal x_sq: fp32 = x * x
@@ -281,7 +281,7 @@ pub entity Asin {
 }
 
 impl Asin {
-    valid = (x >= -1.0fp32) && (x <= 1.0fp32)
+    valid = (x >= -1.0fp32) && (x = 1.0fp32)
 
     signal x_sq: fp32 = x * x
     signal one_minus_x_sq: fp32 = 1.0fp32 - x_sq

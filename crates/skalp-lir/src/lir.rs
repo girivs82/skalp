@@ -1,137 +1,21 @@
 //! LIR - Low-level Intermediate Representation
 //!
-//! Gate-level representation of hardware designs.
+//! Gate-level representation of hardware designs for simulation and fault analysis.
 //!
-//! This module provides both:
-//! 1. Basic gate-level representation (Gate, GateType, Net)
-//! 2. Extended primitive types for fault simulation (PrimitiveType, Primitive, GateNetlist)
+//! This module provides technology-independent primitive types (gates, flip-flops, muxes, etc.)
+//! for gate-level simulation and ISO 26262 safety analysis without requiring external synthesized netlists.
 //!
-//! The extended types support technology-independent fault simulation for ISO 26262
-//! safety analysis without requiring external synthesized netlists.
+//! The compilation flow is: HIR → MIR → LIR → SIR (for simulation)
+//!
+//! Key types:
+//! - `Lir` - The gate-level netlist (collection of primitives and nets)
+//! - `Primitive` - Individual gate/flip-flop/mux with hierarchical path for traceability
+//! - `PrimitiveType` - Type of primitive (AND, OR, DFF, MUX2, etc.)
+//! - `LirNet` - Wire connecting primitives
+//! - `NetId`, `PrimitiveId` - Numeric IDs for efficient lookup
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-/// Low-level Intermediate Representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Lir {
-    /// Module name
-    pub name: String,
-    /// Gates in the design
-    pub gates: Vec<Gate>,
-    /// Nets connecting gates
-    pub nets: Vec<Net>,
-}
-
-/// Complete LIR design with multiple modules
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LirDesign {
-    /// Design name
-    pub name: String,
-    /// Modules in the design
-    pub modules: Vec<LirModule>,
-}
-
-/// LIR module representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LirModule {
-    /// Module name
-    pub name: String,
-    /// Signals in the module
-    pub signals: Vec<LirSignal>,
-    /// Gates in the module
-    pub gates: Vec<Gate>,
-    /// Nets connecting gates
-    pub nets: Vec<Net>,
-}
-
-/// LIR signal representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LirSignal {
-    /// Signal name
-    pub name: String,
-    /// Signal type
-    pub signal_type: String,
-    /// Whether this is an input signal
-    pub is_input: bool,
-    /// Whether this is an output signal
-    pub is_output: bool,
-    /// Whether this is a register
-    pub is_register: bool,
-}
-
-/// Hardware gate representation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Gate {
-    /// Gate identifier
-    pub id: String,
-    /// Gate type (AND, OR, NOT, etc.)
-    pub gate_type: GateType,
-    /// Input nets
-    pub inputs: Vec<String>,
-    /// Output nets
-    pub outputs: Vec<String>,
-}
-
-/// Types of hardware gates
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum GateType {
-    And,
-    Or,
-    Not,
-    Nand,
-    Nor,
-    Xor,
-    Xnor,
-    Buffer,
-    DFF,
-    Latch,
-}
-
-impl std::fmt::Display for GateType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GateType::And => write!(f, "AND"),
-            GateType::Or => write!(f, "OR"),
-            GateType::Not => write!(f, "NOT"),
-            GateType::Nand => write!(f, "NAND"),
-            GateType::Nor => write!(f, "NOR"),
-            GateType::Xor => write!(f, "XOR"),
-            GateType::Xnor => write!(f, "XNOR"),
-            GateType::Buffer => write!(f, "BUF"),
-            GateType::DFF => write!(f, "DFF"),
-            GateType::Latch => write!(f, "LATCH"),
-        }
-    }
-}
-
-/// Hardware net (wire)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Net {
-    /// Net identifier
-    pub id: String,
-    /// Width in bits
-    pub width: usize,
-    /// Driver gate
-    pub driver: Option<String>,
-    /// Load gates
-    pub loads: Vec<String>,
-    /// Whether this net connects to an output port
-    pub is_output: bool,
-    /// Whether this net connects to an input port
-    pub is_input: bool,
-}
-
-impl Lir {
-    /// Create a new empty LIR
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            gates: Vec::new(),
-            nets: Vec::new(),
-        }
-    }
-}
 
 // ============================================================================
 // Extended Primitive Types for Fault Simulation
@@ -477,7 +361,7 @@ impl Primitive {
 ///
 /// Represents a wire connecting primitive outputs to inputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GateNet {
+pub struct LirNet {
     /// Net ID
     pub id: NetId,
     /// Name (for debugging and traceability)
@@ -496,7 +380,7 @@ pub struct GateNet {
     pub width: u8,
 }
 
-impl GateNet {
+impl LirNet {
     /// Create a new net
     pub fn new(id: NetId, name: String) -> Self {
         Self {
@@ -591,7 +475,7 @@ pub struct NetlistStats {
 
 impl NetlistStats {
     /// Calculate statistics from a netlist
-    pub fn from_netlist(netlist: &GateNetlist) -> Self {
+    pub fn from_netlist(netlist: &Lir) -> Self {
         let mut stats = NetlistStats::default();
         stats.total_primitives = netlist.primitives.len() as u64;
         stats.total_nets = netlist.nets.len() as u64;
@@ -642,7 +526,7 @@ impl NetlistStats {
 /// This is the flattened, elaborated representation of a design
 /// used for gate-level simulation and fault injection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GateNetlist {
+pub struct Lir {
     /// Design name
     pub name: String,
     /// Original module hierarchy (for traceability)
@@ -650,7 +534,7 @@ pub struct GateNetlist {
     /// All primitives in flattened design
     pub primitives: Vec<Primitive>,
     /// All nets in flattened design
-    pub nets: Vec<GateNet>,
+    pub nets: Vec<LirNet>,
     /// Primary input net IDs
     pub inputs: Vec<NetId>,
     /// Primary output net IDs
@@ -663,7 +547,7 @@ pub struct GateNetlist {
     pub stats: NetlistStats,
 }
 
-impl GateNetlist {
+impl Lir {
     /// Create a new empty gate netlist
     pub fn new(name: String) -> Self {
         Self {
@@ -687,7 +571,7 @@ impl GateNetlist {
     }
 
     /// Add a net to the netlist
-    pub fn add_net(&mut self, net: GateNet) -> NetId {
+    pub fn add_net(&mut self, net: LirNet) -> NetId {
         let id = net.id;
         self.nets.push(net);
         id
@@ -699,7 +583,7 @@ impl GateNetlist {
     }
 
     /// Get a net by ID
-    pub fn get_net(&self, id: NetId) -> Option<&GateNet> {
+    pub fn get_net(&self, id: NetId) -> Option<&LirNet> {
         self.nets.iter().find(|n| n.id == id)
     }
 
@@ -709,7 +593,7 @@ impl GateNetlist {
     }
 
     /// Get mutable net by ID
-    pub fn get_net_mut(&mut self, id: NetId) -> Option<&mut GateNet> {
+    pub fn get_net_mut(&mut self, id: NetId) -> Option<&mut LirNet> {
         self.nets.iter_mut().find(|n| n.id == id)
     }
 
@@ -833,8 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn test_gate_netlist_creation() {
-        let mut netlist = GateNetlist::new("test".to_string());
+    fn test_lir_creation() {
+        let mut lir = Lir::new("test".to_string());
 
         // Add some primitives
         let prim = Primitive::new_comb(
@@ -844,21 +728,21 @@ mod tests {
             vec![NetId(0), NetId(1)],
             vec![NetId(2)],
         );
-        netlist.add_primitive(prim);
+        lir.add_primitive(prim);
 
         // Add some nets
-        let net_a = GateNet::new_primary_input(NetId(0), "a".to_string());
-        let net_b = GateNet::new_primary_input(NetId(1), "b".to_string());
-        let net_out = GateNet::new_primary_output(NetId(2), "out".to_string(), (PrimitiveId(0), 0));
-        netlist.add_net(net_a);
-        netlist.add_net(net_b);
-        netlist.add_net(net_out);
+        let net_a = LirNet::new_primary_input(NetId(0), "a".to_string());
+        let net_b = LirNet::new_primary_input(NetId(1), "b".to_string());
+        let net_out = LirNet::new_primary_output(NetId(2), "out".to_string(), (PrimitiveId(0), 0));
+        lir.add_net(net_a);
+        lir.add_net(net_b);
+        lir.add_net(net_out);
 
-        netlist.update_stats();
+        lir.update_stats();
 
-        assert_eq!(netlist.stats.total_primitives, 1);
-        assert_eq!(netlist.stats.comb_gates, 1);
-        assert_eq!(netlist.stats.total_nets, 3);
+        assert_eq!(lir.stats.total_primitives, 1);
+        assert_eq!(lir.stats.comb_gates, 1);
+        assert_eq!(lir.stats.total_nets, 3);
     }
 
     #[test]
@@ -875,18 +759,18 @@ mod tests {
     }
 
     #[test]
-    fn test_netlist_stats() {
-        let mut netlist = GateNetlist::new("test".to_string());
+    fn test_lir_stats() {
+        let mut lir = Lir::new("test".to_string());
 
         // Add mixed primitives
-        netlist.add_primitive(Primitive::new_comb(
+        lir.add_primitive(Primitive::new_comb(
             PrimitiveId(0),
             PrimitiveType::And { inputs: 2 },
             "top.and1".to_string(),
             vec![],
             vec![],
         ));
-        netlist.add_primitive(Primitive::new_seq(
+        lir.add_primitive(Primitive::new_seq(
             PrimitiveId(1),
             PrimitiveType::DffP,
             "top.ff1".to_string(),
@@ -895,7 +779,7 @@ mod tests {
             NetId(0),
             None,
         ));
-        netlist.add_primitive(Primitive::new_comb(
+        lir.add_primitive(Primitive::new_comb(
             PrimitiveId(2),
             PrimitiveType::Mux2,
             "top.mux1".to_string(),
@@ -903,27 +787,27 @@ mod tests {
             vec![],
         ));
 
-        netlist.update_stats();
+        lir.update_stats();
 
-        assert_eq!(netlist.stats.total_primitives, 3);
-        assert_eq!(netlist.stats.comb_gates, 1); // AND only
-        assert_eq!(netlist.stats.flip_flops, 1);
-        assert_eq!(netlist.stats.muxes, 1);
-        assert!(netlist.stats.total_fit > 0.0);
+        assert_eq!(lir.stats.total_primitives, 3);
+        assert_eq!(lir.stats.comb_gates, 1); // AND only
+        assert_eq!(lir.stats.flip_flops, 1);
+        assert_eq!(lir.stats.muxes, 1);
+        assert!(lir.stats.total_fit > 0.0);
     }
 
     #[test]
     fn test_sequential_combinational_separation() {
-        let mut netlist = GateNetlist::new("test".to_string());
+        let mut lir = Lir::new("test".to_string());
 
-        netlist.add_primitive(Primitive::new_comb(
+        lir.add_primitive(Primitive::new_comb(
             PrimitiveId(0),
             PrimitiveType::And { inputs: 2 },
             "top.and1".to_string(),
             vec![],
             vec![],
         ));
-        netlist.add_primitive(Primitive::new_seq(
+        lir.add_primitive(Primitive::new_seq(
             PrimitiveId(1),
             PrimitiveType::DffP,
             "top.ff1".to_string(),
@@ -933,7 +817,10 @@ mod tests {
             None,
         ));
 
-        assert_eq!(netlist.sequential_primitives().len(), 1);
-        assert_eq!(netlist.combinational_primitives().len(), 1);
+        assert_eq!(lir.sequential_primitives().len(), 1);
+        assert_eq!(lir.combinational_primitives().len(), 1);
     }
 }
+
+// Old deprecated types have been removed.
+// Use the new types: Lir, LirNet, Primitive, PrimitiveType

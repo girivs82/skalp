@@ -1,7 +1,7 @@
 //! Advanced routing algorithms for FPGA designs
 
 use crate::device::{Device, DeviceFamily};
-use skalp_lir::{Gate, LirDesign, Net};
+use skalp_lir::{Lir, LirNet, Primitive};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
@@ -281,7 +281,7 @@ impl Router {
     /// Run routing algorithm
     pub fn route(
         &mut self,
-        design: &LirDesign,
+        design: &Lir,
         placement: &super::placer::PlacementResult,
     ) -> Result<RoutingResult, RoutingError> {
         println!(
@@ -303,7 +303,7 @@ impl Router {
     /// PathFinder A* routing with negotiated congestion
     fn pathfinder_astar_route(
         &mut self,
-        design: &LirDesign,
+        design: &Lir,
         placement: &super::placer::PlacementResult,
     ) -> Result<RoutingResult, RoutingError> {
         let mut routes = HashMap::new();
@@ -502,24 +502,25 @@ impl Router {
     /// Extract nets from design and placement
     fn extract_nets(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         placement: &super::placer::PlacementResult,
     ) -> Vec<NetToRoute> {
         let mut nets = Vec::new();
 
-        for module in &design.modules {
-            for gate in &module.gates {
-                if let Some(&gate_pos) = placement.placements.get(&gate.id) {
-                    // Create nets for each input connection
-                    for (i, input) in gate.inputs.iter().enumerate() {
-                        if let Some(&source_pos) = placement.placements.get(input) {
-                            nets.push(NetToRoute {
-                                id: format!("{}_{}", gate.id, i),
-                                source: source_pos,
-                                target: gate_pos,
-                                criticality: 1.0, // Default criticality
-                            });
-                        }
+        // Iterate over primitives directly (flat structure)
+        for prim in &design.primitives {
+            let prim_id = format!("prim_{}", prim.id.0);
+            if let Some(&prim_pos) = placement.placements.get(&prim_id) {
+                // Create nets for each input connection
+                for (i, input) in prim.inputs.iter().enumerate() {
+                    let input_net_id = format!("net_{}", input.0);
+                    if let Some(&source_pos) = placement.placements.get(&input_net_id) {
+                        nets.push(NetToRoute {
+                            id: format!("{}_{}", prim_id, i),
+                            source: source_pos,
+                            target: prim_pos,
+                            criticality: 1.0, // Default criticality
+                        });
                     }
                 }
             }
@@ -653,7 +654,7 @@ impl Router {
     /// Simple maze routing (fallback algorithm)
     fn maze_route(
         &mut self,
-        design: &LirDesign,
+        design: &Lir,
         placement: &super::placer::PlacementResult,
     ) -> Result<RoutingResult, RoutingError> {
         println!("   Using simplified maze routing");
@@ -676,7 +677,7 @@ impl Router {
     /// Timing-driven routing
     fn timing_driven_route(
         &mut self,
-        design: &LirDesign,
+        design: &Lir,
         placement: &super::placer::PlacementResult,
     ) -> Result<RoutingResult, RoutingError> {
         println!("   Using timing-driven routing");

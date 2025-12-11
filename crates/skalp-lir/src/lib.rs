@@ -1,135 +1,91 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 //! SKALP LIR - Low-level Intermediate Representation
 //!
-//! This crate handles:
-//! - Gate-level representation
-//! - Technology mapping
-//! - Netlist generation
-//! - Physical primitives
-//! - MIR to LIR transformation
-//! - Optimization passes
-//! - Timing analysis
+//! Gate-level representation for hardware designs. The compilation flow is:
+//!
+//! ```text
+//! HIR → MIR → LIR → SIR (for simulation)
+//! ```
+//!
+//! Key types:
+//! - [`Lir`] - Technology-independent gate-level netlist (primitives + nets)
+//! - [`Primitive`] - Individual gate/flip-flop/mux with hierarchy path
+//! - [`PrimitiveType`] - Type of primitive (AND, OR, DFF, MUX2, etc.)
+//! - [`LirNet`] - Wire connecting primitives
+//!
+//! # Example
+//!
+//! ```ignore
+//! use skalp_lir::lower_to_lir;
+//!
+//! let mir = compile_to_mir(source)?;
+//! let lir_results = lower_to_lir(&mir)?;
+//! for result in lir_results {
+//!     println!("Module: {}", result.lir.name);
+//!     println!("Primitives: {}", result.lir.primitives.len());
+//!     println!("Total FIT: {}", result.lir.stats.total_fit);
+//! }
+//! ```
 
 pub mod gate_optimization;
 pub mod lir;
 pub mod mir_to_gate_netlist;
-pub mod mir_to_lir;
 pub mod netlist;
-pub mod optimization;
 pub mod primitives;
-pub mod tech_mapping;
 pub mod technology;
-pub mod technology_mapping;
-pub mod timing;
 
+// Primary LIR types
+pub use lir::{
+    FitOverrides, HierarchyNode, Lir, LirNet, NetId, NetlistStats, Primitive, PrimitiveId,
+    PrimitiveType,
+};
+
+// MIR to LIR transformation
+pub use mir_to_gate_netlist::{
+    lower_mir_module_to_lir, MirToLirResult, MirToLirTransform, TransformStats,
+};
+
+// Gate optimization passes (operate on Lir type)
 pub use gate_optimization::{
     GateBooleanSimplification, GateBufferRemoval, GateCSE, GateConstantFolding,
     GateDeadCodeElimination, GateFanoutOptimization, GateMuxOptimization,
-    GateNetlistOptimizationPass, GateOptConfig, GateOptimizationPipeline, GateOptimizationResult,
+    LirOptimizationPass, GateOptConfig, GateOptimizationPipeline, GateOptimizationResult,
     OptTarget,
 };
-pub use lir::{Gate, GateType, Lir, LirDesign, LirModule, LirSignal, Net};
-pub use lir::{GateNet, GateNetlist, HierarchyNode, NetId, NetlistStats, Primitive, PrimitiveId, PrimitiveType, FitOverrides};
-pub use mir_to_gate_netlist::{transform_mir_to_gate_netlist, MirToGateNetlistResult, MirToGateNetlistTransform, TransformStats};
-pub use mir_to_lir::transform_mir_to_lir;
+
+// Other exports
 pub use netlist::Netlist;
-pub use optimization::{OptimizationPipeline, OptimizationResult};
-pub use technology_mapping::{
-    ResourceUsage, TechnologyMapper, TechnologyMappingResult, TechnologyTarget,
-};
 
 use anyhow::Result;
 use skalp_mir::Mir;
 
-/// Lower MIR to LIR
-pub fn lower_to_lir(mir: &Mir) -> Result<LirDesign> {
-    let mut lir_modules = Vec::new();
-
-    for module in &mir.modules {
-        // Transform MIR module to LIR
-        let lir = transform_mir_to_lir(module);
-
-        // Create LirSignals from MIR ports and signals
-        let mut signals = Vec::new();
-
-        // Convert ports to signals
-        for port in &module.ports {
-            let signal = LirSignal {
-                name: port.name.clone(),
-                signal_type: format!("{:?}", port.port_type), // Convert type to string
-                is_input: matches!(port.direction, skalp_mir::PortDirection::Input),
-                is_register: false, // Ports are not registers
-                is_output: matches!(port.direction, skalp_mir::PortDirection::Output),
-            };
-            signals.push(signal);
-        }
-
-        // Convert internal signals
-        for signal in &module.signals {
-            let lir_signal = LirSignal {
-                name: signal.name.clone(),
-                signal_type: format!("{:?}", signal.signal_type),
-                is_input: false,
-                is_output: false, // Internal signals are not ports
-                is_register: signal.initial.is_some(), // Signals with initial values are registers
-            };
-            signals.push(lir_signal);
-        }
-
-        // Create LirModule with populated signals
-        lir_modules.push(LirModule {
-            name: module.name.clone(),
-            signals,
-            gates: lir.gates.clone(),
-            nets: lir.nets.clone(),
-        });
-    }
-
-    // If no modules, create a default one
-    if lir_modules.is_empty() {
-        lir_modules.push(LirModule {
-            name: mir.name.clone(),
-            signals: Vec::new(),
-            gates: Vec::new(),
-            nets: Vec::new(),
-        });
-    }
-
-    let _ = !lir_modules.is_empty();
-
-    Ok(LirDesign {
-        name: mir.name.clone(),
-        modules: lir_modules,
-    })
-}
-
-/// Lower MIR to GateNetlist (new primitive-based representation)
+/// Lower MIR to LIR (gate-level netlist)
 ///
-/// This produces a technology-independent gate-level netlist with:
+/// This produces a technology-independent gate-level representation with:
 /// - Full primitive decomposition (gates, flip-flops, muxes, adders)
 /// - Per-bit net representation for multi-bit signals
-/// - FIT estimation for each primitive
-/// - Hierarchy traceability
+/// - FIT estimation for each primitive (for ISO 26262 safety analysis)
+/// - Hierarchy traceability via `Primitive.path`
 ///
 /// # Example
 ///
 /// ```ignore
 /// use skalp_mir::Mir;
-/// use skalp_lir::lower_to_gate_netlist;
+/// use skalp_lir::lower_to_lir;
 ///
 /// let mir = compile_to_mir(source)?;
-/// let gate_netlists = lower_to_gate_netlist(&mir)?;
-/// for result in gate_netlists {
-///     println!("Module: {}", result.netlist.name);
-///     println!("Primitives: {}", result.netlist.primitives.len());
-///     println!("Total FIT: {}", result.netlist.stats.total_fit);
+/// let lir_results = lower_to_lir(&mir)?;
+/// for result in lir_results {
+///     println!("Module: {}", result.lir.name);
+///     println!("Primitives: {}", result.lir.primitives.len());
+///     println!("Total FIT: {}", result.lir.stats.total_fit);
 /// }
 /// ```
-pub fn lower_to_gate_netlist(mir: &Mir) -> Result<Vec<MirToGateNetlistResult>> {
+pub fn lower_to_lir(mir: &Mir) -> Result<Vec<MirToLirResult>> {
     let mut results = Vec::new();
 
     for module in &mir.modules {
-        let result = transform_mir_to_gate_netlist(module);
+        let result = lower_mir_module_to_lir(module);
         results.push(result);
     }
 

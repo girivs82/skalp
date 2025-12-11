@@ -1,6 +1,6 @@
 //! Gate-Level Netlist Optimization Passes
 //!
-//! Optimization passes for `GateNetlist`/`Primitive` structures, enabling
+//! Optimization passes for `Lir`/`Primitive` structures, enabling
 //! technology-independent gate-level optimization for fault simulation.
 //!
 //! # Passes
@@ -17,9 +17,9 @@
 //!
 //! ```ignore
 //! use skalp_lir::gate_optimization::{GateOptimizationPipeline, GateOptConfig};
-//! use skalp_lir::lir::GateNetlist;
+//! use skalp_lir::lir::Lir;
 //!
-//! let mut netlist = GateNetlist::new("test".to_string());
+//! let mut netlist = Lir::new("test".to_string());
 //! // ... populate netlist ...
 //!
 //! let mut pipeline = GateOptimizationPipeline::for_safety_analysis();
@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use crate::lir::{GateNet, GateNetlist, NetId, Primitive, PrimitiveId, PrimitiveType};
+use crate::lir::{LirNet, Lir, NetId, Primitive, PrimitiveId, PrimitiveType};
 use std::collections::{HashMap, HashSet};
 
 /// Result of a gate-level optimization pass
@@ -58,12 +58,12 @@ pub struct GateOptimizationResult {
 }
 
 /// Trait for gate-level netlist optimization passes
-pub trait GateNetlistOptimizationPass {
+pub trait LirOptimizationPass {
     /// Name of the optimization pass
     fn name(&self) -> &str;
 
     /// Apply the optimization to the netlist
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult;
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult;
 }
 
 // ============================================================================
@@ -154,12 +154,12 @@ impl GateConstantFolding {
     }
 }
 
-impl GateNetlistOptimizationPass for GateConstantFolding {
+impl LirOptimizationPass for GateConstantFolding {
     fn name(&self) -> &str {
         "GateConstantFolding"
     }
 
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult {
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult {
         let primitives_before = netlist.primitives.len() as u64;
         let nets_before = netlist.nets.len() as u64;
         let fit_before: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -276,12 +276,12 @@ impl GateDeadCodeElimination {
     }
 }
 
-impl GateNetlistOptimizationPass for GateDeadCodeElimination {
+impl LirOptimizationPass for GateDeadCodeElimination {
     fn name(&self) -> &str {
         "GateDeadCodeElimination"
     }
 
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult {
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult {
         let primitives_before = netlist.primitives.len() as u64;
         let nets_before = netlist.nets.len() as u64;
         let fit_before: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -410,12 +410,12 @@ impl GateCSE {
     }
 }
 
-impl GateNetlistOptimizationPass for GateCSE {
+impl LirOptimizationPass for GateCSE {
     fn name(&self) -> &str {
         "GateCSE"
     }
 
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult {
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult {
         let primitives_before = netlist.primitives.len() as u64;
         let nets_before = netlist.nets.len() as u64;
         let fit_before: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -515,12 +515,12 @@ impl GateBooleanSimplification {
     }
 }
 
-impl GateNetlistOptimizationPass for GateBooleanSimplification {
+impl LirOptimizationPass for GateBooleanSimplification {
     fn name(&self) -> &str {
         "GateBooleanSimplification"
     }
 
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult {
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult {
         let primitives_before = netlist.primitives.len() as u64;
         let nets_before = netlist.nets.len() as u64;
         let fit_before: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -632,12 +632,12 @@ impl GateMuxOptimization {
     }
 }
 
-impl GateNetlistOptimizationPass for GateMuxOptimization {
+impl LirOptimizationPass for GateMuxOptimization {
     fn name(&self) -> &str {
         "GateMuxOptimization"
     }
 
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult {
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult {
         let primitives_before = netlist.primitives.len() as u64;
         let nets_before = netlist.nets.len() as u64;
         let fit_before: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -747,12 +747,12 @@ impl GateBufferRemoval {
     }
 }
 
-impl GateNetlistOptimizationPass for GateBufferRemoval {
+impl LirOptimizationPass for GateBufferRemoval {
     fn name(&self) -> &str {
         "GateBufferRemoval"
     }
 
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult {
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult {
         let primitives_before = netlist.primitives.len() as u64;
         let nets_before = netlist.nets.len() as u64;
         let fit_before: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -833,12 +833,12 @@ impl GateFanoutOptimization {
     }
 }
 
-impl GateNetlistOptimizationPass for GateFanoutOptimization {
+impl LirOptimizationPass for GateFanoutOptimization {
     fn name(&self) -> &str {
         "GateFanoutOptimization"
     }
 
-    fn optimize(&mut self, netlist: &mut GateNetlist) -> GateOptimizationResult {
+    fn optimize(&mut self, netlist: &mut Lir) -> GateOptimizationResult {
         let primitives_before = netlist.primitives.len() as u64;
         let nets_before = netlist.nets.len() as u64;
         let fit_before: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -923,7 +923,7 @@ pub enum OptTarget {
 
 /// Gate optimization pipeline
 pub struct GateOptimizationPipeline {
-    passes: Vec<Box<dyn GateNetlistOptimizationPass>>,
+    passes: Vec<Box<dyn LirOptimizationPass>>,
     config: GateOptConfig,
 }
 
@@ -995,12 +995,12 @@ impl GateOptimizationPipeline {
     }
 
     /// Add an optimization pass to the pipeline
-    pub fn add_pass(&mut self, pass: Box<dyn GateNetlistOptimizationPass>) {
+    pub fn add_pass(&mut self, pass: Box<dyn LirOptimizationPass>) {
         self.passes.push(pass);
     }
 
     /// Run all optimization passes
-    pub fn optimize(&mut self, netlist: &mut GateNetlist) -> Vec<GateOptimizationResult> {
+    pub fn optimize(&mut self, netlist: &mut Lir) -> Vec<GateOptimizationResult> {
         let mut results = Vec::new();
 
         for iteration in 0..self.config.max_iterations {
@@ -1039,15 +1039,15 @@ impl GateOptimizationPipeline {
 mod tests {
     use super::*;
 
-    fn make_simple_netlist() -> GateNetlist {
-        let mut netlist = GateNetlist::new("test".to_string());
+    fn make_simple_netlist() -> Lir {
+        let mut netlist = Lir::new("test".to_string());
 
         // Create nets
-        let net_a = GateNet::new_primary_input(NetId(0), "a".to_string());
-        let net_b = GateNet::new_primary_input(NetId(1), "b".to_string());
-        let mut net_w = GateNet::new(NetId(2), "w".to_string());
+        let net_a = LirNet::new_primary_input(NetId(0), "a".to_string());
+        let net_b = LirNet::new_primary_input(NetId(1), "b".to_string());
+        let mut net_w = LirNet::new(NetId(2), "w".to_string());
         net_w.driver = Some((PrimitiveId(0), 0));
-        let net_y = GateNet::new_primary_output(NetId(3), "y".to_string(), (PrimitiveId(1), 0));
+        let net_y = LirNet::new_primary_output(NetId(3), "y".to_string(), (PrimitiveId(1), 0));
 
         netlist.add_net(net_a);
         netlist.add_net(net_b);
@@ -1082,15 +1082,15 @@ mod tests {
 
     #[test]
     fn test_constant_folding() {
-        let mut netlist = GateNetlist::new("const_test".to_string());
+        let mut netlist = Lir::new("const_test".to_string());
 
         // const_0 -> a (value = true)
         // const_1 -> b (value = true)
         // a & b -> y (should fold to true)
 
-        let net_a = GateNet::new(NetId(0), "a".to_string());
-        let net_b = GateNet::new(NetId(1), "b".to_string());
-        let net_y = GateNet::new_primary_output(NetId(2), "y".to_string(), (PrimitiveId(2), 0));
+        let net_a = LirNet::new(NetId(0), "a".to_string());
+        let net_b = LirNet::new(NetId(1), "b".to_string());
+        let net_y = LirNet::new_primary_output(NetId(2), "y".to_string(), (PrimitiveId(2), 0));
 
         netlist.add_net(net_a);
         netlist.add_net(net_b);
@@ -1144,7 +1144,7 @@ mod tests {
             vec![NetId(0), NetId(1)],
             vec![NetId(100)], // Output not connected to anything
         );
-        let dead_net = GateNet::new(NetId(100), "dead_net".to_string());
+        let dead_net = LirNet::new(NetId(100), "dead_net".to_string());
         netlist.add_primitive(dead_gate);
         netlist.add_net(dead_net);
 
@@ -1159,13 +1159,13 @@ mod tests {
 
     #[test]
     fn test_cse() {
-        let mut netlist = GateNetlist::new("cse_test".to_string());
+        let mut netlist = Lir::new("cse_test".to_string());
 
-        let net_a = GateNet::new_primary_input(NetId(0), "a".to_string());
-        let net_b = GateNet::new_primary_input(NetId(1), "b".to_string());
-        let net_w1 = GateNet::new(NetId(2), "w1".to_string());
-        let net_w2 = GateNet::new(NetId(3), "w2".to_string());
-        let net_y = GateNet::new_primary_output(NetId(4), "y".to_string(), (PrimitiveId(2), 0));
+        let net_a = LirNet::new_primary_input(NetId(0), "a".to_string());
+        let net_b = LirNet::new_primary_input(NetId(1), "b".to_string());
+        let net_w1 = LirNet::new(NetId(2), "w1".to_string());
+        let net_w2 = LirNet::new(NetId(3), "w2".to_string());
+        let net_y = LirNet::new_primary_output(NetId(4), "y".to_string(), (PrimitiveId(2), 0));
 
         netlist.add_net(net_a);
         netlist.add_net(net_b);
@@ -1214,11 +1214,11 @@ mod tests {
 
     #[test]
     fn test_boolean_simplification_double_negation() {
-        let mut netlist = GateNetlist::new("bool_test".to_string());
+        let mut netlist = Lir::new("bool_test".to_string());
 
-        let net_a = GateNet::new_primary_input(NetId(0), "a".to_string());
-        let net_w = GateNet::new(NetId(1), "w".to_string());
-        let net_y = GateNet::new_primary_output(NetId(2), "y".to_string(), (PrimitiveId(1), 0));
+        let net_a = LirNet::new_primary_input(NetId(0), "a".to_string());
+        let net_w = LirNet::new(NetId(1), "w".to_string());
+        let net_y = LirNet::new_primary_output(NetId(2), "y".to_string(), (PrimitiveId(1), 0));
 
         netlist.add_net(net_a);
         netlist.add_net(net_w);
@@ -1255,11 +1255,11 @@ mod tests {
 
     #[test]
     fn test_mux_optimization_identical_inputs() {
-        let mut netlist = GateNetlist::new("mux_test".to_string());
+        let mut netlist = Lir::new("mux_test".to_string());
 
-        let net_sel = GateNet::new_primary_input(NetId(0), "sel".to_string());
-        let net_a = GateNet::new_primary_input(NetId(1), "a".to_string());
-        let net_y = GateNet::new_primary_output(NetId(2), "y".to_string(), (PrimitiveId(0), 0));
+        let net_sel = LirNet::new_primary_input(NetId(0), "sel".to_string());
+        let net_a = LirNet::new_primary_input(NetId(1), "a".to_string());
+        let net_y = LirNet::new_primary_output(NetId(2), "y".to_string(), (PrimitiveId(0), 0));
 
         netlist.add_net(net_sel);
         netlist.add_net(net_a);

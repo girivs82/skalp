@@ -53,14 +53,14 @@ impl AsyncFifo {
     // Write domain logic
     on(wr_clk.rise) {
         if wr_rst {
-            wr_ptr <= 0
-            wr_ptr_gray <= 0
-            rd_ptr_gray_sync1 <= 0
-            rd_ptr_gray_sync2 <= 0
+            wr_ptr = 0
+            wr_ptr_gray = 0
+            rd_ptr_gray_sync1 = 0
+            rd_ptr_gray_sync2 = 0
         } else {
             // Synchronize read pointer from read domain (2-flop synchronizer)
-            rd_ptr_gray_sync1 <= rd_ptr_gray
-            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1
+            rd_ptr_gray_sync1 = rd_ptr_gray
+            rd_ptr_gray_sync2 = rd_ptr_gray_sync1
 
             // Write operation
             if wr_en && !wr_full {
@@ -68,29 +68,29 @@ impl AsyncFifo {
 
                 // Write to memory array (using match for synthesis)
                 match wr_addr {
-                    0x0 => mem0 <= wr_data
-                    0x1 => mem1 <= wr_data
-                    0x2 => mem2 <= wr_data
-                    0x3 => mem3 <= wr_data
-                    0x4 => mem4 <= wr_data
-                    0x5 => mem5 <= wr_data
-                    0x6 => mem6 <= wr_data
-                    0x7 => mem7 <= wr_data
-                    0x8 => mem8 <= wr_data
-                    0x9 => mem9 <= wr_data
-                    0xA => mem10 <= wr_data
-                    0xB => mem11 <= wr_data
-                    0xC => mem12 <= wr_data
-                    0xD => mem13 <= wr_data
-                    0xE => mem14 <= wr_data
-                    _ => mem15 <= wr_data
+                    0x0 => mem0 = wr_data
+                    0x1 => mem1 = wr_data
+                    0x2 => mem2 = wr_data
+                    0x3 => mem3 = wr_data
+                    0x4 => mem4 = wr_data
+                    0x5 => mem5 = wr_data
+                    0x6 => mem6 = wr_data
+                    0x7 => mem7 = wr_data
+                    0x8 => mem8 = wr_data
+                    0x9 => mem9 = wr_data
+                    0xA => mem10 = wr_data
+                    0xB => mem11 = wr_data
+                    0xC => mem12 = wr_data
+                    0xD => mem13 = wr_data
+                    0xE => mem14 = wr_data
+                    _ => mem15 = wr_data
                 }
 
                 // Increment pointer and convert to Gray code
                 let next_wr_ptr = wr_ptr + 1
-                wr_ptr <= next_wr_ptr
+                wr_ptr = next_wr_ptr
                 // Binary to Gray: G = B XOR (B >> 1)
-                wr_ptr_gray <= next_wr_ptr ^ (next_wr_ptr >> 1)
+                wr_ptr_gray = next_wr_ptr ^ (next_wr_ptr >> 1)
             }
         }
     }
@@ -98,22 +98,22 @@ impl AsyncFifo {
     // Read domain logic
     on(rd_clk.rise) {
         if rd_rst {
-            rd_ptr <= 0
-            rd_ptr_gray <= 0
-            wr_ptr_gray_sync1 <= 0
-            wr_ptr_gray_sync2 <= 0
+            rd_ptr = 0
+            rd_ptr_gray = 0
+            wr_ptr_gray_sync1 = 0
+            wr_ptr_gray_sync2 = 0
         } else {
             // Synchronize write pointer from write domain (2-flop synchronizer)
-            wr_ptr_gray_sync1 <= wr_ptr_gray
-            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1
+            wr_ptr_gray_sync1 = wr_ptr_gray
+            wr_ptr_gray_sync2 = wr_ptr_gray_sync1
 
             // Read operation
             if rd_en && !rd_empty {
                 // Increment pointer and convert to Gray code
                 let next_rd_ptr = rd_ptr + 1
-                rd_ptr <= next_rd_ptr
+                rd_ptr = next_rd_ptr
                 // Binary to Gray: G = B XOR (B >> 1)
-                rd_ptr_gray <= next_rd_ptr ^ (next_rd_ptr >> 1)
+                rd_ptr_gray = next_rd_ptr ^ (next_rd_ptr >> 1)
             }
         }
     }

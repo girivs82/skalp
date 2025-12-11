@@ -39,22 +39,22 @@ impl DataProcessor {
 
     on (clk.rise) {
         if (rst) {
-            internal_state <= State::Idle
+            internal_state = State::Idle
         } else {
             match state_cmd {
                 State::Idle => {
-                    buffer <= header_in
-                    internal_state <= State::Processing
+                    buffer = header_in
+                    internal_state = State::Processing
                 }
                 State::Processing => {
                     // Process the data
-                    internal_state <= State::Done
+                    internal_state = State::Done
                 }
                 State::Done => {
-                    internal_state <= State::Idle
+                    internal_state = State::Idle
                 }
                 State::Error => {
-                    internal_state <= State::Idle
+                    internal_state = State::Idle
                 }
             }
         }

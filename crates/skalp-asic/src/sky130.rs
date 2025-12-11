@@ -5,7 +5,7 @@
 
 use crate::placement::{Net, Netlist, StandardCell};
 use crate::AsicError;
-use skalp_lir::{Gate, GateType, LirDesign};
+use skalp_lir::{Lir, Primitive, PrimitiveType};
 use std::collections::HashMap;
 
 /// SKY130 Standard Cell Library
@@ -320,55 +320,56 @@ impl StandardCellLibrary {
     }
 
     /// Map LIR design to SKY130 netlist
-    pub fn map_design(&self, design: &LirDesign) -> Result<Netlist, AsicError> {
+    pub fn map_design(&self, design: &Lir) -> Result<Netlist, AsicError> {
         let mut netlist_cells = Vec::new();
         let mut nets = Vec::new();
-        let mut net_map = HashMap::new();
+        let mut net_map: HashMap<String, usize> = HashMap::new();
 
-        // Process each module
-        for module in &design.modules {
-            // Map each gate to a standard cell
-            for (gate_idx, gate) in module.gates.iter().enumerate() {
-                let cell_name = self.map_gate_type(&gate.gate_type)?;
-                let cell_def = self.get_cell_definition(&cell_name)?;
+        // Map each primitive to a standard cell (flat structure)
+        for (prim_idx, prim) in design.primitives.iter().enumerate() {
+            let cell_name = self.map_primitive_type(&prim.ptype)?;
+            let cell_def = self.get_cell_definition(&cell_name)?;
 
-                let cell = StandardCell {
-                    name: format!("{}_{}", gate.id, gate_idx),
-                    cell_type: cell_name,
-                    width: cell_def.width,
-                    height: cell_def.height,
-                    area: cell_def.area,
-                };
+            let cell = StandardCell {
+                name: format!("prim_{}_{}", prim.id.0, prim_idx),
+                cell_type: cell_name,
+                width: cell_def.width,
+                height: cell_def.height,
+                area: cell_def.area,
+            };
 
-                netlist_cells.push(cell);
+            netlist_cells.push(cell);
 
-                // Track net connections
-                for (i, input) in gate.inputs.iter().enumerate() {
-                    let net_id = net_map.entry(input.clone()).or_insert_with(|| nets.len());
-                    if *net_id == nets.len() {
-                        nets.push(Net {
-                            name: input.clone(),
-                            connections: Vec::new(),
-                        });
-                    }
-                    nets[*net_id]
-                        .connections
-                        .push((gate_idx, format!("I{}", i)));
-                }
+            // Track net connections for inputs
+            for (i, input) in prim.inputs.iter().enumerate() {
+                let input_name = format!("net_{}", input.0);
+                let net_id = *net_map.entry(input_name.clone()).or_insert_with(|| {
+                    let idx = nets.len();
+                    nets.push(Net {
+                        name: input_name.clone(),
+                        connections: Vec::new(),
+                    });
+                    idx
+                });
+                nets[net_id]
+                    .connections
+                    .push((prim_idx, format!("I{}", i)));
+            }
 
-                // Output nets
-                for (i, output) in gate.outputs.iter().enumerate() {
-                    let net_id = net_map.entry(output.clone()).or_insert_with(|| nets.len());
-                    if *net_id == nets.len() {
-                        nets.push(Net {
-                            name: output.clone(),
-                            connections: Vec::new(),
-                        });
-                    }
-                    nets[*net_id]
-                        .connections
-                        .push((gate_idx, format!("O{}", i)));
-                }
+            // Track net connections for outputs
+            for (i, output) in prim.outputs.iter().enumerate() {
+                let output_name = format!("net_{}", output.0);
+                let net_id = *net_map.entry(output_name.clone()).or_insert_with(|| {
+                    let idx = nets.len();
+                    nets.push(Net {
+                        name: output_name.clone(),
+                        connections: Vec::new(),
+                    });
+                    idx
+                });
+                nets[net_id]
+                    .connections
+                    .push((prim_idx, format!("O{}", i)));
             }
         }
 
@@ -378,17 +379,17 @@ impl StandardCellLibrary {
         })
     }
 
-    /// Map gate type to cell name
-    fn map_gate_type(&self, gate_type: &GateType) -> Result<String, AsicError> {
-        let cell_name = match gate_type {
-            GateType::Not => "INV_X1",
-            GateType::Nand => "NAND2_X1",
-            GateType::Nor => "NOR2_X1",
-            GateType::DFF => "DFF_X1",
+    /// Map primitive type to cell name
+    fn map_primitive_type(&self, ptype: &PrimitiveType) -> Result<String, AsicError> {
+        let cell_name = match ptype {
+            PrimitiveType::Inv => "INV_X1",
+            PrimitiveType::Nand { .. } => "NAND2_X1",
+            PrimitiveType::Nor { .. } => "NOR2_X1",
+            PrimitiveType::DffP | PrimitiveType::DffN | PrimitiveType::DffNeg | PrimitiveType::DffE | PrimitiveType::DffAR | PrimitiveType::DffAS | PrimitiveType::DffScan => "DFF_X1",
             _ => {
                 return Err(AsicError::TechnologyError(format!(
-                    "Unsupported gate type: {:?}",
-                    gate_type
+                    "Unsupported primitive type: {:?}",
+                    ptype
                 )))
             }
         };
@@ -402,12 +403,13 @@ impl StandardCellLibrary {
         })
     }
 
-    /// Create pins for a gate based on cell definition
-    fn create_pins_for_gate(&self, gate: &Gate, cell_def: &CellDefinition) -> Vec<Pin> {
+    /// Create pins for a primitive based on cell definition
+    #[allow(dead_code)]
+    fn create_pins_for_primitive(&self, prim: &Primitive, cell_def: &CellDefinition) -> Vec<Pin> {
         let mut pins = Vec::new();
 
         // Input pins
-        for (i, input) in gate.inputs.iter().enumerate() {
+        for (i, _input) in prim.inputs.iter().enumerate() {
             pins.push(Pin {
                 name: format!("A{}", i),
                 direction: PinDirection::Input,
@@ -416,7 +418,7 @@ impl StandardCellLibrary {
         }
 
         // Output pins
-        for (i, output) in gate.outputs.iter().enumerate() {
+        for (i, _output) in prim.outputs.iter().enumerate() {
             pins.push(Pin {
                 name: format!("Y{}", i),
                 direction: PinDirection::Output,

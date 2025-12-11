@@ -73,52 +73,52 @@ impl GeometryProcessor4 {
     // 0 = Idle, 1 = Load, 2 = Process, 3 = Output
     on(clk.rise) {
         if rst {
-            state <= 0
-            vertex_count <= 0
-            stage0_valid <= 0
-            stage1_valid <= 0
-            stage2_valid <= 0
-            stage3_valid <= 0
+            state = 0
+            vertex_count = 0
+            stage0_valid = 0
+            stage1_valid = 0
+            stage2_valid = 0
+            stage3_valid = 0
         } else {
             if state == 0 {
                 // Idle - wait for input
                 if vertex_valid && vertex_ready {
-                    in_position <= vertex.position
-                    in_normal <= vertex.normal
-                    in_color <= vertex.color
-                    stage0_valid <= 1
-                    state <= 1
-                    vertex_count <= vertex_count + 1
+                    in_position = vertex.position
+                    in_normal = vertex.normal
+                    in_color = vertex.color
+                    stage0_valid = 1
+                    state = 1
+                    vertex_count = vertex_count + 1
                 }
             } else if state == 1 {
                 // Process stage 0
                 // Simple passthrough for now (real transform would go here)
-                world_position <= Vec4 {
+                world_position = Vec4 {
                     x: in_position.x,
                     y: in_position.y,
                     z: in_position.z,
                     w: 0x3F800000  // 1.0 in fp32
                 }
-                world_normal <= in_normal
-                stage1_valid <= 1
-                state <= 2
+                world_normal = in_normal
+                stage1_valid = 1
+                state = 2
             } else if state == 2 {
                 // Process stage 1
-                view_position <= world_position
-                view_normal <= world_normal
-                stage2_valid <= 1
-                state <= 3
+                view_position = world_position
+                view_normal = world_normal
+                stage2_valid = 1
+                state = 3
             } else if state == 3 {
                 // Process stage 2
-                clip_position <= view_position
-                lit_color <= in_color
-                stage3_valid <= 1
-                state <= 4
+                clip_position = view_position
+                lit_color = in_color
+                stage3_valid = 1
+                state = 4
             } else if state == 4 {
                 // Output stage
                 if output_ready {
-                    stage3_valid <= 0
-                    state <= 0
+                    stage3_valid = 0
+                    state = 0
                 }
             }
         }
@@ -171,10 +171,10 @@ impl GeometryProcessor4 {
 //
 // impl GeometryProcessor<T, STAGES, INTENT> {
 //     // Matrix multiply using library functions
-//     world_pos <= matrix_vector_multiply(model_matrix, position);
+//     world_pos = matrix_vector_multiply(model_matrix, position);
 //
 //     // Lighting using generic functions
-//     diffuse <= compute_diffuse_lighting(normal, light_dir);
+//     diffuse = compute_diffuse_lighting(normal, light_dir);
 // }
 // ```
 //

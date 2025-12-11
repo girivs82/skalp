@@ -1,7 +1,7 @@
-//! MIR to GateNetlist Transformation
+//! MIR to Lir Transformation
 //!
 //! Converts Mid-level IR (MIR) to technology-independent gate-level netlist
-//! (`GateNetlist`) for gate-level simulation and fault injection.
+//! (`Lir`) for gate-level simulation and fault injection.
 //!
 //! # Design
 //!
@@ -20,7 +20,7 @@
 //! - This enables precise per-bit fault injection
 
 use crate::lir::{
-    GateNet, GateNetlist, HierarchyNode, NetId, NetlistStats, Primitive, PrimitiveId, PrimitiveType,
+    LirNet, Lir, HierarchyNode, NetId, NetlistStats, Primitive, PrimitiveId, PrimitiveType,
 };
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
@@ -29,19 +29,27 @@ use skalp_mir::mir::{
 };
 use std::collections::HashMap;
 
-/// Result of MIR to GateNetlist transformation
-#[derive(Debug)]
-pub struct MirToGateNetlistResult {
-    /// The generated gate netlist
-    pub netlist: GateNetlist,
+/// Result of MIR to LIR transformation
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct MirToLirResult {
+    /// The generated LIR (gate-level netlist)
+    pub lir: Lir,
     /// Transformation statistics
     pub stats: TransformStats,
     /// Warnings generated during transformation
     pub warnings: Vec<String>,
 }
 
+impl MirToLirResult {
+    /// Backward-compatible access to the LIR as `netlist`
+    #[deprecated(since = "0.2.0", note = "Use `lir` field instead")]
+    pub fn netlist(&self) -> &Lir {
+        &self.lir
+    }
+}
+
 /// Statistics from transformation
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TransformStats {
     /// Number of ports processed
     pub ports: usize,
@@ -59,10 +67,10 @@ pub struct TransformStats {
     pub total_bits: usize,
 }
 
-/// MIR to GateNetlist transformer
-pub struct MirToGateNetlistTransform {
-    /// Output netlist being built
-    netlist: GateNetlist,
+/// MIR to LIR transformer
+pub struct MirToLirTransform {
+    /// Output LIR being built
+    lir: Lir,
     /// Next primitive ID
     next_prim_id: u32,
     /// Next net ID
@@ -83,13 +91,15 @@ pub struct MirToGateNetlistTransform {
     clock_nets: Vec<NetId>,
     /// Reset net IDs
     reset_nets: Vec<NetId>,
+    /// Cached constant 0 net (for padding shorter operands)
+    const_zero_net: Option<NetId>,
 }
 
-impl MirToGateNetlistTransform {
+impl MirToLirTransform {
     /// Create a new transformer
     pub fn new(module_name: &str) -> Self {
         Self {
-            netlist: GateNetlist::new(module_name.to_string()),
+            lir: Lir::new(module_name.to_string()),
             next_prim_id: 0,
             next_net_id: 0,
             lvalue_to_net: HashMap::new(),
@@ -100,15 +110,16 @@ impl MirToGateNetlistTransform {
             warnings: Vec::new(),
             clock_nets: Vec::new(),
             reset_nets: Vec::new(),
+            const_zero_net: None,
         }
     }
 
-    /// Transform a MIR module to GateNetlist
-    pub fn transform(&mut self, module: &Module) -> MirToGateNetlistResult {
+    /// Transform a MIR module to Lir
+    pub fn transform(&mut self, module: &Module) -> MirToLirResult {
         self.hierarchy_path = module.name.clone();
 
         // Add hierarchy root node
-        self.netlist.hierarchy.push(HierarchyNode {
+        self.lir.hierarchy.push(HierarchyNode {
             path: self.hierarchy_path.clone(),
             module: module.name.clone(),
             primitive_range: (0, 0), // Updated at end
@@ -141,17 +152,17 @@ impl MirToGateNetlistTransform {
         }
 
         // Update hierarchy node with final primitive range
-        if let Some(node) = self.netlist.hierarchy.first_mut() {
+        if let Some(node) = self.lir.hierarchy.first_mut() {
             node.primitive_range = (0, self.next_prim_id);
         }
 
         // Update statistics
-        self.stats.primitives = self.netlist.primitives.len();
-        self.stats.nets = self.netlist.nets.len();
-        self.netlist.update_stats();
+        self.stats.primitives = self.lir.primitives.len();
+        self.stats.nets = self.lir.nets.len();
+        self.lir.update_stats();
 
-        MirToGateNetlistResult {
-            netlist: self.netlist.clone(),
+        MirToLirResult {
+            lir: self.lir.clone(),
             stats: std::mem::take(&mut self.stats),
             warnings: std::mem::take(&mut self.warnings),
         }
@@ -172,7 +183,7 @@ impl MirToGateNetlistTransform {
             let net_id = self.alloc_net_id();
             let net = match port.direction {
                 PortDirection::Input => {
-                    self.netlist.inputs.push(net_id);
+                    self.lir.inputs.push(net_id);
                     // Check if this is a clock
                     if matches!(port.port_type, DataType::Clock { .. }) {
                         self.clock_nets.push(net_id);
@@ -181,26 +192,26 @@ impl MirToGateNetlistTransform {
                     if matches!(port.port_type, DataType::Reset { .. }) {
                         self.reset_nets.push(net_id);
                     }
-                    GateNet::new_primary_input(net_id, net_name)
+                    LirNet::new_primary_input(net_id, net_name)
                 }
                 PortDirection::Output => {
-                    self.netlist.outputs.push(net_id);
+                    self.lir.outputs.push(net_id);
                     // Output nets need a driver - will be set when we process assignments
-                    let mut net = GateNet::new(net_id, net_name);
+                    let mut net = LirNet::new(net_id, net_name);
                     net.is_primary_output = true;
                     net
                 }
                 PortDirection::InOut => {
-                    self.netlist.inputs.push(net_id);
-                    self.netlist.outputs.push(net_id);
-                    let mut net = GateNet::new(net_id, net_name);
+                    self.lir.inputs.push(net_id);
+                    self.lir.outputs.push(net_id);
+                    let mut net = LirNet::new(net_id, net_name);
                     net.is_primary_input = true;
                     net.is_primary_output = true;
                     net
                 }
             };
 
-            self.netlist.add_net(net);
+            self.lir.add_net(net);
             self.lvalue_to_net.insert((0, port.id.0, bit as u32), net_id);
         }
 
@@ -220,14 +231,14 @@ impl MirToGateNetlistTransform {
             };
 
             let net_id = self.alloc_net_id();
-            let mut net = GateNet::new(net_id, net_name);
+            let mut net = LirNet::new(net_id, net_name);
 
             // If signal has initial value, it's a register output
             if signal.initial.is_some() {
                 net.is_state_output = true;
             }
 
-            self.netlist.add_net(net);
+            self.lir.add_net(net);
             self.lvalue_to_net.insert((1, signal.id.0, bit as u32), net_id);
         }
 
@@ -254,7 +265,7 @@ impl MirToGateNetlistTransform {
                         vec![expr_net],
                         vec![target_net],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                 }
             }
         }
@@ -323,10 +334,10 @@ impl MirToGateNetlistTransform {
                                 prim.reset = Some(rst);
                             }
 
-                            self.netlist.add_primitive(prim);
+                            self.lir.add_primitive(prim);
 
                             // Mark target net as state output
-                            if let Some(net) = self.netlist.get_net_mut(target_net) {
+                            if let Some(net) = self.lir.get_net_mut(target_net) {
                                 net.is_state_output = true;
                             }
                         }
@@ -337,10 +348,87 @@ impl MirToGateNetlistTransform {
                 }
             }
             Statement::If(if_stmt) => {
-                // Transform branches recursively
-                self.transform_sequential_block(&if_stmt.then_block, clock_net, reset_net);
-                if let Some(ref else_block) = if_stmt.else_block {
-                    self.transform_sequential_block(else_block, clock_net, reset_net);
+                // For sequential if, we need to create muxes + DFFs
+                // 1. Identify target signals in both branches
+                // 2. Decompose the condition
+                // 3. For each target: create mux(cond, then_value, else_value) -> DFF -> target
+
+                // Get condition nets
+                let cond_nets = self.decompose_expression(&if_stmt.condition);
+
+                // Collect assignments from each branch
+                let then_assigns = Self::collect_assignments(&if_stmt.then_block);
+                let else_assigns = if let Some(ref else_block) = if_stmt.else_block {
+                    Self::collect_assignments(else_block)
+                } else {
+                    Vec::new()
+                };
+
+                // Get all target lvalues (deduplicated by comparing)
+                let mut all_targets: Vec<LValue> = Vec::new();
+                for (lv, _) in &then_assigns {
+                    if !all_targets.contains(lv) {
+                        all_targets.push(lv.clone());
+                    }
+                }
+                for (lv, _) in &else_assigns {
+                    if !all_targets.contains(lv) {
+                        all_targets.push(lv.clone());
+                    }
+                }
+
+                for target in &all_targets {
+                    // Get then and else expressions for this target
+                    let then_expr = Self::find_assignment_expr(&then_assigns, target);
+                    let else_expr = Self::find_assignment_expr(&else_assigns, target);
+
+                    // Get target nets (current value for feedback)
+                    let target_nets = self.get_lvalue_nets(target);
+
+                    // Decompose then/else values
+                    let then_nets = if let Some(expr) = then_expr {
+                        self.decompose_expression(expr)
+                    } else {
+                        // Use current value (no assignment in this branch)
+                        target_nets.clone()
+                    };
+
+                    let else_nets = if let Some(expr) = else_expr {
+                        self.decompose_expression(expr)
+                    } else {
+                        // Use current value (no assignment in this branch)
+                        target_nets.clone()
+                    };
+
+                    // Create mux: sel=cond, d1=then, d0=else
+                    let mux_output = self.create_mux_primitives(&cond_nets, &then_nets, &else_nets);
+
+                    // Create DFFs: mux_output -> DFF -> target
+                    for (i, &target_net) in target_nets.iter().enumerate() {
+                        if let Some(&d_net) = mux_output.get(i) {
+                            let mut prim = Primitive::new_comb(
+                                self.alloc_prim_id(),
+                                PrimitiveType::DffP,
+                                format!("{}.dff_{}", self.hierarchy_path, target_net.0),
+                                vec![d_net],
+                                vec![target_net],
+                            );
+
+                            if let Some(clk) = clock_net {
+                                prim.clock = Some(clk);
+                                prim.inputs.insert(0, clk);
+                            }
+                            if let Some(rst) = reset_net {
+                                prim.reset = Some(rst);
+                            }
+
+                            self.lir.add_primitive(prim);
+
+                            if let Some(net) = self.lir.get_net_mut(target_net) {
+                                net.is_state_output = true;
+                            }
+                        }
+                    }
                 }
             }
             Statement::Block(block) => {
@@ -351,6 +439,30 @@ impl MirToGateNetlistTransform {
                 self.transform_combinational_statement(stmt);
             }
         }
+    }
+
+    /// Collect non-blocking assignments from a block (target, expression) pairs
+    fn collect_assignments(block: &Block) -> Vec<(LValue, Expression)> {
+        let mut assigns = Vec::new();
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) if matches!(assign.kind, AssignmentKind::NonBlocking) => {
+                    assigns.push((assign.lhs.clone(), assign.rhs.clone()));
+                }
+                Statement::Block(inner_block) => {
+                    assigns.extend(Self::collect_assignments(inner_block));
+                }
+                _ => {}
+            }
+        }
+        assigns
+    }
+
+    /// Find expression for a target LValue in assignments
+    fn find_assignment_expr<'a>(assigns: &'a [(LValue, Expression)], target: &LValue) -> Option<&'a Expression> {
+        assigns.iter()
+            .find(|(lv, _)| lv == target)
+            .map(|(_, expr)| expr)
     }
 
     /// Transform a combinational block
@@ -377,7 +489,7 @@ impl MirToGateNetlistTransform {
                                 vec![expr_net],
                                 vec![target_net],
                             );
-                            self.netlist.add_primitive(prim);
+                            self.lir.add_primitive(prim);
                         }
                     }
                 }
@@ -435,8 +547,8 @@ impl MirToGateNetlistTransform {
                 // Unsupported expression - create placeholder net
                 self.warnings.push(format!("Unsupported expression kind: {:?}", expr.kind));
                 let net_id = self.alloc_net_id();
-                let net = GateNet::new(net_id, format!("unsupported_{}", net_id.0));
-                self.netlist.add_net(net);
+                let net = LirNet::new(net_id, format!("unsupported_{}", net_id.0));
+                self.lir.add_net(net);
                 vec![net_id]
             }
         }
@@ -453,8 +565,8 @@ impl MirToGateNetlistTransform {
                 for bit in 0..width {
                     let bit_val = ((*i as u64) >> bit) & 1 != 0;
                     let net_id = self.alloc_net_id();
-                    let net = GateNet::new(net_id, format!("const_{}_{}", i, bit));
-                    self.netlist.add_net(net);
+                    let net = LirNet::new(net_id, format!("const_{}_{}", i, bit));
+                    self.lir.add_net(net);
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -463,14 +575,14 @@ impl MirToGateNetlistTransform {
                         vec![],
                         vec![net_id],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     nets.push(net_id);
                 }
                 if nets.is_empty() {
                     // Zero constant - create one bit
                     let net_id = self.alloc_net_id();
-                    let net = GateNet::new(net_id, "const_0".to_string());
-                    self.netlist.add_net(net);
+                    let net = LirNet::new(net_id, "const_0".to_string());
+                    self.lir.add_net(net);
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -479,7 +591,7 @@ impl MirToGateNetlistTransform {
                         vec![],
                         vec![net_id],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     nets.push(net_id);
                 }
                 nets
@@ -489,8 +601,8 @@ impl MirToGateNetlistTransform {
                 for bit in 0..*width {
                     let bit_val = (v >> bit) & 1 != 0;
                     let net_id = self.alloc_net_id();
-                    let net = GateNet::new(net_id, format!("const_bv_{}_{}", v, bit));
-                    self.netlist.add_net(net);
+                    let net = LirNet::new(net_id, format!("const_bv_{}_{}", v, bit));
+                    self.lir.add_net(net);
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -499,7 +611,7 @@ impl MirToGateNetlistTransform {
                         vec![],
                         vec![net_id],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     nets.push(net_id);
                 }
                 nets
@@ -507,8 +619,8 @@ impl MirToGateNetlistTransform {
             _ => {
                 // Other value types - create single unknown net
                 let net_id = self.alloc_net_id();
-                let net = GateNet::new(net_id, "const_unknown".to_string());
-                self.netlist.add_net(net);
+                let net = LirNet::new(net_id, "const_unknown".to_string());
+                self.lir.add_net(net);
 
                 let prim = Primitive::new_comb(
                     self.alloc_prim_id(),
@@ -517,9 +629,31 @@ impl MirToGateNetlistTransform {
                     vec![],
                     vec![net_id],
                 );
-                self.netlist.add_primitive(prim);
+                self.lir.add_primitive(prim);
                 vec![net_id]
             }
+        }
+    }
+
+    /// Get or create a cached constant 0 net for padding shorter operands
+    fn get_const_zero_net(&mut self) -> NetId {
+        if let Some(net) = self.const_zero_net {
+            net
+        } else {
+            let net_id = self.alloc_net_id();
+            let net = LirNet::new(net_id, "const_pad_0".to_string());
+            self.lir.add_net(net);
+
+            let prim = Primitive::new_comb(
+                self.alloc_prim_id(),
+                PrimitiveType::Constant { value: false },
+                format!("{}.const_pad_0", self.hierarchy_path),
+                vec![],
+                vec![net_id],
+            );
+            self.lir.add_primitive(prim);
+            self.const_zero_net = Some(net_id);
+            net_id
         }
     }
 
@@ -540,7 +674,7 @@ impl MirToGateNetlistTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.netlist.add_net(GateNet::new(out, format!("and_out_{}", out.0)));
+                    self.lir.add_net(LirNet::new(out, format!("and_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -549,7 +683,7 @@ impl MirToGateNetlistTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     result_nets.push(out);
                 }
             }
@@ -558,7 +692,7 @@ impl MirToGateNetlistTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.netlist.add_net(GateNet::new(out, format!("or_out_{}", out.0)));
+                    self.lir.add_net(LirNet::new(out, format!("or_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -567,7 +701,7 @@ impl MirToGateNetlistTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     result_nets.push(out);
                 }
             }
@@ -576,7 +710,7 @@ impl MirToGateNetlistTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.netlist.add_net(GateNet::new(out, format!("xor_out_{}", out.0)));
+                    self.lir.add_net(LirNet::new(out, format!("xor_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -585,20 +719,23 @@ impl MirToGateNetlistTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     result_nets.push(out);
                 }
             }
             // Arithmetic - use adder chain
             BinaryOp::Add => {
+                // Get constant 0 for padding shorter operands (important for correct arithmetic!)
+                let zero_net = self.get_const_zero_net();
                 let mut carry = None;
                 for i in 0..width {
-                    let l = left.get(i).copied().unwrap_or(left[0]);
-                    let r = right.get(i).copied().unwrap_or(right[0]);
+                    // Pad shorter operand with 0, NOT with its first element
+                    let l = left.get(i).copied().unwrap_or(zero_net);
+                    let r = right.get(i).copied().unwrap_or(zero_net);
                     let sum = self.alloc_net_id();
                     let cout = self.alloc_net_id();
-                    self.netlist.add_net(GateNet::new(sum, format!("add_sum_{}", sum.0)));
-                    self.netlist.add_net(GateNet::new(cout, format!("add_cout_{}", cout.0)));
+                    self.lir.add_net(LirNet::new(sum, format!("add_sum_{}", sum.0)));
+                    self.lir.add_net(LirNet::new(cout, format!("add_cout_{}", cout.0)));
 
                     let (ptype, inputs) = if let Some(cin) = carry {
                         (PrimitiveType::FullAdder, vec![l, r, cin])
@@ -613,9 +750,14 @@ impl MirToGateNetlistTransform {
                         inputs,
                         vec![sum, cout],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     result_nets.push(sum);
                     carry = Some(cout);
+                }
+                // Push the final carry as the MSB (for (N+1)-bit results like N-bit + N-bit)
+                // This is needed when the result is wider than the operands (e.g., temp: bit[5] = a + b)
+                if let Some(final_carry) = carry {
+                    result_nets.push(final_carry);
                 }
             }
             // Comparison - single bit output
@@ -626,7 +768,7 @@ impl MirToGateNetlistTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.netlist.add_net(GateNet::new(out, format!("eq_xnor_{}", out.0)));
+                    self.lir.add_net(LirNet::new(out, format!("eq_xnor_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -635,13 +777,13 @@ impl MirToGateNetlistTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     xnor_outs.push(out);
                 }
 
                 // AND all XNOR outputs
                 let eq_out = self.alloc_net_id();
-                self.netlist.add_net(GateNet::new(eq_out, format!("eq_out_{}", eq_out.0)));
+                self.lir.add_net(LirNet::new(eq_out, format!("eq_out_{}", eq_out.0)));
 
                 let prim = Primitive::new_comb(
                     self.alloc_prim_id(),
@@ -650,12 +792,12 @@ impl MirToGateNetlistTransform {
                     xnor_outs,
                     vec![eq_out],
                 );
-                self.netlist.add_primitive(prim);
+                self.lir.add_primitive(prim);
 
                 if matches!(op, BinaryOp::NotEqual) {
                     // Invert for NotEqual
                     let neq_out = self.alloc_net_id();
-                    self.netlist.add_net(GateNet::new(neq_out, format!("neq_out_{}", neq_out.0)));
+                    self.lir.add_net(LirNet::new(neq_out, format!("neq_out_{}", neq_out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -664,17 +806,160 @@ impl MirToGateNetlistTransform {
                         vec![eq_out],
                         vec![neq_out],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     result_nets.push(neq_out);
                 } else {
                     result_nets.push(eq_out);
+                }
+            }
+            // Unsigned comparison using subtractor with borrow
+            // For a < b: compute b - a, if borrow out is 0, then a < b (actually compute a - b, borrow=1 means a < b)
+            // We use a comparator chain approach: compare from MSB to LSB
+            BinaryOp::Less | BinaryOp::Greater | BinaryOp::LessEqual | BinaryOp::GreaterEqual => {
+                // For Greater/GreaterEqual, swap left and right
+                let (cmp_left, cmp_right) = if matches!(op, BinaryOp::Greater | BinaryOp::GreaterEqual) {
+                    (right, left)  // a > b is same as b < a
+                } else {
+                    (left, right)
+                };
+
+                // Build a subtractor chain (cmp_left - cmp_right) to get borrow out
+                // Borrow out = 1 means cmp_left < cmp_right
+                let zero_net = self.get_const_zero_net();
+                let mut borrow = zero_net; // Initial borrow = 0
+
+                for i in 0..width {
+                    let l = cmp_left.get(i).copied().unwrap_or(zero_net);
+                    let r = cmp_right.get(i).copied().unwrap_or(zero_net);
+
+                    // Full subtractor borrow_out formula:
+                    // borrow_out = (!l AND r) OR ((!l OR r) AND borrow_in)
+                    // which is equivalent to: (!l AND r) OR ((l XNOR r) AND borrow_in)
+                    // when l==r, borrow propagates; when l!=r, depends on !l AND r
+
+                    // XNOR l, r (for borrow propagation when l==r)
+                    let l_xnor_r = self.alloc_net_id();
+                    self.lir.add_net(LirNet::new(l_xnor_r, format!("cmp_xnor_{}", i)));
+                    let prim = Primitive::new_comb(
+                        self.alloc_prim_id(),
+                        PrimitiveType::Xnor,
+                        format!("{}.cmp_xnor_{}", self.hierarchy_path, i),
+                        vec![l, r],
+                        vec![l_xnor_r],
+                    );
+                    self.lir.add_primitive(prim);
+
+                    // NOT l
+                    let not_l = self.alloc_net_id();
+                    self.lir.add_net(LirNet::new(not_l, format!("cmp_not_l_{}", i)));
+                    let prim = Primitive::new_comb(
+                        self.alloc_prim_id(),
+                        PrimitiveType::Inv,
+                        format!("{}.cmp_not_l_{}", self.hierarchy_path, i),
+                        vec![l],
+                        vec![not_l],
+                    );
+                    self.lir.add_primitive(prim);
+
+                    // !l AND r (generate borrow when l=0, r=1)
+                    let not_l_and_r = self.alloc_net_id();
+                    self.lir.add_net(LirNet::new(not_l_and_r, format!("cmp_and1_{}", i)));
+                    let prim = Primitive::new_comb(
+                        self.alloc_prim_id(),
+                        PrimitiveType::And { inputs: 2 },
+                        format!("{}.cmp_and1_{}", self.hierarchy_path, i),
+                        vec![not_l, r],
+                        vec![not_l_and_r],
+                    );
+                    self.lir.add_primitive(prim);
+
+                    // (l XNOR r) AND borrow_in (propagate borrow when l==r)
+                    let xnor_and_borrow = self.alloc_net_id();
+                    self.lir.add_net(LirNet::new(xnor_and_borrow, format!("cmp_and2_{}", i)));
+                    let prim = Primitive::new_comb(
+                        self.alloc_prim_id(),
+                        PrimitiveType::And { inputs: 2 },
+                        format!("{}.cmp_and2_{}", self.hierarchy_path, i),
+                        vec![l_xnor_r, borrow],
+                        vec![xnor_and_borrow],
+                    );
+                    self.lir.add_primitive(prim);
+
+                    // borrow_out = (!l AND r) OR ((l XNOR r) AND borrow_in)
+                    let borrow_out = self.alloc_net_id();
+                    self.lir.add_net(LirNet::new(borrow_out, format!("cmp_borrow_{}", i)));
+                    let prim = Primitive::new_comb(
+                        self.alloc_prim_id(),
+                        PrimitiveType::Or { inputs: 2 },
+                        format!("{}.cmp_borrow_{}", self.hierarchy_path, i),
+                        vec![not_l_and_r, xnor_and_borrow],
+                        vec![borrow_out],
+                    );
+                    self.lir.add_primitive(prim);
+
+                    borrow = borrow_out;
+                }
+
+                // borrow is now 1 if cmp_left < cmp_right
+                let lt_result = borrow;
+
+                // For LessEqual/GreaterEqual, we need (a < b) OR (a == b)
+                if matches!(op, BinaryOp::LessEqual | BinaryOp::GreaterEqual) {
+                    // First compute equality
+                    let mut xnor_outs = Vec::new();
+                    for i in 0..width {
+                        let l = left.get(i).copied().unwrap_or(zero_net);
+                        let r = right.get(i).copied().unwrap_or(zero_net);
+                        let out = self.alloc_net_id();
+                        self.lir.add_net(LirNet::new(out, format!("cmp_eq_xnor_{}", out.0)));
+
+                        let prim = Primitive::new_comb(
+                            self.alloc_prim_id(),
+                            PrimitiveType::Xnor,
+                            format!("{}.cmp_eq_xnor_{}", self.hierarchy_path, i),
+                            vec![l, r],
+                            vec![out],
+                        );
+                        self.lir.add_primitive(prim);
+                        xnor_outs.push(out);
+                    }
+
+                    // AND all XNOR outputs for equality
+                    let eq_out = self.alloc_net_id();
+                    self.lir.add_net(LirNet::new(eq_out, format!("cmp_eq_out_{}", eq_out.0)));
+
+                    let prim = Primitive::new_comb(
+                        self.alloc_prim_id(),
+                        PrimitiveType::And { inputs: xnor_outs.len() as u8 },
+                        format!("{}.cmp_eq_and", self.hierarchy_path),
+                        xnor_outs,
+                        vec![eq_out],
+                    );
+                    self.lir.add_primitive(prim);
+
+                    // OR lt_result with eq_out
+                    let le_result = self.alloc_net_id();
+                    self.lir.add_net(LirNet::new(le_result, format!("cmp_le_out_{}", le_result.0)));
+
+                    let prim = Primitive::new_comb(
+                        self.alloc_prim_id(),
+                        PrimitiveType::Or { inputs: 2 },
+                        format!("{}.cmp_le_or", self.hierarchy_path),
+                        vec![lt_result, eq_out],
+                        vec![le_result],
+                    );
+                    self.lir.add_primitive(prim);
+
+                    result_nets.push(le_result);
+                } else {
+                    result_nets.push(lt_result);
                 }
             }
             _ => {
                 // Other ops - create placeholder
                 self.warnings.push(format!("Unsupported binary op: {:?}", op));
                 let out = self.alloc_net_id();
-                self.netlist.add_net(GateNet::new(out, format!("unsup_binop_{}", out.0)));
+                self.lir.add_net(LirNet::new(out, format!("unsup_binop_{}", out.0)));
                 result_nets.push(out);
             }
         }
@@ -690,7 +975,7 @@ impl MirToGateNetlistTransform {
             UnaryOp::Not | UnaryOp::BitwiseNot => {
                 for &net in operand {
                     let out = self.alloc_net_id();
-                    self.netlist.add_net(GateNet::new(out, format!("not_out_{}", out.0)));
+                    self.lir.add_net(LirNet::new(out, format!("not_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -699,7 +984,7 @@ impl MirToGateNetlistTransform {
                         vec![net],
                         vec![out],
                     );
-                    self.netlist.add_primitive(prim);
+                    self.lir.add_primitive(prim);
                     result_nets.push(out);
                 }
             }
@@ -733,7 +1018,7 @@ impl MirToGateNetlistTransform {
             let d0 = else_nets.get(i).copied().unwrap_or(else_nets[0]);
             let d1 = then_nets.get(i).copied().unwrap_or(then_nets[0]);
             let out = self.alloc_net_id();
-            self.netlist.add_net(GateNet::new(out, format!("mux_out_{}", out.0)));
+            self.lir.add_net(LirNet::new(out, format!("mux_out_{}", out.0)));
 
             let prim = Primitive::new_comb(
                 self.alloc_prim_id(),
@@ -742,7 +1027,7 @@ impl MirToGateNetlistTransform {
                 vec![sel_net, d0, d1],
                 vec![out],
             );
-            self.netlist.add_primitive(prim);
+            self.lir.add_primitive(prim);
             result_nets.push(out);
         }
 
@@ -767,8 +1052,8 @@ impl MirToGateNetlistTransform {
             LValue::Variable(var_id) => {
                 // Variables - create temporary nets
                 let net_id = self.alloc_net_id();
-                let net = GateNet::new(net_id, format!("var_{}", var_id.0));
-                self.netlist.add_net(net);
+                let net = LirNet::new(net_id, format!("var_{}", var_id.0));
+                self.lir.add_net(net);
                 vec![net_id]
             }
             LValue::BitSelect { base, index } => {
@@ -891,9 +1176,9 @@ impl MirToGateNetlistTransform {
     }
 }
 
-/// Transform a MIR module to GateNetlist
-pub fn transform_mir_to_gate_netlist(module: &Module) -> MirToGateNetlistResult {
-    let mut transformer = MirToGateNetlistTransform::new(&module.name);
+/// Transform a MIR module to Lir
+pub fn lower_mir_module_to_lir(module: &Module) -> MirToLirResult {
+    let mut transformer = MirToLirTransform::new(&module.name);
     transformer.transform(module)
 }
 
@@ -985,8 +1270,8 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
-        assert_eq!(result.netlist.name, "empty");
+        let result = lower_mir_module_to_lir(&module);
+        assert_eq!(result.lir.name, "empty");
         assert_eq!(result.stats.ports, 0);
         assert_eq!(result.stats.signals, 0);
     }
@@ -994,16 +1279,16 @@ mod tests {
     #[test]
     fn test_transform_simple_and_gate() {
         let module = make_simple_module();
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
-        assert_eq!(result.netlist.name, "test_module");
+        assert_eq!(result.lir.name, "test_module");
         assert_eq!(result.stats.ports, 3);
-        assert_eq!(result.netlist.inputs.len(), 2);
-        assert_eq!(result.netlist.outputs.len(), 1);
+        assert_eq!(result.lir.inputs.len(), 2);
+        assert_eq!(result.lir.outputs.len(), 1);
 
         // Should have at least one AND primitive
         let and_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| matches!(p.ptype, PrimitiveType::And { .. }))
@@ -1041,10 +1326,10 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // 8-bit port should create 8 nets
-        assert_eq!(result.netlist.inputs.len(), 8);
+        assert_eq!(result.lir.inputs.len(), 8);
         assert_eq!(result.stats.total_bits, 8);
     }
 
@@ -1080,11 +1365,11 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Should have a constant primitive
         let const_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| matches!(p.ptype, PrimitiveType::Constant { .. }))
@@ -1095,10 +1380,10 @@ mod tests {
     #[test]
     fn test_hierarchy_tracking() {
         let module = make_simple_module();
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
-        assert!(!result.netlist.hierarchy.is_empty());
-        assert_eq!(result.netlist.hierarchy[0].module, "test_module");
+        assert!(!result.lir.hierarchy.is_empty());
+        assert_eq!(result.lir.hierarchy[0].module, "test_module");
     }
 
     #[test]
@@ -1159,11 +1444,11 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Should have at least one XOR primitive
         let xor_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| matches!(p.ptype, PrimitiveType::Xor))
@@ -1229,11 +1514,11 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Should have at least one OR primitive
         let or_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| matches!(p.ptype, PrimitiveType::Or { .. }))
@@ -1288,11 +1573,11 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Should have at least one INV primitive
         let inv_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| matches!(p.ptype, PrimitiveType::Inv))
@@ -1358,11 +1643,11 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Should have adder primitives (HalfAdder + FullAdders)
         let adder_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| {
@@ -1375,7 +1660,7 @@ mod tests {
         assert!(
             adder_count >= 1,
             "Expected adder primitives, found {} primitives total",
-            result.netlist.primitives.len()
+            result.lir.primitives.len()
         );
     }
 
@@ -1447,11 +1732,11 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Should have at least one MUX2 primitive
         let mux_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| matches!(p.ptype, PrimitiveType::Mux2))
@@ -1517,11 +1802,11 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Should have XNOR primitives (for bit comparison) and AND (for combining)
         let xnor_count = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .filter(|p| matches!(p.ptype, PrimitiveType::Xnor))
@@ -1582,7 +1867,7 @@ mod tests {
             power_domains: Vec::new(),
         };
 
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // 4-bit input + 4-bit output + 4-bit internal = 12 total bits
         assert_eq!(result.stats.total_bits, 12);
@@ -1592,11 +1877,11 @@ mod tests {
     #[test]
     fn test_fit_estimation() {
         let module = make_simple_module();
-        let result = transform_mir_to_gate_netlist(&module);
+        let result = lower_mir_module_to_lir(&module);
 
         // Calculate total FIT from primitives
         let total_fit: f64 = result
-            .netlist
+            .lir
             .primitives
             .iter()
             .map(|p| p.ptype.base_fit())

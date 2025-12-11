@@ -39,33 +39,33 @@ impl std_uart {
     on(clk.rise) {
         if rst.active {
             // Reset transmitter
-            tx_state <= TxState::Idle;
-            tx_baud_counter <= 0;
-            tx_bit_counter <= 0;
-            tx_shift_reg <= 0;
+            tx_state = TxState::Idle;
+            tx_baud_counter = 0;
+            tx_bit_counter = 0;
+            tx_shift_reg = 0;
             
             // Reset receiver
-            rx_state <= RxState::Idle;
-            rx_baud_counter <= 0;
-            rx_bit_counter <= 0;
-            rx_shift_reg <= 0;
-            rx_sync <= 2'b11;
+            rx_state = RxState::Idle;
+            rx_baud_counter = 0;
+            rx_bit_counter = 0;
+            rx_shift_reg = 0;
+            rx_sync = 2'b11;
         } else {
             // Synchronize RX input
             rx_sync <= {rx_sync[0], rx};
             
             // Transmitter baud rate generator
             if tx_baud_counter == BAUD_DIV - 1 {
-                tx_baud_counter <= 0;
+                tx_baud_counter = 0;
             } else {
-                tx_baud_counter <= tx_baud_counter + 1;
+                tx_baud_counter = tx_baud_counter + 1;
             }
             
             // Receiver baud rate generator
             if rx_baud_counter == BAUD_DIV - 1 {
-                rx_baud_counter <= 0;
+                rx_baud_counter = 0;
             } else {
-                rx_baud_counter <= rx_baud_counter + 1;
+                rx_baud_counter = rx_baud_counter + 1;
             }
             
             // Transmitter state machine
@@ -73,24 +73,24 @@ impl std_uart {
                 match tx_state {
                     TxState::Idle => {
                         if tx_start {
-                            tx_state <= TxState::StartBit;
-                            tx_shift_reg <= tx_data;
-                            tx_bit_counter <= 0;
+                            tx_state = TxState::StartBit;
+                            tx_shift_reg = tx_data;
+                            tx_bit_counter = 0;
                         }
                     },
                     TxState::StartBit => {
-                        tx_state <= TxState::DataBits;
+                        tx_state = TxState::DataBits;
                     },
                     TxState::DataBits => {
                         tx_shift_reg <= {1'b0, tx_shift_reg[7:1]};
                         if tx_bit_counter == 7 {
-                            tx_state <= TxState::StopBit;
+                            tx_state = TxState::StopBit;
                         } else {
-                            tx_bit_counter <= tx_bit_counter + 1;
+                            tx_bit_counter = tx_bit_counter + 1;
                         }
                     },
                     TxState::StopBit => {
-                        tx_state <= TxState::Idle;
+                        tx_state = TxState::Idle;
                     }
                 }
             }
@@ -99,17 +99,17 @@ impl std_uart {
             match rx_state {
                 RxState::Idle => {
                     if rx_sync == 2'b01 {  // Falling edge detected
-                        rx_state <= RxState::StartBit;
-                        rx_baud_counter <= BAUD_DIV / 2;  // Sample in middle
+                        rx_state = RxState::StartBit;
+                        rx_baud_counter = BAUD_DIV / 2;  // Sample in middle
                     }
                 },
                 RxState::StartBit => {
                     if rx_baud_tick {
                         if rx_sync[1] == 0 {  // Valid start bit
-                            rx_state <= RxState::DataBits;
-                            rx_bit_counter <= 0;
+                            rx_state = RxState::DataBits;
+                            rx_bit_counter = 0;
                         } else {
-                            rx_state <= RxState::Idle;  // False start
+                            rx_state = RxState::Idle;  // False start
                         }
                     }
                 },
@@ -117,15 +117,15 @@ impl std_uart {
                     if rx_baud_tick {
                         rx_shift_reg <= {rx_sync[1], rx_shift_reg[7:1]};
                         if rx_bit_counter == 7 {
-                            rx_state <= RxState::StopBit;
+                            rx_state = RxState::StopBit;
                         } else {
-                            rx_bit_counter <= rx_bit_counter + 1;
+                            rx_bit_counter = rx_bit_counter + 1;
                         }
                     }
                 },
                 RxState::StopBit => {
                     if rx_baud_tick {
-                        rx_state <= RxState::Idle;
+                        rx_state = RxState::Idle;
                     }
                 }
             }

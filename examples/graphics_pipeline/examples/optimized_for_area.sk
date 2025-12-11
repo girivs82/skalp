@@ -291,23 +291,23 @@ impl SmallGraphicsPipeline {
             // Initialize to identity matrices
             for i in 0..4 {
                 for j in 0..4 {
-                    matrix_reg_file[i][j] <= if i == j {
+                    matrix_reg_file[i][j] = if i == j {
                         fp16::ONE
                     } else {
                         fp16::ZERO
                     }
                 }
             }
-            current_matrix <= 0u8
+            current_matrix = 0u8
         } else if matrix_update {
             // Load matrix element
             let row = matrix_addr[5:4];
             let col = matrix_addr[3:2];
-            matrix_reg_file[row][col] <= matrix_data;
+            matrix_reg_file[row][col] = matrix_data;
 
             // Cycle through matrices
             if matrix_addr == 8'd15 {
-                current_matrix <= current_matrix + 1u8
+                current_matrix = current_matrix + 1u8
             }
         }
     }

@@ -35,17 +35,17 @@ impl AsyncFifo<T, const DEPTH: nat> {
 
     on(wr_clk.rise) {
         if wr_rst {
-            wr_ptr <= 0
-            wr_ptr_gray <= 0
-            rd_ptr_gray_sync1 <= 0
-            rd_ptr_gray_sync2 <= 0
+            wr_ptr = 0
+            wr_ptr_gray = 0
+            rd_ptr_gray_sync1 = 0
+            rd_ptr_gray_sync2 = 0
         } else {
-            rd_ptr_gray_sync1 <= rd_ptr_gray
-            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1
+            rd_ptr_gray_sync1 = rd_ptr_gray
+            rd_ptr_gray_sync2 = rd_ptr_gray_sync1
 
             if wr_en && !wr_full {
                 mem[wr_ptr % DEPTH] <= wr_data
-                wr_ptr <= wr_ptr + 1
+                wr_ptr = wr_ptr + 1
                 wr_ptr_gray <= (wr_ptr + 1) ^ ((wr_ptr + 1) >> 1)
             }
         }
@@ -56,16 +56,16 @@ impl AsyncFifo<T, const DEPTH: nat> {
 
     on(rd_clk.rise) {
         if rd_rst {
-            rd_ptr <= 0
-            rd_ptr_gray <= 0
-            wr_ptr_gray_sync1 <= 0
-            wr_ptr_gray_sync2 <= 0
+            rd_ptr = 0
+            rd_ptr_gray = 0
+            wr_ptr_gray_sync1 = 0
+            wr_ptr_gray_sync2 = 0
         } else {
-            wr_ptr_gray_sync1 <= wr_ptr_gray
-            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1
+            wr_ptr_gray_sync1 = wr_ptr_gray
+            wr_ptr_gray_sync2 = wr_ptr_gray_sync1
 
             if rd_en && !rd_empty {
-                rd_ptr <= rd_ptr + 1
+                rd_ptr = rd_ptr + 1
                 rd_ptr_gray <= (rd_ptr + 1) ^ ((rd_ptr + 1) >> 1)
             }
         }
@@ -100,14 +100,14 @@ impl SimpleGeometryProcessor {
 
     on(clk.rise) {
         if rst {
-            state <= 0
+            state = 0
         } else {
             if state == 0 && vertex_valid {
                 // Passthrough transformation
-                out_vertex <= vertex_in
-                state <= 1
+                out_vertex = vertex_in
+                state = 1
             } else if state == 1 && output_ready {
-                state <= 0
+                state = 0
             }
         }
     }

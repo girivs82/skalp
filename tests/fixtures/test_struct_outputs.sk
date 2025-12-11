@@ -15,13 +15,13 @@ impl StructOutputTest {
 
     on(clk.rise) {
         if rst {
-            out_vertex.x <= 0x11111111
-            out_vertex.y <= 0x22222222
-            out_vertex.z <= 0x33333333
+            out_vertex.x = 0x11111111
+            out_vertex.y = 0x22222222
+            out_vertex.z = 0x33333333
         } else {
-            out_vertex.x <= 0xAAAAAAAA
-            out_vertex.y <= 0xBBBBBBBB
-            out_vertex.z <= 0xCCCCCCCC
+            out_vertex.x = 0xAAAAAAAA
+            out_vertex.y = 0xBBBBBBBB
+            out_vertex.z = 0xCCCCCCCC
         }
     }
 

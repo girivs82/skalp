@@ -10,7 +10,7 @@ impl TupleDestructTest {
     on(clk.rise) {
         let tuple: (bit[32], bit[8]) = (input_val + 10, input_val[7:0]);
         let (a, b) = tuple;  // Test tuple destructuring
-        reg_result <= a;
+        reg_result = a;
     }
 
     result = reg_result

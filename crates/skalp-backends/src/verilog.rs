@@ -1,11 +1,11 @@
 //! Verilog code generation utilities
 //!
 //! This module provides two code generation paths:
-//! 1. LIR-based: Simple gate-level Verilog for basic designs
+//! 1. LIR-based: Gate-level Verilog from Lir (primitives and nets)
 //! 2. MIR-based: Full SystemVerilog with generate block support for #[preserve_generate]
 
 use crate::BackendError;
-use skalp_lir::LirModule;
+use skalp_lir::Lir;
 use skalp_mir::{
     Expression, ExpressionKind, GenerateBlock, GenerateBlockKind, GenerateBody, GenerateCase,
     GenerateCaseArm, GenerateFor, GenerateIf, Mir, Module, Statement, LValue, BinaryOp, UnaryOp,
@@ -14,38 +14,75 @@ use skalp_mir::{
 use skalp_mir::mir::CaseItem;
 
 /// Generate Verilog from LIR (gate-level)
-pub fn generate_verilog(module: &LirModule) -> Result<String, BackendError> {
+pub fn generate_verilog(lir: &Lir) -> Result<String, BackendError> {
     let mut verilog = String::new();
 
     // Module declaration
-    verilog.push_str(&format!("module {} (\n", module.name));
+    verilog.push_str(&format!("module {} (\n", lir.name));
 
-    // Add ports (simplified)
-    for (i, signal) in module.signals.iter().enumerate() {
-        if i > 0 {
-            verilog.push_str(",\n");
+    // Add ports from nets
+    let mut ports = Vec::new();
+    for net in &lir.nets {
+        if net.is_primary_input {
+            let width_decl = if net.width > 1 {
+                format!("[{}:0] ", net.width - 1)
+            } else {
+                String::new()
+            };
+            ports.push(format!("  input {}{}", width_decl, net.name));
+        } else if net.is_primary_output {
+            let width_decl = if net.width > 1 {
+                format!("[{}:0] ", net.width - 1)
+            } else {
+                String::new()
+            };
+            ports.push(format!("  output {}{}", width_decl, net.name));
         }
-        let direction = if signal.is_input { "input" } else { "output" };
-        verilog.push_str(&format!("  {} {}", direction, signal.name));
+    }
+
+    if !ports.is_empty() {
+        verilog.push_str(&ports.join(",\n"));
     }
 
     verilog.push_str("\n);\n\n");
 
-    // Add signal declarations
-    for signal in &module.signals {
-        if signal.is_register {
-            verilog.push_str(&format!("  reg {};\n", signal.name));
+    // Add internal wire/reg declarations
+    for net in &lir.nets {
+        if !net.is_primary_input && !net.is_primary_output {
+            let width_decl = if net.width > 1 {
+                format!("[{}:0] ", net.width - 1)
+            } else {
+                String::new()
+            };
+            if net.is_state_output {
+                verilog.push_str(&format!("  reg {}{};\n", width_decl, net.name));
+            } else {
+                verilog.push_str(&format!("  wire {}{};\n", width_decl, net.name));
+            }
         }
     }
 
-    // Add gate instantiations (simplified)
-    for gate in &module.gates {
+    // Add primitive instantiations
+    for prim in &lir.primitives {
+        let ptype_name = prim.ptype.short_name().to_lowercase();
+        let prim_id = format!("prim_{}", prim.id.0);
+
+        // Format inputs as net names
+        let inputs: Vec<String> = prim.inputs.iter()
+            .filter_map(|id| lir.nets.get(id.0 as usize).map(|n| n.name.clone()))
+            .collect();
+
+        // Format outputs as net names
+        let outputs: Vec<String> = prim.outputs.iter()
+            .filter_map(|id| lir.nets.get(id.0 as usize).map(|n| n.name.clone()))
+            .collect();
+
         verilog.push_str(&format!(
             "  {} {} (.in({}), .out({}));\n",
-            gate.gate_type.to_string().to_lowercase(),
-            gate.id,
-            gate.inputs.join(", "),
-            gate.outputs.join(", ")
+            ptype_name,
+            prim_id,
+            inputs.join(", "),
+            outputs.join(", ")
         ));
     }
 

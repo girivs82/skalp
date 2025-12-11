@@ -15,9 +15,9 @@ impl std_shift_register {
     
     on(clk.rise) {
         if rst.active {
-            shift_reg <= 0;
+            shift_reg = 0;
         } else if parallel_load {
-            shift_reg <= parallel_data;
+            shift_reg = parallel_data;
         } else if enable {
             shift_reg <= {serial_in, shift_reg[WIDTH-1:1]};
         }

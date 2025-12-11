@@ -17,13 +17,13 @@ impl SimpleArrayWrite {
     on(clk.rise) {
         if rst {
             // Reset all memory locations to 0
-            memory[0] <= 0
-            memory[1] <= 0
-            memory[2] <= 0
-            memory[3] <= 0
+            memory[0] = 0
+            memory[1] = 0
+            memory[2] = 0
+            memory[3] = 0
         } else {
             if wr_en {
-                memory[wr_addr] <= wr_data
+                memory[wr_addr] = wr_data
             }
         }
     }

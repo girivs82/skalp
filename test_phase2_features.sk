@@ -28,40 +28,40 @@ impl StateMachine {
 
     on(clk.rise) {
         if (rst) {
-            state <= 0
-            counter <= 0
-            buffer <= 0
-            valid <= 0
+            state = 0
+            counter = 0
+            buffer = 0
+            valid = 0
         } else {
             match state {
                 0 => {
                     if (enable) {
-                        buffer <= data_in
-                        state <= 1
-                        counter <= counter + 1
+                        buffer = data_in
+                        state = 1
+                        counter = counter + 1
                     }
                 }
                 1 => {
                     // Store in memory array
-                    memory[counter[1:0]] <= buffer[7:0]
-                    data_out <= buffer + checksum
-                    valid <= 1
-                    state <= 2
+                    memory[counter[1:0]] = buffer[7:0]
+                    data_out = buffer + checksum
+                    valid = 1
+                    state = 2
                 }
                 2 => {
                     // Read from memory array and output
-                    data_out <= memory[0] | memory[1]
-                    valid <= 0
+                    data_out = memory[0] | memory[1]
+                    valid = 0
                     if (counter >= 3) {
-                        state <= 0
-                        counter <= 0
+                        state = 0
+                        counter = 0
                     } else {
-                        state <= 0
+                        state = 0
                     }
                 }
                 _ => {
-                    state <= 0
-                    valid <= 0
+                    state = 0
+                    valid = 0
                 }
             }
         }

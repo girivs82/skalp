@@ -178,9 +178,10 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
         // For sequential elements, we return the current state (Q output)
         // The state update is handled separately by the simulation engine
         PrimitiveType::DffP | PrimitiveType::DffN | PrimitiveType::DffNeg | PrimitiveType::DffAR | PrimitiveType::DffAS => {
-            // For combinational evaluation, just return the D input
+            // DFF inputs: [clk, d] - clock is at index 0, data at index 1
+            // On clock edge, sample D input and store to Q output
             // Sequential behavior is handled by SequentialBlock processing
-            let d = inputs.first().copied().unwrap_or(false);
+            let d = inputs.get(1).copied().unwrap_or(false);
             vec![d]
         }
 

@@ -40,8 +40,8 @@ impl ALU {
 
     // Register outputs
     on(clk.rise) {
-        result <= result_comb
-        zero <= zero_comb
-        overflow <= overflow_comb
+        result = result_comb
+        zero = zero_comb
+        overflow = overflow_comb
     }
 }

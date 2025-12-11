@@ -160,32 +160,32 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
 
     on(clk.rise) {
         if rst {
-            state <= GeometryState::Idle;
-            vertex_count <= 0u32;
-            stall_count <= 0u32;
+            state = GeometryState::Idle;
+            vertex_count = 0u32;
+            stall_count = 0u32;
 
             // Clear pipeline
             for i in 0..STAGES {
-                pipeline_valid[i] <= 1'b0
+                pipeline_valid[i] = 1'b0
             }
         } else {
             match state {
                 // Idle: Wait for input vertex
                 GeometryState::Idle => {
                     if vertex_valid && vertex_ready {
-                        state <= GeometryState::LoadVertex
+                        state = GeometryState::LoadVertex
                     }
                 }
 
                 // LoadVertex: Capture input and start pipeline
                 GeometryState::LoadVertex => {
-                    input_position <= vertex.position;
-                    input_normal <= vertex.normal;
-                    input_color <= vertex.color;
+                    input_position = vertex.position;
+                    input_normal = vertex.normal;
+                    input_color = vertex.color;
 
-                    pipeline_valid[0] <= 1'b1;
-                    state <= GeometryState::Transform;
-                    vertex_count <= vertex_count + 1u32;
+                    pipeline_valid[0] = 1'b1;
+                    state = GeometryState::Transform;
+                    vertex_count = vertex_count + 1u32;
                 }
 
                 // Transform: Process through pipeline stages
@@ -193,34 +193,34 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
                     // Pipeline advances automatically (see pipeline logic below)
                     // Check if final stage has valid output
                     if pipeline_valid[STAGES-1] {
-                        state <= GeometryState::Lighting
+                        state = GeometryState::Lighting
                     }
                 }
 
                 // Lighting: Compute lighting (may be pipelined internally)
                 GeometryState::Lighting => {
                     // Lighting computation complete
-                    state <= GeometryState::Viewport
+                    state = GeometryState::Viewport
                 }
 
                 // Viewport: Viewport transformation (simple scale+offset)
                 GeometryState::Viewport => {
-                    state <= GeometryState::WriteOutput
+                    state = GeometryState::WriteOutput
                 }
 
                 // WriteOutput: Wait for output to be consumed
                 GeometryState::WriteOutput => {
                     if output_ready {
                         pipeline_valid[STAGES-1] <= 1'b0;
-                        state <= GeometryState::Idle
+                        state = GeometryState::Idle
                     } else {
                         // Output not ready - stall
-                        stall_count <= stall_count + 1u32
+                        stall_count = stall_count + 1u32
                     }
                 }
 
                 _ => {
-                    state <= GeometryState::Idle
+                    state = GeometryState::Idle
                 }
             }
         }
@@ -235,10 +235,10 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
     on(clk.rise) {
         if !rst {
             // Compute M*V
-            mv_matrix <= matrix_multiply::<T>(view_matrix, model_matrix);
+            mv_matrix = matrix_multiply::<T>(view_matrix, model_matrix);
 
             // Compute (M*V)*P = M*V*P
-            mvp_matrix <= matrix_multiply::<T>(proj_matrix, mv_matrix);
+            mvp_matrix = matrix_multiply::<T>(proj_matrix, mv_matrix);
         }
     }
 
@@ -256,7 +256,7 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
                 w: T::ONE
             };
 
-            world_position <= matrix_vector_multiply::<T>(
+            world_position = matrix_vector_multiply::<T>(
                 model_matrix,
                 pos_homogeneous
             );
@@ -269,14 +269,14 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
                 [model_matrix[2][0], model_matrix[2][1], model_matrix[2][2]]
             ];
 
-            world_normal <= matrix3x3_vector_multiply::<T>(
+            world_normal = matrix3x3_vector_multiply::<T>(
                 normal_matrix,
                 input_normal
             );
 
             // Advance pipeline
             if STAGES > 1 {
-                pipeline_valid[1] <= 1'b1
+                pipeline_valid[1] = 1'b1
             }
         }
     }
@@ -288,7 +288,7 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
     on(clk.rise) {
         if !rst && STAGES > 1 && pipeline_valid[1] {
             // Transform to camera space: view_pos = view_matrix * world_pos
-            view_position <= matrix_vector_multiply::<T>(
+            view_position = matrix_vector_multiply::<T>(
                 view_matrix,
                 world_position
             );
@@ -300,14 +300,14 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
                 [view_matrix[2][0], view_matrix[2][1], view_matrix[2][2]]
             ];
 
-            view_normal <= matrix3x3_vector_multiply::<T>(
+            view_normal = matrix3x3_vector_multiply::<T>(
                 view_normal_matrix,
                 world_normal
             );
 
             // Advance pipeline
             if STAGES > 2 {
-                pipeline_valid[2] <= 1'b1
+                pipeline_valid[2] = 1'b1
             }
         }
     }
@@ -319,14 +319,14 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
     on(clk.rise) {
         if !rst && STAGES > 2 && pipeline_valid[2] {
             // Transform to clip space: clip_pos = proj_matrix * view_pos
-            clip_position <= matrix_vector_multiply::<T>(
+            clip_position = matrix_vector_multiply::<T>(
                 proj_matrix,
                 view_position
             );
 
             // Advance pipeline
             if STAGES > 3 {
-                pipeline_valid[3] <= 1'b1
+                pipeline_valid[3] = 1'b1
             }
         }
     }
@@ -347,7 +347,7 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
             let n_dot_l = vec_dot::<T, 3>(normal_normalized, light_dir_normalized);
             let n_dot_l_clamped = if n_dot_l.lt(T::ZERO) { T::ZERO } else { n_dot_l };
 
-            diffuse_intensity <= n_dot_l_clamped;
+            diffuse_intensity = n_dot_l_clamped;
 
             // Diffuse color: I_diffuse * light_color * surface_color
             let diffuse_r = n_dot_l_clamped.mul(light_color.x).mul(input_color.x);
@@ -376,7 +376,7 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
                 }
             };
 
-            lit_color <= vec4::<T> {
+            lit_color = vec4::<T> {
                 x: clamp(final_r),
                 y: clamp(final_g),
                 z: clamp(final_b),
@@ -385,7 +385,7 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
 
             // Advance pipeline
             if STAGES > 4 {
-                pipeline_valid[4] <= 1'b1
+                pipeline_valid[4] = 1'b1
             }
         }
     }

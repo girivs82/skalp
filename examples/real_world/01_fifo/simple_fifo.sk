@@ -59,20 +59,20 @@ impl SimpleFifo {
     on(clk.rise) {
         if (rst) {
             // Reset all pointers
-            wr_ptr <= 0
-            rd_ptr <= 0
-            data_count <= 0
+            wr_ptr = 0
+            rd_ptr = 0
+            data_count = 0
         } else {
             // Write operation
             if (wr_en && (data_count < 4)) {
                 if (wr_ptr == 0) {
-                    mem0 <= wr_data
+                    mem0 = wr_data
                 } else if (wr_ptr == 1) {
-                    mem1 <= wr_data
+                    mem1 = wr_data
                 } else if (wr_ptr == 2) {
-                    mem2 <= wr_data
+                    mem2 = wr_data
                 } else {
-                    mem3 <= wr_data
+                    mem3 = wr_data
                 }
                 wr_ptr <= (wr_ptr + 1) % 4
             }
@@ -84,9 +84,9 @@ impl SimpleFifo {
 
             // Update count
             if (wr_en && !rd_en && (data_count < 4)) {
-                data_count <= data_count + 1
+                data_count = data_count + 1
             } else if (!wr_en && rd_en && (data_count > 0)) {
-                data_count <= data_count - 1
+                data_count = data_count - 1
             }
         }
     }

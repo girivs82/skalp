@@ -154,8 +154,8 @@ impl AsyncFifo<T, DEPTH> {
     ///
     /// FIFO count should never exceed DEPTH
     property count_bounded {
-        always(wr_count <= DEPTH) &&
-        always(rd_count <= DEPTH)
+        always(wr_count = DEPTH) &&
+        always(rd_count = DEPTH)
     }
 
     /// Property: Count increment on write

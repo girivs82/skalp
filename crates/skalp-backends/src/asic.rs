@@ -66,10 +66,10 @@ impl AsicBackend {
     }
 
     /// Convert LIR to structural Verilog for ASIC synthesis
-    async fn lir_to_structural_verilog(&self, lir: &skalp_lir::LirDesign) -> BackendResult<String> {
+    async fn lir_to_structural_verilog(&self, lir: &skalp_lir::Lir) -> BackendResult<String> {
         // Generate structural Verilog from LIR - more detailed than FPGA version
         // Use the Verilog generation utility
-        crate::verilog::generate_verilog(&lir.modules[0])
+        crate::verilog::generate_verilog(lir)
     }
 
     /// Run ASIC synthesis flow
@@ -104,8 +104,8 @@ impl AsicBackend {
 impl Backend for AsicBackend {
     async fn synthesize(
         &self,
-        lir: &skalp_lir::LirDesign,
-        config: &SynthesisConfig,
+        lir: &skalp_lir::Lir,
+        _config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temporary directory for synthesis
         let temp_dir = TempDir::new()?;
@@ -163,7 +163,7 @@ impl Backend for AsicBackend {
         ]
     }
 
-    fn validate_design(&self, _lir: &skalp_lir::LirDesign) -> BackendResult<()> {
+    fn validate_design(&self, _lir: &skalp_lir::Lir) -> BackendResult<()> {
         Ok(())
     }
 }

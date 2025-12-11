@@ -561,34 +561,30 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
 
     let sir = if design_file.extension() == Some(std::ffi::OsStr::new("lir")) {
         // For LIR files, create a minimal SIR for simulation
-        use skalp_lir::LirDesign;
+        use skalp_lir::Lir;
         use skalp_sir::{SirModule, SirSignal, SirType};
         use std::collections::HashMap;
 
-        let lir: LirDesign = serde_json::from_str(&design_str)?;
-        if lir.modules.is_empty() {
-            anyhow::bail!("No modules found in LIR");
-        }
+        let lir: Lir = serde_json::from_str(&design_str)?;
 
         // Create a simple SIR module from LIR
-        let lir_module = &lir.modules[0];
         let mut signals = Vec::new();
 
-        // Add signals from LIR
-        for signal in lir_module.signals.iter() {
+        // Add signals from LIR nets
+        for net in lir.nets.iter() {
             signals.push(SirSignal {
-                name: signal.name.clone(),
-                width: 32, // Default width
-                sir_type: SirType::Bits(32),
+                name: net.name.clone(),
+                width: net.width as usize,
+                sir_type: SirType::Bits(net.width as usize),
                 driver_node: None,
                 fanout_nodes: Vec::new(),
-                is_state: signal.is_register,
+                is_state: net.is_state_output,
                 span: None,
             });
         }
 
         SirModule {
-            name: lir_module.name.clone(),
+            name: lir.name.clone(),
             inputs: Vec::new(),
             outputs: Vec::new(),
             signals,
@@ -677,8 +673,8 @@ fn analyze_design(
     detailed: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::lower_to_gate_netlist;
-    use skalp_sim::lir_to_sir::convert_gate_netlist_to_sir;
+    use skalp_lir::lower_to_lir;
+    use skalp_sim::lir_to_sir::convert_lir_to_sir;
     use std::collections::HashMap;
 
     println!("🔬 Gate-Level Analysis");
@@ -699,7 +695,7 @@ fn analyze_design(
 
     // Lower to Gate-Level Netlist
     info!("Converting to gate-level netlist...");
-    let gate_results = lower_to_gate_netlist(&mir)?;
+    let gate_results = lower_to_lir(&mir)?;
 
     println!("\n📊 Gate-Level Analysis Results");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -709,19 +705,19 @@ fn analyze_design(
     let mut all_counts: HashMap<String, usize> = HashMap::new();
 
     for result in &gate_results {
-        let netlist = &result.netlist;
+        let lir = &result.lir;
         let stats = &result.stats;
 
-        println!("\n📦 Module: {}", netlist.name);
+        println!("\n📦 Module: {}", lir.name);
         println!("   Ports: {}", stats.ports);
-        println!("   Primitives: {}", netlist.primitives.len());
-        println!("   Nets: {}", netlist.nets.len());
+        println!("   Primitives: {}", lir.primitives.len());
+        println!("   Nets: {}", lir.nets.len());
 
         // Count primitives by type
         let mut counts: HashMap<String, usize> = HashMap::new();
         let mut module_fit = 0.0;
 
-        for prim in &netlist.primitives {
+        for prim in &lir.primitives {
             *counts.entry(prim.ptype.short_name().to_string()).or_insert(0) += 1;
             *all_counts.entry(prim.ptype.short_name().to_string()).or_insert(0) += 1;
             module_fit += prim.ptype.base_fit();
@@ -738,7 +734,7 @@ fn analyze_design(
 
         println!("   Module FIT: {:.2}", module_fit);
 
-        total_primitives += netlist.primitives.len();
+        total_primitives += lir.primitives.len();
         total_fit += module_fit;
     }
 
@@ -763,11 +759,11 @@ fn analyze_design(
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         for result in &gate_results {
-            let netlist = &result.netlist;
-            println!("\n   Module: {}", netlist.name);
+            let lir = &result.lir;
+            println!("\n   Module: {}", lir.name);
 
             // Convert to SIR for simulation
-            let sir_result = convert_gate_netlist_to_sir(netlist);
+            let sir_result = convert_lir_to_sir(lir);
 
             #[cfg(target_os = "macos")]
             {
@@ -869,7 +865,7 @@ fn synthesize_design(source: &PathBuf, device: &str, full_flow: bool) -> Result<
     // Load the LIR
     let lir_path = temp_dir.path().join("design.lir");
     let lir_str = fs::read_to_string(&lir_path)?;
-    let lir: skalp_lir::LirDesign = serde_json::from_str(&lir_str)?;
+    let _lir: skalp_lir::Lir = serde_json::from_str(&lir_str)?;
 
     // Parse device target
     let target = match device {

@@ -31,11 +31,11 @@ impl RegisterFile {
 
     on(clk.rise) {
         if (rst) {
-            regs <= 0
+            regs = 0
         } else {
             if (we == 1) {
                 // Write to register
-                regs[waddr] <= wdata
+                regs[waddr] = wdata
             }
         }
     }

@@ -131,8 +131,8 @@ impl HierarchicalALU {
 
     // Register the output
     on(clk.rise) {
-        result <= result_comb
-        zero <= if result_comb == 0 { 1 } else { 0 }
-        negative <= result_comb[WIDTH-1]
+        result = result_comb
+        zero = if result_comb == 0 { 1 } else { 0 }
+        negative = result_comb[WIDTH-1]
     }
 }

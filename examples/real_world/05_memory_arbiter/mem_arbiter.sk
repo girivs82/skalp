@@ -63,9 +63,9 @@ impl MemArbiter {
 
     on(clk.rise) {
         if (rst) {
-            last_grant <= 0
-            grant_vec <= 0
-            any_granted <= 0
+            last_grant = 0
+            grant_vec = 0
+            any_granted = 0
         } else {
             if (priority_mode == 1) {
                 // Priority-based arbitration
@@ -73,117 +73,117 @@ impl MemArbiter {
 
                 // Check if any requests active
                 if (req0 == 0 && req1 == 0 && req2 == 0 && req3 == 0) {
-                    grant_vec <= 0
-                    any_granted <= 0
+                    grant_vec = 0
+                    any_granted = 0
                 } else {
                     // Find max priority among active requesters
                     // Start with port 0
                     if (req0 == 1) {
-                        winner <= 0
-                        max_prio <= prio0
+                        winner = 0
+                        max_prio = prio0
                     } else {
-                        winner <= 0
-                        max_prio <= 0
+                        winner = 0
+                        max_prio = 0
                     }
 
                     if (req1 == 1 && prio1 > max_prio) {
-                        winner <= 1
-                        max_prio <= prio1
+                        winner = 1
+                        max_prio = prio1
                     }
 
                     if (req2 == 1 && prio2 > max_prio) {
-                        winner <= 2
-                        max_prio <= prio2
+                        winner = 2
+                        max_prio = prio2
                     }
 
                     if (req3 == 1 && prio3 > max_prio) {
-                        winner <= 3
-                        max_prio <= prio3
+                        winner = 3
+                        max_prio = prio3
                     }
 
                     // Set grant vector based on winner
                     if (winner == 0) {
-                        grant_vec <= 1
+                        grant_vec = 1
                     } else if (winner == 1) {
-                        grant_vec <= 2
+                        grant_vec = 2
                     } else if (winner == 2) {
-                        grant_vec <= 4
+                        grant_vec = 4
                     } else {
-                        grant_vec <= 8
+                        grant_vec = 8
                     }
-                    any_granted <= 1
+                    any_granted = 1
                 }
             } else {
                 // Round-robin arbitration
                 // Start searching from next port after last grant
 
                 if (req0 == 0 && req1 == 0 && req2 == 0 && req3 == 0) {
-                    grant_vec <= 0
-                    any_granted <= 0
+                    grant_vec = 0
+                    any_granted = 0
                 } else {
                     // Search in round-robin order
                     if (last_grant == 0) {
                         // Check 1, 2, 3, 0
                         if (req1 == 1) {
-                            grant_vec <= 2
-                            last_grant <= 1
+                            grant_vec = 2
+                            last_grant = 1
                         } else if (req2 == 1) {
-                            grant_vec <= 4
-                            last_grant <= 2
+                            grant_vec = 4
+                            last_grant = 2
                         } else if (req3 == 1) {
-                            grant_vec <= 8
-                            last_grant <= 3
+                            grant_vec = 8
+                            last_grant = 3
                         } else if (req0 == 1) {
-                            grant_vec <= 1
-                            last_grant <= 0
+                            grant_vec = 1
+                            last_grant = 0
                         }
                     } else if (last_grant == 1) {
                         // Check 2, 3, 0, 1
                         if (req2 == 1) {
-                            grant_vec <= 4
-                            last_grant <= 2
+                            grant_vec = 4
+                            last_grant = 2
                         } else if (req3 == 1) {
-                            grant_vec <= 8
-                            last_grant <= 3
+                            grant_vec = 8
+                            last_grant = 3
                         } else if (req0 == 1) {
-                            grant_vec <= 1
-                            last_grant <= 0
+                            grant_vec = 1
+                            last_grant = 0
                         } else if (req1 == 1) {
-                            grant_vec <= 2
-                            last_grant <= 1
+                            grant_vec = 2
+                            last_grant = 1
                         }
                     } else if (last_grant == 2) {
                         // Check 3, 0, 1, 2
                         if (req3 == 1) {
-                            grant_vec <= 8
-                            last_grant <= 3
+                            grant_vec = 8
+                            last_grant = 3
                         } else if (req0 == 1) {
-                            grant_vec <= 1
-                            last_grant <= 0
+                            grant_vec = 1
+                            last_grant = 0
                         } else if (req1 == 1) {
-                            grant_vec <= 2
-                            last_grant <= 1
+                            grant_vec = 2
+                            last_grant = 1
                         } else if (req2 == 1) {
-                            grant_vec <= 4
-                            last_grant <= 2
+                            grant_vec = 4
+                            last_grant = 2
                         }
                     } else {
                         // last_grant == 3: Check 0, 1, 2, 3
                         if (req0 == 1) {
-                            grant_vec <= 1
-                            last_grant <= 0
+                            grant_vec = 1
+                            last_grant = 0
                         } else if (req1 == 1) {
-                            grant_vec <= 2
-                            last_grant <= 1
+                            grant_vec = 2
+                            last_grant = 1
                         } else if (req2 == 1) {
-                            grant_vec <= 4
-                            last_grant <= 2
+                            grant_vec = 4
+                            last_grant = 2
                         } else if (req3 == 1) {
-                            grant_vec <= 8
-                            last_grant <= 3
+                            grant_vec = 8
+                            last_grant = 3
                         }
                     }
-                    any_granted <= 1
+                    any_granted = 1
                 }
             }
         }

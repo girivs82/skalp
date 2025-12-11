@@ -945,12 +945,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_gpu_fault_simulator_creation() {
-        use crate::lir_to_sir::convert_gate_netlist_to_sir;
-        use skalp_lir::lir::{GateNet, GateNetlist, NetId, Primitive};
+        use crate::lir_to_sir::convert_lir_to_sir;
+        use skalp_lir::lir::{Lir, LirNet, NetId, Primitive};
 
-        let mut netlist = GateNetlist::new("test".to_string());
+        let mut lir = Lir::new("test".to_string());
 
-        let net_a = netlist.add_net(GateNet {
+        let net_a = lir.add_net(LirNet {
             id: NetId(0),
             name: "a".to_string(),
             driver: None,
@@ -961,7 +961,7 @@ mod tests {
             width: 1,
         });
 
-        let net_b = netlist.add_net(GateNet {
+        let net_b = lir.add_net(LirNet {
             id: NetId(1),
             name: "b".to_string(),
             driver: None,
@@ -972,7 +972,7 @@ mod tests {
             width: 1,
         });
 
-        let net_y = netlist.add_net(GateNet {
+        let net_y = lir.add_net(LirNet {
             id: NetId(2),
             name: "y".to_string(),
             driver: None,
@@ -983,7 +983,7 @@ mod tests {
             width: 1,
         });
 
-        netlist.add_primitive(Primitive {
+        lir.add_primitive(Primitive {
             id: PrimitiveId(0),
             ptype: PrimitiveType::And { inputs: 2 },
             path: "and_0".to_string(),
@@ -995,7 +995,7 @@ mod tests {
             bit_index: None,
         });
 
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        let sir_result = convert_lir_to_sir(&lir);
         let sim = GpuFaultSimulator::new(&sir_result.sir).expect("Failed to create simulator");
 
         println!("Device: {}", sim.device_info());
@@ -1007,12 +1007,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_gpu_fault_campaign() {
-        use crate::lir_to_sir::convert_gate_netlist_to_sir;
-        use skalp_lir::lir::{GateNet, GateNetlist, NetId, Primitive};
+        use crate::lir_to_sir::convert_lir_to_sir;
+        use skalp_lir::lir::{Lir, LirNet, NetId, Primitive};
 
-        let mut netlist = GateNetlist::new("test".to_string());
+        let mut lir = Lir::new("test".to_string());
 
-        let net_a = netlist.add_net(GateNet {
+        let net_a = lir.add_net(LirNet {
             id: NetId(0),
             name: "a".to_string(),
             driver: None,
@@ -1023,7 +1023,7 @@ mod tests {
             width: 1,
         });
 
-        let net_b = netlist.add_net(GateNet {
+        let net_b = lir.add_net(LirNet {
             id: NetId(1),
             name: "b".to_string(),
             driver: None,
@@ -1034,7 +1034,7 @@ mod tests {
             width: 1,
         });
 
-        let net_y = netlist.add_net(GateNet {
+        let net_y = lir.add_net(LirNet {
             id: NetId(2),
             name: "y".to_string(),
             driver: None,
@@ -1045,7 +1045,7 @@ mod tests {
             width: 1,
         });
 
-        netlist.add_primitive(Primitive {
+        lir.add_primitive(Primitive {
             id: PrimitiveId(0),
             ptype: PrimitiveType::And { inputs: 2 },
             path: "and_0".to_string(),
@@ -1057,7 +1057,7 @@ mod tests {
             bit_index: None,
         });
 
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        let sir_result = convert_lir_to_sir(&lir);
         let sim = GpuFaultSimulator::new(&sir_result.sir).expect("Failed to create simulator");
 
         // Test with GPU

@@ -2,7 +2,7 @@
 
 use crate::{Backend, BackendError, BackendResult, SynthesisConfig, SynthesisResults};
 use async_trait::async_trait;
-use skalp_lir::LirDesign;
+use skalp_lir::Lir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -96,7 +96,7 @@ impl XilinxBackend {
         None
     }
 
-    fn generate_tcl(&self, lir: &LirDesign, output_dir: &Path) -> Result<String, BackendError> {
+    fn generate_tcl(&self, lir: &Lir, output_dir: &Path) -> Result<String, BackendError> {
         let mut tcl = String::new();
 
         // Project setup
@@ -115,21 +115,17 @@ impl XilinxBackend {
             device
         ));
 
-        // Add source files
+        // Add source file
         tcl.push_str("# Add source files\n");
-        for module in &lir.modules {
-            let verilog_file = format!("{}.v", module.name);
-            tcl.push_str(&format!("add_files {}\n", verilog_file));
-        }
+        let verilog_file = format!("{}.v", lir.name);
+        tcl.push_str(&format!("add_files {}\n", verilog_file));
         tcl.push('\n');
 
         // Set top module
-        if let Some(top) = lir.modules.first() {
-            tcl.push_str(&format!(
-                "set_property top {} [current_fileset]\n\n",
-                top.name
-            ));
-        }
+        tcl.push_str(&format!(
+            "set_property top {} [current_fileset]\n\n",
+            lir.name
+        ));
 
         // Synthesis settings based on strategy
         tcl.push_str("# Synthesis settings\n");
@@ -304,19 +300,17 @@ impl XilinxBackend {
 impl Backend for XilinxBackend {
     async fn synthesize(
         &self,
-        lir: &LirDesign,
+        lir: &Lir,
         _config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temp directory for synthesis
         let temp_dir = TempDir::new().map_err(BackendError::IoError)?;
         let work_dir = temp_dir.path();
 
-        // Generate Verilog files
-        for module in &lir.modules {
-            let verilog = crate::verilog::generate_verilog(module)?;
-            let file_path = work_dir.join(format!("{}.v", module.name));
-            fs::write(&file_path, verilog).map_err(BackendError::IoError)?;
-        }
+        // Generate Verilog file
+        let verilog = crate::verilog::generate_verilog(lir)?;
+        let file_path = work_dir.join(format!("{}.v", lir.name));
+        fs::write(&file_path, verilog).map_err(BackendError::IoError)?;
 
         // Generate TCL script
         let tcl_content = self.generate_tcl(lir, work_dir)?;
@@ -349,7 +343,7 @@ impl Backend for XilinxBackend {
         ]
     }
 
-    fn validate_design(&self, _lir: &LirDesign) -> BackendResult<()> {
+    fn validate_design(&self, _lir: &Lir) -> BackendResult<()> {
         // Check if Vivado is available
         if !self.vivado_path.exists() && self.vivado_path != Path::new("vivado") {
             return Err(BackendError::ToolNotFound(

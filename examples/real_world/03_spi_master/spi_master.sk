@@ -52,46 +52,46 @@ impl SpiMaster {
 
     on(clk.rise) {
         if (rst) {
-            state <= 0
-            clk_div <= 0
-            spi_clk <= 0
-            tx_shift <= 0
-            rx_shift <= 0
-            bit_count <= 0
+            state = 0
+            clk_div = 0
+            spi_clk = 0
+            tx_shift = 0
+            rx_shift = 0
+            bit_count = 0
         } else {
             // Clock divider
-            clk_div <= clk_div + 1
+            clk_div = clk_div + 1
 
             if (state == 0) {
                 // IDLE: Wait for start
-                spi_clk <= 0
+                spi_clk = 0
                 if (start) {
-                    state <= 1
-                    tx_shift <= tx_data
-                    bit_count <= 0
-                    clk_div <= 0
+                    state = 1
+                    tx_shift = tx_data
+                    bit_count = 0
+                    clk_div = 0
                 }
             } else if (state == 1) {
                 // TRANSFER: Exchange bits
                 if (clk_div == 3) {
                     // Rising edge of SPI clock - sample MISO
-                    spi_clk <= 1
-                    rx_shift <= (rx_shift * 2) + miso
+                    spi_clk = 1
+                    rx_shift = (rx_shift * 2) + miso
                 } else if (clk_div == 7) {
                     // Falling edge of SPI clock - shift out next bit
-                    spi_clk <= 0
-                    tx_shift <= (tx_shift * 2) % 256
-                    bit_count <= bit_count + 1
-                    clk_div <= 0
+                    spi_clk = 0
+                    tx_shift = (tx_shift * 2) % 256
+                    bit_count = bit_count + 1
+                    clk_div = 0
 
                     if (bit_count == 7) {
-                        state <= 2
+                        state = 2
                     }
                 }
             } else {
                 // DONE: One extra cycle before returning to IDLE
-                state <= 0
-                spi_clk <= 0
+                state = 0
+                spi_clk = 0
             }
         }
     }

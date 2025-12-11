@@ -11,20 +11,20 @@ impl MatchTest {
 
     on(clk.rise) {
         if (rst) {
-            state <= 0
+            state = 0
         } else {
             match start {
                 0 => {
-                    state <= 10
+                    state = 10
                 }
                 1 => {
-                    state <= 20
+                    state = 20
                 }
                 2 => {
-                    state <= 30
+                    state = 30
                 }
                 _ => {
-                    state <= 99
+                    state = 99
                 }
             }
         }

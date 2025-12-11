@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use skalp_frontend::hir::{CdcConfig, CdcType, MemoryStyle, VendorIpConfig, VendorType, PowerConfig, IsolationClamp};
-use skalp_lir::LirDesign;
+use skalp_lir::MirToLirResult;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::type_width; // Use shared type width calculations
 use skalp_mir::mir::{Assertion, AssertionKind};
@@ -72,8 +72,11 @@ fn build_tuple_source_mapping(module: &Module) -> HashMap<SignalId, String> {
     mapping
 }
 
-/// Generate SystemVerilog from MIR and LIR
-pub fn generate_systemverilog_from_mir(mir: &Mir, lir: &LirDesign) -> Result<String> {
+/// Generate SystemVerilog from MIR
+///
+/// Note: The LIR parameter is no longer needed as the SystemVerilog generator
+/// works entirely from MIR. This function is the primary entry point.
+pub fn generate_systemverilog_from_mir(mir: &Mir, _lir: &[MirToLirResult]) -> Result<String> {
     let mut sv = String::new();
 
     // Add header comment
@@ -86,7 +89,7 @@ pub fn generate_systemverilog_from_mir(mir: &Mir, lir: &LirDesign) -> Result<Str
     // 1. Modules with generic/expression-based types (unresolved) are always skipped (not valid SystemVerilog)
     // 2. Modules with parameters but concrete types can be emitted as parameterized SystemVerilog modules
     // 3. Concrete modules (no parameters, all types resolved) are always emitted
-    for (mir_module, lir_module) in mir.modules.iter().zip(lir.modules.iter()) {
+    for mir_module in mir.modules.iter() {
         // Skip modules with unresolved/generic types - these cannot be converted to SystemVerilog
         if has_generic_types(mir_module) {
             continue;
@@ -94,7 +97,7 @@ pub fn generate_systemverilog_from_mir(mir: &Mir, lir: &LirDesign) -> Result<Str
 
         // Emit all modules with concrete types (even if they have parameters)
         // SystemVerilog supports parameterized modules
-        sv.push_str(&generate_module(mir_module, lir_module, mir)?);
+        sv.push_str(&generate_module(mir_module, mir)?);
     }
 
     Ok(sv)
@@ -337,7 +340,6 @@ fn scan_statements_for_variable_widths(
 /// Generate a single SystemVerilog module
 fn generate_module(
     mir_module: &Module,
-    lir_module: &skalp_lir::LirModule,
     mir: &Mir,
 ) -> Result<String> {
     // Check if this is a vendor IP wrapper - generate special output

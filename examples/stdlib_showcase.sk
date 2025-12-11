@@ -51,7 +51,7 @@ impl FpMAC<const F: FloatFormat> {
 
     on(clk.rise) {
         if enable {
-            accumulator <= sum
+            accumulator = sum
         }
     }
 
@@ -142,11 +142,11 @@ impl Particle<T: Numeric> {
 
     on(clk.rise) {
         if reset {
-            pos <= {T::ZERO, T::ZERO, T::ZERO}
-            vel <= {T::ZERO, T::ZERO, T::ZERO}
+            pos = {T::ZERO, T::ZERO, T::ZERO}
+            vel = {T::ZERO, T::ZERO, T::ZERO}
         } else {
-            pos <= new_pos
-            vel <= new_vel
+            pos = new_pos
+            vel = new_vel
         }
     }
 
@@ -193,9 +193,9 @@ impl FIR<const NUM_TAPS: nat> {
     on(clk.rise) {
         // Shift delay line
         for i in (NUM_TAPS-1)..1 {
-            delays[i] <= delays[i-1]
+            delays[i] = delays[i-1]
         }
-        delays[0] <= sample
+        delays[0] = sample
     }
 
     filtered = accumulator

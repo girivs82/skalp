@@ -19,7 +19,7 @@ pub mod harness;
 pub mod strategies;
 pub mod testbench;
 
-use skalp_lir::LirDesign;
+use skalp_lir::Lir;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -135,7 +135,7 @@ impl PropertyTester {
     }
 
     /// Run property-based tests on a design
-    pub async fn test_design(&mut self, design: &LirDesign) -> TestingResult<TestResults> {
+    pub async fn test_design(&mut self, design: &Lir) -> TestingResult<TestResults> {
         log::info!(
             "Starting property-based testing for design: {}",
             design.name
@@ -202,24 +202,29 @@ impl PropertyTester {
 
     fn generate_test_case(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         rng: &mut rand::rngs::StdRng,
     ) -> TestingResult<TestCase> {
         let mut test_case = TestCase::new();
 
-        // Generate inputs for each port
-        for module in &design.modules {
-            for signal in &module.signals {
-                if signal.is_input {
-                    let generator = self.generators.get(&signal.signal_type).ok_or_else(|| {
-                        TestingError::GenerationFailed(format!(
-                            "No generator for signal type: {}",
-                            signal.signal_type
-                        ))
-                    })?;
-
+        // Generate inputs for each primary input net
+        for net in &design.nets {
+            if net.is_primary_input {
+                // Use "bits" as default signal type for generator lookup
+                let signal_type = "bits".to_string();
+                if let Some(generator) = self.generators.get(&signal_type) {
                     let stimulus = generator.generate(rng)?;
-                    test_case.add_stimulus(signal.name.clone(), stimulus);
+                    test_case.add_stimulus(net.name.clone(), stimulus);
+                } else {
+                    // Generate a default random stimulus
+                    test_case.add_stimulus(
+                        net.name.clone(),
+                        Stimulus::Random {
+                            min: 0,
+                            max: (1u64 << net.width.min(63)) - 1,
+                            num_cycles: 1,
+                        },
+                    );
                 }
             }
         }
@@ -229,7 +234,7 @@ impl PropertyTester {
 
     async fn execute_test(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         test_case: &TestCase,
     ) -> TestingResult<TestResult> {
         // Create test harness

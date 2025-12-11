@@ -302,25 +302,25 @@ impl FastGraphicsPipeline {
 
     on(geom_clk.rise) {
         if rst {
-            vertex_count_internal <= 0u32
+            vertex_count_internal = 0u32
         } else if geom_out_valid && geom_out_ready {
-            vertex_count_internal <= vertex_count_internal + 1u32
+            vertex_count_internal = vertex_count_internal + 1u32
         }
     }
 
     on(rast_clk.rise) {
         if rst {
-            pixel_count_internal <= 0u32
+            pixel_count_internal = 0u32
         } else if rast_out_valid && rast_out_ready {
-            pixel_count_internal <= pixel_count_internal + 1u32
+            pixel_count_internal = pixel_count_internal + 1u32
         }
     }
 
     on(video_clk.rise) {
         if rst {
-            frame_count_internal <= 0u32
+            frame_count_internal = 0u32
         } else if video_vsync {  // Count frames on vsync
-            frame_count_internal <= frame_count_internal + 1u32
+            frame_count_internal = frame_count_internal + 1u32
         }
     }
 

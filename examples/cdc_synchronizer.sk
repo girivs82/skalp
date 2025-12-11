@@ -29,15 +29,15 @@ impl CDCSynchronizer {
     // Source clock domain logic
     on(src_clk.rise) {
         if src_rst {
-            src_valid_reg <= 0
-            src_data_gray <= 0
+            src_valid_reg = 0
+            src_data_gray = 0
         } else {
             if src_valid {
                 // Convert to Gray code for safe CDC
-                src_data_gray <= src_data ^ (src_data >> 1)
-                src_valid_reg <= 1
+                src_data_gray = src_data ^ (src_data >> 1)
+                src_valid_reg = 1
             } else {
-                src_valid_reg <= 0
+                src_valid_reg = 0
             }
         }
     }
@@ -45,18 +45,18 @@ impl CDCSynchronizer {
     // Destination clock domain logic (2-flop synchronizer)
     on(dst_clk.rise) {
         if dst_rst {
-            valid_sync1 <= 0
-            valid_sync2 <= 0
-            data_gray_sync1 <= 0
-            data_gray_sync2 <= 0
+            valid_sync1 = 0
+            valid_sync2 = 0
+            data_gray_sync1 = 0
+            data_gray_sync2 = 0
         } else {
             // Stage 1: capture from source domain
-            valid_sync1 <= src_valid_reg
-            data_gray_sync1 <= src_data_gray
+            valid_sync1 = src_valid_reg
+            data_gray_sync1 = src_data_gray
 
             // Stage 2: stable synchronized value
-            valid_sync2 <= valid_sync1
-            data_gray_sync2 <= data_gray_sync1
+            valid_sync2 = valid_sync1
+            data_gray_sync2 = data_gray_sync1
         }
     }
 

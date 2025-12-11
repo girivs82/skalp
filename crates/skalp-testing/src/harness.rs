@@ -4,7 +4,7 @@ use crate::{Stimulus, TestingResult};
 use std::collections::HashMap;
 
 pub struct TestHarness {
-    design: skalp_lir::LirDesign,
+    design: skalp_lir::Lir,
     stimuli: HashMap<String, Stimulus>,
 }
 
@@ -16,7 +16,7 @@ pub struct SimulationResult {
 }
 
 impl TestHarness {
-    pub fn new(design: skalp_lir::LirDesign) -> Self {
+    pub fn new(design: skalp_lir::Lir) -> Self {
         Self {
             design,
             stimuli: HashMap::new(),

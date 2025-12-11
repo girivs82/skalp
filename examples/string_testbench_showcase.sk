@@ -32,20 +32,20 @@ impl SimpleALUTestbench {
     // Simple ALU logic
     on(clk.rise) {
         if rst {
-            alu_result <= 0
+            alu_result = 0
         } else {
             if op == 0 {
                 // ADD
-                alu_result <= a + b
+                alu_result = a + b
             } else if op == 1 {
                 // SUB
-                alu_result <= a - b
+                alu_result = a - b
             } else if op == 2 {
                 // AND
-                alu_result <= a & b
+                alu_result = a & b
             } else {
                 // OR
-                alu_result <= a | b
+                alu_result = a | b
             }
         }
     }

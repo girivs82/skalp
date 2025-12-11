@@ -383,9 +383,9 @@ impl Register {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else {
-            reg <= data_in
+            reg = data_in
         }
     }
 
@@ -505,9 +505,9 @@ impl Register {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else {
-            reg <= data_in
+            reg = data_in
         }
     }
 
@@ -623,10 +623,10 @@ impl SimpleRegFile {
 
     on(clk.rise) {
         if (rst) {
-            regs <= 0
+            regs = 0
         } else {
             if (we == 1) {
-                regs[waddr] <= wdata
+                regs[waddr] = wdata
             }
         }
     }
@@ -710,10 +710,10 @@ impl SimpleRegFile {
 
     on(clk.rise) {
         if (rst) {
-            regs <= 0
+            regs = 0
         } else {
             if (we == 1) {
-                regs[waddr] <= wdata
+                regs[waddr] = wdata
             }
         }
     }

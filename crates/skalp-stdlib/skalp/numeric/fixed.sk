@@ -318,7 +318,7 @@ pub entity FixedRound<const W: nat, const F: nat, const S: bool, const F_OUT: na
 }
 
 impl FixedRound<const W: nat, const F: nat, const S: bool, const F_OUT: nat> {
-    // F_OUT must be <= F
+    // F_OUT must be = F
     const BITS_TO_REMOVE: nat = F - F_OUT
 
     // Extract rounding bit

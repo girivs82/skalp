@@ -2,7 +2,7 @@
 
 use crate::device::{Device, LogicTile};
 use rayon::prelude::*;
-use skalp_lir::{Gate, LirDesign};
+use skalp_lir::{Lir, Primitive};
 use std::collections::HashMap;
 
 /// Main placer struct with advanced algorithms
@@ -337,19 +337,16 @@ impl Placer {
     }
 
     /// Run placement algorithm
-    pub fn place(&mut self, design: &LirDesign) -> Result<PlacementResult, PlacementError> {
+    pub fn place(&mut self, design: &Lir) -> Result<PlacementResult, PlacementError> {
         println!(
             "🔧 Running placement with algorithm: {:?}",
             self.config.algorithm
         );
 
-        // Extract gates from all modules
-        let mut all_gates = Vec::new();
-        for module in &design.modules {
-            all_gates.extend(module.gates.iter());
-        }
+        // Get primitives from LIR
+        let all_primitives: Vec<&Primitive> = design.primitives.iter().collect();
 
-        if all_gates.is_empty() {
+        if all_primitives.is_empty() {
             return Ok(PlacementResult {
                 placements: HashMap::new(),
                 io_configurations: HashMap::new(),
@@ -361,17 +358,17 @@ impl Placer {
         }
 
         match self.config.algorithm {
-            PlacementAlgorithm::Random => self.random_placement(&all_gates),
+            PlacementAlgorithm::Random => self.random_placement(&all_primitives),
             PlacementAlgorithm::SimulatedAnnealing => {
-                self.simulated_annealing_placement(&all_gates)
+                self.simulated_annealing_placement(&all_primitives)
             }
-            PlacementAlgorithm::Analytical => self.analytical_placement(&all_gates),
-            PlacementAlgorithm::ForceDirected => self.force_directed_placement(&all_gates),
+            PlacementAlgorithm::Analytical => self.analytical_placement(&all_primitives),
+            PlacementAlgorithm::ForceDirected => self.force_directed_placement(&all_primitives),
         }
     }
 
     /// Simple random placement
-    fn random_placement(&mut self, gates: &[&Gate]) -> Result<PlacementResult, PlacementError> {
+    fn random_placement(&mut self, gates: &[&Primitive]) -> Result<PlacementResult, PlacementError> {
         let available_tiles: Vec<_> = self.device.logic_tiles.iter().collect();
 
         if gates.len() > available_tiles.len() {
@@ -384,7 +381,7 @@ impl Placer {
         for (i, gate) in gates.iter().enumerate() {
             if i < available_tiles.len() {
                 let tile = available_tiles[i];
-                self.placement.insert(gate.id.clone(), tile.position);
+                self.placement.insert(format!("prim_{}", gate.id.0), tile.position);
             }
         }
 
@@ -394,7 +391,7 @@ impl Placer {
     /// Simulated annealing placement
     fn simulated_annealing_placement(
         &mut self,
-        gates: &[&Gate],
+        gates: &[&Primitive],
     ) -> Result<PlacementResult, PlacementError> {
         // Initial random placement
         self.random_placement(gates)?;
@@ -444,7 +441,7 @@ impl Placer {
     }
 
     /// Analytical placement using quadratic optimization
-    fn analytical_placement(&mut self, gates: &[&Gate]) -> Result<PlacementResult, PlacementError> {
+    fn analytical_placement(&mut self, gates: &[&Primitive]) -> Result<PlacementResult, PlacementError> {
         // Simplified analytical placement - would use actual quadratic solver
         println!("   Running analytical placement (simplified)");
 
@@ -459,7 +456,7 @@ impl Placer {
             let x = x.min(self.device.grid_size.0 - 2);
             let y = y.min(self.device.grid_size.1 - 2);
 
-            self.placement.insert(gate.id.clone(), (x, y));
+            self.placement.insert(format!("prim_{}", gate.id.0), (x, y));
         }
 
         Ok(self.create_placement_result(gates))
@@ -468,7 +465,7 @@ impl Placer {
     /// Force-directed placement
     fn force_directed_placement(
         &mut self,
-        gates: &[&Gate],
+        gates: &[&Primitive],
     ) -> Result<PlacementResult, PlacementError> {
         println!("   Running force-directed placement");
 
@@ -483,10 +480,11 @@ impl Placer {
             for gate in gates {
                 let mut total_force = (0.0, 0.0);
 
-                if let Some(&(x, y)) = self.placement.get(&gate.id) {
-                    // Calculate attractive forces to connected gates
+                if let Some(&(x, y)) = self.placement.get(&format!("prim_{}", gate.id.0)) {
+                    // Calculate attractive forces to connected gates (via input nets)
                     for input in &gate.inputs {
-                        if let Some(&(ix, iy)) = self.placement.get(input) {
+                        let net_key = format!("net_{}", input.0);
+                        if let Some(&(ix, iy)) = self.placement.get(&net_key) {
                             let dx = ix as f64 - x as f64;
                             let dy = iy as f64 - y as f64;
                             let distance = (dx * dx + dy * dy).sqrt().max(1.0);
@@ -498,13 +496,13 @@ impl Placer {
                     }
                 }
 
-                forces.insert(gate.id.clone(), total_force);
+                forces.insert(format!("prim_{}", gate.id.0), total_force);
             }
 
             // Apply forces with damping
             for gate in gates {
-                if let Some(&(fx, fy)) = forces.get(&gate.id) {
-                    if let Some(&(x, y)) = self.placement.get(&gate.id) {
+                if let Some(&(fx, fy)) = forces.get(&format!("prim_{}", gate.id.0)) {
+                    if let Some(&(x, y)) = self.placement.get(&format!("prim_{}", gate.id.0)) {
                         let new_x = ((x as f64 + fx * 0.5)
                             .max(1.0)
                             .min((self.device.grid_size.0 - 2) as f64))
@@ -514,7 +512,7 @@ impl Placer {
                             .min((self.device.grid_size.1 - 2) as f64))
                             as usize;
 
-                        self.placement.insert(gate.id.clone(), (new_x, new_y));
+                        self.placement.insert(format!("prim_{}", gate.id.0), (new_x, new_y));
                     }
                 }
             }
@@ -529,7 +527,7 @@ impl Placer {
     }
 
     /// Calculate placement cost (wirelength + timing + congestion)
-    fn calculate_cost(&self, gates: &[&Gate]) -> f64 {
+    fn calculate_cost(&self, gates: &[&Primitive]) -> f64 {
         let wirelength = self.calculate_wirelength(gates) as f64;
         let timing_cost = self.calculate_timing_cost(gates);
         let congestion_cost = self.calculate_congestion_cost();
@@ -540,13 +538,14 @@ impl Placer {
     }
 
     /// Calculate total wirelength
-    fn calculate_wirelength(&self, gates: &[&Gate]) -> usize {
+    fn calculate_wirelength(&self, gates: &[&Primitive]) -> usize {
         let mut total_wirelength = 0;
 
         for gate in gates {
-            if let Some(&(gx, gy)) = self.placement.get(&gate.id) {
+            if let Some(&(gx, gy)) = self.placement.get(&format!("prim_{}", gate.id.0)) {
                 for input in &gate.inputs {
-                    if let Some(&(ix, iy)) = self.placement.get(input) {
+                    let net_key = format!("net_{}", input.0);
+                    if let Some(&(ix, iy)) = self.placement.get(&net_key) {
                         let dx = (gx as i32 - ix as i32).abs();
                         let dy = (gy as i32 - iy as i32).abs();
                         total_wirelength += (dx + dy) as usize; // Manhattan distance
@@ -559,7 +558,7 @@ impl Placer {
     }
 
     /// Calculate timing cost (simplified)
-    fn calculate_timing_cost(&self, gates: &[&Gate]) -> f64 {
+    fn calculate_timing_cost(&self, gates: &[&Primitive]) -> f64 {
         // Simplified timing model - would use actual delay models
         let wirelength = self.calculate_wirelength(gates) as f64;
         wirelength * 0.1 // Assume 0.1ns per unit wirelength
@@ -589,16 +588,16 @@ impl Placer {
     }
 
     /// Select a random gate to move
-    fn select_random_gate_to_move(&self, gates: &[&Gate]) -> Option<(String, (usize, usize))> {
+    fn select_random_gate_to_move(&self, gates: &[&Primitive]) -> Option<(String, (usize, usize))> {
         if gates.is_empty() {
             return None;
         }
 
         let index = (self.rng_seed as usize) % gates.len();
-        let gate_id = &gates[index].id;
+        let gate_id = format!("prim_{}", gates[index].id.0);
 
-        if let Some(&position) = self.placement.get(gate_id) {
-            Some((gate_id.clone(), position))
+        if let Some(&position) = self.placement.get(&gate_id) {
+            Some((gate_id, position))
         } else {
             None
         }
@@ -636,7 +635,7 @@ impl Placer {
     }
 
     /// Create final placement result
-    fn create_placement_result(&self, gates: &[&Gate]) -> PlacementResult {
+    fn create_placement_result(&self, gates: &[&Primitive]) -> PlacementResult {
         let wirelength = self.calculate_wirelength(gates);
         let timing_score = self.calculate_timing_cost(gates);
         let total_tiles_used = self.placement.len();

@@ -9,7 +9,7 @@ entity GenericAdder<const W: nat> {
 }
 
 impl GenericAdder {
-    sum <= a + b
+    sum = a + b
 }
 
 // Test: positional arg (working baseline)
@@ -24,7 +24,7 @@ impl PositionalTest {
         a: a,
         b: b
     }
-    sum_out <= adder.sum
+    sum_out = adder.sum
 }
 
 // Test: named generic arg - new syntax!
@@ -40,5 +40,5 @@ impl NamedArgTest {
         a: a,
         b: b
     }
-    sum_out <= adder.sum
+    sum_out = adder.sum
 }

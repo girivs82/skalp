@@ -4,13 +4,13 @@
 //! 1. Parse Skalp source code
 //! 2. Build HIR
 //! 3. Lower to MIR
-//! 4. Transform to GateNetlist (primitive-based)
+//! 4. Transform to Lir (primitive-based)
 //! 5. Convert to SIR (structural mode)
 //! 6. Evaluate with fault injection
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
-    lower_to_gate_netlist, GateOptimizationPipeline, MirToGateNetlistResult,
+    lower_to_lir, GateOptimizationPipeline, MirToLirResult,
     PrimitiveId, PrimitiveType,
 };
 use skalp_mir::MirCompiler;
@@ -21,12 +21,12 @@ use skalp_sim::{
     GateLevelSimulator,
 };
 
-/// Helper to compile Skalp source to GateNetlist
-fn compile_to_gate_netlist(source: &str) -> Vec<MirToGateNetlistResult> {
+/// Helper to compile Skalp source to Lir
+fn compile_to_gate_netlist(source: &str) -> Vec<MirToLirResult> {
     let hir = parse_and_build_hir(source).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler.compile(&hir).expect("Failed to compile to MIR");
-    lower_to_gate_netlist(&mir).expect("Failed to lower to GateNetlist")
+    lower_to_lir(&mir).expect("Failed to lower to Lir")
 }
 
 #[test]
@@ -48,14 +48,14 @@ fn test_simple_and_gate_pipeline() {
 
     let result = &results[0];
     println!("=== AND Gate Pipeline ===");
-    println!("Module: {}", result.netlist.name);
+    println!("Module: {}", result.lir.name);
     println!("Ports: {}", result.stats.ports);
-    println!("Primitives: {}", result.netlist.primitives.len());
-    println!("Nets: {}", result.netlist.nets.len());
+    println!("Primitives: {}", result.lir.primitives.len());
+    println!("Nets: {}", result.lir.nets.len());
 
     // Check for AND primitive
     let and_prims: Vec<_> = result
-        .netlist
+        .lir
         .primitives
         .iter()
         .filter(|p| matches!(p.ptype, PrimitiveType::And { .. }))
@@ -63,7 +63,7 @@ fn test_simple_and_gate_pipeline() {
     println!("AND primitives: {}", and_prims.len());
 
     // Print all primitives
-    for prim in &result.netlist.primitives {
+    for prim in &result.lir.primitives {
         println!(
             "  {:?} {} inputs={:?} outputs={:?}",
             prim.ptype, prim.path, prim.inputs, prim.outputs
@@ -91,16 +91,16 @@ fn test_xor_gate_pipeline() {
     let result = &results[0];
 
     println!("=== XOR Gate Pipeline ===");
-    println!("Primitives: {}", result.netlist.primitives.len());
+    println!("Primitives: {}", result.lir.primitives.len());
 
     let xor_prims: Vec<_> = result
-        .netlist
+        .lir
         .primitives
         .iter()
         .filter(|p| matches!(p.ptype, PrimitiveType::Xor))
         .collect();
 
-    for prim in &result.netlist.primitives {
+    for prim in &result.lir.primitives {
         println!("  {:?} {}", prim.ptype, prim.path);
     }
 
@@ -126,14 +126,14 @@ fn test_mux_pipeline() {
     let result = &results[0];
 
     println!("=== MUX Pipeline ===");
-    println!("Primitives: {}", result.netlist.primitives.len());
+    println!("Primitives: {}", result.lir.primitives.len());
 
-    for prim in &result.netlist.primitives {
+    for prim in &result.lir.primitives {
         println!("  {:?} {}", prim.ptype, prim.path);
     }
 
     let mux_prims: Vec<_> = result
-        .netlist
+        .lir
         .primitives
         .iter()
         .filter(|p| matches!(p.ptype, PrimitiveType::Mux2))
@@ -161,18 +161,18 @@ fn test_multi_bit_adder_pipeline() {
 
     println!("=== 4-bit Adder Pipeline ===");
     println!("Total bits: {}", result.stats.total_bits);
-    println!("Primitives: {}", result.netlist.primitives.len());
+    println!("Primitives: {}", result.lir.primitives.len());
 
     // Count adder primitives
     let half_adders: Vec<_> = result
-        .netlist
+        .lir
         .primitives
         .iter()
         .filter(|p| matches!(p.ptype, PrimitiveType::HalfAdder))
         .collect();
 
     let full_adders: Vec<_> = result
-        .netlist
+        .lir
         .primitives
         .iter()
         .filter(|p| matches!(p.ptype, PrimitiveType::FullAdder))
@@ -181,7 +181,7 @@ fn test_multi_bit_adder_pipeline() {
     println!("HalfAdders: {}", half_adders.len());
     println!("FullAdders: {}", full_adders.len());
 
-    for prim in &result.netlist.primitives {
+    for prim in &result.lir.primitives {
         if matches!(
             prim.ptype,
             PrimitiveType::HalfAdder | PrimitiveType::FullAdder
@@ -215,11 +215,11 @@ fn test_comparator_pipeline() {
     let result = &results[0];
 
     println!("=== 4-bit Comparator Pipeline ===");
-    println!("Primitives: {}", result.netlist.primitives.len());
+    println!("Primitives: {}", result.lir.primitives.len());
 
     // Equality comparison uses XNOR for each bit pair, then AND to combine
     let xnor_prims: Vec<_> = result
-        .netlist
+        .lir
         .primitives
         .iter()
         .filter(|p| matches!(p.ptype, PrimitiveType::Xnor))
@@ -227,7 +227,7 @@ fn test_comparator_pipeline() {
 
     println!("XNOR primitives: {}", xnor_prims.len());
 
-    for prim in &result.netlist.primitives {
+    for prim in &result.lir.primitives {
         println!("  {:?} {}", prim.ptype, prim.path);
     }
 }
@@ -250,11 +250,11 @@ fn test_fit_calculation() {
     let result = &results[0];
 
     println!("=== FIT Calculation ===");
-    println!("Primitives: {}", result.netlist.primitives.len());
+    println!("Primitives: {}", result.lir.primitives.len());
 
     // Calculate total FIT
     let total_fit: f64 = result
-        .netlist
+        .lir
         .primitives
         .iter()
         .map(|p| p.ptype.base_fit())
@@ -265,7 +265,7 @@ fn test_fit_calculation() {
     // Print FIT breakdown by primitive type
     let mut fit_by_type: std::collections::HashMap<String, (usize, f64)> =
         std::collections::HashMap::new();
-    for prim in &result.netlist.primitives {
+    for prim in &result.lir.primitives {
         let type_name = format!("{:?}", prim.ptype);
         let entry = fit_by_type.entry(type_name).or_insert((0, 0.0));
         entry.0 += 1;
@@ -294,7 +294,7 @@ fn test_gate_optimization_pipeline() {
     "#;
 
     let results = compile_to_gate_netlist(source);
-    let mut netlist = results[0].netlist.clone();
+    let mut netlist = results[0].lir.clone();
 
     println!("=== Gate Optimization ===");
     println!("Before optimization:");
@@ -333,10 +333,10 @@ fn test_sir_conversion() {
     "#;
 
     let results = compile_to_gate_netlist(source);
-    let netlist = &results[0].netlist;
+    let netlist = &results[0].lir;
 
     println!("=== SIR Conversion ===");
-    println!("GateNetlist primitives: {}", netlist.primitives.len());
+    println!("Lir primitives: {}", netlist.primitives.len());
 
     // Convert to SIR
     let sir_result = convert_gate_netlist_to_sir(netlist);
@@ -457,11 +457,11 @@ fn test_complete_pipeline_with_optimization_and_sir() {
 
     println!("=== Complete Pipeline Test ===");
 
-    // Step 1: Compile to GateNetlist
+    // Step 1: Compile to Lir
     let results = compile_to_gate_netlist(source);
-    let mut netlist = results[0].netlist.clone();
+    let mut netlist = results[0].lir.clone();
 
-    println!("\n1. Initial GateNetlist:");
+    println!("\n1. Initial Lir:");
     println!("   Primitives: {}", netlist.primitives.len());
     println!("   Nets: {}", netlist.nets.len());
 
@@ -523,7 +523,7 @@ fn test_hierarchy_preservation() {
     "#;
 
     let results = compile_to_gate_netlist(source);
-    let netlist = &results[0].netlist;
+    let netlist = &results[0].lir;
 
     println!("=== Hierarchy Preservation ===");
     println!("Module: {}", netlist.name);
@@ -560,7 +560,7 @@ fn test_gate_level_simulator() {
     "#;
 
     let results = compile_to_gate_netlist(source);
-    let netlist = &results[0].netlist;
+    let netlist = &results[0].lir;
 
     // Convert to SIR
     let sir_result = convert_gate_netlist_to_sir(netlist);
@@ -610,7 +610,7 @@ fn test_gate_level_simulator_with_fault() {
     "#;
 
     let results = compile_to_gate_netlist(source);
-    let netlist = &results[0].netlist;
+    let netlist = &results[0].lir;
     let sir_result = convert_gate_netlist_to_sir(netlist);
     let mut sim = GateLevelSimulator::new(&sir_result.sir);
 
@@ -675,7 +675,7 @@ fn test_gate_level_analysis_alu() {
     let results = compile_to_gate_netlist(source);
     assert!(!results.is_empty(), "Should produce at least one netlist");
 
-    let netlist = &results[0].netlist;
+    let netlist = &results[0].lir;
     let stats = &results[0].stats;
 
     println!("=== Gate-Level ALU Analysis ===");
@@ -765,7 +765,7 @@ fn test_gate_level_analysis_pipeline() {
     let results = compile_to_gate_netlist(source);
     assert!(!results.is_empty(), "Should produce at least one netlist");
 
-    let netlist = &results[0].netlist;
+    let netlist = &results[0].lir;
 
     println!("=== Gate-Level Pipeline Analysis ===");
     println!("Module: {}", netlist.name);
@@ -822,7 +822,7 @@ fn test_gpu_fault_campaign_on_alu() {
     "#;
 
     let results = compile_to_gate_netlist(source);
-    let netlist = &results[0].netlist;
+    let netlist = &results[0].lir;
     let sir_result = convert_gate_netlist_to_sir(netlist);
 
     println!("=== GPU Fault Campaign on ALU ===");
@@ -847,4 +847,617 @@ fn test_gpu_fault_campaign_on_alu() {
     println!("Detected faults: {}", results.detected_faults);
     println!("Corruption faults: {}", results.corruption_faults);
     println!("Diagnostic Coverage: {:.2}%", results.diagnostic_coverage);
+}
+
+/// Debug test to trace gate-level evaluation of the 4-bit adder with slice
+#[test]
+fn test_debug_gate_adder_4bit() {
+    let source = r#"
+        entity Adder4<'clk> {
+            in a: bit[4],
+            in b: bit[4],
+            out sum: bit[4],
+            out carry: bit,
+        }
+        impl Adder4<'clk> {
+            signal temp: bit[5] = a + b;
+            sum = temp[3:0];
+            carry = temp[4];
+        }
+    "#;
+
+    let results = compile_to_gate_netlist(source);
+    let netlist = &results[0].lir;
+    let sir_result = convert_gate_netlist_to_sir(netlist);
+    let mut sim = GateLevelSimulator::new(&sir_result.sir);
+
+    println!("=== Debug 4-bit Adder with Slice ===\n");
+
+    // Print all signals
+    println!("--- SIR Signals ---");
+    for sig in &sir_result.sir.top_module.signals {
+        println!("  {} (id={}, width={}): {:?}", sig.name, sig.id.0, sig.width, sig.signal_type);
+    }
+
+    // Print all primitives with eval order
+    println!("\n--- Primitives ({}) ---", sir_result.sir.top_module.comb_blocks.iter()
+        .map(|b| b.operations.len()).sum::<usize>());
+    for block in &sir_result.sir.top_module.comb_blocks {
+        if let Some(ref info) = block.structural_info {
+            if let Some(ref order) = info.eval_order {
+                println!("Eval order: {:?}", order);
+            }
+        }
+        for (i, op) in block.operations.iter().enumerate() {
+            if let skalp_sim::sir::SirOperation::Primitive { ptype, inputs, outputs, path, .. } = op {
+                println!("  [{}] {:?} @ {}: in={:?} out={:?}", i, ptype, path, inputs, outputs);
+            }
+        }
+    }
+
+    // Test: 1 + 3 = 4
+    println!("\n--- Test: a=1, b=3 (expected sum=4, carry=0) ---");
+    sim.set_input_u64("a", 1);
+    sim.set_input_u64("b", 3);
+
+    // Check inputs were set
+    println!("After set_input:");
+    for sig in &sir_result.sir.top_module.signals {
+        if sig.name.starts_with("a[") || sig.name.starts_with("b[") {
+            let val = sim.get_output(&sig.name).unwrap_or_default();
+            println!("  {} = {:?}", sig.name, val);
+        }
+    }
+
+    sim.step();
+
+    println!("\nAfter step:");
+    // Show all signals with non-zero values or output signals
+    for sig in &sir_result.sir.top_module.signals {
+        let val = sim.get_output(&sig.name).unwrap_or_default();
+        if val.iter().any(|&b| b) || sig.name.contains("sum") || sig.name.contains("carry") || sig.name.contains("temp") {
+            println!("  {} = {:?}", sig.name, val);
+        }
+    }
+
+    let sum_result = sim.get_output_u64("sum").unwrap_or(0);
+    let carry_result = sim.get_output_u64("carry").unwrap_or(0);
+    println!("\nResult: sum={}, carry={} (expected sum=4, carry=0)", sum_result, carry_result);
+
+    // Test a few more values
+    println!("\n--- More tests ---");
+    for (a, b, exp_sum, exp_carry) in [(1, 3, 4, 0), (7, 8, 15, 0), (8, 8, 0, 1), (15, 1, 0, 1)] {
+        sim.reset();
+        sim.set_input_u64("a", a);
+        sim.set_input_u64("b", b);
+        sim.step();
+        let sum = sim.get_output_u64("sum").unwrap_or(0);
+        let carry = sim.get_output_u64("carry").unwrap_or(0);
+        let ok = sum == exp_sum && carry == exp_carry;
+        println!("{} + {} = sum={}, carry={} (expected {},{}) {}", a, b, sum, carry, exp_sum, exp_carry,
+            if ok { "✓" } else { "✗" });
+    }
+}
+
+/// Debug test to trace gate-level evaluation of a simple 2-bit adder
+#[test]
+fn test_debug_gate_adder() {
+    let source = r#"
+        entity Add2<'clk> {
+            in a: bit[2],
+            in b: bit[2],
+            out sum: bit[2],
+        }
+        impl Add2<'clk> {
+            sum = a + b;
+        }
+    "#;
+
+    let results = compile_to_gate_netlist(source);
+    let netlist = &results[0].lir;
+    let sir_result = convert_gate_netlist_to_sir(netlist);
+    let mut sim = GateLevelSimulator::new(&sir_result.sir);
+
+    println!("=== Debug 2-bit Adder ===\n");
+
+    // Print all signals
+    println!("--- SIR Signals ---");
+    for sig in &sir_result.sir.top_module.signals {
+        println!("  {} (id={}, width={}): {:?}", sig.name, sig.id.0, sig.width, sig.signal_type);
+    }
+
+    // Print all primitives
+    println!("\n--- Primitives ---");
+    for block in &sir_result.sir.top_module.comb_blocks {
+        for op in &block.operations {
+            if let skalp_sim::sir::SirOperation::Primitive { ptype, inputs, outputs, path, .. } = op {
+                println!("  {:?} @ {}: in={:?} out={:?}", ptype, path, inputs, outputs);
+            }
+        }
+    }
+
+    // Test: 1 + 1 = 2
+    println!("\n--- Test: a=1, b=1 ---");
+    sim.set_input_u64("a", 1);
+    sim.set_input_u64("b", 1);
+
+    // Check inputs were set
+    println!("After set_input:");
+    for sig in &sir_result.sir.top_module.signals {
+        if sig.name.starts_with("a[") || sig.name.starts_with("b[") || sig.name == "a" || sig.name == "b" {
+            let val = sim.get_output(&sig.name).unwrap_or_default();
+            println!("  {} = {:?}", sig.name, val);
+        }
+    }
+
+    sim.step();
+
+    println!("\nAfter step:");
+    for sig in &sir_result.sir.top_module.signals {
+        let val = sim.get_output(&sig.name).unwrap_or_default();
+        let u64val = sim.get_output_u64(&sig.name).unwrap_or(0);
+        if val.iter().any(|&b| b) || sig.name.contains("sum") || sig.name.contains("add_") {
+            println!("  {} = {:?} (u64={})", sig.name, val, u64val);
+        }
+    }
+
+    let result = sim.get_output_u64("sum").unwrap_or(0);
+    println!("\nResult: sum = {} (expected 2)", result);
+
+    // Test a few more values
+    for (a, b) in [(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (3, 3)] {
+        sim.reset();
+        sim.set_input_u64("a", a);
+        sim.set_input_u64("b", b);
+        sim.step();
+        let result = sim.get_output_u64("sum").unwrap_or(0);
+        let expected = (a + b) & 3; // Mask to 2 bits
+        println!("{} + {} = {} (expected {}) {}", a, b, result, expected,
+            if result == expected { "✓" } else { "✗" });
+    }
+}
+
+/// Test equivalence between functional (behavioral) and gate-level simulators
+/// This test verifies that both simulators produce identical outputs for the same inputs
+#[tokio::test]
+async fn test_functional_vs_gate_level_equivalence() {
+    use skalp_mir::MirCompiler;
+    use skalp_sim::{SimulationConfig, Simulator};
+
+    println!("=== Functional vs Gate-Level Equivalence Test ===\n");
+
+    // Simple 4-bit adder - purely combinational
+    let source = r#"
+        entity Adder4<'clk> {
+            in a: bit[4],
+            in b: bit[4],
+            out sum: bit[4],
+            out carry: bit,
+        }
+
+        impl Adder4<'clk> {
+            signal temp: bit[5] = a + b;
+            sum = temp[3:0];
+            carry = temp[4];
+        }
+    "#;
+
+    // ============ Setup Gate-Level Simulator ============
+    let results = compile_to_gate_netlist(source);
+    let netlist = &results[0].lir;
+    let gate_sir = convert_gate_netlist_to_sir(netlist);
+    let mut gate_sim = GateLevelSimulator::new(&gate_sir.sir);
+
+    println!("Gate-level netlist: {} primitives, {:.2} FIT",
+             netlist.primitives.len(), gate_sim.total_fit());
+
+    // ============ Setup Functional Simulator ============
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let func_sir = skalp_sir::convert_mir_to_sir(&mir.modules[0]);
+
+    let config = SimulationConfig {
+        use_gpu: false, // Use CPU runtime for comparison
+        max_cycles: 100,
+        timeout_ms: 5000,
+        capture_waveforms: false,
+        parallel_threads: 1,
+    };
+
+    let mut func_sim = Simulator::new(config).await.expect("Failed to create simulator");
+    func_sim.load_module(&func_sir).await.expect("Failed to load module");
+
+    println!("Functional SIR: {} inputs, {} outputs, {} comb nodes",
+             func_sir.inputs.len(), func_sir.outputs.len(), func_sir.combinational_nodes.len());
+
+    // ============ Test All Input Combinations ============
+    let mut mismatches = 0;
+    let mut total_tests = 0;
+
+    println!("\n--- Testing all input combinations (0-15 × 0-15) ---");
+
+    for a in 0u8..16 {
+        for b in 0u8..16 {
+            total_tests += 1;
+
+            // Expected result
+            let expected_sum = (a + b) & 0x0F;
+            let expected_carry = (a + b) > 15;
+
+            // ---- Gate-Level Simulation ----
+            gate_sim.reset();
+            gate_sim.set_input_u64("a", a as u64);
+            gate_sim.set_input_u64("b", b as u64);
+            gate_sim.step();
+
+            let gate_sum = gate_sim.get_output_u64("sum").unwrap_or(0) as u8;
+            let gate_carry = gate_sim.get_output_u64("carry").unwrap_or(0) != 0;
+
+            // ---- Functional Simulation ----
+            func_sim.reset().await.expect("Reset failed");
+            func_sim.set_input("a", vec![a]).await.expect("Set a failed");
+            func_sim.set_input("b", vec![b]).await.expect("Set b failed");
+            func_sim.step_simulation().await.expect("Step failed");
+
+            let func_sum_bytes = func_sim.get_output("sum").await.expect("Get sum failed");
+            let func_carry_bytes = func_sim.get_output("carry").await.expect("Get carry failed");
+            let func_sum = func_sum_bytes.first().copied().unwrap_or(0) & 0x0F;
+            let func_carry = func_carry_bytes.first().copied().unwrap_or(0) != 0;
+
+            // ---- Compare Results ----
+            let gate_correct = gate_sum == expected_sum && gate_carry == expected_carry;
+            let func_correct = func_sum == expected_sum && func_carry == expected_carry;
+            let match_each_other = gate_sum == func_sum && gate_carry == func_carry;
+
+            if !gate_correct || !func_correct || !match_each_other {
+                mismatches += 1;
+                if mismatches <= 5 {
+                    println!("MISMATCH a={}, b={}: expected={},{} gate={},{} func={},{}",
+                             a, b, expected_sum, expected_carry as u8,
+                             gate_sum, gate_carry as u8, func_sum, func_carry as u8);
+                }
+            }
+        }
+    }
+
+    println!("\n--- Results ---");
+    println!("Total tests: {}", total_tests);
+    println!("Mismatches: {}", mismatches);
+    println!("Match rate: {:.2}%", (total_tests - mismatches) as f64 / total_tests as f64 * 100.0);
+
+    if mismatches == 0 {
+        println!("✓ Gate-level and functional simulators produce IDENTICAL results");
+    } else {
+        println!("✗ EQUIVALENCE FAILURE: {} mismatches detected", mismatches);
+    }
+
+    // The test should pass if results match
+    assert_eq!(mismatches, 0, "Functional and gate-level simulators should produce identical results");
+}
+
+/// Test equivalence for bitwise operations
+#[tokio::test]
+async fn test_bitwise_ops_equivalence() {
+    use skalp_mir::MirCompiler;
+    use skalp_sim::{SimulationConfig, Simulator};
+
+    println!("=== Bitwise Operations Equivalence Test ===\n");
+
+    let source = r#"
+        entity BitwiseOps<'clk> {
+            in a: bit[8],
+            in b: bit[8],
+            out and_out: bit[8],
+            out or_out: bit[8],
+            out xor_out: bit[8],
+            out not_out: bit[8],
+        }
+
+        impl BitwiseOps<'clk> {
+            and_out = a & b;
+            or_out = a | b;
+            xor_out = a ^ b;
+            not_out = !a;
+        }
+    "#;
+
+    // Setup gate-level
+    let results = compile_to_gate_netlist(source);
+    let netlist = &results[0].lir;
+    let gate_sir = convert_gate_netlist_to_sir(netlist);
+    let mut gate_sim = GateLevelSimulator::new(&gate_sir.sir);
+
+    // Setup functional
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let func_sir = skalp_sir::convert_mir_to_sir(&mir.modules[0]);
+
+    let config = SimulationConfig {
+        use_gpu: false,
+        max_cycles: 100,
+        timeout_ms: 5000,
+        capture_waveforms: false,
+        parallel_threads: 1,
+    };
+
+    let mut func_sim = Simulator::new(config).await.expect("Failed to create simulator");
+    func_sim.load_module(&func_sir).await.expect("Failed to load module");
+
+    println!("Gate-level: {} primitives", netlist.primitives.len());
+
+    let test_values: Vec<(u8, u8)> = vec![
+        (0x00, 0x00), (0xFF, 0xFF), (0xAA, 0x55), (0x0F, 0xF0),
+        (0x12, 0x34), (0x80, 0x01), (0x7F, 0x80), (0x55, 0xAA),
+    ];
+
+    let mut mismatches = 0;
+
+    for (a, b) in &test_values {
+        // Gate-level
+        gate_sim.reset();
+        gate_sim.set_input_u64("a", *a as u64);
+        gate_sim.set_input_u64("b", *b as u64);
+        gate_sim.step();
+
+        let gate_and = gate_sim.get_output_u64("and_out").unwrap_or(0) as u8;
+        let gate_or = gate_sim.get_output_u64("or_out").unwrap_or(0) as u8;
+        let gate_xor = gate_sim.get_output_u64("xor_out").unwrap_or(0) as u8;
+        let gate_not = gate_sim.get_output_u64("not_out").unwrap_or(0) as u8;
+
+        // Functional
+        func_sim.reset().await.expect("Reset failed");
+        func_sim.set_input("a", vec![*a]).await.expect("Set a failed");
+        func_sim.set_input("b", vec![*b]).await.expect("Set b failed");
+        func_sim.step_simulation().await.expect("Step failed");
+
+        let func_and = func_sim.get_output("and_out").await.unwrap().first().copied().unwrap_or(0);
+        let func_or = func_sim.get_output("or_out").await.unwrap().first().copied().unwrap_or(0);
+        let func_xor = func_sim.get_output("xor_out").await.unwrap().first().copied().unwrap_or(0);
+        let func_not = func_sim.get_output("not_out").await.unwrap().first().copied().unwrap_or(0);
+
+        // Expected
+        let exp_and = a & b;
+        let exp_or = a | b;
+        let exp_xor = a ^ b;
+        let exp_not = !a;
+
+        if gate_and != exp_and || gate_or != exp_or || gate_xor != exp_xor || gate_not != exp_not ||
+           func_and != exp_and || func_or != exp_or || func_xor != exp_xor || func_not != exp_not ||
+           gate_and != func_and || gate_or != func_or || gate_xor != func_xor || gate_not != func_not {
+            mismatches += 1;
+            println!("MISMATCH a=0x{:02X}, b=0x{:02X}:", a, b);
+            println!("  AND: exp=0x{:02X} gate=0x{:02X} func=0x{:02X}", exp_and, gate_and, func_and);
+            println!("  OR:  exp=0x{:02X} gate=0x{:02X} func=0x{:02X}", exp_or, gate_or, func_or);
+            println!("  XOR: exp=0x{:02X} gate=0x{:02X} func=0x{:02X}", exp_xor, gate_xor, func_xor);
+            println!("  NOT: exp=0x{:02X} gate=0x{:02X} func=0x{:02X}", exp_not, gate_not, func_not);
+        }
+    }
+
+    println!("\nTotal tests: {}", test_values.len());
+    println!("Mismatches: {}", mismatches);
+
+    assert_eq!(mismatches, 0, "Bitwise operations should produce identical results");
+}
+
+/// Test that DFFs are generated for sequential logic
+#[test]
+fn test_dff_generation() {
+    // Simple counter - should generate DFFs
+    let source = r#"
+        entity Counter<'clk> {
+            in clk: clock,
+            in rst: bit,
+            out count: bit[4],
+        }
+
+        impl Counter<'clk> {
+            signal counter_reg: bit[4];
+
+            on(clk.rise) {
+                if rst {
+                    counter_reg = 0;
+                } else {
+                    counter_reg = counter_reg + 1;
+                }
+            }
+
+            count = counter_reg;
+        }
+    "#;
+
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler.compile(&hir).expect("Failed to compile to MIR");
+
+    // Verify process is sequential
+    let module = &mir.modules[0];
+    assert_eq!(module.processes.len(), 1);
+    assert!(matches!(module.processes[0].kind, skalp_mir::mir::ProcessKind::Sequential));
+
+    // Lower to gate netlist
+    let results = lower_to_lir(&mir).expect("Failed to lower to Lir");
+    let netlist = &results[0].lir;
+
+    // Count DFF primitives
+    let dff_count = netlist.primitives.iter()
+        .filter(|p| matches!(p.ptype, PrimitiveType::DffP | PrimitiveType::DffN | PrimitiveType::DffAR | PrimitiveType::DffAS))
+        .count();
+
+    // Should have DFFs for the 4-bit counter register
+    assert!(dff_count >= 4, "Counter should generate at least 4 DFF primitives for the 4-bit register, got {}", dff_count);
+
+    // Verify DFFs have clock connected
+    for prim in &netlist.primitives {
+        if matches!(prim.ptype, PrimitiveType::DffP | PrimitiveType::DffN | PrimitiveType::DffAR | PrimitiveType::DffAS) {
+            assert!(prim.clock.is_some(), "DFF should have clock connected");
+        }
+    }
+}
+
+/// Test sequential simulation equivalence between gate-level and functional simulators
+/// This test runs a counter through multiple clock cycles and compares outputs
+#[tokio::test]
+async fn test_sequential_simulation_equivalence() {
+    use skalp_mir::MirCompiler;
+    use skalp_sim::{SimulationConfig, Simulator};
+
+    println!("=== Sequential Simulation Equivalence Test ===\n");
+
+    // Simple 4-bit counter with synchronous reset
+    let source = r#"
+        entity Counter4<'clk> {
+            in clk: clock,
+            in rst: bit,
+            out count: bit[4],
+        }
+
+        impl Counter4<'clk> {
+            signal counter_reg: bit[4];
+
+            on(clk.rise) {
+                if rst {
+                    counter_reg = 0;
+                } else {
+                    counter_reg = counter_reg + 1;
+                }
+            }
+
+            count = counter_reg;
+        }
+    "#;
+
+    // ============ Setup Gate-Level Simulator ============
+    let results = compile_to_gate_netlist(source);
+    let netlist = &results[0].lir;
+
+    // Count DFFs to verify sequential logic was generated
+    let dff_count = netlist.primitives.iter()
+        .filter(|p| matches!(p.ptype, PrimitiveType::DffP | PrimitiveType::DffN | PrimitiveType::DffAR | PrimitiveType::DffAS))
+        .count();
+    println!("Gate-level netlist: {} primitives, {} DFFs", netlist.primitives.len(), dff_count);
+
+    // Debug: show all primitives
+    println!("\n--- Gate Primitives ---");
+    for prim in &netlist.primitives {
+        println!("  {:?} @ {} inputs={:?} outputs={:?} clk={:?}",
+                 prim.ptype, prim.path, prim.inputs, prim.outputs, prim.clock);
+    }
+
+    assert!(dff_count >= 4, "Should have at least 4 DFFs for 4-bit counter, got {}", dff_count);
+
+    let gate_sir = convert_gate_netlist_to_sir(netlist);
+
+    // Debug: check seq_blocks
+    println!("\n--- SIR Sequential Blocks ---");
+    println!("Number of seq_blocks: {}", gate_sir.sir.top_module.seq_blocks.len());
+    for (i, block) in gate_sir.sir.top_module.seq_blocks.iter().enumerate() {
+        println!("Block {}: clock={:?}, edge={:?}, {} operations", i, block.clock, block.clock_edge, block.operations.len());
+        for (j, op) in block.operations.iter().enumerate() {
+            if let skalp_sim::sir::SirOperation::Primitive { id, ptype, inputs, outputs, path } = op {
+                println!("  Op {}: {:?} @ {} inputs={:?} outputs={:?}", j, ptype, path, inputs, outputs);
+            }
+        }
+    }
+
+    // Debug: print SIR signal mapping
+    println!("\n--- SIR Signals (ID -> Name) ---");
+    for sig in &gate_sir.sir.top_module.signals {
+        println!("  SirSignalId({}) = '{}' width={}", sig.id.0, sig.name, sig.width);
+    }
+
+    let mut gate_sim = GateLevelSimulator::new(&gate_sir.sir);
+
+    // ============ Setup Functional Simulator ============
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let func_sir = skalp_sir::convert_mir_to_sir(&mir.modules[0]);
+
+    let config = SimulationConfig {
+        use_gpu: false,
+        max_cycles: 100,
+        timeout_ms: 5000,
+        capture_waveforms: false,
+        parallel_threads: 1,
+    };
+
+    let mut func_sim = Simulator::new(config).await.expect("Failed to create simulator");
+    func_sim.load_module(&func_sir).await.expect("Failed to load module");
+
+    println!("Functional SIR: {} sequential nodes", func_sir.sequential_nodes.len());
+
+    // ============ Test Reset Behavior ============
+    println!("\n--- Testing reset behavior ---");
+
+    // Apply reset
+    gate_sim.reset();
+    gate_sim.set_input_u64("rst", 1);
+    gate_sim.set_input_u64("clk", 0);
+    gate_sim.step(); // Setup
+    gate_sim.set_input_u64("clk", 1); // Rising edge
+    gate_sim.step();
+
+    func_sim.reset().await.expect("Reset failed");
+    func_sim.set_input("rst", vec![1]).await.expect("Set rst failed");
+    func_sim.set_input("clk", vec![0]).await.expect("Set clk failed");
+    func_sim.step_simulation().await.expect("Step failed");
+    func_sim.set_input("clk", vec![1]).await.expect("Set clk failed");
+    func_sim.step_simulation().await.expect("Step failed");
+
+    let gate_count_after_reset = gate_sim.get_output_u64("count").unwrap_or(999);
+    let func_count_bytes = func_sim.get_output("count").await.expect("Get count failed");
+    let func_count_after_reset = func_count_bytes.first().copied().unwrap_or(99) as u64;
+
+    // ============ Test Counting Behavior ============
+
+    // Release reset and count for several cycles
+    gate_sim.set_input_u64("rst", 0);
+    func_sim.set_input("rst", vec![0]).await.expect("Set rst failed");
+
+    let mut mismatches = 0;
+    let num_cycles = 20;
+
+    for cycle in 0..num_cycles {
+        let expected_count = (cycle + 1) % 16; // 4-bit counter wraps at 16
+
+        // Clock low
+        gate_sim.set_input_u64("clk", 0);
+        gate_sim.step();
+        func_sim.set_input("clk", vec![0]).await.expect("Set clk failed");
+        func_sim.step_simulation().await.expect("Step failed");
+
+        // Clock high (rising edge - count increments)
+        gate_sim.set_input_u64("clk", 1);
+        gate_sim.step();
+        func_sim.set_input("clk", vec![1]).await.expect("Set clk failed");
+        func_sim.step_simulation().await.expect("Step failed");
+
+        // Read outputs
+        let gate_count = gate_sim.get_output_u64("count").unwrap_or(999);
+        let func_count_bytes = func_sim.get_output("count").await.expect("Get count failed");
+        let func_count = func_count_bytes.first().copied().unwrap_or(99) as u64;
+
+        let gate_correct = gate_count == expected_count;
+        let func_correct = func_count == expected_count;
+        let match_each_other = gate_count == func_count;
+
+        if !gate_correct || !func_correct || !match_each_other {
+            mismatches += 1;
+            // On mismatch, dump signals for debugging
+            let signals = gate_sim.dump_signals();
+            println!("Cycle {}: MISMATCH expected={} gate={} func={}",
+                     cycle, expected_count, gate_count, func_count);
+            for (name, val) in &signals {
+                let v: u64 = val.iter().enumerate().map(|(i, &b)| (b as u64) << i).sum();
+                if name.contains("counter") || name.contains("count") || name.contains("add_") {
+                    println!("    {} = {} ({:?})", name, v, val);
+                }
+            }
+        }
+    }
+
+    // Verify all cycles matched
+    assert_eq!(mismatches, 0, "Sequential simulation: gate-level and functional should produce identical results for all {} cycles", num_cycles);
 }

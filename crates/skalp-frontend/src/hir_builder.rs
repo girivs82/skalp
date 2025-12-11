@@ -1448,12 +1448,17 @@ impl HirBuilderContext {
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
-        // Look up signal ID - check if it's a port or signal
-        let signal = self.symbols.lookup(&signal_name).and_then(|id| match id {
-            SymbolId::Signal(s) => Some(HirEventSignal::Signal(*s)),
-            SymbolId::Port(p) => Some(HirEventSignal::Port(*p)),
-            _ => None,
-        })?;
+        // Look up signal ID - check ports first, then signals
+        // We check ports and signals directly rather than using general scope lookup
+        // because clock domain generics (e.g., 'clk stored as "clk") can shadow port names
+        let signal = if let Some(&port_id) = self.symbols.ports.get(&signal_name) {
+            HirEventSignal::Port(port_id)
+        } else if let Some(&signal_id) = self.symbols.signals.get(&signal_name) {
+            HirEventSignal::Signal(signal_id)
+        } else {
+            // Not found in ports or signals
+            return None;
+        };
 
         // Get edge type
         let edge = if let Some(edge_node) = node.first_child_of_kind(SyntaxKind::EdgeType) {

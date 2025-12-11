@@ -586,7 +586,7 @@ impl IntSignExtend<const W_IN: nat, const W_OUT: nat> {
 
 /// Truncate to narrower width
 pub entity IntTruncate<const W_IN: nat, const W_OUT: nat>
-where W_OUT <= W_IN {
+where W_OUT = W_IN {
     in x: bit[W_IN]
     out result: bit[W_OUT]
     out overflow: bit  // True if discarded bits were non-zero

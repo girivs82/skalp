@@ -56,42 +56,42 @@ impl I2cMasterTristate {
 
     on(clk.rise) {
         if (rst) {
-            state <= 0
-            clk_div <= 0
-            scl_tick <= 0
-            scl_phase <= 0
-            scl_reg <= 1
-            sda_drive <= 0
-            bit_count <= 0
-            ack_reg <= 0
+            state = 0
+            clk_div = 0
+            scl_tick = 0
+            scl_phase = 0
+            scl_reg = 1
+            sda_drive = 0
+            bit_count = 0
+            ack_reg = 0
         } else {
             // Clock divider
             if (clk_div == 124) {
-                clk_div <= 0
-                scl_tick <= 1
+                clk_div = 0
+                scl_tick = 1
                 scl_phase <= (scl_phase + 1) % 4
             } else {
-                clk_div <= clk_div + 1
-                scl_tick <= 0
+                clk_div = clk_div + 1
+                scl_tick = 0
             }
 
             // FSM (simplified for testing)
             if (state == 0) {
                 // IDLE
-                scl_reg <= 1
-                sda_drive <= 0
+                scl_reg = 1
+                sda_drive = 0
 
                 if (start) {
-                    state <= 1
+                    state = 1
                     shift_reg <= (addr * 2) + rw
-                    bit_count <= 0
-                    scl_phase <= 0
+                    bit_count = 0
+                    scl_phase = 0
                 }
             } else if (state == 1) {
                 // START condition
                 if (scl_tick && (scl_phase == 0)) {
-                    sda_drive <= 1  // Pull SDA low
-                    state <= 2
+                    sda_drive = 1  // Pull SDA low
+                    state = 2
                 }
             } else if (state == 2) {
                 // Send address byte
@@ -99,17 +99,17 @@ impl I2cMasterTristate {
                     if (scl_phase == 0) {
                         // Setup data bit
                         if ((shift_reg / 128) % 2 == 1) {
-                            sda_drive <= 0  // Release for '1'
+                            sda_drive = 0  // Release for '1'
                         } else {
-                            sda_drive <= 1  // Pull low for '0'
+                            sda_drive = 1  // Pull low for '0'
                         }
-                        scl_reg <= 0
+                        scl_reg = 0
                     } else if (scl_phase == 3) {
-                        scl_reg <= 0
+                        scl_reg = 0
                         shift_reg <= (shift_reg * 2) % 256
-                        bit_count <= bit_count + 1
+                        bit_count = bit_count + 1
                         if (bit_count == 7) {
-                            state <= 3
+                            state = 3
                         }
                     }
                 }
@@ -117,27 +117,27 @@ impl I2cMasterTristate {
                 // ACK: Release SDA and read
                 if (scl_tick) {
                     if (scl_phase == 0) {
-                        sda_drive <= 0  // Release
-                        scl_reg <= 0
+                        sda_drive = 0  // Release
+                        scl_reg = 0
                     } else if (scl_phase == 2) {
                         // Sample ACK (would need to read sda input here)
-                        ack_reg <= 1  // Placeholder
+                        ack_reg = 1  // Placeholder
                     } else if (scl_phase == 3) {
-                        scl_reg <= 0
-                        state <= 6  // Skip to STOP for this test
+                        scl_reg = 0
+                        state = 6  // Skip to STOP for this test
                     }
                 }
             } else if (state == 6) {
                 // STOP condition
                 if (scl_tick) {
                     if (scl_phase == 0) {
-                        sda_drive <= 1
-                        scl_reg <= 0
+                        sda_drive = 1
+                        scl_reg = 0
                     } else if (scl_phase == 2) {
-                        sda_drive <= 0  // Release SDA while SCL high
-                        scl_reg <= 1
+                        sda_drive = 0  // Release SDA while SCL high
+                        scl_reg = 1
                     } else if (scl_phase == 3) {
-                        state <= 0
+                        state = 0
                     }
                 }
             }

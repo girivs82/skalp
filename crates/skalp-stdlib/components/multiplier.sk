@@ -24,37 +24,37 @@ impl std_multiplier {
     
     on(clk.rise) {
         if rst.active {
-            stage1_valid <= 0;
-            stage2_valid <= 0;
-            stage3_valid <= 0;
-            stage1_a <= 0;
-            stage1_b <= 0;
-            stage2_partial <= 0;
-            stage3_product <= 0;
+            stage1_valid = 0;
+            stage2_valid = 0;
+            stage3_valid = 0;
+            stage1_a = 0;
+            stage1_b = 0;
+            stage2_partial = 0;
+            stage3_product = 0;
         } else {
             // Stage 1: Input registration
             if start {
-                stage1_a <= a;
-                stage1_b <= b;
-                stage1_valid <= 1;
+                stage1_a = a;
+                stage1_b = b;
+                stage1_valid = 1;
             } else {
-                stage1_valid <= 0;
+                stage1_valid = 0;
             }
             
             // Stage 2: Partial product calculation
             if stage1_valid {
-                stage2_partial <= stage1_a * stage1_b;
-                stage2_valid <= 1;
+                stage2_partial = stage1_a * stage1_b;
+                stage2_valid = 1;
             } else {
-                stage2_valid <= 0;
+                stage2_valid = 0;
             }
             
             // Stage 3: Output registration
             if stage2_valid {
-                stage3_product <= stage2_partial;
-                stage3_valid <= 1;
+                stage3_product = stage2_partial;
+                stage3_valid = 1;
             } else {
-                stage3_valid <= 0;
+                stage3_valid = 0;
             }
         }
     }

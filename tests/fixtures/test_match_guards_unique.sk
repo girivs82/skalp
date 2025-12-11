@@ -8,9 +8,9 @@ entity UniqueGuards {
 impl UniqueGuards {
     on(clk.rise) {
         match state_val {
-            0 if enable => output <= 5,
-            1 if enable => output <= 6,
-            _ => output <= 0,
+            0 if enable => output = 5,
+            1 if enable => output = 6,
+            _ => output = 0,
         }
     }
 }

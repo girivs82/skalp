@@ -2,7 +2,7 @@
 
 use crate::{Backend, BackendError, BackendResult, SynthesisConfig, SynthesisResults};
 use async_trait::async_trait;
-use skalp_lir::LirDesign;
+use skalp_lir::Lir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -100,7 +100,7 @@ impl IntelBackend {
         None
     }
 
-    fn generate_qsf(&self, lir: &LirDesign, project_dir: &Path) -> Result<String, BackendError> {
+    fn generate_qsf(&self, lir: &Lir, _project_dir: &Path) -> Result<String, BackendError> {
         let mut qsf = String::new();
 
         // Header
@@ -120,19 +120,17 @@ impl IntelBackend {
         // Project settings
         qsf.push_str(&format!(
             "set_global_assignment -name TOP_LEVEL_ENTITY {}\n",
-            lir.modules.first().map(|m| &m.name).unwrap_or(&lir.name)
+            lir.name
         ));
         qsf.push_str("set_global_assignment -name ORIGINAL_QUARTUS_VERSION 21.3.0\n");
         qsf.push_str("set_global_assignment -name PROJECT_CREATION_TIME_DATE \"00:00:00  JANUARY 01, 2024\"\n");
         qsf.push_str("set_global_assignment -name LAST_QUARTUS_VERSION \"21.3.0 Pro Edition\"\n\n");
 
-        // Add source files
-        for module in &lir.modules {
-            qsf.push_str(&format!(
-                "set_global_assignment -name VERILOG_FILE {}.v\n",
-                module.name
-            ));
-        }
+        // Add source file (single LIR = single module)
+        qsf.push_str(&format!(
+            "set_global_assignment -name VERILOG_FILE {}.v\n",
+            lir.name
+        ));
         qsf.push('\n');
 
         // Optimization settings based on goal
@@ -393,7 +391,7 @@ impl IntelBackend {
 impl Backend for IntelBackend {
     async fn synthesize(
         &self,
-        lir: &LirDesign,
+        lir: &Lir,
         _config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temp directory
@@ -404,12 +402,10 @@ impl Backend for IntelBackend {
         let project_name = &lir.name;
         fs::create_dir_all(work_dir.join("output_files")).map_err(BackendError::IoError)?;
 
-        // Generate Verilog files
-        for module in &lir.modules {
-            let verilog = crate::verilog::generate_verilog(module)?;
-            let file_path = work_dir.join(format!("{}.v", module.name));
-            fs::write(&file_path, verilog).map_err(BackendError::IoError)?;
-        }
+        // Generate Verilog file for the LIR
+        let verilog = crate::verilog::generate_verilog(lir)?;
+        let file_path = work_dir.join(format!("{}.v", lir.name));
+        fs::write(&file_path, verilog).map_err(BackendError::IoError)?;
 
         // Generate QSF file
         let qsf_content = self.generate_qsf(lir, work_dir)?;
@@ -454,7 +450,7 @@ impl Backend for IntelBackend {
         ]
     }
 
-    fn validate_design(&self, _lir: &LirDesign) -> BackendResult<()> {
+    fn validate_design(&self, _lir: &Lir) -> BackendResult<()> {
         // Check if Quartus is available
         if !self.quartus_path.exists() && self.quartus_path != Path::new("quartus_sh") {
             return Err(BackendError::ToolNotFound(

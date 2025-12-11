@@ -3,7 +3,7 @@
 use crate::property::{Property, TemporalFormula};
 use crate::smt::{SatResult, SmtSolver};
 use crate::{FormalError, FormalResult, PropertyStatus, TraceStep};
-use skalp_lir::LirDesign;
+use skalp_lir::Lir;
 
 /// Bounded Model Checker
 pub struct BoundedModelChecker {
@@ -34,7 +34,7 @@ impl BoundedModelChecker {
     /// Check safety property at specific bound
     pub async fn check_safety_at_bound(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         formula: &str,
         k: usize,
     ) -> FormalResult<bool> {
@@ -46,7 +46,7 @@ impl BoundedModelChecker {
     /// Check liveness property at specific bound
     pub async fn check_liveness_at_bound(
         &self,
-        design: &LirDesign,
+        design: &Lir,
         formula: &str,
         k: usize,
     ) -> FormalResult<Option<bool>> {
@@ -62,7 +62,7 @@ impl BoundedModelChecker {
     /// Check property using BMC (legacy method)
     pub fn check_property(
         &mut self,
-        design: &LirDesign,
+        design: &Lir,
         property: &Property,
     ) -> FormalResult<PropertyStatus> {
         // Create transition system first (doesn't need mutable self)
@@ -120,25 +120,23 @@ impl BoundedModelChecker {
         Ok(PropertyStatus::Unknown) // Cannot prove property, only bounded check
     }
 
-    fn create_transition_system(&self, design: &LirDesign) -> FormalResult<TransitionSystem> {
+    fn create_transition_system(&self, design: &Lir) -> FormalResult<TransitionSystem> {
         let mut ts = TransitionSystem::new();
 
         // Convert LIR design to transition system
         // This is a simplified implementation
         ts.initial_state = "true".to_string();
 
-        for module in &design.modules {
-            // Add state variables for each register/memory
-            for signal in &module.signals {
-                if signal.is_register {
-                    ts.state_vars.push(signal.name.clone());
-                }
+        // Add state variables for each state output net
+        for net in &design.nets {
+            if net.is_state_output {
+                ts.state_vars.push(net.name.clone());
             }
-
-            // Add transition relations
-            let transition = format!("(= {}' {})", "state", "next_state");
-            ts.transitions.push(transition);
         }
+
+        // Add transition relations (simplified)
+        let transition = format!("(= {}' {})", "state", "next_state");
+        ts.transitions.push(transition);
 
         Ok(ts)
     }

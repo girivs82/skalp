@@ -26,7 +26,7 @@ impl CoverageTracker {
         }
     }
 
-    pub fn initialize_for_design(&mut self, _design: &skalp_lir::LirDesign) -> TestingResult<()> {
+    pub fn initialize_for_design(&mut self, _design: &skalp_lir::Lir) -> TestingResult<()> {
         // Initialize coverage tracking for design
         Ok(())
     }

@@ -62,43 +62,43 @@ impl Axi4LiteSlave {
 
     on(clk.rise) {
         if (rst) {
-            state <= 0
-            resp_valid <= 0
-            read_valid <= 0
-            addr_latch <= 0
-            reg0 <= 0
-            reg1 <= 0
-            reg2 <= 0
-            reg3 <= 0
+            state = 0
+            resp_valid = 0
+            read_valid = 0
+            addr_latch = 0
+            reg0 = 0
+            reg1 = 0
+            reg2 = 0
+            reg3 = 0
         } else {
             // IDLE state
             if (state == 0) {
                 if (awvalid == 1) {
-                    state <= 1
-                    addr_latch <= awaddr
+                    state = 1
+                    addr_latch = awaddr
                 } else {
                     if (arvalid == 1) {
-                        state <= 4
-                        addr_latch <= araddr
+                        state = 4
+                        addr_latch = araddr
                     }
                 }
             } else {
                 if (state == 1) {
                     // WRITE_ADDR: wait for write data
                     if (wvalid == 1) {
-                        state <= 2
+                        state = 2
                         // Perform write based on address
                         if (addr_latch == 0) {
-                            reg0 <= wdata
+                            reg0 = wdata
                         } else {
                             if (addr_latch == 4) {
-                                reg1 <= wdata
+                                reg1 = wdata
                             } else {
                                 if (addr_latch == 8) {
-                                    reg2 <= wdata
+                                    reg2 = wdata
                                 } else {
                                     if (addr_latch == 12) {
-                                        reg3 <= wdata
+                                        reg3 = wdata
                                     }
                                 }
                             }
@@ -107,33 +107,33 @@ impl Axi4LiteSlave {
                 } else {
                     if (state == 2) {
                         // WRITE_DATA: send response
-                        state <= 3
-                        resp_valid <= 1
+                        state = 3
+                        resp_valid = 1
                     } else {
                         if (state == 3) {
                             // WRITE_RESP: wait for response handshake
                             if (bready == 1) {
-                                state <= 0
-                                resp_valid <= 0
+                                state = 0
+                                resp_valid = 0
                             }
                         } else {
                             if (state == 4) {
                                 // READ_ADDR: perform read
-                                state <= 5
-                                read_valid <= 1
+                                state = 5
+                                read_valid = 1
                                 if (addr_latch == 0) {
-                                    read_data_reg <= reg0
+                                    read_data_reg = reg0
                                 } else {
                                     if (addr_latch == 4) {
-                                        read_data_reg <= reg1
+                                        read_data_reg = reg1
                                     } else {
                                         if (addr_latch == 8) {
-                                            read_data_reg <= reg2
+                                            read_data_reg = reg2
                                         } else {
                                             if (addr_latch == 12) {
-                                                read_data_reg <= reg3
+                                                read_data_reg = reg3
                                             } else {
-                                                read_data_reg <= 0
+                                                read_data_reg = 0
                                             }
                                         }
                                     }
@@ -142,8 +142,8 @@ impl Axi4LiteSlave {
                                 if (state == 5) {
                                     // READ_DATA: wait for read handshake
                                     if (rready == 1) {
-                                        state <= 0
-                                        read_valid <= 0
+                                        state = 0
+                                        read_valid = 0
                                     }
                                 }
                             }

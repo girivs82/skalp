@@ -21,13 +21,13 @@ impl BitReverser8 {
 
     on(clk.rise) {
         // Generate-for unrolls at compile time to:
-        //   reversed[0] <= data_in[7]
-        //   reversed[1] <= data_in[6]
+        //   reversed[0] = data_in[7]
+        //   reversed[1] = data_in[6]
         //   ... etc
         generate for i in 0..8 {
-            reversed[i] <= data_in[7 - i]
+            reversed[i] = data_in[7 - i]
         }
-        data_out <= reversed
+        data_out = reversed
     }
 }
 
@@ -43,9 +43,9 @@ impl BitReverser32 {
 
     on(clk.rise) {
         generate for i in 0..32 {
-            reversed[i] <= data_in[31 - i]
+            reversed[i] = data_in[31 - i]
         }
-        data_out <= reversed
+        data_out = reversed
     }
 }
 
@@ -71,11 +71,11 @@ impl Popcount8 {
 
         // First, extract each bit and accumulate
         generate for i in 0..8 {
-            sum <= sum + data_in[i]
+            sum = sum + data_in[i]
         }
 
-        bit_count <= sum
-        count <= bit_count
+        bit_count = sum
+        count = bit_count
     }
 }
 
@@ -100,15 +100,15 @@ impl PipelineDelay4 {
 
     on(clk.rise) {
         // First stage captures input
-        stage0 <= data_in
+        stage0 = data_in
 
         // Generate the pipeline chain
-        // This creates: stage1 <= stage0, stage2 <= stage1, stage3 <= stage2
-        stage1 <= stage0
-        stage2 <= stage1
-        stage3 <= stage2
+        // This creates: stage1 = stage0, stage2 = stage1, stage3 = stage2
+        stage1 = stage0
+        stage2 = stage1
+        stage3 = stage2
 
-        data_out <= stage3
+        data_out = stage3
     }
 }
 
@@ -134,11 +134,11 @@ impl Mask16Bit {
     on(clk.rise) {
         // generate-if selects masking behavior at compile time
         generate if USE_16BIT_MASK {
-            result <= data_in & 0x0000FFFF
+            result = data_in & 0x0000FFFF
         } else {
-            result <= data_in
+            result = data_in
         }
-        data_out <= result
+        data_out = result
     }
 }
 
@@ -164,9 +164,9 @@ impl BarrelShiftStage8 {
             // Each output bit selects from the appropriate input bit
             // For simplicity, this demonstrates the pattern
             // Full implementation would use shift_amount to select
-            shifted[i] <= data_in[(i + shift_amount) & 7]
+            shifted[i] = data_in[(i + shift_amount) & 7]
         }
-        data_out <= shifted
+        data_out = shifted
     }
 }
 
@@ -186,14 +186,14 @@ impl BinaryToGray8 {
 
     on(clk.rise) {
         // MSB stays the same
-        gray_code[7] <= binary[7]
+        gray_code[7] = binary[7]
 
         // Each other bit is XOR of adjacent binary bits
         generate for i in 0..7 {
-            gray_code[i] <= binary[i] ^ binary[i + 1]
+            gray_code[i] = binary[i] ^ binary[i + 1]
         }
 
-        gray <= gray_code
+        gray = gray_code
     }
 }
 
@@ -209,21 +209,21 @@ impl GrayToBinary8 {
 
     on(clk.rise) {
         // MSB stays the same
-        bin[7] <= gray[7]
+        bin[7] = gray[7]
 
         // Each bit depends on XOR of all higher gray bits
         // bin[i] = XOR(gray[7:i])
         // This is hard to express with generate-for directly
         // So we compute iteratively from MSB down
-        bin[6] <= gray[7] ^ gray[6]
-        bin[5] <= gray[7] ^ gray[6] ^ gray[5]
-        bin[4] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4]
-        bin[3] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3]
-        bin[2] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2]
-        bin[1] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2] ^ gray[1]
-        bin[0] <= gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2] ^ gray[1] ^ gray[0]
+        bin[6] = gray[7] ^ gray[6]
+        bin[5] = gray[7] ^ gray[6] ^ gray[5]
+        bin[4] = gray[7] ^ gray[6] ^ gray[5] ^ gray[4]
+        bin[3] = gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3]
+        bin[2] = gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2]
+        bin[1] = gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2] ^ gray[1]
+        bin[0] = gray[7] ^ gray[6] ^ gray[5] ^ gray[4] ^ gray[3] ^ gray[2] ^ gray[1] ^ gray[0]
 
-        binary <= bin
+        binary = bin
     }
 }
 
@@ -246,41 +246,41 @@ impl PriorityEncoder8 {
     on(clk.rise) {
         // Priority encoding: check from MSB to LSB
         // First match wins
-        pos <= 0
-        found <= 0
+        pos = 0
+        found = 0
 
         // Check each bit position, higher bits have priority
         generate if data_in[7] {
-            pos <= 7
-            found <= 1
+            pos = 7
+            found = 1
         } else {
             generate if data_in[6] {
-                pos <= 6
-                found <= 1
+                pos = 6
+                found = 1
             } else {
                 generate if data_in[5] {
-                    pos <= 5
-                    found <= 1
+                    pos = 5
+                    found = 1
                 } else {
                     generate if data_in[4] {
-                        pos <= 4
-                        found <= 1
+                        pos = 4
+                        found = 1
                     } else {
                         generate if data_in[3] {
-                            pos <= 3
-                            found <= 1
+                            pos = 3
+                            found = 1
                         } else {
                             generate if data_in[2] {
-                                pos <= 2
-                                found <= 1
+                                pos = 2
+                                found = 1
                             } else {
                                 generate if data_in[1] {
-                                    pos <= 1
-                                    found <= 1
+                                    pos = 1
+                                    found = 1
                                 } else {
                                     generate if data_in[0] {
-                                        pos <= 0
-                                        found <= 1
+                                        pos = 0
+                                        found = 1
                                     }
                                 }
                             }
@@ -290,8 +290,8 @@ impl PriorityEncoder8 {
             }
         }
 
-        position <= pos
-        valid <= found
+        position = pos
+        valid = found
     }
 }
 
@@ -311,9 +311,9 @@ impl Parity8 {
 
     on(clk.rise) {
         // XOR all bits together
-        p <= data_in[0] ^ data_in[1] ^ data_in[2] ^ data_in[3] ^
+        p = data_in[0] ^ data_in[1] ^ data_in[2] ^ data_in[3] ^
              data_in[4] ^ data_in[5] ^ data_in[6] ^ data_in[7]
-        parity <= p
+        parity = p
     }
 }
 
@@ -341,9 +341,9 @@ impl MatrixInit2x2 {
         // Nested generate with const bounds - both levels expand at compile time
         generate for row in 0..MATRIX_ROWS {
             generate for col in 0..MATRIX_COLS {
-                initialized <= 1
+                initialized = 1
             }
         }
-        done <= initialized
+        done = initialized
     }
 }

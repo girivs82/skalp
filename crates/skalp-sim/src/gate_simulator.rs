@@ -261,11 +261,26 @@ impl GateLevelSimulator {
     }
 
     /// Set an input signal value from u64
+    ///
+    /// This handles both single signals (e.g., "a") and bit-indexed signals (e.g., "a[0]", "a[1]").
+    /// For multi-bit ports that were decomposed to bit-level signals, this will set all
+    /// bit signals from "name[0]" to "name[N-1]".
     pub fn set_input_u64(&mut self, name: &str, value: u64) {
+        // First, try direct lookup (single-bit signal or non-decomposed)
         if let Some(id) = self.signal_name_to_id.get(name) {
             let width = self.signal_widths.get(&id.0).copied().unwrap_or(1);
             let bits: Vec<bool> = (0..width).map(|i| (value >> i) & 1 == 1).collect();
             self.state.signals.insert(id.0, bits);
+            return;
+        }
+
+        // Otherwise, look for bit-indexed signals: name[0], name[1], ...
+        // Count how many bit signals exist for this base name
+        let mut bit_idx = 0;
+        while let Some(id) = self.signal_name_to_id.get(&format!("{}[{}]", name, bit_idx)) {
+            let bit_value = (value >> bit_idx) & 1 == 1;
+            self.state.signals.insert(id.0, vec![bit_value]);
+            bit_idx += 1;
         }
     }
 
@@ -276,13 +291,60 @@ impl GateLevelSimulator {
             .and_then(|id| self.state.signals.get(&id.0).cloned())
     }
 
+    /// Get any signal value by name (for debugging)
+    pub fn get_signal(&self, name: &str) -> Option<Vec<bool>> {
+        self.signal_name_to_id
+            .get(name)
+            .and_then(|id| self.state.signals.get(&id.0).cloned())
+    }
+
+    /// Get all signal values (for debugging)
+    pub fn dump_signals(&self) -> Vec<(String, Vec<bool>)> {
+        let mut result: Vec<_> = self.signal_name_to_id
+            .iter()
+            .filter_map(|(name, id)| {
+                self.state.signals.get(&id.0).map(|v| (name.clone(), v.clone()))
+            })
+            .collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+
     /// Get an output signal value as u64
+    ///
+    /// This handles both single signals (e.g., "sum") and bit-indexed signals (e.g., "sum[0]", "sum[1]").
+    /// For multi-bit outputs that were decomposed to bit-level signals, this will collect all
+    /// bit signals from "name[0]" to "name[N-1]" and combine them into a u64.
     pub fn get_output_u64(&self, name: &str) -> Option<u64> {
-        self.get_output(name).map(|bits| {
-            bits.iter()
-                .enumerate()
-                .fold(0u64, |acc, (i, &b)| acc | ((b as u64) << i))
-        })
+        // First, try direct lookup
+        if let Some(bits) = self.get_output(name) {
+            return Some(
+                bits.iter()
+                    .enumerate()
+                    .fold(0u64, |acc, (i, &b)| acc | ((b as u64) << i)),
+            );
+        }
+
+        // Otherwise, collect bit-indexed signals: name[0], name[1], ...
+        let mut result = 0u64;
+        let mut bit_idx = 0;
+        let mut found_any = false;
+
+        while let Some(id) = self.signal_name_to_id.get(&format!("{}[{}]", name, bit_idx)) {
+            found_any = true;
+            if let Some(bits) = self.state.signals.get(&id.0) {
+                if bits.first().copied().unwrap_or(false) {
+                    result |= 1u64 << bit_idx;
+                }
+            }
+            bit_idx += 1;
+        }
+
+        if found_any {
+            Some(result)
+        } else {
+            None
+        }
     }
 
     /// Get the current cycle
@@ -401,7 +463,7 @@ impl GateLevelSimulator {
                 ptype,
                 inputs,
                 outputs,
-                ..
+                path,
             } => {
                 // Gather input values
                 let input_values: Vec<bool> = inputs
@@ -777,14 +839,14 @@ impl GateLevelSimulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lir_to_sir::convert_gate_netlist_to_sir;
-    use skalp_lir::lir::{GateNet, GateNetlist, NetId, Primitive};
+    use crate::lir_to_sir::convert_lir_to_sir;
+    use skalp_lir::lir::{Lir, LirNet, NetId, Primitive};
 
-    fn make_and_gate_netlist() -> GateNetlist {
-        let mut netlist = GateNetlist::new("and_gate".to_string());
+    fn make_and_gate_lir() -> Lir {
+        let mut lir = Lir::new("and_gate".to_string());
 
         // Create nets: a, b, y
-        let net_a = netlist.add_net(GateNet {
+        let net_a = lir.add_net(LirNet {
             id: NetId(0),
             name: "a".to_string(),
             driver: None,
@@ -795,7 +857,7 @@ mod tests {
             width: 1,
         });
 
-        let net_b = netlist.add_net(GateNet {
+        let net_b = lir.add_net(LirNet {
             id: NetId(1),
             name: "b".to_string(),
             driver: None,
@@ -806,7 +868,7 @@ mod tests {
             width: 1,
         });
 
-        let net_y = netlist.add_net(GateNet {
+        let net_y = lir.add_net(LirNet {
             id: NetId(2),
             name: "y".to_string(),
             driver: None,
@@ -818,7 +880,7 @@ mod tests {
         });
 
         // Create AND gate
-        netlist.add_primitive(Primitive {
+        lir.add_primitive(Primitive {
             id: PrimitiveId(0),
             ptype: PrimitiveType::And { inputs: 2 },
             path: "and_0".to_string(),
@@ -830,13 +892,13 @@ mod tests {
             bit_index: None,
         });
 
-        netlist
+        lir
     }
 
     #[test]
     fn test_gate_simulator_creation() {
-        let netlist = make_and_gate_netlist();
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        let lir = make_and_gate_lir();
+        let sir_result = convert_lir_to_sir(&lir);
         let sim = GateLevelSimulator::new(&sir_result.sir);
 
         assert!(sim.primitive_count() >= 1);
@@ -845,8 +907,8 @@ mod tests {
 
     #[test]
     fn test_and_gate_simulation() {
-        let netlist = make_and_gate_netlist();
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        let lir = make_and_gate_lir();
+        let sir_result = convert_lir_to_sir(&lir);
         let mut sim = GateLevelSimulator::new(&sir_result.sir);
 
         // Test AND(1,1) = 1
@@ -876,8 +938,8 @@ mod tests {
 
     #[test]
     fn test_fault_injection() {
-        let netlist = make_and_gate_netlist();
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        let lir = make_and_gate_lir();
+        let sir_result = convert_lir_to_sir(&lir);
         let mut sim = GateLevelSimulator::new(&sir_result.sir);
 
         // Normal: AND(1,1) = 1
@@ -899,8 +961,8 @@ mod tests {
 
     #[test]
     fn test_primitive_breakdown() {
-        let netlist = make_and_gate_netlist();
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        let lir = make_and_gate_lir();
+        let sir_result = convert_lir_to_sir(&lir);
         let sim = GateLevelSimulator::new(&sir_result.sir);
 
         let breakdown = sim.primitive_breakdown();

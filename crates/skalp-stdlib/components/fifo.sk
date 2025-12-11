@@ -27,24 +27,24 @@ impl std_fifo {
     
     on(clk.rise) {
         if rst.active {
-            write_ptr <= 0;
-            read_ptr <= 0;
-            count <= 0;
+            write_ptr = 0;
+            read_ptr = 0;
+            count = 0;
         } else {
             match {write_enable && !full, read_enable && !empty} {
                 {true, true} => {
-                    memory[write_ptr] <= write_data;
+                    memory[write_ptr] = write_data;
                     write_ptr <= (write_ptr + 1) % DEPTH;
                     read_ptr <= (read_ptr + 1) % DEPTH;
                 },
                 {true, false} => {
-                    memory[write_ptr] <= write_data;
+                    memory[write_ptr] = write_data;
                     write_ptr <= (write_ptr + 1) % DEPTH;
-                    count <= count + 1;
+                    count = count + 1;
                 },
                 {false, true} => {
                     read_ptr <= (read_ptr + 1) % DEPTH;
-                    count <= count - 1;
+                    count = count - 1;
                 },
                 {false, false} => {}
             }
@@ -55,10 +55,10 @@ impl std_fifo {
     full = (count == DEPTH);
     empty = (count == 0);
     almost_full = (count >= DEPTH - 1);
-    almost_empty = (count <= 1);
+    almost_empty = (count = 1);
     fill_count = count;
     
     assert property (write_enable -> !full) @(posedge clk);
     assert property (read_enable -> !empty) @(posedge clk);
-    assert property (count <= DEPTH) @(posedge clk);
+    assert property (count = DEPTH) @(posedge clk);
 }

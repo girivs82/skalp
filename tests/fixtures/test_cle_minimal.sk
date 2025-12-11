@@ -12,11 +12,11 @@ impl CLETupleTest {
 
     on(clk.rise) {
         if (rst) {
-            reg_result <= 0;
+            reg_result = 0;
         } else {
             // Test tuple destructuring (like in CLE line 229)
             let (a, b) = (data1 + 5, data2[7:0] + 1);
-            reg_result <= a + b;
+            reg_result = a + b;
         }
     }
 

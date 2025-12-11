@@ -1,6 +1,6 @@
 //! LIR to SIR Conversion for Gate-Level Simulation
 //!
-//! Converts a `GateNetlist` (LIR) to `Sir` in structural mode, enabling
+//! Converts a `Lir` (gate-level netlist) to `Sir` in structural mode, enabling
 //! gate-level simulation with fault injection support.
 //!
 //! # Conversion Process
@@ -19,7 +19,7 @@ use crate::sir::{
 use bitvec::prelude::*;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
-use skalp_lir::lir::{GateNet, GateNetlist, NetId, Primitive, PrimitiveId, PrimitiveType};
+use skalp_lir::lir::{Lir, LirNet, NetId, Primitive, PrimitiveId, PrimitiveType};
 use std::collections::HashMap;
 
 /// Result of LIR to SIR conversion
@@ -54,7 +54,7 @@ pub struct ConversionStats {
     pub seq_primitives: usize,
 }
 
-/// Converter from LIR GateNetlist to SIR
+/// Converter from LIR Lir to SIR
 pub struct LirToSirConverter {
     /// Mapping from LIR net IDs to SIR signal IDs
     net_to_signal: HashMap<NetId, SirSignalId>,
@@ -80,8 +80,8 @@ impl LirToSirConverter {
         }
     }
 
-    /// Convert a GateNetlist to SIR
-    pub fn convert(&mut self, netlist: &GateNetlist) -> LirToSirResult {
+    /// Convert a Lir to SIR
+    pub fn convert(&mut self, netlist: &Lir) -> LirToSirResult {
         let mut stats = ConversionStats::default();
 
         // Phase 1: Create signals for all nets
@@ -144,7 +144,7 @@ impl LirToSirConverter {
     /// Convert LIR nets to SIR signals
     fn convert_nets(
         &mut self,
-        nets: &[GateNet],
+        nets: &[LirNet],
         _inputs: &[NetId],
         _outputs: &[NetId],
     ) -> Vec<SirSignal> {
@@ -190,7 +190,7 @@ impl LirToSirConverter {
     fn create_comb_blocks(
         &mut self,
         comb_prims: &[&Primitive],
-        netlist: &GateNetlist,
+        netlist: &Lir,
     ) -> Vec<CombinationalBlock> {
         if comb_prims.is_empty() {
             return Vec::new();
@@ -254,6 +254,8 @@ impl LirToSirConverter {
 
         // Create a single combinational block containing all comb logic
         // (Could split into multiple blocks for GPU parallelism in future)
+        // Operations are already in topological order, so eval_order is just 0, 1, 2, ...
+        let eval_order: Vec<usize> = (0..operations.len()).collect();
         let block = CombinationalBlock {
             id: self.alloc_comb_id(),
             inputs: all_inputs,
@@ -262,7 +264,7 @@ impl LirToSirConverter {
             workgroup_size_hint: Some(64), // Default for GPU
             structural_info: Some(StructuralBlockInfo {
                 is_structural: true,
-                eval_order: Some(topo_order),
+                eval_order: Some(eval_order),
                 total_fit,
             }),
         };
@@ -274,7 +276,7 @@ impl LirToSirConverter {
     fn compute_topological_order(
         &self,
         comb_prims: &[&Primitive],
-        _netlist: &GateNetlist,
+        _netlist: &Lir,
     ) -> (Vec<usize>, Vec<usize>) {
         let mut graph = DiGraph::<usize, ()>::new();
         let mut prim_to_node = HashMap::new();
@@ -326,7 +328,7 @@ impl LirToSirConverter {
     fn create_seq_blocks(
         &mut self,
         seq_prims: &[&Primitive],
-        _netlist: &GateNetlist,
+        _netlist: &Lir,
     ) -> Vec<SequentialBlock> {
         if seq_prims.is_empty() {
             return Vec::new();
@@ -449,20 +451,20 @@ impl Default for LirToSirConverter {
     }
 }
 
-/// Convert a GateNetlist to SIR for gate-level simulation
+/// Convert a Lir to SIR for gate-level simulation
 ///
 /// # Example
 ///
 /// ```ignore
-/// use skalp_lir::lir::GateNetlist;
-/// use skalp_sim::lir_to_sir::convert_gate_netlist_to_sir;
+/// use skalp_lir::lir::Lir;
+/// use skalp_sim::lir_to_sir::convert_lir_to_sir;
 ///
-/// let netlist = GateNetlist::new("my_design".to_string());
-/// let result = convert_gate_netlist_to_sir(&netlist);
+/// let netlist = Lir::new("my_design".to_string());
+/// let result = convert_lir_to_sir(&netlist);
 /// println!("Converted {} signals, {} comb blocks, {} seq blocks",
 ///          result.stats.signals, result.stats.comb_blocks, result.stats.seq_blocks);
 /// ```
-pub fn convert_gate_netlist_to_sir(netlist: &GateNetlist) -> LirToSirResult {
+pub fn convert_lir_to_sir(netlist: &Lir) -> LirToSirResult {
     let mut converter = LirToSirConverter::new();
     converter.convert(netlist)
 }
@@ -474,17 +476,17 @@ pub fn convert_gate_netlist_to_sir(netlist: &GateNetlist) -> LirToSirResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_lir::lir::{GateNet, Primitive};
+    use skalp_lir::lir::{LirNet, Primitive};
 
-    fn make_test_netlist() -> GateNetlist {
-        let mut netlist = GateNetlist::new("test_design".to_string());
+    fn make_test_netlist() -> Lir {
+        let mut netlist = Lir::new("test_design".to_string());
 
         // Create nets: input a, b, internal wire w, output y
-        let net_a = GateNet::new_primary_input(NetId(0), "a".to_string());
-        let net_b = GateNet::new_primary_input(NetId(1), "b".to_string());
-        let mut net_w = GateNet::new(NetId(2), "w".to_string());
+        let net_a = LirNet::new_primary_input(NetId(0), "a".to_string());
+        let net_b = LirNet::new_primary_input(NetId(1), "b".to_string());
+        let mut net_w = LirNet::new(NetId(2), "w".to_string());
         net_w.driver = Some((PrimitiveId(0), 0));
-        let net_y = GateNet::new_primary_output(NetId(3), "y".to_string(), (PrimitiveId(1), 0));
+        let net_y = LirNet::new_primary_output(NetId(3), "y".to_string(), (PrimitiveId(1), 0));
 
         netlist.add_net(net_a);
         netlist.add_net(net_b);
@@ -519,8 +521,8 @@ mod tests {
 
     #[test]
     fn test_convert_empty_netlist() {
-        let netlist = GateNetlist::new("empty".to_string());
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let netlist = Lir::new("empty".to_string());
+        let result = convert_lir_to_sir(&netlist);
 
         assert_eq!(result.sir.name, "empty");
         assert_eq!(result.stats.signals, 0);
@@ -531,7 +533,7 @@ mod tests {
     #[test]
     fn test_convert_simple_comb_logic() {
         let netlist = make_test_netlist();
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         assert_eq!(result.sir.name, "test_design");
         assert_eq!(result.stats.signals, 4); // a, b, w, y
@@ -545,7 +547,7 @@ mod tests {
     #[test]
     fn test_topological_order() {
         let netlist = make_test_netlist();
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         // Check that operations are in correct order (AND before INV)
         let comb_block = &result.sir.top_module.comb_blocks[0];
@@ -571,7 +573,7 @@ mod tests {
     #[test]
     fn test_net_to_signal_mapping() {
         let netlist = make_test_netlist();
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         // All 4 nets should be mapped
         assert_eq!(result.net_to_signal.len(), 4);
@@ -584,7 +586,7 @@ mod tests {
     #[test]
     fn test_primitive_to_op_mapping() {
         let netlist = make_test_netlist();
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         // Both primitives should be mapped
         assert_eq!(result.primitive_to_op.len(), 2);
@@ -595,7 +597,7 @@ mod tests {
     #[test]
     fn test_signal_types() {
         let netlist = make_test_netlist();
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         let signals = &result.sir.top_module.signals;
 
@@ -634,7 +636,7 @@ mod tests {
     #[test]
     fn test_structural_info() {
         let netlist = make_test_netlist();
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         let comb_block = &result.sir.top_module.comb_blocks[0];
         assert!(comb_block.structural_info.is_some());
@@ -648,7 +650,7 @@ mod tests {
     #[test]
     fn test_total_fit() {
         let netlist = make_test_netlist();
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         // AND gate FIT = 0.1, INV FIT = 0.05
         let expected_fit = 0.1 + 0.05;
@@ -657,13 +659,13 @@ mod tests {
 
     #[test]
     fn test_sequential_primitives() {
-        let mut netlist = GateNetlist::new("seq_test".to_string());
+        let mut netlist = Lir::new("seq_test".to_string());
 
         // Create nets
-        let net_clk = GateNet::new_primary_input(NetId(0), "clk".to_string());
-        let net_d = GateNet::new_primary_input(NetId(1), "d".to_string());
-        let net_rst = GateNet::new_primary_input(NetId(2), "rst".to_string());
-        let mut net_q = GateNet::new_primary_output(NetId(3), "q".to_string(), (PrimitiveId(0), 0));
+        let net_clk = LirNet::new_primary_input(NetId(0), "clk".to_string());
+        let net_d = LirNet::new_primary_input(NetId(1), "d".to_string());
+        let net_rst = LirNet::new_primary_input(NetId(2), "rst".to_string());
+        let mut net_q = LirNet::new_primary_output(NetId(3), "q".to_string(), (PrimitiveId(0), 0));
         net_q.is_state_output = true;
 
         netlist.add_net(net_clk);
@@ -689,7 +691,7 @@ mod tests {
 
         netlist.add_primitive(dff);
 
-        let result = convert_gate_netlist_to_sir(&netlist);
+        let result = convert_lir_to_sir(&netlist);
 
         assert_eq!(result.stats.comb_blocks, 0);
         assert_eq!(result.stats.seq_blocks, 1);

@@ -32,18 +32,18 @@ impl SpiMaster {
 
     on(clk.rise) {
         if (reset.active) {
-            state <= State::Idle
-            shift_reg <= 0
-            bit_count <= 0
-            sclk_reg <= 0
+            state = State::Idle
+            shift_reg = 0
+            bit_count = 0
+            sclk_reg = 0
         } else {
             match state {
                 State::Idle => {
                     if (start) {
-                        state <= State::Transfer(0)
-                        shift_reg <= data_in
-                        bit_count <= 0
-                        sclk_reg <= 0
+                        state = State::Transfer(0)
+                        shift_reg = data_in
+                        bit_count = 0
+                        sclk_reg = 0
                     }
                 }
 
@@ -54,9 +54,9 @@ impl SpiMaster {
                         shift_reg <= {shift_reg[6:0], miso}
                     } else {  // Falling edge of SCLK
                         if (count == 7) {
-                            state <= State::Idle
+                            state = State::Idle
                         } else {
-                            state <= State::Transfer(count + 1)
+                            state = State::Transfer(count + 1)
                         }
                     }
                 }

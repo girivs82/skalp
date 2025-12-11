@@ -20,43 +20,43 @@ impl PipelinedProcessor {
     on(clk.rise) {
         if (rst) {
             // Reset all pipeline stages
-            fetch_instruction <= 0
-            decode_opcode <= 0
-            decode_operand <= 0
-            execute_result <= 0
-            writeback_data <= 0
-            pipeline_valid <= 0
+            fetch_instruction = 0
+            decode_opcode = 0
+            decode_operand = 0
+            execute_result = 0
+            writeback_data = 0
+            pipeline_valid = 0
         } else {
             // Stage 1: Fetch
-            fetch_instruction <= instruction
+            fetch_instruction = instruction
 
             // Stage 2: Decode
-            decode_opcode <= fetch_instruction[15:12]  // Upper 4 bits
-            decode_operand <= fetch_instruction[7:0]   // Lower 8 bits
+            decode_opcode = fetch_instruction[15:12]  // Upper 4 bits
+            decode_operand = fetch_instruction[7:0]   // Lower 8 bits
 
             // Stage 3: Execute (complex combinational logic)
             if (decode_opcode == 1) {
                 // ADD operation
-                execute_result <= decode_operand + data_in
+                execute_result = decode_operand + data_in
             } else if (decode_opcode == 2) {
                 // SUB operation
-                execute_result <= decode_operand - data_in
+                execute_result = decode_operand - data_in
             } else if (decode_opcode == 3) {
                 // MUL operation (simplified)
-                execute_result <= decode_operand * 2  // Simple shift
+                execute_result = decode_operand * 2  // Simple shift
             } else if (decode_opcode == 4) {
                 // XOR operation
-                execute_result <= decode_operand ^ data_in
+                execute_result = decode_operand ^ data_in
             } else {
                 // NOP
-                execute_result <= decode_operand
+                execute_result = decode_operand
             }
 
             // Stage 4: Writeback
-            writeback_data <= execute_result
+            writeback_data = execute_result
 
             // Valid bit pipeline (tracks when data is valid through pipeline)
-            pipeline_valid <= (pipeline_valid << 1) | 1
+            pipeline_valid = (pipeline_valid << 1) | 1
         }
     }
 

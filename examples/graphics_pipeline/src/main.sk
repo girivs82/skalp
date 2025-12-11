@@ -39,23 +39,23 @@ impl GeometryProcessor4 {
 
     on(clk.rise) {
         if rst {
-            state <= 0
-            count <= 0
+            state = 0
+            count = 0
         } else {
             if state == 0 && vertex_valid {
                 // Capture and transform vertex (passthrough for now)
-                out_vertex.position.x <= vertex.position.x
-                out_vertex.position.y <= vertex.position.y
-                out_vertex.position.z <= vertex.position.z
-                out_vertex.position.w <= 0x3F800000  // 1.0
-                out_vertex.normal <= vertex.normal
-                out_vertex.color <= vertex.color
-                out_vertex.tex_coord.x <= 0
-                out_vertex.tex_coord.y <= 0
-                state <= 1
-                count <= count + 1
+                out_vertex.position.x = vertex.position.x
+                out_vertex.position.y = vertex.position.y
+                out_vertex.position.z = vertex.position.z
+                out_vertex.position.w = 0x3F800000  // 1.0
+                out_vertex.normal = vertex.normal
+                out_vertex.color = vertex.color
+                out_vertex.tex_coord.x = 0
+                out_vertex.tex_coord.y = 0
+                state = 1
+                count = count + 1
             } else if state == 1 && output_ready {
-                state <= 0
+                state = 0
             }
         }
     }
@@ -148,17 +148,17 @@ impl GraphicsPipelineTop {
 
     on(sys_clk.rise) {
         if sys_rst {
-            model_matrix <= identity_matrix()
-            view_matrix <= identity_matrix()
-            proj_matrix <= identity_matrix()
-            light_direction <= Vec3 { x: 0, y: 0, z: 0x3F800000 }  // [0,0,1]
-            light_color <= Vec3 { x: 0x3F800000, y: 0x3F800000, z: 0x3F800000 }  // white
-            ambient_color <= Vec3 { x: 0x3E800000, y: 0x3E800000, z: 0x3E800000 }  // 0.25
-            viewport_width <= 640
-            viewport_height <= 480
-            cmd_valid <= 0
-            triangles_drawn <= 0
-            frames_rendered <= 0
+            model_matrix = identity_matrix()
+            view_matrix = identity_matrix()
+            proj_matrix = identity_matrix()
+            light_direction = Vec3 { x: 0, y: 0, z: 0x3F800000 }  // [0,0,1]
+            light_color = Vec3 { x: 0x3F800000, y: 0x3F800000, z: 0x3F800000 }  // white
+            ambient_color = Vec3 { x: 0x3E800000, y: 0x3E800000, z: 0x3E800000 }  // 0.25
+            viewport_width = 640
+            viewport_height = 480
+            cmd_valid = 0
+            triangles_drawn = 0
+            frames_rendered = 0
         } else {
             // AXI write transaction handling
             if axi_awvalid && axi_wvalid && axi_awready {
@@ -167,27 +167,27 @@ impl GraphicsPipelineTop {
                 // Register map (simplified - would decode properly in real design)
                 match addr {
                     0x0000 => { /* Command register */
-                        current_command.opcode <= axi_wdata[3:0]
-                        current_command.vertex_addr <= axi_wdata[31:4]
-                        cmd_valid <= 1
+                        current_command.opcode = axi_wdata[3:0]
+                        current_command.vertex_addr = axi_wdata[31:4]
+                        cmd_valid = 1
                     }
-                    0x0100 => model_matrix.col0.x <= axi_wdata
-                    0x0104 => model_matrix.col0.y <= axi_wdata
-                    0x0108 => model_matrix.col0.z <= axi_wdata
-                    0x010C => model_matrix.col0.w <= axi_wdata
+                    0x0100 => model_matrix.col0.x = axi_wdata
+                    0x0104 => model_matrix.col0.y = axi_wdata
+                    0x0108 => model_matrix.col0.z = axi_wdata
+                    0x010C => model_matrix.col0.w = axi_wdata
                     // ... more matrix registers ...
-                    0x0200 => light_direction.x <= axi_wdata
-                    0x0204 => light_direction.y <= axi_wdata
-                    0x0208 => light_direction.z <= axi_wdata
-                    0x0300 => viewport_width <= axi_wdata[15:0]
-                    0x0304 => viewport_height <= axi_wdata[15:0]
+                    0x0200 => light_direction.x = axi_wdata
+                    0x0204 => light_direction.y = axi_wdata
+                    0x0208 => light_direction.z = axi_wdata
+                    0x0300 => viewport_width = axi_wdata[15:0]
+                    0x0304 => viewport_height = axi_wdata[15:0]
                     _ => { /* Ignore unknown addresses */ }
                 }
             }
 
             // Clear command valid after consumed
             if cmd_valid && cmd_ready {
-                cmd_valid <= 0
+                cmd_valid = 0
             }
         }
     }
@@ -199,11 +199,11 @@ impl GraphicsPipelineTop {
         if axi_arvalid && axi_arready {
             let addr: bit[16] = axi_araddr[15:0]
             match addr {
-                0x1000 => axi_read_data <= vertices_processed
-                0x1004 => axi_read_data <= triangles_drawn
-                0x1008 => axi_read_data <= frames_rendered
+                0x1000 => axi_read_data = vertices_processed
+                0x1004 => axi_read_data = triangles_drawn
+                0x1008 => axi_read_data = frames_rendered
                 0x100C => axi_read_data <= {31'b0, busy}
-                _ => axi_read_data <= 0
+                _ => axi_read_data = 0
             }
         }
     }
@@ -324,14 +324,14 @@ impl GraphicsPipelineTop {
     // Simplified rasterizer (in real design, this would be much more complex)
     on(pixel_clk.rise) {
         if pixel_rst {
-            pixel_x <= 0
-            pixel_y <= 0
-            pixel_valid <= 0
+            pixel_x = 0
+            pixel_y = 0
+            pixel_valid = 0
         } else {
             // Read transformed vertices from FIFO
             if !xform_fifo_rd_empty {
                 let vertex = xform_fifo_rd_data
-                xform_fifo_rd_en <= 1
+                xform_fifo_rd_en = 1
 
                 // Simplified: just output vertex color
                 // Real rasterizer would:
@@ -340,22 +340,22 @@ impl GraphicsPipelineTop {
                 // 3. Scan convert
                 // 4. Generate fragments
 
-                pixel_valid <= 1
+                pixel_valid = 1
             } else {
-                xform_fifo_rd_en <= 0
-                pixel_valid <= 0
+                xform_fifo_rd_en = 0
+                pixel_valid = 0
             }
 
             // Scanline counter for video timing
             if pixel_x < viewport_width - 1 {
-                pixel_x <= pixel_x + 1
+                pixel_x = pixel_x + 1
             } else {
-                pixel_x <= 0
+                pixel_x = 0
                 if pixel_y < viewport_height - 1 {
-                    pixel_y <= pixel_y + 1
+                    pixel_y = pixel_y + 1
                 } else {
-                    pixel_y <= 0
-                    frames_rendered <= frames_rendered + 1
+                    pixel_y = 0
+                    frames_rendered = frames_rendered + 1
                 }
             }
         }

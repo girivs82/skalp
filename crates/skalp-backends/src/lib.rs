@@ -8,63 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
-// Temporary mock structures for LIR types until they're properly defined
-pub mod mock_lir {
-    use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Design {
-        pub name: String,
-        pub ports: Vec<Port>,
-        pub wires: Vec<Wire>,
-        pub gates: Vec<Gate>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Port {
-        pub name: String,
-        pub direction: PortDirection,
-        pub width: usize,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum PortDirection {
-        Input,
-        Output,
-        Inout,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Wire {
-        pub name: String,
-        pub width: usize,
-        pub source: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Gate {
-        pub id: usize,
-        pub gate_type: GateType,
-        pub inputs: Vec<String>,
-        pub outputs: Vec<String>,
-        pub parameters: HashMap<String, String>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum GateType {
-        And,
-        Or,
-        Not,
-        Xor,
-        Mux,
-        FlipFlop,
-        Constant,
-        Buffer,
-        Latch,
-    }
-}
-
 pub mod asic;
 pub mod constraint_gen;
 pub mod constraints;
@@ -381,7 +324,7 @@ pub trait Backend {
     /// Synthesize a design from LIR
     async fn synthesize(
         &self,
-        lir: &skalp_lir::LirDesign,
+        lir: &skalp_lir::Lir,
         config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults>;
 
@@ -401,7 +344,7 @@ pub trait Backend {
     fn supported_devices(&self) -> Vec<String>;
 
     /// Validate design for backend
-    fn validate_design(&self, lir: &skalp_lir::LirDesign) -> BackendResult<()>;
+    fn validate_design(&self, lir: &skalp_lir::Lir) -> BackendResult<()>;
 }
 
 /// Backend factory for creating appropriate backend instances

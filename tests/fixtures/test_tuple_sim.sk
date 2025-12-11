@@ -19,13 +19,13 @@ impl TupleSim {
 
     on(clk.rise) {
         if (rst) {
-            reg_a <= 0;
-            reg_b <= 0;
+            reg_a = 0;
+            reg_b = 0;
         } else {
             // Test tuple literal
             let tuple_val: (bit[32], bit[8]) = (input_val + 5, input_val[7:0] + 1);
-            reg_a <= tuple_val.0;
-            reg_b <= tuple_val.1;
+            reg_a = tuple_val.0;
+            reg_b = tuple_val.1;
         }
     }
 

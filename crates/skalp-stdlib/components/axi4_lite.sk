@@ -68,67 +68,67 @@ impl axi4_lite_master {
     
     on(clk.rise) {
         if rst.active {
-            state <= State::Idle;
-            axi.awvalid <= 0;
-            axi.wvalid <= 0;
-            axi.bready <= 0;
-            axi.arvalid <= 0;
-            axi.rready <= 0;
+            state = State::Idle;
+            axi.awvalid = 0;
+            axi.wvalid = 0;
+            axi.bready = 0;
+            axi.arvalid = 0;
+            axi.rready = 0;
         } else {
             match state {
                 State::Idle => {
                     if write_req {
-                        state <= State::WriteAddr;
-                        addr_reg <= addr;
-                        write_data_reg <= write_data;
-                        write_strb_reg <= write_strb;
-                        axi.awaddr <= addr;
-                        axi.awprot <= 3'b000;
-                        axi.awvalid <= 1;
+                        state = State::WriteAddr;
+                        addr_reg = addr;
+                        write_data_reg = write_data;
+                        write_strb_reg = write_strb;
+                        axi.awaddr = addr;
+                        axi.awprot = 3'b000;
+                        axi.awvalid = 1;
                     } else if read_req {
-                        state <= State::ReadAddr;
-                        addr_reg <= addr;
-                        axi.araddr <= addr;
-                        axi.arprot <= 3'b000;
-                        axi.arvalid <= 1;
+                        state = State::ReadAddr;
+                        addr_reg = addr;
+                        axi.araddr = addr;
+                        axi.arprot = 3'b000;
+                        axi.arvalid = 1;
                     }
                 },
                 State::WriteAddr => {
                     if axi.awready {
-                        axi.awvalid <= 0;
-                        state <= State::WriteData;
-                        axi.wdata <= write_data_reg;
-                        axi.wstrb <= write_strb_reg;
-                        axi.wvalid <= 1;
+                        axi.awvalid = 0;
+                        state = State::WriteData;
+                        axi.wdata = write_data_reg;
+                        axi.wstrb = write_strb_reg;
+                        axi.wvalid = 1;
                     }
                 },
                 State::WriteData => {
                     if axi.wready {
-                        axi.wvalid <= 0;
-                        state <= State::WriteResp;
-                        axi.bready <= 1;
+                        axi.wvalid = 0;
+                        state = State::WriteResp;
+                        axi.bready = 1;
                     }
                 },
                 State::WriteResp => {
                     if axi.bvalid {
-                        axi.bready <= 0;
-                        resp_reg <= axi.bresp;
-                        state <= State::Idle;
+                        axi.bready = 0;
+                        resp_reg = axi.bresp;
+                        state = State::Idle;
                     }
                 },
                 State::ReadAddr => {
                     if axi.arready {
-                        axi.arvalid <= 0;
-                        state <= State::ReadData;
-                        axi.rready <= 1;
+                        axi.arvalid = 0;
+                        state = State::ReadData;
+                        axi.rready = 1;
                     }
                 },
                 State::ReadData => {
                     if axi.rvalid {
-                        axi.rready <= 0;
-                        read_data_reg <= axi.rdata;
-                        resp_reg <= axi.rresp;
-                        state <= State::Idle;
+                        axi.rready = 0;
+                        read_data_reg = axi.rdata;
+                        resp_reg = axi.rresp;
+                        state = State::Idle;
                     }
                 }
             }

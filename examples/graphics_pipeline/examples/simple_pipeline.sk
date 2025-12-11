@@ -282,9 +282,9 @@ impl SimpleGraphicsPipeline {
 
     on(video_clk.rise) {
         if rst {
-            frame_counter <= 0u32
+            frame_counter = 0u32
         } else if frame_pulse {
-            frame_counter <= frame_counter + 1u32
+            frame_counter = frame_counter + 1u32
         }
     }
 
@@ -372,7 +372,7 @@ impl SimpleFrameBuffer<const WIDTH: nat, const HEIGHT: nat> {
     // Write logic
     on(clk.rise) {
         if wr_enable && (wr_x < WIDTH) && (wr_y < HEIGHT) {
-            memory[wr_y][wr_x] <= wr_color
+            memory[wr_y][wr_x] = wr_color
         }
     }
 
@@ -419,23 +419,23 @@ impl VideoTimingGenerator<const WIDTH: nat, const HEIGHT: nat> {
     // Horizontal counter
     on(clk.rise) {
         if rst {
-            h_count <= 0u16
+            h_count = 0u16
         } else if h_count == (H_TOTAL - 1) {
-            h_count <= 0u16
+            h_count = 0u16
         } else {
-            h_count <= h_count + 1u16
+            h_count = h_count + 1u16
         }
     }
 
     // Vertical counter
     on(clk.rise) {
         if rst {
-            v_count <= 0u16
+            v_count = 0u16
         } else if h_count == (H_TOTAL - 1) {
             if v_count == (V_TOTAL - 1) {
-                v_count <= 0u16
+                v_count = 0u16
             } else {
-                v_count <= v_count + 1u16
+                v_count = v_count + 1u16
             }
         }
     }

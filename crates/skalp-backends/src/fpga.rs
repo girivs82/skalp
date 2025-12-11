@@ -53,81 +53,9 @@ impl FpgaBackend {
     }
 
     /// Convert LIR to Verilog for FPGA synthesis
-    async fn lir_to_verilog(&self, lir: &skalp_lir::LirDesign) -> BackendResult<String> {
+    async fn lir_to_verilog(&self, lir: &skalp_lir::Lir) -> BackendResult<String> {
         // Generate Verilog from LIR
-        // For now, just generate from the first module
-        if let Some(module) = lir.modules.first() {
-            crate::verilog::generate_verilog(module)
-        } else {
-            // Generate a simple stub module
-            Ok(format!("module {} ();\nendmodule\n", lir.name))
-        }
-    }
-
-    async fn lir_to_verilog_old(&self, lir: &crate::mock_lir::Design) -> BackendResult<String> {
-        let mut verilog = String::new();
-        // Gate instantiations
-        for gate in &lir.gates {
-            match &gate.gate_type {
-                crate::mock_lir::GateType::And => {
-                    verilog.push_str(&format!("assign {} = ", gate.outputs[0]));
-                    verilog.push_str(&gate.inputs.join(" & "));
-                    verilog.push_str(";\n");
-                }
-                crate::mock_lir::GateType::Or => {
-                    verilog.push_str(&format!("assign {} = ", gate.outputs[0]));
-                    verilog.push_str(&gate.inputs.join(" | "));
-                    verilog.push_str(";\n");
-                }
-                crate::mock_lir::GateType::Not => {
-                    verilog.push_str(&format!(
-                        "assign {} = ~{};\n",
-                        gate.outputs[0], gate.inputs[0]
-                    ));
-                }
-                crate::mock_lir::GateType::Xor => {
-                    verilog.push_str(&format!("assign {} = ", gate.outputs[0]));
-                    verilog.push_str(&gate.inputs.join(" ^ "));
-                    verilog.push_str(";\n");
-                }
-                crate::mock_lir::GateType::Mux => {
-                    if gate.inputs.len() >= 3 {
-                        verilog.push_str(&format!(
-                            "assign {} = {} ? {} : {};\n",
-                            gate.outputs[0], gate.inputs[0], gate.inputs[1], gate.inputs[2]
-                        ));
-                    }
-                }
-                crate::mock_lir::GateType::FlipFlop => {
-                    verilog.push_str(&format!("always @(posedge {}) begin\n", gate.inputs[1])); // clock
-                    if gate.inputs.len() > 2 {
-                        verilog.push_str(&format!("    if ({})\n", gate.inputs[2])); // reset
-                        verilog.push_str(&format!("        {} <= 1'b0;\n", gate.outputs[0]));
-                        verilog.push_str("    else\n");
-                        verilog.push_str(&format!(
-                            "        {} <= {};\n",
-                            gate.outputs[0], gate.inputs[0]
-                        ));
-                    } else {
-                        verilog
-                            .push_str(&format!("    {} <= {};\n", gate.outputs[0], gate.inputs[0]));
-                    }
-                    verilog.push_str("end\n");
-                }
-                crate::mock_lir::GateType::Constant => {
-                    if let Some(value) = gate.parameters.get("value") {
-                        verilog.push_str(&format!("assign {} = {};\n", gate.outputs[0], value));
-                    }
-                }
-                _ => {
-                    // Handle other gate types
-                    verilog.push_str(&format!("// Unsupported gate type: {:?}\n", gate.gate_type));
-                }
-            }
-        }
-
-        verilog.push_str("\nendmodule\n");
-        Ok(verilog)
+        crate::verilog::generate_verilog(lir)
     }
 
     /// Run synthesis tool chain
@@ -135,9 +63,9 @@ impl FpgaBackend {
         &self,
         verilog: &str,
         temp_dir: &Path,
-        _lir: &skalp_lir::LirDesign,
+        _lir: &skalp_lir::Lir,
     ) -> BackendResult<SynthesisResults> {
-        // TODO: Convert LirDesign to Netlist for constraint generation
+        // TODO: Convert Lir to Netlist for constraint generation
         // For now, pass None until full integration is complete
         let netlist = None;
 
@@ -161,7 +89,7 @@ impl FpgaBackend {
 impl Backend for FpgaBackend {
     async fn synthesize(
         &self,
-        lir: &skalp_lir::LirDesign,
+        lir: &skalp_lir::Lir,
         config: &SynthesisConfig,
     ) -> BackendResult<SynthesisResults> {
         // Create temporary directory for synthesis
@@ -220,7 +148,7 @@ impl Backend for FpgaBackend {
         ]
     }
 
-    fn validate_design(&self, _lir: &skalp_lir::LirDesign) -> BackendResult<()> {
+    fn validate_design(&self, _lir: &skalp_lir::Lir) -> BackendResult<()> {
         Ok(())
     }
 }

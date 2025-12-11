@@ -4902,7 +4902,9 @@ impl<'a> ParseState<'a> {
         } else {
             // Parse as regular identifier expression
             self.start_node(SyntaxKind::IdentExpr);
-            self.bump(); // consume identifier
+            // Use bump_as_ident to ensure keywords used as identifiers are emitted as Ident tokens
+            // This is needed for cases like `reset` keyword used as a port/signal name
+            self.bump_as_ident(); // consume identifier (or keyword-as-identifier)
         }
 
         // Handle postfix operations (works for both path and identifier expressions)

@@ -47,56 +47,56 @@ impl UartTx {
 
     on(clk.rise) {
         if (rst) {
-            state <= 0
-            baud_counter <= 0
-            bit_counter <= 0
-            shift_reg <= 0
-            tx_out <= 1
+            state = 0
+            baud_counter = 0
+            bit_counter = 0
+            shift_reg = 0
+            tx_out = 1
         } else {
             // Default: decrement baud counter if active
             if (baud_counter > 0) {
-                baud_counter <= baud_counter - 1
+                baud_counter = baud_counter - 1
             }
 
             // State machine
             if (state == 0) {
                 // IDLE state
-                tx_out <= 1
+                tx_out = 1
                 if (tx_start) {
                     // Start transmission
-                    state <= 1
-                    shift_reg <= tx_data
-                    baud_counter <= 434
-                    bit_counter <= 0
+                    state = 1
+                    shift_reg = tx_data
+                    baud_counter = 434
+                    bit_counter = 0
                 }
             } else if (state == 1) {
                 // START_BIT state
-                tx_out <= 0
+                tx_out = 0
                 if (baud_counter == 0) {
-                    state <= 2
-                    baud_counter <= 434
+                    state = 2
+                    baud_counter = 434
                 }
             } else if (state == 2) {
                 // DATA_BITS state
                 // Output LSB of shift register
-                tx_out <= shift_reg % 2
+                tx_out = shift_reg % 2
 
                 if (baud_counter == 0) {
                     // Shift to next bit
-                    shift_reg <= shift_reg / 2
-                    bit_counter <= bit_counter + 1
+                    shift_reg = shift_reg / 2
+                    bit_counter = bit_counter + 1
 
                     if (bit_counter == 7) {
                         // All 8 bits sent
-                        state <= 3
+                        state = 3
                     }
-                    baud_counter <= 434
+                    baud_counter = 434
                 }
             } else {
                 // STOP_BIT state
-                tx_out <= 1
+                tx_out = 1
                 if (baud_counter == 0) {
-                    state <= 0
+                    state = 0
                 }
             }
         }

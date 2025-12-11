@@ -16,7 +16,7 @@ pub mod smt;
 pub mod temporal;
 
 use skalp_frontend::ast::Item;
-use skalp_lir::LirDesign;
+use skalp_lir::Lir;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -67,7 +67,7 @@ impl FormalEngine {
     }
 
     /// Verify all properties against the design
-    pub async fn verify(&mut self, design: &LirDesign) -> FormalResult<VerificationResults> {
+    pub async fn verify(&mut self, design: &Lir) -> FormalResult<VerificationResults> {
         let mut results = VerificationResults::new();
 
         for (i, property) in self.properties.iter().enumerate() {

@@ -13,20 +13,20 @@ impl SimpleTest {
 
     on(clk.rise) {
         if (rst) {
-            state <= 0
-            buffer <= 0
+            state = 0
+            buffer = 0
         } else {
             match state {
                 0 => {
-                    buffer <= data_in
-                    state <= 1
+                    buffer = data_in
+                    state = 1
                 }
                 1 => {
-                    data_out <= buffer
-                    state <= 0
+                    data_out = buffer
+                    state = 0
                 }
                 _ => {
-                    state <= 0
+                    state = 0
                 }
             }
         }

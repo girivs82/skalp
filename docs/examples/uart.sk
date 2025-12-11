@@ -2,12 +2,12 @@
 entity uart_tx<const CLK_FREQ: usize, const BAUD_RATE: usize> {
     in clk: clock;
     in rst: reset;
-    
+
     // Data interface
     in data: bit<8>;
     in start: bit;
     out busy: bit;
-    
+
     // Serial output
     out tx: bit;
 }
@@ -17,7 +17,7 @@ impl uart_tx {
     const BAUD_DIV: usize = CLK_FREQ / BAUD_RATE;
     signal baud_counter: bit<log2(BAUD_DIV)>;
     signal baud_tick: bit;
-    
+
     // TX state machine
     enum TxState {
         Idle,
@@ -25,72 +25,72 @@ impl uart_tx {
         DataBits,
         StopBit
     }
-    
+
     signal state: TxState;
     signal bit_counter: bit<3>;
     signal shift_reg: bit<8>;
-    
+
     on(clk.rise) {
         if rst.active {
-            state <= TxState::Idle;
-            baud_counter <= 0;
-            bit_counter <= 0;
-            shift_reg <= 0;
+            state = TxState::Idle;
+            baud_counter = 0;
+            bit_counter = 0;
+            shift_reg = 0;
         } else {
             // Baud rate generator
             if baud_counter == BAUD_DIV - 1 {
-                baud_counter <= 0;
+                baud_counter = 0;
             } else {
-                baud_counter <= baud_counter + 1;
+                baud_counter = baud_counter + 1;
             }
-            
+
             // State machine
             if baud_tick {
                 match state {
                     TxState::Idle => {
                         if start {
-                            state <= TxState::StartBit;
-                            shift_reg <= data;
-                            bit_counter <= 0;
+                            state = TxState::StartBit;
+                            shift_reg = data;
+                            bit_counter = 0;
                         }
                     },
                     TxState::StartBit => {
-                        state <= TxState::DataBits;
+                        state = TxState::DataBits;
                     },
                     TxState::DataBits => {
-                        shift_reg <= {1'b0, shift_reg[7:1]};  // Right shift
+                        shift_reg = {1'b0, shift_reg[7:1]};  // Right shift
                         if bit_counter == 7 {
-                            state <= TxState::StopBit;
+                            state = TxState::StopBit;
                         } else {
-                            bit_counter <= bit_counter + 1;
+                            bit_counter = bit_counter + 1;
                         }
                     },
                     TxState::StopBit => {
-                        state <= TxState::Idle;
+                        state = TxState::Idle;
                     }
                 }
             }
         }
     }
-    
+
     // Combinational outputs
     baud_tick = (baud_counter == BAUD_DIV - 1);
     busy = (state != TxState::Idle);
-    
+
     tx = match state {
         TxState::Idle => 1,           // Idle high
         TxState::StartBit => 0,       // Start bit low
         TxState::DataBits => shift_reg[0],  // Data bit
         TxState::StopBit => 1         // Stop bit high
     };
-    
+
     // Verification properties
     assert property (start && !busy |=> busy)
         @(posedge clk);
-        
+
     assert property (state == TxState::StartBit |=> tx == 0)
         @(posedge clk);
-        
+
     assert property (state == TxState::StopBit |=> tx == 1)
         @(posedge clk);
 }

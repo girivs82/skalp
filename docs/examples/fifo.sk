@@ -2,17 +2,17 @@
 entity sync_fifo<const WIDTH: usize, const DEPTH: usize> {
     in clk: clock;
     in rst: reset;
-    
+
     // Write interface
     in write_data: bit<WIDTH>;
     in write_enable: bit;
     out full: bit;
-    
-    // Read interface  
+
+    // Read interface
     out read_data: bit<WIDTH>;
     in read_enable: bit;
     out empty: bit;
-    
+
     // Status
     out fill_count: bit<log2(DEPTH+1)>;
 }
@@ -23,31 +23,31 @@ impl sync_fifo {
     signal write_ptr: bit<log2(DEPTH)>;
     signal read_ptr: bit<log2(DEPTH)>;
     signal count: bit<log2(DEPTH+1)>;
-    
+
     on(clk.rise) {
         if rst.active {
-            write_ptr <= 0;
-            read_ptr <= 0;
-            count <= 0;
+            write_ptr = 0;
+            read_ptr = 0;
+            count = 0;
         } else {
             // Handle simultaneous read/write
             match {write_enable && !full, read_enable && !empty} {
                 {true, true} => {
                     // Read and write - count unchanged
-                    memory[write_ptr] <= write_data;
-                    write_ptr <= write_ptr + 1;
-                    read_ptr <= read_ptr + 1;
+                    memory[write_ptr] = write_data;
+                    write_ptr = write_ptr + 1;
+                    read_ptr = read_ptr + 1;
                 },
                 {true, false} => {
                     // Write only
-                    memory[write_ptr] <= write_data;
-                    write_ptr <= write_ptr + 1;
-                    count <= count + 1;
+                    memory[write_ptr] = write_data;
+                    write_ptr = write_ptr + 1;
+                    count = count + 1;
                 },
                 {false, true} => {
                     // Read only
-                    read_ptr <= read_ptr + 1;
-                    count <= count - 1;
+                    read_ptr = read_ptr + 1;
+                    count = count - 1;
                 },
                 {false, false} => {
                     // No operation
@@ -55,20 +55,20 @@ impl sync_fifo {
             }
         }
     }
-    
+
     // Combinational outputs
     read_data = memory[read_ptr];
     full = (count == DEPTH);
     empty = (count == 0);
     fill_count = count;
-    
+
     // Assertions for verification
     assert property (write_enable -> !full)
         @(posedge clk);
-        
+
     assert property (read_enable -> !empty)
         @(posedge clk);
-        
-    assert property (count <= DEPTH)
+
+    assert property (count = DEPTH)
         @(posedge clk);
 }
