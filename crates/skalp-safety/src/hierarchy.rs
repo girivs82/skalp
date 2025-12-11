@@ -583,6 +583,252 @@ impl FmeaComponent {
     pub fn add_safe_mode(&mut self, mode: FailureMode) {
         self.safe_modes.push(mode);
     }
+
+    /// Calculate the total FIT rate for this component
+    /// Considers multi-contributor weights for failure modes with contributors
+    pub fn calculate_total_fit(&self) -> f64 {
+        let mut total_fit = 0.0;
+
+        // Sum PSM-detected failure modes
+        for modes in self.psm_detected.values() {
+            for mode in modes {
+                if let Some(fit) = mode.get_fit_contribution(&self.design_ref) {
+                    total_fit += fit;
+                } else if let Some(base_fit) = mode.base_fit {
+                    // If no contributor info matches, use base FIT (backward compat)
+                    if mode.contributors.is_none() {
+                        total_fit += base_fit;
+                    }
+                }
+            }
+        }
+
+        // Sum LSM-detected failure modes
+        for modes in self.lsm_detected.values() {
+            for mode in modes {
+                if let Some(fit) = mode.get_fit_contribution(&self.design_ref) {
+                    total_fit += fit;
+                } else if let Some(base_fit) = mode.base_fit {
+                    if mode.contributors.is_none() {
+                        total_fit += base_fit;
+                    }
+                }
+            }
+        }
+
+        // Sum safe failure modes
+        for mode in &self.safe_modes {
+            if let Some(fit) = mode.get_fit_contribution(&self.design_ref) {
+                total_fit += fit;
+            } else if let Some(base_fit) = mode.base_fit {
+                if mode.contributors.is_none() {
+                    total_fit += base_fit;
+                }
+            }
+        }
+
+        total_fit
+    }
+}
+
+/// Cross-component failure mode that spans multiple design entities
+/// Used for failure modes where no single component "owns" the failure
+/// Examples:
+/// - Timing failure: 50% clock tree, 50% interconnect
+/// - Data corruption: 40% sender, 40% receiver, 20% bus
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossComponentFailureMode {
+    /// Unique identifier for this failure mode
+    pub id: String,
+    /// The underlying failure mode with multi-contributor info
+    pub failure_mode: FailureMode,
+    /// Detecting mechanism (PSM, LSM, or Safe)
+    pub detector: DetectorRef,
+    /// Description of the cross-component nature
+    pub description: String,
+}
+
+impl CrossComponentFailureMode {
+    /// Create a new cross-component failure mode
+    pub fn new(
+        id: String,
+        name: String,
+        severity: Severity,
+        class: FailureClass,
+        contributors: Vec<FailureContributor>,
+        detector: DetectorRef,
+    ) -> Self {
+        Self {
+            id,
+            failure_mode: FailureMode::new(name, severity, class).with_contributors(contributors),
+            detector,
+            description: String::new(),
+        }
+    }
+
+    /// Set description
+    pub fn with_description(mut self, desc: String) -> Self {
+        self.description = desc;
+        self
+    }
+
+    /// Set base FIT rate (total, before splitting by contributors)
+    pub fn with_fit(mut self, fit: f64) -> Self {
+        self.failure_mode.base_fit = Some(fit);
+        self
+    }
+
+    /// Set coverage
+    pub fn with_coverage(mut self, coverage: f64) -> Self {
+        self.failure_mode.coverage = coverage;
+        self
+    }
+
+    /// Get FIT contribution for a specific design entity
+    pub fn get_fit_contribution(&self, design_ref: &DesignRef) -> Option<f64> {
+        self.failure_mode.get_fit_contribution(design_ref)
+    }
+
+    /// Validate that contributors are properly configured
+    pub fn validate(&self) -> Result<(), String> {
+        if self.failure_mode.contributors.is_none() {
+            return Err("Cross-component failure mode must have contributors".to_string());
+        }
+        self.failure_mode.validate_contributors()
+    }
+}
+
+/// Container for all FMEA data including cross-component failure modes
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FmeaData {
+    /// Component-specific failure modes
+    pub components: Vec<FmeaComponent>,
+    /// Cross-component failure modes (spanning multiple entities)
+    pub cross_component_modes: Vec<CrossComponentFailureMode>,
+}
+
+impl FmeaData {
+    /// Create a new FMEA data container
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a component
+    pub fn add_component(&mut self, component: FmeaComponent) {
+        self.components.push(component);
+    }
+
+    /// Add a cross-component failure mode
+    pub fn add_cross_component_mode(&mut self, mode: CrossComponentFailureMode) {
+        self.cross_component_modes.push(mode);
+    }
+
+    /// Calculate total FIT rate for a specific design entity
+    /// Includes contributions from both component-specific and cross-component modes
+    pub fn calculate_entity_fit(&self, design_ref: &DesignRef) -> f64 {
+        let mut total_fit = 0.0;
+
+        // Component-specific FIT
+        for component in &self.components {
+            if &component.design_ref == design_ref {
+                total_fit += component.calculate_total_fit();
+            }
+        }
+
+        // Cross-component FIT contributions
+        for cross_mode in &self.cross_component_modes {
+            if let Some(fit) = cross_mode.get_fit_contribution(design_ref) {
+                total_fit += fit;
+            }
+        }
+
+        total_fit
+    }
+
+    /// Calculate total FIT rate for all entities
+    pub fn calculate_total_fit(&self) -> f64 {
+        let mut total_fit = 0.0;
+
+        // Sum all component FIT rates
+        for component in &self.components {
+            total_fit += component.calculate_total_fit();
+        }
+
+        // Add cross-component FIT rates (already include contributor weights)
+        for cross_mode in &self.cross_component_modes {
+            if let Some(fit) = cross_mode.failure_mode.base_fit {
+                total_fit += fit;
+            }
+        }
+
+        total_fit
+    }
+
+    /// Get all failure modes affecting a specific design entity
+    pub fn get_failure_modes_for_entity(&self, design_ref: &DesignRef) -> Vec<&FailureMode> {
+        let mut modes = Vec::new();
+
+        // Component-specific modes
+        for component in &self.components {
+            if &component.design_ref == design_ref {
+                for mode_list in component.psm_detected.values() {
+                    modes.extend(mode_list.iter());
+                }
+                for mode_list in component.lsm_detected.values() {
+                    modes.extend(mode_list.iter());
+                }
+                modes.extend(component.safe_modes.iter());
+            }
+        }
+
+        // Cross-component modes where this entity contributes
+        for cross_mode in &self.cross_component_modes {
+            if let Some(contributors) = &cross_mode.failure_mode.contributors {
+                if contributors.iter().any(|c| &c.design_ref == design_ref) {
+                    modes.push(&cross_mode.failure_mode);
+                }
+            }
+        }
+
+        modes
+    }
+
+    /// Validate all failure modes
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        // Validate cross-component modes
+        for cross_mode in &self.cross_component_modes {
+            if let Err(e) = cross_mode.validate() {
+                errors.push(format!("Cross-component mode '{}': {}", cross_mode.id, e));
+            }
+        }
+
+        // Validate multi-contributor modes in components
+        for component in &self.components {
+            for (psm, modes) in &component.psm_detected {
+                for mode in modes {
+                    if mode.is_multi_contributor() {
+                        if let Err(e) = mode.validate_contributors() {
+                            errors.push(format!(
+                                "Component '{}', PSM '{}', mode '{}': {}",
+                                component.design_ref.to_string(),
+                                psm,
+                                mode.name,
+                                e
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
 }
 
 /// Individual failure mode
@@ -600,6 +846,39 @@ pub struct FailureMode {
     pub class: FailureClass,
     /// Base FIT rate (from library)
     pub base_fit: Option<f64>,
+    /// Multi-contributor weights (for failure modes spanning multiple entities)
+    /// If None, 100% contribution from parent component
+    /// Sum of weights should equal 1.0 (100%)
+    pub contributors: Option<Vec<FailureContributor>>,
+}
+
+/// Contributor to a multi-entity failure mode
+/// Used when a failure mode has contributions from multiple design entities
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailureContributor {
+    /// Design reference to the contributing entity
+    pub design_ref: DesignRef,
+    /// Weight/contribution (0.0 to 1.0, representing 0% to 100%)
+    pub weight: f64,
+    /// Optional description of how this entity contributes
+    pub contribution_description: Option<String>,
+}
+
+impl FailureContributor {
+    /// Create a new failure contributor
+    pub fn new(design_ref: DesignRef, weight: f64) -> Self {
+        Self {
+            design_ref,
+            weight,
+            contribution_description: None,
+        }
+    }
+
+    /// Add a description of the contribution
+    pub fn with_description(mut self, desc: String) -> Self {
+        self.contribution_description = Some(desc);
+        self
+    }
 }
 
 impl FailureMode {
@@ -612,6 +891,7 @@ impl FailureMode {
             coverage: 0.0,
             class,
             base_fit: None,
+            contributors: None,
         }
     }
 
@@ -631,6 +911,75 @@ impl FailureMode {
     pub fn with_fit(mut self, fit: f64) -> Self {
         self.base_fit = Some(fit);
         self
+    }
+
+    /// Set contributors for multi-entity failure mode
+    /// Contributors should have weights summing to 1.0
+    pub fn with_contributors(mut self, contributors: Vec<FailureContributor>) -> Self {
+        self.contributors = Some(contributors);
+        self
+    }
+
+    /// Add a single contributor to this failure mode
+    /// Converts to multi-contributor mode if not already
+    pub fn add_contributor(&mut self, contributor: FailureContributor) {
+        match &mut self.contributors {
+            Some(contributors) => contributors.push(contributor),
+            None => self.contributors = Some(vec![contributor]),
+        }
+    }
+
+    /// Check if this is a multi-contributor failure mode
+    pub fn is_multi_contributor(&self) -> bool {
+        self.contributors
+            .as_ref()
+            .map(|c| c.len() > 1)
+            .unwrap_or(false)
+    }
+
+    /// Validate that contributor weights sum to approximately 1.0
+    pub fn validate_contributors(&self) -> Result<(), String> {
+        if let Some(contributors) = &self.contributors {
+            let total_weight: f64 = contributors.iter().map(|c| c.weight).sum();
+            // Allow 1% tolerance for floating point
+            if (total_weight - 1.0).abs() > 0.01 {
+                return Err(format!(
+                    "Contributor weights sum to {:.2}, expected 1.0",
+                    total_weight
+                ));
+            }
+            // Check for negative weights
+            for c in contributors {
+                if c.weight < 0.0 {
+                    return Err(format!(
+                        "Negative weight {} for contributor {:?}",
+                        c.weight,
+                        c.design_ref.to_string()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the effective FIT rate contribution from a specific design entity
+    /// Returns None if this entity doesn't contribute to this failure mode
+    pub fn get_fit_contribution(&self, design_ref: &DesignRef) -> Option<f64> {
+        let base_fit = self.base_fit?;
+
+        match &self.contributors {
+            Some(contributors) => {
+                // Find the contributor matching this design ref
+                contributors
+                    .iter()
+                    .find(|c| &c.design_ref == design_ref)
+                    .map(|c| base_fit * c.weight)
+            }
+            None => {
+                // Single contributor mode - return full FIT if no multi-contributor
+                Some(base_fit)
+            }
+        }
     }
 }
 
@@ -1454,5 +1803,271 @@ mod tests {
             decomposes: "BrakingSafety".to_string(),
         };
         assert!(!invalid_decomp.is_valid());
+    }
+
+    // =========================================================================
+    // Multi-Contributor Failure Mode Tests
+    // =========================================================================
+
+    #[test]
+    fn test_failure_contributor_creation() {
+        let design_ref = DesignRef::from_str("top.clock_tree::clk_out");
+        let contributor = FailureContributor::new(design_ref.clone(), 0.5)
+            .with_description("Clock distribution delay".to_string());
+
+        assert_eq!(contributor.weight, 0.5);
+        assert_eq!(
+            contributor.contribution_description,
+            Some("Clock distribution delay".to_string())
+        );
+    }
+
+    #[test]
+    fn test_multi_contributor_failure_mode() {
+        // Create a timing failure that's 50% clock tree, 50% interconnect
+        let clock_ref = DesignRef::from_str("top.clock_tree::clk_out");
+        let interconnect_ref = DesignRef::from_str("top.interconnect::data_bus");
+
+        let mode = FailureMode::new(
+            "timing_violation".to_string(),
+            Severity::S2,
+            FailureClass::SinglePointFault,
+        )
+        .with_fit(100.0) // Total 100 FIT
+        .with_coverage(95.0)
+        .with_contributors(vec![
+            FailureContributor::new(clock_ref.clone(), 0.5),
+            FailureContributor::new(interconnect_ref.clone(), 0.5),
+        ]);
+
+        assert!(mode.is_multi_contributor());
+        assert!(mode.validate_contributors().is_ok());
+
+        // Check FIT contributions
+        assert_eq!(mode.get_fit_contribution(&clock_ref), Some(50.0));
+        assert_eq!(mode.get_fit_contribution(&interconnect_ref), Some(50.0));
+
+        // Unknown ref should return None
+        let other_ref = DesignRef::from_str("top.cpu::core");
+        assert_eq!(mode.get_fit_contribution(&other_ref), None);
+    }
+
+    #[test]
+    fn test_multi_contributor_unequal_weights() {
+        // Data corruption: 40% sender, 40% receiver, 20% bus
+        let sender_ref = DesignRef::from_str("top.sender::tx");
+        let receiver_ref = DesignRef::from_str("top.receiver::rx");
+        let bus_ref = DesignRef::from_str("top.bus::data");
+
+        let mode = FailureMode::new(
+            "data_corruption".to_string(),
+            Severity::S3,
+            FailureClass::SinglePointFault,
+        )
+        .with_fit(200.0) // Total 200 FIT
+        .with_contributors(vec![
+            FailureContributor::new(sender_ref.clone(), 0.4),
+            FailureContributor::new(receiver_ref.clone(), 0.4),
+            FailureContributor::new(bus_ref.clone(), 0.2),
+        ]);
+
+        assert!(mode.validate_contributors().is_ok());
+        assert_eq!(mode.get_fit_contribution(&sender_ref), Some(80.0));
+        assert_eq!(mode.get_fit_contribution(&receiver_ref), Some(80.0));
+        assert_eq!(mode.get_fit_contribution(&bus_ref), Some(40.0));
+    }
+
+    #[test]
+    fn test_contributor_validation_sum_error() {
+        let ref1 = DesignRef::from_str("top.a");
+        let ref2 = DesignRef::from_str("top.b");
+
+        // Weights sum to 0.8, not 1.0
+        let mode = FailureMode::new("bad_mode".to_string(), Severity::S1, FailureClass::Safe)
+            .with_contributors(vec![
+                FailureContributor::new(ref1, 0.5),
+                FailureContributor::new(ref2, 0.3),
+            ]);
+
+        let result = mode.validate_contributors();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("sum to 0.80"));
+    }
+
+    #[test]
+    fn test_contributor_validation_negative_weight() {
+        let ref1 = DesignRef::from_str("top.a");
+        let ref2 = DesignRef::from_str("top.b");
+
+        let mode = FailureMode::new("bad_mode".to_string(), Severity::S1, FailureClass::Safe)
+            .with_contributors(vec![
+                FailureContributor::new(ref1, 1.5),
+                FailureContributor::new(ref2, -0.5), // Negative!
+            ]);
+
+        let result = mode.validate_contributors();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Negative weight"));
+    }
+
+    #[test]
+    fn test_cross_component_failure_mode() {
+        let clock_ref = DesignRef::from_str("top.pll::clk");
+        let dist_ref = DesignRef::from_str("top.clock_dist::out");
+
+        let cross_mode = CrossComponentFailureMode::new(
+            "CCF-001".to_string(),
+            "clock_jitter".to_string(),
+            Severity::S2,
+            FailureClass::SinglePointFault,
+            vec![
+                FailureContributor::new(clock_ref.clone(), 0.6)
+                    .with_description("PLL phase noise".to_string()),
+                FailureContributor::new(dist_ref.clone(), 0.4)
+                    .with_description("Distribution skew".to_string()),
+            ],
+            DetectorRef::Psm("ClockMonitor".to_string()),
+        )
+        .with_fit(50.0)
+        .with_coverage(90.0)
+        .with_description("Jitter exceeds spec due to PLL and distribution".to_string());
+
+        assert!(cross_mode.validate().is_ok());
+        assert_eq!(cross_mode.get_fit_contribution(&clock_ref), Some(30.0));
+        assert_eq!(cross_mode.get_fit_contribution(&dist_ref), Some(20.0));
+    }
+
+    #[test]
+    fn test_cross_component_validation_no_contributors() {
+        // A cross-component mode must have contributors
+        let mode = CrossComponentFailureMode {
+            id: "CCF-BAD".to_string(),
+            failure_mode: FailureMode::new(
+                "bad".to_string(),
+                Severity::S1,
+                FailureClass::Safe,
+            ),
+            detector: DetectorRef::Safe,
+            description: String::new(),
+        };
+
+        assert!(mode.validate().is_err());
+    }
+
+    #[test]
+    fn test_fmea_data_with_cross_component() {
+        let mut fmea_data = FmeaData::new();
+
+        // Component-specific failure mode
+        let sensor_ref = DesignRef::from_str("top.sensor::out");
+        let mut sensor_component =
+            FmeaComponent::new(sensor_ref.clone(), "sensors".to_string(), "TEMP_SENSOR".to_string());
+        sensor_component.add_psm_failure_mode(
+            "TempMonitor",
+            FailureMode::new("stuck_high".to_string(), Severity::S2, FailureClass::Residual)
+                .with_fit(25.0),
+        );
+        fmea_data.add_component(sensor_component);
+
+        // Cross-component failure mode
+        let adc_ref = DesignRef::from_str("top.adc::data");
+        let cross_mode = CrossComponentFailureMode::new(
+            "CCF-002".to_string(),
+            "adc_coupling_noise".to_string(),
+            Severity::S2,
+            FailureClass::SinglePointFault,
+            vec![
+                FailureContributor::new(sensor_ref.clone(), 0.3),
+                FailureContributor::new(adc_ref.clone(), 0.7),
+            ],
+            DetectorRef::Psm("NoiseFilter".to_string()),
+        )
+        .with_fit(100.0);
+        fmea_data.add_cross_component_mode(cross_mode);
+
+        // Validate
+        assert!(fmea_data.validate().is_ok());
+
+        // Calculate FIT for sensor (25 from component + 30 from cross-component)
+        let sensor_fit = fmea_data.calculate_entity_fit(&sensor_ref);
+        assert_eq!(sensor_fit, 55.0);
+
+        // Calculate FIT for ADC (only from cross-component)
+        let adc_fit = fmea_data.calculate_entity_fit(&adc_ref);
+        assert_eq!(adc_fit, 70.0);
+
+        // Total FIT: 25 (sensor component) + 100 (cross-component total)
+        let total_fit = fmea_data.calculate_total_fit();
+        assert_eq!(total_fit, 125.0);
+    }
+
+    #[test]
+    fn test_fmea_data_get_failure_modes_for_entity() {
+        let mut fmea_data = FmeaData::new();
+
+        let ref_a = DesignRef::from_str("top.a");
+        let ref_b = DesignRef::from_str("top.b");
+
+        // Component with one mode
+        let mut comp_a = FmeaComponent::new(ref_a.clone(), "lib".to_string(), "PART_A".to_string());
+        comp_a.add_safe_mode(FailureMode::new(
+            "mode_a".to_string(),
+            Severity::S1,
+            FailureClass::Safe,
+        ));
+        fmea_data.add_component(comp_a);
+
+        // Cross-component mode affecting both
+        fmea_data.add_cross_component_mode(
+            CrossComponentFailureMode::new(
+                "CCF-X".to_string(),
+                "shared_mode".to_string(),
+                Severity::S2,
+                FailureClass::MultiPoint,
+                vec![
+                    FailureContributor::new(ref_a.clone(), 0.5),
+                    FailureContributor::new(ref_b.clone(), 0.5),
+                ],
+                DetectorRef::Safe,
+            )
+        );
+
+        // Entity A should see 2 modes (1 component + 1 cross-component)
+        let modes_a = fmea_data.get_failure_modes_for_entity(&ref_a);
+        assert_eq!(modes_a.len(), 2);
+
+        // Entity B should see 1 mode (just cross-component)
+        let modes_b = fmea_data.get_failure_modes_for_entity(&ref_b);
+        assert_eq!(modes_b.len(), 1);
+    }
+
+    #[test]
+    fn test_backward_compatibility_single_contributor() {
+        // Failure modes without contributors should still work
+        let mode =
+            FailureMode::new("legacy_mode".to_string(), Severity::S2, FailureClass::Residual)
+                .with_fit(50.0);
+
+        assert!(!mode.is_multi_contributor());
+        assert!(mode.validate_contributors().is_ok()); // No contributors = valid
+
+        // get_fit_contribution returns full FIT for single contributor mode
+        let any_ref = DesignRef::from_str("top.any::signal");
+        assert_eq!(mode.get_fit_contribution(&any_ref), Some(50.0));
+    }
+
+    #[test]
+    fn test_add_contributor_incrementally() {
+        let mut mode =
+            FailureMode::new("incremental".to_string(), Severity::S1, FailureClass::Safe);
+
+        let ref1 = DesignRef::from_str("top.a");
+        let ref2 = DesignRef::from_str("top.b");
+
+        mode.add_contributor(FailureContributor::new(ref1, 0.6));
+        mode.add_contributor(FailureContributor::new(ref2, 0.4));
+
+        assert!(mode.is_multi_contributor());
+        assert!(mode.validate_contributors().is_ok());
     }
 }
