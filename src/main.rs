@@ -91,6 +91,14 @@ enum Commands {
         /// Simulation duration
         #[arg(short, long)]
         duration: Option<String>,
+
+        /// Use gate-level simulation (HIR→MIR→LIR→SIR) instead of behavioral (HIR→MIR→SIR)
+        #[arg(long)]
+        gate_level: bool,
+
+        /// Use GPU acceleration
+        #[arg(long)]
+        gpu: bool,
     },
 
     /// Synthesize for FPGA target
@@ -294,8 +302,8 @@ fn main() -> Result<()> {
             build_design(&source_file, &target, &output, safety_options)?;
         }
 
-        Commands::Sim { design, duration } => {
-            simulate_design(&design, duration.as_deref())?;
+        Commands::Sim { design, duration, gate_level, gpu } => {
+            simulate_design(&design, duration.as_deref(), gate_level, gpu)?;
         }
 
         Commands::Synth {
@@ -546,67 +554,16 @@ fn build_design(
     Ok(())
 }
 
-/// Simulate design using GPU-accelerated simulation
-fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> {
+/// Simulate design
+///
+/// Supports two simulation paths:
+/// - Behavioral (default): HIR → MIR → SIR (fast, functional)
+/// - Gate-level (--gate-level): HIR → MIR → LIR → SIR (gate-level primitives, fault injection ready)
+fn simulate_design(design_file: &PathBuf, duration: Option<&str>, gate_level: bool, use_gpu: bool) -> Result<()> {
     use skalp_mir::Mir;
-    use skalp_sim::waveform::Waveform;
-    use skalp_sim::{SimulationConfig, Simulator};
     use skalp_sir::convert_mir_to_sir;
-    use tokio::runtime::Runtime;
 
     info!("Loading design from {:?}", design_file);
-
-    // Load design (support both .lir and .mir files)
-    let design_str = fs::read_to_string(design_file)?;
-
-    let sir = if design_file.extension() == Some(std::ffi::OsStr::new("lir")) {
-        // For LIR files, create a minimal SIR for simulation
-        use skalp_lir::Lir;
-        use skalp_sir::{SirModule, SirSignal, SirType};
-        use std::collections::HashMap;
-
-        let lir: Lir = serde_json::from_str(&design_str)?;
-
-        // Create a simple SIR module from LIR
-        let mut signals = Vec::new();
-
-        // Add signals from LIR nets
-        for net in lir.nets.iter() {
-            signals.push(SirSignal {
-                name: net.name.clone(),
-                width: net.width as usize,
-                sir_type: SirType::Bits(net.width as usize),
-                driver_node: None,
-                fanout_nodes: Vec::new(),
-                is_state: net.is_state_output,
-                span: None,
-            });
-        }
-
-        SirModule {
-            name: lir.name.clone(),
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            signals,
-            combinational_nodes: Vec::new(),
-            sequential_nodes: Vec::new(),
-            state_elements: HashMap::new(),
-            clock_domains: HashMap::new(),
-            sorted_combinational_node_ids: Vec::new(), // Empty for LIR (no combinational nodes)
-            pipeline_config: None, // LIR doesn't support pipeline config
-            span: None,
-        }
-    } else if design_file.extension() == Some(std::ffi::OsStr::new("mir")) {
-        // Load MIR and convert to SIR
-        let mir: Mir = serde_json::from_str(&design_str)?;
-        // Use the first module in the MIR
-        if mir.modules.is_empty() {
-            anyhow::bail!("No modules found in MIR");
-        }
-        convert_mir_to_sir(&mir.modules[0])
-    } else {
-        anyhow::bail!("Unsupported file format. Use .lir or .mir files");
-    };
 
     // Parse duration (default 1000 cycles)
     let cycles = if let Some(dur) = duration {
@@ -621,8 +578,206 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
         1000
     };
 
-    println!("Starting GPU-accelerated simulation");
-    println!("Simulating {} cycles", cycles);
+    // Determine file type and compile path
+    let extension = design_file.extension().and_then(|s| s.to_str());
+
+    match extension {
+        Some("sk") | Some("skalp") => {
+            // Source file - compile it
+            if gate_level {
+                simulate_gate_level(design_file, cycles, use_gpu)
+            } else {
+                simulate_behavioral(design_file, cycles, use_gpu)
+            }
+        }
+        Some("mir") => {
+            // Pre-compiled MIR file
+            let design_str = fs::read_to_string(design_file)?;
+            let mir: Mir = serde_json::from_str(&design_str)?;
+            if mir.modules.is_empty() {
+                anyhow::bail!("No modules found in MIR");
+            }
+
+            if gate_level {
+                // MIR → LIR → SIR
+                simulate_gate_level_from_mir(&mir, cycles, use_gpu)
+            } else {
+                // MIR → SIR
+                let sir = convert_mir_to_sir(&mir.modules[0]);
+                simulate_sir_behavioral(&sir, cycles, use_gpu)
+            }
+        }
+        Some("lir") => {
+            // Pre-compiled LIR file - always gate-level
+            use skalp_lir::lir::Lir;
+            let design_str = fs::read_to_string(design_file)?;
+            let lir: Lir = serde_json::from_str(&design_str)?;
+            simulate_lir(&lir, cycles, use_gpu)
+        }
+        _ => {
+            anyhow::bail!("Unsupported file format. Use .sk, .mir, or .lir files");
+        }
+    }
+}
+
+/// Behavioral simulation: HIR → MIR → SIR
+fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
+    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_mir::MirCompiler;
+    use skalp_sir::convert_mir_to_sir;
+
+    println!("🔧 Behavioral Simulation (HIR → MIR → SIR)");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Source: {:?}", source_file);
+    println!("Cycles: {}", cycles);
+    println!("GPU: {}", use_gpu);
+    println!();
+
+    // Parse and build HIR
+    info!("Parsing SKALP source...");
+    let hir = parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
+
+    // Lower to MIR
+    info!("Compiling to MIR...");
+    let compiler = MirCompiler::new();
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR: {}", e))?;
+
+    if mir.modules.is_empty() {
+        anyhow::bail!("No modules found in compiled design");
+    }
+
+    // Convert to SIR
+    info!("Converting to SIR...");
+    let sir = convert_mir_to_sir(&mir.modules[0]);
+
+    println!("📊 Design Statistics:");
+    println!("   Inputs: {}", sir.inputs.len());
+    println!("   Outputs: {}", sir.outputs.len());
+    println!("   Combinational nodes: {}", sir.combinational_nodes.len());
+    println!("   Sequential nodes: {}", sir.sequential_nodes.len());
+    println!();
+
+    simulate_sir_behavioral(&sir, cycles, use_gpu)
+}
+
+/// Gate-level simulation: HIR → MIR → LIR → SIR
+fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
+    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_mir::MirCompiler;
+
+    println!("🔬 Gate-Level Simulation (HIR → MIR → LIR → SIR)");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Source: {:?}", source_file);
+    println!("Cycles: {}", cycles);
+    println!("GPU: {}", use_gpu);
+    println!();
+
+    // Parse and build HIR
+    info!("Parsing SKALP source...");
+    let hir = parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
+
+    // Lower to MIR
+    info!("Compiling to MIR...");
+    let compiler = MirCompiler::new();
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR: {}", e))?;
+
+    simulate_gate_level_from_mir(&mir, cycles, use_gpu)
+}
+
+/// Gate-level simulation from MIR
+fn simulate_gate_level_from_mir(mir: &skalp_mir::Mir, cycles: u64, use_gpu: bool) -> Result<()> {
+    use skalp_lir::lower_to_lir;
+
+    // Lower to LIR (gate-level netlist)
+    info!("Converting to gate-level netlist (LIR)...");
+    let lir_results = lower_to_lir(mir)?;
+
+    if lir_results.is_empty() {
+        anyhow::bail!("No modules produced in LIR lowering");
+    }
+
+    let lir = &lir_results[0].lir;
+    let stats = &lir_results[0].stats;
+
+    println!("📊 Gate-Level Statistics:");
+    println!("   Module: {}", lir.name);
+    println!("   Ports: {}", stats.ports);
+    println!("   Primitives: {}", lir.primitives.len());
+    println!("   Nets: {}", lir.nets.len());
+
+    // Count by type
+    let seq_count = lir.primitives.iter().filter(|p| p.ptype.is_sequential()).count();
+    let comb_count = lir.primitives.len() - seq_count;
+    println!("   Sequential (DFFs): {}", seq_count);
+    println!("   Combinational: {}", comb_count);
+
+    // FIT calculation
+    let total_fit: f64 = lir.primitives.iter().map(|p| p.ptype.base_fit()).sum();
+    println!("   Total FIT: {:.2}", total_fit);
+    println!();
+
+    simulate_lir(lir, cycles, use_gpu)
+}
+
+/// Simulate from LIR (gate-level netlist)
+fn simulate_lir(lir: &skalp_lir::lir::Lir, cycles: u64, use_gpu: bool) -> Result<()> {
+    use skalp_sim::lir_to_sir::convert_lir_to_sir;
+    use skalp_sim::GateLevelSimulator;
+
+    // Convert LIR to structural SIR
+    info!("Converting to structural SIR...");
+    let sir_result = convert_lir_to_sir(lir);
+
+    println!("🔧 Running gate-level simulation...");
+
+    // Create gate-level simulator
+    let mut sim = GateLevelSimulator::new(&sir_result.sir);
+
+    println!("   Primitive count: {}", sim.primitive_count());
+    println!("   Total FIT: {:.2}", sim.total_fit());
+
+    // Run simulation for specified cycles
+    for cycle in 0..cycles {
+        sim.step();
+
+        // Print progress every 100 cycles
+        if cycle > 0 && cycle % 100 == 0 {
+            print!("\r   Cycle: {}/{}", cycle, cycles);
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+    }
+    println!("\r   Completed {} cycles", cycles);
+
+    // Dump final state
+    let signals = sim.dump_signals();
+    if !signals.is_empty() {
+        println!("\n📊 Final Signal Values (sample):");
+        for (name, bits) in signals.iter().take(10) {
+            let val: u64 = bits.iter().enumerate().map(|(i, &b)| (b as u64) << i).sum();
+            println!("   {} = {} (0x{:X})", name, val, val);
+        }
+        if signals.len() > 10 {
+            println!("   ... and {} more signals", signals.len() - 10);
+        }
+    }
+
+    println!("\n✅ Gate-level simulation complete!");
+
+    Ok(())
+}
+
+/// Run behavioral SIR simulation
+fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: bool) -> Result<()> {
+    use skalp_sim::waveform::Waveform;
+    use skalp_sim::{SimulationConfig, Simulator};
+    use tokio::runtime::Runtime;
+
+    println!("🔧 Running behavioral simulation...");
 
     // Create async runtime for simulation
     let runtime = Runtime::new()?;
@@ -630,7 +785,7 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
     runtime.block_on(async {
         // Create simulation config
         let config = SimulationConfig {
-            use_gpu: true,
+            use_gpu,
             max_cycles: cycles,
             timeout_ms: 60_000,
             capture_waveforms: true,
@@ -639,22 +794,23 @@ fn simulate_design(design_file: &PathBuf, duration: Option<&str>) -> Result<()> 
 
         // Create and initialize simulator
         let mut simulator = Simulator::new(config).await?;
-        simulator.load_module(&sir).await?;
+        simulator.load_module(sir).await?;
 
         // Run simulation
         simulator.run_simulation().await?;
 
-        println!("Simulation complete!");
-        println!("Simulated {} cycles", cycles);
+        println!("   Completed {} cycles", cycles);
 
         // Get simulation history and create waveform
         let state_history = simulator.get_waveforms().await;
         if !state_history.is_empty() {
             let waveform = Waveform::from_simulation_states(&state_history);
             waveform.export_vcd(&PathBuf::from("simulation.vcd"))?;
-            println!("📈 Waveform exported to simulation.vcd");
+            println!("\n📈 Waveform exported to simulation.vcd");
             waveform.print_summary();
         }
+
+        println!("\n✅ Behavioral simulation complete!");
 
         Ok::<(), anyhow::Error>(())
     })?;
