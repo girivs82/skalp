@@ -167,10 +167,79 @@ pub struct ConditionTerm {
     pub value: CompareValue,
 }
 
+/// Built-in temporal operators for failure effect conditions
+/// These correspond to the @operator() syntax in safety goals
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TemporalOperator {
+    // === Edge Detection ===
+    /// @rose(s) - Rising edge (0→1 this cycle)
+    Rose(String),
+    /// @fell(s) - Falling edge (1→0 this cycle)
+    Fell(String),
+    /// @changed(s) - Value changed this cycle
+    Changed(String),
+    /// @stable(s, n) - Unchanged for n consecutive cycles
+    Stable(String, u64),
+
+    // === History/Past Values ===
+    /// @prev(s) - Value in previous cycle
+    Prev(String),
+    /// @prev(s, n) - Value from n cycles ago
+    PrevN(String, u64),
+    /// @was_high(s, n) - Was 1 at some point in last n cycles
+    WasHigh(String, u64),
+    /// @was_low(s, n) - Was 0 at some point in last n cycles
+    WasLow(String, u64),
+    /// @cycles_since(event) - Cycles since event was true
+    CyclesSince(Box<EffectCondition>),
+
+    // === Range/Set Membership ===
+    /// @in_range(s, lo, hi) - lo ≤ s ≤ hi
+    InRange(String, u64, u64),
+    /// @outside_range(s, lo, hi) - s < lo OR s > hi
+    OutsideRange(String, u64, u64),
+    /// @oneof(s, [vals]) - s in set
+    OneOf(String, Vec<u64>),
+    /// @not_oneof(s, [vals]) - s not in set
+    NotOneOf(String, Vec<u64>),
+
+    // === Arithmetic ===
+    /// @abs_diff(a, b) - |a - b|
+    AbsDiff(String, String),
+    /// @max_deviation(a, b, ...) - Maximum pairwise |diff|
+    MaxDeviation(Vec<String>),
+    /// @popcount(s) - Count of 1 bits
+    PopCount(String),
+    /// @hamming_distance(a, b) - Differing bit count
+    HammingDistance(String, String),
+
+    // === Counting/Frequency ===
+    /// @pulse_count(s, window) - Rising edges in window
+    PulseCount(String, u64),
+    /// @glitch_count(s, window) - Value changes in window
+    GlitchCount(String, u64),
+    /// @period(s) - Cycles between rising edges
+    Period(String),
+
+    // === Data Integrity ===
+    /// @crc8(data) - Calculate CRC-8
+    Crc8(String),
+    /// @crc16(data) - Calculate CRC-16
+    Crc16(String),
+    /// @crc32(data) - Calculate CRC-32
+    Crc32(String),
+    /// @parity(data) - Calculate parity
+    Parity(String),
+
+    // === Timing ===
+    /// @latency(trigger, response) - Cycles between events
+    Latency(String, String),
+}
+
 /// Compound condition (AND/OR of terms)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EffectCondition {
-    /// Single term
+    /// Single term (signal op value)
     Term(ConditionTerm),
     /// AND of conditions
     And(Vec<EffectCondition>),
@@ -180,6 +249,10 @@ pub enum EffectCondition {
     Not(Box<EffectCondition>),
     /// Temporal: condition holds for duration
     Temporal(Box<EffectCondition>, TemporalQualifier),
+    /// Built-in temporal operator
+    Operator(TemporalOperator),
+    /// Comparison involving temporal operator result
+    OperatorCompare(TemporalOperator, CompareOp, u64),
 }
 
 impl EffectCondition {
@@ -238,6 +311,93 @@ impl EffectCondition {
     /// NOT a condition
     pub fn not(self) -> Self {
         Self::Not(Box::new(self))
+    }
+
+    // === Temporal Operator Builders ===
+
+    /// @rose(signal) - Rising edge detected
+    pub fn rose(signal: &str) -> Self {
+        Self::Operator(TemporalOperator::Rose(signal.to_string()))
+    }
+
+    /// @fell(signal) - Falling edge detected
+    pub fn fell(signal: &str) -> Self {
+        Self::Operator(TemporalOperator::Fell(signal.to_string()))
+    }
+
+    /// @changed(signal) - Value changed this cycle
+    pub fn changed(signal: &str) -> Self {
+        Self::Operator(TemporalOperator::Changed(signal.to_string()))
+    }
+
+    /// @stable(signal, cycles) - Signal unchanged for N cycles
+    pub fn stable(signal: &str, cycles: u64) -> Self {
+        Self::Operator(TemporalOperator::Stable(signal.to_string(), cycles))
+    }
+
+    /// @in_range(signal, lo, hi) - Signal in range
+    pub fn in_range(signal: &str, lo: u64, hi: u64) -> Self {
+        Self::Operator(TemporalOperator::InRange(signal.to_string(), lo, hi))
+    }
+
+    /// @outside_range(signal, lo, hi) - Signal outside range
+    pub fn outside_range(signal: &str, lo: u64, hi: u64) -> Self {
+        Self::Operator(TemporalOperator::OutsideRange(signal.to_string(), lo, hi))
+    }
+
+    /// @oneof(signal, values) - Signal is one of the values
+    pub fn oneof(signal: &str, values: Vec<u64>) -> Self {
+        Self::Operator(TemporalOperator::OneOf(signal.to_string(), values))
+    }
+
+    /// @not_oneof(signal, values) - Signal is not one of the values
+    pub fn not_oneof(signal: &str, values: Vec<u64>) -> Self {
+        Self::Operator(TemporalOperator::NotOneOf(signal.to_string(), values))
+    }
+
+    /// @abs_diff(a, b) > threshold
+    pub fn abs_diff_exceeds(a: &str, b: &str, threshold: u64) -> Self {
+        Self::OperatorCompare(
+            TemporalOperator::AbsDiff(a.to_string(), b.to_string()),
+            CompareOp::GreaterThan,
+            threshold,
+        )
+    }
+
+    /// @max_deviation(signals) > threshold
+    pub fn max_deviation_exceeds(signals: Vec<&str>, threshold: u64) -> Self {
+        Self::OperatorCompare(
+            TemporalOperator::MaxDeviation(signals.into_iter().map(|s| s.to_string()).collect()),
+            CompareOp::GreaterThan,
+            threshold,
+        )
+    }
+
+    /// @pulse_count(signal, window) < min
+    pub fn pulse_count_below(signal: &str, window: u64, min: u64) -> Self {
+        Self::OperatorCompare(
+            TemporalOperator::PulseCount(signal.to_string(), window),
+            CompareOp::LessThan,
+            min,
+        )
+    }
+
+    /// @pulse_count(signal, window) > max
+    pub fn pulse_count_above(signal: &str, window: u64, max: u64) -> Self {
+        Self::OperatorCompare(
+            TemporalOperator::PulseCount(signal.to_string(), window),
+            CompareOp::GreaterThan,
+            max,
+        )
+    }
+
+    /// @cycles_since(event) > timeout
+    pub fn timeout_since(event: EffectCondition, timeout: u64) -> Self {
+        Self::OperatorCompare(
+            TemporalOperator::CyclesSince(Box::new(event)),
+            CompareOp::GreaterThan,
+            timeout,
+        )
     }
 }
 
@@ -1082,5 +1242,126 @@ mod tests {
         // Should not meet ASIL because silent_failure has 90% < 99% target
         assert!(!results.meets_asil);
         assert!(!results.gaps.is_empty());
+    }
+
+    #[test]
+    fn test_temporal_operator_builders() {
+        // Edge detection operators
+        let rose = EffectCondition::rose("clk");
+        assert!(matches!(rose, EffectCondition::Operator(TemporalOperator::Rose(_))));
+
+        let fell = EffectCondition::fell("reset");
+        assert!(matches!(fell, EffectCondition::Operator(TemporalOperator::Fell(_))));
+
+        let changed = EffectCondition::changed("state");
+        assert!(matches!(changed, EffectCondition::Operator(TemporalOperator::Changed(_))));
+
+        let stable = EffectCondition::stable("fsm_state", 100);
+        assert!(matches!(stable, EffectCondition::Operator(TemporalOperator::Stable(_, 100))));
+    }
+
+    #[test]
+    fn test_range_operators() {
+        let in_range = EffectCondition::in_range("voltage", 1000, 1200);
+        assert!(matches!(
+            in_range,
+            EffectCondition::Operator(TemporalOperator::InRange(_, 1000, 1200))
+        ));
+
+        let outside = EffectCondition::outside_range("temp", 0, 85);
+        assert!(matches!(
+            outside,
+            EffectCondition::Operator(TemporalOperator::OutsideRange(_, 0, 85))
+        ));
+
+        let valid_states = vec![0, 1, 2, 3];
+        let oneof = EffectCondition::oneof("state", valid_states);
+        assert!(matches!(oneof, EffectCondition::Operator(TemporalOperator::OneOf(_, _))));
+
+        let invalid_states = vec![10, 11, 12];
+        let not_oneof = EffectCondition::not_oneof("error_code", invalid_states);
+        assert!(matches!(not_oneof, EffectCondition::Operator(TemporalOperator::NotOneOf(_, _))));
+    }
+
+    #[test]
+    fn test_comparison_operators() {
+        let abs_diff = EffectCondition::abs_diff_exceeds("sensor_a", "sensor_b", 50);
+        assert!(matches!(
+            abs_diff,
+            EffectCondition::OperatorCompare(TemporalOperator::AbsDiff(_, _), CompareOp::GreaterThan, 50)
+        ));
+
+        let max_dev = EffectCondition::max_deviation_exceeds(vec!["s1", "s2", "s3"], 10);
+        assert!(matches!(
+            max_dev,
+            EffectCondition::OperatorCompare(TemporalOperator::MaxDeviation(_), CompareOp::GreaterThan, 10)
+        ));
+    }
+
+    #[test]
+    fn test_pulse_count_operators() {
+        let pulse_low = EffectCondition::pulse_count_below("heartbeat", 1000, 5);
+        assert!(matches!(
+            pulse_low,
+            EffectCondition::OperatorCompare(TemporalOperator::PulseCount(_, 1000), CompareOp::LessThan, 5)
+        ));
+
+        let pulse_high = EffectCondition::pulse_count_above("irq", 100, 50);
+        assert!(matches!(
+            pulse_high,
+            EffectCondition::OperatorCompare(TemporalOperator::PulseCount(_, 100), CompareOp::GreaterThan, 50)
+        ));
+    }
+
+    #[test]
+    fn test_compound_temporal_conditions() {
+        // Complex condition: @stable(fsm_state, 100) && !@oneof(fsm_state, [0, 15])
+        let fsm_stuck_invalid = EffectCondition::stable("fsm_state", 100)
+            .and(EffectCondition::not_oneof("fsm_state", vec![0, 15]));
+
+        assert!(matches!(fsm_stuck_invalid, EffectCondition::And(_)));
+
+        // Timeout condition: @cycles_since(@rose(request)) > 1000
+        let timeout = EffectCondition::timeout_since(EffectCondition::rose("request"), 1000);
+        assert!(matches!(
+            timeout,
+            EffectCondition::OperatorCompare(TemporalOperator::CyclesSince(_), CompareOp::GreaterThan, 1000)
+        ));
+    }
+
+    #[test]
+    fn test_watchdog_pattern() {
+        // Typical watchdog failure patterns:
+        // 1. No kicks for too long
+        let no_kicks = EffectCondition::pulse_count_below("kick", 5000, 3);
+
+        // 2. Kicks too frequent (runaway)
+        let kicks_too_fast = EffectCondition::pulse_count_above("kick", 100, 10);
+
+        // 3. Timeout without effect
+        let timeout_ignored = EffectCondition::rose("timeout")
+            .and(EffectCondition::stable("cpu_alive", 100));
+
+        assert!(matches!(no_kicks, EffectCondition::OperatorCompare(_, _, _)));
+        assert!(matches!(kicks_too_fast, EffectCondition::OperatorCompare(_, _, _)));
+        assert!(matches!(timeout_ignored, EffectCondition::And(_)));
+    }
+
+    #[test]
+    fn test_redundancy_pattern() {
+        // Triple-modular redundancy failure patterns:
+        // Channels should agree within tolerance
+        let sensor_disagree = EffectCondition::max_deviation_exceeds(
+            vec!["sensor_a", "sensor_b", "sensor_c"],
+            50,
+        );
+
+        // Pairwise comparison
+        let a_b_differ = EffectCondition::abs_diff_exceeds("sensor_a", "sensor_b", 100);
+        let b_c_differ = EffectCondition::abs_diff_exceeds("sensor_b", "sensor_c", 100);
+        let total_disagree = a_b_differ.and(b_c_differ);
+
+        assert!(matches!(sensor_disagree, EffectCondition::OperatorCompare(_, _, _)));
+        assert!(matches!(total_disagree, EffectCondition::And(_)));
     }
 }
