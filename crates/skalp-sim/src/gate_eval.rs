@@ -261,8 +261,16 @@ pub fn evaluate_primitive_with_fault(
 }
 
 /// Apply a fault effect to output values
+///
+/// This function implements the digital-level effect of various fault types.
+/// For timing violations and power-related faults, we model the observable
+/// digital effect rather than the analog root cause.
 fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
     match fault_type {
+        // ====================================================================
+        // Permanent/Hard Faults
+        // ====================================================================
+
         FaultType::StuckAt0 => {
             // All outputs forced to 0
             for out in outputs.iter_mut() {
@@ -277,18 +285,12 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
             }
         }
 
-        FaultType::BitFlip | FaultType::Transient => {
-            // Invert all outputs
+        FaultType::Open { float_value } => {
+            // Open fault - signal floats to technology-dependent value
+            // In CMOS, typically floats high (weak pull-up from PMOS leakage)
+            // but we allow configuration via float_value
             for out in outputs.iter_mut() {
-                *out = !*out;
-            }
-        }
-
-        FaultType::TimingDelay { .. } => {
-            // Timing delay - output the previous value (needs state tracking)
-            // For now, just return the inputs as a rough approximation
-            for (i, out) in outputs.iter_mut().enumerate() {
-                *out = inputs.get(i).copied().unwrap_or(false);
+                *out = *float_value;
             }
         }
 
@@ -313,6 +315,258 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
                     }
                 }
             }
+        }
+
+        // ====================================================================
+        // Transient/Soft Faults
+        // ====================================================================
+
+        FaultType::BitFlip | FaultType::Transient => {
+            // Invert all outputs
+            for out in outputs.iter_mut() {
+                *out = !*out;
+            }
+        }
+
+        FaultType::MultiBitUpset { additional_bits: _ } => {
+            // Multi-bit upset - flip the primary output
+            // Additional bits are handled by the fault campaign (creates multiple faults)
+            for out in outputs.iter_mut() {
+                *out = !*out;
+            }
+        }
+
+        // ====================================================================
+        // Timing Violations
+        // ====================================================================
+
+        FaultType::TimingDelay { .. } => {
+            // Timing delay - output the previous value (needs state tracking)
+            // For combinational logic: output reflects stale input
+            // Approximation: use first input as representative of "old" data
+            for (i, out) in outputs.iter_mut().enumerate() {
+                *out = inputs.get(i).copied().unwrap_or(false);
+            }
+        }
+
+        FaultType::SetupViolation => {
+            // Setup violation - FF captures PREVIOUS data value
+            // For combinational gates, this manifests as output reflecting
+            // the previous input state (approximated as first input)
+            //
+            // In actual FF evaluation (in gate_simulator.rs), this uses
+            // the saved previous D value. Here we approximate for comb logic.
+            for (i, out) in outputs.iter_mut().enumerate() {
+                // Conservative: assume previous data was opposite
+                *out = !inputs.get(i).copied().unwrap_or(false);
+            }
+        }
+
+        FaultType::HoldViolation => {
+            // Hold violation - FF captures CORRUPTED value
+            // Model as: output is inverted (worst-case corruption)
+            //
+            // This is conservative - actual hold violation could result in
+            // either value or metastability. Inversion ensures detection
+            // by comparison mechanisms.
+            for out in outputs.iter_mut() {
+                *out = !*out;
+            }
+        }
+
+        FaultType::Metastability { resolution_cycles: _ } => {
+            // Metastability - output is undefined during resolution
+            // Model as: random value (use simple hash-based pseudo-random)
+            //
+            // In actual implementation, the simulator tracks metastable state
+            // and resolves after resolution_cycles. Here we just flip to
+            // represent uncertainty.
+            for out in outputs.iter_mut() {
+                *out = !*out; // Flip as worst-case
+            }
+        }
+
+        // ====================================================================
+        // Power-Related Faults (Digital Effects)
+        // ====================================================================
+
+        FaultType::VoltageDropout => {
+            // Voltage dropout manifests as setup violations (slower logic)
+            // At the primitive level, treat as setup violation
+            for (i, out) in outputs.iter_mut().enumerate() {
+                *out = !inputs.get(i).copied().unwrap_or(false);
+            }
+        }
+
+        FaultType::GroundBounce => {
+            // Ground bounce manifests as transient glitch
+            // Invert output for one cycle
+            for out in outputs.iter_mut() {
+                *out = !*out;
+            }
+        }
+
+        FaultType::CrosstalkGlitch => {
+            // Crosstalk glitch - brief inversion due to coupling
+            for out in outputs.iter_mut() {
+                *out = !*out;
+            }
+        }
+
+        // ====================================================================
+        // Clock Faults
+        // ====================================================================
+
+        FaultType::ClockGlitch => {
+            // Clock glitch - extra clock edge
+            // For combinational logic, this doesn't directly apply
+            // The effect is handled in sequential element evaluation
+            // Here we treat it as a transient on combinational outputs
+            for out in outputs.iter_mut() {
+                *out = !*out;
+            }
+        }
+
+        FaultType::ClockStretch { stretch_cycles: _ } => {
+            // Clock stretch - period temporarily longer
+            // May cause setup violations on receiving FFs
+            // For comb logic, treat as timing delay
+            for (i, out) in outputs.iter_mut().enumerate() {
+                *out = inputs.get(i).copied().unwrap_or(false);
+            }
+        }
+    }
+}
+
+/// State for tracking timing violation effects on sequential elements
+#[derive(Debug, Clone, Default)]
+pub struct TimingFaultState {
+    /// Previous D input value (for setup violation modeling)
+    pub prev_d_value: bool,
+    /// Metastability countdown (cycles until resolution)
+    pub metastable_countdown: u32,
+    /// Resolved value after metastability (set when countdown reaches 0)
+    pub metastable_resolved_value: Option<bool>,
+}
+
+impl TimingFaultState {
+    /// Create new timing fault state
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update previous D value (call each cycle before clock edge)
+    pub fn update_prev_d(&mut self, d_value: bool) {
+        self.prev_d_value = d_value;
+    }
+
+    /// Start metastability countdown
+    pub fn enter_metastability(&mut self, resolution_cycles: u32) {
+        self.metastable_countdown = resolution_cycles;
+        self.metastable_resolved_value = None;
+    }
+
+    /// Tick metastability countdown, returns true if just resolved
+    pub fn tick_metastability(&mut self) -> bool {
+        if self.metastable_countdown > 0 {
+            self.metastable_countdown -= 1;
+            if self.metastable_countdown == 0 {
+                // Resolve randomly (using simple deterministic "random" for reproducibility)
+                // In practice, use a seeded RNG for the simulation
+                self.metastable_resolved_value = Some(false); // Or use RNG
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if currently in metastable state
+    pub fn is_metastable(&self) -> bool {
+        self.metastable_countdown > 0
+    }
+
+    /// Get resolved value (if resolved)
+    pub fn get_resolved_value(&self) -> Option<bool> {
+        self.metastable_resolved_value
+    }
+}
+
+/// Evaluate a flip-flop with timing violation fault
+///
+/// This function handles the special cases for setup/hold violations
+/// and metastability that require state tracking.
+///
+/// # Arguments
+///
+/// * `current_d` - Current D input value
+/// * `clock_edge` - True if there's a positive clock edge this cycle
+/// * `fault` - Optional fault injection configuration
+/// * `state` - Mutable timing fault state for this FF
+/// * `current_cycle` - Current simulation cycle
+///
+/// # Returns
+///
+/// The Q output value after considering faults
+pub fn evaluate_dff_with_timing_fault(
+    current_d: bool,
+    clock_edge: bool,
+    fault: Option<&FaultInjectionConfig>,
+    state: &mut TimingFaultState,
+    current_cycle: u64,
+) -> bool {
+    // Check if fault is active
+    let active_fault = fault.filter(|f| f.is_active_at(current_cycle));
+
+    match active_fault.map(|f| &f.fault_type) {
+        Some(FaultType::SetupViolation) => {
+            // Setup violation: capture previous D value instead of current
+            if clock_edge {
+                let result = state.prev_d_value;
+                state.update_prev_d(current_d);
+                result
+            } else {
+                state.update_prev_d(current_d);
+                current_d // No edge, return current (will be latched)
+            }
+        }
+
+        Some(FaultType::HoldViolation) => {
+            // Hold violation: capture inverted value
+            if clock_edge {
+                state.update_prev_d(current_d);
+                !current_d // Corrupted: inverted
+            } else {
+                state.update_prev_d(current_d);
+                current_d
+            }
+        }
+
+        Some(FaultType::Metastability { resolution_cycles }) => {
+            if clock_edge && !state.is_metastable() {
+                // Enter metastability on clock edge
+                state.enter_metastability(*resolution_cycles);
+            }
+
+            // Tick countdown
+            let just_resolved = state.tick_metastability();
+
+            if state.is_metastable() {
+                // Still metastable - return undefined (model as toggle)
+                !current_d
+            } else if just_resolved {
+                // Just resolved - return resolved value
+                state.get_resolved_value().unwrap_or(current_d)
+            } else {
+                // Normal operation
+                state.update_prev_d(current_d);
+                current_d
+            }
+        }
+
+        _ => {
+            // No timing fault or other fault type - normal operation
+            state.update_prev_d(current_d);
+            current_d
         }
     }
 }
@@ -592,5 +846,349 @@ mod tests {
         let bits = value_to_bits(&original, 16);
         let result = bits_to_value(&bits);
         assert_eq!(result, original);
+    }
+
+    // ========================================================================
+    // Timing Violation Fault Tests
+    // ========================================================================
+
+    #[test]
+    fn test_setup_violation_fault() {
+        // Setup violation: output reflects previous input instead of current
+        let ptype = PrimitiveType::Buf;
+        let config = FaultInjectionConfig::setup_violation(PrimitiveId(0), 5, Some(3));
+
+        // Before fault - normal operation
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 4);
+        assert_eq!(outputs, vec![true]);
+
+        // During fault - setup violation approximated as inverted input
+        // (previous D value is modeled as opposite of current)
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 5);
+        assert_eq!(outputs, vec![false]); // Inverted due to setup violation
+
+        // Still during fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false], Some(&config), 6);
+        assert_eq!(outputs, vec![true]); // Inverted
+
+        // After fault duration ends - normal again
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 8);
+        assert_eq!(outputs, vec![true]);
+    }
+
+    #[test]
+    fn test_hold_violation_fault() {
+        // Hold violation: output is inverted (corrupted)
+        let ptype = PrimitiveType::Buf;
+        let config = FaultInjectionConfig::hold_violation(PrimitiveId(0), 10, Some(2));
+
+        // Before fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 9);
+        assert_eq!(outputs, vec![true]);
+
+        // During fault - hold violation inverts output
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 10);
+        assert_eq!(outputs, vec![false]); // Inverted
+
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false], Some(&config), 11);
+        assert_eq!(outputs, vec![true]); // Inverted
+
+        // After fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 12);
+        assert_eq!(outputs, vec![true]);
+    }
+
+    #[test]
+    fn test_metastability_fault() {
+        // Metastability: output is undefined (modeled as inverted)
+        let ptype = PrimitiveType::Buf;
+        let config = FaultInjectionConfig::metastability(PrimitiveId(0), 5, 3);
+
+        // Before fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 4);
+        assert_eq!(outputs, vec![true]);
+
+        // During metastability - output is undefined (inverted in model)
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 5);
+        assert_eq!(outputs, vec![false]); // Metastable: inverted
+
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false], Some(&config), 6);
+        assert_eq!(outputs, vec![true]); // Still metastable: inverted
+
+        // After resolution (duration = resolution_cycles + 1 = 4)
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 9);
+        assert_eq!(outputs, vec![true]); // Normal
+    }
+
+    // ========================================================================
+    // Power Effect Fault Tests
+    // ========================================================================
+
+    #[test]
+    fn test_voltage_dropout_fault() {
+        // Voltage dropout manifests as setup violation (slower logic)
+        let ptype = PrimitiveType::And { inputs: 2 };
+        let config = FaultInjectionConfig::voltage_dropout(PrimitiveId(0), 10, 5);
+
+        // Before fault - normal
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 9);
+        assert_eq!(outputs, vec![true]); // 1 AND 1 = 1
+
+        // During fault - voltage dropout causes setup violation behavior
+        // Output reflects previous input state (inverted first input)
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 10);
+        assert_eq!(outputs, vec![false]); // Corrupted
+
+        // Still during fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false, false], Some(&config), 12);
+        assert_eq!(outputs, vec![true]); // Corrupted (inverted)
+
+        // After fault ends
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 15);
+        assert_eq!(outputs, vec![true]); // Normal
+    }
+
+    #[test]
+    fn test_ground_bounce_fault() {
+        // Ground bounce manifests as transient glitch (single cycle)
+        let ptype = PrimitiveType::Or { inputs: 2 };
+        let config = FaultInjectionConfig::ground_bounce(PrimitiveId(0), 20);
+
+        // Before fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false, false], Some(&config), 19);
+        assert_eq!(outputs, vec![false]); // 0 OR 0 = 0
+
+        // During fault - ground bounce inverts output
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false, false], Some(&config), 20);
+        assert_eq!(outputs, vec![true]); // Glitched to 1
+
+        // After fault (single cycle duration)
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false, false], Some(&config), 21);
+        assert_eq!(outputs, vec![false]); // Normal
+    }
+
+    #[test]
+    fn test_crosstalk_glitch_fault() {
+        // Crosstalk glitch - brief inversion due to coupling
+        let ptype = PrimitiveType::Xor;
+        let config = FaultInjectionConfig::crosstalk_glitch(PrimitiveId(0), 15);
+
+        // Before fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, false], Some(&config), 14);
+        assert_eq!(outputs, vec![true]); // 1 XOR 0 = 1
+
+        // During fault - crosstalk inverts
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, false], Some(&config), 15);
+        assert_eq!(outputs, vec![false]); // Glitched
+
+        // After fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, false], Some(&config), 16);
+        assert_eq!(outputs, vec![true]); // Normal
+    }
+
+    // ========================================================================
+    // Clock Fault Tests
+    // ========================================================================
+
+    #[test]
+    fn test_clock_glitch_fault() {
+        // Clock glitch - treated as transient on combinational outputs
+        let ptype = PrimitiveType::Nand { inputs: 2 };
+        let config = FaultInjectionConfig {
+            target_primitive: PrimitiveId(0),
+            fault_type: FaultType::ClockGlitch,
+            inject_at_cycle: 25,
+            duration: Some(1),
+        };
+
+        // Before fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 24);
+        assert_eq!(outputs, vec![false]); // 1 NAND 1 = 0
+
+        // During fault - clock glitch inverts output
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 25);
+        assert_eq!(outputs, vec![true]); // Glitched
+
+        // After fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 26);
+        assert_eq!(outputs, vec![false]); // Normal
+    }
+
+    #[test]
+    fn test_clock_stretch_fault() {
+        // Clock stretch - period temporarily longer, may cause timing issues
+        // For comb logic, output passes through (timing delay model)
+        let ptype = PrimitiveType::And { inputs: 2 };
+        let config = FaultInjectionConfig {
+            target_primitive: PrimitiveId(0),
+            fault_type: FaultType::ClockStretch { stretch_cycles: 2 },
+            inject_at_cycle: 30,
+            duration: Some(2),
+        };
+
+        // Before fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 29);
+        assert_eq!(outputs, vec![true]); // 1 AND 1 = 1
+
+        // During fault - clock stretch passes through first input
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, false], Some(&config), 30);
+        assert_eq!(outputs, vec![true]); // Passes first input
+
+        // After fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, false], Some(&config), 32);
+        assert_eq!(outputs, vec![false]); // Normal: 1 AND 0 = 0
+    }
+
+    // ========================================================================
+    // Open/Multi-bit Fault Tests
+    // ========================================================================
+
+    #[test]
+    fn test_open_fault() {
+        // Open fault - output floats to specified value (false = low)
+        let ptype = PrimitiveType::Or { inputs: 2 };
+        let config = FaultInjectionConfig {
+            target_primitive: PrimitiveId(0),
+            fault_type: FaultType::Open { float_value: false },
+            inject_at_cycle: 0,
+            duration: None, // Permanent
+        };
+
+        // With fault - output always 0 regardless of inputs
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, true], Some(&config), 10);
+        assert_eq!(outputs, vec![false]); // Open: floats to 0
+
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true, false], Some(&config), 20);
+        assert_eq!(outputs, vec![false]); // Open: floats to 0
+    }
+
+    #[test]
+    fn test_open_fault_float_high() {
+        // Open fault with float_value = true (output floats high)
+        let ptype = PrimitiveType::And { inputs: 2 };
+        let config = FaultInjectionConfig {
+            target_primitive: PrimitiveId(0),
+            fault_type: FaultType::Open { float_value: true },
+            inject_at_cycle: 0,
+            duration: None,
+        };
+
+        // With fault - output always 1 regardless of inputs
+        let outputs = evaluate_primitive_with_fault(&ptype, &[false, false], Some(&config), 10);
+        assert_eq!(outputs, vec![true]); // Open: floats to 1
+    }
+
+    #[test]
+    fn test_multi_bit_upset_fault() {
+        // Multi-bit upset - multiple bits affected (treated similar to bit flip)
+        let ptype = PrimitiveType::Buf;
+        let config = FaultInjectionConfig {
+            target_primitive: PrimitiveId(0),
+            fault_type: FaultType::MultiBitUpset { additional_bits: 1 },
+            inject_at_cycle: 5,
+            duration: Some(1), // Transient
+        };
+
+        // Before fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 4);
+        assert_eq!(outputs, vec![true]);
+
+        // During fault - output flipped
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 5);
+        assert_eq!(outputs, vec![false]); // MBU inverts
+
+        // After fault
+        let outputs = evaluate_primitive_with_fault(&ptype, &[true], Some(&config), 6);
+        assert_eq!(outputs, vec![true]);
+    }
+
+    // ========================================================================
+    // DFF-specific Timing Fault Tests
+    // ========================================================================
+
+    #[test]
+    fn test_dff_setup_violation() {
+        let mut state = TimingFaultState::new();
+        let config = FaultInjectionConfig::setup_violation(PrimitiveId(0), 0, None);
+
+        // Set up previous D value
+        state.update_prev_d(false);
+
+        // On clock edge with setup violation: should capture previous value (false)
+        // not current value (true)
+        let result = evaluate_dff_with_timing_fault(true, true, Some(&config), &mut state, 0);
+        assert_eq!(result, false); // Captured previous D value
+    }
+
+    #[test]
+    fn test_dff_hold_violation() {
+        let mut state = TimingFaultState::new();
+        let config = FaultInjectionConfig::hold_violation(PrimitiveId(0), 0, None);
+
+        // On clock edge with hold violation: should capture inverted value
+        let result = evaluate_dff_with_timing_fault(true, true, Some(&config), &mut state, 0);
+        assert_eq!(result, false); // Inverted: true -> false
+    }
+
+    #[test]
+    fn test_dff_metastability_enters_and_resolves() {
+        let mut state = TimingFaultState::new();
+        let config = FaultInjectionConfig::metastability(PrimitiveId(0), 0, 3);
+
+        // Initially not metastable
+        assert!(!state.is_metastable());
+
+        // Clock edge triggers metastability, then immediately ticks (countdown: 3 -> 2)
+        let result = evaluate_dff_with_timing_fault(true, true, Some(&config), &mut state, 0);
+        assert_eq!(result, false); // Toggled: true -> false (metastable output)
+
+        // Should now be metastable with countdown already decremented once
+        assert!(state.is_metastable());
+        assert_eq!(state.metastable_countdown, 2); // 3 -> 2 after first tick
+
+        // Continue ticking (countdown: 2 -> 1)
+        let result = evaluate_dff_with_timing_fault(true, false, Some(&config), &mut state, 1);
+        assert_eq!(result, false); // Toggled: true -> false (still metastable)
+        assert!(state.is_metastable());
+        assert_eq!(state.metastable_countdown, 1);
+
+        // Continue ticking (countdown: 1 -> 0, resolves)
+        let _ = evaluate_dff_with_timing_fault(false, false, Some(&config), &mut state, 2);
+        assert_eq!(state.metastable_countdown, 0);
+
+        // Should have resolved
+        assert!(!state.is_metastable());
+        assert!(state.metastable_resolved_value.is_some());
+    }
+
+    #[test]
+    fn test_timing_fault_state_update() {
+        let mut state = TimingFaultState::new();
+
+        // Initial state
+        assert_eq!(state.prev_d_value, false);
+        assert!(!state.is_metastable());
+        assert!(state.get_resolved_value().is_none());
+
+        // Update previous D
+        state.update_prev_d(true);
+        assert_eq!(state.prev_d_value, true);
+
+        // Enter metastability
+        state.enter_metastability(5);
+        assert!(state.is_metastable());
+        assert_eq!(state.metastable_countdown, 5);
+
+        // Tick without resolution
+        let resolved = state.tick_metastability();
+        assert!(!resolved);
+        assert_eq!(state.metastable_countdown, 4);
+
+        // Tick to resolution
+        state.metastable_countdown = 1;
+        let resolved = state.tick_metastability();
+        assert!(resolved);
+        assert!(!state.is_metastable());
+        assert!(state.get_resolved_value().is_some());
     }
 }

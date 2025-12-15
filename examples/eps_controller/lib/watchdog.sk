@@ -1,0 +1,400 @@
+// ============================================================================
+// Watchdog Timer
+// Safety Mechanism for Control Flow Monitoring
+// ============================================================================
+//
+// This module implements a watchdog timer for safety-critical control loops.
+// The watchdog ensures that the control software is executing correctly and
+// hasn't hung, deadlocked, or crashed.
+//
+// Watchdog Principles:
+// - Timer counts down from initial value
+// - Software must "kick" (refresh) the watchdog periodically
+// - If timer reaches zero, timeout occurs (fault detected)
+// - Timeout indicates control loop failure
+//
+// Expected Diagnostic Coverage: 90%+ for control flow faults
+//
+// ASIL-D systems typically require:
+// - Window watchdog (too early refresh is also an error)
+// - Challenge-response protocol (to detect stuck software)
+// - Multiple watchdogs for different safety functions
+
+// ============================================================================
+// Simple Watchdog Timer
+// ============================================================================
+//
+// Basic countdown watchdog with configurable timeout.
+// Software must refresh before timeout expires.
+
+entity Watchdog<TIMEOUT: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    // Input: Watchdog refresh (kick) signal
+    in  refresh: bit,
+
+    // Output: Timeout flag (watchdog expired)
+    out timeout: bit,
+
+    // Output: Current counter value (for monitoring)
+    out count: bit[32],
+}
+
+impl Watchdog<TIMEOUT, 'clk> {
+    // ========================================================================
+    // Countdown Counter
+    // ========================================================================
+
+    reg counter: bit[32]<'clk> = TIMEOUT;
+
+    always @(posedge clk) {
+        if reset {
+            // Reset: Load initial timeout value
+            counter <= TIMEOUT;
+        } else if refresh {
+            // Refresh: Reload counter
+            counter <= TIMEOUT;
+        } else if counter > 0 {
+            // Count down
+            counter <= counter - 1;
+        }
+        // else: counter stays at 0 (timeout condition)
+    }
+
+    // ========================================================================
+    // Timeout Detection
+    // ========================================================================
+
+    // Timeout occurs when counter reaches zero
+    timeout = (counter == 0);
+
+    // Output current count for monitoring
+    count = counter;
+}
+
+
+// ============================================================================
+// Window Watchdog Timer (ASIL-D Compliant)
+// ============================================================================
+//
+// Enhanced watchdog with window checking:
+// - Refresh too early = error (software running too fast, may have jumped)
+// - Refresh too late = error (software running too slow or hung)
+// - Refresh in window = OK
+//
+// This provides better diagnostic coverage than simple watchdog because it
+// detects both control flow acceleration and deceleration.
+//
+// Window: [window_min, window_max]
+// - Refresh before window_min: early error
+// - Refresh after window_max: timeout error
+// - Refresh within window: OK
+
+entity WindowWatchdog<WINDOW_MIN: nat, WINDOW_MAX: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    in  refresh: bit,
+
+    out timeout: bit,           // Refresh too late
+    out early_refresh: bit,     // Refresh too early
+    out count: bit[32],
+}
+
+impl WindowWatchdog<WINDOW_MIN, WINDOW_MAX, 'clk> {
+    // ========================================================================
+    // Validation
+    // ========================================================================
+
+    // Ensure window is valid
+    static_assert(WINDOW_MIN < WINDOW_MAX, "Window min must be less than max");
+    static_assert(WINDOW_MAX > 0, "Window max must be positive");
+
+    // ========================================================================
+    // Countdown Counter
+    // ========================================================================
+
+    reg counter: bit[32]<'clk> = WINDOW_MAX;
+
+    // ========================================================================
+    // Window Check Logic
+    // ========================================================================
+
+    // Early refresh: refresh when counter > WINDOW_MAX - WINDOW_MIN
+    signal is_early: bit = counter > (WINDOW_MAX - WINDOW_MIN);
+
+    // Timeout: counter reaches zero
+    signal is_timeout: bit = (counter == 0);
+
+    // Valid window: counter in range [WINDOW_MIN, WINDOW_MAX - WINDOW_MIN]
+    signal in_window: bit = !is_early && !is_timeout;
+
+    // ========================================================================
+    // State Machine
+    // ========================================================================
+
+    always @(posedge clk) {
+        if reset {
+            counter <= WINDOW_MAX;
+        } else if refresh {
+            // Refresh occurred
+            if in_window {
+                // Valid refresh: reload counter
+                counter <= WINDOW_MAX;
+            }
+            // else: invalid refresh (too early or too late)
+            // Keep counter value to maintain error state
+        } else if counter > 0 {
+            // Count down
+            counter <= counter - 1;
+        }
+    }
+
+    // ========================================================================
+    // Error Outputs
+    // ========================================================================
+
+    // Latch early_refresh error
+    reg early_error: bit<'clk> = 0;
+
+    always @(posedge clk) {
+        if reset {
+            early_error <= 0;
+        } else if refresh && is_early {
+            early_error <= 1;
+        }
+        // Once set, stays set until reset
+    }
+
+    timeout = is_timeout;
+    early_refresh = early_error;
+    count = counter;
+}
+
+
+// ============================================================================
+// Challenge-Response Watchdog (Maximum Security)
+// ============================================================================
+//
+// Most secure watchdog for ASIL-D:
+// - Watchdog provides a random challenge
+// - Software must calculate correct response
+// - Incorrect response = error (software not functioning correctly)
+//
+// This prevents:
+// - Simple stuck software (always writing same value)
+// - Runaway pointers (accidentally writing to watchdog)
+// - Malicious or corrupted software
+//
+// Challenge-Response Algorithm (simplified):
+// - Challenge: C (provided by watchdog)
+// - Expected Response: R = f(C) (where f is known function)
+// - Software must calculate and provide R
+// - Watchdog verifies R == f(C)
+
+entity ChallengeResponseWatchdog<TIMEOUT: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    // Output: Challenge value (software must respond to this)
+    out challenge: bit[16],
+
+    // Input: Response value (calculated by software)
+    in  response: bit[16],
+
+    // Input: Response valid (software is submitting response)
+    in  response_valid: bit,
+
+    // Output: Timeout (no valid response in time)
+    out timeout: bit,
+
+    // Output: Incorrect response (software gave wrong answer)
+    out incorrect_response: bit,
+
+    out count: bit[32],
+}
+
+impl ChallengeResponseWatchdog<TIMEOUT, 'clk> {
+    // ========================================================================
+    // Challenge Generation (Linear Feedback Shift Register)
+    // ========================================================================
+    //
+    // Generate pseudo-random challenges using LFSR.
+    // This ensures different challenge each refresh cycle.
+
+    reg lfsr: bit[16]<'clk> = 0xACE1;  // Non-zero seed
+
+    always @(posedge clk) {
+        if reset {
+            lfsr <= 0xACE1;
+        } else {
+            // LFSR feedback: x^16 + x^15 + x^13 + x^4 + 1
+            let feedback: bit = lfsr[15] ^ lfsr[14] ^ lfsr[12] ^ lfsr[3];
+            lfsr <= {lfsr[14:0], feedback};
+        }
+    }
+
+    challenge = lfsr;
+
+    // ========================================================================
+    // Expected Response Calculation
+    // ========================================================================
+    //
+    // Define the challenge-response function.
+    // In this example: response = challenge XOR 0xDEAD
+    // (In practice, use a more complex function)
+
+    const SECRET_KEY: bit[16] = 0xDEAD;
+
+    signal expected_response: bit[16] = challenge ^ SECRET_KEY;
+
+    // ========================================================================
+    // Response Validation
+    // ========================================================================
+
+    signal response_correct: bit = (response == expected_response);
+
+    // ========================================================================
+    // Countdown Timer
+    // ========================================================================
+
+    reg counter: bit[32]<'clk> = TIMEOUT;
+
+    always @(posedge clk) {
+        if reset {
+            counter <= TIMEOUT;
+        } else if response_valid {
+            if response_correct {
+                // Correct response: reload counter
+                counter <= TIMEOUT;
+            }
+            // Incorrect response: don't reload (will timeout)
+        } else if counter > 0 {
+            counter <= counter - 1;
+        }
+    }
+
+    // ========================================================================
+    // Error Detection
+    // ========================================================================
+
+    timeout = (counter == 0);
+
+    // Latch incorrect response error
+    reg incorrect_resp: bit<'clk> = 0;
+
+    always @(posedge clk) {
+        if reset {
+            incorrect_resp <= 0;
+        } else if response_valid && !response_correct {
+            incorrect_resp <= 1;
+        }
+    }
+
+    incorrect_response = incorrect_resp;
+    count = counter;
+}
+
+
+// ============================================================================
+// Multi-Stage Watchdog (Hierarchical Monitoring)
+// ============================================================================
+//
+// Complex safety systems often have multiple levels of watchdog:
+// - Fast watchdog: Monitors critical inner loop (e.g., 1ms)
+// - Slow watchdog: Monitors outer control loop (e.g., 10ms)
+// - System watchdog: Monitors overall health (e.g., 100ms)
+//
+// This provides defense-in-depth: multiple independent monitors.
+
+entity MultiStageWatchdog<FAST_TIMEOUT: nat, SLOW_TIMEOUT: nat, SYS_TIMEOUT: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    in  fast_refresh: bit,   // Inner loop refresh
+    in  slow_refresh: bit,   // Outer loop refresh
+    in  sys_refresh: bit,    // System health refresh
+
+    out fast_timeout: bit,
+    out slow_timeout: bit,
+    out sys_timeout: bit,
+
+    out any_timeout: bit,    // Logical OR of all timeouts
+}
+
+impl MultiStageWatchdog<FAST_TIMEOUT, SLOW_TIMEOUT, SYS_TIMEOUT, 'clk> {
+    // ========================================================================
+    // Instantiate Three Watchdogs
+    // ========================================================================
+
+    inst fast_wd: Watchdog<FAST_TIMEOUT, 'clk> {
+        clk: clk,
+        reset: reset,
+        refresh: fast_refresh,
+    };
+
+    inst slow_wd: Watchdog<SLOW_TIMEOUT, 'clk> {
+        clk: clk,
+        reset: reset,
+        refresh: slow_refresh,
+    };
+
+    inst sys_wd: Watchdog<SYS_TIMEOUT, 'clk> {
+        clk: clk,
+        reset: reset,
+        refresh: sys_refresh,
+    };
+
+    // ========================================================================
+    // Aggregate Outputs
+    // ========================================================================
+
+    fast_timeout = fast_wd.timeout;
+    slow_timeout = slow_wd.timeout;
+    sys_timeout = sys_wd.timeout;
+
+    // Any timeout triggers overall fault
+    any_timeout = fast_wd.timeout || slow_wd.timeout || sys_wd.timeout;
+}
+
+
+// ============================================================================
+// Watchdog with Safe State Trigger
+// ============================================================================
+//
+// Watchdog that automatically triggers safe state on timeout.
+// This is the typical integration point with the rest of the safety system.
+
+entity WatchdogWithSafeState<TIMEOUT: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    in  refresh: bit,
+
+    out timeout: bit,
+    out safe_state_request: bit,  // Request system enter safe state
+}
+
+impl WatchdogWithSafeState<TIMEOUT, 'clk> {
+    inst wd: Watchdog<TIMEOUT, 'clk> {
+        clk: clk,
+        reset: reset,
+        refresh: refresh,
+    };
+
+    timeout = wd.timeout;
+
+    // Safe state request latches on timeout
+    reg safe_state: bit<'clk> = 0;
+
+    always @(posedge clk) {
+        if reset {
+            safe_state <= 0;
+        } else if wd.timeout {
+            safe_state <= 1;
+        }
+    }
+
+    safe_state_request = safe_state;
+}

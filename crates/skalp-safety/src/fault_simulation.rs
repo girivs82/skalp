@@ -25,26 +25,123 @@ use std::time::Duration;
 // ============================================================================
 
 /// Types of faults that can be injected at primitives
+///
+/// This enum provides a high-level classification of fault types for safety
+/// analysis. These map to the more detailed fault types in `skalp_sim::sir::FaultType`
+/// for actual simulation.
+///
+/// # Fault Categories
+///
+/// 1. **Permanent Faults**: Manufacturing defects, wear-out
+///    - StuckAt0, StuckAt1, Bridging, Open
+///
+/// 2. **Transient Faults**: Radiation, EMI, power transients
+///    - Transient, MultiBitUpset
+///
+/// 3. **Timing Violations**: Design margins, temperature, voltage
+///    - SetupViolation, HoldViolation, Metastability
+///
+/// 4. **Power-Related**: Digital effects of analog power issues
+///    - VoltageDropout, GroundBounce
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FaultType {
+    // ========================================================================
+    // Permanent/Hard Faults (Manufacturing, Wear-out)
+    // ========================================================================
+
     /// Output stuck at logic 0
+    /// Cause: Manufacturing defect, oxide breakdown, electromigration
     StuckAt0,
+
     /// Output stuck at logic 1
+    /// Cause: Manufacturing defect, oxide breakdown, electromigration
     StuckAt1,
-    /// Single-bit transient (SET/SEU)
-    Transient,
-    /// Multi-bit upset (for memory cells)
-    MultiBitUpset,
-    /// Timing fault (setup/hold violation)
-    TimingViolation,
+
     /// Bridging fault (short between signals)
+    /// Cause: Metal bridging, contamination, ESD damage
     Bridging,
+
     /// Open fault (signal disconnected)
+    /// Cause: Broken via, cracked metal, bond wire failure
     Open,
+
+    // ========================================================================
+    // Transient/Soft Faults (Radiation, EMI)
+    // ========================================================================
+
+    /// Single-bit transient (SET/SEU)
+    /// Cause: Single-Event Upset from radiation, alpha particles
+    Transient,
+
+    /// Multi-bit upset (for memory cells)
+    /// Cause: High-energy particle affecting multiple bits
+    MultiBitUpset,
+
+    // ========================================================================
+    // Timing Violations
+    // ========================================================================
+
+    /// Setup time violation
+    /// Cause: Data path too slow, clock arrives too early
+    /// Effect: FF captures previous data value instead of current
+    SetupViolation,
+
+    /// Hold time violation
+    /// Cause: Data path too fast, clock arrives too late
+    /// Effect: FF captures corrupted/inverted value
+    HoldViolation,
+
+    /// Metastability
+    /// Cause: Async input, clock domain crossing
+    /// Effect: FF output undefined for N cycles, then resolves randomly
+    Metastability,
+
+    /// Generic timing violation (legacy, use SetupViolation/HoldViolation instead)
+    #[deprecated(note = "Use SetupViolation or HoldViolation for more precise analysis")]
+    TimingViolation,
+
+    // ========================================================================
+    // Power-Related Faults (Digital Effects)
+    // ========================================================================
+
+    /// Voltage dropout / IR drop
+    /// Cause: Sudden current demand, inadequate power grid
+    /// Effect: Regional setup violations (modeled as SetupViolation on affected FFs)
+    VoltageDropout,
+
+    /// Ground bounce
+    /// Cause: Simultaneous switching noise (SSN)
+    /// Effect: Transient glitches on outputs
+    GroundBounce,
+
+    /// Crosstalk-induced glitch
+    /// Cause: Capacitive coupling from adjacent signal
+    /// Effect: Brief glitch on victim signal
+    CrosstalkGlitch,
+
+    // ========================================================================
+    // Clock Faults
+    // ========================================================================
+
+    /// Clock glitch (extra clock edge)
+    /// Cause: EMI, power supply noise
+    /// Effect: FFs may capture data twice
+    ClockGlitch,
 }
 
 impl FaultType {
-    /// Get all standard fault types for exhaustive analysis
+    /// Get the minimal standard fault set for basic analysis
+    ///
+    /// This set covers the most common failure modes and is sufficient
+    /// for initial design validation. Includes only stuck-at faults.
+    pub fn minimal_set() -> Vec<FaultType> {
+        vec![FaultType::StuckAt0, FaultType::StuckAt1]
+    }
+
+    /// Get the standard fault set for comprehensive stuck-at analysis
+    ///
+    /// This is the traditional fault set used in ATPG and DFT.
+    /// Adds transient faults to the minimal set.
     pub fn standard_set() -> Vec<FaultType> {
         vec![
             FaultType::StuckAt0,
@@ -53,28 +150,231 @@ impl FaultType {
         ]
     }
 
-    /// Get extended fault types including timing and bridging
-    pub fn extended_set() -> Vec<FaultType> {
+    /// Get the timing-aware fault set
+    ///
+    /// Adds setup/hold violations for timing-critical designs.
+    /// Use this for designs with tight timing margins or ASIL-D requirements.
+    pub fn timing_aware_set() -> Vec<FaultType> {
         vec![
             FaultType::StuckAt0,
             FaultType::StuckAt1,
             FaultType::Transient,
-            FaultType::TimingViolation,
-            FaultType::Open,
+            FaultType::SetupViolation,
+            FaultType::HoldViolation,
         ]
     }
 
-    /// Human-readable name
+    /// Get the extended fault set including all digital-level faults
+    ///
+    /// Comprehensive set for ASIL-D certification with full coverage of:
+    /// - Permanent faults (stuck-at, open)
+    /// - Transient faults (SEU, MBU)
+    /// - Timing violations (setup, hold, metastability)
+    /// - Power effects (voltage dropout, ground bounce)
+    pub fn extended_set() -> Vec<FaultType> {
+        vec![
+            // Permanent
+            FaultType::StuckAt0,
+            FaultType::StuckAt1,
+            FaultType::Open,
+            // Transient
+            FaultType::Transient,
+            FaultType::MultiBitUpset,
+            // Timing
+            FaultType::SetupViolation,
+            FaultType::HoldViolation,
+            FaultType::Metastability,
+            // Power
+            FaultType::VoltageDropout,
+            FaultType::GroundBounce,
+        ]
+    }
+
+    /// Get the ASIL-D comprehensive fault set
+    ///
+    /// Maximum coverage for ISO 26262 ASIL-D certification.
+    /// Includes all fault types that can be modeled at the digital level.
+    pub fn asil_d_set() -> Vec<FaultType> {
+        vec![
+            // Permanent faults
+            FaultType::StuckAt0,
+            FaultType::StuckAt1,
+            FaultType::Bridging,
+            FaultType::Open,
+            // Transient faults
+            FaultType::Transient,
+            FaultType::MultiBitUpset,
+            // Timing violations
+            FaultType::SetupViolation,
+            FaultType::HoldViolation,
+            FaultType::Metastability,
+            // Power-related
+            FaultType::VoltageDropout,
+            FaultType::GroundBounce,
+            FaultType::CrosstalkGlitch,
+            // Clock faults
+            FaultType::ClockGlitch,
+        ]
+    }
+
+    /// Human-readable name for reports
     pub fn name(&self) -> &'static str {
         match self {
             FaultType::StuckAt0 => "stuck_at_0",
             FaultType::StuckAt1 => "stuck_at_1",
             FaultType::Transient => "transient",
             FaultType::MultiBitUpset => "multi_bit_upset",
+            FaultType::SetupViolation => "setup_violation",
+            FaultType::HoldViolation => "hold_violation",
+            FaultType::Metastability => "metastability",
+            #[allow(deprecated)]
             FaultType::TimingViolation => "timing_violation",
             FaultType::Bridging => "bridging",
             FaultType::Open => "open",
+            FaultType::VoltageDropout => "voltage_dropout",
+            FaultType::GroundBounce => "ground_bounce",
+            FaultType::CrosstalkGlitch => "crosstalk_glitch",
+            FaultType::ClockGlitch => "clock_glitch",
         }
+    }
+
+    /// Human-readable display name for UI
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            FaultType::StuckAt0 => "Stuck-at-0",
+            FaultType::StuckAt1 => "Stuck-at-1",
+            FaultType::Transient => "Transient (SEU)",
+            FaultType::MultiBitUpset => "Multi-bit Upset",
+            FaultType::SetupViolation => "Setup Violation",
+            FaultType::HoldViolation => "Hold Violation",
+            FaultType::Metastability => "Metastability",
+            #[allow(deprecated)]
+            FaultType::TimingViolation => "Timing Violation",
+            FaultType::Bridging => "Bridging Fault",
+            FaultType::Open => "Open Fault",
+            FaultType::VoltageDropout => "Voltage Dropout",
+            FaultType::GroundBounce => "Ground Bounce",
+            FaultType::CrosstalkGlitch => "Crosstalk Glitch",
+            FaultType::ClockGlitch => "Clock Glitch",
+        }
+    }
+
+    /// Get the fault category for grouping in reports
+    pub fn category(&self) -> FaultCategory {
+        match self {
+            FaultType::StuckAt0 | FaultType::StuckAt1 | FaultType::Bridging | FaultType::Open => {
+                FaultCategory::Permanent
+            }
+            FaultType::Transient | FaultType::MultiBitUpset => FaultCategory::Transient,
+            FaultType::SetupViolation
+            | FaultType::HoldViolation
+            | FaultType::Metastability => FaultCategory::Timing,
+            #[allow(deprecated)]
+            FaultType::TimingViolation => FaultCategory::Timing,
+            FaultType::VoltageDropout | FaultType::GroundBounce | FaultType::CrosstalkGlitch => {
+                FaultCategory::Power
+            }
+            FaultType::ClockGlitch => FaultCategory::Clock,
+        }
+    }
+
+    /// Check if this fault type is applicable to sequential elements (FFs)
+    pub fn is_sequential_fault(&self) -> bool {
+        matches!(
+            self,
+            FaultType::SetupViolation
+                | FaultType::HoldViolation
+                | FaultType::Metastability
+                | FaultType::ClockGlitch
+        )
+    }
+
+    /// Check if this fault type is a regional fault (affects multiple primitives)
+    pub fn is_regional_fault(&self) -> bool {
+        matches!(
+            self,
+            FaultType::VoltageDropout | FaultType::GroundBounce | FaultType::MultiBitUpset
+        )
+    }
+}
+
+/// Category of fault for grouping in reports
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FaultCategory {
+    /// Permanent/hard faults (manufacturing defects, wear-out)
+    Permanent,
+    /// Transient/soft faults (radiation, EMI)
+    Transient,
+    /// Timing violations (design margins, temperature, voltage)
+    Timing,
+    /// Power-related faults (voltage, ground, crosstalk)
+    Power,
+    /// Clock-related faults (glitches, jitter)
+    Clock,
+}
+
+impl FaultCategory {
+    /// Human-readable name
+    pub fn name(&self) -> &'static str {
+        match self {
+            FaultCategory::Permanent => "Permanent",
+            FaultCategory::Transient => "Transient",
+            FaultCategory::Timing => "Timing",
+            FaultCategory::Power => "Power",
+            FaultCategory::Clock => "Clock",
+        }
+    }
+
+    /// Description for reports
+    pub fn description(&self) -> &'static str {
+        match self {
+            FaultCategory::Permanent => "Manufacturing defects and wear-out failures",
+            FaultCategory::Transient => "Radiation-induced and EMI-related upsets",
+            FaultCategory::Timing => "Setup/hold violations and metastability",
+            FaultCategory::Power => "Voltage droop, ground bounce, and crosstalk",
+            FaultCategory::Clock => "Clock tree glitches and jitter",
+        }
+    }
+}
+
+/// Definition of a power region for regional fault injection
+///
+/// Power regions group primitives that share power/ground rails and are
+/// susceptible to correlated failures (e.g., voltage dropout affecting
+/// all FFs in a region simultaneously).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PowerRegion {
+    /// Name of the power region
+    pub name: String,
+    /// Description
+    pub description: Option<String>,
+    /// Glob pattern matching primitives in this region
+    pub primitive_pattern: String,
+    /// Explicit list of primitive paths (if pattern not sufficient)
+    pub explicit_primitives: Vec<DesignRef>,
+}
+
+impl PowerRegion {
+    /// Create a new power region with a glob pattern
+    pub fn new(name: &str, pattern: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: None,
+            primitive_pattern: pattern.to_string(),
+            explicit_primitives: Vec::new(),
+        }
+    }
+
+    /// Add description
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = Some(desc.to_string());
+        self
+    }
+
+    /// Add explicit primitive
+    pub fn with_primitive(mut self, prim: DesignRef) -> Self {
+        self.explicit_primitives.push(prim);
+        self
     }
 }
 
@@ -1363,5 +1663,252 @@ mod tests {
 
         assert!(matches!(sensor_disagree, EffectCondition::OperatorCompare(_, _, _)));
         assert!(matches!(total_disagree, EffectCondition::And(_)));
+    }
+
+    // ========================================================================
+    // Extended Fault Type Tests
+    // ========================================================================
+
+    #[test]
+    fn test_timing_violation_fault_types() {
+        // Setup violation
+        assert_eq!(FaultType::SetupViolation.name(), "setup_violation");
+        assert_eq!(FaultType::SetupViolation.category(), FaultCategory::Timing);
+
+        // Hold violation
+        assert_eq!(FaultType::HoldViolation.name(), "hold_violation");
+        assert_eq!(FaultType::HoldViolation.category(), FaultCategory::Timing);
+
+        // Metastability
+        assert_eq!(FaultType::Metastability.name(), "metastability");
+        assert_eq!(FaultType::Metastability.category(), FaultCategory::Timing);
+    }
+
+    #[test]
+    fn test_power_effect_fault_types() {
+        // Voltage dropout
+        assert_eq!(FaultType::VoltageDropout.name(), "voltage_dropout");
+        assert_eq!(FaultType::VoltageDropout.category(), FaultCategory::Power);
+
+        // Ground bounce
+        assert_eq!(FaultType::GroundBounce.name(), "ground_bounce");
+        assert_eq!(FaultType::GroundBounce.category(), FaultCategory::Power);
+
+        // Crosstalk
+        assert_eq!(FaultType::CrosstalkGlitch.name(), "crosstalk_glitch");
+        assert_eq!(FaultType::CrosstalkGlitch.category(), FaultCategory::Power);
+    }
+
+    #[test]
+    fn test_clock_fault_types() {
+        assert_eq!(FaultType::ClockGlitch.name(), "clock_glitch");
+        assert_eq!(FaultType::ClockGlitch.category(), FaultCategory::Clock);
+    }
+
+    #[test]
+    fn test_other_fault_types() {
+        // Open fault
+        assert_eq!(FaultType::Open.name(), "open");
+        assert_eq!(FaultType::Open.category(), FaultCategory::Permanent);
+
+        // Multi-bit upset
+        assert_eq!(FaultType::MultiBitUpset.name(), "multi_bit_upset");
+        assert_eq!(FaultType::MultiBitUpset.category(), FaultCategory::Transient);
+
+        // Bridging fault
+        assert_eq!(FaultType::Bridging.name(), "bridging");
+        assert_eq!(FaultType::Bridging.category(), FaultCategory::Permanent);
+    }
+
+    // ========================================================================
+    // Fault Category Tests
+    // ========================================================================
+
+    #[test]
+    fn test_fault_category_names() {
+        assert_eq!(FaultCategory::Permanent.name(), "Permanent");
+        assert_eq!(FaultCategory::Transient.name(), "Transient");
+        assert_eq!(FaultCategory::Timing.name(), "Timing");
+        assert_eq!(FaultCategory::Power.name(), "Power");
+        assert_eq!(FaultCategory::Clock.name(), "Clock");
+    }
+
+    #[test]
+    fn test_fault_category_descriptions() {
+        assert!(FaultCategory::Permanent.description().contains("Manufacturing"));
+        assert!(FaultCategory::Transient.description().contains("Radiation"));
+        assert!(FaultCategory::Timing.description().contains("Setup/hold"));
+        assert!(FaultCategory::Power.description().contains("Voltage"));
+        assert!(FaultCategory::Clock.description().contains("Clock"));
+    }
+
+    // ========================================================================
+    // Fault Set Tests
+    // ========================================================================
+
+    #[test]
+    fn test_minimal_fault_set() {
+        let set = FaultType::minimal_set();
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&FaultType::StuckAt0));
+        assert!(set.contains(&FaultType::StuckAt1));
+    }
+
+    #[test]
+    fn test_standard_fault_set() {
+        let set = FaultType::standard_set();
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&FaultType::StuckAt0));
+        assert!(set.contains(&FaultType::StuckAt1));
+        assert!(set.contains(&FaultType::Transient));
+    }
+
+    #[test]
+    fn test_timing_aware_fault_set() {
+        let set = FaultType::timing_aware_set();
+        assert_eq!(set.len(), 5);
+        assert!(set.contains(&FaultType::StuckAt0));
+        assert!(set.contains(&FaultType::StuckAt1));
+        assert!(set.contains(&FaultType::Transient));
+        assert!(set.contains(&FaultType::SetupViolation));
+        assert!(set.contains(&FaultType::HoldViolation));
+    }
+
+    #[test]
+    fn test_extended_fault_set() {
+        let set = FaultType::extended_set();
+        // Should include permanent, transient, timing, and power faults
+        assert!(set.len() >= 10);
+        // Check key fault types
+        assert!(set.contains(&FaultType::StuckAt0));
+        assert!(set.contains(&FaultType::Open));
+        assert!(set.contains(&FaultType::Transient));
+        assert!(set.contains(&FaultType::MultiBitUpset));
+        assert!(set.contains(&FaultType::SetupViolation));
+        assert!(set.contains(&FaultType::Metastability));
+        assert!(set.contains(&FaultType::VoltageDropout));
+        assert!(set.contains(&FaultType::GroundBounce));
+    }
+
+    #[test]
+    fn test_asil_d_fault_set() {
+        let set = FaultType::asil_d_set();
+        // ASIL-D requires comprehensive coverage
+        assert!(set.len() >= 12);
+        // Must include bridging (required for ASIL-D)
+        assert!(set.contains(&FaultType::Bridging));
+        // Must include timing violations
+        assert!(set.contains(&FaultType::SetupViolation));
+        assert!(set.contains(&FaultType::HoldViolation));
+        assert!(set.contains(&FaultType::Metastability));
+        // Must include power effects
+        assert!(set.contains(&FaultType::VoltageDropout));
+        assert!(set.contains(&FaultType::GroundBounce));
+    }
+
+    // ========================================================================
+    // Power Region Tests
+    // ========================================================================
+
+    #[test]
+    fn test_power_region_creation() {
+        let region = PowerRegion::new("core_vdd", "top.cpu.*");
+        assert_eq!(region.name, "core_vdd");
+        assert_eq!(region.primitive_pattern, "top.cpu.*");
+        assert!(region.description.is_none());
+        assert!(region.explicit_primitives.is_empty());
+    }
+
+    #[test]
+    fn test_power_region_with_description() {
+        let region = PowerRegion::new("io_vdd", "top.io.*")
+            .with_description("I/O ring power domain");
+        assert_eq!(region.name, "io_vdd");
+        assert_eq!(region.description, Some("I/O ring power domain".to_string()));
+    }
+
+    #[test]
+    fn test_power_region_with_primitives() {
+        let region = PowerRegion::new("analog_vdd", "top.adc.*")
+            .with_primitive(DesignRef::from_str("top.adc::dac_core"))
+            .with_primitive(DesignRef::from_str("top.adc::comparator"));
+
+        assert_eq!(region.explicit_primitives.len(), 2);
+        assert_eq!(
+            region.explicit_primitives[0].to_string(),
+            "top.adc::dac_core"
+        );
+    }
+
+    // ========================================================================
+    // Fault Site with Extended Types Tests
+    // ========================================================================
+
+    #[test]
+    fn test_fault_site_timing_violation() {
+        let path = DesignRef::from_str("top.cpu.reg_file::ff_0");
+        let site = FaultSite::new(path, FaultType::SetupViolation);
+        assert_eq!(site.id(), "top.cpu.reg_file::ff_0@setup_violation");
+    }
+
+    #[test]
+    fn test_fault_site_power_effect() {
+        let path = DesignRef::from_str("top.mem.bank0::sram_cell");
+        let site = FaultSite::new(path.clone(), FaultType::VoltageDropout);
+        assert_eq!(site.id(), "top.mem.bank0::sram_cell@voltage_dropout");
+
+        let site2 = FaultSite::new(path, FaultType::GroundBounce);
+        assert_eq!(site2.id(), "top.mem.bank0::sram_cell@ground_bounce");
+    }
+
+    #[test]
+    fn test_fault_site_metastability_with_bit() {
+        let path = DesignRef::from_str("top.sync::synchronizer_ff");
+        let site = FaultSite::new(path, FaultType::Metastability).with_bit(3);
+        assert_eq!(site.id(), "top.sync::synchronizer_ff@metastability[3]");
+    }
+
+    // ========================================================================
+    // Category-based Fault Analysis Tests
+    // ========================================================================
+
+    #[test]
+    fn test_fault_type_category_mapping() {
+        // Verify all fault types have correct categories
+        let permanent_faults = vec![
+            FaultType::StuckAt0,
+            FaultType::StuckAt1,
+            FaultType::Bridging,
+            FaultType::Open,
+        ];
+        for ft in permanent_faults {
+            assert_eq!(ft.category(), FaultCategory::Permanent, "{:?}", ft);
+        }
+
+        let transient_faults = vec![FaultType::Transient, FaultType::MultiBitUpset];
+        for ft in transient_faults {
+            assert_eq!(ft.category(), FaultCategory::Transient, "{:?}", ft);
+        }
+
+        let timing_faults = vec![
+            FaultType::SetupViolation,
+            FaultType::HoldViolation,
+            FaultType::Metastability,
+            FaultType::TimingViolation,
+        ];
+        for ft in timing_faults {
+            assert_eq!(ft.category(), FaultCategory::Timing, "{:?}", ft);
+        }
+
+        let power_faults = vec![
+            FaultType::VoltageDropout,
+            FaultType::GroundBounce,
+            FaultType::CrosstalkGlitch,
+        ];
+        for ft in power_faults {
+            assert_eq!(ft.category(), FaultCategory::Power, "{:?}", ft);
+        }
+
+        assert_eq!(FaultType::ClockGlitch.category(), FaultCategory::Clock);
     }
 }

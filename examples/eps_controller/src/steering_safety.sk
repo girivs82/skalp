@@ -1,0 +1,329 @@
+// ============================================================================
+// Electric Power Steering (EPS) Safety Goals
+// ISO 26262 ASIL-D Safety Requirements
+// ============================================================================
+//
+// This file defines the safety goals for an Electric Power Steering controller.
+// The steering torque assist function is ASIL-D because incorrect torque can
+// directly lead to vehicle accidents.
+//
+// Key Safety Requirements:
+// - Unintended torque must be detected within 100ms
+// - Loss of torque assist must not cause jerky behavior
+// - Silent corruption (undetected errors) must be < 1%
+// - All sensor failures must be detected within 3 cycles
+
+// ============================================================================
+// Safety Goal: Steering Torque Control (ASIL-D)
+// ============================================================================
+//
+// This safety goal monitors the steering torque assist function. The steering
+// torque is calculated from three redundant torque sensors (TMR for ASIL-D).
+//
+// Failure Effects:
+// 1. Unintended Torque: System applies assist when driver didn't request it
+//    - Can cause unexpected vehicle movement
+//    - ASIL-D severity (S3)
+//
+// 2. Loss of Assist: System fails to provide requested assist torque
+//    - Driver experiences sudden increase in steering effort
+//    - ASIL-D severity (S3) if sustained
+//
+// 3. Silent Corruption: Internal computation errors not detected
+//    - Can lead to delayed detection of failures
+//    - ASIL-D severity (S3)
+//
+// 4. Sensor Disagreement: TMR sensors disagree beyond tolerance
+//    - May indicate sensor failure or EMI
+//    - ASIL-C severity (S2) - detected, but needs handling
+//
+// 5. Watchdog Timeout: Safety watchdog not refreshed
+//    - Indicates control loop failure
+//    - ASIL-D severity (S3)
+
+safety_goal SteeringTorqueSafety: ASIL_D {
+    // ========================================================================
+    // Primary Interface Signals
+    // ========================================================================
+
+    // Input: Three redundant torque sensors (TMR for ASIL-D)
+    in  torque_sensor_a: logic[16],  // Primary sensor
+    in  torque_sensor_b: logic[16],  // Secondary sensor
+    in  torque_sensor_c: logic[16],  // Tertiary sensor
+
+    // Input: Driver handwheel angle
+    in  handwheel_angle: logic[12],
+
+    // Input: Vehicle speed (for speed-dependent assist)
+    in  vehicle_speed: logic[12],
+
+    // Output: Motor torque command to steering actuator
+    out motor_torque: logic[16],
+
+    // Output: Fault detection indicator
+    #[detection]
+    out fault_detected: logic,
+
+    // Output: Safe state indicator (limp-home mode)
+    #[safe_state]
+    out safe_mode: logic,
+
+    // Output: Diagnostic status for system monitor
+    out diag_status: logic[8],
+
+    // ========================================================================
+    // Internal Observation Points (for Safety Analysis)
+    // ========================================================================
+
+    // TMR voted torque value
+    signal voted_torque: logic[16],
+
+    // Expected torque from golden model (for comparison)
+    signal expected_torque: logic[16],
+
+    // Actual computed torque from primary datapath
+    signal actual_torque: logic[16],
+
+    // Control state machine state
+    signal ctrl_state: logic[4],
+
+    // Watchdog counter
+    signal watchdog_count: logic[12],
+
+    // CRC value for communication integrity
+    signal comm_crc: logic[8],
+
+    // ========================================================================
+    // Constants and Thresholds
+    // ========================================================================
+
+    // Maximum allowed deviation between TMR sensors (in torque units)
+    const sensor_tolerance: nat = 50,
+
+    // Maximum torque value (saturation limit)
+    const max_torque: nat = 32000,
+
+    // Minimum torque for "no assist" detection
+    const min_assist_torque: nat = 100,
+
+    // Watchdog timeout threshold (in cycles)
+    const watchdog_timeout: nat = 1000,
+
+    // Number of cycles to observe stuck condition
+    const stuck_threshold: nat = 100,
+
+    // Expected state transitions per second
+    const min_state_changes: nat = 10,
+
+    // ========================================================================
+    // Failure Effects (Observable at System Level)
+    // ========================================================================
+
+    failure_effects {
+        // --------------------------------------------------------------------
+        // Failure Effect 1: Unintended Torque
+        // --------------------------------------------------------------------
+        // Motor applies significant torque when:
+        // - Driver request is zero (all sensors show zero)
+        // - Vehicle is moving (not parked)
+        // This is the most critical failure: can cause loss of control
+
+        unintended_torque:
+            motor_torque > min_assist_torque &&
+            @max_deviation(torque_sensor_a, torque_sensor_b, torque_sensor_c) < sensor_tolerance &&
+            voted_torque < min_assist_torque &&
+            vehicle_speed > 0,
+
+        // --------------------------------------------------------------------
+        // Failure Effect 2: Loss of Assist (Sustained)
+        // --------------------------------------------------------------------
+        // Motor fails to provide torque when:
+        // - Driver is requesting assist (sensors show non-zero)
+        // - Motor output remains at zero
+        // - Condition persists for more than 10 cycles
+        // This causes sudden increase in steering effort
+
+        loss_of_assist:
+            motor_torque == 0 &&
+            voted_torque > min_assist_torque &&
+            !safe_mode
+            for > 10_cycles,
+
+        // --------------------------------------------------------------------
+        // Failure Effect 3: Silent Corruption
+        // --------------------------------------------------------------------
+        // Internal computation produces wrong result:
+        // - Actual torque differs from expected (golden model)
+        // - Fault indicator is NOT asserted
+        // This is dangerous because error goes undetected
+
+        silent_corruption:
+            @abs_diff(actual_torque, expected_torque) > sensor_tolerance &&
+            !fault_detected &&
+            !safe_mode,
+
+        // --------------------------------------------------------------------
+        // Failure Effect 4: Sensor Disagreement
+        // --------------------------------------------------------------------
+        // TMR sensors disagree beyond acceptable tolerance:
+        // - Maximum deviation exceeds threshold
+        // This may indicate sensor failure, EMI, or wiring issue
+
+        sensor_disagreement:
+            @max_deviation(torque_sensor_a, torque_sensor_b, torque_sensor_c) > sensor_tolerance,
+
+        // --------------------------------------------------------------------
+        // Failure Effect 5: Watchdog Timeout
+        // --------------------------------------------------------------------
+        // Safety watchdog counter exceeds timeout threshold
+        // Indicates control loop is not executing properly
+
+        watchdog_timeout:
+            watchdog_count > watchdog_timeout,
+
+        // --------------------------------------------------------------------
+        // Failure Effect 6: Output Stuck (Temporal)
+        // --------------------------------------------------------------------
+        // Motor output is stuck at same value:
+        // - Value unchanged for extended period
+        // - Input (voted_torque) has changed
+        // Could indicate actuator failure or control loop hang
+
+        output_stuck:
+            @stable(motor_torque, stuck_threshold) &&
+            !@stable(voted_torque, stuck_threshold),
+
+        // --------------------------------------------------------------------
+        // Failure Effect 7: Excessive Oscillation (Glitches)
+        // --------------------------------------------------------------------
+        // Motor torque oscillates rapidly (glitching):
+        // - Multiple edges within short time window
+        // Could indicate EMI, timing violation, or metastability
+
+        torque_glitch:
+            @changed(motor_torque) &&
+            @changed(@prev(motor_torque)) &&
+            @changed(@prev(@prev(motor_torque))),
+
+        // --------------------------------------------------------------------
+        // Failure Effect 8: CRC Mismatch (Communication Integrity)
+        // --------------------------------------------------------------------
+        // Communication CRC doesn't match expected value
+        // Indicates data corruption in communication path
+
+        comm_crc_error:
+            comm_crc != @crc8(voted_torque),
+
+        // --------------------------------------------------------------------
+        // Failure Effect 9: State Machine Stuck
+        // --------------------------------------------------------------------
+        // Control state machine not transitioning:
+        // - State unchanged for extended period
+        // - Normally should transition regularly
+
+        state_stuck:
+            @stable(ctrl_state, stuck_threshold),
+    }
+
+    // ========================================================================
+    // Severity Classification (ISO 26262 Severity Classes)
+    // ========================================================================
+    // S0: No injuries
+    // S1: Light/moderate injuries
+    // S2: Severe/life-threatening injuries (survivable)
+    // S3: Life-threatening/fatal injuries (not survivable)
+
+    severity {
+        unintended_torque:      S3,  // Can cause loss of vehicle control
+        loss_of_assist:         S3,  // Sudden effort change can cause accident
+        silent_corruption:      S3,  // Undetected errors are extremely dangerous
+        sensor_disagreement:    S2,  // Detected, but needs immediate action
+        watchdog_timeout:       S3,  // Control loop failure
+        output_stuck:           S3,  // Actuator not responding
+        torque_glitch:          S2,  // May be transient EMI
+        comm_crc_error:         S2,  // Detected data corruption
+        state_stuck:            S3,  // Control loop not functioning
+    }
+
+    // ========================================================================
+    // ASIL-D Targets (ISO 26262 Part 5)
+    // ========================================================================
+    // These are the quantitative targets that must be met for ASIL-D
+
+    target {
+        // Single Point Fault Metric: 99% of single-point faults must be detected
+        spfm: >= 99.0,
+
+        // Latent Fault Metric: 90% of latent faults must be detected
+        lfm: >= 90.0,
+
+        // Probabilistic Metric for Hardware Failures: Max 10 FIT
+        pmhf: <= 10.0,
+    }
+}
+
+
+// ============================================================================
+// Safety Goal: Return-to-Center Assist (ASIL-B)
+// ============================================================================
+//
+// This safety goal monitors the return-to-center assist function, which
+// helps the steering wheel return to center after a turn. This is a comfort
+// feature with lower safety criticality (ASIL-B instead of ASIL-D).
+//
+// Lower ASIL because:
+// - Driver can manually return steering to center
+// - Failure doesn't immediately threaten vehicle control
+// - Effect is gradual, not sudden
+
+safety_goal ReturnToCenterSafety: ASIL_B {
+    // ========================================================================
+    // Interface Signals
+    // ========================================================================
+
+    in  handwheel_angle: logic[12],
+    in  vehicle_speed: logic[12],
+    out rtc_torque: logic[12],
+
+    #[detection]
+    out rtc_fault: logic,
+
+    signal target_angle: logic[12],
+
+    // ========================================================================
+    // Constants
+    // ========================================================================
+
+    const max_rtc_torque: nat = 5000,  // Lower than main assist
+    const angle_threshold: nat = 10,    // Degrees from center
+
+    // ========================================================================
+    // Failure Effects
+    // ========================================================================
+
+    failure_effects {
+        // Excessive return torque could cause jerky return
+        excessive_rtc:
+            rtc_torque > max_rtc_torque,
+
+        // RTC active when already centered (unnecessary)
+        unnecessary_rtc:
+            @abs_diff(handwheel_angle, 0) < angle_threshold &&
+            rtc_torque > 100,
+    }
+
+    severity {
+        excessive_rtc:   S2,  // Uncomfortable but not dangerous
+        unnecessary_rtc: S1,  // Minor annoyance
+    }
+
+    // ========================================================================
+    // ASIL-B Targets (Lower requirements than ASIL-D)
+    // ========================================================================
+
+    target {
+        spfm: >= 90.0,  // 90% vs 99% for ASIL-D
+        lfm: >= 80.0,   // 80% vs 90% for ASIL-D
+        pmhf: <= 100.0, // 100 FIT vs 10 FIT for ASIL-D
+    }
+}

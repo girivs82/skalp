@@ -1,0 +1,260 @@
+// ============================================================================
+// Triple Modular Redundancy (TMR) Voter
+// Safety Mechanism for ASIL-D Sensor Inputs
+// ============================================================================
+//
+// This module implements a TMR (Triple Modular Redundancy) voter for three
+// redundant sensor inputs. TMR is a critical safety mechanism for ASIL-D
+// systems, providing both error detection and error correction.
+//
+// TMR Principles:
+// - Three identical sensors measure the same physical quantity
+// - Voter selects the median value (majority voting)
+// - Single sensor failure is tolerated (corrected)
+// - Double sensor failure is detected (disagreement flag)
+//
+// Expected Diagnostic Coverage: 99%+
+// - Single sensor fault: Corrected, detected
+// - Double sensor fault: Detected (disagreement)
+// - Triple sensor fault: Detected (but not corrected)
+
+use std::cmp::max_3;
+use std::cmp::min_3;
+
+// ============================================================================
+// TMR Voter Entity
+// ============================================================================
+//
+// Generic TMR voter that works with any bit width.
+// Uses median voting: Output = MEDIAN(A, B, C)
+//
+// Voting Algorithm:
+// 1. Sort inputs: min ≤ mid ≤ max
+// 2. Output = mid (median value)
+// 3. Check disagreement: (max - min) > tolerance
+
+entity TmrVoter<WIDTH: nat, TOLERANCE: nat> {
+    // Input: Three redundant sensor channels
+    in  channel_a: bit[WIDTH],
+    in  channel_b: bit[WIDTH],
+    in  channel_c: bit[WIDTH],
+
+    // Output: Voted (median) value
+    out voted: bit[WIDTH],
+
+    // Output: Disagreement flag (sensors differ beyond tolerance)
+    out disagreement: bit,
+
+    // Output: Which channel is the outlier (if any)
+    // 00 = no outlier, 01 = A, 10 = B, 11 = C
+    out outlier: bit[2],
+}
+
+impl TmrVoter<WIDTH, TOLERANCE> {
+    // ========================================================================
+    // Voting Logic
+    // ========================================================================
+
+    // Find minimum, median, and maximum values
+    signal min_val: bit[WIDTH] = min_3(channel_a, channel_b, channel_c);
+    signal max_val: bit[WIDTH] = max_3(channel_a, channel_b, channel_c);
+
+    // Median is the value that's not min and not max
+    // This is the TMR output
+    signal median_val: bit[WIDTH] = {
+        if channel_a != min_val && channel_a != max_val {
+            channel_a
+        } else if channel_b != min_val && channel_b != max_val {
+            channel_b
+        } else {
+            channel_c
+        }
+    };
+
+    // Output the median value
+    voted = median_val;
+
+    // ========================================================================
+    // Disagreement Detection
+    // ========================================================================
+
+    // Calculate spread: difference between max and min
+    signal spread: bit[WIDTH] = max_val - min_val;
+
+    // Assert disagreement if spread exceeds tolerance
+    disagreement = spread > TOLERANCE;
+
+    // ========================================================================
+    // Outlier Detection
+    // ========================================================================
+    //
+    // Determine which channel (if any) is the outlier.
+    // An outlier is a channel that differs significantly from the other two.
+    //
+    // Algorithm:
+    // - If A is far from B and C (which are close), A is outlier
+    // - If B is far from A and C (which are close), B is outlier
+    // - If C is far from A and B (which are close), C is outlier
+    // - Otherwise, no clear outlier
+
+    signal a_to_b: bit[WIDTH] = if channel_a > channel_b {
+        channel_a - channel_b
+    } else {
+        channel_b - channel_a
+    };
+
+    signal a_to_c: bit[WIDTH] = if channel_a > channel_c {
+        channel_a - channel_c
+    } else {
+        channel_c - channel_a
+    };
+
+    signal b_to_c: bit[WIDTH] = if channel_b > channel_c {
+        channel_b - channel_c
+    } else {
+        channel_c - channel_b
+    };
+
+    // A is outlier if A differs from both B and C, but B and C are close
+    signal a_is_outlier: bit =
+        (a_to_b > TOLERANCE) && (a_to_c > TOLERANCE) && (b_to_c <= TOLERANCE);
+
+    // B is outlier if B differs from both A and C, but A and C are close
+    signal b_is_outlier: bit =
+        (a_to_b > TOLERANCE) && (b_to_c > TOLERANCE) && (a_to_c <= TOLERANCE);
+
+    // C is outlier if C differs from both A and B, but A and B are close
+    signal c_is_outlier: bit =
+        (a_to_c > TOLERANCE) && (b_to_c > TOLERANCE) && (a_to_b <= TOLERANCE);
+
+    // Encode outlier as 2-bit value
+    outlier = {
+        if a_is_outlier {
+            0b01  // Channel A is outlier
+        } else if b_is_outlier {
+            0b10  // Channel B is outlier
+        } else if c_is_outlier {
+            0b11  // Channel C is outlier
+        } else {
+            0b00  // No clear outlier
+        }
+    };
+}
+
+
+// ============================================================================
+// TMR Voter with History (Temporal Disagreement Detection)
+// ============================================================================
+//
+// Enhanced TMR voter that tracks disagreement history over time.
+// This helps distinguish between:
+// - Transient faults (brief disagreement, may be EMI)
+// - Persistent faults (sustained disagreement, likely sensor failure)
+//
+// ASIL-D systems typically require persistent fault detection to avoid
+// false positives from transient EMI.
+
+entity TmrVoterWithHistory<WIDTH: nat, TOLERANCE: nat, HISTORY_DEPTH: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    in  channel_a: bit[WIDTH],
+    in  channel_b: bit[WIDTH],
+    in  channel_c: bit[WIDTH],
+
+    out voted: bit[WIDTH],
+    out disagreement: bit,
+    out persistent_disagreement: bit,  // Disagreement for > threshold cycles
+    out outlier: bit[2],
+}
+
+impl TmrVoterWithHistory<WIDTH, TOLERANCE, HISTORY_DEPTH, 'clk> {
+    // ========================================================================
+    // Instantiate Base TMR Voter
+    // ========================================================================
+
+    inst voter: TmrVoter<WIDTH, TOLERANCE> {
+        channel_a: channel_a,
+        channel_b: channel_b,
+        channel_c: channel_c,
+    };
+
+    // Connect outputs
+    voted = voter.voted;
+    disagreement = voter.disagreement;
+    outlier = voter.outlier;
+
+    // ========================================================================
+    // Disagreement History Tracking
+    // ========================================================================
+
+    // Counter: increments when disagreement, resets when agreement
+    reg disagreement_count: bit[16]<'clk> = 0;
+
+    always @(posedge clk) {
+        if reset {
+            disagreement_count <= 0;
+        } else if voter.disagreement {
+            // Increment counter, saturate at max
+            if disagreement_count < 0xFFFF {
+                disagreement_count <= disagreement_count + 1;
+            }
+        } else {
+            // Reset counter on agreement
+            disagreement_count <= 0;
+        }
+    }
+
+    // Assert persistent disagreement if counter exceeds threshold
+    persistent_disagreement = disagreement_count >= HISTORY_DEPTH;
+}
+
+
+// ============================================================================
+// Pre-instantiated TMR Voters for Common Configurations
+// ============================================================================
+
+// 16-bit TMR voter with tolerance of 50 units (typical for torque sensors)
+entity TmrVoter16 {
+    in  channel_a: bit[16],
+    in  channel_b: bit[16],
+    in  channel_c: bit[16],
+    out voted: bit[16],
+    out disagreement: bit,
+    out outlier: bit[2],
+}
+
+impl TmrVoter16 {
+    inst voter: TmrVoter<16, 50> {
+        channel_a: channel_a,
+        channel_b: channel_b,
+        channel_c: channel_c,
+    };
+
+    voted = voter.voted;
+    disagreement = voter.disagreement;
+    outlier = voter.outlier;
+}
+
+
+// 12-bit TMR voter with tolerance of 20 units (typical for angle sensors)
+entity TmrVoter12 {
+    in  channel_a: bit[12],
+    in  channel_b: bit[12],
+    in  channel_c: bit[12],
+    out voted: bit[12],
+    out disagreement: bit,
+    out outlier: bit[2],
+}
+
+impl TmrVoter12 {
+    inst voter: TmrVoter<12, 20> {
+        channel_a: channel_a,
+        channel_b: channel_b,
+        channel_c: channel_c,
+    };
+
+    voted = voter.voted;
+    disagreement = voter.disagreement;
+    outlier = voter.outlier;
+}

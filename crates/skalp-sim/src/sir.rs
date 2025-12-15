@@ -419,27 +419,144 @@ pub struct FaultInjectionConfig {
 }
 
 /// Types of faults that can be injected
+///
+/// This enum covers the full range of digital fault models used in ISO 26262
+/// safety analysis, including:
+/// - Permanent faults (stuck-at, bridging, open)
+/// - Transient faults (SEU, bit flips)
+/// - Timing violations (setup, hold, metastability)
+/// - Power-related effects (modeled at digital level)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FaultType {
+    // ========================================================================
+    // Permanent/Hard Faults (Manufacturing Defects, Wear-out)
+    // ========================================================================
+
     /// Output stuck at logic 0 (SA0)
+    /// Cause: Manufacturing defect, oxide breakdown, electromigration
     StuckAt0,
+
     /// Output stuck at logic 1 (SA1)
+    /// Cause: Manufacturing defect, oxide breakdown, electromigration
     StuckAt1,
-    /// Output inverted (bit flip)
-    BitFlip,
-    /// Transient upset (single-cycle flip, then recovers)
-    Transient,
-    /// Timing violation (output delayed by N cycles)
-    TimingDelay {
-        /// Number of cycles to delay
-        cycles: u32,
-    },
+
     /// Bridge fault (short between two nets)
+    /// Cause: Metal bridging, contamination, ESD damage
     Bridge {
         /// Net ID of the bridged net
         bridged_net: SirSignalId,
         /// Bridge type: AND (wired-AND) or OR (wired-OR)
         bridge_type: BridgeType,
+    },
+
+    /// Open fault (signal disconnected, floats to undefined)
+    /// Cause: Broken via, cracked metal, bond wire failure
+    /// Digital effect: Output may float high, low, or oscillate
+    Open {
+        /// What the floating output resolves to (technology-dependent)
+        float_value: bool,
+    },
+
+    // ========================================================================
+    // Transient/Soft Faults (Radiation, EMI, Power Transients)
+    // ========================================================================
+
+    /// Output inverted (bit flip)
+    /// Cause: Radiation-induced charge collection, EMI
+    BitFlip,
+
+    /// Transient upset (single-cycle flip, then recovers)
+    /// Cause: Single-Event Upset (SEU), alpha particle, cosmic ray
+    Transient,
+
+    /// Multi-bit upset (multiple bits flip simultaneously)
+    /// Cause: High-energy particle, heavy ion, neutron
+    MultiBitUpset {
+        /// Number of additional bits affected (beyond the primary target)
+        additional_bits: u32,
+    },
+
+    // ========================================================================
+    // Timing Violations (Design Margins, Temperature, Voltage, Aging)
+    // ========================================================================
+
+    /// Timing delay (output delayed by N cycles)
+    /// Cause: Slow path, process variation, temperature
+    /// Digital effect: Sequential element captures stale data
+    TimingDelay {
+        /// Number of cycles to delay
+        cycles: u32,
+    },
+
+    /// Setup time violation
+    /// Cause: Data path too slow, clock arrives too early
+    /// Digital effect: FF captures PREVIOUS data value instead of current
+    ///
+    /// At the digital level, we model this as: on clock edge, the FF
+    /// samples the data value from the previous cycle rather than current.
+    SetupViolation,
+
+    /// Hold time violation
+    /// Cause: Data path too fast, clock arrives too late, race condition
+    /// Digital effect: FF captures CORRUPTED/INVERTED value
+    ///
+    /// At the digital level, we model this as: on clock edge, the FF
+    /// captures an inverted or random value (worst-case model).
+    HoldViolation,
+
+    /// Metastability (FF enters undefined state, resolves randomly)
+    /// Cause: Async input, clock domain crossing, setup/hold boundary
+    /// Digital effect: Output undefined for N cycles, then resolves to 0 or 1
+    ///
+    /// This is critical for CDC (Clock Domain Crossing) analysis.
+    Metastability {
+        /// Number of cycles before metastable state resolves
+        resolution_cycles: u32,
+    },
+
+    // ========================================================================
+    // Power-Related Faults (Modeled at Digital Level)
+    // ========================================================================
+    // These analog/power issues manifest as digital effects. We model
+    // the EFFECT, not the root cause, enabling gate-level simulation.
+
+    /// Voltage dropout / IR drop
+    /// Cause: Sudden current demand, inadequate power grid
+    /// Digital effect: Multiple FFs experience setup violations (slower logic)
+    ///
+    /// Note: This is typically injected as a "regional" fault affecting
+    /// multiple primitives. The fault campaign handles expansion.
+    VoltageDropout,
+
+    /// Ground bounce
+    /// Cause: Simultaneous switching noise (SSN), inadequate ground grid
+    /// Digital effect: Transient glitches on outputs
+    ///
+    /// Modeled as: Multiple outputs experience single-cycle transients
+    GroundBounce,
+
+    /// Crosstalk-induced glitch
+    /// Cause: Capacitive coupling from adjacent switching signal
+    /// Digital effect: Brief glitch on victim signal
+    ///
+    /// Modeled as: Single-cycle transient when aggressor transitions
+    CrosstalkGlitch,
+
+    // ========================================================================
+    // Clock Faults
+    // ========================================================================
+
+    /// Clock glitch (extra clock edge)
+    /// Cause: EMI, power supply noise, clock tree issues
+    /// Digital effect: FFs may double-clock (capture twice)
+    ClockGlitch,
+
+    /// Clock stretch (clock period temporarily longer)
+    /// Cause: PLL unlock, clock source instability
+    /// Digital effect: May cause setup violations on receiving FFs
+    ClockStretch {
+        /// Additional cycles of stretch
+        stretch_cycles: u32,
     },
 }
 
@@ -492,6 +609,159 @@ impl FaultInjectionConfig {
             fault_type: FaultType::BitFlip,
             inject_at_cycle: at_cycle,
             duration,
+        }
+    }
+
+    // ========================================================================
+    // Timing Violation Faults
+    // ========================================================================
+
+    /// Create a setup violation fault
+    ///
+    /// Models the case where data arrives too late at a flip-flop.
+    /// The FF captures the PREVIOUS data value instead of the current one.
+    ///
+    /// # Arguments
+    /// * `target` - The flip-flop primitive to inject the fault into
+    /// * `at_cycle` - Cycle when the violation occurs
+    /// * `duration` - How many cycles the violation persists (None = permanent)
+    pub fn setup_violation(target: PrimitiveId, at_cycle: u64, duration: Option<u64>) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::SetupViolation,
+            inject_at_cycle: at_cycle,
+            duration,
+        }
+    }
+
+    /// Create a hold violation fault
+    ///
+    /// Models the case where data changes too soon after the clock edge.
+    /// The FF captures a CORRUPTED (inverted) value.
+    ///
+    /// # Arguments
+    /// * `target` - The flip-flop primitive to inject the fault into
+    /// * `at_cycle` - Cycle when the violation occurs
+    /// * `duration` - How many cycles the violation persists (None = permanent)
+    pub fn hold_violation(target: PrimitiveId, at_cycle: u64, duration: Option<u64>) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::HoldViolation,
+            inject_at_cycle: at_cycle,
+            duration,
+        }
+    }
+
+    /// Create a metastability fault
+    ///
+    /// Models the case where a flip-flop enters a metastable state
+    /// (typically from clock domain crossing or async input).
+    /// The output is undefined for `resolution_cycles`, then resolves randomly.
+    ///
+    /// # Arguments
+    /// * `target` - The flip-flop primitive affected
+    /// * `at_cycle` - Cycle when metastability begins
+    /// * `resolution_cycles` - Number of cycles before output resolves
+    pub fn metastability(target: PrimitiveId, at_cycle: u64, resolution_cycles: u32) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::Metastability { resolution_cycles },
+            inject_at_cycle: at_cycle,
+            duration: Some(resolution_cycles as u64 + 1), // Active during resolution + final cycle
+        }
+    }
+
+    // ========================================================================
+    // Power-Related Faults
+    // ========================================================================
+
+    /// Create a voltage dropout fault
+    ///
+    /// Models regional power supply issues. At the digital level, this
+    /// manifests as setup violations (logic runs slower due to lower voltage).
+    ///
+    /// # Arguments
+    /// * `target` - Representative primitive in the affected region
+    /// * `at_cycle` - Cycle when dropout begins
+    /// * `duration` - How many cycles the dropout lasts
+    pub fn voltage_dropout(target: PrimitiveId, at_cycle: u64, duration: u64) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::VoltageDropout,
+            inject_at_cycle: at_cycle,
+            duration: Some(duration),
+        }
+    }
+
+    /// Create a ground bounce fault
+    ///
+    /// Models simultaneous switching noise. At the digital level, this
+    /// manifests as transient glitches on outputs.
+    ///
+    /// # Arguments
+    /// * `target` - Primitive experiencing the ground bounce
+    /// * `at_cycle` - Cycle when bounce occurs
+    pub fn ground_bounce(target: PrimitiveId, at_cycle: u64) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::GroundBounce,
+            inject_at_cycle: at_cycle,
+            duration: Some(1), // Single cycle glitch
+        }
+    }
+
+    /// Create a crosstalk glitch fault
+    ///
+    /// Models capacitive coupling from adjacent signal transition.
+    /// Causes a brief glitch on the victim signal.
+    ///
+    /// # Arguments
+    /// * `target` - The victim primitive
+    /// * `at_cycle` - Cycle when aggressor transitions (causing glitch)
+    pub fn crosstalk_glitch(target: PrimitiveId, at_cycle: u64) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::CrosstalkGlitch,
+            inject_at_cycle: at_cycle,
+            duration: Some(1), // Single cycle glitch
+        }
+    }
+
+    // ========================================================================
+    // Other Faults
+    // ========================================================================
+
+    /// Create an open fault (disconnected signal)
+    ///
+    /// Models a broken connection where the signal floats to a technology-dependent value.
+    ///
+    /// # Arguments
+    /// * `target` - The primitive with the open fault
+    /// * `at_cycle` - Cycle when fault begins
+    /// * `float_value` - What the floating output resolves to
+    pub fn open(target: PrimitiveId, at_cycle: u64, float_value: bool) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::Open { float_value },
+            inject_at_cycle: at_cycle,
+            duration: None, // Permanent
+        }
+    }
+
+    /// Create a multi-bit upset fault
+    ///
+    /// Models a high-energy particle affecting multiple bits.
+    ///
+    /// # Arguments
+    /// * `target` - The primary primitive affected
+    /// * `at_cycle` - Cycle when upset occurs
+    /// * `additional_bits` - Number of additional bits affected
+    pub fn multi_bit_upset(target: PrimitiveId, at_cycle: u64, additional_bits: u32) -> Self {
+        Self {
+            target_primitive: target,
+            fault_type: FaultType::MultiBitUpset { additional_bits },
+            inject_at_cycle: at_cycle,
+            duration: Some(1), // Single cycle
         }
     }
 

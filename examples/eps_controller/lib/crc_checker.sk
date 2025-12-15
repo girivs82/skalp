@@ -1,0 +1,263 @@
+// ============================================================================
+// CRC (Cyclic Redundancy Check) Checker
+// Safety Mechanism for Data Integrity
+// ============================================================================
+//
+// This module implements CRC-8 checking for communication integrity.
+// CRC is a critical safety mechanism for detecting data corruption in:
+// - Communication buses (CAN, FlexRay, etc.)
+// - Memory transfers
+// - Internal datapath integrity
+//
+// CRC Properties:
+// - Detects all single-bit errors
+// - Detects all double-bit errors
+// - Detects any odd number of bit errors
+// - Detects burst errors up to (polynomial degree) bits
+//
+// Expected Diagnostic Coverage: 99%+ for covered data
+//
+// CRC-8 Polynomial: x^8 + x^2 + x + 1 (0x07)
+// This is the CRC-8-CCITT polynomial, commonly used in automotive
+
+// ============================================================================
+// CRC-8 Calculator
+// ============================================================================
+//
+// Calculates CRC-8 checksum for arbitrary data width.
+// This is a combinational function (no clock required).
+
+fn crc8<WIDTH: nat>(data: bit[WIDTH]) -> bit[8] {
+    // CRC-8-CCITT polynomial: x^8 + x^2 + x + 1
+    const POLY: bit[8] = 0x07;
+
+    // Initial CRC value (typical for CRC-8)
+    let crc: bit[8] = 0x00;
+
+    // Process each bit of input data
+    for i in 0..WIDTH {
+        // XOR current bit into MSB of CRC
+        let bit: bit = data[i];
+        let msb: bit = crc[7];
+        let do_xor: bit = msb ^ bit;
+
+        // Shift CRC left by 1
+        crc = (crc << 1);
+
+        // If XOR needed, apply polynomial
+        if do_xor {
+            crc = crc ^ POLY;
+        }
+    }
+
+    crc
+}
+
+
+// ============================================================================
+// CRC Checker Entity
+// ============================================================================
+//
+// Validates that received CRC matches calculated CRC for data.
+//
+// Usage:
+// - Sender calculates CRC and transmits: {data, crc8(data)}
+// - Receiver checks: received_crc == crc8(received_data)
+// - Mismatch indicates data corruption
+
+entity CrcChecker<WIDTH: nat> {
+    // Input: Data to be checked
+    in  data: bit[WIDTH],
+
+    // Input: Received CRC value
+    in  received_crc: bit[8],
+
+    // Output: Calculated CRC value
+    out calculated_crc: bit[8],
+
+    // Output: Error flag (received != calculated)
+    out crc_error: bit,
+}
+
+impl CrcChecker<WIDTH> {
+    // Calculate expected CRC
+    calculated_crc = crc8(data);
+
+    // Compare with received CRC
+    crc_error = (received_crc != calculated_crc);
+}
+
+
+// ============================================================================
+// CRC Generator Entity
+// ============================================================================
+//
+// Generates CRC for outgoing data.
+// Sender uses this to append CRC to transmitted data.
+
+entity CrcGenerator<WIDTH: nat> {
+    in  data: bit[WIDTH],
+    out crc: bit[8],
+}
+
+impl CrcGenerator<WIDTH> {
+    crc = crc8(data);
+}
+
+
+// ============================================================================
+// CRC Protected Data Path (Clocked)
+// ============================================================================
+//
+// This entity provides a complete CRC-protected datapath for safety-critical
+// data transfers. It includes:
+// - CRC generation on write
+// - CRC checking on read
+// - Error detection and reporting
+//
+// This is suitable for protecting register transfers, memory operations,
+// or communication interfaces in ASIL-D systems.
+
+entity CrcProtectedDataPath<WIDTH: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    // Write interface
+    in  write_enable: bit,
+    in  write_data: bit[WIDTH],
+
+    // Read interface
+    out read_data: bit[WIDTH],
+    out read_data_valid: bit,
+
+    // Error reporting
+    out crc_error: bit,
+    out error_count: bit[16],
+}
+
+impl CrcProtectedDataPath<WIDTH, 'clk> {
+    // ========================================================================
+    // Storage with CRC
+    // ========================================================================
+
+    // Stored data
+    reg stored_data: bit[WIDTH]<'clk> = 0;
+
+    // Stored CRC (generated at write time)
+    reg stored_crc: bit[8]<'clk> = 0;
+
+    // Error counter (for monitoring)
+    reg error_cnt: bit[16]<'clk> = 0;
+
+    // ========================================================================
+    // Write Path: Generate and Store CRC
+    // ========================================================================
+
+    always @(posedge clk) {
+        if reset {
+            stored_data <= 0;
+            stored_crc <= 0;
+        } else if write_enable {
+            // Store data
+            stored_data <= write_data;
+
+            // Calculate and store CRC
+            stored_crc <= crc8(write_data);
+        }
+    }
+
+    // ========================================================================
+    // Read Path: Check CRC
+    // ========================================================================
+
+    // Calculate CRC of current stored data
+    signal calculated_crc: bit[8] = crc8(stored_data);
+
+    // Check if CRC matches (no corruption)
+    signal crc_match: bit = (calculated_crc == stored_crc);
+
+    // Output data only if CRC is valid
+    read_data = stored_data;
+    read_data_valid = crc_match;
+    crc_error = !crc_match;
+
+    // ========================================================================
+    // Error Counting
+    // ========================================================================
+
+    always @(posedge clk) {
+        if reset {
+            error_cnt <= 0;
+        } else if !crc_match && error_cnt < 0xFFFF {
+            // Increment error counter (saturate at max)
+            error_cnt <= error_cnt + 1;
+        }
+    }
+
+    error_count = error_cnt;
+}
+
+
+// ============================================================================
+// End-to-End CRC Protected Communication
+// ============================================================================
+//
+// This entity demonstrates a complete end-to-end CRC-protected communication
+// channel. It includes:
+// - Transmitter: Appends CRC to data
+// - Receiver: Validates CRC and reports errors
+//
+// This pattern is commonly used in automotive communication protocols like
+// CAN, FlexRay, and Ethernet.
+
+entity CrcProtectedComm<WIDTH: nat, 'clk> {
+    in  clk: clock<'clk>,
+    in  reset: bit,
+
+    // Transmit side
+    in  tx_data: bit[WIDTH],
+    in  tx_valid: bit,
+    out tx_frame: bit[WIDTH + 8],  // Data + CRC
+
+    // Receive side
+    in  rx_frame: bit[WIDTH + 8],  // Data + CRC
+    in  rx_valid: bit,
+    out rx_data: bit[WIDTH],
+    out rx_data_valid: bit,
+    out rx_crc_error: bit,
+}
+
+impl CrcProtectedComm<WIDTH, 'clk> {
+    // ========================================================================
+    // Transmit Path: Generate CRC
+    // ========================================================================
+
+    // Generate CRC for transmit data
+    inst tx_crc_gen: CrcGenerator<WIDTH> {
+        data: tx_data,
+    };
+
+    // Append CRC to data
+    tx_frame = {tx_data, tx_crc_gen.crc};
+
+    // ========================================================================
+    // Receive Path: Check CRC
+    // ========================================================================
+
+    // Split received frame into data and CRC
+    signal rx_data_part: bit[WIDTH] = rx_frame[WIDTH + 8 - 1 : 8];
+    signal rx_crc_part: bit[8] = rx_frame[7 : 0];
+
+    // Check CRC
+    inst rx_crc_check: CrcChecker<WIDTH> {
+        data: rx_data_part,
+        received_crc: rx_crc_part,
+    };
+
+    // Output received data
+    rx_data = rx_data_part;
+
+    // Data is valid only if CRC check passes and rx_valid is asserted
+    rx_data_valid = rx_valid && !rx_crc_check.crc_error;
+    rx_crc_error = rx_crc_check.crc_error;
+}

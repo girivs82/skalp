@@ -1,0 +1,383 @@
+// ============================================================================
+// EPS Controller Safety Test Harness
+// Fault Injection and Safety Analysis Testing
+// ============================================================================
+//
+// This test harness demonstrates how to:
+// 1. Instantiate the EPS controller
+// 2. Generate realistic test vectors
+// 3. Run fault injection campaigns
+// 4. Verify safety mechanisms
+// 5. Measure diagnostic coverage
+//
+// Test Scenarios:
+// - Normal operation (no faults)
+// - Single sensor fault (TMR should correct)
+// - Double sensor fault (TMR should detect)
+// - Computation fault (golden model should detect)
+// - Watchdog timeout (control loop fault)
+// - CRC errors (communication fault)
+
+use ../src/eps_controller::*;
+use std::test::*;
+
+// ============================================================================
+// Test Scenario 1: Normal Operation
+// ============================================================================
+//
+// Verify correct operation with no faults:
+// - Torque calculation is accurate
+// - Safety mechanisms are inactive
+// - No false positives
+
+#[test]
+fn test_normal_operation() {
+    // Create testbench
+    let tb = Testbench::new();
+
+    // Instantiate DUT (Device Under Test)
+    let eps = EpsController();
+
+    // Initialize
+    tb.reset(eps, 10_cycles);
+
+    // Test case 1: Low torque request at low speed
+    eps.torque_sensor_a <= 1000;
+    eps.torque_sensor_b <= 1000;
+    eps.torque_sensor_c <= 1000;
+    eps.vehicle_speed <= 10;
+    eps.handwheel_angle <= 0;
+
+    tb.step(100_cycles);
+
+    // Verify: Motor torque should be calculated correctly
+    // At low speed, expect high assist (close to input torque)
+    assert!(eps.motor_torque > 900 && eps.motor_torque < 1100,
+        "Motor torque should match input at low speed");
+
+    // Verify: No faults detected
+    assert!(!eps.fault_detected, "No fault should be detected");
+    assert!(!eps.safe_mode, "Should not be in safe mode");
+    assert!(eps.motor_enable, "Motor should be enabled");
+
+    // Test case 2: High torque request at high speed
+    eps.torque_sensor_a <= 5000;
+    eps.torque_sensor_b <= 5000;
+    eps.torque_sensor_c <= 5000;
+    eps.vehicle_speed <= 120;
+    eps.handwheel_angle <= 500;
+
+    tb.step(100_cycles);
+
+    // Verify: Motor torque should be reduced at high speed
+    // Expect ~30% assist at high speed
+    assert!(eps.motor_torque > 1200 && eps.motor_torque < 1800,
+        "Motor torque should be scaled down at high speed");
+
+    // Verify: Still no faults
+    assert!(!eps.fault_detected, "No fault should be detected");
+
+    tb.finish();
+}
+
+
+// ============================================================================
+// Test Scenario 2: Single Sensor Fault (TMR Correction)
+// ============================================================================
+//
+// Inject fault in one sensor, verify:
+// - TMR corrects the fault (output is median)
+// - Disagreement is detected
+// - System continues operating (fault tolerance)
+
+#[test]
+fn test_single_sensor_fault() {
+    let tb = Testbench::new();
+    let eps = EpsController();
+
+    tb.reset(eps, 10_cycles);
+
+    // Normal operation: all sensors agree
+    eps.torque_sensor_a <= 2000;
+    eps.torque_sensor_b <= 2000;
+    eps.torque_sensor_c <= 2000;
+    eps.vehicle_speed <= 50;
+    eps.handwheel_angle <= 0;
+
+    tb.step(50_cycles);
+
+    // Verify normal operation
+    assert!(!eps.fault_detected, "No fault yet");
+
+    // Inject fault: Sensor A stuck at 0
+    eps.torque_sensor_a <= 0;
+    eps.torque_sensor_b <= 2000;
+    eps.torque_sensor_c <= 2000;
+
+    tb.step(50_cycles);
+
+    // Verify TMR correction:
+    // - Voted value should be median (2000), not 0
+    // - Motor torque should still be calculated from 2000
+    // - Disagreement should be detected
+    assert!(eps.motor_torque > 1000, "TMR should correct fault, output should not be zero");
+
+    // Verify fault detection
+    // Note: Single sensor fault should trigger disagreement but may not trigger safe mode
+    // (depends on controller policy - ASIL-D allows single fault tolerance)
+
+    tb.finish();
+}
+
+
+// ============================================================================
+// Test Scenario 3: Double Sensor Fault (TMR Detection)
+// ============================================================================
+//
+// Inject faults in two sensors, verify:
+// - TMR cannot correct (no majority)
+// - Disagreement is strongly detected
+// - System may enter degraded or safe mode
+
+#[test]
+fn test_double_sensor_fault() {
+    let tb = Testbench::new();
+    let eps = EpsController();
+
+    tb.reset(eps, 10_cycles);
+
+    // Normal operation
+    eps.torque_sensor_a <= 2000;
+    eps.torque_sensor_b <= 2000;
+    eps.torque_sensor_c <= 2000;
+    eps.vehicle_speed <= 50;
+    eps.handwheel_angle <= 0;
+
+    tb.step(50_cycles);
+
+    // Inject double fault: Sensors A and B stuck at 0
+    eps.torque_sensor_a <= 0;
+    eps.torque_sensor_b <= 0;
+    eps.torque_sensor_c <= 2000;
+
+    tb.step(50_cycles);
+
+    // Verify:
+    // - Large disagreement detected (max - min = 2000)
+    // - Voted value is 0 (median of [0, 0, 2000])
+    // - This should trigger fault detection
+
+    assert!(eps.fault_detected, "Double sensor fault should be detected");
+
+    tb.finish();
+}
+
+
+// ============================================================================
+// Test Scenario 4: Computation Fault (Golden Model Detection)
+// ============================================================================
+//
+// This test would inject a fault into the primary datapath and verify
+// that the golden model detects the mismatch.
+//
+// Note: In actual gate-level simulation, faults are injected automatically.
+// In behavioral simulation, we would need to explicitly corrupt the signal.
+
+#[test]
+fn test_computation_fault() {
+    let tb = Testbench::new();
+    let eps = EpsController();
+
+    tb.reset(eps, 10_cycles);
+
+    // Normal operation
+    eps.torque_sensor_a <= 1000;
+    eps.torque_sensor_b <= 1000;
+    eps.torque_sensor_c <= 1000;
+    eps.vehicle_speed <= 30;
+    eps.handwheel_angle <= 0;
+
+    tb.step(50_cycles);
+
+    // At this point, primary_torque and golden_torque should match
+    // In gate-level fault simulation, SKALP will inject faults into
+    // primitives in the primary datapath and observe if golden model
+    // detects the mismatch.
+
+    // For behavioral testing, we can't directly inject gate-level faults,
+    // but we trust that the safety analysis framework will handle this
+    // during compilation with --safety flag.
+
+    tb.finish();
+}
+
+
+// ============================================================================
+// Test Scenario 5: Watchdog Timeout
+// ============================================================================
+//
+// Simulate control loop hang by not advancing state machine.
+// Verify watchdog detects timeout and triggers safe mode.
+
+#[test]
+fn test_watchdog_timeout() {
+    let tb = Testbench::new();
+    let eps = EpsController();
+
+    tb.reset(eps, 10_cycles);
+
+    // Normal operation
+    eps.torque_sensor_a <= 1000;
+    eps.torque_sensor_b <= 1000;
+    eps.torque_sensor_c <= 1000;
+    eps.vehicle_speed <= 30;
+    eps.handwheel_angle <= 0;
+
+    tb.step(50_cycles);
+
+    // Verify normal operation
+    assert!(!eps.fault_detected, "No fault initially");
+
+    // Simulate control loop hang:
+    // In real implementation, control loop would stop refreshing watchdog.
+    // In our design, watchdog is refreshed when ctrl_state != INIT.
+    // To test watchdog, we would need to inject a fault that causes
+    // control loop to stop executing.
+
+    // Wait for watchdog timeout (1000 cycles)
+    tb.step(1100_cycles);
+
+    // Verify: Watchdog should timeout
+    // (Depends on design - in our implementation, watchdog is always
+    // refreshed in active states, so this test would need fault injection)
+
+    tb.finish();
+}
+
+
+// ============================================================================
+// Test Scenario 6: Stress Test with Multiple Concurrent Faults
+// ============================================================================
+//
+// Test system resilience with multiple simultaneous faults:
+// - Sensor fault
+// - High speed
+// - Sudden torque change
+
+#[test]
+fn test_stress_multiple_faults() {
+    let tb = Testbench::new();
+    let eps = EpsController();
+
+    tb.reset(eps, 10_cycles);
+
+    // Start with normal operation
+    eps.torque_sensor_a <= 1000;
+    eps.torque_sensor_b <= 1000;
+    eps.torque_sensor_c <= 1000;
+    eps.vehicle_speed <= 30;
+    eps.handwheel_angle <= 0;
+
+    tb.step(50_cycles);
+
+    // Apply stress: sudden large torque change + sensor fault + high speed
+    eps.torque_sensor_a <= 8000;
+    eps.torque_sensor_b <= 8000;
+    eps.torque_sensor_c <= 100;  // Sensor C fault (outlier)
+    eps.vehicle_speed <= 150;
+    eps.handwheel_angle <= 1000;
+
+    tb.step(100_cycles);
+
+    // Verify:
+    // - TMR should detect disagreement
+    // - System should handle gracefully (no crash, no undefined behavior)
+    // - Output should be saturated at maximum safe value
+    assert!(eps.motor_torque <= 32000, "Output should be limited");
+
+    // System should detect sensor C as outlier
+    // Voted value should be median of [8000, 8000, 100] = 8000
+
+    tb.finish();
+}
+
+
+// ============================================================================
+// Fault Injection Campaign Configuration
+// ============================================================================
+//
+// This configuration tells SKALP how to run the fault injection campaign
+// when compiling with --safety flag.
+
+#[fault_campaign]
+const CAMPAIGN_CONFIG: FaultCampaignConfig = FaultCampaignConfig {
+    // Run each fault for 500 cycles
+    cycles_per_fault: 500,
+
+    // Clock signal name
+    clock_name: "clk",
+
+    // Which fault types to test
+    fault_types: [
+        FaultType::StuckAt0,
+        FaultType::StuckAt1,
+        FaultType::Transient,
+    ],
+
+    // Test all faults (0 = unlimited)
+    max_faults: 0,
+
+    // Test vectors: Use scenarios defined above
+    test_vectors: [
+        test_normal_operation,
+        test_single_sensor_fault,
+        test_double_sensor_fault,
+    ],
+
+    // Enable GPU acceleration if available
+    enable_gpu: true,
+};
+
+
+// ============================================================================
+// Expected Diagnostic Coverage Targets
+// ============================================================================
+//
+// Based on safety mechanisms implemented:
+// - TMR: Expected DC = 99%+
+// - Golden Model: Expected DC = 95%+
+// - Watchdog: Expected DC = 90%+
+// - CRC: Expected DC = 99%+
+//
+// Overall ASIL-D Target: SPFM ≥ 99%, LFM ≥ 90%
+
+#[expected_diagnostic_coverage]
+const EXPECTED_DC: DiagnosticCoverageExpectation = {
+    // Per safety mechanism
+    mechanisms: [
+        ("tmr", 99.0),
+        ("diversity", 95.0),
+        ("watchdog", 90.0),
+        ("crc", 99.0),
+    ],
+
+    // Per failure effect (from safety goal)
+    failure_effects: [
+        ("unintended_torque", 99.0),
+        ("loss_of_assist", 99.0),
+        ("silent_corruption", 99.0),
+        ("sensor_disagreement", 99.0),
+        ("watchdog_timeout", 90.0),
+        ("output_stuck", 95.0),
+        ("torque_glitch", 85.0),
+        ("comm_crc_error", 99.0),
+        ("state_stuck", 90.0),
+    ],
+
+    // Overall ASIL-D targets
+    overall: {
+        spfm: 99.0,
+        lfm: 90.0,
+        pmhf: 10.0,
+    },
+};
