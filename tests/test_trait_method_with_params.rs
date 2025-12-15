@@ -36,16 +36,27 @@ mod test_trait_method_with_params {
                 let monomorphized_hir = mono.monomorphize(&hir);
 
                 println!("\n✅ Monomorphization completed");
-                println!("Functions after monomorphization: {}", monomorphized_hir.functions.len());
+                println!(
+                    "Functions after monomorphization: {}",
+                    monomorphized_hir.functions.len()
+                );
 
                 // Should be 2 functions: test_add + Numeric_nat32_add
-                assert_eq!(monomorphized_hir.functions.len(), 2,
-                    "Expected 2 functions (test_add + Numeric_nat32_add)");
+                assert_eq!(
+                    monomorphized_hir.functions.len(),
+                    2,
+                    "Expected 2 functions (test_add + Numeric_nat32_add)"
+                );
 
                 // Check that the specialized function was generated
-                let has_specialized = monomorphized_hir.functions.iter()
+                let has_specialized = monomorphized_hir
+                    .functions
+                    .iter()
                     .any(|f| f.name.contains("Numeric") && f.name.contains("add"));
-                assert!(has_specialized, "Should have generated Numeric_*_add function");
+                assert!(
+                    has_specialized,
+                    "Should have generated Numeric_*_add function"
+                );
 
                 println!("✅ Trait method call on function parameter works!");
             }

@@ -177,14 +177,16 @@ impl BehavioralBackend {
         // Initialize outputs
         for output in &self.module.outputs {
             let byte_size = output.width.div_ceil(8);
-            self.outputs.insert(output.name.clone(), vec![0u8; byte_size]);
+            self.outputs
+                .insert(output.name.clone(), vec![0u8; byte_size]);
             self.signal_widths.insert(output.name.clone(), output.width);
         }
 
         // Initialize signals
         for signal in &self.module.signals {
             let byte_size = signal.width.div_ceil(8);
-            self.signals.insert(signal.name.clone(), vec![0u8; byte_size]);
+            self.signals
+                .insert(signal.name.clone(), vec![0u8; byte_size]);
             self.signal_widths.insert(signal.name.clone(), signal.width);
         }
 
@@ -232,9 +234,7 @@ impl BehavioralBackend {
                 }
                 val
             })
-            .ok_or_else(|| {
-                SimulationError::InvalidInput(format!("Output '{}' not found", name))
-            })
+            .ok_or_else(|| SimulationError::InvalidInput(format!("Output '{}' not found", name)))
     }
 
     fn step(&mut self) -> SimulationResult<SimulationState> {
@@ -307,14 +307,13 @@ impl BehavioralBackend {
                         }
                         bytes
                     }
-                    SirNodeKind::SignalRef { signal } => {
-                        self.signals
-                            .get(signal)
-                            .or_else(|| self.inputs.get(signal))
-                            .or_else(|| self.state.get(signal))
-                            .cloned()
-                            .unwrap_or_else(|| vec![0u8])
-                    }
+                    SirNodeKind::SignalRef { signal } => self
+                        .signals
+                        .get(signal)
+                        .or_else(|| self.inputs.get(signal))
+                        .or_else(|| self.state.get(signal))
+                        .cloned()
+                        .unwrap_or_else(|| vec![0u8]),
                     SirNodeKind::BinaryOp(op) => {
                         if input_values.len() >= 2 {
                             self.eval_binary_op(op, &input_values[0], &input_values[1])
@@ -346,7 +345,8 @@ impl BehavioralBackend {
 
                 // Store outputs
                 for output in &node.outputs {
-                    self.signals.insert(output.signal_id.clone(), output_value.clone());
+                    self.signals
+                        .insert(output.signal_id.clone(), output_value.clone());
                 }
             }
         }
@@ -438,20 +438,64 @@ impl BehavioralBackend {
             BinaryOperation::Sub => left_val.wrapping_sub(right_val),
             BinaryOperation::Mul => left_val.wrapping_mul(right_val),
             BinaryOperation::Div => {
-                if right_val == 0 { 0 } else { left_val / right_val }
+                if right_val == 0 {
+                    0
+                } else {
+                    left_val / right_val
+                }
             }
             BinaryOperation::Mod => {
-                if right_val == 0 { 0 } else { left_val % right_val }
+                if right_val == 0 {
+                    0
+                } else {
+                    left_val % right_val
+                }
             }
             BinaryOperation::And => left_val & right_val,
             BinaryOperation::Or => left_val | right_val,
             BinaryOperation::Xor => left_val ^ right_val,
-            BinaryOperation::Eq => if left_val == right_val { 1 } else { 0 },
-            BinaryOperation::Neq => if left_val != right_val { 1 } else { 0 },
-            BinaryOperation::Lt => if left_val < right_val { 1 } else { 0 },
-            BinaryOperation::Lte => if left_val <= right_val { 1 } else { 0 },
-            BinaryOperation::Gt => if left_val > right_val { 1 } else { 0 },
-            BinaryOperation::Gte => if left_val >= right_val { 1 } else { 0 },
+            BinaryOperation::Eq => {
+                if left_val == right_val {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Neq => {
+                if left_val != right_val {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Lt => {
+                if left_val < right_val {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Lte => {
+                if left_val <= right_val {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Gt => {
+                if left_val > right_val {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Gte => {
+                if left_val >= right_val {
+                    1
+                } else {
+                    0
+                }
+            }
             BinaryOperation::Shl => left_val << (right_val & 0x3F),
             BinaryOperation::Shr => left_val >> (right_val & 0x3F),
             _ => 0, // FP ops not implemented in simplified version
@@ -471,9 +515,19 @@ impl BehavioralBackend {
             UnaryOperation::Neg => val.wrapping_neg(),
             UnaryOperation::RedAnd => {
                 let mask = (1u64 << (operand.len() * 8)) - 1;
-                if (val & mask) == mask { 1 } else { 0 }
+                if (val & mask) == mask {
+                    1
+                } else {
+                    0
+                }
             }
-            UnaryOperation::RedOr => if val != 0 { 1 } else { 0 },
+            UnaryOperation::RedOr => {
+                if val != 0 {
+                    1
+                } else {
+                    0
+                }
+            }
             UnaryOperation::RedXor => {
                 let mut result = 0;
                 let mut v = val;
@@ -540,10 +594,7 @@ impl UnifiedSimulator {
     }
 
     /// Create a unified simulator from a gate-level netlist (LIR)
-    pub fn from_lir(
-        lir: &skalp_lir::lir::Lir,
-        config: UnifiedSimConfig,
-    ) -> SimulationResult<Self> {
+    pub fn from_lir(lir: &skalp_lir::lir::Lir, config: UnifiedSimConfig) -> SimulationResult<Self> {
         let mode = match config.hw_accel {
             HwAccel::Cpu => SimulationMode::Cpu,
             HwAccel::Gpu => SimulationMode::Gpu,

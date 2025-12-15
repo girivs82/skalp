@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// ISO 26262 Safety build options
@@ -57,7 +57,6 @@ enum Commands {
         output: PathBuf,
 
         // === ISO 26262 Safety Options ===
-
         /// Enable ISO 26262 functional safety analysis
         #[arg(long)]
         safety: bool,
@@ -302,7 +301,12 @@ fn main() -> Result<()> {
             build_design(&source_file, &target, &output, safety_options)?;
         }
 
-        Commands::Sim { design, duration, gate_level, gpu } => {
+        Commands::Sim {
+            design,
+            duration,
+            gate_level,
+            gpu,
+        } => {
             simulate_design(&design, duration.as_deref(), gate_level, gpu)?;
         }
 
@@ -339,7 +343,9 @@ fn main() -> Result<()> {
             max_faults,
             detailed,
         } => {
-            analyze_design(&source, &output, fault_sim, cycles, gpu, max_faults, detailed)?;
+            analyze_design(
+                &source, &output, fault_sim, cycles, gpu, max_faults, detailed,
+            )?;
         }
 
         Commands::Add {
@@ -559,7 +565,12 @@ fn build_design(
 /// Supports two simulation paths:
 /// - Behavioral (default): HIR → MIR → SIR (fast, functional)
 /// - Gate-level (--gate-level): HIR → MIR → LIR → SIR (gate-level primitives, fault injection ready)
-fn simulate_design(design_file: &PathBuf, duration: Option<&str>, gate_level: bool, use_gpu: bool) -> Result<()> {
+fn simulate_design(
+    design_file: &PathBuf,
+    duration: Option<&str>,
+    gate_level: bool,
+    use_gpu: bool,
+) -> Result<()> {
     use skalp_mir::Mir;
     use skalp_sir::convert_mir_to_sir;
 
@@ -635,7 +646,8 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
 
     // Parse and build HIR
     info!("Parsing SKALP source...");
-    let hir = parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
+    let hir =
+        parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
 
     // Lower to MIR
     info!("Compiling to MIR...");
@@ -676,7 +688,8 @@ fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
 
     // Parse and build HIR
     info!("Parsing SKALP source...");
-    let hir = parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
+    let hir =
+        parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
 
     // Lower to MIR
     info!("Compiling to MIR...");
@@ -710,7 +723,11 @@ fn simulate_gate_level_from_mir(mir: &skalp_mir::Mir, cycles: u64, use_gpu: bool
     println!("   Nets: {}", lir.nets.len());
 
     // Count by type
-    let seq_count = lir.primitives.iter().filter(|p| p.ptype.is_sequential()).count();
+    let seq_count = lir
+        .primitives
+        .iter()
+        .filter(|p| p.ptype.is_sequential())
+        .count();
     let comb_count = lir.primitives.len() - seq_count;
     println!("   Sequential (DFFs): {}", seq_count);
     println!("   Combinational: {}", comb_count);
@@ -843,8 +860,8 @@ fn analyze_design(
 
     // Lower to MIR
     info!("Lowering to MIR...");
-    let compiler = skalp_mir::MirCompiler::new()
-        .with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let compiler =
+        skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
     let mir = compiler
         .compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR: {}", e))?;
@@ -874,8 +891,12 @@ fn analyze_design(
         let mut module_fit = 0.0;
 
         for prim in &lir.primitives {
-            *counts.entry(prim.ptype.short_name().to_string()).or_insert(0) += 1;
-            *all_counts.entry(prim.ptype.short_name().to_string()).or_insert(0) += 1;
+            *counts
+                .entry(prim.ptype.short_name().to_string())
+                .or_insert(0) += 1;
+            *all_counts
+                .entry(prim.ptype.short_name().to_string())
+                .or_insert(0) += 1;
             module_fit += prim.ptype.base_fit();
         }
 
@@ -923,8 +944,8 @@ fn analyze_design(
 
             #[cfg(target_os = "macos")]
             {
-                use skalp_sim::{GpuFaultCampaignConfig, GpuFaultSimulator};
                 use skalp_sim::sir::FaultType;
+                use skalp_sim::{GpuFaultCampaignConfig, GpuFaultSimulator};
 
                 if use_gpu {
                     match GpuFaultSimulator::new(&sir_result.sir) {
@@ -944,7 +965,10 @@ fn analyze_design(
                             println!("   Faults Tested: {}", results.total_faults);
                             println!("   Detected: {}", results.detected_faults);
                             println!("   Corruption Faults: {}", results.corruption_faults);
-                            println!("   Diagnostic Coverage: {:.2}%", results.diagnostic_coverage);
+                            println!(
+                                "   Diagnostic Coverage: {:.2}%",
+                                results.diagnostic_coverage
+                            );
                         }
                         Err(e) => {
                             println!("   GPU initialization failed: {}. Using CPU fallback.", e);
@@ -969,7 +993,7 @@ fn analyze_design(
     // Save analysis summary
     let summary_path = output_dir.join("analysis_summary.txt");
     let mut summary = String::new();
-    summary.push_str(&format!("Gate-Level Analysis Summary\n"));
+    summary.push_str("Gate-Level Analysis Summary\n");
     summary.push_str(&format!("Source: {:?}\n", source));
     summary.push_str(&format!("Total Modules: {}\n", gate_results.len()));
     summary.push_str(&format!("Total Primitives: {}\n", total_primitives));
@@ -1005,7 +1029,10 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
     println!("   Faults Tested: {}", results.total_faults);
     println!("   Detected: {}", results.detected_faults);
     println!("   Corruption Faults: {}", results.corruption_faults);
-    println!("   Diagnostic Coverage: {:.2}%", results.diagnostic_coverage);
+    println!(
+        "   Diagnostic Coverage: {:.2}%",
+        results.diagnostic_coverage
+    );
 }
 
 /// Synthesize design for FPGA/ASIC
@@ -1529,7 +1556,7 @@ fn save_manifest(manifest: &skalp_manifest::Manifest, path: &PathBuf) -> Result<
 fn run_safety_analysis(
     hir: &skalp_frontend::hir::Hir,
     options: &SafetyBuildOptions,
-    output_dir: &PathBuf,
+    output_dir: &Path,
 ) -> Result<()> {
     use skalp_safety::analysis::AnalysisContext;
     use skalp_safety::asil::AsilLevel;
@@ -1607,7 +1634,10 @@ fn run_safety_analysis(
     // Generate work products if metrics pass
     if !result.can_generate_workproducts {
         println!("\n❌ Work products NOT generated - fix errors first");
-        anyhow::bail!("Cannot generate work products - {} errors found", result.total_errors);
+        anyhow::bail!(
+            "Cannot generate work products - {} errors found",
+            result.total_errors
+        );
     }
 
     // Parse work products to generate
@@ -1620,7 +1650,13 @@ fn run_safety_analysis(
         .collect::<Vec<_>>();
 
     // Generate requested work products
-    generate_safety_workproducts(&result, &hierarchy, &report_dir, &workproducts, &options.formats)?;
+    generate_safety_workproducts(
+        &result,
+        &hierarchy,
+        &report_dir,
+        &workproducts,
+        &options.formats,
+    )?;
 
     println!("\n✅ Safety analysis complete");
     println!("📁 Reports: {:?}", report_dir);
@@ -1632,7 +1668,7 @@ fn run_safety_analysis(
 fn generate_safety_workproducts(
     result: &skalp_safety::analysis::CombinedAnalysisResult,
     hierarchy: &skalp_safety::hierarchy::SafetyHierarchy,
-    output_dir: &PathBuf,
+    output_dir: &Path,
     workproducts: &[&str],
     formats: &str,
 ) -> Result<()> {
@@ -1717,10 +1753,7 @@ fn generate_fmeda_report_md(result: &skalp_safety::analysis::CombinedAnalysisRes
     }
 
     output.push_str("## Analysis Results\n\n");
-    output.push_str(&format!(
-        "- **Status**: {:?}\n",
-        result.overall_status
-    ));
+    output.push_str(&format!("- **Status**: {:?}\n", result.overall_status));
     output.push_str(&format!("- **Errors**: {}\n", result.total_errors));
     output.push_str(&format!("- **Warnings**: {}\n", result.total_warnings));
 
@@ -1743,7 +1776,10 @@ fn generate_fmeda_report_html(result: &skalp_safety::analysis::CombinedAnalysisR
     html.push_str("</style>\n</head>\n<body>\n");
 
     html.push_str("<h1>FMEDA Report</h1>\n");
-    html.push_str(&format!("<p>Target ASIL: <strong>{:?}</strong></p>\n", result.target_asil));
+    html.push_str(&format!(
+        "<p>Target ASIL: <strong>{:?}</strong></p>\n",
+        result.target_asil
+    ));
 
     if let Some(ref metrics) = result.final_metrics {
         html.push_str("<h2>Metrics Summary</h2>\n");

@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod unroll_tests {
-    use skalp_frontend::parse_and_build_hir;
     use skalp_frontend::hir::{HirStatement, UnrollConfig};
+    use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
 
     #[test]
@@ -27,9 +27,10 @@ mod unroll_tests {
         assert_eq!(func.name, "count_bits");
 
         // Find the for loop in the function body
-        let has_for_loop = func.body.iter().any(|stmt| {
-            matches!(stmt, HirStatement::For(_))
-        });
+        let has_for_loop = func
+            .body
+            .iter()
+            .any(|stmt| matches!(stmt, HirStatement::For(_)));
         assert!(has_for_loop, "Should have a for loop statement");
 
         println!("Basic for loop parsing test passed");
@@ -68,8 +69,15 @@ mod unroll_tests {
         let for_loop = for_loop.unwrap();
 
         // Check that unroll is set to Full
-        assert!(for_loop.unroll.is_some(), "For loop should have unroll config");
-        assert_eq!(for_loop.unroll.as_ref().unwrap(), &UnrollConfig::Full, "Unroll should be Full");
+        assert!(
+            for_loop.unroll.is_some(),
+            "For loop should have unroll config"
+        );
+        assert_eq!(
+            for_loop.unroll.as_ref().unwrap(),
+            &UnrollConfig::Full,
+            "Unroll should be Full"
+        );
 
         println!("Full unroll attribute test passed");
     }
@@ -107,8 +115,15 @@ mod unroll_tests {
         let for_loop = for_loop.unwrap();
 
         // Check that unroll is set to Factor(4)
-        assert!(for_loop.unroll.is_some(), "For loop should have unroll config");
-        assert_eq!(for_loop.unroll.as_ref().unwrap(), &UnrollConfig::Factor(4), "Unroll should be Factor(4)");
+        assert!(
+            for_loop.unroll.is_some(),
+            "For loop should have unroll config"
+        );
+        assert_eq!(
+            for_loop.unroll.as_ref().unwrap(),
+            &UnrollConfig::Factor(4),
+            "Unroll should be Factor(4)"
+        );
 
         println!("Partial unroll(4) attribute test passed");
     }
@@ -134,14 +149,17 @@ mod unroll_tests {
         assert_eq!(func.name, "xor_fold");
 
         // Verify the function has a for loop
-        let has_for_loop = func.body.iter().any(|stmt| {
-            matches!(stmt, HirStatement::For(_))
-        });
+        let has_for_loop = func
+            .body
+            .iter()
+            .any(|stmt| matches!(stmt, HirStatement::For(_)));
         assert!(has_for_loop, "Should have a for loop in function body");
 
         // Convert to MIR - this tests that MIR conversion doesn't crash
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR conversion successful for function with for loop");
         println!("MIR name: {}", mir.name);
@@ -179,11 +197,17 @@ mod unroll_tests {
             }
         });
         assert!(for_loop.is_some(), "Should have a for loop");
-        assert_eq!(for_loop.unwrap().unroll, Some(UnrollConfig::Full), "For loop should be marked for full unroll");
+        assert_eq!(
+            for_loop.unwrap().unroll,
+            Some(UnrollConfig::Full),
+            "For loop should be marked for full unroll"
+        );
 
         // Convert to MIR - this tests that MIR conversion with unrolling doesn't crash
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
 
         println!("MIR conversion successful for function with unrolled for loop");
         println!("MIR name: {}", mir.name);

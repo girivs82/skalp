@@ -28,8 +28,7 @@ mod test_parse_generics {
     }
         "#;
 
-        let hir = parse_and_build_hir(skalp_code)
-            .expect("Failed to parse");
+        let hir = parse_and_build_hir(skalp_code).expect("Failed to parse");
 
         println!("\n=== Checking HIR Structure ===");
         println!("Functions: {}", hir.functions.len());
@@ -66,9 +65,11 @@ mod test_parse_generics {
                             }
 
                             // This should be 1 (the `::<32>` part)
-                            assert!(call.type_args.len() > 0,
+                            assert!(
+                                !call.type_args.is_empty(),
                                 "Expected at least one type argument for add::<32> call, got {}",
-                                call.type_args.len());
+                                call.type_args.len()
+                            );
 
                             println!("\n✅ Type arguments were parsed correctly!");
                         } else {

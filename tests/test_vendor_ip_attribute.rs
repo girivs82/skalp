@@ -3,9 +3,9 @@
 //! Tests the vendor IP attribute for wrapping vendor-specific IP cores
 //! and its propagation through HIR -> MIR -> SystemVerilog codegen.
 
+use skalp_frontend::hir::VendorType;
 use skalp_frontend::hir_builder::build_hir;
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir::{VendorType};
 
 #[test]
 fn test_xilinx_ip_basic() {
@@ -74,7 +74,11 @@ impl SinglePortRam {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "SinglePortRam").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "SinglePortRam")
+        .unwrap();
 
     assert!(entity.vendor_ip_config.is_some());
     let config = entity.vendor_ip_config.as_ref().unwrap();
@@ -185,7 +189,9 @@ impl AsyncFifo {
 
     // Compile to MIR
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("Failed to compile to MIR");
 
     // Find the module
     let module = mir.modules.iter().find(|m| m.name == "AsyncFifo");
@@ -235,17 +241,28 @@ impl XpmFifoWrapper {
     // Full pipeline
     let hir = parse_and_build_hir(source).expect("Failed to parse");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("Failed to compile to MIR");
     let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
     let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
 
     println!("Generated SystemVerilog:\n{}", sv);
 
     // Check output contains expected elements
-    assert!(sv.contains("Vendor IP Wrapper"), "Should have vendor IP comment");
+    assert!(
+        sv.contains("Vendor IP Wrapper"),
+        "Should have vendor IP comment"
+    );
     assert!(sv.contains("xpm_fifo_sync"), "Should reference IP name");
-    assert!(sv.contains("module XpmFifoWrapper"), "Should have module declaration");
-    assert!(sv.contains("XpmFifoWrapper_inst"), "Should have IP instance");
+    assert!(
+        sv.contains("module XpmFifoWrapper"),
+        "Should have module declaration"
+    );
+    assert!(
+        sv.contains("XpmFifoWrapper_inst"),
+        "Should have IP instance"
+    );
 
     println!("Vendor IP codegen test PASSED!");
 }
@@ -272,7 +289,11 @@ impl ExternalIp {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "ExternalIp").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "ExternalIp")
+        .unwrap();
 
     assert!(entity.vendor_ip_config.is_some());
     let config = entity.vendor_ip_config.as_ref().unwrap();

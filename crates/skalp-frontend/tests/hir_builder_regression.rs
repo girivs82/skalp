@@ -857,7 +857,9 @@ pub fn test_nested_call(a: bit[32], b: bit[32], c: bit[32]) -> bit[32] {
     let hir = assert_builds(source);
 
     // Find the test_nested_call function
-    let func = hir.functions.iter()
+    let func = hir
+        .functions
+        .iter()
         .find(|f| f.name == "test_nested_call")
         .expect("Should find test_nested_call function");
 

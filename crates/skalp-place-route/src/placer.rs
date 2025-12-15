@@ -368,7 +368,10 @@ impl Placer {
     }
 
     /// Simple random placement
-    fn random_placement(&mut self, gates: &[&Primitive]) -> Result<PlacementResult, PlacementError> {
+    fn random_placement(
+        &mut self,
+        gates: &[&Primitive],
+    ) -> Result<PlacementResult, PlacementError> {
         let available_tiles: Vec<_> = self.device.logic_tiles.iter().collect();
 
         if gates.len() > available_tiles.len() {
@@ -381,7 +384,8 @@ impl Placer {
         for (i, gate) in gates.iter().enumerate() {
             if i < available_tiles.len() {
                 let tile = available_tiles[i];
-                self.placement.insert(format!("prim_{}", gate.id.0), tile.position);
+                self.placement
+                    .insert(format!("prim_{}", gate.id.0), tile.position);
             }
         }
 
@@ -441,7 +445,10 @@ impl Placer {
     }
 
     /// Analytical placement using quadratic optimization
-    fn analytical_placement(&mut self, gates: &[&Primitive]) -> Result<PlacementResult, PlacementError> {
+    fn analytical_placement(
+        &mut self,
+        gates: &[&Primitive],
+    ) -> Result<PlacementResult, PlacementError> {
         // Simplified analytical placement - would use actual quadratic solver
         println!("   Running analytical placement (simplified)");
 
@@ -512,7 +519,8 @@ impl Placer {
                             .min((self.device.grid_size.1 - 2) as f64))
                             as usize;
 
-                        self.placement.insert(format!("prim_{}", gate.id.0), (new_x, new_y));
+                        self.placement
+                            .insert(format!("prim_{}", gate.id.0), (new_x, new_y));
                     }
                 }
             }

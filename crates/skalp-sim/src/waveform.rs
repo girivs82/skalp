@@ -130,11 +130,17 @@ impl Waveform {
                 let id_char = identifier as char;
                 let id = id_char.to_string();
                 // Use display_name if provided in trace config
-                let display_name = signal.trace_config.as_ref()
+                let display_name = signal
+                    .trace_config
+                    .as_ref()
                     .and_then(|tc| tc.display_name.as_ref())
                     .map(|s| s.as_str())
                     .unwrap_or(name.as_str());
-                writeln!(writer, "$var wire {} {} {} $end", signal.width, id, display_name)?;
+                writeln!(
+                    writer,
+                    "$var wire {} {} {} $end",
+                    signal.width, id, display_name
+                )?;
                 signal_map.insert((*name).clone(), id.clone());
                 identifier += 1;
                 if identifier > 126 {
@@ -151,11 +157,17 @@ impl Waveform {
                     let id_char = identifier as char;
                     let id = id_char.to_string();
                     // Use display_name if provided
-                    let display_name = signal.trace_config.as_ref()
+                    let display_name = signal
+                        .trace_config
+                        .as_ref()
                         .and_then(|tc| tc.display_name.as_ref())
                         .map(|s| s.as_str())
                         .unwrap_or(name.as_str());
-                    writeln!(writer, "$var wire {} {} {} $end", signal.width, id, display_name)?;
+                    writeln!(
+                        writer,
+                        "$var wire {} {} {} $end",
+                        signal.width, id, display_name
+                    )?;
                     signal_map.insert((*name).clone(), id.clone());
                     identifier += 1;
                     if identifier > 126 {
@@ -211,7 +223,9 @@ impl Waveform {
     pub fn export_traced_vcd(&self, path: &Path) -> std::io::Result<()> {
         // Filter to only traced signals
         let traced_waveform = Waveform {
-            signals: self.signals.iter()
+            signals: self
+                .signals
+                .iter()
                 .filter(|(_, sig)| sig.trace_config.is_some())
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
@@ -222,7 +236,8 @@ impl Waveform {
 
     /// Get list of all traced signal names
     pub fn get_traced_signals(&self) -> Vec<&str> {
-        self.signals.iter()
+        self.signals
+            .iter()
             .filter(|(_, sig)| sig.trace_config.is_some())
             .map(|(name, _)| name.as_str())
             .collect()
@@ -230,9 +245,11 @@ impl Waveform {
 
     /// Get list of traced signals in a specific group
     pub fn get_traced_signals_in_group(&self, group: &str) -> Vec<&str> {
-        self.signals.iter()
+        self.signals
+            .iter()
             .filter(|(_, sig)| {
-                sig.trace_config.as_ref()
+                sig.trace_config
+                    .as_ref()
                     .and_then(|tc| tc.group.as_ref())
                     .map(|g| g == group)
                     .unwrap_or(false)
@@ -282,11 +299,10 @@ impl Waveform {
                 }
                 val.to_string()
             }
-            TraceRadix::Ascii => {
-                bytes.iter()
-                    .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
-                    .collect()
-            }
+            TraceRadix::Ascii => bytes
+                .iter()
+                .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+                .collect(),
         }
     }
 

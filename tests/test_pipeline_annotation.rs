@@ -60,7 +60,10 @@ impl TestEntity {
     let config = func.pipeline_config.as_ref().unwrap();
     assert_eq!(config.stages, 2, "Pipeline should have 2 stages");
 
-    println!("Pipeline annotation parsed successfully with {} stages", config.stages);
+    println!(
+        "Pipeline annotation parsed successfully with {} stages",
+        config.stages
+    );
 }
 
 #[test]
@@ -100,7 +103,10 @@ impl MacTest {
         "MIR should have at least one module"
     );
 
-    println!("MIR compilation successful with {} modules", mir.modules.len());
+    println!(
+        "MIR compilation successful with {} modules",
+        mir.modules.len()
+    );
 
     // Find the top module
     let top_module = mir.modules.iter().find(|m| m.name == "MacTest");
@@ -116,7 +122,10 @@ impl MacTest {
 
     // Verify pipeline config was propagated
     // The pipeline_config should be on the synthesized function module
-    let pipelined_module = mir.modules.iter().find(|m| m.name.contains("pipelined_mac"));
+    let pipelined_module = mir
+        .modules
+        .iter()
+        .find(|m| m.name.contains("pipelined_mac"));
     if let Some(pm) = pipelined_module {
         println!(
             "Found pipelined module '{}' with pipeline config: {:?}",
@@ -133,7 +142,10 @@ fn test_pipeline_annotation_fixture() {
 
     let fixture_path = Path::new("tests/fixtures/test_pipeline_annotation.sk");
     if !fixture_path.exists() {
-        println!("Skipping fixture test - file not found at {:?}", fixture_path);
+        println!(
+            "Skipping fixture test - file not found at {:?}",
+            fixture_path
+        );
         return;
     }
 
@@ -150,7 +162,10 @@ fn test_pipeline_annotation_fixture() {
         .filter(|f| f.pipeline_config.is_some())
         .collect();
 
-    println!("Found {} functions with pipeline annotations:", pipelined_funcs.len());
+    println!(
+        "Found {} functions with pipeline annotations:",
+        pipelined_funcs.len()
+    );
     for func in &pipelined_funcs {
         let config = func.pipeline_config.as_ref().unwrap();
         println!("  - {} (stages={})", func.name, config.stages);

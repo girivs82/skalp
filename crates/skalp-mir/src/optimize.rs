@@ -272,7 +272,10 @@ impl ConstantFolding {
         right: &Expression,
     ) -> Option<Expression> {
         match (&left.kind, &right.kind) {
-            (ExpressionKind::Literal(Value::Integer(l)), ExpressionKind::Literal(Value::Integer(r))) => {
+            (
+                ExpressionKind::Literal(Value::Integer(l)),
+                ExpressionKind::Literal(Value::Integer(r)),
+            ) => {
                 let result = match op {
                     BinaryOp::Add => l + r,
                     BinaryOp::Sub => l - r,
@@ -294,8 +297,12 @@ impl ConstantFolding {
     fn fold_unary(&self, op: &UnaryOp, operand: &Expression) -> Option<Expression> {
         match &operand.kind {
             ExpressionKind::Literal(Value::Integer(n)) => match op {
-                UnaryOp::Negate => Some(Expression::literal(Value::Integer(-n), operand.ty.clone())),
-                UnaryOp::Not if *n == 0 => Some(Expression::literal(Value::Integer(1), operand.ty.clone())),
+                UnaryOp::Negate => {
+                    Some(Expression::literal(Value::Integer(-n), operand.ty.clone()))
+                }
+                UnaryOp::Not if *n == 0 => {
+                    Some(Expression::literal(Value::Integer(1), operand.ty.clone()))
+                }
                 UnaryOp::Not => Some(Expression::literal(Value::Integer(0), operand.ty.clone())),
                 _ => None,
             },
@@ -348,7 +355,9 @@ impl ConstantFolding {
                     self.fold_expression(expr);
                 }
             }
-            ExpressionKind::Cast { expr: inner_expr, .. } => {
+            ExpressionKind::Cast {
+                expr: inner_expr, ..
+            } => {
                 // Fold the inner expression, but preserve the cast
                 self.fold_expression(inner_expr);
             }

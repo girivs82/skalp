@@ -1013,7 +1013,10 @@ impl TestDoubleAnd {
 "#;
     let sv1 = compile_to_sv(code1).expect("Double && should compile");
     assert!(sv1.contains("&&"), "Output should contain && operator");
-    assert!(!sv1.contains("!= 0) != "), "Should not have != where && should be");
+    assert!(
+        !sv1.contains("!= 0) != "),
+        "Should not have != where && should be"
+    );
 
     // Test 2: Triple-chained && (Bug #148 - no duplication)
     let code2 = r#"
@@ -1085,10 +1088,26 @@ impl TestQuadAnd {
     let sv5 = compile_to_sv(code5).expect("Quadruple && should compile");
 
     // Each comparison should appear exactly once
-    assert_eq!(sv5.matches("(a != 0)").count(), 1, "Should have exactly one (a != 0)");
-    assert_eq!(sv5.matches("(b != 0)").count(), 1, "Should have exactly one (b != 0)");
-    assert_eq!(sv5.matches("(c != 0)").count(), 1, "Should have exactly one (c != 0)");
-    assert_eq!(sv5.matches("(d != 0)").count(), 1, "Should have exactly one (d != 0)");
+    assert_eq!(
+        sv5.matches("(a != 0)").count(),
+        1,
+        "Should have exactly one (a != 0)"
+    );
+    assert_eq!(
+        sv5.matches("(b != 0)").count(),
+        1,
+        "Should have exactly one (b != 0)"
+    );
+    assert_eq!(
+        sv5.matches("(c != 0)").count(),
+        1,
+        "Should have exactly one (c != 0)"
+    );
+    assert_eq!(
+        sv5.matches("(d != 0)").count(),
+        1,
+        "Should have exactly one (d != 0)"
+    );
 
     // Test 6: Mixed && and || operators
     let code6 = r#"

@@ -89,7 +89,10 @@ mod test_karythra_fp_style {
                 let monomorphized_hir = mono.monomorphize(&hir);
 
                 println!("\n=== Monomorphization Results ===");
-                println!("Functions after monomorphization: {}", monomorphized_hir.functions.len());
+                println!(
+                    "Functions after monomorphization: {}",
+                    monomorphized_hir.functions.len()
+                );
 
                 // List all generated functions
                 println!("\nGenerated functions:");
@@ -98,18 +101,29 @@ mod test_karythra_fp_style {
                 }
 
                 // Check that trait methods were specialized
-                let fp32_methods: Vec<_> = monomorphized_hir.functions.iter()
+                let fp32_methods: Vec<_> = monomorphized_hir
+                    .functions
+                    .iter()
                     .filter(|f| f.name.contains("FloatingPoint") && f.name.contains("fp32"))
                     .collect();
 
-                println!("\n✅ Generated {} FloatingPoint methods for fp32", fp32_methods.len());
+                println!(
+                    "\n✅ Generated {} FloatingPoint methods for fp32",
+                    fp32_methods.len()
+                );
 
                 // Verify we generated the expected methods
-                let has_add = monomorphized_hir.functions.iter()
+                let has_add = monomorphized_hir
+                    .functions
+                    .iter()
                     .any(|f| f.name.contains("add") && f.name.contains("FloatingPoint"));
-                let has_mul = monomorphized_hir.functions.iter()
+                let has_mul = monomorphized_hir
+                    .functions
+                    .iter()
                     .any(|f| f.name.contains("mul") && f.name.contains("FloatingPoint"));
-                let has_to_bits = monomorphized_hir.functions.iter()
+                let has_to_bits = monomorphized_hir
+                    .functions
+                    .iter()
                     .any(|f| f.name.contains("to_bits") && f.name.contains("FloatingPoint"));
 
                 println!("\nMethod specializations:");
@@ -118,7 +132,9 @@ mod test_karythra_fp_style {
                 println!("  to_bits: {}", if has_to_bits { "✅" } else { "❌" });
 
                 if has_add && has_mul && has_to_bits {
-                    println!("\n🎉 SUCCESS! Trait methods are working with Karythra-style FP code!");
+                    println!(
+                        "\n🎉 SUCCESS! Trait methods are working with Karythra-style FP code!"
+                    );
                     println!("   This enables the 67% code reduction we've been targeting!");
                 } else {
                     println!("\n⚠️  Some methods weren't generated, but core functionality works");
@@ -194,7 +210,9 @@ mod test_karythra_fp_style {
                 println!("Functions after: {}", monomorphized_hir.functions.len());
 
                 // Should have: test_nat32, test_nat64, test_fp32 + specialized methods
-                let specialized_methods: Vec<_> = monomorphized_hir.functions.iter()
+                let specialized_methods: Vec<_> = monomorphized_hir
+                    .functions
+                    .iter()
                     .filter(|f| f.name.contains("Numeric"))
                     .collect();
 
@@ -204,11 +222,16 @@ mod test_karythra_fp_style {
                 }
 
                 // Core functionality works - methods are being generated
-                assert!(specialized_methods.len() >= 1,
-                    "Expected at least 1 specialized method");
+                assert!(
+                    !specialized_methods.is_empty(),
+                    "Expected at least 1 specialized method"
+                );
 
                 println!("\n✅ Multiple trait implementations work correctly!");
-                println!("   Note: Generated {} methods - type inference working as designed", specialized_methods.len());
+                println!(
+                    "   Note: Generated {} methods - type inference working as designed",
+                    specialized_methods.len()
+                );
             }
             Err(e) => {
                 println!("❌ FAILED: {:?}", e);

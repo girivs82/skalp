@@ -3,9 +3,9 @@
 //! Tests the #[cdc] attribute for clock domain crossing synchronization
 //! and its propagation through HIR -> MIR.
 
+use skalp_frontend::hir::CdcType;
 use skalp_frontend::hir_builder::build_hir;
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir::CdcType;
 use skalp_mir::hir_to_mir::HirToMir;
 
 #[test]
@@ -51,7 +51,11 @@ impl CdcTest {
 
     let cdc_config = cdc_signal.cdc_config.as_ref().unwrap();
     assert_eq!(cdc_config.sync_stages, 2, "Default sync_stages should be 2");
-    assert_eq!(cdc_config.cdc_type, CdcType::TwoFF, "Default cdc_type should be TwoFF");
+    assert_eq!(
+        cdc_config.cdc_type,
+        CdcType::TwoFF,
+        "Default cdc_type should be TwoFF"
+    );
 
     println!("Basic #[cdc] attribute test PASSED!");
 }
@@ -86,19 +90,43 @@ impl CdcStagesTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CdcStagesTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CdcStagesTest")
+        .unwrap();
 
     // Check metastable_input has 3 stages
-    let signal = entity.signals.iter().find(|s| s.name == "metastable_input").unwrap();
-    assert!(signal.cdc_config.is_some(), "metastable_input should have cdc_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "metastable_input")
+        .unwrap();
+    assert!(
+        signal.cdc_config.is_some(),
+        "metastable_input should have cdc_config"
+    );
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.sync_stages, 3, "metastable_input should have 3 sync_stages");
+    assert_eq!(
+        cdc_config.sync_stages, 3,
+        "metastable_input should have 3 sync_stages"
+    );
 
     // Check four_stage has 4 stages
-    let signal = entity.signals.iter().find(|s| s.name == "four_stage").unwrap();
-    assert!(signal.cdc_config.is_some(), "four_stage should have cdc_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "four_stage")
+        .unwrap();
+    assert!(
+        signal.cdc_config.is_some(),
+        "four_stage should have cdc_config"
+    );
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.sync_stages, 4, "four_stage should have 4 sync_stages");
+    assert_eq!(
+        cdc_config.sync_stages, 4,
+        "four_stage should have 4 sync_stages"
+    );
 
     println!("#[cdc] with custom stages test PASSED!");
 }
@@ -138,25 +166,53 @@ impl CdcTypeTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CdcTypeTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CdcTypeTest")
+        .unwrap();
 
     // Check gray_sync has Gray type
-    let signal = entity.signals.iter().find(|s| s.name == "gray_sync").unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "gray_sync")
+        .unwrap();
     assert!(signal.cdc_config.is_some());
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.cdc_type, CdcType::Gray, "gray_sync should have Gray cdc_type");
+    assert_eq!(
+        cdc_config.cdc_type,
+        CdcType::Gray,
+        "gray_sync should have Gray cdc_type"
+    );
 
     // Check pulse_sync has Pulse type
-    let signal = entity.signals.iter().find(|s| s.name == "pulse_sync").unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "pulse_sync")
+        .unwrap();
     assert!(signal.cdc_config.is_some());
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.cdc_type, CdcType::Pulse, "pulse_sync should have Pulse cdc_type");
+    assert_eq!(
+        cdc_config.cdc_type,
+        CdcType::Pulse,
+        "pulse_sync should have Pulse cdc_type"
+    );
 
     // Check handshake_sync has Handshake type
-    let signal = entity.signals.iter().find(|s| s.name == "handshake_sync").unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "handshake_sync")
+        .unwrap();
     assert!(signal.cdc_config.is_some());
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.cdc_type, CdcType::Handshake, "handshake_sync should have Handshake cdc_type");
+    assert_eq!(
+        cdc_config.cdc_type,
+        CdcType::Handshake,
+        "handshake_sync should have Handshake cdc_type"
+    );
 
     println!("#[cdc] with CDC type test PASSED!");
 }
@@ -254,17 +310,41 @@ impl CombinedCdcTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CombinedCdcTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CombinedCdcTest")
+        .unwrap();
 
     // Check sync_data has cdc_config but not trace_config
-    let sync_signal = entity.signals.iter().find(|s| s.name == "sync_data").unwrap();
-    assert!(sync_signal.cdc_config.is_some(), "sync_data should have cdc_config");
-    assert!(sync_signal.trace_config.is_none(), "sync_data should NOT have trace_config");
+    let sync_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "sync_data")
+        .unwrap();
+    assert!(
+        sync_signal.cdc_config.is_some(),
+        "sync_data should have cdc_config"
+    );
+    assert!(
+        sync_signal.trace_config.is_none(),
+        "sync_data should NOT have trace_config"
+    );
 
     // Check debug_state has trace_config but not cdc_config
-    let debug_signal = entity.signals.iter().find(|s| s.name == "debug_state").unwrap();
-    assert!(debug_signal.trace_config.is_some(), "debug_state should have trace_config");
-    assert!(debug_signal.cdc_config.is_none(), "debug_state should NOT have cdc_config");
+    let debug_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "debug_state")
+        .unwrap();
+    assert!(
+        debug_signal.trace_config.is_some(),
+        "debug_state should have trace_config"
+    );
+    assert!(
+        debug_signal.cdc_config.is_none(),
+        "debug_state should NOT have cdc_config"
+    );
 
     println!("Combined #[cdc] and #[trace] test PASSED!");
 }
@@ -299,17 +379,33 @@ impl CdcCombinedTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CdcCombinedTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CdcCombinedTest")
+        .unwrap();
 
     // Check gray_bus has both stages and type
-    let signal = entity.signals.iter().find(|s| s.name == "gray_bus").unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "gray_bus")
+        .unwrap();
     assert!(signal.cdc_config.is_some());
     let cdc_config = signal.cdc_config.as_ref().unwrap();
     assert_eq!(cdc_config.sync_stages, 3, "gray_bus should have 3 stages");
-    assert_eq!(cdc_config.cdc_type, CdcType::Gray, "gray_bus should have Gray type");
+    assert_eq!(
+        cdc_config.cdc_type,
+        CdcType::Gray,
+        "gray_bus should have Gray type"
+    );
 
     // Check two_stage uses "stages" shorthand
-    let signal = entity.signals.iter().find(|s| s.name == "two_stage").unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "two_stage")
+        .unwrap();
     assert!(signal.cdc_config.is_some());
     let cdc_config = signal.cdc_config.as_ref().unwrap();
     assert_eq!(cdc_config.sync_stages, 2, "two_stage should have 2 stages");
@@ -349,22 +445,56 @@ impl CdcDomainTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CdcDomainTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CdcDomainTest")
+        .unwrap();
 
     // Check cross_domain has from/to domains
-    let signal = entity.signals.iter().find(|s| s.name == "cross_domain").unwrap();
-    assert!(signal.cdc_config.is_some(), "cross_domain should have cdc_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "cross_domain")
+        .unwrap();
+    assert!(
+        signal.cdc_config.is_some(),
+        "cross_domain should have cdc_config"
+    );
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.from_domain, Some("fast_clk".to_string()), "from_domain should be 'fast_clk'");
-    assert_eq!(cdc_config.to_domain, Some("slow_clk".to_string()), "to_domain should be 'slow_clk'");
+    assert_eq!(
+        cdc_config.from_domain,
+        Some("fast_clk".to_string()),
+        "from_domain should be 'fast_clk'"
+    );
+    assert_eq!(
+        cdc_config.to_domain,
+        Some("slow_clk".to_string()),
+        "to_domain should be 'slow_clk'"
+    );
     assert_eq!(cdc_config.sync_stages, 2, "sync_stages should be 2");
 
     // Check async_data with source/destination aliases
-    let signal = entity.signals.iter().find(|s| s.name == "async_data").unwrap();
-    assert!(signal.cdc_config.is_some(), "async_data should have cdc_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "async_data")
+        .unwrap();
+    assert!(
+        signal.cdc_config.is_some(),
+        "async_data should have cdc_config"
+    );
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.from_domain, Some("producer".to_string()), "from_domain should be 'producer'");
-    assert_eq!(cdc_config.to_domain, Some("consumer".to_string()), "to_domain should be 'consumer'");
+    assert_eq!(
+        cdc_config.from_domain,
+        Some("producer".to_string()),
+        "from_domain should be 'producer'"
+    );
+    assert_eq!(
+        cdc_config.to_domain,
+        Some("consumer".to_string()),
+        "to_domain should be 'consumer'"
+    );
 
     println!("#[cdc] with domain identifiers test PASSED!");
 }
@@ -393,14 +523,33 @@ impl CdcFromToTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CdcFromToTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CdcFromToTest")
+        .unwrap();
 
     // Check cross_domain has from/to domains
-    let signal = entity.signals.iter().find(|s| s.name == "cross_domain").unwrap();
-    assert!(signal.cdc_config.is_some(), "cross_domain should have cdc_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "cross_domain")
+        .unwrap();
+    assert!(
+        signal.cdc_config.is_some(),
+        "cross_domain should have cdc_config"
+    );
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.from_domain, Some("fast_domain".to_string()), "from_domain should be 'fast_domain'");
-    assert_eq!(cdc_config.to_domain, Some("slow_domain".to_string()), "to_domain should be 'slow_domain'");
+    assert_eq!(
+        cdc_config.from_domain,
+        Some("fast_domain".to_string()),
+        "from_domain should be 'fast_domain'"
+    );
+    assert_eq!(
+        cdc_config.to_domain,
+        Some("slow_domain".to_string()),
+        "to_domain should be 'slow_domain'"
+    );
     assert_eq!(cdc_config.sync_stages, 3, "sync_stages should be 3");
 
     println!("#[cdc] with from/to keywords test PASSED!");
@@ -436,7 +585,9 @@ impl CdcCodegenTest {
 
     let hir = parse_and_build_hir(source).expect("Failed to parse");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("Failed to compile to MIR");
     let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
     // Generate SystemVerilog
@@ -483,7 +634,9 @@ impl CdcGrayTest {
 
     let hir = parse_and_build_hir(source).expect("Failed to parse");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("Failed to compile to MIR");
     let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
     // Generate SystemVerilog
@@ -494,8 +647,14 @@ impl CdcGrayTest {
     // Verify Gray code synchronizer was generated
     assert!(sv.contains("CDC Synchronizer"), "Should have CDC comment");
     assert!(sv.contains("Gray"), "Should mention Gray type");
-    assert!(sv.contains("gray_synced_gray"), "Should have gray-coded signal");
-    assert!(sv.contains("gray_synced_bin_in"), "Should have binary input");
+    assert!(
+        sv.contains("gray_synced_gray"),
+        "Should have gray-coded signal"
+    );
+    assert!(
+        sv.contains("gray_synced_bin_in"),
+        "Should have binary input"
+    );
 
     println!("CDC codegen Gray test PASSED!");
 }
@@ -529,24 +688,62 @@ impl CdcLifetimeTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CdcLifetimeTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CdcLifetimeTest")
+        .unwrap();
 
     // Check cross_domain with lifetime domains
-    let signal = entity.signals.iter().find(|s| s.name == "cross_domain").unwrap();
-    assert!(signal.cdc_config.is_some(), "cross_domain should have cdc_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "cross_domain")
+        .unwrap();
+    assert!(
+        signal.cdc_config.is_some(),
+        "cross_domain should have cdc_config"
+    );
     let cdc_config = signal.cdc_config.as_ref().unwrap();
     // The lexer captures lifetime as "'name" but stores as "name"
-    assert_eq!(cdc_config.from_domain, Some("'fast_clk".to_string()), "from_domain should be 'fast_clk'");
-    assert_eq!(cdc_config.to_domain, Some("'slow_clk".to_string()), "to_domain should be 'slow_clk'");
+    assert_eq!(
+        cdc_config.from_domain,
+        Some("'fast_clk".to_string()),
+        "from_domain should be 'fast_clk'"
+    );
+    assert_eq!(
+        cdc_config.to_domain,
+        Some("'slow_clk".to_string()),
+        "to_domain should be 'slow_clk'"
+    );
     assert_eq!(cdc_config.sync_stages, 3, "sync_stages should be 3");
 
     // Check gray_cross with full spec
-    let signal = entity.signals.iter().find(|s| s.name == "gray_cross").unwrap();
-    assert!(signal.cdc_config.is_some(), "gray_cross should have cdc_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "gray_cross")
+        .unwrap();
+    assert!(
+        signal.cdc_config.is_some(),
+        "gray_cross should have cdc_config"
+    );
     let cdc_config = signal.cdc_config.as_ref().unwrap();
-    assert_eq!(cdc_config.from_domain, Some("'src_domain".to_string()), "from_domain should be 'src_domain'");
-    assert_eq!(cdc_config.to_domain, Some("'dst_domain".to_string()), "to_domain should be 'dst_domain'");
-    assert_eq!(cdc_config.cdc_type, CdcType::Gray, "cdc_type should be Gray");
+    assert_eq!(
+        cdc_config.from_domain,
+        Some("'src_domain".to_string()),
+        "from_domain should be 'src_domain'"
+    );
+    assert_eq!(
+        cdc_config.to_domain,
+        Some("'dst_domain".to_string()),
+        "to_domain should be 'dst_domain'"
+    );
+    assert_eq!(
+        cdc_config.cdc_type,
+        CdcType::Gray,
+        "cdc_type should be Gray"
+    );
 
     println!("#[cdc] with lifetime-style domains test PASSED!");
 }

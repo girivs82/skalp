@@ -243,11 +243,7 @@ impl ModelChecker {
     }
 
     /// Get bad states (violating property) for IC3
-    async fn get_bad_states(
-        &self,
-        design: &Lir,
-        property: &Property,
-    ) -> FormalResult<StateSet> {
+    async fn get_bad_states(&self, design: &Lir, property: &Property) -> FormalResult<StateSet> {
         Ok(StateSet::new())
     }
 

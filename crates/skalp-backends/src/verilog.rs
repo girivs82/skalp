@@ -6,12 +6,12 @@
 
 use crate::BackendError;
 use skalp_lir::Lir;
-use skalp_mir::{
-    Expression, ExpressionKind, GenerateBlock, GenerateBlockKind, GenerateBody, GenerateCase,
-    GenerateCaseArm, GenerateFor, GenerateIf, Mir, Module, Statement, LValue, BinaryOp, UnaryOp,
-    ReduceOp, CaseStatement,
-};
 use skalp_mir::mir::CaseItem;
+use skalp_mir::{
+    BinaryOp, CaseStatement, Expression, ExpressionKind, GenerateBlock, GenerateBlockKind,
+    GenerateBody, GenerateCase, GenerateCaseArm, GenerateFor, GenerateIf, LValue, Mir, Module,
+    ReduceOp, Statement, UnaryOp,
+};
 
 /// Generate Verilog from LIR (gate-level)
 pub fn generate_verilog(lir: &Lir) -> Result<String, BackendError> {
@@ -68,12 +68,16 @@ pub fn generate_verilog(lir: &Lir) -> Result<String, BackendError> {
         let prim_id = format!("prim_{}", prim.id.0);
 
         // Format inputs as net names
-        let inputs: Vec<String> = prim.inputs.iter()
+        let inputs: Vec<String> = prim
+            .inputs
+            .iter()
             .filter_map(|id| lir.nets.get(id.0 as usize).map(|n| n.name.clone()))
             .collect();
 
         // Format outputs as net names
-        let outputs: Vec<String> = prim.outputs.iter()
+        let outputs: Vec<String> = prim
+            .outputs
+            .iter()
             .filter_map(|id| lir.nets.get(id.0 as usize).map(|n| n.name.clone()))
             .collect();
 
@@ -99,6 +103,12 @@ pub fn generate_verilog(lir: &Lir) -> Result<String, BackendError> {
 pub struct SvCodegen {
     output: String,
     indent: usize,
+}
+
+impl Default for SvCodegen {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SvCodegen {
@@ -360,7 +370,7 @@ impl SvCodegen {
                             skalp_mir::EdgeType::Rising => "posedge",
                             skalp_mir::EdgeType::Falling => "negedge",
                             skalp_mir::EdgeType::Both => "",
-                            skalp_mir::EdgeType::Active => "posedge",  // Active level
+                            skalp_mir::EdgeType::Active => "posedge", // Active level
                             skalp_mir::EdgeType::Inactive => "negedge", // Inactive level
                         };
                         format!("{} {}", edge, self.lvalue_to_sv(&e.signal))
@@ -368,13 +378,11 @@ impl SvCodegen {
                     .collect::<Vec<_>>()
                     .join(" or ")
             }
-            skalp_mir::SensitivityList::Level(signals) => {
-                signals
-                    .iter()
-                    .map(|s| self.lvalue_to_sv(s))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
+            skalp_mir::SensitivityList::Level(signals) => signals
+                .iter()
+                .map(|s| self.lvalue_to_sv(s))
+                .collect::<Vec<_>>()
+                .join(", "),
         };
 
         self.emit_line(&format!("always @({}) begin", sens));
@@ -503,7 +511,10 @@ impl SvCodegen {
                 if let Some(msg) = &assert_stmt.message {
                     self.emit_line(&format!("assert({}) else {}(\"{}\");", cond, severity, msg));
                 } else {
-                    self.emit_line(&format!("assert({}) else {}(\"Assertion failed\");", cond, severity));
+                    self.emit_line(&format!(
+                        "assert({}) else {}(\"Assertion failed\");",
+                        cond, severity
+                    ));
                 }
             }
             Statement::Assume(assume_stmt) => {
@@ -667,7 +678,7 @@ impl SvCodegen {
             UnaryOp::Not => "!",
             UnaryOp::BitwiseNot => "~",
             UnaryOp::Negate => "-",
-            UnaryOp::FSqrt => "$sqrt",  // Placeholder for floating-point sqrt
+            UnaryOp::FSqrt => "$sqrt", // Placeholder for floating-point sqrt
             UnaryOp::FNegate => "-",
             UnaryOp::Reduce(rop) => match rop {
                 ReduceOp::And => "&",

@@ -3,9 +3,9 @@
 //! Tests the #[trace] attribute for debug/waveform export and its propagation
 //! through HIR -> MIR.
 
+use skalp_frontend::hir::TraceRadix;
 use skalp_frontend::hir_builder::build_hir;
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir::TraceRadix;
 use skalp_mir::hir_to_mir::HirToMir;
 
 #[test]
@@ -50,8 +50,15 @@ impl TraceTest {
     );
 
     let trace_config = debug_signal.trace_config.as_ref().unwrap();
-    assert!(trace_config.group.is_none(), "Basic trace should have no group");
-    assert_eq!(trace_config.radix, TraceRadix::Binary, "Default radix should be Binary");
+    assert!(
+        trace_config.group.is_none(),
+        "Basic trace should have no group"
+    );
+    assert_eq!(
+        trace_config.radix,
+        TraceRadix::Binary,
+        "Default radix should be Binary"
+    );
 
     println!("Basic #[trace] attribute test PASSED!");
 }
@@ -87,19 +94,40 @@ impl GroupedTrace {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "GroupedTrace").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "GroupedTrace")
+        .unwrap();
 
     // Check fsm_state has trace config
-    let fsm_signal = entity.signals.iter().find(|s| s.name == "fsm_state").unwrap();
-    assert!(fsm_signal.trace_config.is_some(), "fsm_state should have trace_config");
+    let fsm_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "fsm_state")
+        .unwrap();
+    assert!(
+        fsm_signal.trace_config.is_some(),
+        "fsm_state should have trace_config"
+    );
 
     // Check counter has trace config
     let counter_signal = entity.signals.iter().find(|s| s.name == "counter").unwrap();
-    assert!(counter_signal.trace_config.is_some(), "counter should have trace_config");
+    assert!(
+        counter_signal.trace_config.is_some(),
+        "counter should have trace_config"
+    );
 
     // Check data_bus has trace config
-    let data_signal = entity.signals.iter().find(|s| s.name == "data_bus").unwrap();
-    assert!(data_signal.trace_config.is_some(), "data_bus should have trace_config");
+    let data_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "data_bus")
+        .unwrap();
+    assert!(
+        data_signal.trace_config.is_some(),
+        "data_bus should have trace_config"
+    );
 
     println!("#[trace] with group attribute test PASSED!");
 }
@@ -133,22 +161,38 @@ impl RadixTrace {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "RadixTrace").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "RadixTrace")
+        .unwrap();
 
     // Check hex_data
-    let hex_signal = entity.signals.iter().find(|s| s.name == "hex_data").unwrap();
+    let hex_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "hex_data")
+        .unwrap();
     assert!(hex_signal.trace_config.is_some());
     let trace_config = hex_signal.trace_config.as_ref().unwrap();
     assert_eq!(trace_config.radix, TraceRadix::Hex);
 
     // Check signed_val
-    let signed_signal = entity.signals.iter().find(|s| s.name == "signed_val").unwrap();
+    let signed_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "signed_val")
+        .unwrap();
     assert!(signed_signal.trace_config.is_some());
     let trace_config = signed_signal.trace_config.as_ref().unwrap();
     assert_eq!(trace_config.radix, TraceRadix::Signed);
 
     // Check unsigned_val
-    let unsigned_signal = entity.signals.iter().find(|s| s.name == "unsigned_val").unwrap();
+    let unsigned_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "unsigned_val")
+        .unwrap();
     assert!(unsigned_signal.trace_config.is_some());
     let trace_config = unsigned_signal.trace_config.as_ref().unwrap();
     assert_eq!(trace_config.radix, TraceRadix::Unsigned);
@@ -203,7 +247,10 @@ impl MirTraceTest {
 
     // Check untraced_data does NOT have trace_config
     let untraced_signal = module.signals.iter().find(|s| s.name == "untraced_data");
-    assert!(untraced_signal.is_some(), "Should have untraced_data signal");
+    assert!(
+        untraced_signal.is_some(),
+        "Should have untraced_data signal"
+    );
     let untraced_signal = untraced_signal.unwrap();
     assert!(
         untraced_signal.trace_config.is_none(),
@@ -243,17 +290,37 @@ impl CombinedTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "CombinedTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CombinedTest")
+        .unwrap();
 
     // Check mem signal has memory_config but not trace_config
     let mem_signal = entity.signals.iter().find(|s| s.name == "mem").unwrap();
-    assert!(mem_signal.memory_config.is_some(), "mem should have memory_config");
-    assert!(mem_signal.trace_config.is_none(), "mem should NOT have trace_config");
+    assert!(
+        mem_signal.memory_config.is_some(),
+        "mem should have memory_config"
+    );
+    assert!(
+        mem_signal.trace_config.is_none(),
+        "mem should NOT have trace_config"
+    );
 
     // Check addr_debug has trace_config but not memory_config
-    let debug_signal = entity.signals.iter().find(|s| s.name == "addr_debug").unwrap();
-    assert!(debug_signal.trace_config.is_some(), "addr_debug should have trace_config");
-    assert!(debug_signal.memory_config.is_none(), "addr_debug should NOT have memory_config");
+    let debug_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "addr_debug")
+        .unwrap();
+    assert!(
+        debug_signal.trace_config.is_some(),
+        "addr_debug should have trace_config"
+    );
+    assert!(
+        debug_signal.memory_config.is_none(),
+        "addr_debug should NOT have memory_config"
+    );
 
     println!("Combined attributes test PASSED!");
 }
@@ -284,21 +351,45 @@ impl DisplayNameTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "DisplayNameTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "DisplayNameTest")
+        .unwrap();
 
     // Check internal_state has display_name
-    let signal = entity.signals.iter().find(|s| s.name == "internal_state").unwrap();
-    assert!(signal.trace_config.is_some(), "internal_state should have trace_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "internal_state")
+        .unwrap();
+    assert!(
+        signal.trace_config.is_some(),
+        "internal_state should have trace_config"
+    );
     let trace_config = signal.trace_config.as_ref().unwrap();
-    assert_eq!(trace_config.display_name, Some("FSM State".to_string()),
-               "display_name should be 'FSM State'");
+    assert_eq!(
+        trace_config.display_name,
+        Some("FSM State".to_string()),
+        "display_name should be 'FSM State'"
+    );
 
     // Check debug_counter has name (alias for display_name)
-    let signal = entity.signals.iter().find(|s| s.name == "debug_counter").unwrap();
-    assert!(signal.trace_config.is_some(), "debug_counter should have trace_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "debug_counter")
+        .unwrap();
+    assert!(
+        signal.trace_config.is_some(),
+        "debug_counter should have trace_config"
+    );
     let trace_config = signal.trace_config.as_ref().unwrap();
-    assert_eq!(trace_config.display_name, Some("Debug Counter".to_string()),
-               "display_name should be 'Debug Counter'");
+    assert_eq!(
+        trace_config.display_name,
+        Some("Debug Counter".to_string()),
+        "display_name should be 'Debug Counter'"
+    );
 
     println!("#[trace] display_name test PASSED!");
 }
@@ -328,21 +419,45 @@ impl GroupStringTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "GroupStringTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "GroupStringTest")
+        .unwrap();
 
     // Check fsm_state has group
-    let signal = entity.signals.iter().find(|s| s.name == "fsm_state").unwrap();
-    assert!(signal.trace_config.is_some(), "fsm_state should have trace_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "fsm_state")
+        .unwrap();
+    assert!(
+        signal.trace_config.is_some(),
+        "fsm_state should have trace_config"
+    );
     let trace_config = signal.trace_config.as_ref().unwrap();
-    assert_eq!(trace_config.group, Some("control_signals".to_string()),
-               "group should be 'control_signals'");
+    assert_eq!(
+        trace_config.group,
+        Some("control_signals".to_string()),
+        "group should be 'control_signals'"
+    );
 
     // Check data_bus has group and radix
-    let signal = entity.signals.iter().find(|s| s.name == "data_bus").unwrap();
-    assert!(signal.trace_config.is_some(), "data_bus should have trace_config");
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "data_bus")
+        .unwrap();
+    assert!(
+        signal.trace_config.is_some(),
+        "data_bus should have trace_config"
+    );
     let trace_config = signal.trace_config.as_ref().unwrap();
-    assert_eq!(trace_config.group, Some("data_path".to_string()),
-               "group should be 'data_path'");
+    assert_eq!(
+        trace_config.group,
+        Some("data_path".to_string()),
+        "group should be 'data_path'"
+    );
     assert_eq!(trace_config.radix, TraceRadix::Hex, "radix should be Hex");
 
     println!("#[trace] with group string test PASSED!");

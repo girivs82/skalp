@@ -17,10 +17,17 @@ mod tuple_destructuring_tests {
 
         // Find the entity module by name (functions may be synthesized as separate modules)
         assert!(!mir.modules.is_empty());
-        let top_module = mir.modules.iter()
+        let top_module = mir
+            .modules
+            .iter()
             .find(|m| m.name == entity_name)
-            .unwrap_or_else(|| panic!("Entity '{}' not found in MIR modules: {:?}",
-                entity_name, mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "Entity '{}' not found in MIR modules: {:?}",
+                    entity_name,
+                    mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()
+                )
+            });
         let sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
         // Create CPU simulator
@@ -70,15 +77,29 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "TupleSwap").await;
 
         // Test: swap(10, 20) should return (20, 10)
-        sim.set_input("a", 10u32.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", 20u32.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a", 10u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("b", 20u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
         sim.step_simulation().await.unwrap();
 
         let first_bytes = sim.get_output("first").await.unwrap();
         let second_bytes = sim.get_output("second").await.unwrap();
 
-        let first = u32::from_le_bytes([first_bytes[0], first_bytes[1], first_bytes[2], first_bytes[3]]);
-        let second = u32::from_le_bytes([second_bytes[0], second_bytes[1], second_bytes[2], second_bytes[3]]);
+        let first = u32::from_le_bytes([
+            first_bytes[0],
+            first_bytes[1],
+            first_bytes[2],
+            first_bytes[3],
+        ]);
+        let second = u32::from_le_bytes([
+            second_bytes[0],
+            second_bytes[1],
+            second_bytes[2],
+            second_bytes[3],
+        ]);
 
         assert_eq!(first, 20, "First element should be 20 (swapped from b)");
         assert_eq!(second, 10, "Second element should be 10 (swapped from a)");
@@ -117,17 +138,36 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "SafeDivide").await;
 
         // Test: 17 / 5 = quotient 3, remainder 2
-        sim.set_input("dividend", 17u32.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("divisor", 5u32.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("dividend", 17u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("divisor", 5u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
         sim.step_simulation().await.unwrap();
 
         let valid_bytes = sim.get_output("valid").await.unwrap();
         let quotient_bytes = sim.get_output("quotient").await.unwrap();
         let remainder_bytes = sim.get_output("remainder").await.unwrap();
 
-        let valid = u32::from_le_bytes([valid_bytes[0], valid_bytes[1], valid_bytes[2], valid_bytes[3]]);
-        let quotient = u32::from_le_bytes([quotient_bytes[0], quotient_bytes[1], quotient_bytes[2], quotient_bytes[3]]);
-        let remainder = u32::from_le_bytes([remainder_bytes[0], remainder_bytes[1], remainder_bytes[2], remainder_bytes[3]]);
+        let valid = u32::from_le_bytes([
+            valid_bytes[0],
+            valid_bytes[1],
+            valid_bytes[2],
+            valid_bytes[3],
+        ]);
+        let quotient = u32::from_le_bytes([
+            quotient_bytes[0],
+            quotient_bytes[1],
+            quotient_bytes[2],
+            quotient_bytes[3],
+        ]);
+        let remainder = u32::from_le_bytes([
+            remainder_bytes[0],
+            remainder_bytes[1],
+            remainder_bytes[2],
+            remainder_bytes[3],
+        ]);
 
         assert_eq!(valid, 1, "Division should be valid (divisor != 0)");
         assert_eq!(quotient, 3, "17 / 5 = 3");
@@ -166,12 +206,21 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "SafeDivide").await;
 
         // Test: division by zero should return valid=0
-        sim.set_input("dividend", 17u32.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("divisor", 0u32.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("dividend", 17u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("divisor", 0u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
         sim.step_simulation().await.unwrap();
 
         let valid_bytes = sim.get_output("valid").await.unwrap();
-        let valid = u32::from_le_bytes([valid_bytes[0], valid_bytes[1], valid_bytes[2], valid_bytes[3]]);
+        let valid = u32::from_le_bytes([
+            valid_bytes[0],
+            valid_bytes[1],
+            valid_bytes[2],
+            valid_bytes[3],
+        ]);
 
         assert_eq!(valid, 0, "Division by zero should return valid=0");
     }
@@ -264,27 +313,51 @@ mod tuple_destructuring_tests {
         let b: f32 = -5.0;
         let c: f32 = 6.0;
 
-        sim.set_input("a", a.to_bits().to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", b.to_bits().to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("c", c.to_bits().to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a", a.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("b", b.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("c", c.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
         sim.step_simulation().await.unwrap();
 
         let valid_bytes = sim.get_output("valid").await.unwrap();
         let x1_bytes = sim.get_output("x1").await.unwrap();
         let x2_bytes = sim.get_output("x2").await.unwrap();
 
-        let valid = u32::from_le_bytes([valid_bytes[0], valid_bytes[1], valid_bytes[2], valid_bytes[3]]);
-        let x1 = f32::from_bits(u32::from_le_bytes([x1_bytes[0], x1_bytes[1], x1_bytes[2], x1_bytes[3]]));
-        let x2 = f32::from_bits(u32::from_le_bytes([x2_bytes[0], x2_bytes[1], x2_bytes[2], x2_bytes[3]]));
+        let valid = u32::from_le_bytes([
+            valid_bytes[0],
+            valid_bytes[1],
+            valid_bytes[2],
+            valid_bytes[3],
+        ]);
+        let x1 = f32::from_bits(u32::from_le_bytes([
+            x1_bytes[0],
+            x1_bytes[1],
+            x1_bytes[2],
+            x1_bytes[3],
+        ]));
+        let x2 = f32::from_bits(u32::from_le_bytes([
+            x2_bytes[0],
+            x2_bytes[1],
+            x2_bytes[2],
+            x2_bytes[3],
+        ]));
 
         assert_eq!(valid, 1, "Quadratic should have real solutions");
 
         // Roots should be 2.0 and 3.0 (in some order)
-        let roots_correct =
-            ((x1 - 2.0).abs() < 0.01 && (x2 - 3.0).abs() < 0.01) ||
-            ((x1 - 3.0).abs() < 0.01 && (x2 - 2.0).abs() < 0.01);
+        let roots_correct = ((x1 - 2.0).abs() < 0.01 && (x2 - 3.0).abs() < 0.01)
+            || ((x1 - 3.0).abs() < 0.01 && (x2 - 2.0).abs() < 0.01);
 
-        assert!(roots_correct, "Roots of x²-5x+6=0 should be 2.0 and 3.0, got x1={}, x2={}", x1, x2);
+        assert!(
+            roots_correct,
+            "Roots of x²-5x+6=0 should be 2.0 and 3.0, got x1={}, x2={}",
+            x1, x2
+        );
     }
 
     /// Test quadratic with no real solutions (negative discriminant)
@@ -371,15 +444,29 @@ mod tuple_destructuring_tests {
         let b: f32 = 1.0;
         let c: f32 = 1.0;
 
-        sim.set_input("a", a.to_bits().to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", b.to_bits().to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("c", c.to_bits().to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("a", a.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("b", b.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("c", c.to_bits().to_le_bytes().to_vec())
+            .await
+            .unwrap();
         sim.step_simulation().await.unwrap();
 
         let valid_bytes = sim.get_output("valid").await.unwrap();
-        let valid = u32::from_le_bytes([valid_bytes[0], valid_bytes[1], valid_bytes[2], valid_bytes[3]]);
+        let valid = u32::from_le_bytes([
+            valid_bytes[0],
+            valid_bytes[1],
+            valid_bytes[2],
+            valid_bytes[3],
+        ]);
 
-        assert_eq!(valid, 0, "Quadratic x²+x+1=0 should have no real solutions (discriminant < 0)");
+        assert_eq!(
+            valid, 0,
+            "Quadratic x²+x+1=0 should have no real solutions (discriminant < 0)"
+        );
     }
 
     /// Test tuple with four elements to verify general N-element support
@@ -415,8 +502,12 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "Stats").await;
 
         // Test: x=10, y=3
-        sim.set_input("x", 10u32.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("y", 3u32.to_le_bytes().to_vec()).await.unwrap();
+        sim.set_input("x", 10u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
+        sim.set_input("y", 3u32.to_le_bytes().to_vec())
+            .await
+            .unwrap();
         sim.step_simulation().await.unwrap();
 
         let sum_bytes = sim.get_output("sum").await.unwrap();

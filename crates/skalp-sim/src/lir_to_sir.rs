@@ -13,13 +13,13 @@
 
 use crate::sir::{
     CombBlockId, CombinationalBlock, EdgeType, ResetSpec, SeqBlockId, SequentialBlock, Sir,
-    SirConnection, SirInstance, SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId,
-    SirSignalType, StructuralBlockInfo,
+    SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId, SirSignalType,
+    StructuralBlockInfo,
 };
 use bitvec::prelude::*;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
-use skalp_lir::lir::{Lir, LirNet, NetId, Primitive, PrimitiveId, PrimitiveType};
+use skalp_lir::lir::{Lir, LirNet, NetId, Primitive, PrimitiveId};
 use std::collections::HashMap;
 
 /// Result of LIR to SIR conversion
@@ -122,8 +122,8 @@ impl LirToSirConverter {
             signals,
             comb_blocks,
             seq_blocks,
-            instances: Vec::new(),     // No sub-instances in flattened netlist
-            connections: Vec::new(),   // All connections are via signals
+            instances: Vec::new(),   // No sub-instances in flattened netlist
+            connections: Vec::new(), // All connections are via signals
         };
 
         let sir = Sir {
@@ -476,7 +476,7 @@ pub fn convert_lir_to_sir(netlist: &Lir) -> LirToSirResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_lir::lir::{LirNet, Primitive};
+    use skalp_lir::lir::{LirNet, Primitive, PrimitiveType};
 
     fn make_test_netlist() -> Lir {
         let mut netlist = Lir::new("test_design".to_string());

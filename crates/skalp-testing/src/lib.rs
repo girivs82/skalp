@@ -232,11 +232,7 @@ impl PropertyTester {
         Ok(test_case)
     }
 
-    async fn execute_test(
-        &self,
-        design: &Lir,
-        test_case: &TestCase,
-    ) -> TestingResult<TestResult> {
+    async fn execute_test(&self, design: &Lir, test_case: &TestCase) -> TestingResult<TestResult> {
         // Create test harness
         let mut harness = harness::TestHarness::new(design.clone());
 

@@ -13,9 +13,7 @@
 //! 4. Insert pipeline registers (FlipFlop nodes) at cut points
 //! 5. Rewire the graph to use the registered signals
 
-use crate::sir::{
-    ClockEdge, SignalRef, SirModule, SirNode, SirNodeKind, SirSignal, SirType,
-};
+use crate::sir::{ClockEdge, SignalRef, SirModule, SirNode, SirNodeKind, SirSignal, SirType};
 use skalp_frontend::hir::PipelineConfig;
 use std::collections::{HashMap, HashSet};
 
@@ -153,12 +151,8 @@ impl<'a> PipelineInserter<'a> {
         }
 
         // Find input signals (no driver = primary input)
-        let input_signals: HashSet<String> = self
-            .sir
-            .inputs
-            .iter()
-            .map(|p| p.name.clone())
-            .collect();
+        let input_signals: HashSet<String> =
+            self.sir.inputs.iter().map(|p| p.name.clone()).collect();
 
         // Initialize: nodes driven directly by inputs are level 0
         // All others start as not computed
@@ -222,9 +216,9 @@ impl<'a> PipelineInserter<'a> {
                                     .inputs
                                     .iter()
                                     .filter_map(|input| {
-                                        signal_to_driver.get(&input.signal_id).and_then(|id| {
-                                            self.node_levels.get(id)
-                                        })
+                                        signal_to_driver
+                                            .get(&input.signal_id)
+                                            .and_then(|id| self.node_levels.get(id))
                                     })
                                     .max()
                                     .unwrap_or(&0);
@@ -275,7 +269,7 @@ impl<'a> PipelineInserter<'a> {
                 stages
             ));
             // Still try to insert at least some cuts
-            return (1..stages).map(|i| i).collect();
+            return (1..stages).collect();
         }
 
         // Insert cuts after every levels_per_stage levels
@@ -316,11 +310,7 @@ impl<'a> PipelineInserter<'a> {
                             if node_level < cut && consumer_level >= cut {
                                 // Signal crosses this cut - needs a pipeline register
                                 let width = self.get_signal_width(&output.signal_id);
-                                signals_to_register.push((
-                                    output.signal_id.clone(),
-                                    width,
-                                    cut,
-                                ));
+                                signals_to_register.push((output.signal_id.clone(), width, cut));
                             }
                         }
                     }
@@ -409,14 +399,18 @@ impl<'a> PipelineInserter<'a> {
             .iter()
             .filter(|node| {
                 let node_level = self.node_levels.get(&node.id).copied().unwrap_or(0);
-                node_level >= cut_level
-                    && node.inputs.iter().any(|i| i.signal_id == signal_name)
+                node_level >= cut_level && node.inputs.iter().any(|i| i.signal_id == signal_name)
             })
             .map(|n| n.id)
             .collect();
 
         for node_id in consumers_to_rewire {
-            if let Some(node) = self.sir.combinational_nodes.iter_mut().find(|n| n.id == node_id) {
+            if let Some(node) = self
+                .sir
+                .combinational_nodes
+                .iter_mut()
+                .find(|n| n.id == node_id)
+            {
                 for input in &mut node.inputs {
                     if input.signal_id == signal_name {
                         input.signal_id = reg_name.clone();

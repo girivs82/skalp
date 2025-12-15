@@ -46,7 +46,9 @@ impl SafetyPipeline {
         pipeline.add_pass(Box::new(AsilDecompositionPass));
         pipeline.add_pass(Box::new(DesignBindingPass));
         pipeline.add_pass(Box::new(HsiValidationPass));
-        pipeline.add_pass(Box::new(FmedaAnalysisPass::new(pipeline.library_manager.clone())));
+        pipeline.add_pass(Box::new(FmedaAnalysisPass::new(
+            pipeline.library_manager.clone(),
+        )));
         pipeline.add_pass(Box::new(TraceabilityPass));
         pipeline
     }
@@ -155,58 +157,55 @@ impl SafetyAnalysisPass for GoalValidationPass {
         for (name, goal) in &hierarchy.goals {
             // Check ASIL is set
             if goal.asil == AsilLevel::QM && context.target_asil > AsilLevel::QM {
-                result = result.with_warning(
-                    AnalysisWarning::new(
-                        "W0104",
-                        &format!("Safety goal '{}' has QM level but target is {:?}",
-                            name, context.target_asil),
-                    )
-                );
+                result = result.with_warning(AnalysisWarning::new(
+                    "W0104",
+                    &format!(
+                        "Safety goal '{}' has QM level but target is {:?}",
+                        name, context.target_asil
+                    ),
+                ));
             }
 
             // Check target metrics for high ASIL
             if goal.asil >= AsilLevel::B {
                 if goal.target_spfm.is_none() {
-                    result = result.with_warning(
-                        AnalysisWarning::new(
-                            "W0105",
-                            &format!("Safety goal '{}' missing SPFM target for {:?}",
-                                name, goal.asil),
-                        )
-                    );
+                    result = result.with_warning(AnalysisWarning::new(
+                        "W0105",
+                        &format!(
+                            "Safety goal '{}' missing SPFM target for {:?}",
+                            name, goal.asil
+                        ),
+                    ));
                 }
                 if goal.target_lfm.is_none() {
-                    result = result.with_warning(
-                        AnalysisWarning::new(
-                            "W0106",
-                            &format!("Safety goal '{}' missing LFM target for {:?}",
-                                name, goal.asil),
-                        )
-                    );
+                    result = result.with_warning(AnalysisWarning::new(
+                        "W0106",
+                        &format!(
+                            "Safety goal '{}' missing LFM target for {:?}",
+                            name, goal.asil
+                        ),
+                    ));
                 }
             }
 
             // Check HSRs have mechanisms
             for hsr in &goal.hsrs {
                 if hsr.psm.is_none() {
-                    result = result.with_warning(
-                        AnalysisWarning::new(
-                            "W0107",
-                            &format!("HSR '{}' in goal '{}' has no PSM defined",
-                                hsr.id, name),
-                        )
-                    );
+                    result = result.with_warning(AnalysisWarning::new(
+                        "W0107",
+                        &format!("HSR '{}' in goal '{}' has no PSM defined", hsr.id, name),
+                    ));
                 }
 
                 // Check verification methods
                 if hsr.verification.is_empty() && goal.asil >= AsilLevel::C {
-                    result = result.with_warning(
-                        AnalysisWarning::new(
-                            error_codes::W0103_MISSING_VERIFICATION,
-                            &format!("HSR '{}' has no verification methods for {:?}",
-                                hsr.id, goal.asil),
-                        )
-                    );
+                    result = result.with_warning(AnalysisWarning::new(
+                        error_codes::W0103_MISSING_VERIFICATION,
+                        &format!(
+                            "HSR '{}' has no verification methods for {:?}",
+                            hsr.id, goal.asil
+                        ),
+                    ));
                 }
             }
         }
@@ -238,36 +237,33 @@ impl SafetyAnalysisPass for EntityValidationPass {
         for (name, entity) in &hierarchy.entities {
             // Check implements references existing goal
             if !hierarchy.goals.contains_key(&entity.implements) {
-                result = result.with_error(
-                    AnalysisError::new(
-                        error_codes::E0505_UNDEFINED_ENTITY,
-                        &format!("Safety entity '{}' implements undefined goal '{}'",
-                            name, entity.implements),
-                    )
-                );
+                result = result.with_error(AnalysisError::new(
+                    error_codes::E0505_UNDEFINED_ENTITY,
+                    &format!(
+                        "Safety entity '{}' implements undefined goal '{}'",
+                        name, entity.implements
+                    ),
+                ));
             }
 
             // Check covers patterns are non-empty
             if entity.covers.is_empty() {
-                result = result.with_warning(
-                    AnalysisWarning::new(
-                        "W0108",
-                        &format!("Safety entity '{}' has no 'covers' patterns",
-                            name),
-                    )
-                );
+                result = result.with_warning(AnalysisWarning::new(
+                    "W0108",
+                    &format!("Safety entity '{}' has no 'covers' patterns", name),
+                ));
             }
 
             // Check child instances reference existing entities
             for inst in &entity.instances {
                 if !hierarchy.entities.contains_key(&inst.entity_type) {
-                    result = result.with_error(
-                        AnalysisError::new(
-                            error_codes::E0505_UNDEFINED_ENTITY,
-                            &format!("Instance '{}' in '{}' references undefined entity '{}'",
-                                inst.name, name, inst.entity_type),
-                        )
-                    );
+                    result = result.with_error(AnalysisError::new(
+                        error_codes::E0505_UNDEFINED_ENTITY,
+                        &format!(
+                            "Instance '{}' in '{}' references undefined entity '{}'",
+                            inst.name, name, inst.entity_type
+                        ),
+                    ));
                 }
             }
         }
@@ -305,7 +301,7 @@ impl SafetyAnalysisPass for AsilDecompositionPass {
                             &format!(
                                 "{:?} cannot decompose to ({:?}, {:?})",
                                 decomp.original_asil,
-                                decomp.parts.get(0).unwrap_or(&AsilLevel::QM),
+                                decomp.parts.first().unwrap_or(&AsilLevel::QM),
                                 decomp.parts.get(1).unwrap_or(&AsilLevel::QM),
                             ),
                         )
@@ -346,14 +342,18 @@ impl SafetyAnalysisPass for DesignBindingPass {
 
         let Some(resolver) = resolver else {
             // If no resolver, skip validation but warn
-            return result.with_note("Design resolver not available - skipping path validation".to_string());
+            return result
+                .with_note("Design resolver not available - skipping path validation".to_string());
         };
 
         for (name, entity) in &hierarchy.entities {
             // Validate covers patterns
             for pattern in &entity.covers {
                 match resolver.validate_pattern(pattern) {
-                    crate::design_resolver::PatternValidationResult::NoMatches { suggestion, .. } => {
+                    crate::design_resolver::PatternValidationResult::NoMatches {
+                        suggestion,
+                        ..
+                    } => {
                         let mut error = AnalysisError::new(
                             error_codes::E0504_UNRESOLVED_PATH,
                             &format!(
@@ -372,17 +372,16 @@ impl SafetyAnalysisPass for DesignBindingPass {
 
             // Validate HSI patterns
             for include in &entity.hsi.includes {
-                match resolver.validate_pattern(include) {
-                    crate::design_resolver::PatternValidationResult::NoMatches { .. } => {
-                        result = result.with_warning(
-                            AnalysisWarning::new(
-                                "W0109",
-                                &format!("HSI include pattern '{}' matches no signals",
-                                    include.instance_pattern),
-                            )
-                        );
-                    }
-                    _ => {}
+                if let crate::design_resolver::PatternValidationResult::NoMatches { .. } =
+                    resolver.validate_pattern(include)
+                {
+                    result = result.with_warning(AnalysisWarning::new(
+                        "W0109",
+                        &format!(
+                            "HSI include pattern '{}' matches no signals",
+                            include.instance_pattern
+                        ),
+                    ));
                 }
             }
         }
@@ -418,29 +417,25 @@ impl SafetyAnalysisPass for HsiValidationPass {
 
         for (name, entity) in &hierarchy.entities {
             // Check HSI has content for high ASIL
-            if context.target_asil >= AsilLevel::C
-                && entity.hsi.includes.is_empty()
-            {
-                result = result.with_warning(
-                    AnalysisWarning::new(
-                        "W0110",
-                        &format!("Safety entity '{}' has empty HSI for {:?}",
-                            name, context.target_asil),
-                    )
-                );
+            if context.target_asil >= AsilLevel::C && entity.hsi.includes.is_empty() {
+                result = result.with_warning(AnalysisWarning::new(
+                    "W0110",
+                    &format!(
+                        "Safety entity '{}' has empty HSI for {:?}",
+                        name, context.target_asil
+                    ),
+                ));
             }
 
             // Check timing constraints are set for ASIL D
-            if context.target_asil == AsilLevel::D
-                && entity.hsi.timing.ftti.is_none()
-            {
-                result = result.with_warning(
-                    AnalysisWarning::new(
-                        "W0111",
-                        &format!("Safety entity '{}' missing FTTI in HSI timing for ASIL D",
-                            name),
-                    )
-                );
+            if context.target_asil == AsilLevel::D && entity.hsi.timing.ftti.is_none() {
+                result = result.with_warning(AnalysisWarning::new(
+                    "W0111",
+                    &format!(
+                        "Safety entity '{}' missing FTTI in HSI timing for ASIL D",
+                        name
+                    ),
+                ));
             }
         }
 
@@ -493,7 +488,9 @@ impl SafetyAnalysisPass for FmedaAnalysisPass {
                         // Simple mapping from PSM name to mechanism type
                         match name.as_str() {
                             s if s.contains("Voting") => Some(MechanismType::Tmr),
-                            s if s.contains("Crc") || s.contains("Integrity") => Some(MechanismType::Crc),
+                            s if s.contains("Crc") || s.contains("Integrity") => {
+                                Some(MechanismType::Crc)
+                            }
                             s if s.contains("Ecc") => Some(MechanismType::Ecc),
                             s if s.contains("Watchdog") => Some(MechanismType::Watchdog),
                             s if s.contains("Lockstep") => Some(MechanismType::Lockstep),
@@ -521,18 +518,22 @@ impl SafetyAnalysisPass for FmedaAnalysisPass {
         let analysis = calculator.calculate(&bindings);
 
         // Get targets from context or goals
-        let spfm_target = context.config.spfm_target_override
-            .or_else(|| {
-                hierarchy.goals.values().next()
-                    .and_then(|g| g.target_spfm)
-            })
-            .unwrap_or_else(|| context.target_asil.requirements().spfm_target.unwrap_or(0.0));
+        let spfm_target = context
+            .config
+            .spfm_target_override
+            .or_else(|| hierarchy.goals.values().next().and_then(|g| g.target_spfm))
+            .unwrap_or_else(|| {
+                context
+                    .target_asil
+                    .requirements()
+                    .spfm_target
+                    .unwrap_or(0.0)
+            });
 
-        let lfm_target = context.config.lfm_target_override
-            .or_else(|| {
-                hierarchy.goals.values().next()
-                    .and_then(|g| g.target_lfm)
-            })
+        let lfm_target = context
+            .config
+            .lfm_target_override
+            .or_else(|| hierarchy.goals.values().next().and_then(|g| g.target_lfm))
             .unwrap_or_else(|| context.target_asil.requirements().lf_target.unwrap_or(0.0));
 
         // Check metrics against targets
@@ -568,10 +569,7 @@ impl SafetyAnalysisPass for FmedaAnalysisPass {
         metrics.meets_target = meets_target;
 
         result = result.with_metrics(metrics);
-        result = result.with_note(format!(
-            "FMEDA analyzed {} components",
-            bindings.len()
-        ));
+        result = result.with_note(format!("FMEDA analyzed {} components", bindings.len()));
 
         result
     }
@@ -607,7 +605,9 @@ impl SafetyAnalysisPass for TraceabilityPass {
                 if let Some(ref psm) = hsr.psm {
                     // Check if we have implementations from resolver annotations
                     let has_implementations = if let Some(resolver) = resolver {
-                        !resolver.find_implementations(goal_name, &psm.name).is_empty()
+                        !resolver
+                            .find_implementations(goal_name, &psm.name)
+                            .is_empty()
                     } else {
                         !psm.implementations.is_empty()
                     };
@@ -654,8 +654,8 @@ impl SafetyAnalysisPass for TraceabilityPass {
 mod tests {
     use super::*;
     use crate::hierarchy::{
-        DiagnosticHardwareSafetyRequirement, HardwareSafetyRequirement,
-        PrimarySafetyMechanism, SafetyGoalId, SafetyEntityId,
+        DiagnosticHardwareSafetyRequirement, HardwareSafetyRequirement, PrimarySafetyMechanism,
+        SafetyEntityId, SafetyGoalId,
     };
 
     fn create_test_hierarchy() -> SafetyHierarchy {
@@ -748,7 +748,10 @@ mod tests {
         let result = pass.run(&hierarchy, None, &context);
 
         assert!(result.is_fail());
-        assert!(result.errors.iter().any(|e| e.code == error_codes::E0501_ASIL_DECOMPOSITION));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.code == error_codes::E0501_ASIL_DECOMPOSITION));
     }
 
     #[test]
@@ -773,6 +776,6 @@ mod tests {
 
         // In strict mode, should stop at first failure
         // Empty hierarchy should pass validation (nothing to validate)
-        assert!(result.pass_results.len() > 0);
+        assert!(!result.pass_results.is_empty());
     }
 }

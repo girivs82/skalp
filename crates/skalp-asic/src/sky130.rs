@@ -351,9 +351,7 @@ impl StandardCellLibrary {
                     });
                     idx
                 });
-                nets[net_id]
-                    .connections
-                    .push((prim_idx, format!("I{}", i)));
+                nets[net_id].connections.push((prim_idx, format!("I{}", i)));
             }
 
             // Track net connections for outputs
@@ -367,9 +365,7 @@ impl StandardCellLibrary {
                     });
                     idx
                 });
-                nets[net_id]
-                    .connections
-                    .push((prim_idx, format!("O{}", i)));
+                nets[net_id].connections.push((prim_idx, format!("O{}", i)));
             }
         }
 
@@ -385,7 +381,13 @@ impl StandardCellLibrary {
             PrimitiveType::Inv => "INV_X1",
             PrimitiveType::Nand { .. } => "NAND2_X1",
             PrimitiveType::Nor { .. } => "NOR2_X1",
-            PrimitiveType::DffP | PrimitiveType::DffN | PrimitiveType::DffNeg | PrimitiveType::DffE | PrimitiveType::DffAR | PrimitiveType::DffAS | PrimitiveType::DffScan => "DFF_X1",
+            PrimitiveType::DffP
+            | PrimitiveType::DffN
+            | PrimitiveType::DffNeg
+            | PrimitiveType::DffE
+            | PrimitiveType::DffAR
+            | PrimitiveType::DffAS
+            | PrimitiveType::DffScan => "DFF_X1",
             _ => {
                 return Err(AsicError::TechnologyError(format!(
                     "Unsupported primitive type: {:?}",

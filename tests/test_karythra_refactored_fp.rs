@@ -95,14 +95,21 @@ fn test_fp32_operations(op: bit[2], a: bit[32], b: bit[32]) -> bit[32] {
 
                 // Verify trait structure
                 assert_eq!(hir.trait_definitions.len(), 1, "Should have 1 trait");
-                assert_eq!(hir.trait_implementations.len(), 2, "Should have 2 impls (fp16, fp32)");
+                assert_eq!(
+                    hir.trait_implementations.len(),
+                    2,
+                    "Should have 2 impls (fp16, fp32)"
+                );
 
                 // Run monomorphization
                 let mut mono = Monomorphizer::new();
                 let monomorphized_hir = mono.monomorphize(&hir);
 
                 println!("\n=== Monomorphization Results ===");
-                println!("Functions after monomorphization: {}", monomorphized_hir.functions.len());
+                println!(
+                    "Functions after monomorphization: {}",
+                    monomorphized_hir.functions.len()
+                );
 
                 // List all generated functions
                 println!("\nGenerated functions:");
@@ -111,26 +118,40 @@ fn test_fp32_operations(op: bit[2], a: bit[32], b: bit[32]) -> bit[32] {
                 }
 
                 // Check for specialized trait methods
-                let fp32_methods: Vec<_> = monomorphized_hir.functions.iter()
+                let fp32_methods: Vec<_> = monomorphized_hir
+                    .functions
+                    .iter()
                     .filter(|f| f.name.contains("FloatingPoint") && f.name.contains("fp32"))
                     .collect();
 
-                println!("\n✅ Generated {} FloatingPoint methods for fp32:", fp32_methods.len());
+                println!(
+                    "\n✅ Generated {} FloatingPoint methods for fp32:",
+                    fp32_methods.len()
+                );
                 for method in &fp32_methods {
                     println!("  - {}", method.name);
                 }
 
                 // Verify we have the key methods
-                let has_add = monomorphized_hir.functions.iter()
+                let has_add = monomorphized_hir
+                    .functions
+                    .iter()
                     .any(|f| f.name.contains("add") && f.name.contains("FloatingPoint"));
-                let has_mul = monomorphized_hir.functions.iter()
+                let has_mul = monomorphized_hir
+                    .functions
+                    .iter()
                     .any(|f| f.name.contains("mul") && f.name.contains("FloatingPoint"));
-                let has_to_bits = monomorphized_hir.functions.iter()
+                let has_to_bits = monomorphized_hir
+                    .functions
+                    .iter()
                     .any(|f| f.name.contains("to_bits") && f.name.contains("FloatingPoint"));
 
                 assert!(has_add, "Should have generated FloatingPoint add method");
                 assert!(has_mul, "Should have generated FloatingPoint mul method");
-                assert!(has_to_bits, "Should have generated FloatingPoint to_bits method");
+                assert!(
+                    has_to_bits,
+                    "Should have generated FloatingPoint to_bits method"
+                );
 
                 println!("\n🎉 SUCCESS! Karythra refactored FP operations work!");
                 println!("   - Generic fp_binop function compiles ✅");
@@ -226,15 +247,23 @@ fn test_fp32(a: fp32, b: fp32) -> fp32 {
         match parse_and_build_hir(skalp_code) {
             Ok(hir) => {
                 println!("✅ Both implementations compile");
-                assert_eq!(hir.trait_implementations.len(), 2, "Should have 2 implementations");
+                assert_eq!(
+                    hir.trait_implementations.len(),
+                    2,
+                    "Should have 2 implementations"
+                );
 
                 let mut mono = Monomorphizer::new();
                 let monomorphized_hir = mono.monomorphize(&hir);
 
-                let fp16_methods = monomorphized_hir.functions.iter()
+                let fp16_methods = monomorphized_hir
+                    .functions
+                    .iter()
                     .filter(|f| f.name.contains("fp16"))
                     .count();
-                let fp32_methods = monomorphized_hir.functions.iter()
+                let fp32_methods = monomorphized_hir
+                    .functions
+                    .iter()
                     .filter(|f| f.name.contains("fp32"))
                     .count();
 

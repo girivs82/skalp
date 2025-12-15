@@ -11,12 +11,12 @@
 //! - Gate-level fault injection using structural primitives
 //! - Single simulator infrastructure for both modes
 
+use bitvec::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use bitvec::prelude::*;
 
 // Re-export primitive types from LIR for gate-level simulation
-pub use skalp_lir::lir::{PrimitiveId, PrimitiveType, NetId};
+pub use skalp_lir::lir::{NetId, PrimitiveId, PrimitiveType};
 
 /// Clock domain identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -84,9 +84,7 @@ pub enum SirSignalType {
         reset_active_high: bool,
     },
     /// Port (interface to parent module)
-    Port {
-        direction: SirPortDirection,
-    },
+    Port { direction: SirPortDirection },
 }
 
 /// Port direction
@@ -169,7 +167,6 @@ pub enum EdgeType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SirOperation {
     // === Behavioral Operations (expression-based) ===
-
     /// Assignment: target = source
     Assign {
         target: SirSignalId,
@@ -189,7 +186,6 @@ pub enum SirOperation {
     },
 
     // === Structural Operations (primitive-based for gate-level simulation) ===
-
     /// Single primitive gate evaluation
     ///
     /// Used for gate-level simulation with fault injection support.
@@ -259,19 +255,33 @@ pub enum SirExpression {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BinaryOp {
     // Arithmetic
-    Add, Sub, Mul, Div, Mod,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 
     // Logical
-    And, Or, Xor,
+    And,
+    Or,
+    Xor,
 
     // Bitwise
-    BitwiseAnd, BitwiseOr, BitwiseXor,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
 
     // Comparison
-    Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
 
     // Shift
-    LeftShift, RightShift,
+    LeftShift,
+    RightShift,
 }
 
 /// Unary operations
@@ -290,7 +300,12 @@ pub enum UnaryOp {
 /// Reduction operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReduceOp {
-    And, Or, Xor, Nand, Nor, Xnor,
+    And,
+    Or,
+    Xor,
+    Nand,
+    Nor,
+    Xnor,
 }
 
 /// Module instance in SIR
@@ -351,7 +366,8 @@ impl Sir {
                     if other_block.id != block.id && other_block.outputs.contains(input_signal) {
                         // Add dependency edge: other_block -> block
                         if let (Some(&source_node), Some(&target_node)) =
-                            (block_nodes.get(&other_block.id), block_nodes.get(&block.id)) {
+                            (block_nodes.get(&other_block.id), block_nodes.get(&block.id))
+                        {
                             graph.add_edge(source_node, target_node, ());
                         }
                     }
@@ -431,7 +447,6 @@ pub enum FaultType {
     // ========================================================================
     // Permanent/Hard Faults (Manufacturing Defects, Wear-out)
     // ========================================================================
-
     /// Output stuck at logic 0 (SA0)
     /// Cause: Manufacturing defect, oxide breakdown, electromigration
     StuckAt0,
@@ -460,7 +475,6 @@ pub enum FaultType {
     // ========================================================================
     // Transient/Soft Faults (Radiation, EMI, Power Transients)
     // ========================================================================
-
     /// Output inverted (bit flip)
     /// Cause: Radiation-induced charge collection, EMI
     BitFlip,
@@ -479,7 +493,6 @@ pub enum FaultType {
     // ========================================================================
     // Timing Violations (Design Margins, Temperature, Voltage, Aging)
     // ========================================================================
-
     /// Timing delay (output delayed by N cycles)
     /// Cause: Slow path, process variation, temperature
     /// Digital effect: Sequential element captures stale data
@@ -519,7 +532,6 @@ pub enum FaultType {
     // ========================================================================
     // These analog/power issues manifest as digital effects. We model
     // the EFFECT, not the root cause, enabling gate-level simulation.
-
     /// Voltage dropout / IR drop
     /// Cause: Sudden current demand, inadequate power grid
     /// Digital effect: Multiple FFs experience setup violations (slower logic)
@@ -545,7 +557,6 @@ pub enum FaultType {
     // ========================================================================
     // Clock Faults
     // ========================================================================
-
     /// Clock glitch (extra clock edge)
     /// Cause: EMI, power supply noise, clock tree issues
     /// Digital effect: FFs may double-clock (capture twice)
@@ -873,7 +884,13 @@ mod tests {
         };
 
         match op {
-            SirOperation::Primitive { id, ptype, inputs, outputs, path } => {
+            SirOperation::Primitive {
+                id,
+                ptype,
+                inputs,
+                outputs,
+                path,
+            } => {
                 assert_eq!(id, PrimitiveId(123));
                 assert!(matches!(ptype, PrimitiveType::And { inputs: 2 }));
                 assert_eq!(inputs.len(), 2);
@@ -899,7 +916,10 @@ mod tests {
             bridge_type: BridgeType::WiredAnd,
         };
         match fault {
-            FaultType::Bridge { bridged_net, bridge_type } => {
+            FaultType::Bridge {
+                bridged_net,
+                bridge_type,
+            } => {
                 assert_eq!(bridged_net, SirSignalId(42));
                 assert!(matches!(bridge_type, BridgeType::WiredAnd));
             }
@@ -924,15 +944,13 @@ mod tests {
             id: CombBlockId(1),
             inputs: vec![SirSignalId(1)],
             outputs: vec![SirSignalId(2)],
-            operations: vec![
-                SirOperation::Primitive {
-                    id: PrimitiveId(1),
-                    ptype: PrimitiveType::Inv,
-                    inputs: vec![SirSignalId(1)],
-                    outputs: vec![SirSignalId(2)],
-                    path: "top.inv_0".to_string(),
-                },
-            ],
+            operations: vec![SirOperation::Primitive {
+                id: PrimitiveId(1),
+                ptype: PrimitiveType::Inv,
+                inputs: vec![SirSignalId(1)],
+                outputs: vec![SirSignalId(2)],
+                path: "top.inv_0".to_string(),
+            }],
             workgroup_size_hint: Some(64),
             structural_info: Some(StructuralBlockInfo {
                 is_structural: true,

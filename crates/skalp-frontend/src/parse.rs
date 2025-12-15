@@ -3676,7 +3676,7 @@ impl<'a> ParseState<'a> {
             self.start_node(SyntaxKind::NamedArg);
             self.bump(); // consume the name identifier
             self.expect(SyntaxKind::Colon); // consume the colon
-            // Parse the value (can be a literal, identifier, or type)
+                                            // Parse the value (can be a literal, identifier, or type)
             self.parse_named_arg_value();
             self.finish_node();
             return;
@@ -5092,7 +5092,7 @@ impl<'a> ParseState<'a> {
             self.bump(); // &
             if self.at(SyntaxKind::SelfKw) {
                 self.bump(); // self
-                // Check for optional type annotation: &self: Type
+                             // Check for optional type annotation: &self: Type
                 if self.at(SyntaxKind::Colon) {
                     self.bump();
                     self.parse_type();
@@ -5102,7 +5102,7 @@ impl<'a> ParseState<'a> {
             }
         } else if self.at(SyntaxKind::SelfKw) {
             self.bump(); // self
-            // Check for optional type annotation: self: Self or self: Type
+                         // Check for optional type annotation: self: Self or self: Type
             if self.at(SyntaxKind::Colon) {
                 self.bump();
                 self.parse_type();
@@ -6047,7 +6047,9 @@ impl ParseState<'_> {
     fn parse_safety_kv_pair(&mut self) {
         self.skip_trivia();
         // Key - can be identifier or keyword (spfm, lfm, pmhf, dc, lc, etc.)
-        if self.at(SyntaxKind::Ident) || self.current_kind().map(|k| k.is_keyword()).unwrap_or(false) {
+        if self.at(SyntaxKind::Ident)
+            || self.current_kind().map(|k| k.is_keyword()).unwrap_or(false)
+        {
             self.bump();
         } else {
             // Not a valid key - error and bump to avoid infinite loop
@@ -6355,13 +6357,7 @@ impl ParseState<'_> {
         // Following segments with . or ::
         loop {
             self.skip_trivia();
-            if self.at(SyntaxKind::Dot) {
-                self.bump();
-                self.skip_trivia();
-                if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::Star) {
-                    self.bump();
-                }
-            } else if self.at(SyntaxKind::ColonColon) {
+            if self.at(SyntaxKind::Dot) || self.at(SyntaxKind::ColonColon) {
                 self.bump();
                 self.skip_trivia();
                 if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::Star) {
@@ -7286,7 +7282,8 @@ mod tests {
     #[test]
     fn test_parse_intent_without_leading_whitespace() {
         // This mimics a file that starts directly with intent declaration (no leading whitespace)
-        let source = "intent parallel = mux_style::parallel;\n\nintent priority = mux_style::priority;\n";
+        let source =
+            "intent parallel = mux_style::parallel;\n\nintent priority = mux_style::priority;\n";
         let (tree, errors) = parse_with_errors(source);
 
         eprintln!("Errors: {:?}", errors);
@@ -7331,10 +7328,7 @@ mod tests {
         let (tree, errors) = parse_with_errors(source);
 
         eprintln!("Errors: {:?}", errors);
-        assert!(
-            errors.is_empty(),
-            "Safety goal should parse without errors"
-        );
+        assert!(errors.is_empty(), "Safety goal should parse without errors");
         assert_eq!(tree.kind(), SyntaxKind::SourceFile);
     }
 

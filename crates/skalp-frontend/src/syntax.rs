@@ -199,43 +199,43 @@ pub enum SyntaxKind {
     // NOTE: NonBlockingAssign (<= for assignment) and BlockingAssign (:=) both removed
     // Using unified `=` operator with context-based inference for all assignments
     // `<=` is now always parsed as LessEqual (Le) comparison operator
-    Assign,            // =
-    Eq,                // ==
-    Neq,               // !=
-    Lt,                // <
-    Gt,                // >
-    Le,                // <=
-    Ge,                // >=
-    Plus,              // +
-    Minus,             // -
-    Star,              // *
-    Slash,             // /
-    Percent,           // %
-    Amp,               // &
-    Pipe,              // |
-    Caret,             // ^
-    Bang,              // !
-    Tilde,             // ~
-    AmpAmp,            // &&
-    PipePipe,          // ||
-    Shl,               // <<
-    Shr,               // >>
-    Pipeline,          // |>
-    FatArrow,          // =>
-    Arrow,             // ->
-    LeftArrow,         // <-
-    Implies,           // |->
-    ImpliesOverlap,    // |=>
-    HashHash,          // ##
-    HashBracket,       // #[ (for attributes)
-    RepeatOpen,        // [*
-    RepeatClose,       // *]
-    RepeatPlusOpen,    // [+
-    RepeatPlusClose,   // +]
-    RepeatEqualOpen,   // [=
-    RepeatEqualClose,  // =]
-    At,                // @
-    Dollar,            // $
+    Assign,           // =
+    Eq,               // ==
+    Neq,              // !=
+    Lt,               // <
+    Gt,               // >
+    Le,               // <=
+    Ge,               // >=
+    Plus,             // +
+    Minus,            // -
+    Star,             // *
+    Slash,            // /
+    Percent,          // %
+    Amp,              // &
+    Pipe,             // |
+    Caret,            // ^
+    Bang,             // !
+    Tilde,            // ~
+    AmpAmp,           // &&
+    PipePipe,         // ||
+    Shl,              // <<
+    Shr,              // >>
+    Pipeline,         // |>
+    FatArrow,         // =>
+    Arrow,            // ->
+    LeftArrow,        // <-
+    Implies,          // |->
+    ImpliesOverlap,   // |=>
+    HashHash,         // ##
+    HashBracket,      // #[ (for attributes)
+    RepeatOpen,       // [*
+    RepeatClose,      // *]
+    RepeatPlusOpen,   // [+
+    RepeatPlusClose,  // +]
+    RepeatEqualOpen,  // [=
+    RepeatEqualClose, // =]
+    At,               // @
+    Dollar,           // $
 
     // Delimiters
     LParen,     // (
@@ -271,9 +271,9 @@ pub enum SyntaxKind {
     ImplBlock,
     ProtocolDecl,
     IntentDecl,
-    IntentValue,       // Single-line intent value: mux_style::parallel
-    Attribute,         // #[parallel] or #[parallel + critical]
-    AttributeList,     // List of attributes
+    IntentValue,   // Single-line intent value: mux_style::parallel
+    Attribute,     // #[parallel] or #[parallel + critical]
+    AttributeList, // List of attributes
     RequirementDecl,
     TraitDef,
     TraitImpl,
@@ -385,9 +385,9 @@ pub enum SyntaxKind {
     FormalBlock,
     ProveStmt,
     InstanceDecl,
-    SeveritySpec,     // severity: Error/Warning/Info/Fatal specification
-    AssumeMacroStmt,  // Simple assume!(cond) statement (without property keyword)
-    CoverMacroStmt,   // Simple cover!(cond) statement (without property keyword)
+    SeveritySpec,    // severity: Error/Warning/Info/Fatal specification
+    AssumeMacroStmt, // Simple assume!(cond) statement (without property keyword)
+    CoverMacroStmt,  // Simple cover!(cond) statement (without property keyword)
     ConnectionList,
     Connection,
 

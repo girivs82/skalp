@@ -114,7 +114,8 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     }
 
     // Build HIR (first pass - will have incomplete instances for imported entities)
-    let mut builder = hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
+    let mut builder =
+        hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
     let mut hir = builder.build(&syntax_tree).map_err(|errors| {
         anyhow::anyhow!(
             "HIR build failed: {}",
@@ -174,7 +175,8 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     let (syntax_tree, _) = parse::parse_with_errors(&source);
 
     // Create a new builder with all entities pre-registered
-    let mut builder = hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
+    let mut builder =
+        hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
 
     // Pre-register all entities in the symbol table
     for entity in &hir.entities {
@@ -477,7 +479,7 @@ fn remap_expr_ports(
                 type_args: call.type_args.clone(), // Preserve type args during port remapping
                 named_type_args: call.named_type_args.clone(), // Preserve named type args
                 args: new_args,
-                impl_style: call.impl_style.clone(),
+                impl_style: call.impl_style,
             })
         }
         hir::HirExpression::If(if_expr) => {

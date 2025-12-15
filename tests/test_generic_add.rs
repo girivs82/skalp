@@ -46,7 +46,11 @@ mod test_generics {
                 println!("✅ Parsed to HIR successfully");
                 println!("   Functions: {}", h.functions.len());
                 for func in &h.functions {
-                    println!("   - {} (generic params: {})", func.name, func.generics.len());
+                    println!(
+                        "   - {} (generic params: {})",
+                        func.name,
+                        func.generics.len()
+                    );
                 }
                 h
             }
@@ -66,29 +70,49 @@ mod test_generics {
         println!("\n=== Verifying Monomorphization ===");
         println!("Functions after monomorphization:");
         for func in &monomorphized_hir.functions {
-            println!("   - {} (generic params: {})", func.name, func.generics.len());
+            println!(
+                "   - {} (generic params: {})",
+                func.name,
+                func.generics.len()
+            );
         }
 
         // Check that we have a specialized function (add_c32 or add_bit8 or similar)
-        let has_specialized = monomorphized_hir.functions.iter()
+        let _has_specialized = monomorphized_hir
+            .functions
+            .iter()
             .any(|f| f.name.starts_with("add_") && f.generics.is_empty());
 
         // Find the specialized function
-        let specialized_func = monomorphized_hir.functions.iter()
+        let specialized_func = monomorphized_hir
+            .functions
+            .iter()
             .find(|f| f.name.starts_with("add_") && f.generics.is_empty());
 
         if let Some(func) = specialized_func {
             println!("✅ Found specialized function: {}", func.name);
-            println!("   Parameters: {:?}", func.params.iter()
-                .map(|p| format!("{}:{:?}", p.name, p.param_type))
-                .collect::<Vec<_>>());
+            println!(
+                "   Parameters: {:?}",
+                func.params
+                    .iter()
+                    .map(|p| format!("{}:{:?}", p.name, p.param_type))
+                    .collect::<Vec<_>>()
+            );
             println!("   Generic params: {} (should be 0)", func.generics.len());
 
-            assert_eq!(func.generics.len(), 0, "Specialized function should have no generics");
+            assert_eq!(
+                func.generics.len(),
+                0,
+                "Specialized function should have no generics"
+            );
 
             // Check that parameter types are concrete
-            assert!(func.params.iter().all(|p| matches!(p.param_type, skalp_frontend::hir::HirType::Bit(_))),
-                "All parameters should be concrete bit types");
+            assert!(
+                func.params
+                    .iter()
+                    .all(|p| matches!(p.param_type, skalp_frontend::hir::HirType::Bit(_))),
+                "All parameters should be concrete bit types"
+            );
         } else {
             println!("❌ No specialized add function found");
             panic!("Expected specialized add function (e.g., add_c32 or add_bit8)");
@@ -96,7 +120,9 @@ mod test_generics {
 
         // Check that generic function is NOT in the final HIR
         // (it should be replaced by specialized versions)
-        let still_has_generic_add = monomorphized_hir.functions.iter()
+        let still_has_generic_add = monomorphized_hir
+            .functions
+            .iter()
             .any(|f| f.name == "add" && !f.generics.is_empty());
 
         if still_has_generic_add {
@@ -139,13 +165,16 @@ mod test_generics {
         println!("\n=== Testing Multiple Specializations ===");
 
         // Parse to HIR
-        let hir = parse_and_build_hir(skalp_code)
-            .expect("Failed to parse");
+        let hir = parse_and_build_hir(skalp_code).expect("Failed to parse");
 
         println!("✅ Parsed to HIR");
-        println!("   Generic functions: {}", hir.functions.iter()
-            .filter(|f| !f.generics.is_empty())
-            .count());
+        println!(
+            "   Generic functions: {}",
+            hir.functions
+                .iter()
+                .filter(|f| !f.generics.is_empty())
+                .count()
+        );
 
         // Monomorphize
         let mut monomorphizer = Monomorphizer::new();
@@ -153,17 +182,17 @@ mod test_generics {
 
         println!("✅ Monomorphization completed");
 
-        let function_names: Vec<String> = monomorphized_hir.functions.iter()
+        let function_names: Vec<String> = monomorphized_hir
+            .functions
+            .iter()
             .map(|f| f.name.clone())
             .collect();
 
         println!("Functions generated: {:?}", function_names);
 
         // Should have both add_c8 and add_c32
-        let has_add_8 = function_names.iter()
-            .any(|n| n.contains("add_c8"));
-        let has_add_32 = function_names.iter()
-            .any(|n| n.contains("add_c32"));
+        let has_add_8 = function_names.iter().any(|n| n.contains("add_c8"));
+        let has_add_32 = function_names.iter().any(|n| n.contains("add_c32"));
 
         println!("Found add_c8: {}", has_add_8);
         println!("Found add_c32: {}", has_add_32);
@@ -172,9 +201,13 @@ mod test_generics {
             println!("✅ Found both specializations!");
 
             // Verify they have no generics
-            let spec_8 = monomorphized_hir.functions.iter()
+            let spec_8 = monomorphized_hir
+                .functions
+                .iter()
                 .find(|f| f.name.contains("add_c8"));
-            let spec_32 = monomorphized_hir.functions.iter()
+            let spec_32 = monomorphized_hir
+                .functions
+                .iter()
                 .find(|f| f.name.contains("add_c32"));
 
             if let Some(f8) = spec_8 {
@@ -187,9 +220,15 @@ mod test_generics {
                 println!("✅ add_c32 has no generics");
             }
         } else {
-            println!("⚠️  Only found: add_c8={}, add_c32={}", has_add_8, has_add_32);
+            println!(
+                "⚠️  Only found: add_c8={}, add_c32={}",
+                has_add_8, has_add_32
+            );
         }
 
-        assert!(has_add_8 && has_add_32, "Expected both add_c8 and add_c32 specializations");
+        assert!(
+            has_add_8 && has_add_32,
+            "Expected both add_c8 and add_c32 specializations"
+        );
     }
 }

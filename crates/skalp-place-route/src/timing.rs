@@ -365,7 +365,9 @@ impl TimingAnalyzer {
                 slack: 0.0,
                 clock_domain: 0,
             };
-            self.timing_graph.node_map.insert(prim_name.clone(), node_id);
+            self.timing_graph
+                .node_map
+                .insert(prim_name.clone(), node_id);
             self.timing_graph.nodes.push(output_node);
             node_id += 1;
 

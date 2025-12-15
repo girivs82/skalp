@@ -5,7 +5,7 @@ mod pipelined_processor_tests {
     #[cfg(target_os = "macos")]
     use skalp_frontend::parse_and_build_hir;
     #[cfg(target_os = "macos")]
-    use skalp_mir::{Expression, ExpressionKind, Statement};
+    use skalp_mir::{ExpressionKind, Statement};
     #[cfg(target_os = "macos")]
     use skalp_mir::{MirCompiler, OptimizationLevel};
     #[cfg(target_os = "macos")]

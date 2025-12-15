@@ -27,8 +27,7 @@ use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
 use metal::{
-    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions,
-    MTLSize,
+    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
 };
 
 /// GPU-accelerated gate-level runtime
@@ -116,8 +115,7 @@ struct GpuPrimitive {
 impl GpuGateRuntime {
     /// Create a new GPU gate runtime from SIR
     pub fn new(sir: &Sir) -> Result<Self, String> {
-        let device =
-            Device::system_default().ok_or_else(|| "No Metal device found".to_string())?;
+        let device = Device::system_default().ok_or_else(|| "No Metal device found".to_string())?;
         let command_queue = device.new_command_queue();
 
         let mut runtime = Self {
@@ -168,7 +166,8 @@ impl GpuGateRuntime {
             self.signal_widths.insert(signal.id.0, signal.width);
 
             // Initialize CPU fallback signals
-            self.cpu_signals.insert(signal.id.0, vec![false; signal.width]);
+            self.cpu_signals
+                .insert(signal.id.0, vec![false; signal.width]);
 
             // Categorize signals
             match &signal.signal_type {
@@ -350,8 +349,7 @@ impl GpuGateRuntime {
 
     /// Generate Metal shader source
     fn generate_shader(&self) -> String {
-        format!(
-            r#"
+        r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -372,18 +370,18 @@ constant uint PTYPE_HALF_ADDER = 12;
 constant uint PTYPE_FULL_ADDER = 13;
 constant uint PTYPE_CONST = 14;
 
-struct Primitive {{
+struct Primitive {
     uint ptype;
     uint inputs[4];
     uint num_inputs;
     uint output;
     uint is_sequential;
     uint clock;
-}};
+};
 
 // Evaluate a combinational gate
-uint eval_gate(uint ptype, uint in0, uint in1, uint in2, uint in3, uint num_inputs) {{
-    switch (ptype) {{
+uint eval_gate(uint ptype, uint in0, uint in1, uint in2, uint in3, uint num_inputs) {
+    switch (ptype) {
         case PTYPE_AND:
             if (num_inputs == 2) return in0 & in1;
             if (num_inputs == 3) return in0 & in1 & in2;
@@ -413,17 +411,17 @@ uint eval_gate(uint ptype, uint in0, uint in1, uint in2, uint in3, uint num_inpu
             return (in0 ^ in1) | ((in0 & in1) << 1);
         case PTYPE_FULL_ADDER:
             // Returns sum in bit 0, carry in bit 1
-            {{
+            {
                 uint sum = in0 ^ in1 ^ in2;
                 uint carry = (in0 & in1) | (in1 & in2) | (in0 & in2);
                 return sum | (carry << 1);
-            }}
+            }
         case PTYPE_CONST:
             return in0;
         default:
             return 0;
-    }}
-}}
+    }
+}
 
 // Kernel: Evaluate all combinational primitives
 // Each thread evaluates one primitive
@@ -433,7 +431,7 @@ kernel void eval_combinational(
     device uint* signals_out [[buffer(2)]],
     constant uint& num_primitives [[buffer(3)]],
     uint tid [[thread_position_in_grid]]
-) {{
+) {
     if (tid >= num_primitives) return;
 
     Primitive prim = primitives[tid];
@@ -452,7 +450,7 @@ kernel void eval_combinational(
 
     // Store result
     signals_out[prim.output] = result;
-}}
+}
 
 // Kernel: Evaluate sequential primitives on clock edge
 kernel void eval_sequential(
@@ -462,7 +460,7 @@ kernel void eval_sequential(
     constant uint& num_primitives [[buffer(3)]],
     constant uint& clock_mask [[buffer(4)]],  // Bitmask of clocks with rising edge
     uint tid [[thread_position_in_grid]]
-) {{
+) {
     if (tid >= num_primitives) return;
 
     Primitive prim = primitives[tid];
@@ -474,13 +472,13 @@ kernel void eval_sequential(
     if (((clock_mask >> prim.clock) & 1) == 0) return;
 
     // DFF: output = D input (inputs[1] is D, inputs[0] is clk)
-    if (prim.ptype == PTYPE_DFF_P || prim.ptype == PTYPE_DFF_N) {{
+    if (prim.ptype == PTYPE_DFF_P || prim.ptype == PTYPE_DFF_N) {
         uint d_input = signals_in[prim.inputs[1]];
         signals_out[prim.output] = d_input;
-    }}
-}}
+    }
+}
 "#
-        )
+        .to_string()
     }
 
     /// Set an input signal value
@@ -538,7 +536,10 @@ kernel void eval_sequential(
 
         // Try bit-indexed signals
         let mut bit_idx = 0;
-        while let Some(id) = self.signal_name_to_id.get(&format!("{}[{}]", name, bit_idx)) {
+        while let Some(id) = self
+            .signal_name_to_id
+            .get(&format!("{}[{}]", name, bit_idx))
+        {
             let bit_value = (value >> bit_idx) & 1 == 1;
             self.cpu_signals.insert(id.0, vec![bit_value]);
 
@@ -603,7 +604,10 @@ kernel void eval_sequential(
         let mut bit_idx = 0;
         let mut found_any = false;
 
-        while self.signal_name_to_id.contains_key(&format!("{}[{}]", name, bit_idx)) {
+        while self
+            .signal_name_to_id
+            .contains_key(&format!("{}[{}]", name, bit_idx))
+        {
             found_any = true;
             if let Some(bits) = self.get_output(&format!("{}[{}]", name, bit_idx)) {
                 if bits.first().copied().unwrap_or(false) {
@@ -643,7 +647,9 @@ kernel void eval_sequential(
             (&self.signal_buffer_b, &self.signal_buffer_a)
         };
 
-        let Some(prim_buf) = &self.primitive_buffer else { return };
+        let Some(prim_buf) = &self.primitive_buffer else {
+            return;
+        };
         let Some(src) = src_buf else { return };
         let Some(dst) = dst_buf else { return };
 
@@ -668,7 +674,11 @@ kernel void eval_sequential(
             encoder.set_buffer(2, Some(dst), 0);
 
             let num_prims = self.primitives.len() as u32;
-            encoder.set_bytes(3, std::mem::size_of::<u32>() as u64, &num_prims as *const u32 as _);
+            encoder.set_bytes(
+                3,
+                std::mem::size_of::<u32>() as u64,
+                &num_prims as *const u32 as _,
+            );
 
             let thread_group_size = MTLSize::new(64, 1, 1);
             let grid_size = MTLSize::new(self.primitives.len().max(1) as u64, 1, 1);
@@ -688,12 +698,20 @@ kernel void eval_sequential(
 
                 encoder.set_compute_pipeline_state(pipeline);
                 encoder.set_buffer(0, Some(prim_buf), 0);
-                encoder.set_buffer(1, Some(dst), 0);  // Read from dst (post-comb)
-                encoder.set_buffer(2, Some(dst), 0);  // Write to same dst
+                encoder.set_buffer(1, Some(dst), 0); // Read from dst (post-comb)
+                encoder.set_buffer(2, Some(dst), 0); // Write to same dst
 
                 let num_prims = self.primitives.len() as u32;
-                encoder.set_bytes(3, std::mem::size_of::<u32>() as u64, &num_prims as *const u32 as _);
-                encoder.set_bytes(4, std::mem::size_of::<u32>() as u64, &clock_mask as *const u32 as _);
+                encoder.set_bytes(
+                    3,
+                    std::mem::size_of::<u32>() as u64,
+                    &num_prims as *const u32 as _,
+                );
+                encoder.set_bytes(
+                    4,
+                    std::mem::size_of::<u32>() as u64,
+                    &clock_mask as *const u32 as _,
+                );
 
                 let thread_group_size = MTLSize::new(64, 1, 1);
                 let grid_size = MTLSize::new(self.primitives.len().max(1) as u64, 1, 1);
@@ -765,7 +783,8 @@ kernel void eval_sequential(
         let mut rising_edges = Vec::new();
         for clock_id in &self.clock_signals {
             let prev = self.prev_clocks.get(&clock_id.0).copied().unwrap_or(false);
-            let curr = self.cpu_signals
+            let curr = self
+                .cpu_signals
                 .get(&clock_id.0)
                 .and_then(|v| v.first().copied())
                 .unwrap_or(false);
@@ -856,7 +875,8 @@ kernel void eval_sequential(
 
         // Reset CPU signals
         for signal in &self.sir.top_module.signals {
-            self.cpu_signals.insert(signal.id.0, vec![false; signal.width]);
+            self.cpu_signals
+                .insert(signal.id.0, vec![false; signal.width]);
         }
 
         // Reset GPU buffers
@@ -903,9 +923,7 @@ kernel void eval_sequential(
         let mut result: Vec<_> = self
             .signal_name_to_id
             .iter()
-            .filter_map(|(name, id)| {
-                self.get_output(name).map(|v| (name.clone(), v))
-            })
+            .filter_map(|(name, id)| self.get_output(name).map(|v| (name.clone(), v)))
             .collect();
         result.sort_by(|a, b| a.0.cmp(&b.0));
         result

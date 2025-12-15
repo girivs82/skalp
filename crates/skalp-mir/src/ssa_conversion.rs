@@ -54,7 +54,13 @@ impl SsaConverter {
 
         // Initialize current_version for variables that need SSA
         for variable in &module.variables {
-            if self.reassignment_count.get(&variable.id).copied().unwrap_or(0) > 0 {
+            if self
+                .reassignment_count
+                .get(&variable.id)
+                .copied()
+                .unwrap_or(0)
+                > 0
+            {
                 // Variable is reassigned - initialize version mapping
                 self.current_version.insert(variable.id, variable.id);
                 eprintln!(
@@ -72,7 +78,7 @@ impl SsaConverter {
         }
 
         // Add new SSA variables to module
-        module.variables.extend(self.new_variables.drain(..));
+        module.variables.append(&mut self.new_variables);
 
         eprintln!(
             "SSA: Conversion complete - created {} new variable versions",
@@ -215,11 +221,19 @@ impl SsaConverter {
             Statement::Loop(loop_stmt) => {
                 // Loops are complex for SSA - for now, just convert the body
                 match loop_stmt {
-                    LoopStatement::For { init, condition, update, body } => {
+                    LoopStatement::For {
+                        init,
+                        condition,
+                        update,
+                        body,
+                    } => {
                         self.convert_stmt(&mut Statement::Assignment(*init.clone()), original_vars);
                         self.update_expr_refs(condition);
                         self.convert_block(body, original_vars);
-                        self.convert_stmt(&mut Statement::Assignment(*update.clone()), original_vars);
+                        self.convert_stmt(
+                            &mut Statement::Assignment(*update.clone()),
+                            original_vars,
+                        );
                     }
                     LoopStatement::While { condition, body } => {
                         self.update_expr_refs(condition);
@@ -251,7 +265,11 @@ impl SsaConverter {
     }
 
     /// Create a new SSA version of a variable
-    fn create_new_version(&mut self, original_var_id: VariableId, original_vars: &[Variable]) -> VariableId {
+    fn create_new_version(
+        &mut self,
+        original_var_id: VariableId,
+        original_vars: &[Variable],
+    ) -> VariableId {
         let new_id = VariableId(self.next_var_id);
         self.next_var_id += 1;
 
@@ -306,7 +324,11 @@ impl SsaConverter {
             ExpressionKind::Cast { expr, .. } => {
                 self.update_expr_refs(expr);
             }
-            ExpressionKind::Conditional { cond, then_expr, else_expr } => {
+            ExpressionKind::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 self.update_expr_refs(cond);
                 self.update_expr_refs(then_expr);
                 self.update_expr_refs(else_expr);
@@ -325,10 +347,15 @@ impl SsaConverter {
 
 /// Apply SSA conversion to a MIR design
 pub fn apply_ssa_conversion(mir: &mut Mir) {
-    eprintln!("SSA: Starting SSA conversion for {} modules", mir.modules.len());
+    eprintln!(
+        "SSA: Starting SSA conversion for {} modules",
+        mir.modules.len()
+    );
 
     // Find the maximum variable ID across all modules
-    let max_var_id = mir.modules.iter()
+    let max_var_id = mir
+        .modules
+        .iter()
         .flat_map(|m| m.variables.iter().map(|v| v.id.0))
         .max()
         .unwrap_or(0);

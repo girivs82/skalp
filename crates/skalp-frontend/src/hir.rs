@@ -1215,7 +1215,7 @@ pub struct HirGenerateArm {
 }
 
 /// Body of a generate block containing declarations and statements
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HirGenerateBody {
     /// Signals declared in the generate block
     pub signals: Vec<HirSignal>,
@@ -1231,20 +1231,6 @@ pub struct HirGenerateBody {
     pub assignments: Vec<HirAssignment>,
     /// Nested generate statements
     pub generate_stmts: Vec<HirStatement>,
-}
-
-impl Default for HirGenerateBody {
-    fn default() -> Self {
-        Self {
-            signals: Vec::new(),
-            variables: Vec::new(),
-            constants: Vec::new(),
-            instances: Vec::new(),
-            event_blocks: Vec::new(),
-            assignments: Vec::new(),
-            generate_stmts: Vec::new(),
-        }
-    }
 }
 
 /// Let statement in HIR - local variable binding
@@ -2757,7 +2743,7 @@ pub struct HirModule {
 /// Items that can appear in a module
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HirModuleItem {
-    Entity(HirEntity),
+    Entity(Box<HirEntity>),
     Module(HirModule),
     Import(HirImport),
     TraitDef(HirTraitDefinition),

@@ -7,8 +7,8 @@
 //! - Specific cycle numbers
 //! - Named breakpoints with custom messages
 
-use std::collections::HashMap;
 use skalp_frontend::hir::BreakpointConfig;
+use std::collections::HashMap;
 
 /// Action to take when a breakpoint triggers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,22 +134,14 @@ impl BreakpointCondition {
     }
 
     /// Check if the condition is satisfied
-    pub fn check(
-        &self,
-        current_value: &[u8],
-        previous_value: Option<&[u8]>,
-    ) -> bool {
+    pub fn check(&self, current_value: &[u8], previous_value: Option<&[u8]>) -> bool {
         match self {
-            BreakpointCondition::NonZero => {
-                current_value.iter().any(|&b| b != 0)
-            }
+            BreakpointCondition::NonZero => current_value.iter().any(|&b| b != 0),
             BreakpointCondition::Equals(expected) => {
                 // Compare with zero-padding for different lengths
                 values_equal(current_value, expected)
             }
-            BreakpointCondition::NotEquals(expected) => {
-                !values_equal(current_value, expected)
-            }
+            BreakpointCondition::NotEquals(expected) => !values_equal(current_value, expected),
             BreakpointCondition::GreaterThan(threshold) => {
                 let current = bytes_to_u64(current_value);
                 current > *threshold
@@ -220,22 +212,23 @@ impl BreakpointManager {
     }
 
     /// Register a breakpoint from HIR BreakpointConfig
-    pub fn register_from_config(
-        &mut self,
-        signal_name: &str,
-        config: &BreakpointConfig,
-    ) -> u32 {
+    pub fn register_from_config(&mut self, signal_name: &str, config: &BreakpointConfig) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
 
-        let condition = config.condition.as_ref()
+        let condition = config
+            .condition
+            .as_ref()
             .map(|c| BreakpointCondition::parse(c))
             .unwrap_or(BreakpointCondition::NonZero);
 
         let breakpoint = SimBreakpoint {
             id,
             signal_name: signal_name.to_string(),
-            name: config.name.clone().unwrap_or_else(|| signal_name.to_string()),
+            name: config
+                .name
+                .clone()
+                .unwrap_or_else(|| signal_name.to_string()),
             condition: Some(condition),
             message: config.message.clone(),
             is_error: config.is_error,
@@ -371,9 +364,7 @@ impl BreakpointManager {
 
     /// Get breakpoint by ID
     pub fn get_breakpoint(&self, id: u32) -> Option<&SimBreakpoint> {
-        self.breakpoints.values()
-            .flatten()
-            .find(|bp| bp.id == id)
+        self.breakpoints.values().flatten().find(|bp| bp.id == id)
     }
 
     /// Clear all breakpoints

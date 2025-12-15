@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use crate::lir::{LirNet, Lir, NetId, Primitive, PrimitiveId, PrimitiveType};
+use crate::lir::{Lir, LirNet, NetId, Primitive, PrimitiveId, PrimitiveType};
 use std::collections::{HashMap, HashSet};
 
 /// Result of a gate-level optimization pass
@@ -214,13 +214,7 @@ impl LirOptimizationPass for GateConstantFolding {
             .filter(|net| self.constants.contains_key(net))
             .collect();
 
-        let mut next_prim_id = netlist
-            .primitives
-            .iter()
-            .map(|p| p.id.0)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let mut next_prim_id = netlist.primitives.iter().map(|p| p.id.0).max().unwrap_or(0) + 1;
 
         for net_id in needed_constants {
             if let Some(&value) = self.constants.get(&net_id) {
@@ -338,9 +332,7 @@ impl LirOptimizationPass for GateDeadCodeElimination {
             .collect();
 
         let removed_count = dead_prims.len();
-        netlist
-            .primitives
-            .retain(|p| !dead_prims.contains(&p.id));
+        netlist.primitives.retain(|p| !dead_prims.contains(&p.id));
 
         // Remove dead nets
         let dead_nets_count = netlist.nets.len();
@@ -444,8 +436,7 @@ impl LirOptimizationPass for GateCSE {
                     if let Some(dup) = netlist.primitives.iter().find(|p| p.id == dup_id) {
                         if let Some(keeper) = keeper {
                             // Map duplicate outputs to keeper outputs
-                            for (dup_out, keep_out) in
-                                dup.outputs.iter().zip(keeper.outputs.iter())
+                            for (dup_out, keep_out) in dup.outputs.iter().zip(keeper.outputs.iter())
                             {
                                 output_replacements.insert(*dup_out, *keep_out);
                             }
@@ -474,7 +465,8 @@ impl LirOptimizationPass for GateCSE {
 
         // Update net loads
         for net in &mut netlist.nets {
-            net.loads.retain(|(prim_id, _)| !prims_to_remove.contains(prim_id));
+            net.loads
+                .retain(|(prim_id, _)| !prims_to_remove.contains(prim_id));
         }
 
         let fit_after: f64 = netlist.primitives.iter().map(|p| p.fit()).sum();
@@ -764,9 +756,7 @@ impl LirOptimizationPass for GateBufferRemoval {
         // Find buffers that can be removed (not ClkBuf, single fanout)
         for prim in &netlist.primitives {
             if matches!(prim.ptype, PrimitiveType::Buf) {
-                if let (Some(&input), Some(&output)) =
-                    (prim.inputs.first(), prim.outputs.first())
-                {
+                if let (Some(&input), Some(&output)) = (prim.inputs.first(), prim.outputs.first()) {
                     // Check that output is not a primary output
                     if !netlist.outputs.contains(&output) {
                         wire_through.insert(output, input);
@@ -1284,10 +1274,7 @@ mod tests {
         assert!(result.success);
         // Should replace MUX with BUF
         assert_eq!(netlist.primitives.len(), 1);
-        assert!(matches!(
-            netlist.primitives[0].ptype,
-            PrimitiveType::Buf
-        ));
+        assert!(matches!(netlist.primitives[0].ptype, PrimitiveType::Buf));
     }
 
     #[test]

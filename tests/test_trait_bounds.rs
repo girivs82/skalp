@@ -61,7 +61,10 @@ mod test_trait_bounds {
             Ok(h) => {
                 println!("✅ Parsed to HIR successfully");
                 println!("   Trait definitions: {}", h.trait_definitions.len());
-                println!("   Trait implementations: {}", h.trait_implementations.len());
+                println!(
+                    "   Trait implementations: {}",
+                    h.trait_implementations.len()
+                );
                 println!("   Functions: {}", h.functions.len());
                 h
             }
@@ -71,18 +74,23 @@ mod test_trait_bounds {
         };
 
         // Check trait definition
-        assert!(hir.trait_definitions.len() > 0, "Should have trait definition");
+        assert!(
+            !hir.trait_definitions.is_empty(),
+            "Should have trait definition"
+        );
         let trait_def = &hir.trait_definitions[0];
         println!("\n✅ Found trait: {}", trait_def.name);
         println!("   Methods: {}", trait_def.methods.len());
 
         // Check trait implementation
-        assert!(hir.trait_implementations.len() > 0, "Should have trait impl");
+        assert!(
+            !hir.trait_implementations.is_empty(),
+            "Should have trait impl"
+        );
         println!("✅ Found trait implementation");
 
         // Check generic function
-        let fp_add_func = hir.functions.iter()
-            .find(|f| f.name == "fp_add");
+        let fp_add_func = hir.functions.iter().find(|f| f.name == "fp_add");
 
         assert!(fp_add_func.is_some(), "Should have fp_add function");
         let func = fp_add_func.unwrap();
@@ -106,7 +114,9 @@ mod test_trait_bounds {
         }
 
         // Should have specialized fp_add function
-        let has_specialized = monomorphized_hir.functions.iter()
+        let has_specialized = monomorphized_hir
+            .functions
+            .iter()
             .any(|f| f.name.starts_with("fp_add_") && f.generics.is_empty());
 
         if has_specialized {

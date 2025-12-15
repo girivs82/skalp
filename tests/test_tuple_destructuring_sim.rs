@@ -92,7 +92,11 @@ mod tuple_destructuring_sim_tests {
         // Check valid output (should be 1)
         let valid_bytes = sim.get_output("valid").await.unwrap();
         println!("valid_bytes = {:?}", valid_bytes);
-        assert_eq!(valid_bytes[0], 1, "valid should be true (1), got {}", valid_bytes[0]);
+        assert_eq!(
+            valid_bytes[0], 1,
+            "valid should be true (1), got {}",
+            valid_bytes[0]
+        );
 
         // Check x1 output (should be -5.0)
         let x1_bytes = sim.get_output("x1").await.unwrap();

@@ -7,7 +7,7 @@
 //! - Type conversion issues
 
 use crate::{Lint, LintContext, LintLevel, LintPass};
-use skalp_frontend::hir::{HirFunction, HirExpression};
+use skalp_frontend::hir::{HirExpression, HirFunction};
 
 // ============================================================================
 // Lint Definitions
@@ -92,7 +92,7 @@ fn get_bit_width(ty: &skalp_frontend::hir::HirType) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_frontend::hir::{HirFunction, HirType, FunctionId};
+    use skalp_frontend::hir::{FunctionId, HirFunction, HirType};
 
     #[test]
     fn test_width_mismatch_detection() {
@@ -107,6 +107,8 @@ mod tests {
             params: vec![],
             return_type: Some(HirType::Bit(32)),
             body: vec![],
+            pipeline_config: None,
+            span: None,
         };
 
         lint.check_function(&func, &mut ctx);

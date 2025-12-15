@@ -101,7 +101,7 @@ impl OutputFormat {
     }
 
     /// Parse format from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "md" | "markdown" => Some(OutputFormat::Markdown),
             "html" => Some(OutputFormat::Html),
@@ -151,7 +151,7 @@ impl WorkProductType {
     }
 
     /// Parse work product type from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "manual" | "safety_manual" | "safetymanual" => Some(WorkProductType::SafetyManual),
             "fmeda" | "fmeda_report" | "fmedareport" => Some(WorkProductType::FmedaReport),
@@ -296,17 +296,9 @@ impl WorkProductGenerator {
         };
 
         // Get actual values (from results or compute)
-        let spfm_actual = self
-            .results
-            .as_ref()
-            .and_then(|r| r.spfm)
-            .unwrap_or(95.0);
+        let spfm_actual = self.results.as_ref().and_then(|r| r.spfm).unwrap_or(95.0);
         let lfm_actual = self.results.as_ref().and_then(|r| r.lfm).unwrap_or(85.0);
-        let pmhf_actual = self
-            .results
-            .as_ref()
-            .and_then(|r| r.pmhf)
-            .unwrap_or(15.0);
+        let pmhf_actual = self.results.as_ref().and_then(|r| r.pmhf).unwrap_or(15.0);
 
         let mut passed = true;
         let mut gaps = Vec::new();
@@ -374,7 +366,12 @@ impl WorkProductGenerator {
                 let gaps_msg = check
                     .gaps
                     .iter()
-                    .map(|g| format!("  - {}: {:.1}% < {:.1}%", g.component, g.current_coverage, g.required_coverage))
+                    .map(|g| {
+                        format!(
+                            "  - {}: {:.1}% < {:.1}%",
+                            g.component, g.current_coverage, g.required_coverage
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Err(WorkProductError::MetricsCheckFailed(format!(
@@ -433,12 +430,7 @@ impl WorkProductGenerator {
 
         match format {
             OutputFormat::Markdown => {
-                writeln!(
-                    content,
-                    "# Safety Manual: {}\n",
-                    self.config.design_name
-                )
-                .unwrap();
+                writeln!(content, "# Safety Manual: {}\n", self.config.design_name).unwrap();
                 writeln!(content, "## 1. Safety Goal\n").unwrap();
 
                 for goal in self.hierarchy.goals.values() {
@@ -451,8 +443,12 @@ impl WorkProductGenerator {
                         writeln!(content, "| FTTI | {} |", format_duration(ftti)).unwrap();
                     }
                     if !goal.traces_to.is_empty() {
-                        writeln!(content, "| External Reference | {} |", goal.traces_to.join(", "))
-                            .unwrap();
+                        writeln!(
+                            content,
+                            "| External Reference | {} |",
+                            goal.traces_to.join(", ")
+                        )
+                        .unwrap();
                     }
                     writeln!(content).unwrap();
                 }
@@ -501,12 +497,12 @@ impl WorkProductGenerator {
                                 .dhsr
                                 .as_ref()
                                 .and_then(|d| d.detection_time.as_ref())
-                                .map(|t| format_duration(t))
+                                .map(format_duration)
                                 .unwrap_or_else(|| "-".to_string());
                             let impls = psm
                                 .implementations
                                 .iter()
-                                .map(|i| format_design_ref(i))
+                                .map(format_design_ref)
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             writeln!(
@@ -526,7 +522,7 @@ impl WorkProductGenerator {
                         let impls = lsm
                             .implementations
                             .iter()
-                            .map(|i| format_design_ref(i))
+                            .map(format_design_ref)
                             .collect::<Vec<_>>()
                             .join(", ");
                         writeln!(
@@ -540,17 +536,9 @@ impl WorkProductGenerator {
 
                 writeln!(content, "\n## 4. FMEDA Summary\n").unwrap();
 
-                let spfm = self
-                    .results
-                    .as_ref()
-                    .and_then(|r| r.spfm)
-                    .unwrap_or(0.0);
+                let spfm = self.results.as_ref().and_then(|r| r.spfm).unwrap_or(0.0);
                 let lfm = self.results.as_ref().and_then(|r| r.lfm).unwrap_or(0.0);
-                let pmhf = self
-                    .results
-                    .as_ref()
-                    .and_then(|r| r.pmhf)
-                    .unwrap_or(0.0);
+                let pmhf = self.results.as_ref().and_then(|r| r.pmhf).unwrap_or(0.0);
                 let total_fit = self
                     .results
                     .as_ref()
@@ -585,16 +573,19 @@ impl WorkProductGenerator {
 
         match format {
             OutputFormat::Markdown => {
-                writeln!(
-                    content,
-                    "# FMEDA Report: {}\n",
-                    self.config.design_name
-                )
-                .unwrap();
+                writeln!(content, "# FMEDA Report: {}\n", self.config.design_name).unwrap();
 
                 writeln!(content, "## Component Failure Analysis\n").unwrap();
-                writeln!(content, "| Component | Part | Total FIT | Safe | SPF | Residual | Latent | DC | LC |").unwrap();
-                writeln!(content, "|-----------|------|-----------|------|-----|----------|--------|----|----|").unwrap();
+                writeln!(
+                    content,
+                    "| Component | Part | Total FIT | Safe | SPF | Residual | Latent | DC | LC |"
+                )
+                .unwrap();
+                writeln!(
+                    content,
+                    "|-----------|------|-----------|------|-----|----------|--------|----|----|"
+                )
+                .unwrap();
 
                 for entity in self.hierarchy.entities.values() {
                     for fmea in &entity.fmea {
@@ -626,17 +617,9 @@ impl WorkProductGenerator {
 
                 writeln!(content, "\n## Metrics Summary\n").unwrap();
 
-                let spfm = self
-                    .results
-                    .as_ref()
-                    .and_then(|r| r.spfm)
-                    .unwrap_or(0.0);
+                let spfm = self.results.as_ref().and_then(|r| r.spfm).unwrap_or(0.0);
                 let lfm = self.results.as_ref().and_then(|r| r.lfm).unwrap_or(0.0);
-                let pmhf = self
-                    .results
-                    .as_ref()
-                    .and_then(|r| r.pmhf)
-                    .unwrap_or(0.0);
+                let pmhf = self.results.as_ref().and_then(|r| r.pmhf).unwrap_or(0.0);
 
                 writeln!(content, "| Metric | Value | Target | Status |").unwrap();
                 writeln!(content, "|--------|-------|--------|--------|").unwrap();
@@ -685,18 +668,30 @@ impl WorkProductGenerator {
             }
             OutputFormat::Html => {
                 let md = self.generate_fmeda_report(OutputFormat::Markdown)?;
-                content = self.wrap_html(&format!("FMEDA Report: {}", self.config.design_name), &md);
+                content =
+                    self.wrap_html(&format!("FMEDA Report: {}", self.config.design_name), &md);
             }
             OutputFormat::Csv => {
-                writeln!(content, "Component,Part,Total FIT,Safe,SPF,Residual,Latent,DC,LC")
-                    .unwrap();
+                writeln!(
+                    content,
+                    "Component,Part,Total FIT,Safe,SPF,Residual,Latent,DC,LC"
+                )
+                .unwrap();
 
                 for entity in self.hierarchy.entities.values() {
                     for fmea in &entity.fmea {
                         writeln!(
                             content,
                             "{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
-                            format_design_ref(&fmea.design_ref), fmea.part, 0.0, 0.0, 0.0, 0.0, 0.0, 99.0, 90.0
+                            format_design_ref(&fmea.design_ref),
+                            fmea.part,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            99.0,
+                            90.0
                         )
                         .unwrap();
                     }
@@ -741,18 +736,27 @@ impl WorkProductGenerator {
                         writeln!(content, "### {} - {}\n", hsr.id, hsr.requirement).unwrap();
 
                         if let Some(psm) = &hsr.psm {
-                            writeln!(content, "- **PSM**: {} (DC >= {:.1}%)", psm.name, psm.dc_target)
-                                .unwrap();
+                            writeln!(
+                                content,
+                                "- **PSM**: {} (DC >= {:.1}%)",
+                                psm.name, psm.dc_target
+                            )
+                            .unwrap();
 
                             if let Some(dhsr) = &psm.dhsr {
-                                writeln!(content, "  - **DHSR**: {} - {}", dhsr.id, dhsr.requirement)
-                                    .unwrap();
+                                writeln!(
+                                    content,
+                                    "  - **DHSR**: {} - {}",
+                                    dhsr.id, dhsr.requirement
+                                )
+                                .unwrap();
                             }
 
                             if !psm.implementations.is_empty() {
                                 writeln!(content, "  - **Implementations**:").unwrap();
                                 for impl_ref in &psm.implementations {
-                                    writeln!(content, "    - {}", format_design_ref(impl_ref)).unwrap();
+                                    writeln!(content, "    - {}", format_design_ref(impl_ref))
+                                        .unwrap();
                                 }
                             }
                         }
@@ -810,7 +814,12 @@ impl WorkProductGenerator {
                 .unwrap();
 
                 for goal in self.hierarchy.goals.values() {
-                    writeln!(content, "## Safety Goal: {} ({})\n", goal.name, goal.external_id).unwrap();
+                    writeln!(
+                        content,
+                        "## Safety Goal: {} ({})\n",
+                        goal.name, goal.external_id
+                    )
+                    .unwrap();
 
                     for hsr in &goal.hsrs {
                         writeln!(content, "### {}\n", hsr.id).unwrap();
@@ -835,7 +844,12 @@ impl WorkProductGenerator {
                                     .unwrap();
                                 writeln!(content, "{}\n", dhsr.requirement).unwrap();
                                 if let Some(time) = &dhsr.detection_time {
-                                    writeln!(content, "- Detection Time: {}", format_duration(time)).unwrap();
+                                    writeln!(
+                                        content,
+                                        "- Detection Time: {}",
+                                        format_duration(time)
+                                    )
+                                    .unwrap();
                                 }
                             }
                         }
@@ -875,8 +889,16 @@ impl WorkProductGenerator {
                 .unwrap();
 
                 writeln!(content, "## 1. Interface Signals\n").unwrap();
-                writeln!(content, "| Signal | Direction | Width | ASIL | Max Latency |").unwrap();
-                writeln!(content, "|--------|-----------|-------|------|-------------|").unwrap();
+                writeln!(
+                    content,
+                    "| Signal | Direction | Width | ASIL | Max Latency |"
+                )
+                .unwrap();
+                writeln!(
+                    content,
+                    "|--------|-----------|-------|------|-------------|"
+                )
+                .unwrap();
 
                 for entity in self.hierarchy.entities.values() {
                     // Use includes patterns as the signals
@@ -891,7 +913,7 @@ impl WorkProductGenerator {
                             .timing
                             .signal_latencies
                             .get(&signal_str)
-                            .map(|l| format_duration(l))
+                            .map(format_duration)
                             .unwrap_or_else(|| "-".to_string());
 
                         writeln!(
@@ -914,8 +936,13 @@ impl WorkProductGenerator {
                 // Also show entity-level FTTI
                 for entity in self.hierarchy.entities.values() {
                     if let Some(ftti) = &entity.hsi.timing.ftti {
-                        writeln!(content, "- **{} FTTI**: {}", entity.name, format_duration(ftti))
-                            .unwrap();
+                        writeln!(
+                            content,
+                            "- **{} FTTI**: {}",
+                            entity.name,
+                            format_duration(ftti)
+                        )
+                        .unwrap();
                     }
                 }
 
@@ -990,7 +1017,7 @@ impl WorkProductGenerator {
                             let impls = psm
                                 .implementations
                                 .iter()
-                                .map(|i| format_design_ref(i))
+                                .map(format_design_ref)
                                 .collect::<Vec<_>>()
                                 .join(", ");
 
@@ -1027,12 +1054,12 @@ impl WorkProductGenerator {
                         let interval = lsm
                             .interval
                             .as_ref()
-                            .map(|i| format_duration(i))
+                            .map(format_duration)
                             .unwrap_or_else(|| "-".to_string());
                         let impls = lsm
                             .implementations
                             .iter()
-                            .map(|i| format_design_ref(i))
+                            .map(format_design_ref)
                             .collect::<Vec<_>>()
                             .join(", ");
 
@@ -1103,8 +1130,16 @@ impl WorkProductGenerator {
                 )
                 .unwrap();
 
-                writeln!(content, "| Initial Failure | Potential Cascade | Protection |").unwrap();
-                writeln!(content, "|-----------------|-------------------|------------|").unwrap();
+                writeln!(
+                    content,
+                    "| Initial Failure | Potential Cascade | Protection |"
+                )
+                .unwrap();
+                writeln!(
+                    content,
+                    "|-----------------|-------------------|------------|"
+                )
+                .unwrap();
 
                 writeln!(content, "\n## 3. Recommendations\n").unwrap();
                 writeln!(
@@ -1112,7 +1147,11 @@ impl WorkProductGenerator {
                     "- Implement physical separation between redundant channels"
                 )
                 .unwrap();
-                writeln!(content, "- Use diverse implementations for safety mechanisms").unwrap();
+                writeln!(
+                    content,
+                    "- Use diverse implementations for safety mechanisms"
+                )
+                .unwrap();
                 writeln!(
                     content,
                     "- Ensure independent power and clock domains for critical functions"
@@ -1121,10 +1160,7 @@ impl WorkProductGenerator {
             }
             OutputFormat::Html => {
                 let md = self.generate_dfa_report(OutputFormat::Markdown)?;
-                content = self.wrap_html(
-                    &format!("DFA Report: {}", self.config.design_name),
-                    &md,
-                );
+                content = self.wrap_html(&format!("DFA Report: {}", self.config.design_name), &md);
             }
             _ => {
                 return Err(WorkProductError::FormatError(format!(
@@ -1164,7 +1200,11 @@ impl WorkProductGenerator {
                 writeln!(content, "|--------|-------|--------|--------|").unwrap();
 
                 if let Some((actual, target)) = check.spfm {
-                    let status_str = if actual >= target { "✅ PASS" } else { "❌ FAIL" };
+                    let status_str = if actual >= target {
+                        "✅ PASS"
+                    } else {
+                        "❌ FAIL"
+                    };
                     writeln!(
                         content,
                         "| SPFM | {:.1}% | >= {:.1}% | {} |",
@@ -1174,7 +1214,11 @@ impl WorkProductGenerator {
                 }
 
                 if let Some((actual, target)) = check.lfm {
-                    let status_str = if actual >= target { "✅ PASS" } else { "❌ FAIL" };
+                    let status_str = if actual >= target {
+                        "✅ PASS"
+                    } else {
+                        "❌ FAIL"
+                    };
                     writeln!(
                         content,
                         "| LFM | {:.1}% | >= {:.1}% | {} |",
@@ -1184,7 +1228,11 @@ impl WorkProductGenerator {
                 }
 
                 if let Some((actual, target)) = check.pmhf {
-                    let status_str = if actual <= target { "✅ PASS" } else { "❌ FAIL" };
+                    let status_str = if actual <= target {
+                        "✅ PASS"
+                    } else {
+                        "❌ FAIL"
+                    };
                     writeln!(
                         content,
                         "| PMHF | {:.1} FIT | <= {:.1} FIT | {} |",
@@ -1228,10 +1276,8 @@ impl WorkProductGenerator {
             }
             OutputFormat::Html => {
                 let md = self.generate_safety_summary(OutputFormat::Markdown)?;
-                content = self.wrap_html(
-                    &format!("Safety Summary: {}", self.config.design_name),
-                    &md,
-                );
+                content =
+                    self.wrap_html(&format!("Safety Summary: {}", self.config.design_name), &md);
             }
             _ => {
                 return Err(WorkProductError::FormatError(format!(
@@ -1288,12 +1334,7 @@ impl WorkProductGenerator {
             writeln!(content, "        </SPEC-OBJECT>").unwrap();
 
             for hsr in &goal.hsrs {
-                writeln!(
-                    content,
-                    "        <SPEC-OBJECT IDENTIFIER=\"{}\">",
-                    hsr.id
-                )
-                .unwrap();
+                writeln!(content, "        <SPEC-OBJECT IDENTIFIER=\"{}\">", hsr.id).unwrap();
                 writeln!(
                     content,
                     "          <VALUES><ATTRIBUTE-VALUE-STRING THE-VALUE=\"{}\"/></VALUES>",
@@ -1316,8 +1357,12 @@ impl WorkProductGenerator {
                 )
                 .unwrap();
                 writeln!(content, "          <SOURCE>").unwrap();
-                writeln!(content, "            <SPEC-OBJECT-REF>{}</SPEC-OBJECT-REF>", hsr.id)
-                    .unwrap();
+                writeln!(
+                    content,
+                    "            <SPEC-OBJECT-REF>{}</SPEC-OBJECT-REF>",
+                    hsr.id
+                )
+                .unwrap();
                 writeln!(content, "          </SOURCE>").unwrap();
                 writeln!(content, "          <TARGET>").unwrap();
                 writeln!(
@@ -1344,16 +1389,16 @@ impl WorkProductGenerator {
         let html_body = markdown
             .lines()
             .map(|line| {
-                if line.starts_with("# ") {
-                    format!("<h1>{}</h1>", &line[2..])
-                } else if line.starts_with("## ") {
-                    format!("<h2>{}</h2>", &line[3..])
-                } else if line.starts_with("### ") {
-                    format!("<h3>{}</h3>", &line[4..])
+                if let Some(stripped) = line.strip_prefix("# ") {
+                    format!("<h1>{}</h1>", stripped)
+                } else if let Some(stripped) = line.strip_prefix("## ") {
+                    format!("<h2>{}</h2>", stripped)
+                } else if let Some(stripped) = line.strip_prefix("### ") {
+                    format!("<h3>{}</h3>", stripped)
                 } else if line.starts_with("| ") {
                     format!("<tr><td>{}</td></tr>", line.replace(" | ", "</td><td>"))
-                } else if line.starts_with("- ") {
-                    format!("<li>{}</li>", &line[2..])
+                } else if let Some(stripped) = line.strip_prefix("- ") {
+                    format!("<li>{}</li>", stripped)
                 } else if line.starts_with("**") && line.ends_with("**") {
                     format!("<strong>{}</strong>", &line[2..line.len() - 2])
                 } else {
@@ -1409,50 +1454,50 @@ mod tests {
 
     #[test]
     fn test_output_format_from_str() {
-        assert_eq!(OutputFormat::from_str("md"), Some(OutputFormat::Markdown));
+        assert_eq!(OutputFormat::parse("md"), Some(OutputFormat::Markdown));
         assert_eq!(
-            OutputFormat::from_str("markdown"),
+            OutputFormat::parse("markdown"),
             Some(OutputFormat::Markdown)
         );
-        assert_eq!(OutputFormat::from_str("html"), Some(OutputFormat::Html));
-        assert_eq!(OutputFormat::from_str("csv"), Some(OutputFormat::Csv));
-        assert_eq!(OutputFormat::from_str("reqif"), Some(OutputFormat::ReqIF));
-        assert_eq!(OutputFormat::from_str("xml"), Some(OutputFormat::Xml));
-        assert_eq!(OutputFormat::from_str("unknown"), None);
+        assert_eq!(OutputFormat::parse("html"), Some(OutputFormat::Html));
+        assert_eq!(OutputFormat::parse("csv"), Some(OutputFormat::Csv));
+        assert_eq!(OutputFormat::parse("reqif"), Some(OutputFormat::ReqIF));
+        assert_eq!(OutputFormat::parse("xml"), Some(OutputFormat::Xml));
+        assert_eq!(OutputFormat::parse("unknown"), None);
     }
 
     #[test]
     fn test_work_product_type_from_str() {
         assert_eq!(
-            WorkProductType::from_str("manual"),
+            WorkProductType::parse("manual"),
             Some(WorkProductType::SafetyManual)
         );
         assert_eq!(
-            WorkProductType::from_str("fmeda"),
+            WorkProductType::parse("fmeda"),
             Some(WorkProductType::FmedaReport)
         );
         assert_eq!(
-            WorkProductType::from_str("traceability"),
+            WorkProductType::parse("traceability"),
             Some(WorkProductType::TraceabilityMatrix)
         );
         assert_eq!(
-            WorkProductType::from_str("hsr"),
+            WorkProductType::parse("hsr"),
             Some(WorkProductType::HsrSpecification)
         );
         assert_eq!(
-            WorkProductType::from_str("hsi"),
+            WorkProductType::parse("hsi"),
             Some(WorkProductType::HsiSpecification)
         );
         assert_eq!(
-            WorkProductType::from_str("mechanisms"),
+            WorkProductType::parse("mechanisms"),
             Some(WorkProductType::SafetyMechanismReport)
         );
         assert_eq!(
-            WorkProductType::from_str("dfa"),
+            WorkProductType::parse("dfa"),
             Some(WorkProductType::DfaReport)
         );
         assert_eq!(
-            WorkProductType::from_str("summary"),
+            WorkProductType::parse("summary"),
             Some(WorkProductType::SafetySummary)
         );
     }

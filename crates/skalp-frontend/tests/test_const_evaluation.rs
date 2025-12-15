@@ -70,6 +70,7 @@ fn test_builtin_clog2() {
         function: "clog2".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(1024))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
@@ -79,6 +80,7 @@ fn test_builtin_clog2() {
         function: "clog2".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(1))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(0));
@@ -88,6 +90,7 @@ fn test_builtin_clog2() {
         function: "clog2".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(3));
@@ -102,6 +105,7 @@ fn test_builtin_pow2() {
         function: "pow2".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(3))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(8));
@@ -111,6 +115,7 @@ fn test_builtin_pow2() {
         function: "pow2".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(0))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(1));
@@ -128,6 +133,7 @@ fn test_builtin_max_min() {
             HirExpression::Literal(HirLiteral::Integer(5)),
             HirExpression::Literal(HirLiteral::Integer(10)),
         ],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
@@ -140,6 +146,7 @@ fn test_builtin_max_min() {
             HirExpression::Literal(HirLiteral::Integer(5)),
             HirExpression::Literal(HirLiteral::Integer(10)),
         ],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));
@@ -154,6 +161,7 @@ fn test_builtin_popcount() {
         function: "popcount".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(3));
@@ -163,6 +171,7 @@ fn test_builtin_popcount() {
         function: "popcount".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(15))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(4));
@@ -177,6 +186,7 @@ fn test_builtin_is_power_of_2() {
         function: "is_power_of_2".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(8))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Bool(true));
@@ -186,6 +196,7 @@ fn test_builtin_is_power_of_2() {
         function: "is_power_of_2".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Bool(false));
@@ -200,6 +211,7 @@ fn test_builtin_gray_code() {
         function: "gray_encode".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(5))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     let encoded = eval.eval(&expr).unwrap();
@@ -210,6 +222,7 @@ fn test_builtin_gray_code() {
         function: "gray_decode".to_string(),
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
+        named_type_args: std::collections::HashMap::new(),
         impl_style: ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));

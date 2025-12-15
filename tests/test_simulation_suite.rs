@@ -310,8 +310,14 @@ mod simulation_suite {
             );
             // Compare counter register value (8-bit counter stored in 32-bit buffer)
             // Only compare the actual value byte, not padding bytes which may differ
-            let cpu_counter = cpu_final.registers.get("counter").map(|v| v.first().copied());
-            let gpu_counter = gpu_final.registers.get("counter").map(|v| v.first().copied());
+            let cpu_counter = cpu_final
+                .registers
+                .get("counter")
+                .map(|v| v.first().copied());
+            let gpu_counter = gpu_final
+                .registers
+                .get("counter")
+                .map(|v| v.first().copied());
             assert_eq!(
                 cpu_counter, gpu_counter,
                 "Final counter register value should match between CPU and GPU"

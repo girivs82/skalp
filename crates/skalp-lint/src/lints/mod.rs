@@ -6,6 +6,6 @@
 //! - `types`: Type-related lints (width mismatches, sign confusion)
 //! - `hardware`: Hardware design best practices
 
-pub mod unused;
-pub mod types;
 pub mod hardware;
+pub mod types;
+pub mod unused;

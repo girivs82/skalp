@@ -46,7 +46,7 @@ impl Testbench {
         // Check SKALP_SIM_MODE environment variable - "cpu" disables GPU
         let use_gpu = std::env::var("SKALP_SIM_MODE")
             .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);  // Default to GPU if not set
+            .unwrap_or(true); // Default to GPU if not set
 
         let config = SimulationConfig {
             // SSA conversion is now implemented in skalp-mir to eliminate combinational cycles
@@ -57,7 +57,11 @@ impl Testbench {
             capture_waveforms: true,
             parallel_threads: 4,
         };
-        eprintln!("🚨 DEBUG: use_gpu = {} (SKALP_SIM_MODE={:?})", config.use_gpu, std::env::var("SKALP_SIM_MODE").ok());
+        eprintln!(
+            "🚨 DEBUG: use_gpu = {} (SKALP_SIM_MODE={:?})",
+            config.use_gpu,
+            std::env::var("SKALP_SIM_MODE").ok()
+        );
         Self::with_config(source_path, config).await
     }
 
@@ -93,9 +97,15 @@ impl Testbench {
         eprintln!("⏱️  [TESTBENCH] Creating simulator and loading design...");
         let mut sim = Simulator::new(config).await?;
         sim.load_module(&sir).await?;
-        eprintln!("⏱️  [TESTBENCH] Simulator initialization completed in {:?}", start_sim.elapsed());
+        eprintln!(
+            "⏱️  [TESTBENCH] Simulator initialization completed in {:?}",
+            start_sim.elapsed()
+        );
 
-        eprintln!("⏱️  [TESTBENCH] ✅ Total testbench creation time: {:?}", start_total.elapsed());
+        eprintln!(
+            "⏱️  [TESTBENCH] ✅ Total testbench creation time: {:?}",
+            start_total.elapsed()
+        );
 
         Ok(Self {
             sim,
@@ -116,7 +126,10 @@ impl Testbench {
         // This handles imports like "mod async_fifo; use async_fifo::AsyncFifo"
         let start_hir = Instant::now();
         let context = skalp_frontend::parse_and_build_compilation_context(path)?;
-        eprintln!("⏱️  [TESTBENCH] HIR parsing completed in {:?}", start_hir.elapsed());
+        eprintln!(
+            "⏱️  [TESTBENCH] HIR parsing completed in {:?}",
+            start_hir.elapsed()
+        );
 
         // Compile to MIR with optimizations and module scope resolution
         // The proper HIR→MIR fix ensures array assignments are expanded correctly
@@ -126,7 +139,10 @@ impl Testbench {
         let mir = compiler
             .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        eprintln!("⏱️  [TESTBENCH] MIR compilation completed in {:?}", start_mir.elapsed());
+        eprintln!(
+            "⏱️  [TESTBENCH] MIR compilation completed in {:?}",
+            start_mir.elapsed()
+        );
 
         // Convert to SIR with hierarchical elaboration
         let start_sir = Instant::now();
@@ -198,7 +214,10 @@ impl Testbench {
         );
 
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
-        eprintln!("⏱️  [TESTBENCH] SIR conversion completed in {:?}", start_sir.elapsed());
+        eprintln!(
+            "⏱️  [TESTBENCH] SIR conversion completed in {:?}",
+            start_sir.elapsed()
+        );
 
         // Store in cache if we have a key
         if let Some(key) = cache_key {
@@ -427,12 +446,7 @@ impl Testbench {
     /// ```rust,ignore
     /// tb.expect_fp32("result", 3.14159, 0.001).await;
     /// ```
-    pub async fn expect_fp32(
-        &mut self,
-        signal: &str,
-        expected: f32,
-        tolerance: f32,
-    ) -> &mut Self {
+    pub async fn expect_fp32(&mut self, signal: &str, expected: f32, tolerance: f32) -> &mut Self {
         let actual_bytes = self.sim.get_output(signal).await.unwrap();
 
         // Convert bytes to f32 (assuming little-endian IEEE 754)

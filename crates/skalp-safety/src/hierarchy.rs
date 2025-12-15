@@ -13,6 +13,7 @@ use petgraph::graph::NodeIndex;
 use petgraph::Graph;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::time::Duration;
 
 // ============================================================================
@@ -34,17 +35,20 @@ impl InstancePath {
     }
 
     /// Parse from dot-notation string: "top.subsys.instance"
-    pub fn from_str(path: &str) -> Self {
+    pub fn parse(path: &str) -> Self {
         Self {
             segments: path.split('.').map(|s| s.to_string()).collect(),
         }
     }
+}
 
-    /// Convert to dot-notation string
-    pub fn to_string(&self) -> String {
-        self.segments.join(".")
+impl fmt::Display for InstancePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.segments.join("."))
     }
+}
 
+impl InstancePath {
     /// Check if this path matches a glob pattern (e.g., "top.sram_*")
     pub fn matches_pattern(&self, pattern: &str) -> bool {
         let pattern_segments: Vec<&str> = pattern.split('.').collect();
@@ -131,10 +135,10 @@ impl DesignRef {
     }
 
     /// Parse from string: "top.brake_main::pressure_a[11:0]"
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         // Split on :: for instance::signal
         let parts: Vec<&str> = s.split("::").collect();
-        let instance = InstancePath::from_str(parts[0]);
+        let instance = InstancePath::parse(parts[0]);
 
         if parts.len() == 1 {
             return Self::instance(instance);
@@ -156,18 +160,18 @@ impl DesignRef {
 
         Self::signal(instance, signal_part.to_string())
     }
+}
 
-    /// Convert to string representation
-    pub fn to_string(&self) -> String {
-        let mut result = self.instance.to_string();
+impl fmt::Display for DesignRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.instance)?;
         if let Some(ref sig) = self.signal {
-            result.push_str("::");
-            result.push_str(sig);
+            write!(f, "::{}", sig)?;
             if let Some((high, low)) = self.bit_range {
-                result.push_str(&format!("[{}:{}]", high, low));
+                write!(f, "[{}:{}]", high, low)?;
             }
         }
-        result
+        Ok(())
     }
 }
 
@@ -812,10 +816,7 @@ impl FmeaData {
                         if let Err(e) = mode.validate_contributors() {
                             errors.push(format!(
                                 "Component '{}', PSM '{}', mode '{}': {}",
-                                component.design_ref.to_string(),
-                                psm,
-                                mode.name,
-                                e
+                                component.design_ref, psm, mode.name, e
                             ));
                         }
                     }
@@ -1025,7 +1026,7 @@ pub struct FailureModeBinding {
 // ============================================================================
 
 /// Hardware-Software Interface specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HardwareSoftwareInterface {
     /// Included signal patterns
     pub includes: Vec<DesignPattern>,
@@ -1035,17 +1036,6 @@ pub struct HardwareSoftwareInterface {
     pub timing: HsiTiming,
     /// Signal-specific ASIL overrides
     pub asil_overrides: HashMap<String, AsilLevel>,
-}
-
-impl Default for HardwareSoftwareInterface {
-    fn default() -> Self {
-        Self {
-            includes: Vec::new(),
-            excludes: Vec::new(),
-            timing: HsiTiming::default(),
-            asil_overrides: HashMap::new(),
-        }
-    }
 }
 
 impl HardwareSoftwareInterface {
@@ -1188,7 +1178,7 @@ impl AsilDecomposition {
     /// Check if decomposition is valid per ISO 26262
     pub fn is_valid(&self) -> bool {
         self.original_asil.decompose().contains(&(
-            *self.parts.get(0).unwrap_or(&AsilLevel::QM),
+            *self.parts.first().unwrap_or(&AsilLevel::QM),
             *self.parts.get(1).unwrap_or(&AsilLevel::QM),
         ))
     }
@@ -1460,9 +1450,7 @@ impl SafetyHierarchy {
                         goal.lsms.push(lsm.clone());
                     }
                 } else {
-                    return Err(TraitExpansionError::TraitNotFound(
-                        usage.trait_name.clone(),
-                    ));
+                    return Err(TraitExpansionError::TraitNotFound(usage.trait_name.clone()));
                 }
             }
         }
@@ -1507,11 +1495,7 @@ impl SafetyHierarchy {
                         description: format!("DC >= {}%", psm.dc_target),
                         parent: Some(hsr.id.clone()),
                         children: Vec::new(),
-                        design_refs: psm
-                            .implementations
-                            .iter()
-                            .map(|r| r.to_string())
-                            .collect(),
+                        design_refs: psm.implementations.iter().map(|r| r.to_string()).collect(),
                         verification: Vec::new(),
                     };
 
@@ -1541,17 +1525,10 @@ impl SafetyHierarchy {
                 entries.push(TraceabilityEntry {
                     level: TraceLevel::Lsm,
                     id: lsm.name.clone(),
-                    description: format!(
-                        "LC >= {}%, interval: {:?}",
-                        lsm.lc_target, lsm.interval
-                    ),
+                    description: format!("LC >= {}%, interval: {:?}", lsm.lc_target, lsm.interval),
                     parent: Some(goal.external_id.clone()),
                     children: Vec::new(),
-                    design_refs: lsm
-                        .implementations
-                        .iter()
-                        .map(|r| r.to_string())
-                        .collect(),
+                    design_refs: lsm.implementations.iter().map(|r| r.to_string()).collect(),
                     verification: Vec::new(),
                 });
             }
@@ -1626,19 +1603,16 @@ mod tests {
 
     #[test]
     fn test_instance_path() {
-        let path = InstancePath::from_str("top.brake_main.crc");
+        let path = InstancePath::parse("top.brake_main.crc");
         assert_eq!(path.segments, vec!["top", "brake_main", "crc"]);
         assert_eq!(path.to_string(), "top.brake_main.crc");
         assert_eq!(path.leaf(), Some("crc"));
-        assert_eq!(
-            path.parent().unwrap().to_string(),
-            "top.brake_main"
-        );
+        assert_eq!(path.parent().unwrap().to_string(), "top.brake_main");
     }
 
     #[test]
     fn test_instance_path_glob() {
-        let path = InstancePath::from_str("top.sram_0");
+        let path = InstancePath::parse("top.sram_0");
         assert!(path.matches_pattern("top.sram_*"));
         assert!(path.matches_pattern("top.*"));
         assert!(!path.matches_pattern("top.cpu"));
@@ -1646,12 +1620,12 @@ mod tests {
 
     #[test]
     fn test_design_ref() {
-        let ref1 = DesignRef::from_str("top.brake_main::pressure_a");
+        let ref1 = DesignRef::parse("top.brake_main::pressure_a");
         assert_eq!(ref1.instance.to_string(), "top.brake_main");
         assert_eq!(ref1.signal, Some("pressure_a".to_string()));
         assert_eq!(ref1.bit_range, None);
 
-        let ref2 = DesignRef::from_str("top.cpu::state[7:0]");
+        let ref2 = DesignRef::parse("top.cpu::state[7:0]");
         assert_eq!(ref2.signal, Some("state".to_string()));
         assert_eq!(ref2.bit_range, Some((7, 0)));
     }
@@ -1659,8 +1633,8 @@ mod tests {
     #[test]
     fn test_design_pattern() {
         let pattern = DesignPattern::signals("top.brake_*", "*");
-        let ref1 = DesignRef::from_str("top.brake_main::pressure_a");
-        let ref2 = DesignRef::from_str("top.cpu::state");
+        let ref1 = DesignRef::parse("top.brake_main::pressure_a");
+        let ref2 = DesignRef::parse("top.cpu::state");
 
         assert!(pattern.matches(&ref1));
         assert!(!pattern.matches(&ref2));
@@ -1708,7 +1682,7 @@ mod tests {
     #[test]
     fn test_fmea_component() {
         let mut component = FmeaComponent::new(
-            DesignRef::from_str("top.brake_main::pressure_a"),
+            DesignRef::parse("top.brake_main::pressure_a"),
             "automotive_sensors".to_string(),
             "PRESSURE_SENSOR".to_string(),
         );
@@ -1811,7 +1785,7 @@ mod tests {
 
     #[test]
     fn test_failure_contributor_creation() {
-        let design_ref = DesignRef::from_str("top.clock_tree::clk_out");
+        let design_ref = DesignRef::parse("top.clock_tree::clk_out");
         let contributor = FailureContributor::new(design_ref.clone(), 0.5)
             .with_description("Clock distribution delay".to_string());
 
@@ -1825,8 +1799,8 @@ mod tests {
     #[test]
     fn test_multi_contributor_failure_mode() {
         // Create a timing failure that's 50% clock tree, 50% interconnect
-        let clock_ref = DesignRef::from_str("top.clock_tree::clk_out");
-        let interconnect_ref = DesignRef::from_str("top.interconnect::data_bus");
+        let clock_ref = DesignRef::parse("top.clock_tree::clk_out");
+        let interconnect_ref = DesignRef::parse("top.interconnect::data_bus");
 
         let mode = FailureMode::new(
             "timing_violation".to_string(),
@@ -1848,16 +1822,16 @@ mod tests {
         assert_eq!(mode.get_fit_contribution(&interconnect_ref), Some(50.0));
 
         // Unknown ref should return None
-        let other_ref = DesignRef::from_str("top.cpu::core");
+        let other_ref = DesignRef::parse("top.cpu::core");
         assert_eq!(mode.get_fit_contribution(&other_ref), None);
     }
 
     #[test]
     fn test_multi_contributor_unequal_weights() {
         // Data corruption: 40% sender, 40% receiver, 20% bus
-        let sender_ref = DesignRef::from_str("top.sender::tx");
-        let receiver_ref = DesignRef::from_str("top.receiver::rx");
-        let bus_ref = DesignRef::from_str("top.bus::data");
+        let sender_ref = DesignRef::parse("top.sender::tx");
+        let receiver_ref = DesignRef::parse("top.receiver::rx");
+        let bus_ref = DesignRef::parse("top.bus::data");
 
         let mode = FailureMode::new(
             "data_corruption".to_string(),
@@ -1879,8 +1853,8 @@ mod tests {
 
     #[test]
     fn test_contributor_validation_sum_error() {
-        let ref1 = DesignRef::from_str("top.a");
-        let ref2 = DesignRef::from_str("top.b");
+        let ref1 = DesignRef::parse("top.a");
+        let ref2 = DesignRef::parse("top.b");
 
         // Weights sum to 0.8, not 1.0
         let mode = FailureMode::new("bad_mode".to_string(), Severity::S1, FailureClass::Safe)
@@ -1896,8 +1870,8 @@ mod tests {
 
     #[test]
     fn test_contributor_validation_negative_weight() {
-        let ref1 = DesignRef::from_str("top.a");
-        let ref2 = DesignRef::from_str("top.b");
+        let ref1 = DesignRef::parse("top.a");
+        let ref2 = DesignRef::parse("top.b");
 
         let mode = FailureMode::new("bad_mode".to_string(), Severity::S1, FailureClass::Safe)
             .with_contributors(vec![
@@ -1912,8 +1886,8 @@ mod tests {
 
     #[test]
     fn test_cross_component_failure_mode() {
-        let clock_ref = DesignRef::from_str("top.pll::clk");
-        let dist_ref = DesignRef::from_str("top.clock_dist::out");
+        let clock_ref = DesignRef::parse("top.pll::clk");
+        let dist_ref = DesignRef::parse("top.clock_dist::out");
 
         let cross_mode = CrossComponentFailureMode::new(
             "CCF-001".to_string(),
@@ -1942,11 +1916,7 @@ mod tests {
         // A cross-component mode must have contributors
         let mode = CrossComponentFailureMode {
             id: "CCF-BAD".to_string(),
-            failure_mode: FailureMode::new(
-                "bad".to_string(),
-                Severity::S1,
-                FailureClass::Safe,
-            ),
+            failure_mode: FailureMode::new("bad".to_string(), Severity::S1, FailureClass::Safe),
             detector: DetectorRef::Safe,
             description: String::new(),
         };
@@ -1959,18 +1929,25 @@ mod tests {
         let mut fmea_data = FmeaData::new();
 
         // Component-specific failure mode
-        let sensor_ref = DesignRef::from_str("top.sensor::out");
-        let mut sensor_component =
-            FmeaComponent::new(sensor_ref.clone(), "sensors".to_string(), "TEMP_SENSOR".to_string());
+        let sensor_ref = DesignRef::parse("top.sensor::out");
+        let mut sensor_component = FmeaComponent::new(
+            sensor_ref.clone(),
+            "sensors".to_string(),
+            "TEMP_SENSOR".to_string(),
+        );
         sensor_component.add_psm_failure_mode(
             "TempMonitor",
-            FailureMode::new("stuck_high".to_string(), Severity::S2, FailureClass::Residual)
-                .with_fit(25.0),
+            FailureMode::new(
+                "stuck_high".to_string(),
+                Severity::S2,
+                FailureClass::Residual,
+            )
+            .with_fit(25.0),
         );
         fmea_data.add_component(sensor_component);
 
         // Cross-component failure mode
-        let adc_ref = DesignRef::from_str("top.adc::data");
+        let adc_ref = DesignRef::parse("top.adc::data");
         let cross_mode = CrossComponentFailureMode::new(
             "CCF-002".to_string(),
             "adc_coupling_noise".to_string(),
@@ -2005,8 +1982,8 @@ mod tests {
     fn test_fmea_data_get_failure_modes_for_entity() {
         let mut fmea_data = FmeaData::new();
 
-        let ref_a = DesignRef::from_str("top.a");
-        let ref_b = DesignRef::from_str("top.b");
+        let ref_a = DesignRef::parse("top.a");
+        let ref_b = DesignRef::parse("top.b");
 
         // Component with one mode
         let mut comp_a = FmeaComponent::new(ref_a.clone(), "lib".to_string(), "PART_A".to_string());
@@ -2018,19 +1995,17 @@ mod tests {
         fmea_data.add_component(comp_a);
 
         // Cross-component mode affecting both
-        fmea_data.add_cross_component_mode(
-            CrossComponentFailureMode::new(
-                "CCF-X".to_string(),
-                "shared_mode".to_string(),
-                Severity::S2,
-                FailureClass::MultiPoint,
-                vec![
-                    FailureContributor::new(ref_a.clone(), 0.5),
-                    FailureContributor::new(ref_b.clone(), 0.5),
-                ],
-                DetectorRef::Safe,
-            )
-        );
+        fmea_data.add_cross_component_mode(CrossComponentFailureMode::new(
+            "CCF-X".to_string(),
+            "shared_mode".to_string(),
+            Severity::S2,
+            FailureClass::MultiPoint,
+            vec![
+                FailureContributor::new(ref_a.clone(), 0.5),
+                FailureContributor::new(ref_b.clone(), 0.5),
+            ],
+            DetectorRef::Safe,
+        ));
 
         // Entity A should see 2 modes (1 component + 1 cross-component)
         let modes_a = fmea_data.get_failure_modes_for_entity(&ref_a);
@@ -2044,15 +2019,18 @@ mod tests {
     #[test]
     fn test_backward_compatibility_single_contributor() {
         // Failure modes without contributors should still work
-        let mode =
-            FailureMode::new("legacy_mode".to_string(), Severity::S2, FailureClass::Residual)
-                .with_fit(50.0);
+        let mode = FailureMode::new(
+            "legacy_mode".to_string(),
+            Severity::S2,
+            FailureClass::Residual,
+        )
+        .with_fit(50.0);
 
         assert!(!mode.is_multi_contributor());
         assert!(mode.validate_contributors().is_ok()); // No contributors = valid
 
         // get_fit_contribution returns full FIT for single contributor mode
-        let any_ref = DesignRef::from_str("top.any::signal");
+        let any_ref = DesignRef::parse("top.any::signal");
         assert_eq!(mode.get_fit_contribution(&any_ref), Some(50.0));
     }
 
@@ -2061,8 +2039,8 @@ mod tests {
         let mut mode =
             FailureMode::new("incremental".to_string(), Severity::S1, FailureClass::Safe);
 
-        let ref1 = DesignRef::from_str("top.a");
-        let ref2 = DesignRef::from_str("top.b");
+        let ref1 = DesignRef::parse("top.a");
+        let ref2 = DesignRef::parse("top.b");
 
         mode.add_contributor(FailureContributor::new(ref1, 0.6));
         mode.add_contributor(FailureContributor::new(ref2, 0.4));

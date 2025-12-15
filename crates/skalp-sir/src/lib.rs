@@ -1,6 +1,5 @@
-#[cfg(target_os = "macos")]
-
 // GLOBAL: Disable all debug output for performance
+#[cfg(target_os = "macos")]
 macro_rules! eprintln {
     ($($arg:tt)*) => {{}};
 }

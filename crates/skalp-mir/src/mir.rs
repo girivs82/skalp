@@ -513,10 +513,7 @@ pub enum ExpressionKind {
     },
     /// Tuple field/element access (for destructuring)
     /// BUG FIX #85: Enables `let (a, b, c) = func()` pattern in module synthesis
-    TupleFieldAccess {
-        base: Box<Expression>,
-        index: usize,
-    },
+    TupleFieldAccess { base: Box<Expression>, index: usize },
     /// Named field access on structs
     FieldAccess {
         base: Box<Expression>,
@@ -527,7 +524,11 @@ pub enum ExpressionKind {
 impl Expression {
     /// Create a new expression with the given kind and type
     pub fn new(kind: ExpressionKind, ty: Type) -> Self {
-        Self { kind, ty, span: None }
+        Self {
+            kind,
+            ty,
+            span: None,
+        }
     }
 
     /// Create a new expression with the given kind, type, and span
@@ -932,6 +933,7 @@ pub struct ParallelCase {
 
 /// Unified mux type that can be either priority or parallel
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum MuxTree {
     /// Priority encoder - cascaded ternary (default, safe for overlapping conditions)
     Priority(PriorityMux),

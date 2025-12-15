@@ -48,7 +48,6 @@ pub enum FaultType {
     // ========================================================================
     // Permanent/Hard Faults (Manufacturing, Wear-out)
     // ========================================================================
-
     /// Output stuck at logic 0
     /// Cause: Manufacturing defect, oxide breakdown, electromigration
     StuckAt0,
@@ -68,7 +67,6 @@ pub enum FaultType {
     // ========================================================================
     // Transient/Soft Faults (Radiation, EMI)
     // ========================================================================
-
     /// Single-bit transient (SET/SEU)
     /// Cause: Single-Event Upset from radiation, alpha particles
     Transient,
@@ -80,7 +78,6 @@ pub enum FaultType {
     // ========================================================================
     // Timing Violations
     // ========================================================================
-
     /// Setup time violation
     /// Cause: Data path too slow, clock arrives too early
     /// Effect: FF captures previous data value instead of current
@@ -103,7 +100,6 @@ pub enum FaultType {
     // ========================================================================
     // Power-Related Faults (Digital Effects)
     // ========================================================================
-
     /// Voltage dropout / IR drop
     /// Cause: Sudden current demand, inadequate power grid
     /// Effect: Regional setup violations (modeled as SetupViolation on affected FFs)
@@ -122,7 +118,6 @@ pub enum FaultType {
     // ========================================================================
     // Clock Faults
     // ========================================================================
-
     /// Clock glitch (extra clock edge)
     /// Cause: EMI, power supply noise
     /// Effect: FFs may capture data twice
@@ -266,9 +261,9 @@ impl FaultType {
                 FaultCategory::Permanent
             }
             FaultType::Transient | FaultType::MultiBitUpset => FaultCategory::Transient,
-            FaultType::SetupViolation
-            | FaultType::HoldViolation
-            | FaultType::Metastability => FaultCategory::Timing,
+            FaultType::SetupViolation | FaultType::HoldViolation | FaultType::Metastability => {
+                FaultCategory::Timing
+            }
             #[allow(deprecated)]
             FaultType::TimingViolation => FaultCategory::Timing,
             FaultType::VoltageDropout | FaultType::GroundBounce | FaultType::CrosstalkGlitch => {
@@ -405,7 +400,7 @@ impl FaultSite {
 
     /// Generate unique identifier for this fault site
     pub fn id(&self) -> String {
-        let mut id = format!("{}@{}", self.primitive_path.to_string(), self.fault_type.name());
+        let mut id = format!("{}@{}", self.primitive_path, self.fault_type.name());
         if let Some(bit) = self.bit_index {
             id.push_str(&format!("[{}]", bit));
         }
@@ -608,8 +603,8 @@ impl EffectCondition {
         }
     }
 
-    /// NOT a condition
-    pub fn not(self) -> Self {
+    /// Negate a condition (logical NOT)
+    pub fn negate(self) -> Self {
         Self::Not(Box::new(self))
     }
 
@@ -968,8 +963,7 @@ impl EffectAnalysis {
         if self.meets_target {
             0
         } else {
-            let needed_detected =
-                (self.target_dc * self.total_faults_causing as f64).ceil() as u64;
+            let needed_detected = (self.target_dc * self.total_faults_causing as f64).ceil() as u64;
             needed_detected.saturating_sub(self.faults_detected)
         }
     }
@@ -1328,10 +1322,7 @@ impl SafetyAnalysisError {
         let mut output = String::new();
 
         // Error header
-        output.push_str(&format!(
-            "error[{}]: {}\n",
-            self.code, self.message
-        ));
+        output.push_str(&format!("error[{}]: {}\n", self.code, self.message));
 
         // Location
         if let Some(ref loc) = self.location {
@@ -1383,7 +1374,7 @@ mod tests {
 
     #[test]
     fn test_fault_site_id() {
-        let path = DesignRef::from_str("top.cpu.alu::adder");
+        let path = DesignRef::parse("top.cpu.alu::adder");
         let site = FaultSite::new(path, FaultType::StuckAt0);
         assert_eq!(site.id(), "top.cpu.alu::adder@stuck_at_0");
 
@@ -1393,7 +1384,7 @@ mod tests {
 
     #[test]
     fn test_effect_condition_builder() {
-        let signal = DesignRef::from_str("top.brake::valve_cmd");
+        let signal = DesignRef::parse("top.brake::valve_cmd");
 
         // Simple equality
         let cond1 = EffectCondition::equals(signal.clone(), 0xFFFF);
@@ -1455,10 +1446,7 @@ mod tests {
 
     #[test]
     fn test_fault_simulation_result() {
-        let site = FaultSite::new(
-            DesignRef::from_str("top.cpu::reg"),
-            FaultType::StuckAt0,
-        );
+        let site = FaultSite::new(DesignRef::parse("top.cpu::reg"), FaultType::StuckAt0);
 
         // Dangerous undetected fault
         let dangerous = FaultSimulationResult {
@@ -1526,13 +1514,17 @@ mod tests {
         effect1.total_faults_causing = 10000;
         effect1.faults_detected = 9920;
         effect1.update_dc();
-        results.effect_analyses.insert("valve_corrupted".to_string(), effect1);
+        results
+            .effect_analyses
+            .insert("valve_corrupted".to_string(), effect1);
 
         let mut effect2 = EffectAnalysis::new("silent_failure", Severity::S3, 0.99);
         effect2.total_faults_causing = 500;
         effect2.faults_detected = 450;
         effect2.update_dc();
-        results.effect_analyses.insert("silent_failure".to_string(), effect2);
+        results
+            .effect_analyses
+            .insert("silent_failure".to_string(), effect2);
 
         results.update_metrics();
 
@@ -1548,16 +1540,28 @@ mod tests {
     fn test_temporal_operator_builders() {
         // Edge detection operators
         let rose = EffectCondition::rose("clk");
-        assert!(matches!(rose, EffectCondition::Operator(TemporalOperator::Rose(_))));
+        assert!(matches!(
+            rose,
+            EffectCondition::Operator(TemporalOperator::Rose(_))
+        ));
 
         let fell = EffectCondition::fell("reset");
-        assert!(matches!(fell, EffectCondition::Operator(TemporalOperator::Fell(_))));
+        assert!(matches!(
+            fell,
+            EffectCondition::Operator(TemporalOperator::Fell(_))
+        ));
 
         let changed = EffectCondition::changed("state");
-        assert!(matches!(changed, EffectCondition::Operator(TemporalOperator::Changed(_))));
+        assert!(matches!(
+            changed,
+            EffectCondition::Operator(TemporalOperator::Changed(_))
+        ));
 
         let stable = EffectCondition::stable("fsm_state", 100);
-        assert!(matches!(stable, EffectCondition::Operator(TemporalOperator::Stable(_, 100))));
+        assert!(matches!(
+            stable,
+            EffectCondition::Operator(TemporalOperator::Stable(_, 100))
+        ));
     }
 
     #[test]
@@ -1576,11 +1580,17 @@ mod tests {
 
         let valid_states = vec![0, 1, 2, 3];
         let oneof = EffectCondition::oneof("state", valid_states);
-        assert!(matches!(oneof, EffectCondition::Operator(TemporalOperator::OneOf(_, _))));
+        assert!(matches!(
+            oneof,
+            EffectCondition::Operator(TemporalOperator::OneOf(_, _))
+        ));
 
         let invalid_states = vec![10, 11, 12];
         let not_oneof = EffectCondition::not_oneof("error_code", invalid_states);
-        assert!(matches!(not_oneof, EffectCondition::Operator(TemporalOperator::NotOneOf(_, _))));
+        assert!(matches!(
+            not_oneof,
+            EffectCondition::Operator(TemporalOperator::NotOneOf(_, _))
+        ));
     }
 
     #[test]
@@ -1588,13 +1598,21 @@ mod tests {
         let abs_diff = EffectCondition::abs_diff_exceeds("sensor_a", "sensor_b", 50);
         assert!(matches!(
             abs_diff,
-            EffectCondition::OperatorCompare(TemporalOperator::AbsDiff(_, _), CompareOp::GreaterThan, 50)
+            EffectCondition::OperatorCompare(
+                TemporalOperator::AbsDiff(_, _),
+                CompareOp::GreaterThan,
+                50
+            )
         ));
 
         let max_dev = EffectCondition::max_deviation_exceeds(vec!["s1", "s2", "s3"], 10);
         assert!(matches!(
             max_dev,
-            EffectCondition::OperatorCompare(TemporalOperator::MaxDeviation(_), CompareOp::GreaterThan, 10)
+            EffectCondition::OperatorCompare(
+                TemporalOperator::MaxDeviation(_),
+                CompareOp::GreaterThan,
+                10
+            )
         ));
     }
 
@@ -1603,13 +1621,21 @@ mod tests {
         let pulse_low = EffectCondition::pulse_count_below("heartbeat", 1000, 5);
         assert!(matches!(
             pulse_low,
-            EffectCondition::OperatorCompare(TemporalOperator::PulseCount(_, 1000), CompareOp::LessThan, 5)
+            EffectCondition::OperatorCompare(
+                TemporalOperator::PulseCount(_, 1000),
+                CompareOp::LessThan,
+                5
+            )
         ));
 
         let pulse_high = EffectCondition::pulse_count_above("irq", 100, 50);
         assert!(matches!(
             pulse_high,
-            EffectCondition::OperatorCompare(TemporalOperator::PulseCount(_, 100), CompareOp::GreaterThan, 50)
+            EffectCondition::OperatorCompare(
+                TemporalOperator::PulseCount(_, 100),
+                CompareOp::GreaterThan,
+                50
+            )
         ));
     }
 
@@ -1625,7 +1651,11 @@ mod tests {
         let timeout = EffectCondition::timeout_since(EffectCondition::rose("request"), 1000);
         assert!(matches!(
             timeout,
-            EffectCondition::OperatorCompare(TemporalOperator::CyclesSince(_), CompareOp::GreaterThan, 1000)
+            EffectCondition::OperatorCompare(
+                TemporalOperator::CyclesSince(_),
+                CompareOp::GreaterThan,
+                1000
+            )
         ));
     }
 
@@ -1639,11 +1669,17 @@ mod tests {
         let kicks_too_fast = EffectCondition::pulse_count_above("kick", 100, 10);
 
         // 3. Timeout without effect
-        let timeout_ignored = EffectCondition::rose("timeout")
-            .and(EffectCondition::stable("cpu_alive", 100));
+        let timeout_ignored =
+            EffectCondition::rose("timeout").and(EffectCondition::stable("cpu_alive", 100));
 
-        assert!(matches!(no_kicks, EffectCondition::OperatorCompare(_, _, _)));
-        assert!(matches!(kicks_too_fast, EffectCondition::OperatorCompare(_, _, _)));
+        assert!(matches!(
+            no_kicks,
+            EffectCondition::OperatorCompare(_, _, _)
+        ));
+        assert!(matches!(
+            kicks_too_fast,
+            EffectCondition::OperatorCompare(_, _, _)
+        ));
         assert!(matches!(timeout_ignored, EffectCondition::And(_)));
     }
 
@@ -1651,17 +1687,18 @@ mod tests {
     fn test_redundancy_pattern() {
         // Triple-modular redundancy failure patterns:
         // Channels should agree within tolerance
-        let sensor_disagree = EffectCondition::max_deviation_exceeds(
-            vec!["sensor_a", "sensor_b", "sensor_c"],
-            50,
-        );
+        let sensor_disagree =
+            EffectCondition::max_deviation_exceeds(vec!["sensor_a", "sensor_b", "sensor_c"], 50);
 
         // Pairwise comparison
         let a_b_differ = EffectCondition::abs_diff_exceeds("sensor_a", "sensor_b", 100);
         let b_c_differ = EffectCondition::abs_diff_exceeds("sensor_b", "sensor_c", 100);
         let total_disagree = a_b_differ.and(b_c_differ);
 
-        assert!(matches!(sensor_disagree, EffectCondition::OperatorCompare(_, _, _)));
+        assert!(matches!(
+            sensor_disagree,
+            EffectCondition::OperatorCompare(_, _, _)
+        ));
         assert!(matches!(total_disagree, EffectCondition::And(_)));
     }
 
@@ -1713,7 +1750,10 @@ mod tests {
 
         // Multi-bit upset
         assert_eq!(FaultType::MultiBitUpset.name(), "multi_bit_upset");
-        assert_eq!(FaultType::MultiBitUpset.category(), FaultCategory::Transient);
+        assert_eq!(
+            FaultType::MultiBitUpset.category(),
+            FaultCategory::Transient
+        );
 
         // Bridging fault
         assert_eq!(FaultType::Bridging.name(), "bridging");
@@ -1735,7 +1775,9 @@ mod tests {
 
     #[test]
     fn test_fault_category_descriptions() {
-        assert!(FaultCategory::Permanent.description().contains("Manufacturing"));
+        assert!(FaultCategory::Permanent
+            .description()
+            .contains("Manufacturing"));
         assert!(FaultCategory::Transient.description().contains("Radiation"));
         assert!(FaultCategory::Timing.description().contains("Setup/hold"));
         assert!(FaultCategory::Power.description().contains("Voltage"));
@@ -1821,17 +1863,20 @@ mod tests {
 
     #[test]
     fn test_power_region_with_description() {
-        let region = PowerRegion::new("io_vdd", "top.io.*")
-            .with_description("I/O ring power domain");
+        let region =
+            PowerRegion::new("io_vdd", "top.io.*").with_description("I/O ring power domain");
         assert_eq!(region.name, "io_vdd");
-        assert_eq!(region.description, Some("I/O ring power domain".to_string()));
+        assert_eq!(
+            region.description,
+            Some("I/O ring power domain".to_string())
+        );
     }
 
     #[test]
     fn test_power_region_with_primitives() {
         let region = PowerRegion::new("analog_vdd", "top.adc.*")
-            .with_primitive(DesignRef::from_str("top.adc::dac_core"))
-            .with_primitive(DesignRef::from_str("top.adc::comparator"));
+            .with_primitive(DesignRef::parse("top.adc::dac_core"))
+            .with_primitive(DesignRef::parse("top.adc::comparator"));
 
         assert_eq!(region.explicit_primitives.len(), 2);
         assert_eq!(
@@ -1846,14 +1891,14 @@ mod tests {
 
     #[test]
     fn test_fault_site_timing_violation() {
-        let path = DesignRef::from_str("top.cpu.reg_file::ff_0");
+        let path = DesignRef::parse("top.cpu.reg_file::ff_0");
         let site = FaultSite::new(path, FaultType::SetupViolation);
         assert_eq!(site.id(), "top.cpu.reg_file::ff_0@setup_violation");
     }
 
     #[test]
     fn test_fault_site_power_effect() {
-        let path = DesignRef::from_str("top.mem.bank0::sram_cell");
+        let path = DesignRef::parse("top.mem.bank0::sram_cell");
         let site = FaultSite::new(path.clone(), FaultType::VoltageDropout);
         assert_eq!(site.id(), "top.mem.bank0::sram_cell@voltage_dropout");
 
@@ -1863,7 +1908,7 @@ mod tests {
 
     #[test]
     fn test_fault_site_metastability_with_bit() {
-        let path = DesignRef::from_str("top.sync::synchronizer_ff");
+        let path = DesignRef::parse("top.sync::synchronizer_ff");
         let site = FaultSite::new(path, FaultType::Metastability).with_bit(3);
         assert_eq!(site.id(), "top.sync::synchronizer_ff@metastability[3]");
     }
@@ -1894,7 +1939,6 @@ mod tests {
             FaultType::SetupViolation,
             FaultType::HoldViolation,
             FaultType::Metastability,
-            FaultType::TimingViolation,
         ];
         for ft in timing_faults {
             assert_eq!(ft.category(), FaultCategory::Timing, "{:?}", ft);

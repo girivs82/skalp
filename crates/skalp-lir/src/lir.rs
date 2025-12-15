@@ -141,24 +141,24 @@ impl PrimitiveType {
             PrimitiveType::Xnor => 2,
             PrimitiveType::Inv => 1,
             PrimitiveType::Buf => 1,
-            PrimitiveType::Tribuf { .. } => 2,         // data, enable
-            PrimitiveType::Mux2 => 3,                  // sel, d0, d1
-            PrimitiveType::Mux4 => 6,                  // sel0, sel1, d0-d3
+            PrimitiveType::Tribuf { .. } => 2, // data, enable
+            PrimitiveType::Mux2 => 3,          // sel, d0, d1
+            PrimitiveType::Mux4 => 6,          // sel0, sel1, d0-d3
             PrimitiveType::MuxN { select_bits } => *select_bits + (1 << *select_bits),
-            PrimitiveType::DffP => 3,                  // clk, d, rst
-            PrimitiveType::DffN => 3,                  // clk, d, rst
-            PrimitiveType::DffNeg => 3,                // clk, d, rst
-            PrimitiveType::DffE => 4,                  // clk, d, en, rst
-            PrimitiveType::DffAR => 3,                 // clk, d, rst
-            PrimitiveType::DffAS => 3,                 // clk, d, set
-            PrimitiveType::DffScan => 5,               // clk, d, scan_in, scan_en, rst
-            PrimitiveType::Dlatch => 2,                // en, d
-            PrimitiveType::SRlatch => 2,               // s, r
-            PrimitiveType::HalfAdder => 2,             // a, b
-            PrimitiveType::FullAdder => 3,             // a, b, cin
-            PrimitiveType::CompBit => 4,               // a, b, lt_in, eq_in
-            PrimitiveType::MemCell => 3,               // data_in, write_en, clk
-            PrimitiveType::RegCell => 3,               // data_in, write_en, clk
+            PrimitiveType::DffP => 3,      // clk, d, rst
+            PrimitiveType::DffN => 3,      // clk, d, rst
+            PrimitiveType::DffNeg => 3,    // clk, d, rst
+            PrimitiveType::DffE => 4,      // clk, d, en, rst
+            PrimitiveType::DffAR => 3,     // clk, d, rst
+            PrimitiveType::DffAS => 3,     // clk, d, set
+            PrimitiveType::DffScan => 5,   // clk, d, scan_in, scan_en, rst
+            PrimitiveType::Dlatch => 2,    // en, d
+            PrimitiveType::SRlatch => 2,   // s, r
+            PrimitiveType::HalfAdder => 2, // a, b
+            PrimitiveType::FullAdder => 3, // a, b, cin
+            PrimitiveType::CompBit => 4,   // a, b, lt_in, eq_in
+            PrimitiveType::MemCell => 3,   // data_in, write_en, clk
+            PrimitiveType::RegCell => 3,   // data_in, write_en, clk
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
         }
@@ -167,10 +167,10 @@ impl PrimitiveType {
     /// Returns the number of output pins for this primitive type
     pub fn output_count(&self) -> u8 {
         match self {
-            PrimitiveType::HalfAdder => 2,  // sum, carry
-            PrimitiveType::FullAdder => 2,  // sum, cout
-            PrimitiveType::CompBit => 2,    // lt_out, eq_out
-            _ => 1,                          // All others have single output
+            PrimitiveType::HalfAdder => 2, // sum, carry
+            PrimitiveType::FullAdder => 2, // sum, cout
+            PrimitiveType::CompBit => 2,   // lt_out, eq_out
+            _ => 1,                        // All others have single output
         }
     }
 
@@ -476,9 +476,11 @@ pub struct NetlistStats {
 impl NetlistStats {
     /// Calculate statistics from a netlist
     pub fn from_netlist(netlist: &Lir) -> Self {
-        let mut stats = NetlistStats::default();
-        stats.total_primitives = netlist.primitives.len() as u64;
-        stats.total_nets = netlist.nets.len() as u64;
+        let mut stats = NetlistStats {
+            total_primitives: netlist.primitives.len() as u64,
+            total_nets: netlist.nets.len() as u64,
+            ..Default::default()
+        };
 
         for prim in &netlist.primitives {
             stats.total_fit += prim.fit();
@@ -712,7 +714,10 @@ mod tests {
     #[test]
     fn test_primitive_type_display() {
         assert_eq!(format!("{}", PrimitiveType::And { inputs: 3 }), "AND3");
-        assert_eq!(format!("{}", PrimitiveType::MuxN { select_bits: 3 }), "MUX8:1");
+        assert_eq!(
+            format!("{}", PrimitiveType::MuxN { select_bits: 3 }),
+            "MUX8:1"
+        );
         assert_eq!(format!("{}", PrimitiveType::DffP), "DFFP");
     }
 
@@ -748,7 +753,9 @@ mod tests {
     #[test]
     fn test_fit_overrides() {
         let mut overrides = FitOverrides::none();
-        overrides.primitive_overrides.insert("DFFP".to_string(), 0.5);
+        overrides
+            .primitive_overrides
+            .insert("DFFP".to_string(), 0.5);
         overrides.global_scale = 0.8;
 
         let dff_fit = overrides.effective_fit(&PrimitiveType::DffP);

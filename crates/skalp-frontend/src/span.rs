@@ -128,7 +128,11 @@ impl LineIndex {
             Err(line) => line,    // Between lines, use the previous line
         };
 
-        let line_start = self.line_starts.get(line.saturating_sub(1)).copied().unwrap_or(0);
+        let line_start = self
+            .line_starts
+            .get(line.saturating_sub(1))
+            .copied()
+            .unwrap_or(0);
         let column = offset.saturating_sub(line_start) + 1;
         (line, column)
     }
@@ -194,8 +198,8 @@ mod tests {
     fn test_source_span_display() {
         let source = "fn foo() {\n    error here\n}";
         let index = LineIndex::new(source);
-        let span = SourceSpan::from_offset_range(15, 20, &index)
-            .with_file(PathBuf::from("test.sk"));
+        let span =
+            SourceSpan::from_offset_range(15, 20, &index).with_file(PathBuf::from("test.sk"));
 
         assert_eq!(span.display(), "test.sk:2:5");
         assert_eq!(span.line_col_display(), "2:5");

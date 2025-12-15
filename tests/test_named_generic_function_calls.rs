@@ -3,9 +3,9 @@
 //! Tests the syntax: func::<NAME: value>(args) is correctly parsed
 //! and stored in HirCallExpr.named_type_args.
 
+use skalp_frontend::hir::HirExpression;
 use skalp_frontend::hir_builder::build_hir;
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir::HirExpression;
 use skalp_mir::hir_to_mir::HirToMir;
 
 #[test]
@@ -42,18 +42,27 @@ impl TestEntity {
 
     let impl_block = hir.implementations.iter().find(|i| {
         // Find the impl associated with the entity
-        hir.entities.iter().any(|e| e.id == i.entity && e.name == "TestEntity")
+        hir.entities
+            .iter()
+            .any(|e| e.id == i.entity && e.name == "TestEntity")
     });
 
-    assert!(impl_block.is_some(), "Should have implementation for TestEntity");
+    assert!(
+        impl_block.is_some(),
+        "Should have implementation for TestEntity"
+    );
     let impl_block = impl_block.unwrap();
 
-    println!("Found implementation with {} assignments", impl_block.assignments.len());
+    println!(
+        "Found implementation with {} assignments",
+        impl_block.assignments.len()
+    );
 
     for (idx, assign) in impl_block.assignments.iter().enumerate() {
         println!("Assignment {}: lhs={:?}", idx, assign.lhs);
         if let HirExpression::Call(call) = &assign.rhs {
-            println!("  Found call to '{}' with {} type_args and {} named_type_args",
+            println!(
+                "  Found call to '{}' with {} type_args and {} named_type_args",
                 call.function,
                 call.type_args.len(),
                 call.named_type_args.len()
@@ -103,10 +112,15 @@ impl MixedTest {
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
     let impl_block = hir.implementations.iter().find(|i| {
-        hir.entities.iter().any(|e| e.id == i.entity && e.name == "MixedTest")
+        hir.entities
+            .iter()
+            .any(|e| e.id == i.entity && e.name == "MixedTest")
     });
 
-    assert!(impl_block.is_some(), "Should have implementation for MixedTest");
+    assert!(
+        impl_block.is_some(),
+        "Should have implementation for MixedTest"
+    );
     let impl_block = impl_block.unwrap();
 
     for assign in &impl_block.assignments {
@@ -118,8 +132,15 @@ impl MixedTest {
 
                 // Should have one positional and one named
                 assert_eq!(call.type_args.len(), 1, "Should have 1 positional type arg");
-                assert_eq!(call.named_type_args.len(), 1, "Should have 1 named type arg");
-                assert!(call.named_type_args.contains_key("M"), "Should have named arg 'M'");
+                assert_eq!(
+                    call.named_type_args.len(),
+                    1,
+                    "Should have 1 named type arg"
+                );
+                assert!(
+                    call.named_type_args.contains_key("M"),
+                    "Should have named arg 'M'"
+                );
 
                 println!("Mixed positional and named generics test PASSED!");
                 return;
@@ -163,7 +184,10 @@ impl WidthTest {
         "MIR should have at least one module"
     );
 
-    println!("MIR compilation successful with {} modules", mir.modules.len());
+    println!(
+        "MIR compilation successful with {} modules",
+        mir.modules.len()
+    );
 
     let top_module = mir.modules.iter().find(|m| m.name == "WidthTest");
     assert!(top_module.is_some(), "Should have WidthTest module");

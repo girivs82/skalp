@@ -36,7 +36,10 @@ mod test_trait_method_literal {
                 let monomorphized_hir = mono.monomorphize(&hir);
 
                 println!("\n✅ Monomorphization completed");
-                println!("Functions after monomorphization: {}", monomorphized_hir.functions.len());
+                println!(
+                    "Functions after monomorphization: {}",
+                    monomorphized_hir.functions.len()
+                );
             }
             Err(e) => {
                 println!("❌ FAILED: {:?}", e);

@@ -27,12 +27,18 @@
 //! }
 //! ```
 
+pub mod builtin_libraries;
+pub mod gate_netlist;
 pub mod gate_optimization;
 pub mod lir;
 pub mod mir_to_gate_netlist;
+pub mod mir_to_word_lir;
 pub mod netlist;
 pub mod primitives;
+pub mod tech_library;
+pub mod tech_mapper;
 pub mod technology;
+pub mod word_lir;
 
 // Primary LIR types
 pub use lir::{
@@ -48,13 +54,38 @@ pub use mir_to_gate_netlist::{
 // Gate optimization passes (operate on Lir type)
 pub use gate_optimization::{
     GateBooleanSimplification, GateBufferRemoval, GateCSE, GateConstantFolding,
-    GateDeadCodeElimination, GateFanoutOptimization, GateMuxOptimization,
-    LirOptimizationPass, GateOptConfig, GateOptimizationPipeline, GateOptimizationResult,
-    OptTarget,
+    GateDeadCodeElimination, GateFanoutOptimization, GateMuxOptimization, GateOptConfig,
+    GateOptimizationPipeline, GateOptimizationResult, LirOptimizationPass, OptTarget,
 };
 
 // Other exports
 pub use netlist::Netlist;
+
+// Word-level LIR (for technology mapping)
+pub use word_lir::{WordLir, WordLirStats, WordNode, WordNodeId, WordOp, WordSignal, WordSignalId};
+
+// MIR to Word-level LIR transformation
+pub use mir_to_word_lir::{lower_mir_module_to_word_lir, MirToWordLirResult};
+
+// Gate-level netlist (output of technology mapping)
+pub use gate_netlist::{
+    Cell, CellFailureMode, CellId, FaultType, GateNet, GateNetId, GateNetlist, GateNetlistStats,
+};
+
+// Technology library
+pub use tech_library::{
+    CellFunction, DecompConnectivity, DecompSource, DecompositionRule, LibraryCell,
+    LibraryFailureMode, TechLibrary,
+};
+
+// Technology mapper
+pub use tech_mapper::{map_word_lir_to_gates, TechMapResult, TechMapStats, TechMapper};
+
+// Built-in technology libraries
+pub use builtin_libraries::{
+    builtin_asic_28nm, builtin_asic_7nm, builtin_fpga_lut4, builtin_fpga_lut6,
+    builtin_generic_asic, get_builtin_library, list_builtin_libraries,
+};
 
 use anyhow::Result;
 use skalp_mir::Mir;

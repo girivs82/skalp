@@ -57,7 +57,7 @@ impl DesignIndex {
 
     /// Add a signal to the index
     pub fn add_signal(&mut self, signal: DesignSignal) {
-        let key = format!("{}::{}", signal.instance_path.to_string(), signal.name);
+        let key = format!("{}::{}", signal.instance_path, signal.name);
         self.signals.insert(key, signal);
     }
 
@@ -95,7 +95,11 @@ impl DesignIndex {
     }
 
     /// Get annotations for a specific mechanism
-    pub fn get_annotations_for_mechanism(&self, goal: &str, mechanism: &str) -> Vec<&SafetyAnnotation> {
+    pub fn get_annotations_for_mechanism(
+        &self,
+        goal: &str,
+        mechanism: &str,
+    ) -> Vec<&SafetyAnnotation> {
         self.annotations
             .iter()
             .filter(|a| a.goal_name == goal && a.mechanism_name == mechanism)
@@ -160,7 +164,7 @@ impl DesignSignal {
 
     /// Get full path including signal
     pub fn full_path(&self) -> String {
-        format!("{}::{}", self.instance_path.to_string(), self.name)
+        format!("{}::{}", self.instance_path, self.name)
     }
 }
 
@@ -429,12 +433,10 @@ fn matches_signal_pattern(name: &str, pattern: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
+    if let Some(prefix) = pattern.strip_suffix('*') {
         return name.starts_with(prefix);
     }
-    if pattern.starts_with('*') {
-        let suffix = &pattern[1..];
+    if let Some(suffix) = pattern.strip_prefix('*') {
         return name.ends_with(suffix);
     }
     name == pattern
@@ -632,7 +634,7 @@ mod tests {
         let index = create_test_index();
         let resolver = DesignPathResolver::new(index);
 
-        let ref1 = DesignRef::from_str("top.brake_main::pressure_a");
+        let ref1 = DesignRef::parse("top.brake_main::pressure_a");
         match resolver.resolve(&ref1) {
             ResolutionResult::Signal(sig) => {
                 assert_eq!(sig.name, "pressure_a");
@@ -647,7 +649,7 @@ mod tests {
         let index = create_test_index();
         let resolver = DesignPathResolver::new(index);
 
-        let ref1 = DesignRef::from_str("top.brake_main.crc");
+        let ref1 = DesignRef::parse("top.brake_main.crc");
         match resolver.resolve(&ref1) {
             ResolutionResult::Instance(inst) => {
                 assert_eq!(inst.entity_type, "Crc8Checker");
@@ -661,13 +663,13 @@ mod tests {
         let index = create_test_index();
         let resolver = DesignPathResolver::new(index);
 
-        let ref1 = DesignRef::from_str("top.nonexistent");
+        let ref1 = DesignRef::parse("top.nonexistent");
         match resolver.resolve(&ref1) {
             ResolutionResult::NotFound(_) => {}
             _ => panic!("Expected not found"),
         }
 
-        let ref2 = DesignRef::from_str("top.brake_main::nonexistent_signal");
+        let ref2 = DesignRef::parse("top.brake_main::nonexistent_signal");
         match resolver.resolve(&ref2) {
             ResolutionResult::NotFound(_) => {}
             _ => panic!("Expected not found"),
@@ -706,8 +708,8 @@ mod tests {
         let resolver = DesignPathResolver::new(index);
 
         let refs = vec![
-            DesignRef::from_str("top.brake_main::pressure_a"),
-            DesignRef::from_str("top.brake_main.crc"),
+            DesignRef::parse("top.brake_main::pressure_a"),
+            DesignRef::parse("top.brake_main.crc"),
         ];
 
         match resolver.validate_refs(&refs) {
@@ -716,8 +718,8 @@ mod tests {
         }
 
         let invalid_refs = vec![
-            DesignRef::from_str("top.brake_main::pressure_a"),
-            DesignRef::from_str("top.nonexistent::signal"),
+            DesignRef::parse("top.brake_main::pressure_a"),
+            DesignRef::parse("top.nonexistent::signal"),
         ];
 
         match resolver.validate_refs(&invalid_refs) {
@@ -750,7 +752,7 @@ mod tests {
         let resolver = DesignPathResolver::new(index);
 
         // Valid bit range
-        let ref1 = DesignRef::from_str("top.brake_main::pressure_a[11:0]");
+        let ref1 = DesignRef::parse("top.brake_main::pressure_a[11:0]");
         match resolver.resolve(&ref1) {
             ResolutionResult::Signal(_) => {}
             _ => panic!("Expected valid signal with bit range"),
@@ -758,7 +760,7 @@ mod tests {
 
         // Invalid bit range (exceeds width)
         let ref2 = DesignRef::signal_slice(
-            InstancePath::from_str("top.brake_main"),
+            InstancePath::parse("top.brake_main"),
             "pressure_a".to_string(),
             15,
             0,
@@ -783,7 +785,9 @@ mod tests {
 
         let sub_children = index.get_children("top.brake_main");
         assert!(sub_children.is_some());
-        assert!(sub_children.unwrap().contains(&"top.brake_main.crc".to_string()));
+        assert!(sub_children
+            .unwrap()
+            .contains(&"top.brake_main.crc".to_string()));
     }
 
     #[test]

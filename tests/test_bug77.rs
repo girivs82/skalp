@@ -32,5 +32,9 @@ async fn test_simple_add() {
     println!("ADD: 10 + 20 = {} (expected 30)", result);
 
     // This assertion fails with Bug #77
-    assert_eq!(result, 30, "ADD: 10 + 20 failed: got {}, expected 30", result);
+    assert_eq!(
+        result, 30,
+        "ADD: 10 + 20 failed: got {}, expected 30",
+        result
+    );
 }

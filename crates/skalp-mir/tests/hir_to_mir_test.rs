@@ -58,6 +58,10 @@ fn create_simple_entity() -> Hir {
         signals: vec![],
         assignments: vec![],
         span: None,
+        pipeline_config: None,
+        vendor_ip_config: None,
+        power_domains: vec![],
+        safety_mechanism_config: None,
     };
 
     hir.entities.push(entity);
@@ -72,6 +76,12 @@ fn create_simple_entity() -> Hir {
             initial_value: None,
             clock_domain: None,
             span: None,
+            memory_config: None,
+            trace_config: None,
+            cdc_config: None,
+            breakpoint_config: None,
+            power_config: None,
+            safety_config: None,
         }],
         variables: vec![],
         constants: vec![],
@@ -97,6 +107,7 @@ fn create_simple_entity() -> Hir {
         instances: vec![],
         covergroups: vec![],
         formal_blocks: vec![],
+        statements: vec![],
     };
 
     hir.implementations.push(implementation);

@@ -50,9 +50,18 @@ impl BreakpointTest {
 
     let bp_config = signal.breakpoint_config.as_ref().unwrap();
     // Basic breakpoint should have no condition, name, or message
-    assert!(bp_config.condition.is_none(), "Basic breakpoint should have no condition");
-    assert!(bp_config.name.is_none(), "Basic breakpoint should have no name");
-    assert!(!bp_config.is_error, "Basic breakpoint should not be an error type");
+    assert!(
+        bp_config.condition.is_none(),
+        "Basic breakpoint should have no condition"
+    );
+    assert!(
+        bp_config.name.is_none(),
+        "Basic breakpoint should have no name"
+    );
+    assert!(
+        !bp_config.is_error,
+        "Basic breakpoint should not be an error type"
+    );
 
     println!("✓ Basic breakpoint attribute parsed correctly");
 }
@@ -78,10 +87,21 @@ impl ConditionTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "ConditionTest").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "watch_counter").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "ConditionTest")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "watch_counter")
+        .unwrap();
 
-    assert!(signal.breakpoint_config.is_some(), "Should have breakpoint_config");
+    assert!(
+        signal.breakpoint_config.is_some(),
+        "Should have breakpoint_config"
+    );
     let bp_config = signal.breakpoint_config.as_ref().unwrap();
 
     assert_eq!(
@@ -114,13 +134,28 @@ impl NamedBreakpoint {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "NamedBreakpoint").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "fsm_state").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "NamedBreakpoint")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "fsm_state")
+        .unwrap();
 
-    assert!(signal.breakpoint_config.is_some(), "Should have breakpoint_config");
+    assert!(
+        signal.breakpoint_config.is_some(),
+        "Should have breakpoint_config"
+    );
     let bp_config = signal.breakpoint_config.as_ref().unwrap();
 
-    assert_eq!(bp_config.name.as_deref(), Some("FSM_ERROR"), "Breakpoint should have name");
+    assert_eq!(
+        bp_config.name.as_deref(),
+        Some("FSM_ERROR"),
+        "Breakpoint should have name"
+    );
     assert_eq!(
         bp_config.message.as_deref(),
         Some("Invalid FSM state"),
@@ -151,13 +186,27 @@ impl ErrorBreakpoint {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "ErrorBreakpoint").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "critical_error").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "ErrorBreakpoint")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "critical_error")
+        .unwrap();
 
-    assert!(signal.breakpoint_config.is_some(), "Should have breakpoint_config");
+    assert!(
+        signal.breakpoint_config.is_some(),
+        "Should have breakpoint_config"
+    );
     let bp_config = signal.breakpoint_config.as_ref().unwrap();
 
-    assert!(bp_config.is_error, "Breakpoint should be marked as error type");
+    assert!(
+        bp_config.is_error,
+        "Breakpoint should be marked as error type"
+    );
     assert_eq!(
         bp_config.message.as_deref(),
         Some("Unexpected reset"),
@@ -189,7 +238,9 @@ impl MirTest {
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("MIR compilation should succeed");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation should succeed");
 
     // Find the module and signal
     let module = mir.modules.iter().find(|m| m.name == "MirTest").unwrap();
@@ -233,7 +284,9 @@ impl CodegenTest {
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("MIR compilation should succeed");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation should succeed");
     let lir = lower_to_lir(&mir).expect("LIR lowering should succeed");
     let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
 
@@ -278,7 +331,9 @@ impl SimpleBreakpoint {
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("MIR compilation should succeed");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation should succeed");
     let lir = lower_to_lir(&mir).expect("LIR lowering should succeed");
     let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
 

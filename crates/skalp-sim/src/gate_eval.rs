@@ -177,7 +177,11 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
         // === Sequential Logic ===
         // For sequential elements, we return the current state (Q output)
         // The state update is handled separately by the simulation engine
-        PrimitiveType::DffP | PrimitiveType::DffN | PrimitiveType::DffNeg | PrimitiveType::DffAR | PrimitiveType::DffAS => {
+        PrimitiveType::DffP
+        | PrimitiveType::DffN
+        | PrimitiveType::DffNeg
+        | PrimitiveType::DffAR
+        | PrimitiveType::DffAS => {
             // DFF inputs: [clk, d] - clock is at index 0, data at index 1
             // On clock edge, sample D input and store to Q output
             // Sequential behavior is handled by SequentialBlock processing
@@ -270,7 +274,6 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
         // ====================================================================
         // Permanent/Hard Faults
         // ====================================================================
-
         FaultType::StuckAt0 => {
             // All outputs forced to 0
             for out in outputs.iter_mut() {
@@ -294,7 +297,10 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
             }
         }
 
-        FaultType::Bridge { bridged_net: _, bridge_type } => {
+        FaultType::Bridge {
+            bridged_net: _,
+            bridge_type,
+        } => {
             // Bridge fault - would need the bridged net's value
             // For now, apply a fixed effect based on bridge type
             match bridge_type {
@@ -320,7 +326,6 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
         // ====================================================================
         // Transient/Soft Faults
         // ====================================================================
-
         FaultType::BitFlip | FaultType::Transient => {
             // Invert all outputs
             for out in outputs.iter_mut() {
@@ -339,7 +344,6 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
         // ====================================================================
         // Timing Violations
         // ====================================================================
-
         FaultType::TimingDelay { .. } => {
             // Timing delay - output the previous value (needs state tracking)
             // For combinational logic: output reflects stale input
@@ -374,7 +378,9 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
             }
         }
 
-        FaultType::Metastability { resolution_cycles: _ } => {
+        FaultType::Metastability {
+            resolution_cycles: _,
+        } => {
             // Metastability - output is undefined during resolution
             // Model as: random value (use simple hash-based pseudo-random)
             //
@@ -389,7 +395,6 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
         // ====================================================================
         // Power-Related Faults (Digital Effects)
         // ====================================================================
-
         FaultType::VoltageDropout => {
             // Voltage dropout manifests as setup violations (slower logic)
             // At the primitive level, treat as setup violation
@@ -416,7 +421,6 @@ fn apply_fault(outputs: &mut [bool], fault_type: &FaultType, inputs: &[bool]) {
         // ====================================================================
         // Clock Faults
         // ====================================================================
-
         FaultType::ClockGlitch => {
             // Clock glitch - extra clock edge
             // For combinational logic, this doesn't directly apply
@@ -639,7 +643,10 @@ mod tests {
     #[test]
     fn test_and_gate_3_inputs() {
         let ptype = PrimitiveType::And { inputs: 3 };
-        assert_eq!(evaluate_primitive(&ptype, &[true, true, false]), vec![false]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, true, false]),
+            vec![false]
+        );
         assert_eq!(evaluate_primitive(&ptype, &[true, true, true]), vec![true]);
     }
 
@@ -701,33 +708,60 @@ mod tests {
     fn test_mux2() {
         let ptype = PrimitiveType::Mux2;
         // sel=0 -> d0
-        assert_eq!(evaluate_primitive(&ptype, &[false, true, false]), vec![true]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[false, true, false]),
+            vec![true]
+        );
         // sel=1 -> d1
-        assert_eq!(evaluate_primitive(&ptype, &[true, true, false]), vec![false]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, true, false]),
+            vec![false]
+        );
     }
 
     #[test]
     fn test_mux4() {
         let ptype = PrimitiveType::Mux4;
         // sel=00 -> d0
-        assert_eq!(evaluate_primitive(&ptype, &[false, false, true, false, false, false]), vec![true]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[false, false, true, false, false, false]),
+            vec![true]
+        );
         // sel=01 -> d1
-        assert_eq!(evaluate_primitive(&ptype, &[true, false, false, true, false, false]), vec![true]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, false, false, true, false, false]),
+            vec![true]
+        );
         // sel=10 -> d2
-        assert_eq!(evaluate_primitive(&ptype, &[false, true, false, false, true, false]), vec![true]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[false, true, false, false, true, false]),
+            vec![true]
+        );
         // sel=11 -> d3
-        assert_eq!(evaluate_primitive(&ptype, &[true, true, false, false, false, true]), vec![true]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, true, false, false, false, true]),
+            vec![true]
+        );
     }
 
     #[test]
     fn test_half_adder() {
         let ptype = PrimitiveType::HalfAdder;
         // 0+0 = 0, carry=0
-        assert_eq!(evaluate_primitive(&ptype, &[false, false]), vec![false, false]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[false, false]),
+            vec![false, false]
+        );
         // 0+1 = 1, carry=0
-        assert_eq!(evaluate_primitive(&ptype, &[false, true]), vec![true, false]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[false, true]),
+            vec![true, false]
+        );
         // 1+0 = 1, carry=0
-        assert_eq!(evaluate_primitive(&ptype, &[true, false]), vec![true, false]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, false]),
+            vec![true, false]
+        );
         // 1+1 = 0, carry=1
         assert_eq!(evaluate_primitive(&ptype, &[true, true]), vec![false, true]);
     }
@@ -736,18 +770,32 @@ mod tests {
     fn test_full_adder() {
         let ptype = PrimitiveType::FullAdder;
         // 0+0+0 = 0, cout=0
-        assert_eq!(evaluate_primitive(&ptype, &[false, false, false]), vec![false, false]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[false, false, false]),
+            vec![false, false]
+        );
         // 1+0+0 = 1, cout=0
-        assert_eq!(evaluate_primitive(&ptype, &[true, false, false]), vec![true, false]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, false, false]),
+            vec![true, false]
+        );
         // 1+1+0 = 0, cout=1
-        assert_eq!(evaluate_primitive(&ptype, &[true, true, false]), vec![false, true]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, true, false]),
+            vec![false, true]
+        );
         // 1+1+1 = 1, cout=1
-        assert_eq!(evaluate_primitive(&ptype, &[true, true, true]), vec![true, true]);
+        assert_eq!(
+            evaluate_primitive(&ptype, &[true, true, true]),
+            vec![true, true]
+        );
     }
 
     #[test]
     fn test_tribuf_active_high() {
-        let ptype = PrimitiveType::Tribuf { enable_active_high: true };
+        let ptype = PrimitiveType::Tribuf {
+            enable_active_high: true,
+        };
         // enable=0 -> output=0 (tri-state approximation)
         assert_eq!(evaluate_primitive(&ptype, &[true, false]), vec![false]);
         // enable=1 -> output=data
@@ -757,8 +805,14 @@ mod tests {
 
     #[test]
     fn test_constant() {
-        assert_eq!(evaluate_primitive(&PrimitiveType::Constant { value: false }, &[]), vec![false]);
-        assert_eq!(evaluate_primitive(&PrimitiveType::Constant { value: true }, &[]), vec![true]);
+        assert_eq!(
+            evaluate_primitive(&PrimitiveType::Constant { value: false }, &[]),
+            vec![false]
+        );
+        assert_eq!(
+            evaluate_primitive(&PrimitiveType::Constant { value: true }, &[]),
+            vec![true]
+        );
     }
 
     #[test]
@@ -830,7 +884,10 @@ mod tests {
     fn test_value_to_bits() {
         let value = vec![0b10110101u8];
         let bits = value_to_bits(&value, 8);
-        assert_eq!(bits, vec![true, false, true, false, true, true, false, true]);
+        assert_eq!(
+            bits,
+            vec![true, false, true, false, true, true, false, true]
+        );
     }
 
     #[test]
@@ -1117,7 +1174,7 @@ mod tests {
         // On clock edge with setup violation: should capture previous value (false)
         // not current value (true)
         let result = evaluate_dff_with_timing_fault(true, true, Some(&config), &mut state, 0);
-        assert_eq!(result, false); // Captured previous D value
+        assert!(!result); // Captured previous D value
     }
 
     #[test]
@@ -1127,7 +1184,7 @@ mod tests {
 
         // On clock edge with hold violation: should capture inverted value
         let result = evaluate_dff_with_timing_fault(true, true, Some(&config), &mut state, 0);
-        assert_eq!(result, false); // Inverted: true -> false
+        assert!(!result); // Inverted: true -> false
     }
 
     #[test]
@@ -1140,7 +1197,7 @@ mod tests {
 
         // Clock edge triggers metastability, then immediately ticks (countdown: 3 -> 2)
         let result = evaluate_dff_with_timing_fault(true, true, Some(&config), &mut state, 0);
-        assert_eq!(result, false); // Toggled: true -> false (metastable output)
+        assert!(!result); // Toggled: true -> false (metastable output)
 
         // Should now be metastable with countdown already decremented once
         assert!(state.is_metastable());
@@ -1148,7 +1205,7 @@ mod tests {
 
         // Continue ticking (countdown: 2 -> 1)
         let result = evaluate_dff_with_timing_fault(true, false, Some(&config), &mut state, 1);
-        assert_eq!(result, false); // Toggled: true -> false (still metastable)
+        assert!(!result); // Toggled: true -> false (still metastable)
         assert!(state.is_metastable());
         assert_eq!(state.metastable_countdown, 1);
 
@@ -1166,13 +1223,13 @@ mod tests {
         let mut state = TimingFaultState::new();
 
         // Initial state
-        assert_eq!(state.prev_d_value, false);
+        assert!(!state.prev_d_value);
         assert!(!state.is_metastable());
         assert!(state.get_resolved_value().is_none());
 
         // Update previous D
         state.update_prev_d(true);
-        assert_eq!(state.prev_d_value, true);
+        assert!(state.prev_d_value);
 
         // Enter metastability
         state.enter_metastability(5);

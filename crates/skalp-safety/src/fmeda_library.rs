@@ -49,7 +49,8 @@ impl FmedaLibrary {
 
     /// Add a component to the library
     pub fn add_component(&mut self, component: LibraryComponent) {
-        self.components.insert(component.part_number.clone(), component);
+        self.components
+            .insert(component.part_number.clone(), component);
     }
 
     /// Get a component by part number
@@ -58,7 +59,11 @@ impl FmedaLibrary {
     }
 
     /// Calculate total FIT for a component with mechanisms applied
-    pub fn calculate_fit(&self, part_number: &str, mechanisms: &[MechanismType]) -> Option<FitBreakdown> {
+    pub fn calculate_fit(
+        &self,
+        part_number: &str,
+        mechanisms: &[MechanismType],
+    ) -> Option<FitBreakdown> {
         let component = self.get_component(part_number)?;
         Some(component.calculate_fit(mechanisms))
     }
@@ -684,8 +689,7 @@ impl MultiContributorFailureMode {
             if c.weight < 0.0 {
                 return Err(format!(
                     "Negative weight {} for contributor {}",
-                    c.weight,
-                    c.design_ref.to_string()
+                    c.weight, c.design_ref
                 ));
             }
         }
@@ -747,11 +751,7 @@ impl PrimitiveFmeda {
 
     /// Calculate total FIT for a specific primitive instance
     /// Includes both single-primitive and multi-contributor modes
-    pub fn calculate_primitive_fit(
-        &self,
-        design_ref: &DesignRef,
-        tech_lib: &TechLibrary,
-    ) -> f64 {
+    pub fn calculate_primitive_fit(&self, design_ref: &DesignRef, tech_lib: &TechLibrary) -> f64 {
         let mut total_fit = 0.0;
 
         // FIT from primitive bindings
@@ -810,7 +810,10 @@ impl PrimitiveFmeda {
     }
 
     /// Get all failure modes affecting a specific primitive
-    pub fn get_modes_for_primitive(&self, design_ref: &DesignRef) -> Vec<&MultiContributorFailureMode> {
+    pub fn get_modes_for_primitive(
+        &self,
+        design_ref: &DesignRef,
+    ) -> Vec<&MultiContributorFailureMode> {
         self.multi_contributor_modes
             .iter()
             .filter(|m| m.get_involved_primitives().contains(&design_ref))
@@ -1088,16 +1091,16 @@ impl FmedaCalculator {
                 let mode_fit = component.base_fit * mode.distribution_pct / 100.0;
                 let dc = component.get_effective_dc(&binding.mechanisms);
 
-                let final_class = if mode.default_class == FailureClass::SinglePointFault && dc > 0.0
-                {
-                    if dc >= 99.0 {
-                        FailureClass::Safe
+                let final_class =
+                    if mode.default_class == FailureClass::SinglePointFault && dc > 0.0 {
+                        if dc >= 99.0 {
+                            FailureClass::Safe
+                        } else {
+                            FailureClass::Residual
+                        }
                     } else {
-                        FailureClass::Residual
-                    }
-                } else {
-                    mode.default_class
-                };
+                        mode.default_class
+                    };
 
                 FailureModeResult {
                     name: mode.name.clone(),
@@ -1183,11 +1186,8 @@ fn create_automotive_digital_library() -> FmedaLibrary {
     library.add_component(sram);
 
     // CRC checker
-    let mut crc = LibraryComponent::new(
-        "CRC8_CHECKER".to_string(),
-        "CRC-8 Checker".to_string(),
-        5.0,
-    );
+    let mut crc =
+        LibraryComponent::new("CRC8_CHECKER".to_string(), "CRC-8 Checker".to_string(), 5.0);
     crc.category = ComponentCategory::Digital;
     crc.quality_level = QualityLevel::Automotive;
     crc.add_failure_mode(LibraryFailureMode::new(
@@ -1294,11 +1294,7 @@ fn create_automotive_sensor_library() -> FmedaLibrary {
     library.add_component(temp);
 
     // ADC
-    let mut adc = LibraryComponent::new(
-        "ADC_12BIT".to_string(),
-        "12-bit ADC".to_string(),
-        20.0,
-    );
+    let mut adc = LibraryComponent::new("ADC_12BIT".to_string(), "12-bit ADC".to_string(), 20.0);
     adc.category = ComponentCategory::MixedSignal;
     adc.quality_level = QualityLevel::Automotive;
     adc.add_failure_mode(LibraryFailureMode::new(
@@ -1328,11 +1324,7 @@ fn create_digital_logic_library() -> FmedaLibrary {
     library.source = "IEC 62380".to_string();
 
     // Register
-    let mut reg = LibraryComponent::new(
-        "REG_8BIT".to_string(),
-        "8-bit Register".to_string(),
-        2.0,
-    );
+    let mut reg = LibraryComponent::new("REG_8BIT".to_string(), "8-bit Register".to_string(), 2.0);
     reg.category = ComponentCategory::Digital;
     reg.set_mechanism_coverage(MechanismType::Ecc, 99.0);
     reg.set_mechanism_coverage(MechanismType::Tmr, 99.5);
@@ -1379,26 +1371,30 @@ pub fn create_tech_primitive_library() -> TechLibrary {
     let mut dff = TechPrimitive::new("DFF".to_string(), PrimitiveType::Dff, 0.5);
     dff.area = Some(2.0);
     dff.transistor_count = Some(20);
-    dff.add_failure_mode(PrimitiveFailureMode::new(
-        "stuck_at_0".to_string(),
-        0.2,
-        FailureClass::SinglePointFault,
-    ).with_description("Output stuck at logic 0".to_string()));
-    dff.add_failure_mode(PrimitiveFailureMode::new(
-        "stuck_at_1".to_string(),
-        0.2,
-        FailureClass::SinglePointFault,
-    ).with_description("Output stuck at logic 1".to_string()));
-    dff.add_failure_mode(PrimitiveFailureMode::new(
-        "setup_violation".to_string(),
-        0.05,
-        FailureClass::Residual,
-    ).with_description("Setup time violation".to_string()));
-    dff.add_failure_mode(PrimitiveFailureMode::new(
-        "hold_violation".to_string(),
-        0.05,
-        FailureClass::Residual,
-    ).with_description("Hold time violation".to_string()));
+    dff.add_failure_mode(
+        PrimitiveFailureMode::new(
+            "stuck_at_0".to_string(),
+            0.2,
+            FailureClass::SinglePointFault,
+        )
+        .with_description("Output stuck at logic 0".to_string()),
+    );
+    dff.add_failure_mode(
+        PrimitiveFailureMode::new(
+            "stuck_at_1".to_string(),
+            0.2,
+            FailureClass::SinglePointFault,
+        )
+        .with_description("Output stuck at logic 1".to_string()),
+    );
+    dff.add_failure_mode(
+        PrimitiveFailureMode::new("setup_violation".to_string(), 0.05, FailureClass::Residual)
+            .with_description("Setup time violation".to_string()),
+    );
+    dff.add_failure_mode(
+        PrimitiveFailureMode::new("hold_violation".to_string(), 0.05, FailureClass::Residual)
+            .with_description("Hold time violation".to_string()),
+    );
     library.add_primitive(dff);
 
     // Latch
@@ -1474,16 +1470,22 @@ pub fn create_tech_primitive_library() -> TechLibrary {
     let mut mux2 = TechPrimitive::new("MUX2".to_string(), PrimitiveType::Mux, 0.15);
     mux2.area = Some(1.0);
     mux2.transistor_count = Some(8);
-    mux2.add_failure_mode(PrimitiveFailureMode::new(
-        "select_stuck_0".to_string(),
-        0.05,
-        FailureClass::SinglePointFault,
-    ).with_description("Select line stuck, always selects input 0".to_string()));
-    mux2.add_failure_mode(PrimitiveFailureMode::new(
-        "select_stuck_1".to_string(),
-        0.05,
-        FailureClass::SinglePointFault,
-    ).with_description("Select line stuck, always selects input 1".to_string()));
+    mux2.add_failure_mode(
+        PrimitiveFailureMode::new(
+            "select_stuck_0".to_string(),
+            0.05,
+            FailureClass::SinglePointFault,
+        )
+        .with_description("Select line stuck, always selects input 0".to_string()),
+    );
+    mux2.add_failure_mode(
+        PrimitiveFailureMode::new(
+            "select_stuck_1".to_string(),
+            0.05,
+            FailureClass::SinglePointFault,
+        )
+        .with_description("Select line stuck, always selects input 1".to_string()),
+    );
     mux2.add_failure_mode(PrimitiveFailureMode::new(
         "output_stuck".to_string(),
         0.05,
@@ -1495,21 +1497,22 @@ pub fn create_tech_primitive_library() -> TechLibrary {
     let mut clkbuf = TechPrimitive::new("CLKBUF".to_string(), PrimitiveType::ClkBuf, 0.2);
     clkbuf.area = Some(1.5);
     clkbuf.transistor_count = Some(8);
-    clkbuf.add_failure_mode(PrimitiveFailureMode::new(
-        "stuck_low".to_string(),
-        0.1,
-        FailureClass::SinglePointFault,
-    ).with_description("Clock output stuck low".to_string()));
-    clkbuf.add_failure_mode(PrimitiveFailureMode::new(
-        "stuck_high".to_string(),
-        0.05,
-        FailureClass::SinglePointFault,
-    ).with_description("Clock output stuck high".to_string()));
-    clkbuf.add_failure_mode(PrimitiveFailureMode::new(
-        "jitter".to_string(),
-        0.05,
-        FailureClass::Residual,
-    ).with_description("Excessive clock jitter".to_string()));
+    clkbuf.add_failure_mode(
+        PrimitiveFailureMode::new("stuck_low".to_string(), 0.1, FailureClass::SinglePointFault)
+            .with_description("Clock output stuck low".to_string()),
+    );
+    clkbuf.add_failure_mode(
+        PrimitiveFailureMode::new(
+            "stuck_high".to_string(),
+            0.05,
+            FailureClass::SinglePointFault,
+        )
+        .with_description("Clock output stuck high".to_string()),
+    );
+    clkbuf.add_failure_mode(
+        PrimitiveFailureMode::new("jitter".to_string(), 0.05, FailureClass::Residual)
+            .with_description("Excessive clock jitter".to_string()),
+    );
     library.add_primitive(clkbuf);
 
     // Memory bit cell
@@ -1526,11 +1529,10 @@ pub fn create_tech_primitive_library() -> TechLibrary {
         0.0004,
         FailureClass::SinglePointFault,
     ));
-    memcell.add_failure_mode(PrimitiveFailureMode::new(
-        "seu".to_string(),
-        0.0002,
-        FailureClass::SinglePointFault,
-    ).with_description("Single event upset (soft error)".to_string()));
+    memcell.add_failure_mode(
+        PrimitiveFailureMode::new("seu".to_string(), 0.0002, FailureClass::SinglePointFault)
+            .with_description("Single event upset (soft error)".to_string()),
+    );
     library.add_primitive(memcell);
 
     library
@@ -1572,7 +1574,7 @@ mod tests {
         let fit = FitBreakdown {
             total_fit: 100.0,
             safe_fit: 10.0,
-            spf_fit: 9.0,   // 10% of dangerous
+            spf_fit: 9.0, // 10% of dangerous
             residual_fit: 0.0,
             latent_fit: 0.0,
             dc_applied: 90.0,
@@ -1589,7 +1591,7 @@ mod tests {
             safe_fit: 10.0,
             spf_fit: 0.0,
             residual_fit: 0.0,
-            latent_fit: 18.0,  // 20% of dangerous
+            latent_fit: 18.0, // 20% of dangerous
             dc_applied: 0.0,
         };
 
@@ -1616,14 +1618,14 @@ mod tests {
 
         let bindings = vec![
             FmedaBinding {
-                design_ref: DesignRef::from_str("top.cpu"),
+                design_ref: DesignRef::parse("top.cpu"),
                 library: "automotive_digital".to_string(),
                 part_number: "ARM_CORTEX_M7".to_string(),
                 mechanisms: vec![MechanismType::Lockstep],
                 overrides: FmedaOverrides::default(),
             },
             FmedaBinding {
-                design_ref: DesignRef::from_str("top.pressure"),
+                design_ref: DesignRef::parse("top.pressure"),
                 library: "automotive_sensors".to_string(),
                 part_number: "PRESSURE_SENSOR".to_string(),
                 mechanisms: vec![MechanismType::Tmr],
@@ -1648,8 +1650,8 @@ mod tests {
             spf_fit: 5.0,
             residual_fit: 5.0,
             latent_fit: 20.0,
-            spfm: 94.4,  // Below ASIL D target
-            lfm: 77.8,   // Below ASIL D target
+            spfm: 94.4, // Below ASIL D target
+            lfm: 77.8,  // Below ASIL D target
             pmhf: 10.0,
             achievable_asil: AsilLevel::B,
         };
@@ -1662,11 +1664,8 @@ mod tests {
 
     #[test]
     fn test_effective_dc_combination() {
-        let mut component = LibraryComponent::new(
-            "TEST".to_string(),
-            "Test Component".to_string(),
-            100.0,
-        );
+        let mut component =
+            LibraryComponent::new("TEST".to_string(), "Test Component".to_string(), 100.0);
         component.set_mechanism_coverage(MechanismType::Lockstep, 99.0);
         component.set_mechanism_coverage(MechanismType::Ecc, 99.0);
 
@@ -1705,7 +1704,7 @@ mod tests {
     #[test]
     fn test_primitive_binding() {
         let binding = PrimitiveBinding {
-            design_ref: DesignRef::from_str("top.voter.ff_a_reg"),
+            design_ref: DesignRef::parse("top.voter.ff_a_reg"),
             tech_library: "tech_standard".to_string(),
             primitive_name: "DFF".to_string(),
             instance_count: 1,
@@ -1731,15 +1730,15 @@ mod tests {
             FailureClass::SinglePointFault,
         )
         .with_contributors(vec![
-            PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_a_reg"), 0.3)
+            PrimitiveContributor::new(DesignRef::parse("top.voter.ff_a_reg"), 0.3)
                 .with_description("Source flop".to_string()),
-            PrimitiveContributor::new(DesignRef::from_str("top.voter.comb.u1"), 0.2)
+            PrimitiveContributor::new(DesignRef::parse("top.voter.comb.u1"), 0.2)
                 .with_description("NAND in path".to_string()),
-            PrimitiveContributor::new(DesignRef::from_str("top.voter.comb.u2"), 0.2)
+            PrimitiveContributor::new(DesignRef::parse("top.voter.comb.u2"), 0.2)
                 .with_description("Another gate".to_string()),
-            PrimitiveContributor::new(DesignRef::from_str("top.voter.mux_sel"), 0.15)
+            PrimitiveContributor::new(DesignRef::parse("top.voter.mux_sel"), 0.15)
                 .with_description("Mux in path".to_string()),
-            PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_out_reg"), 0.15)
+            PrimitiveContributor::new(DesignRef::parse("top.voter.ff_out_reg"), 0.15)
                 .with_description("Dest flop".to_string()),
         ])
         .with_detector(DetectorBinding {
@@ -1753,7 +1752,7 @@ mod tests {
         assert_eq!(mode.contributors.len(), 5);
 
         // Check FIT contribution
-        let ff_a_ref = DesignRef::from_str("top.voter.ff_a_reg");
+        let ff_a_ref = DesignRef::parse("top.voter.ff_a_reg");
         assert_eq!(mode.get_fit_for_primitive(&ff_a_ref), Some(0.3));
     }
 
@@ -1768,8 +1767,8 @@ mod tests {
             FailureClass::Safe,
         )
         .with_contributors(vec![
-            PrimitiveContributor::new(DesignRef::from_str("top.a"), 0.5),
-            PrimitiveContributor::new(DesignRef::from_str("top.b"), 0.3),
+            PrimitiveContributor::new(DesignRef::parse("top.a"), 0.5),
+            PrimitiveContributor::new(DesignRef::parse("top.b"), 0.3),
         ]);
 
         let result = mode.validate();
@@ -1780,14 +1779,11 @@ mod tests {
     #[test]
     fn test_primitive_fmeda() {
         let tech_lib = create_tech_primitive_library();
-        let mut fmeda = PrimitiveFmeda::new(
-            "top.voter".to_string(),
-            "tech_standard".to_string(),
-        );
+        let mut fmeda = PrimitiveFmeda::new("top.voter".to_string(), "tech_standard".to_string());
 
         // Add primitive bindings
         fmeda.add_primitive_binding(PrimitiveBinding {
-            design_ref: DesignRef::from_str("top.voter.ff_a_reg"),
+            design_ref: DesignRef::parse("top.voter.ff_a_reg"),
             tech_library: "tech_standard".to_string(),
             primitive_name: "DFF".to_string(),
             instance_count: 1,
@@ -1796,7 +1792,7 @@ mod tests {
         });
 
         fmeda.add_primitive_binding(PrimitiveBinding {
-            design_ref: DesignRef::from_str("top.voter.ff_b_reg"),
+            design_ref: DesignRef::parse("top.voter.ff_b_reg"),
             tech_library: "tech_standard".to_string(),
             primitive_name: "DFF".to_string(),
             instance_count: 1,
@@ -1814,9 +1810,9 @@ mod tests {
                 FailureClass::SinglePointFault,
             )
             .with_contributors(vec![
-                PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_a_reg"), 0.5),
-                PrimitiveContributor::new(DesignRef::from_str("top.voter.ff_b_reg"), 0.5),
-            ])
+                PrimitiveContributor::new(DesignRef::parse("top.voter.ff_a_reg"), 0.5),
+                PrimitiveContributor::new(DesignRef::parse("top.voter.ff_b_reg"), 0.5),
+            ]),
         );
 
         assert!(fmeda.validate().is_ok());
@@ -1826,7 +1822,7 @@ mod tests {
         assert!((total_fit - 1.2).abs() < 0.001);
 
         // FIT for ff_a_reg: 0.5 (DFF) + 0.1 (50% of MCF) = 0.6
-        let ff_a_ref = DesignRef::from_str("top.voter.ff_a_reg");
+        let ff_a_ref = DesignRef::parse("top.voter.ff_a_reg");
         let ff_a_fit = fmeda.calculate_primitive_fit(&ff_a_ref, &tech_lib);
         assert!((ff_a_fit - 0.6).abs() < 0.001);
     }
@@ -1835,9 +1831,9 @@ mod tests {
     fn test_get_modes_for_primitive() {
         let mut fmeda = PrimitiveFmeda::new("design".to_string(), "lib".to_string());
 
-        let ref_a = DesignRef::from_str("top.a");
-        let ref_b = DesignRef::from_str("top.b");
-        let ref_c = DesignRef::from_str("top.c");
+        let ref_a = DesignRef::parse("top.a");
+        let ref_b = DesignRef::parse("top.b");
+        let ref_c = DesignRef::parse("top.c");
 
         // Mode affecting A and B
         fmeda.add_multi_contributor_mode(
@@ -1851,7 +1847,7 @@ mod tests {
             .with_contributors(vec![
                 PrimitiveContributor::new(ref_a.clone(), 0.5),
                 PrimitiveContributor::new(ref_b.clone(), 0.5),
-            ])
+            ]),
         );
 
         // Mode affecting B and C
@@ -1866,7 +1862,7 @@ mod tests {
             .with_contributors(vec![
                 PrimitiveContributor::new(ref_b.clone(), 0.6),
                 PrimitiveContributor::new(ref_c.clone(), 0.4),
-            ])
+            ]),
         );
 
         // A is in 1 mode
@@ -1884,7 +1880,7 @@ mod tests {
 
     #[test]
     fn test_primitive_contributor() {
-        let design_ref = DesignRef::from_str("top.voter.ff_out_reg");
+        let design_ref = DesignRef::parse("top.voter.ff_out_reg");
         let contributor = PrimitiveContributor::new(design_ref.clone(), 0.3)
             .with_description("Output register in timing path".to_string());
 

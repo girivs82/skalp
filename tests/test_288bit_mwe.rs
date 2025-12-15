@@ -38,7 +38,7 @@ async fn test_288bit_metal_limitation() {
 
     let result: Vec<u8> = tb.get_as("result").await;
     let result_val = f32::from_bits(u32::from_le_bytes([
-        result[0], result[1], result[2], result[3]
+        result[0], result[1], result[2], result[3],
     ]));
 
     println!("\n  INPUTS:");

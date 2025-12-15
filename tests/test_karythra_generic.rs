@@ -80,8 +80,11 @@ mod test_karythra_generics {
         let func = &hir.functions[0];
         assert_eq!(func.name, "exec_generic");
         assert!(!func.generics.is_empty(), "Function should have generics");
-        println!("\n✅ Found generic function: {} with {} generic params",
-                 func.name, func.generics.len());
+        println!(
+            "\n✅ Found generic function: {} with {} generic params",
+            func.name,
+            func.generics.len()
+        );
 
         // Step 2: Monomorphize
         println!("\n=== Running Monomorphization Pass ===");
@@ -98,31 +101,44 @@ mod test_karythra_generics {
         }
 
         // Should have specialized functions for 32 and 64
-        let specialized_functions: Vec<_> = monomorphized_hir.functions.iter()
+        let specialized_functions: Vec<_> = monomorphized_hir
+            .functions
+            .iter()
             .filter(|f| f.name.starts_with("exec_generic_") && f.generics.is_empty())
             .collect();
 
-        println!("\nFound {} specialized functions:", specialized_functions.len());
+        println!(
+            "\nFound {} specialized functions:",
+            specialized_functions.len()
+        );
         for func in &specialized_functions {
             println!("   - {}", func.name);
         }
 
         // We should have at least 2 specializations (c32 and c64)
-        assert!(specialized_functions.len() >= 2,
-                "Expected at least 2 specializations (c32 and c64), got {}",
-                specialized_functions.len());
+        assert!(
+            specialized_functions.len() >= 2,
+            "Expected at least 2 specializations (c32 and c64), got {}",
+            specialized_functions.len()
+        );
 
         // Check that each specialization has no generics
         for func in &specialized_functions {
-            assert_eq!(func.generics.len(), 0,
-                       "Specialized function {} should have no generics", func.name);
+            assert_eq!(
+                func.generics.len(),
+                0,
+                "Specialized function {} should have no generics",
+                func.name
+            );
         }
 
         println!("\n✅ SUCCESS: Generic Karythra pattern works!");
         println!("   - Generic function defined with <const W: nat>");
         println!("   - Called with explicit type arguments ::<32> and ::<64>");
-        println!("   - Monomorphizer generated {} specialized functions",
-                 specialized_functions.len());
+        println!(
+            "   - Monomorphizer generated {} specialized functions",
+            specialized_functions.len()
+        );
         println!("   - All specializations have concrete types (no generics)");
     }
 
@@ -156,14 +172,15 @@ mod test_karythra_generics {
 
         println!("\n=== Testing Multiple Width Specializations ===");
 
-        let hir = parse_and_build_hir(skalp_code)
-            .expect("Failed to parse");
+        let hir = parse_and_build_hir(skalp_code).expect("Failed to parse");
 
         let mut monomorphizer = Monomorphizer::new();
         let monomorphized_hir = monomorphizer.monomorphize(&hir);
 
         // Should have 4 specializations
-        let specialized = monomorphized_hir.functions.iter()
+        let specialized = monomorphized_hir
+            .functions
+            .iter()
             .filter(|f| f.name.starts_with("add_width_c") && f.generics.is_empty())
             .count();
 

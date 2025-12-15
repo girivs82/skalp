@@ -369,7 +369,6 @@ pub enum Token {
     // NOTE: NonBlockingAssign (<= for assignment) and BlockingAssign (:=) both removed
     // Using unified `=` operator with context-based inference for all assignments
     // `<=` is now always parsed as LessEqual comparison operator
-
     #[token("=")]
     Assign,
 
@@ -456,7 +455,7 @@ pub enum Token {
     HashHash,
 
     #[token("#[")]
-    HashBracket,  // For attributes: #[parallel]
+    HashBracket, // For attributes: #[parallel]
 
     #[token("[*")]
     RepeatOpen,

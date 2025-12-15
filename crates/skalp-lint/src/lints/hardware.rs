@@ -8,7 +8,7 @@
 //! - Excessive fan-out
 
 use crate::{Lint, LintContext, LintLevel, LintPass};
-use skalp_frontend::hir::{HirFunction, HirExpression};
+use skalp_frontend::hir::{HirExpression, HirFunction};
 
 // ============================================================================
 // Lint Definitions
@@ -112,7 +112,7 @@ fn is_match_exhaustive(_expr: &HirExpression) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_frontend::hir::{HirFunction, HirType, FunctionId};
+    use skalp_frontend::hir::{FunctionId, HirFunction, HirType};
 
     #[test]
     fn test_long_combinational_detection() {
@@ -127,6 +127,8 @@ mod tests {
             params: vec![],
             return_type: Some(HirType::Bit(32)),
             body: vec![],
+            pipeline_config: None,
+            span: None,
         };
 
         lint.check_function(&func, &mut ctx);

@@ -9,27 +9,24 @@
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::lower_to_lir;
 use skalp_mir::MirCompiler;
-use skalp_sim::{
-    GateLevelRuntime, SimLevel, SimulationMode, UnifiedSimConfig, UnifiedSimulator,
-};
+use skalp_sim::{GateLevelRuntime, SimLevel, SimulationMode, UnifiedSimConfig, UnifiedSimulator};
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 
 /// Helper function to compile source to both behavioral SIR and LIR (gate netlist)
-fn compile_to_both(
-    source: &str,
-    module_name: &str,
-) -> (skalp_sir::SirModule, skalp_lir::lir::Lir) {
+fn compile_to_both(source: &str, module_name: &str) -> (skalp_sir::SirModule, skalp_lir::lir::Lir) {
     // Parse and compile to HIR and MIR
     let hir = parse_and_build_hir(source).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
-    let mir_design = mir_compiler.compile(&hir).expect("Failed to compile to MIR");
+    let mir_design = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
 
     // Find the module
     let mir_module = mir_design
         .modules
         .iter()
         .find(|m| m.name == module_name)
-        .expect(&format!("Module '{}' not found", module_name))
+        .unwrap_or_else(|| panic!("Module '{}' not found", module_name))
         .clone();
 
     // Path 1: MIR → behavioral SIR
@@ -41,7 +38,7 @@ fn compile_to_both(
         .into_iter()
         .find(|r| r.lir.name == module_name)
         .map(|r| r.lir)
-        .expect(&format!("LIR for '{}' not found", module_name));
+        .unwrap_or_else(|| panic!("LIR for '{}' not found", module_name));
 
     (behavioral_sir, lir)
 }
@@ -125,7 +122,10 @@ fn test_unified_adder_behavioral_vs_gate_level() {
 
     println!("\nTotal tests: {}", test_cases.len());
     println!("Mismatches: {}", mismatches);
-    assert_eq!(mismatches, 0, "Behavioral and gate-level results should match");
+    assert_eq!(
+        mismatches, 0,
+        "Behavioral and gate-level results should match"
+    );
 }
 
 #[test]
@@ -202,7 +202,10 @@ fn test_unified_bitwise_ops() {
         }
     }
 
-    assert!(all_match, "All behavioral and gate-level results should match");
+    assert!(
+        all_match,
+        "All behavioral and gate-level results should match"
+    );
 }
 
 #[test]
@@ -240,11 +243,15 @@ fn test_gate_level_cpu_vs_gpu() {
         .expect("Failed to create GPU gate-level simulator");
 
     println!("CPU backend: {}", cpu_sim.device_info());
-    println!("GPU backend: {} (using GPU: {})", gpu_sim.device_info(), gpu_sim.is_using_gpu());
+    println!(
+        "GPU backend: {} (using GPU: {})",
+        gpu_sim.device_info(),
+        gpu_sim.is_using_gpu()
+    );
 
     let test_cases: Vec<(u64, u64, u64)> = vec![
-        (10, 5, 0), // ADD
-        (10, 5, 1), // SUB
+        (10, 5, 0),      // ADD
+        (10, 5, 1),      // SUB
         (0xAA, 0x55, 2), // AND
         (0xAA, 0x55, 3), // OR
     ];
@@ -284,7 +291,10 @@ fn test_gate_level_cpu_vs_gpu() {
         }
     }
 
-    assert!(all_match, "CPU and GPU backends should produce identical results");
+    assert!(
+        all_match,
+        "CPU and GPU backends should produce identical results"
+    );
 }
 
 #[test]
@@ -301,11 +311,9 @@ fn test_unified_simulation_info() {
 
     let (behavioral_sir, lir) = compile_to_both(source, "TestModule");
 
-    let behavioral_sim = UnifiedSimulator::from_behavioral_sir(
-        behavioral_sir,
-        UnifiedSimConfig::behavioral(),
-    )
-    .unwrap();
+    let behavioral_sim =
+        UnifiedSimulator::from_behavioral_sir(behavioral_sir, UnifiedSimConfig::behavioral())
+            .unwrap();
 
     let gate_sim = UnifiedSimulator::from_lir(
         &lir,
@@ -350,15 +358,15 @@ fn test_same_testbench_both_modes() {
     let (behavioral_sir, lir) = compile_to_both(source, "Comparator");
 
     // Create both simulators
-    let mut behavioral_sim = UnifiedSimulator::from_behavioral_sir(
-        behavioral_sir,
-        UnifiedSimConfig::behavioral(),
-    ).unwrap();
+    let mut behavioral_sim =
+        UnifiedSimulator::from_behavioral_sir(behavioral_sir, UnifiedSimConfig::behavioral())
+            .unwrap();
 
     let mut gate_sim = UnifiedSimulator::from_lir(
         &lir,
         UnifiedSimConfig::gate_level().with_hw_accel(skalp_sim::HwAccel::Cpu),
-    ).unwrap();
+    )
+    .unwrap();
 
     println!("=== Same Testbench, Two Modes ===\n");
     println!("Behavioral: {}", behavioral_sim.device_info());
@@ -386,7 +394,10 @@ fn test_same_testbench_both_modes() {
             let lt = sim.get_output("lt").unwrap_or(0);
             let gt = sim.get_output("gt").unwrap_or(0);
 
-            println!("[{}] a={}, b={}: eq={}, lt={}, gt={}", name, a, b, eq, lt, gt);
+            println!(
+                "[{}] a={}, b={}: eq={}, lt={}, gt={}",
+                name, a, b, eq, lt, gt
+            );
             results.push((a, b, eq, lt, gt));
         }
 
@@ -400,16 +411,29 @@ fn test_same_testbench_both_modes() {
     // Compare
     println!("\n=== Comparison ===");
     let mut all_match = true;
-    for (i, (b_res, g_res)) in behavioral_results.iter().zip(gate_results.iter()).enumerate() {
+    for (i, (b_res, g_res)) in behavioral_results
+        .iter()
+        .zip(gate_results.iter())
+        .enumerate()
+    {
         if b_res != g_res {
-            println!("Test {}: MISMATCH behavioral={:?} vs gate={:?}", i, b_res, g_res);
+            println!(
+                "Test {}: MISMATCH behavioral={:?} vs gate={:?}",
+                i, b_res, g_res
+            );
             all_match = false;
         }
     }
 
     if all_match {
-        println!("✓ All {} tests match between behavioral and gate-level!", behavioral_results.len());
+        println!(
+            "✓ All {} tests match between behavioral and gate-level!",
+            behavioral_results.len()
+        );
     }
 
-    assert!(all_match, "Same testbench should produce same results on both modes");
+    assert!(
+        all_match,
+        "Same testbench should produce same results on both modes"
+    );
 }

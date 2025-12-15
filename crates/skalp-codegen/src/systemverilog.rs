@@ -4,11 +4,13 @@
 //! preserving sequential logic, event blocks, and assignments.
 
 use anyhow::Result;
-use skalp_frontend::hir::{CdcConfig, CdcType, MemoryStyle, VendorIpConfig, VendorType, PowerConfig, IsolationClamp};
+use skalp_frontend::hir::{
+    CdcConfig, CdcType, IsolationClamp, MemoryStyle, PowerConfig, VendorIpConfig, VendorType,
+};
 use skalp_lir::MirToLirResult;
 use skalp_mir::mir::PriorityMux;
-use skalp_mir::type_width; // Use shared type width calculations
 use skalp_mir::mir::{Assertion, AssertionKind};
+use skalp_mir::type_width; // Use shared type width calculations
 use skalp_mir::{
     Assignment, AssignmentKind, DataType, EdgeType, EnumType, Mir, Module, Process, ProcessKind,
     SignalId, Statement, StructType,
@@ -33,7 +35,9 @@ fn build_tuple_source_mapping(module: &Module) -> HashMap<SignalId, String> {
         // Check if LHS is a signal
         if let skalp_mir::LValue::Signal(lhs_id) = &assign.lhs {
             // Case 1: RHS is a reference to another signal
-            if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(rhs_id)) = &assign.rhs.kind {
+            if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(rhs_id)) =
+                &assign.rhs.kind
+            {
                 // Check if RHS signal name contains "_inst_" and "_result_"
                 // This indicates it's a module instance result signal
                 if let Some(rhs_signal) = module.signals.iter().find(|s| s.id == *rhs_id) {
@@ -52,9 +56,14 @@ fn build_tuple_source_mapping(module: &Module) -> HashMap<SignalId, String> {
             else if let skalp_mir::ExpressionKind::Concat(elements) = &assign.rhs.kind {
                 // Look for any signal reference in the Concat that looks like a module result
                 for elem in elements {
-                    if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(elem_id)) = &elem.kind {
-                        if let Some(elem_signal) = module.signals.iter().find(|s| s.id == *elem_id) {
-                            if elem_signal.name.contains("_inst_") && elem_signal.name.contains("_result_") {
+                    if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(elem_id)) =
+                        &elem.kind
+                    {
+                        if let Some(elem_signal) = module.signals.iter().find(|s| s.id == *elem_id)
+                        {
+                            if elem_signal.name.contains("_inst_")
+                                && elem_signal.name.contains("_result_")
+                            {
                                 // Extract the prefix (everything before "_result_N")
                                 if let Some(pos) = elem_signal.name.rfind("_result_") {
                                     let prefix = &elem_signal.name[..pos];
@@ -338,10 +347,7 @@ fn scan_statements_for_variable_widths(
 }
 
 /// Generate a single SystemVerilog module
-fn generate_module(
-    mir_module: &Module,
-    mir: &Mir,
-) -> Result<String> {
+fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
     // Check if this is a vendor IP wrapper - generate special output
     if let Some(ref vendor_config) = mir_module.vendor_ip_config {
         return generate_vendor_ip_wrapper(mir_module, vendor_config);
@@ -450,9 +456,9 @@ fn generate_module(
             // Format: (* ram_style = "block" *) reg [WIDTH-1:0] mem [0:DEPTH-1];
 
             // Determine data width from config or signal type
-            let data_width = mem_config.width.unwrap_or_else(|| {
-                type_width::get_type_width(&signal.signal_type) as u32
-            });
+            let data_width = mem_config
+                .width
+                .unwrap_or_else(|| type_width::get_type_width(&signal.signal_type) as u32);
 
             // Generate synthesis attribute based on memory style
             let ram_style_attr = match mem_config.style {
@@ -470,7 +476,11 @@ fn generate_module(
                 data_width,
                 mem_config.ports,
                 mem_config.read_latency,
-                if mem_config.read_only { ", read_only" } else { "" }
+                if mem_config.read_only {
+                    ", read_only"
+                } else {
+                    ""
+                }
             ));
 
             // Add synthesis attribute if applicable
@@ -536,7 +546,13 @@ fn generate_module(
             // Generate isolation logic if configured
             if let Some(power_config) = &signal.power_config {
                 if let Some(isolation) = &power_config.isolation {
-                    generate_isolation_logic(&mut sv, &signal.name, &element_width, &array_dim, isolation);
+                    generate_isolation_logic(
+                        &mut sv,
+                        &signal.name,
+                        &element_width,
+                        &array_dim,
+                        isolation,
+                    );
                 }
             }
         }
@@ -649,7 +665,9 @@ fn generate_module(
     }
 
     // Generate breakpoint assertions (SVA)
-    let breakpoint_signals: Vec<_> = mir_module.signals.iter()
+    let breakpoint_signals: Vec<_> = mir_module
+        .signals
+        .iter()
         .filter(|s| s.breakpoint_config.is_some())
         .collect();
     if !breakpoint_signals.is_empty() {
@@ -984,10 +1002,7 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
             // Generate assumption: assume(condition);
             let condition = format_expression_with_context(&assume_stmt.condition, module);
             if let Some(msg) = &assume_stmt.message {
-                sv.push_str(&format!(
-                    "{}assume({}); // {}\n",
-                    indent, condition, msg
-                ));
+                sv.push_str(&format!("{}assume({}); // {}\n", indent, condition, msg));
             } else {
                 sv.push_str(&format!("{}assume({});\n", indent, condition));
             }
@@ -996,10 +1011,7 @@ fn generate_statement(stmt: &Statement, module: &Module, indent_level: usize) ->
             // Generate cover point: cover(condition);
             let condition = format_expression_with_context(&cover_stmt.condition, module);
             if let Some(lbl) = &cover_stmt.label {
-                sv.push_str(&format!(
-                    "{}{}: cover({});\n",
-                    indent, lbl, condition
-                ));
+                sv.push_str(&format!("{}{}: cover({});\n", indent, lbl, condition));
             } else {
                 sv.push_str(&format!("{}cover({});\n", indent, condition));
             }
@@ -1335,9 +1347,7 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
             // First, check if the base is a signal reference that's in our tuple source mapping
             if let skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(sig_id)) = &base.kind {
                 // Check the thread-local mapping for this signal
-                let prefix = TUPLE_SOURCE_MAP.with(|map| {
-                    map.borrow().get(sig_id).cloned()
-                });
+                let prefix = TUPLE_SOURCE_MAP.with(|map| map.borrow().get(sig_id).cloned());
 
                 if let Some(inst_prefix) = prefix {
                     // Found in mapping - use the module instance result signal directly
@@ -1482,12 +1492,8 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             format_expression(expr)
         }
         // BUG FIX #85: Handle tuple/field access for module synthesis
-        skalp_mir::ExpressionKind::TupleFieldAccess { base, .. } => {
-            format_expression(base)
-        }
-        skalp_mir::ExpressionKind::FieldAccess { base, .. } => {
-            format_expression(base)
-        }
+        skalp_mir::ExpressionKind::TupleFieldAccess { base, .. } => format_expression(base),
+        skalp_mir::ExpressionKind::FieldAccess { base, .. } => format_expression(base),
     }
 }
 
@@ -1954,7 +1960,8 @@ fn expand_port_connection(
     match port_type {
         DataType::Struct(struct_type) => {
             // Get the signal base name if it's a simple reference
-            let signal_base_name = if let skalp_mir::ExpressionKind::Ref(lvalue) = &signal_expr.kind {
+            let signal_base_name = if let skalp_mir::ExpressionKind::Ref(lvalue) = &signal_expr.kind
+            {
                 Some(format_lvalue_with_context(lvalue, parent_module))
             } else {
                 None
@@ -1983,7 +1990,8 @@ fn expand_port_connection(
         | DataType::Vec3(element_type)
         | DataType::Vec4(element_type) => {
             // Get the signal base name
-            let signal_base_name = if let skalp_mir::ExpressionKind::Ref(lvalue) = &signal_expr.kind {
+            let signal_base_name = if let skalp_mir::ExpressionKind::Ref(lvalue) = &signal_expr.kind
+            {
                 Some(format_lvalue_with_context(lvalue, parent_module))
             } else {
                 None
@@ -2545,7 +2553,10 @@ fn generate_assertion(assertion: &Assertion, module: &Module) -> String {
     match assertion.kind {
         AssertionKind::Assert => {
             if let Some(ref msg) = assertion.message {
-                format!("    assert property ({}) else $error(\"{}\");\n", condition, msg)
+                format!(
+                    "    assert property ({}) else $error(\"{}\");\n",
+                    condition, msg
+                )
             } else {
                 format!("    assert property ({});\n", condition)
             }
@@ -2599,7 +2610,10 @@ fn generate_breakpoint_assertion(
 
     // Add comment
     if let Some(ref condition) = bp_config.condition {
-        sv.push_str(&format!("    // Breakpoint: {} (condition: {})\n", bp_name, condition));
+        sv.push_str(&format!(
+            "    // Breakpoint: {} (condition: {})\n",
+            bp_name, condition
+        ));
     } else {
         sv.push_str(&format!("    // Breakpoint: {}\n", bp_name));
     }
@@ -2619,12 +2633,10 @@ fn generate_breakpoint_assertion(
         } else {
             format!("$error(\"BREAKPOINT [{}] triggered\"); $stop;", bp_name)
         }
+    } else if let Some(ref msg) = bp_config.message {
+        format!("$display(\"BREAKPOINT [{}]: {}\"); $stop;", bp_name, msg)
     } else {
-        if let Some(ref msg) = bp_config.message {
-            format!("$display(\"BREAKPOINT [{}]: {}\"); $stop;", bp_name, msg)
-        } else {
-            format!("$display(\"BREAKPOINT [{}] triggered\"); $stop;", bp_name)
-        }
+        format!("$display(\"BREAKPOINT [{}] triggered\"); $stop;", bp_name)
     };
 
     // Generate the assertion block
@@ -2673,7 +2685,14 @@ fn generate_cdc_synchronizer(
             // Generate Gray code synchronizer for multi-bit values
             // Converts binary -> gray -> sync stages -> binary
             if data_width > 1 {
-                generate_gray_code_synchronizer(sv, signal_name, element_width, array_dim, data_width, stages);
+                generate_gray_code_synchronizer(
+                    sv,
+                    signal_name,
+                    element_width,
+                    array_dim,
+                    data_width,
+                    stages,
+                );
             } else {
                 // Fall back to 2FF for single-bit
                 generate_two_ff_synchronizer(sv, signal_name, element_width, array_dim, stages);
@@ -2729,7 +2748,11 @@ fn generate_two_ff_synchronizer(
     // The final output signal is the last sync stage
     sv.push_str(&format!(
         "    wire {}{}{} = {}_sync_{};\n",
-        element_width, signal_name, array_dim, signal_name, stages - 1
+        element_width,
+        signal_name,
+        array_dim,
+        signal_name,
+        stages - 1
     ));
 }
 
@@ -2780,20 +2803,28 @@ fn generate_gray_code_synchronizer(
 
     // Gray to Binary conversion (XOR chain)
     // For n-bit: bin[n-1] = gray[n-1], bin[i] = bin[i+1] ^ gray[i]
-    sv.push_str(&format!(
-        "    // Gray to binary decoder\n"
-    ));
+    sv.push_str("    // Gray to binary decoder\n");
 
     if data_width <= 8 {
         // Inline decoder for small widths
         sv.push_str(&format!(
             "    assign {}[{}] = {}_gray_sync_{}[{}];\n",
-            signal_name, width_m1, signal_name, stages - 1, width_m1
+            signal_name,
+            width_m1,
+            signal_name,
+            stages - 1,
+            width_m1
         ));
         for i in (0..width_m1).rev() {
             sv.push_str(&format!(
                 "    assign {}[{}] = {}[{}] ^ {}_gray_sync_{}[{}];\n",
-                signal_name, i, signal_name, i + 1, signal_name, stages - 1, i
+                signal_name,
+                i,
+                signal_name,
+                i + 1,
+                signal_name,
+                stages - 1,
+                i
             ));
         }
     } else {
@@ -2804,7 +2835,9 @@ fn generate_gray_code_synchronizer(
         ));
         sv.push_str(&format!(
             "    assign {} = gray_to_bin({}_gray_sync_{});\n",
-            signal_name, signal_name, stages - 1
+            signal_name,
+            signal_name,
+            stages - 1
         ));
     }
 }
@@ -2818,10 +2851,7 @@ fn generate_pulse_synchronizer(
     stages: usize,
 ) {
     // Toggle flip-flop in source domain
-    sv.push_str(&format!(
-        "    reg {}_toggle{};\n",
-        signal_name, array_dim
-    ));
+    sv.push_str(&format!("    reg {}_toggle{};\n", signal_name, array_dim));
 
     // Synchronizer chain for toggle
     for i in 0..stages {
@@ -2841,7 +2871,12 @@ fn generate_pulse_synchronizer(
     // Output pulse (XOR of synced toggle and previous)
     sv.push_str(&format!(
         "    wire {}{}{} = {}_toggle_sync_{} ^ {}_toggle_prev;\n",
-        element_width, signal_name, array_dim, signal_name, stages - 1, signal_name
+        element_width,
+        signal_name,
+        array_dim,
+        signal_name,
+        stages - 1,
+        signal_name
     ));
 }
 
@@ -2854,10 +2889,7 @@ fn generate_handshake_synchronizer(
     stages: usize,
 ) {
     // Request signal (source domain)
-    sv.push_str(&format!(
-        "    reg {}_req{};\n",
-        signal_name, array_dim
-    ));
+    sv.push_str(&format!("    reg {}_req{};\n", signal_name, array_dim));
 
     // Request synchronizer chain (into destination domain)
     for i in 0..stages {
@@ -2869,10 +2901,7 @@ fn generate_handshake_synchronizer(
     }
 
     // Acknowledge signal (destination domain)
-    sv.push_str(&format!(
-        "    reg {}_ack{};\n",
-        signal_name, array_dim
-    ));
+    sv.push_str(&format!("    reg {}_ack{};\n", signal_name, array_dim));
 
     // Acknowledge synchronizer chain (back to source domain)
     for i in 0..stages {
@@ -2907,11 +2936,7 @@ fn generate_handshake_synchronizer(
 /// - Retention registers: preserved during power-down
 /// - Isolation cells: clamp outputs when source domain is off
 /// - Level shifters: voltage domain crossings
-fn generate_power_attributes(
-    sv: &mut String,
-    signal_name: &str,
-    power_config: &PowerConfig,
-) {
+fn generate_power_attributes(sv: &mut String, signal_name: &str, power_config: &PowerConfig) {
     // Track if we generated any power-related comments
     let mut has_power_comment = false;
 
@@ -2961,8 +2986,15 @@ fn generate_power_attributes(
         sv.push_str(&format!("    // Isolation: clamp={}\n", clamp_str));
 
         if let Some(enable) = &isolation.enable_signal {
-            let polarity = if isolation.active_high { "active-high" } else { "active-low" };
-            sv.push_str(&format!("    // Isolation enable: {} ({})\n", enable, polarity));
+            let polarity = if isolation.active_high {
+                "active-high"
+            } else {
+                "active-low"
+            };
+            sv.push_str(&format!(
+                "    // Isolation enable: {} ({})\n",
+                enable, polarity
+            ));
         }
     }
 
@@ -3139,7 +3171,10 @@ fn generate_vendor_ip_wrapper(
         ));
     } else {
         // Generate actual instantiation
-        sv.push_str(&format!("    // Instantiate vendor IP: {}\n", vendor_config.ip_name));
+        sv.push_str(&format!(
+            "    // Instantiate vendor IP: {}\n",
+            vendor_config.ip_name
+        ));
 
         // For Xilinx IP, add XPM library prefix if applicable
         let ip_module_name = if vendor_config.vendor == VendorType::Xilinx {

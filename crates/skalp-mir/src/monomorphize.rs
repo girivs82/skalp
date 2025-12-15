@@ -120,18 +120,18 @@ impl TypeSubstitution {
 
             // Type expressions that may contain parameters
             HirType::BitExpr(expr) => HirType::BitExpr(Box::new(self.substitute_expression(expr))),
-            HirType::LogicExpr(expr) => HirType::LogicExpr(Box::new(self.substitute_expression(expr))),
+            HirType::LogicExpr(expr) => {
+                HirType::LogicExpr(Box::new(self.substitute_expression(expr)))
+            }
 
             // Composite types that may contain parametric types
             HirType::Array(elem_ty, size) => {
                 HirType::Array(Box::new(self.substitute_type(elem_ty)), *size)
             }
-            HirType::ArrayExpr(elem_ty, size_expr) => {
-                HirType::ArrayExpr(
-                    Box::new(self.substitute_type(elem_ty)),
-                    Box::new(self.substitute_expression(size_expr)),
-                )
-            }
+            HirType::ArrayExpr(elem_ty, size_expr) => HirType::ArrayExpr(
+                Box::new(self.substitute_type(elem_ty)),
+                Box::new(self.substitute_expression(size_expr)),
+            ),
             HirType::Tuple(types) => {
                 HirType::Tuple(types.iter().map(|t| self.substitute_type(t)).collect())
             }
@@ -167,9 +167,10 @@ impl TypeSubstitution {
                     .iter()
                     .map(|s| self.substitute_statement(s))
                     .collect(),
-                else_statements: if_stmt.else_statements.as_ref().map(|stmts| {
-                    stmts.iter().map(|s| self.substitute_statement(s)).collect()
-                }),
+                else_statements: if_stmt
+                    .else_statements
+                    .as_ref()
+                    .map(|stmts| stmts.iter().map(|s| self.substitute_statement(s)).collect()),
                 mux_style: if_stmt.mux_style,
             }),
             hir::HirStatement::Match(match_stmt) => {
@@ -203,18 +204,28 @@ impl TypeSubstitution {
         match expr {
             hir::HirExpression::Call(call) => hir::HirExpression::Call(hir::HirCallExpr {
                 function: call.function.clone(),
-                type_args: call.type_args.iter().map(|t| self.substitute_type(t)).collect(),
-                named_type_args: call.named_type_args.iter().map(|(k, v)| (k.clone(), self.substitute_type(v))).collect(),
-                args: call.args.iter().map(|a| self.substitute_expression(a)).collect(),
-                impl_style: call.impl_style.clone(),
+                type_args: call
+                    .type_args
+                    .iter()
+                    .map(|t| self.substitute_type(t))
+                    .collect(),
+                named_type_args: call
+                    .named_type_args
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.substitute_type(v)))
+                    .collect(),
+                args: call
+                    .args
+                    .iter()
+                    .map(|a| self.substitute_expression(a))
+                    .collect(),
+                impl_style: call.impl_style,
             }),
-            hir::HirExpression::Binary(binary) => {
-                hir::HirExpression::Binary(hir::HirBinaryExpr {
-                    left: Box::new(self.substitute_expression(&binary.left)),
-                    op: binary.op.clone(),
-                    right: Box::new(self.substitute_expression(&binary.right)),
-                })
-            }
+            hir::HirExpression::Binary(binary) => hir::HirExpression::Binary(hir::HirBinaryExpr {
+                left: Box::new(self.substitute_expression(&binary.left)),
+                op: binary.op.clone(),
+                right: Box::new(self.substitute_expression(&binary.right)),
+            }),
             hir::HirExpression::Unary(unary) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: unary.op.clone(),
                 operand: Box::new(self.substitute_expression(&unary.operand)),
@@ -224,21 +235,19 @@ impl TypeSubstitution {
                 then_expr: Box::new(self.substitute_expression(&if_expr.then_expr)),
                 else_expr: Box::new(self.substitute_expression(&if_expr.else_expr)),
             }),
-            hir::HirExpression::Match(match_expr) => {
-                hir::HirExpression::Match(hir::HirMatchExpr {
-                    expr: Box::new(self.substitute_expression(&match_expr.expr)),
-                    arms: match_expr
-                        .arms
-                        .iter()
-                        .map(|arm| hir::HirMatchArmExpr {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.substitute_expression(g)),
-                            expr: self.substitute_expression(&arm.expr),
-                        })
-                        .collect(),
-                    mux_style: match_expr.mux_style,
-                })
-            }
+            hir::HirExpression::Match(match_expr) => hir::HirExpression::Match(hir::HirMatchExpr {
+                expr: Box::new(self.substitute_expression(&match_expr.expr)),
+                arms: match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| hir::HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| self.substitute_expression(g)),
+                        expr: self.substitute_expression(&arm.expr),
+                    })
+                    .collect(),
+                mux_style: match_expr.mux_style,
+            }),
             hir::HirExpression::Block {
                 statements,
                 result_expr,
@@ -267,13 +276,22 @@ impl TypeSubstitution {
                 })
             }
             hir::HirExpression::TupleLiteral(exprs) => hir::HirExpression::TupleLiteral(
-                exprs.iter().map(|e| self.substitute_expression(e)).collect(),
+                exprs
+                    .iter()
+                    .map(|e| self.substitute_expression(e))
+                    .collect(),
             ),
             hir::HirExpression::ArrayLiteral(exprs) => hir::HirExpression::ArrayLiteral(
-                exprs.iter().map(|e| self.substitute_expression(e)).collect(),
+                exprs
+                    .iter()
+                    .map(|e| self.substitute_expression(e))
+                    .collect(),
             ),
             hir::HirExpression::Concat(exprs) => hir::HirExpression::Concat(
-                exprs.iter().map(|e| self.substitute_expression(e)).collect(),
+                exprs
+                    .iter()
+                    .map(|e| self.substitute_expression(e))
+                    .collect(),
             ),
             hir::HirExpression::Ternary {
                 condition,
@@ -293,12 +311,10 @@ impl TypeSubstitution {
                 Box::new(self.substitute_expression(start)),
                 Box::new(self.substitute_expression(end)),
             ),
-            hir::HirExpression::FieldAccess { base, field } => {
-                hir::HirExpression::FieldAccess {
-                    base: Box::new(self.substitute_expression(base)),
-                    field: field.clone(),
-                }
-            }
+            hir::HirExpression::FieldAccess { base, field } => hir::HirExpression::FieldAccess {
+                base: Box::new(self.substitute_expression(base)),
+                field: field.clone(),
+            },
             // Leaf expressions - no substitution needed
             _ => expr.clone(),
         }
@@ -441,12 +457,13 @@ impl Monomorphizer {
 
                 eprintln!(
                     "  [TRAIT] Found impl {} for {:?}",
-                    trait_impl.trait_name,
-                    target_type
+                    trait_impl.trait_name, target_type
                 );
 
                 // Get trait definition to get parameter info
-                let trait_def = hir.trait_definitions.iter()
+                let trait_def = hir
+                    .trait_definitions
+                    .iter()
                     .find(|t| t.name == trait_impl.trait_name);
 
                 if let Some(def) = trait_def {
@@ -464,7 +481,7 @@ impl Monomorphizer {
 
                 // Get or create method map for this (trait, type) pair
                 let key = (trait_impl.trait_name.clone(), type_key.clone());
-                let methods_map = self.trait_methods.entry(key).or_insert_with(HashMap::new);
+                let methods_map = self.trait_methods.entry(key).or_default();
 
                 for method_impl in &trait_impl.method_implementations {
                     // Find corresponding trait method definition for params/return type
@@ -495,16 +512,14 @@ impl Monomorphizer {
                         method_name: method_impl.name.clone(),
                         body: method_impl.body.clone(),
                         parameters,
-                        return_type: trait_method
-                            .and_then(|m| m.return_type.clone()),
+                        return_type: trait_method.and_then(|m| m.return_type.clone()),
                     };
 
                     methods_map.insert(method_impl.name.clone(), info);
 
                     eprintln!(
                         "    [TRAIT] Registered method: {}.{}",
-                        trait_impl.trait_name,
-                        method_impl.name
+                        trait_impl.trait_name, method_impl.name
                     );
                 }
             }
@@ -637,15 +652,20 @@ impl Monomorphizer {
     fn collect_calls_from_expression(&mut self, expr: &hir::HirExpression, context: &str) {
         match expr {
             hir::HirExpression::Call(call) => {
-                eprintln!("    [MONO_DEBUG] Found call to '{}' with {} type args",
-                    call.function, call.type_args.len());
+                eprintln!(
+                    "    [MONO_DEBUG] Found call to '{}' with {} type args",
+                    call.function,
+                    call.type_args.len()
+                );
 
                 // Check if this is a call to a generic function with type arguments
                 if !call.type_args.is_empty() {
                     eprintln!("    [MONO_DEBUG] Call has type args, looking up function...");
 
                     // Look up the function by name to get its ID
-                    if let Some((func_id, func)) = self.find_generic_function_by_name(&call.function) {
+                    if let Some((func_id, func)) =
+                        self.find_generic_function_by_name(&call.function)
+                    {
                         eprintln!(
                             "  [MONO] Found call to generic function '{}' with {} type args in {}",
                             call.function,
@@ -705,10 +725,16 @@ impl Monomorphizer {
                         // Queue this specialization
                         self.request_specialization(func_id, type_args);
                     } else {
-                        eprintln!("    [MONO_DEBUG] Function '{}' not found in generic_functions map", call.function);
+                        eprintln!(
+                            "    [MONO_DEBUG] Function '{}' not found in generic_functions map",
+                            call.function
+                        );
                     }
                 } else {
-                    eprintln!("    [MONO_DEBUG] Call to '{}' has no type args", call.function);
+                    eprintln!(
+                        "    [MONO_DEBUG] Call to '{}' has no type args",
+                        call.function
+                    );
                 }
 
                 // Recursively collect from arguments
@@ -734,7 +760,10 @@ impl Monomorphizer {
                     self.collect_calls_from_expression(&arm.expr, context);
                 }
             }
-            hir::HirExpression::Block { statements, result_expr } => {
+            hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } => {
                 self.collect_calls_from_statements(statements, context);
                 self.collect_calls_from_expression(result_expr, context);
             }
@@ -753,7 +782,11 @@ impl Monomorphizer {
                     self.collect_calls_from_expression(expr, context);
                 }
             }
-            hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+            hir::HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
                 self.collect_calls_from_expression(condition, context);
                 self.collect_calls_from_expression(true_expr, context);
                 self.collect_calls_from_expression(false_expr, context);
@@ -788,7 +821,11 @@ impl Monomorphizer {
     }
 
     /// Create a key for the specializations map
-    fn make_specialization_key(&self, function_id: hir::FunctionId, type_args: &[ConcreteType]) -> String {
+    fn make_specialization_key(
+        &self,
+        function_id: hir::FunctionId,
+        type_args: &[ConcreteType],
+    ) -> String {
         let mut key = format!("{:?}", function_id);
         for arg in type_args {
             key.push(':');
@@ -798,7 +835,11 @@ impl Monomorphizer {
     }
 
     /// Request a specialization
-    fn request_specialization(&mut self, function_id: hir::FunctionId, type_args: Vec<ConcreteType>) {
+    fn request_specialization(
+        &mut self,
+        function_id: hir::FunctionId,
+        type_args: Vec<ConcreteType>,
+    ) {
         // Check if we've already specialized this combination
         let key = self.make_specialization_key(function_id, &type_args);
         if !self.specializations.contains_key(&key) {
@@ -855,7 +896,8 @@ impl Monomorphizer {
 
         // Build substitution map: generic param name -> concrete type
         let mut substitution = TypeSubstitution::new();
-        for (generic_param, concrete_type) in generic_func.generics.iter().zip(req.type_args.iter()) {
+        for (generic_param, concrete_type) in generic_func.generics.iter().zip(req.type_args.iter())
+        {
             substitution.add_mapping(generic_param.name.clone(), concrete_type.clone());
         }
 
@@ -871,7 +913,10 @@ impl Monomorphizer {
                 .map(|p| hir::HirParameter {
                     name: p.name.clone(),
                     param_type: substitution.substitute_type(&p.param_type),
-                    default_value: p.default_value.as_ref().map(|v| substitution.substitute_expression(v)),
+                    default_value: p
+                        .default_value
+                        .as_ref()
+                        .map(|v| substitution.substitute_expression(v)),
                 })
                 .collect(),
             return_type: generic_func
@@ -966,14 +1011,15 @@ impl Monomorphizer {
             );
 
             // Process statements with accumulating context (for let bindings)
-            let (new_body, _final_ctx) = func.body.iter().fold(
-                (Vec::new(), ctx.clone()),
-                |(mut stmts, mut acc_ctx), stmt| {
-                    let (new_stmt, updated_ctx) = self.replace_calls_in_statement_with_context(stmt, acc_ctx);
-                    stmts.push(new_stmt);
-                    (stmts, updated_ctx)
-                }
-            );
+            let (new_body, _final_ctx) =
+                func.body
+                    .iter()
+                    .fold((Vec::new(), ctx.clone()), |(mut stmts, acc_ctx), stmt| {
+                        let (new_stmt, updated_ctx) =
+                            self.replace_calls_in_statement_with_context(stmt, acc_ctx);
+                        stmts.push(new_stmt);
+                        (stmts, updated_ctx)
+                    });
             func.body = new_body;
         }
 
@@ -1025,7 +1071,11 @@ impl Monomorphizer {
     /// Try to resolve a call as a trait method and generate specialized function
     ///
     /// Returns Some(specialized_function_name) if this is a resolvable trait method call
-    fn try_resolve_trait_method(&mut self, call: &hir::HirCallExpr, ctx: &TypeContext) -> Option<String> {
+    fn try_resolve_trait_method(
+        &mut self,
+        call: &hir::HirCallExpr,
+        ctx: &TypeContext,
+    ) -> Option<String> {
         // Method calls have at least one argument (the receiver)
         if call.args.is_empty() {
             return None;
@@ -1050,7 +1100,8 @@ impl Monomorphizer {
             if impl_type_key == &type_key {
                 if let Some(method_info) = methods.get(&call.function) {
                     // Found a matching trait method!
-                    let specialized_name = format!("{}_{}_{}",
+                    let specialized_name = format!(
+                        "{}_{}_{}",
                         trait_name,
                         self.mangle_type(&receiver_type),
                         call.function
@@ -1069,7 +1120,7 @@ impl Monomorphizer {
                         self.generate_trait_method_function(
                             &specialized_name,
                             &method_info_cloned,
-                            &receiver_type
+                            &receiver_type,
                         );
                     }
 
@@ -1130,8 +1181,8 @@ impl Monomorphizer {
             params: specialized_params,
             return_type: specialized_return_type,
             body: method_info.body.clone(), // TODO: May need to substitute Self in body too
-            span: None, // Specialized functions don't have source spans
-            pipeline_config: None, // Trait methods don't have pipeline config
+            span: None,                     // Specialized functions don't have source spans
+            pipeline_config: None,          // Trait methods don't have pipeline config
         };
 
         eprintln!(
@@ -1141,25 +1192,31 @@ impl Monomorphizer {
         );
 
         // Record that we've generated this specialization
-        self.specializations.insert(specialized_name.to_string(), specialized_name.to_string());
+        self.specializations
+            .insert(specialized_name.to_string(), specialized_name.to_string());
 
         // Add to specialized functions list
         self.specialized_functions.push(specialized_func);
     }
 
     /// Substitute 'Self' type with concrete type
+    #[allow(clippy::only_used_in_recursion)]
     fn substitute_self_type(&self, ty: &HirType, concrete_type: &HirType) -> HirType {
         match ty {
             // 'Self' type gets replaced
             HirType::Custom(name) if name == "Self" => concrete_type.clone(),
 
             // Recursively substitute in composite types
-            HirType::Array(elem_ty, size) => {
-                HirType::Array(Box::new(self.substitute_self_type(elem_ty, concrete_type)), *size)
-            }
-            HirType::Tuple(types) => {
-                HirType::Tuple(types.iter().map(|t| self.substitute_self_type(t, concrete_type)).collect())
-            }
+            HirType::Array(elem_ty, size) => HirType::Array(
+                Box::new(self.substitute_self_type(elem_ty, concrete_type)),
+                *size,
+            ),
+            HirType::Tuple(types) => HirType::Tuple(
+                types
+                    .iter()
+                    .map(|t| self.substitute_self_type(t, concrete_type))
+                    .collect(),
+            ),
             HirType::Vec2(elem_ty) => {
                 HirType::Vec2(Box::new(self.substitute_self_type(elem_ty, concrete_type)))
             }
@@ -1233,7 +1290,10 @@ impl Monomorphizer {
             // - Infer from function return types
             // - Use trait bounds from generic parameters
             _ => {
-                eprintln!("    [TRAIT_RESOLVE] Cannot infer type for expression: {:?}", expr);
+                eprintln!(
+                    "    [TRAIT_RESOLVE] Cannot infer type for expression: {:?}",
+                    expr
+                );
                 None
             }
         }
@@ -1243,7 +1303,7 @@ impl Monomorphizer {
     fn replace_calls_in_statement_with_context(
         &mut self,
         stmt: &hir::HirStatement,
-        ctx: TypeContext
+        ctx: TypeContext,
     ) -> (hir::HirStatement, TypeContext) {
         match stmt {
             hir::HirStatement::Let(let_stmt) => {
@@ -1279,7 +1339,11 @@ impl Monomorphizer {
     }
 
     /// Replace calls in a statement (preserves context)
-    fn replace_calls_in_statement(&mut self, stmt: &hir::HirStatement, ctx: &TypeContext) -> hir::HirStatement {
+    fn replace_calls_in_statement(
+        &mut self,
+        stmt: &hir::HirStatement,
+        ctx: &TypeContext,
+    ) -> hir::HirStatement {
         match stmt {
             hir::HirStatement::Assignment(assign) => {
                 hir::HirStatement::Assignment(hir::HirAssignment {
@@ -1302,9 +1366,11 @@ impl Monomorphizer {
                     value: self.replace_calls_in_expression(&let_stmt.value, ctx),
                 })
             }
-            hir::HirStatement::Return(expr_opt) => {
-                hir::HirStatement::Return(expr_opt.as_ref().map(|e| self.replace_calls_in_expression(e, ctx)))
-            }
+            hir::HirStatement::Return(expr_opt) => hir::HirStatement::Return(
+                expr_opt
+                    .as_ref()
+                    .map(|e| self.replace_calls_in_expression(e, ctx)),
+            ),
             hir::HirStatement::If(if_stmt) => hir::HirStatement::If(hir::HirIfStatement {
                 condition: self.replace_calls_in_expression(&if_stmt.condition, ctx),
                 then_statements: if_stmt
@@ -1313,7 +1379,10 @@ impl Monomorphizer {
                     .map(|s| self.replace_calls_in_statement(s, ctx))
                     .collect(),
                 else_statements: if_stmt.else_statements.as_ref().map(|stmts| {
-                    stmts.iter().map(|s| self.replace_calls_in_statement(s, ctx)).collect()
+                    stmts
+                        .iter()
+                        .map(|s| self.replace_calls_in_statement(s, ctx))
+                        .collect()
                 }),
                 mux_style: if_stmt.mux_style,
             }),
@@ -1325,7 +1394,10 @@ impl Monomorphizer {
                         .iter()
                         .map(|arm| hir::HirMatchArm {
                             pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.replace_calls_in_expression(g, ctx)),
+                            guard: arm
+                                .guard
+                                .as_ref()
+                                .map(|g| self.replace_calls_in_expression(g, ctx)),
                             statements: arm
                                 .statements
                                 .iter()
@@ -1337,19 +1409,28 @@ impl Monomorphizer {
                 })
             }
             hir::HirStatement::Block(stmts) => hir::HirStatement::Block(
-                stmts.iter().map(|s| self.replace_calls_in_statement(s, ctx)).collect(),
+                stmts
+                    .iter()
+                    .map(|s| self.replace_calls_in_statement(s, ctx))
+                    .collect(),
             ),
             _ => stmt.clone(),
         }
     }
 
     /// Replace calls in an expression
-    fn replace_calls_in_expression(&mut self, expr: &hir::HirExpression, ctx: &TypeContext) -> hir::HirExpression {
+    fn replace_calls_in_expression(
+        &mut self,
+        expr: &hir::HirExpression,
+        ctx: &TypeContext,
+    ) -> hir::HirExpression {
         match expr {
             hir::HirExpression::Call(call) => {
                 // Check if this is a generic call that needs replacement
                 if !call.type_args.is_empty() {
-                    if let Some((func_id, func)) = self.find_generic_function_by_name(&call.function) {
+                    if let Some((func_id, func)) =
+                        self.find_generic_function_by_name(&call.function)
+                    {
                         let type_args: Vec<ConcreteType> = call
                             .type_args
                             .iter()
@@ -1361,7 +1442,9 @@ impl Monomorphizer {
                                         match ty {
                                             HirType::NatExpr(expr) => {
                                                 // Extract literal value from expression
-                                                if let hir::HirExpression::Literal(lit) = expr.as_ref() {
+                                                if let hir::HirExpression::Literal(lit) =
+                                                    expr.as_ref()
+                                                {
                                                     let value = match lit {
                                                         hir::HirLiteral::Integer(v) => *v,
                                                         _ => 0,
@@ -1405,7 +1488,7 @@ impl Monomorphizer {
                                     .iter()
                                     .map(|a| self.replace_calls_in_expression(a, ctx))
                                     .collect(),
-                                impl_style: call.impl_style.clone(),
+                                impl_style: call.impl_style,
                             });
                         }
                     }
@@ -1427,7 +1510,7 @@ impl Monomorphizer {
                             .iter()
                             .map(|a| self.replace_calls_in_expression(a, ctx))
                             .collect(),
-                        impl_style: call.impl_style.clone(),
+                        impl_style: call.impl_style,
                     });
                 }
 
@@ -1441,16 +1524,14 @@ impl Monomorphizer {
                         .iter()
                         .map(|a| self.replace_calls_in_expression(a, ctx))
                         .collect(),
-                    impl_style: call.impl_style.clone(),
+                    impl_style: call.impl_style,
                 })
             }
-            hir::HirExpression::Binary(binary) => {
-                hir::HirExpression::Binary(hir::HirBinaryExpr {
-                    left: Box::new(self.replace_calls_in_expression(&binary.left, ctx)),
-                    op: binary.op.clone(),
-                    right: Box::new(self.replace_calls_in_expression(&binary.right, ctx)),
-                })
-            }
+            hir::HirExpression::Binary(binary) => hir::HirExpression::Binary(hir::HirBinaryExpr {
+                left: Box::new(self.replace_calls_in_expression(&binary.left, ctx)),
+                op: binary.op.clone(),
+                right: Box::new(self.replace_calls_in_expression(&binary.right, ctx)),
+            }),
             hir::HirExpression::Unary(unary) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: unary.op.clone(),
                 operand: Box::new(self.replace_calls_in_expression(&unary.operand, ctx)),
@@ -1460,21 +1541,22 @@ impl Monomorphizer {
                 then_expr: Box::new(self.replace_calls_in_expression(&if_expr.then_expr, ctx)),
                 else_expr: Box::new(self.replace_calls_in_expression(&if_expr.else_expr, ctx)),
             }),
-            hir::HirExpression::Match(match_expr) => {
-                hir::HirExpression::Match(hir::HirMatchExpr {
-                    expr: Box::new(self.replace_calls_in_expression(&match_expr.expr, ctx)),
-                    arms: match_expr
-                        .arms
-                        .iter()
-                        .map(|arm| hir::HirMatchArmExpr {
-                            pattern: arm.pattern.clone(),
-                            guard: arm.guard.as_ref().map(|g| self.replace_calls_in_expression(g, ctx)),
-                            expr: self.replace_calls_in_expression(&arm.expr, ctx),
-                        })
-                        .collect(),
-                    mux_style: match_expr.mux_style,
-                })
-            }
+            hir::HirExpression::Match(match_expr) => hir::HirExpression::Match(hir::HirMatchExpr {
+                expr: Box::new(self.replace_calls_in_expression(&match_expr.expr, ctx)),
+                arms: match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| hir::HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: arm
+                            .guard
+                            .as_ref()
+                            .map(|g| self.replace_calls_in_expression(g, ctx)),
+                        expr: self.replace_calls_in_expression(&arm.expr, ctx),
+                    })
+                    .collect(),
+                mux_style: match_expr.mux_style,
+            }),
             hir::HirExpression::Block {
                 statements,
                 result_expr,
@@ -1538,12 +1620,10 @@ impl Monomorphizer {
                 Box::new(self.replace_calls_in_expression(start, ctx)),
                 Box::new(self.replace_calls_in_expression(end, ctx)),
             ),
-            hir::HirExpression::FieldAccess { base, field } => {
-                hir::HirExpression::FieldAccess {
-                    base: Box::new(self.replace_calls_in_expression(base, ctx)),
-                    field: field.clone(),
-                }
-            }
+            hir::HirExpression::FieldAccess { base, field } => hir::HirExpression::FieldAccess {
+                base: Box::new(self.replace_calls_in_expression(base, ctx)),
+                field: field.clone(),
+            },
             // Leaf expressions - no replacement needed
             _ => expr.clone(),
         }

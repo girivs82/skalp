@@ -476,12 +476,14 @@ mod sva_generation_tests {
         // Parse and compile
         let hir = parse_and_build_hir(source).expect("Failed to parse");
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
         let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
         // Generate SystemVerilog
-        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
-            .expect("Failed to generate SystemVerilog");
+        let sv_code =
+            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 
@@ -520,12 +522,14 @@ mod sva_generation_tests {
         // Parse and compile
         let hir = parse_and_build_hir(source).expect("Failed to parse");
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
         let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
         // Generate SystemVerilog
-        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
-            .expect("Failed to generate SystemVerilog");
+        let sv_code =
+            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 
@@ -558,12 +562,14 @@ mod sva_generation_tests {
         // Parse and compile
         let hir = parse_and_build_hir(source).expect("Failed to parse");
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
         let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
         // Generate SystemVerilog
-        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
-            .expect("Failed to generate SystemVerilog");
+        let sv_code =
+            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 
@@ -609,12 +615,14 @@ mod sva_generation_tests {
         // Parse and compile
         let hir = parse_and_build_hir(source).expect("Failed to parse");
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        let mir = compiler.compile_to_mir(&hir).expect("Failed to compile to MIR");
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
         let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
         // Generate SystemVerilog
-        let sv_code = generate_systemverilog_from_mir(&mir, &lir)
-            .expect("Failed to generate SystemVerilog");
+        let sv_code =
+            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 

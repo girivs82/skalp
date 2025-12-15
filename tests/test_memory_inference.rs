@@ -3,9 +3,9 @@
 //! Tests the #[memory(depth=N)] attribute and its propagation through
 //! HIR -> MIR.
 
+use skalp_frontend::hir::MemoryStyle;
 use skalp_frontend::hir_builder::build_hir;
 use skalp_frontend::parse::parse;
-use skalp_frontend::hir::MemoryStyle;
 use skalp_mir::hir_to_mir::HirToMir;
 
 /// Debug test to understand syntax tree structure
@@ -101,7 +101,11 @@ impl MemoryTest {
 
     let mem_config = mem_signal.memory_config.as_ref().unwrap();
     assert_eq!(mem_config.depth, 1024, "Memory depth should be 1024");
-    assert_eq!(mem_config.style, MemoryStyle::Auto, "Default style should be Auto");
+    assert_eq!(
+        mem_config.style,
+        MemoryStyle::Auto,
+        "Default style should be Auto"
+    );
 
     println!("Memory attribute parsing test PASSED!");
 }
@@ -183,7 +187,10 @@ impl MirMemTest {
     );
 
     let mem_config = mem_signal.memory_config.as_ref().unwrap();
-    assert_eq!(mem_config.depth, 1024, "Memory depth should propagate to MIR");
+    assert_eq!(
+        mem_config.depth, 1024,
+        "Memory depth should propagate to MIR"
+    );
 
     println!("Memory MIR propagation test PASSED!");
 }
@@ -210,7 +217,11 @@ impl DistMemTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "DistMemTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "DistMemTest")
+        .unwrap();
     let mem_signal = entity.signals.iter().find(|s| s.name == "lutram").unwrap();
 
     assert!(mem_signal.memory_config.is_some());
@@ -222,11 +233,18 @@ impl DistMemTest {
     let mut transformer = HirToMir::new();
     let mir = transformer.transform(&hir);
 
-    let module = mir.modules.iter().find(|m| m.name == "DistMemTest").unwrap();
+    let module = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "DistMemTest")
+        .unwrap();
     let mir_signal = module.signals.iter().find(|s| s.name == "lutram").unwrap();
 
     assert!(mir_signal.memory_config.is_some());
-    assert_eq!(mir_signal.memory_config.as_ref().unwrap().style, MemoryStyle::Distributed);
+    assert_eq!(
+        mir_signal.memory_config.as_ref().unwrap().style,
+        MemoryStyle::Distributed
+    );
 
     println!("Distributed memory style test PASSED!");
 }
@@ -254,8 +272,16 @@ impl WidthOverrideTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "WidthOverrideTest").unwrap();
-    let mem_signal = entity.signals.iter().find(|s| s.name == "custom_mem").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "WidthOverrideTest")
+        .unwrap();
+    let mem_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "custom_mem")
+        .unwrap();
 
     assert!(mem_signal.memory_config.is_some());
     let mem_config = mem_signal.memory_config.as_ref().unwrap();
@@ -287,8 +313,16 @@ impl UltraMemTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "UltraMemTest").unwrap();
-    let mem_signal = entity.signals.iter().find(|s| s.name == "ultraram").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "UltraMemTest")
+        .unwrap();
+    let mem_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "ultraram")
+        .unwrap();
 
     assert!(mem_signal.memory_config.is_some());
     let mem_config = mem_signal.memory_config.as_ref().unwrap();
@@ -320,7 +354,11 @@ impl RegMemTest {
     let tree = parse(source);
     let hir = build_hir(&tree).expect("HIR building should succeed");
 
-    let entity = hir.entities.iter().find(|e| e.name == "RegMemTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "RegMemTest")
+        .unwrap();
     let mem_signal = entity.signals.iter().find(|s| s.name == "regfile").unwrap();
 
     assert!(mem_signal.memory_config.is_some());

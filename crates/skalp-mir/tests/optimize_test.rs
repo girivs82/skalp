@@ -34,6 +34,11 @@ fn create_module_with_unused() -> Mir {
         clock_domain: None,
         initial: None,
         span: None,
+        memory_config: None,
+        trace_config: None,
+        cdc_config: None,
+        breakpoint_config: None,
+        power_config: None,
     });
     module.signals.push(Signal {
         id: SignalId(1),
@@ -42,6 +47,11 @@ fn create_module_with_unused() -> Mir {
         clock_domain: None,
         initial: None,
         span: None,
+        memory_config: None,
+        trace_config: None,
+        cdc_config: None,
+        breakpoint_config: None,
+        power_config: None,
     });
 
     // Add variables - some used, some unused
@@ -69,13 +79,17 @@ fn create_module_with_unused() -> Mir {
             statements: vec![
                 Statement::Assignment(Assignment {
                     lhs: LValue::Signal(SignalId(0)),
-                    rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(0)))),
+                    rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(
+                        0,
+                    )))),
                     kind: AssignmentKind::Blocking,
                     span: None,
                 }),
                 Statement::Assignment(Assignment {
                     lhs: LValue::Variable(VariableId(0)),
-                    rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(0)))),
+                    rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
+                        SignalId(0),
+                    ))),
                     kind: AssignmentKind::Blocking,
                     span: None,
                 }),
@@ -119,6 +133,11 @@ fn create_module_with_constants() -> Mir {
         clock_domain: None,
         initial: None,
         span: None,
+        memory_config: None,
+        trace_config: None,
+        cdc_config: None,
+        breakpoint_config: None,
+        power_config: None,
     });
 
     // Create process with constant expressions
@@ -133,19 +152,27 @@ fn create_module_with_constants() -> Mir {
                     lhs: LValue::Signal(SignalId(0)),
                     rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Add,
-                        left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(2)))),
-                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(3)))),
+                        left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                            Value::Integer(2),
+                        ))),
+                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                            Value::Integer(3),
+                        ))),
                     }),
                     kind: AssignmentKind::Blocking,
                     span: None,
                 }),
                 // Conditional with constant condition
                 Statement::If(IfStatement {
-                    condition: Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(1))), // Always true
+                    condition: Expression::with_unknown_type(ExpressionKind::Literal(
+                        Value::Integer(1),
+                    )), // Always true
                     then_block: Block {
                         statements: vec![Statement::Assignment(Assignment {
                             lhs: LValue::Port(PortId(0)),
-                            rhs: Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(42))),
+                            rhs: Expression::with_unknown_type(ExpressionKind::Literal(
+                                Value::Integer(42),
+                            )),
                             kind: AssignmentKind::Blocking,
                             span: None,
                         })],
@@ -153,7 +180,9 @@ fn create_module_with_constants() -> Mir {
                     else_block: Some(Block {
                         statements: vec![Statement::Assignment(Assignment {
                             lhs: LValue::Port(PortId(0)),
-                            rhs: Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))),
+                            rhs: Expression::with_unknown_type(ExpressionKind::Literal(
+                                Value::Integer(0),
+                            )),
                             kind: AssignmentKind::Blocking,
                             span: None,
                         })],
@@ -224,6 +253,11 @@ fn test_constant_folding_arithmetic() {
         clock_domain: None,
         initial: None,
         span: None,
+        memory_config: None,
+        trace_config: None,
+        cdc_config: None,
+        breakpoint_config: None,
+        power_config: None,
     });
 
     // Test various arithmetic operations
@@ -233,8 +267,12 @@ fn test_constant_folding_arithmetic() {
             lhs: LValue::Signal(SignalId(0)),
             rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                 op: BinaryOp::Mul,
-                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(3)))),
-                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(4)))),
+                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                    Value::Integer(3),
+                ))),
+                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                    Value::Integer(4),
+                ))),
             }),
             kind: AssignmentKind::Blocking,
             span: None,
@@ -244,8 +282,12 @@ fn test_constant_folding_arithmetic() {
             lhs: LValue::Signal(SignalId(0)),
             rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                 op: BinaryOp::Div,
-                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(20)))),
-                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(4)))),
+                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                    Value::Integer(20),
+                ))),
+                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                    Value::Integer(4),
+                ))),
             }),
             kind: AssignmentKind::Blocking,
             span: None,
@@ -255,8 +297,12 @@ fn test_constant_folding_arithmetic() {
             lhs: LValue::Signal(SignalId(0)),
             rhs: Expression::with_unknown_type(ExpressionKind::Binary {
                 op: BinaryOp::Sub,
-                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(10)))),
-                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(3)))),
+                left: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                    Value::Integer(10),
+                ))),
+                right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                    Value::Integer(3),
+                ))),
             }),
             kind: AssignmentKind::Blocking,
             span: None,
@@ -320,13 +366,24 @@ fn test_constant_folding_conditional() {
         clock_domain: None,
         initial: None,
         span: None,
+        memory_config: None,
+        trace_config: None,
+        cdc_config: None,
+        breakpoint_config: None,
+        power_config: None,
     });
 
     // Test conditional expression with constant condition
     let cond_expr = Expression::with_unknown_type(ExpressionKind::Conditional {
-        cond: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(1)))), // true
-        then_expr: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(42)))),
-        else_expr: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0)))),
+        cond: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+            Value::Integer(1),
+        ))), // true
+        then_expr: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+            Value::Integer(42),
+        ))),
+        else_expr: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+            Value::Integer(0),
+        ))),
     });
 
     let process = Process {

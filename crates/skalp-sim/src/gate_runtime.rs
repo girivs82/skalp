@@ -35,7 +35,7 @@
 use crate::gate_simulator::GateLevelSimulator;
 use crate::lir_to_sir::convert_lir_to_sir;
 use crate::simulator::{SimulationError, SimulationResult, SimulationState};
-use crate::sir::{Sir, SirSignalType, SirPortDirection};
+use crate::sir::{Sir, SirPortDirection, SirSignalType};
 use skalp_lir::lir::Lir;
 use std::collections::HashMap;
 
@@ -43,20 +43,15 @@ use std::collections::HashMap;
 use crate::gpu_gate_runtime::GpuGateRuntime;
 
 /// Simulation backend mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SimulationMode {
     /// CPU-based simulation
     Cpu,
     /// GPU-accelerated simulation (Metal on macOS)
     Gpu,
     /// Auto-select (prefer GPU if available)
+    #[default]
     Auto,
-}
-
-impl Default for SimulationMode {
-    fn default() -> Self {
-        SimulationMode::Auto
-    }
 }
 
 /// Backend implementation selector
@@ -95,10 +90,7 @@ impl GateLevelRuntime {
     }
 
     /// Create a gate-level runtime with explicit mode selection
-    pub fn from_lir_with_mode(
-        netlist: &Lir,
-        mode: SimulationMode,
-    ) -> SimulationResult<Self> {
+    pub fn from_lir_with_mode(netlist: &Lir, mode: SimulationMode) -> SimulationResult<Self> {
         // Convert Lir to SIR
         let sir_result = convert_lir_to_sir(netlist);
         let sir = sir_result.sir;
@@ -138,21 +130,17 @@ impl GateLevelRuntime {
 
         // Select backend based on mode
         let (backend, using_gpu) = match mode {
-            SimulationMode::Cpu => {
-                (Backend::Cpu(GateLevelSimulator::new(sir)), false)
-            }
+            SimulationMode::Cpu => (Backend::Cpu(GateLevelSimulator::new(sir)), false),
             #[cfg(target_os = "macos")]
-            SimulationMode::Gpu => {
-                match GpuGateRuntime::new(sir) {
-                    Ok(gpu_rt) => {
-                        let is_using = gpu_rt.is_using_gpu();
-                        (Backend::Gpu(gpu_rt), is_using)
-                    }
-                    Err(e) => {
-                        return Err(SimulationError::GpuError(e));
-                    }
+            SimulationMode::Gpu => match GpuGateRuntime::new(sir) {
+                Ok(gpu_rt) => {
+                    let is_using = gpu_rt.is_using_gpu();
+                    (Backend::Gpu(gpu_rt), is_using)
                 }
-            }
+                Err(e) => {
+                    return Err(SimulationError::GpuError(e));
+                }
+            },
             #[cfg(not(target_os = "macos"))]
             SimulationMode::Gpu => {
                 return Err(SimulationError::GpuError(
@@ -167,15 +155,11 @@ impl GateLevelRuntime {
                         let is_using = gpu_rt.is_using_gpu();
                         (Backend::Gpu(gpu_rt), is_using)
                     }
-                    Err(_) => {
-                        (Backend::Cpu(GateLevelSimulator::new(sir)), false)
-                    }
+                    Err(_) => (Backend::Cpu(GateLevelSimulator::new(sir)), false),
                 }
             }
             #[cfg(not(target_os = "macos"))]
-            SimulationMode::Auto => {
-                (Backend::Cpu(GateLevelSimulator::new(sir)), false)
-            }
+            SimulationMode::Auto => (Backend::Cpu(GateLevelSimulator::new(sir)), false),
         };
 
         Ok(GateLevelRuntime {
@@ -212,7 +196,11 @@ impl GateLevelRuntime {
                     while sim.get_signal(&format!("{}[{}]", name, w)).is_some() {
                         w += 1;
                     }
-                    if w > 0 { w } else { value.len() * 8 }
+                    if w > 0 {
+                        w
+                    } else {
+                        value.len() * 8
+                    }
                 });
 
                 // Convert bytes to bits
@@ -339,17 +327,13 @@ impl GateLevelRuntime {
     /// Get an output port value as u64
     pub fn get_output_u64(&self, name: &str) -> SimulationResult<u64> {
         match &self.backend {
-            Backend::Cpu(sim) => {
-                sim.get_output_u64(name).ok_or_else(|| {
-                    SimulationError::InvalidInput(format!("Output '{}' not found", name))
-                })
-            }
+            Backend::Cpu(sim) => sim.get_output_u64(name).ok_or_else(|| {
+                SimulationError::InvalidInput(format!("Output '{}' not found", name))
+            }),
             #[cfg(target_os = "macos")]
-            Backend::Gpu(gpu_rt) => {
-                gpu_rt.get_output_u64(name).ok_or_else(|| {
-                    SimulationError::InvalidInput(format!("Output '{}' not found", name))
-                })
-            }
+            Backend::Gpu(gpu_rt) => gpu_rt.get_output_u64(name).ok_or_else(|| {
+                SimulationError::InvalidInput(format!("Output '{}' not found", name))
+            }),
         }
     }
 

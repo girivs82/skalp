@@ -171,14 +171,29 @@ pub enum SirNodeKind {
         result_width: usize,
     },
     Concat,
-    Slice { start: usize, end: usize },
-    Constant { value: u64, width: usize },
-    SignalRef { signal: String }, // Read from signal/state
+    Slice {
+        start: usize,
+        end: usize,
+    },
+    Constant {
+        value: u64,
+        width: usize,
+    },
+    SignalRef {
+        signal: String,
+    }, // Read from signal/state
 
     // Sequential operations
-    FlipFlop { clock_edge: ClockEdge },
-    Latch { enable: SignalRef },
-    Memory { depth: usize, width: usize },
+    FlipFlop {
+        clock_edge: ClockEdge,
+    },
+    Latch {
+        enable: SignalRef,
+    },
+    Memory {
+        depth: usize,
+        width: usize,
+    },
 
     // Array operations
     ArrayRead,  // Read array[index]: inputs=[array_signal, index], outputs=[value]

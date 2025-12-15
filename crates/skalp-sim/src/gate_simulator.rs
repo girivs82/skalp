@@ -36,9 +36,8 @@
 
 use crate::gate_eval::{evaluate_primitive, evaluate_primitive_with_fault};
 use crate::sir::{
-    CombinationalBlock, EdgeType, FaultInjectionConfig, PrimitiveId, PrimitiveType,
-    SequentialBlock, Sir, SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId,
-    SirSignalType,
+    CombinationalBlock, EdgeType, FaultInjectionConfig, PrimitiveId, PrimitiveType, Sir,
+    SirOperation, SirPortDirection, SirSignalId, SirSignalType,
 };
 use std::collections::HashMap;
 
@@ -277,7 +276,10 @@ impl GateLevelSimulator {
         // Otherwise, look for bit-indexed signals: name[0], name[1], ...
         // Count how many bit signals exist for this base name
         let mut bit_idx = 0;
-        while let Some(id) = self.signal_name_to_id.get(&format!("{}[{}]", name, bit_idx)) {
+        while let Some(id) = self
+            .signal_name_to_id
+            .get(&format!("{}[{}]", name, bit_idx))
+        {
             let bit_value = (value >> bit_idx) & 1 == 1;
             self.state.signals.insert(id.0, vec![bit_value]);
             bit_idx += 1;
@@ -300,10 +302,14 @@ impl GateLevelSimulator {
 
     /// Get all signal values (for debugging)
     pub fn dump_signals(&self) -> Vec<(String, Vec<bool>)> {
-        let mut result: Vec<_> = self.signal_name_to_id
+        let mut result: Vec<_> = self
+            .signal_name_to_id
             .iter()
             .filter_map(|(name, id)| {
-                self.state.signals.get(&id.0).map(|v| (name.clone(), v.clone()))
+                self.state
+                    .signals
+                    .get(&id.0)
+                    .map(|v| (name.clone(), v.clone()))
             })
             .collect();
         result.sort_by(|a, b| a.0.cmp(&b.0));
@@ -330,7 +336,10 @@ impl GateLevelSimulator {
         let mut bit_idx = 0;
         let mut found_any = false;
 
-        while let Some(id) = self.signal_name_to_id.get(&format!("{}[{}]", name, bit_idx)) {
+        while let Some(id) = self
+            .signal_name_to_id
+            .get(&format!("{}[{}]", name, bit_idx))
+        {
             found_any = true;
             if let Some(bits) = self.state.signals.get(&id.0) {
                 if bits.first().copied().unwrap_or(false) {
@@ -410,7 +419,12 @@ impl GateLevelSimulator {
         let mut edges = Vec::new();
 
         for clock_id in &self.clock_signals {
-            let prev = self.state.prev_clocks.get(&clock_id.0).copied().unwrap_or(false);
+            let prev = self
+                .state
+                .prev_clocks
+                .get(&clock_id.0)
+                .copied()
+                .unwrap_or(false);
             let curr = self
                 .state
                 .signals
@@ -518,9 +532,7 @@ impl GateLevelSimulator {
     fn evaluate_expression(&self, expr: &crate::sir::SirExpression) -> Vec<bool> {
         use crate::sir::SirExpression;
         match expr {
-            SirExpression::Signal(id) => {
-                self.state.signals.get(&id.0).cloned().unwrap_or_default()
-            }
+            SirExpression::Signal(id) => self.state.signals.get(&id.0).cloned().unwrap_or_default(),
             SirExpression::Constant(bv) => bv.iter().by_vals().collect(),
             _ => vec![false], // Simplified - full expression eval not needed for structural
         }
@@ -966,6 +978,6 @@ mod tests {
         let sim = GateLevelSimulator::new(&sir_result.sir);
 
         let breakdown = sim.primitive_breakdown();
-        assert!(breakdown.get("AND").is_some() || breakdown.get("And { inputs: 2 }").is_some());
+        assert!(breakdown.contains_key("AND") || breakdown.contains_key("And { inputs: 2 }"));
     }
 }

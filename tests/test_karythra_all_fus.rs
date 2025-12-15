@@ -74,7 +74,7 @@ mod test_karythra_all_fus {
                 println!("✅ HIR build succeeded");
 
                 let mut mono = Monomorphizer::new();
-                let monomorphized_hir = mono.monomorphize(&hir);
+                let _monomorphized_hir = mono.monomorphize(&hir);
 
                 println!("✅ Monomorphization succeeded");
                 println!("✅ L0-L1: All 18 operations compile with let bindings!");

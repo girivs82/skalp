@@ -34,11 +34,9 @@ use crate::sir::{
     SirPortDirection, SirSignalId, SirSignalType,
 };
 use metal::{
-    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions,
-    MTLSize,
+    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// GPU-accelerated fault simulator
 #[cfg(target_os = "macos")]
@@ -163,8 +161,7 @@ impl Default for GpuFaultCampaignConfig {
 impl GpuFaultSimulator {
     /// Create a new GPU fault simulator
     pub fn new(sir: &Sir) -> Result<Self, String> {
-        let device =
-            Device::system_default().ok_or_else(|| "No Metal device found".to_string())?;
+        let device = Device::system_default().ok_or_else(|| "No Metal device found".to_string())?;
         let command_queue = device.new_command_queue();
 
         let mut sim = Self {
@@ -202,8 +199,8 @@ impl GpuFaultSimulator {
                 .insert(signal.id.0, signal.name.clone());
             self.signal_widths.insert(signal.id.0, signal.width);
 
-            match &signal.signal_type {
-                SirSignalType::Port { direction } => match direction {
+            if let SirSignalType::Port { direction } = &signal.signal_type {
+                match direction {
                     SirPortDirection::Input => {
                         self.input_ports.push(signal.id);
                     }
@@ -220,8 +217,7 @@ impl GpuFaultSimulator {
                         self.input_ports.push(signal.id);
                         self.output_ports.push(signal.id);
                     }
-                },
-                _ => {}
+                }
             }
         }
 
@@ -710,9 +706,21 @@ kernel void fault_sim_kernel(
         encoder.set_buffer(1, Some(&fault_buffer), 0);
         encoder.set_buffer(2, Some(&result_buffer), 0);
         encoder.set_buffer(3, Some(&golden_buffer), 0);
-        encoder.set_bytes(4, std::mem::size_of::<u32>() as u64, &num_prims as *const u32 as _);
-        encoder.set_bytes(5, std::mem::size_of::<u32>() as u64, &num_cycles as *const u32 as _);
-        encoder.set_bytes(6, std::mem::size_of::<u32>() as u64, &num_outputs as *const u32 as _);
+        encoder.set_bytes(
+            4,
+            std::mem::size_of::<u32>() as u64,
+            &num_prims as *const u32 as _,
+        );
+        encoder.set_bytes(
+            5,
+            std::mem::size_of::<u32>() as u64,
+            &num_cycles as *const u32 as _,
+        );
+        encoder.set_bytes(
+            6,
+            std::mem::size_of::<u32>() as u64,
+            &num_outputs as *const u32 as _,
+        );
         encoder.set_bytes(
             7,
             std::mem::size_of::<u32>() as u64,
@@ -791,7 +799,10 @@ kernel void fault_sim_kernel(
             .collect();
 
         let detected_faults = results.iter().filter(|r| r.detected).count();
-        let corruption_faults = results.iter().filter(|r| !r.output_diffs.is_empty()).count();
+        let corruption_faults = results
+            .iter()
+            .filter(|r| !r.output_diffs.is_empty())
+            .count();
 
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0

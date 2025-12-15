@@ -20,7 +20,7 @@
 //! - This enables precise per-bit fault injection
 
 use crate::lir::{
-    LirNet, Lir, HierarchyNode, NetId, NetlistStats, Primitive, PrimitiveId, PrimitiveType,
+    HierarchyNode, Lir, LirNet, NetId, NetlistStats, Primitive, PrimitiveId, PrimitiveType,
 };
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
@@ -170,7 +170,7 @@ impl MirToLirTransform {
 
     /// Create nets for a port (one per bit)
     fn create_port_nets(&mut self, port: &skalp_mir::mir::Port, module: &Module) {
-        let width = self.get_type_width(&port.port_type);
+        let width = Self::get_type_width(&port.port_type);
         self.port_widths.insert(port.id, width);
 
         for bit in 0..width {
@@ -212,7 +212,8 @@ impl MirToLirTransform {
             };
 
             self.lir.add_net(net);
-            self.lvalue_to_net.insert((0, port.id.0, bit as u32), net_id);
+            self.lvalue_to_net
+                .insert((0, port.id.0, bit as u32), net_id);
         }
 
         self.stats.total_bits += width;
@@ -220,7 +221,7 @@ impl MirToLirTransform {
 
     /// Create nets for an internal signal (one per bit)
     fn create_signal_nets(&mut self, signal: &skalp_mir::mir::Signal) {
-        let width = self.get_type_width(&signal.signal_type);
+        let width = Self::get_type_width(&signal.signal_type);
         self.signal_widths.insert(signal.id, width);
 
         for bit in 0..width {
@@ -239,7 +240,8 @@ impl MirToLirTransform {
             }
 
             self.lir.add_net(net);
-            self.lvalue_to_net.insert((1, signal.id.0, bit as u32), net_id);
+            self.lvalue_to_net
+                .insert((1, signal.id.0, bit as u32), net_id);
         }
 
         self.stats.total_bits += width;
@@ -446,7 +448,9 @@ impl MirToLirTransform {
         let mut assigns = Vec::new();
         for stmt in &block.statements {
             match stmt {
-                Statement::Assignment(assign) if matches!(assign.kind, AssignmentKind::NonBlocking) => {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) =>
+                {
                     assigns.push((assign.lhs.clone(), assign.rhs.clone()));
                 }
                 Statement::Block(inner_block) => {
@@ -459,8 +463,12 @@ impl MirToLirTransform {
     }
 
     /// Find expression for a target LValue in assignments
-    fn find_assignment_expr<'a>(assigns: &'a [(LValue, Expression)], target: &LValue) -> Option<&'a Expression> {
-        assigns.iter()
+    fn find_assignment_expr<'a>(
+        assigns: &'a [(LValue, Expression)],
+        target: &LValue,
+    ) -> Option<&'a Expression> {
+        assigns
+            .iter()
             .find(|(lv, _)| lv == target)
             .map(|(_, expr)| expr)
     }
@@ -514,12 +522,8 @@ impl MirToLirTransform {
     /// Decompose an expression into primitives and return output net IDs
     fn decompose_expression(&mut self, expr: &Expression) -> Vec<NetId> {
         match &expr.kind {
-            ExpressionKind::Literal(value) => {
-                self.create_constant_nets(value)
-            }
-            ExpressionKind::Ref(lvalue) => {
-                self.get_lvalue_nets(lvalue)
-            }
+            ExpressionKind::Literal(value) => self.create_constant_nets(value),
+            ExpressionKind::Ref(lvalue) => self.get_lvalue_nets(lvalue),
             ExpressionKind::Binary { op, left, right } => {
                 let left_nets = self.decompose_expression(left);
                 let right_nets = self.decompose_expression(right);
@@ -529,7 +533,11 @@ impl MirToLirTransform {
                 let operand_nets = self.decompose_expression(operand);
                 self.create_unary_op_primitives(*op, &operand_nets)
             }
-            ExpressionKind::Conditional { cond, then_expr, else_expr } => {
+            ExpressionKind::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 let cond_nets = self.decompose_expression(cond);
                 let then_nets = self.decompose_expression(then_expr);
                 let else_nets = self.decompose_expression(else_expr);
@@ -545,7 +553,8 @@ impl MirToLirTransform {
             }
             _ => {
                 // Unsupported expression - create placeholder net
-                self.warnings.push(format!("Unsupported expression kind: {:?}", expr.kind));
+                self.warnings
+                    .push(format!("Unsupported expression kind: {:?}", expr.kind));
                 let net_id = self.alloc_net_id();
                 let net = LirNet::new(net_id, format!("unsupported_{}", net_id.0));
                 self.lir.add_net(net);
@@ -559,7 +568,11 @@ impl MirToLirTransform {
         match value {
             Value::Integer(i) => {
                 // Determine width from value
-                let width = if *i == 0 { 1 } else { (64 - i.leading_zeros()) as usize };
+                let width = if *i == 0 {
+                    1
+                } else {
+                    (64 - i.leading_zeros()) as usize
+                };
                 let mut nets = Vec::new();
 
                 for bit in 0..width {
@@ -674,7 +687,8 @@ impl MirToLirTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(out, format!("and_out_{}", out.0)));
+                    self.lir
+                        .add_net(LirNet::new(out, format!("and_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -692,7 +706,8 @@ impl MirToLirTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(out, format!("or_out_{}", out.0)));
+                    self.lir
+                        .add_net(LirNet::new(out, format!("or_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -710,7 +725,8 @@ impl MirToLirTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(out, format!("xor_out_{}", out.0)));
+                    self.lir
+                        .add_net(LirNet::new(out, format!("xor_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -734,8 +750,10 @@ impl MirToLirTransform {
                     let r = right.get(i).copied().unwrap_or(zero_net);
                     let sum = self.alloc_net_id();
                     let cout = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(sum, format!("add_sum_{}", sum.0)));
-                    self.lir.add_net(LirNet::new(cout, format!("add_cout_{}", cout.0)));
+                    self.lir
+                        .add_net(LirNet::new(sum, format!("add_sum_{}", sum.0)));
+                    self.lir
+                        .add_net(LirNet::new(cout, format!("add_cout_{}", cout.0)));
 
                     let (ptype, inputs) = if let Some(cin) = carry {
                         (PrimitiveType::FullAdder, vec![l, r, cin])
@@ -768,7 +786,8 @@ impl MirToLirTransform {
                     let l = left.get(i).copied().unwrap_or(left[0]);
                     let r = right.get(i).copied().unwrap_or(right[0]);
                     let out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(out, format!("eq_xnor_{}", out.0)));
+                    self.lir
+                        .add_net(LirNet::new(out, format!("eq_xnor_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -783,11 +802,14 @@ impl MirToLirTransform {
 
                 // AND all XNOR outputs
                 let eq_out = self.alloc_net_id();
-                self.lir.add_net(LirNet::new(eq_out, format!("eq_out_{}", eq_out.0)));
+                self.lir
+                    .add_net(LirNet::new(eq_out, format!("eq_out_{}", eq_out.0)));
 
                 let prim = Primitive::new_comb(
                     self.alloc_prim_id(),
-                    PrimitiveType::And { inputs: xnor_outs.len() as u8 },
+                    PrimitiveType::And {
+                        inputs: xnor_outs.len() as u8,
+                    },
                     format!("{}.eq_and", self.hierarchy_path),
                     xnor_outs,
                     vec![eq_out],
@@ -797,7 +819,8 @@ impl MirToLirTransform {
                 if matches!(op, BinaryOp::NotEqual) {
                     // Invert for NotEqual
                     let neq_out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(neq_out, format!("neq_out_{}", neq_out.0)));
+                    self.lir
+                        .add_net(LirNet::new(neq_out, format!("neq_out_{}", neq_out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -817,11 +840,12 @@ impl MirToLirTransform {
             // We use a comparator chain approach: compare from MSB to LSB
             BinaryOp::Less | BinaryOp::Greater | BinaryOp::LessEqual | BinaryOp::GreaterEqual => {
                 // For Greater/GreaterEqual, swap left and right
-                let (cmp_left, cmp_right) = if matches!(op, BinaryOp::Greater | BinaryOp::GreaterEqual) {
-                    (right, left)  // a > b is same as b < a
-                } else {
-                    (left, right)
-                };
+                let (cmp_left, cmp_right) =
+                    if matches!(op, BinaryOp::Greater | BinaryOp::GreaterEqual) {
+                        (right, left) // a > b is same as b < a
+                    } else {
+                        (left, right)
+                    };
 
                 // Build a subtractor chain (cmp_left - cmp_right) to get borrow out
                 // Borrow out = 1 means cmp_left < cmp_right
@@ -839,7 +863,8 @@ impl MirToLirTransform {
 
                     // XNOR l, r (for borrow propagation when l==r)
                     let l_xnor_r = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(l_xnor_r, format!("cmp_xnor_{}", i)));
+                    self.lir
+                        .add_net(LirNet::new(l_xnor_r, format!("cmp_xnor_{}", i)));
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
                         PrimitiveType::Xnor,
@@ -851,7 +876,8 @@ impl MirToLirTransform {
 
                     // NOT l
                     let not_l = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(not_l, format!("cmp_not_l_{}", i)));
+                    self.lir
+                        .add_net(LirNet::new(not_l, format!("cmp_not_l_{}", i)));
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
                         PrimitiveType::Inv,
@@ -863,7 +889,8 @@ impl MirToLirTransform {
 
                     // !l AND r (generate borrow when l=0, r=1)
                     let not_l_and_r = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(not_l_and_r, format!("cmp_and1_{}", i)));
+                    self.lir
+                        .add_net(LirNet::new(not_l_and_r, format!("cmp_and1_{}", i)));
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
                         PrimitiveType::And { inputs: 2 },
@@ -875,7 +902,8 @@ impl MirToLirTransform {
 
                     // (l XNOR r) AND borrow_in (propagate borrow when l==r)
                     let xnor_and_borrow = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(xnor_and_borrow, format!("cmp_and2_{}", i)));
+                    self.lir
+                        .add_net(LirNet::new(xnor_and_borrow, format!("cmp_and2_{}", i)));
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
                         PrimitiveType::And { inputs: 2 },
@@ -887,7 +915,8 @@ impl MirToLirTransform {
 
                     // borrow_out = (!l AND r) OR ((l XNOR r) AND borrow_in)
                     let borrow_out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(borrow_out, format!("cmp_borrow_{}", i)));
+                    self.lir
+                        .add_net(LirNet::new(borrow_out, format!("cmp_borrow_{}", i)));
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
                         PrimitiveType::Or { inputs: 2 },
@@ -911,7 +940,8 @@ impl MirToLirTransform {
                         let l = left.get(i).copied().unwrap_or(zero_net);
                         let r = right.get(i).copied().unwrap_or(zero_net);
                         let out = self.alloc_net_id();
-                        self.lir.add_net(LirNet::new(out, format!("cmp_eq_xnor_{}", out.0)));
+                        self.lir
+                            .add_net(LirNet::new(out, format!("cmp_eq_xnor_{}", out.0)));
 
                         let prim = Primitive::new_comb(
                             self.alloc_prim_id(),
@@ -926,11 +956,14 @@ impl MirToLirTransform {
 
                     // AND all XNOR outputs for equality
                     let eq_out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(eq_out, format!("cmp_eq_out_{}", eq_out.0)));
+                    self.lir
+                        .add_net(LirNet::new(eq_out, format!("cmp_eq_out_{}", eq_out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
-                        PrimitiveType::And { inputs: xnor_outs.len() as u8 },
+                        PrimitiveType::And {
+                            inputs: xnor_outs.len() as u8,
+                        },
                         format!("{}.cmp_eq_and", self.hierarchy_path),
                         xnor_outs,
                         vec![eq_out],
@@ -939,7 +972,10 @@ impl MirToLirTransform {
 
                     // OR lt_result with eq_out
                     let le_result = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(le_result, format!("cmp_le_out_{}", le_result.0)));
+                    self.lir.add_net(LirNet::new(
+                        le_result,
+                        format!("cmp_le_out_{}", le_result.0),
+                    ));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -957,9 +993,11 @@ impl MirToLirTransform {
             }
             _ => {
                 // Other ops - create placeholder
-                self.warnings.push(format!("Unsupported binary op: {:?}", op));
+                self.warnings
+                    .push(format!("Unsupported binary op: {:?}", op));
                 let out = self.alloc_net_id();
-                self.lir.add_net(LirNet::new(out, format!("unsup_binop_{}", out.0)));
+                self.lir
+                    .add_net(LirNet::new(out, format!("unsup_binop_{}", out.0)));
                 result_nets.push(out);
             }
         }
@@ -975,7 +1013,8 @@ impl MirToLirTransform {
             UnaryOp::Not | UnaryOp::BitwiseNot => {
                 for &net in operand {
                     let out = self.alloc_net_id();
-                    self.lir.add_net(LirNet::new(out, format!("not_out_{}", out.0)));
+                    self.lir
+                        .add_net(LirNet::new(out, format!("not_out_{}", out.0)));
 
                     let prim = Primitive::new_comb(
                         self.alloc_prim_id(),
@@ -1018,7 +1057,8 @@ impl MirToLirTransform {
             let d0 = else_nets.get(i).copied().unwrap_or(else_nets[0]);
             let d1 = then_nets.get(i).copied().unwrap_or(then_nets[0]);
             let out = self.alloc_net_id();
-            self.lir.add_net(LirNet::new(out, format!("mux_out_{}", out.0)));
+            self.lir
+                .add_net(LirNet::new(out, format!("mux_out_{}", out.0)));
 
             let prim = Primitive::new_comb(
                 self.alloc_prim_id(),
@@ -1046,7 +1086,11 @@ impl MirToLirTransform {
             LValue::Signal(signal_id) => {
                 let width = self.signal_widths.get(signal_id).copied().unwrap_or(1);
                 (0..width)
-                    .filter_map(|bit| self.lvalue_to_net.get(&(1, signal_id.0, bit as u32)).copied())
+                    .filter_map(|bit| {
+                        self.lvalue_to_net
+                            .get(&(1, signal_id.0, bit as u32))
+                            .copied()
+                    })
                     .collect()
             }
             LValue::Variable(var_id) => {
@@ -1128,7 +1172,11 @@ impl MirToLirTransform {
             LValue::Signal(signal_id) => {
                 let width = self.signal_widths.get(signal_id).copied().unwrap_or(1);
                 (0..width)
-                    .filter_map(|bit| self.lvalue_to_net.get(&(1, signal_id.0, bit as u32)).copied())
+                    .filter_map(|bit| {
+                        self.lvalue_to_net
+                            .get(&(1, signal_id.0, bit as u32))
+                            .copied()
+                    })
                     .collect()
             }
             _ => Vec::new(),
@@ -1136,7 +1184,7 @@ impl MirToLirTransform {
     }
 
     /// Get width of a data type
-    fn get_type_width(&self, dtype: &DataType) -> usize {
+    fn get_type_width(dtype: &DataType) -> usize {
         match dtype {
             DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => *w,
             DataType::Bool => 1,
@@ -1145,7 +1193,7 @@ impl MirToLirTransform {
             DataType::Float16 => 16,
             DataType::Float32 => 32,
             DataType::Float64 => 64,
-            DataType::Array(inner, size) => self.get_type_width(inner) * size,
+            DataType::Array(inner, size) => Self::get_type_width(inner) * size,
             DataType::BitParam { default, .. }
             | DataType::LogicParam { default, .. }
             | DataType::IntParam { default, .. }
@@ -1154,9 +1202,9 @@ impl MirToLirTransform {
             | DataType::LogicExpr { default, .. }
             | DataType::IntExpr { default, .. }
             | DataType::NatExpr { default, .. } => *default,
-            DataType::Vec2(inner) => self.get_type_width(inner) * 2,
-            DataType::Vec3(inner) => self.get_type_width(inner) * 3,
-            DataType::Vec4(inner) => self.get_type_width(inner) * 4,
+            DataType::Vec2(inner) => Self::get_type_width(inner) * 2,
+            DataType::Vec3(inner) => Self::get_type_width(inner) * 3,
+            DataType::Vec4(inner) => Self::get_type_width(inner) * 4,
             _ => 1, // Default for unsupported types
         }
     }
@@ -1302,16 +1350,14 @@ mod tests {
             id: ModuleId(0),
             name: "multi_bit".to_string(),
             parameters: Vec::new(),
-            ports: vec![
-                Port {
-                    id: PortId(0),
-                    name: "data".to_string(),
-                    direction: PortDirection::Input,
-                    port_type: DataType::Bit(8),
-                    physical_constraints: None,
-                    span: None,
-                },
-            ],
+            ports: vec![Port {
+                id: PortId(0),
+                name: "data".to_string(),
+                direction: PortDirection::Input,
+                port_type: DataType::Bit(8),
+                physical_constraints: None,
+                span: None,
+            }],
             signals: Vec::new(),
             variables: Vec::new(),
             processes: Vec::new(),
@@ -1650,12 +1696,7 @@ mod tests {
             .lir
             .primitives
             .iter()
-            .filter(|p| {
-                matches!(
-                    p.ptype,
-                    PrimitiveType::HalfAdder | PrimitiveType::FullAdder
-                )
-            })
+            .filter(|p| matches!(p.ptype, PrimitiveType::HalfAdder | PrimitiveType::FullAdder))
             .count();
         assert!(
             adder_count >= 1,

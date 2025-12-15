@@ -72,7 +72,11 @@
       "Bash(/Users/girivs/src/hw/hls/target/release/skalp build --help)",
       "Bash(env SKALP_STDLIB_PATH=/Users/girivs/src/hw/hls/crates/skalp-stdlib SKALP_DUMP_MIR=1 /Users/girivs/src/hw/hls/target/release/skalp build:*)",
       "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib SKALP_DUMP_MIR=1 /Users/girivs/src/hw/hls/target/release/skalp build:*)",
-      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib /Users/girivs/src/hw/hls/target/release/skalp build:*)"
+      "Bash(SKALP_STDLIB_PATH=/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib /Users/girivs/src/hw/hls/target/release/skalp build:*)",
+      "Bash(chmod:*)",
+      "Bash(cargo check:*)",
+      "Bash(git -C /Users/girivs/src/hw/hls log --oneline -3)",
+      "Bash(git -C /Users/girivs/src/hw/hls add:*)"
     ],
     "deny": [],
     "ask": []

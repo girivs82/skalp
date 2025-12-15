@@ -491,7 +491,10 @@ impl SimulationRuntime for GpuRuntime {
 
         // DEBUG: Write Metal shader source to file for inspection
         if let Err(e) = fs::write("/tmp/skalp_metal_shader.metal", &shader_source) {
-            eprintln!("Warning: Could not write Metal shader to /tmp/skalp_metal_shader.metal: {}", e);
+            eprintln!(
+                "Warning: Could not write Metal shader to /tmp/skalp_metal_shader.metal: {}",
+                e
+            );
         } else {
             eprintln!("✅ Metal shader written to /tmp/skalp_metal_shader.metal");
         }

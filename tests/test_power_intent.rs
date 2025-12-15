@@ -83,13 +83,27 @@ impl RetentionStrategyTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "RetentionStrategyTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "RetentionStrategyTest")
+        .unwrap();
 
     // Check first signal has retention
-    let balloon_signal = entity.signals.iter().find(|s| s.name == "state_balloon").unwrap();
-    assert!(balloon_signal.power_config.is_some(), "Should have power_config");
+    let balloon_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "state_balloon")
+        .unwrap();
+    assert!(
+        balloon_signal.power_config.is_some(),
+        "Should have power_config"
+    );
     let balloon_config = balloon_signal.power_config.as_ref().unwrap();
-    assert!(balloon_config.retention.is_some(), "Should have retention config");
+    assert!(
+        balloon_config.retention.is_some(),
+        "Should have retention config"
+    );
     let balloon_retention = balloon_config.retention.as_ref().unwrap();
     assert_eq!(
         balloon_retention.strategy,
@@ -98,7 +112,11 @@ impl RetentionStrategyTest {
     );
 
     // Check second signal has retention
-    let shadow_signal = entity.signals.iter().find(|s| s.name == "state_shadow").unwrap();
+    let shadow_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "state_shadow")
+        .unwrap();
     let shadow_config = shadow_signal.power_config.as_ref().unwrap();
     let shadow_retention = shadow_config.retention.as_ref().unwrap();
     assert_eq!(
@@ -134,15 +152,29 @@ impl RetentionSaveRestore {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "RetentionSaveRestore").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "critical_data").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "RetentionSaveRestore")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "critical_data")
+        .unwrap();
 
     let power_config = signal.power_config.as_ref().unwrap();
     let retention = power_config.retention.as_ref().unwrap();
 
     // Basic retention has no save/restore signals
-    assert!(retention.save_signal.is_none(), "Basic retention should have no save signal");
-    assert!(retention.restore_signal.is_none(), "Basic retention should have no restore signal");
+    assert!(
+        retention.save_signal.is_none(),
+        "Basic retention should have no save signal"
+    );
+    assert!(
+        retention.restore_signal.is_none(),
+        "Basic retention should have no restore signal"
+    );
 
     println!("✓ Basic retention parsed correctly");
 }
@@ -170,12 +202,23 @@ impl IsolationTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "IsolationTest").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "isolated_signal").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "IsolationTest")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "isolated_signal")
+        .unwrap();
 
     assert!(signal.power_config.is_some(), "Should have power_config");
     let power_config = signal.power_config.as_ref().unwrap();
-    assert!(power_config.isolation.is_some(), "Should have isolation config");
+    assert!(
+        power_config.isolation.is_some(),
+        "Should have isolation config"
+    );
 
     let isolation = power_config.isolation.as_ref().unwrap();
     assert_eq!(
@@ -222,19 +265,53 @@ impl IsolationClampTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "IsolationClampTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "IsolationClampTest")
+        .unwrap();
 
     // All three signals should have isolation config with default (Low) clamp
-    let sig1 = entity.signals.iter().find(|s| s.name == "iso_sig1").unwrap();
-    let iso1 = sig1.power_config.as_ref().unwrap().isolation.as_ref().unwrap();
+    let sig1 = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "iso_sig1")
+        .unwrap();
+    let iso1 = sig1
+        .power_config
+        .as_ref()
+        .unwrap()
+        .isolation
+        .as_ref()
+        .unwrap();
     assert_eq!(iso1.clamp, skalp_frontend::hir::IsolationClamp::Low);
 
-    let sig2 = entity.signals.iter().find(|s| s.name == "iso_sig2").unwrap();
-    let iso2 = sig2.power_config.as_ref().unwrap().isolation.as_ref().unwrap();
+    let sig2 = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "iso_sig2")
+        .unwrap();
+    let iso2 = sig2
+        .power_config
+        .as_ref()
+        .unwrap()
+        .isolation
+        .as_ref()
+        .unwrap();
     assert_eq!(iso2.clamp, skalp_frontend::hir::IsolationClamp::Low);
 
-    let sig3 = entity.signals.iter().find(|s| s.name == "iso_sig3").unwrap();
-    let iso3 = sig3.power_config.as_ref().unwrap().isolation.as_ref().unwrap();
+    let sig3 = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "iso_sig3")
+        .unwrap();
+    let iso3 = sig3
+        .power_config
+        .as_ref()
+        .unwrap()
+        .isolation
+        .as_ref()
+        .unwrap();
     assert_eq!(iso3.clamp, skalp_frontend::hir::IsolationClamp::Low);
 
     println!("✓ Isolation on multiple signals parsed correctly");
@@ -263,12 +340,29 @@ impl IsolationEnableTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "IsolationEnableTest").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "controlled_signal").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "IsolationEnableTest")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "controlled_signal")
+        .unwrap();
 
     // Basic isolation should have no enable signal
-    let isolation = signal.power_config.as_ref().unwrap().isolation.as_ref().unwrap();
-    assert!(isolation.enable_signal.is_none(), "Basic isolation should have no enable signal");
+    let isolation = signal
+        .power_config
+        .as_ref()
+        .unwrap()
+        .isolation
+        .as_ref()
+        .unwrap();
+    assert!(
+        isolation.enable_signal.is_none(),
+        "Basic isolation should have no enable signal"
+    );
 
     println!("✓ Basic isolation parsed correctly");
 }
@@ -295,15 +389,35 @@ impl LevelShiftTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "LevelShiftTest").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "shifted_signal").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "LevelShiftTest")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "shifted_signal")
+        .unwrap();
 
     assert!(signal.power_config.is_some(), "Should have power_config");
-    let level_shift = signal.power_config.as_ref().unwrap().level_shift.as_ref().unwrap();
+    let level_shift = signal
+        .power_config
+        .as_ref()
+        .unwrap()
+        .level_shift
+        .as_ref()
+        .unwrap();
 
     // Basic level_shift has no from/to domains
-    assert!(level_shift.from_domain.is_none(), "Basic level_shift should have no from domain");
-    assert!(level_shift.to_domain.is_none(), "Basic level_shift should have no to domain");
+    assert!(
+        level_shift.from_domain.is_none(),
+        "Basic level_shift should have no from domain"
+    );
+    assert!(
+        level_shift.to_domain.is_none(),
+        "Basic level_shift should have no to domain"
+    );
 
     println!("✓ Level shift attribute parsed correctly");
 }
@@ -336,18 +450,42 @@ impl LevelShiftTypeTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "LevelShiftTypeTest").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "LevelShiftTypeTest")
+        .unwrap();
 
-    let up_signal = entity.signals.iter().find(|s| s.name == "shift_up").unwrap();
-    let up_ls = up_signal.power_config.as_ref().unwrap().level_shift.as_ref().unwrap();
+    let up_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "shift_up")
+        .unwrap();
+    let up_ls = up_signal
+        .power_config
+        .as_ref()
+        .unwrap()
+        .level_shift
+        .as_ref()
+        .unwrap();
     assert_eq!(
         up_ls.shifter_type,
         skalp_frontend::hir::LevelShifterType::Auto,
         "Should be Auto (default)"
     );
 
-    let down_signal = entity.signals.iter().find(|s| s.name == "shift_down").unwrap();
-    let down_ls = down_signal.power_config.as_ref().unwrap().level_shift.as_ref().unwrap();
+    let down_signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "shift_down")
+        .unwrap();
+    let down_ls = down_signal
+        .power_config
+        .as_ref()
+        .unwrap()
+        .level_shift
+        .as_ref()
+        .unwrap();
     assert_eq!(
         down_ls.shifter_type,
         skalp_frontend::hir::LevelShifterType::Auto,
@@ -379,12 +517,21 @@ impl PowerMirTest {
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("MIR compilation should succeed");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation should succeed");
 
     // Find the module and signal
-    let module = mir.modules.iter().find(|m| m.name == "PowerMirTest").unwrap();
+    let module = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "PowerMirTest")
+        .unwrap();
     let signal = module.signals.iter().find(|s| s.name == "retained_signal");
-    assert!(signal.is_some(), "Should have 'retained_signal' signal in MIR");
+    assert!(
+        signal.is_some(),
+        "Should have 'retained_signal' signal in MIR"
+    );
     let signal = signal.unwrap();
 
     assert!(
@@ -422,7 +569,9 @@ impl RetentionCodegen {
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("MIR compilation should succeed");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation should succeed");
     let lir = lower_to_lir(&mir).expect("LIR lowering should succeed");
     let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
 
@@ -464,7 +613,9 @@ impl IsolationCodegen {
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("MIR compilation should succeed");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation should succeed");
     let lir = lower_to_lir(&mir).expect("LIR lowering should succeed");
     let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
 
@@ -501,7 +652,9 @@ impl LevelShiftCodegen {
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
     let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-    let mir = compiler.compile_to_mir(&hir).expect("MIR compilation should succeed");
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation should succeed");
     let lir = lower_to_lir(&mir).expect("LIR lowering should succeed");
     let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
 
@@ -542,10 +695,21 @@ impl CombinedPowerTest {
 "#;
 
     let hir = parse_and_build_hir(source).expect("HIR building should succeed");
-    let entity = hir.entities.iter().find(|e| e.name == "CombinedPowerTest").unwrap();
-    let signal = entity.signals.iter().find(|s| s.name == "protected_data").unwrap();
+    let entity = hir
+        .entities
+        .iter()
+        .find(|e| e.name == "CombinedPowerTest")
+        .unwrap();
+    let signal = entity
+        .signals
+        .iter()
+        .find(|s| s.name == "protected_data")
+        .unwrap();
 
-    let power_config = signal.power_config.as_ref().expect("Should have power_config");
+    let power_config = signal
+        .power_config
+        .as_ref()
+        .expect("Should have power_config");
 
     // Check that at least one of retention or isolation is present
     // Note: How multiple attributes are merged depends on implementation

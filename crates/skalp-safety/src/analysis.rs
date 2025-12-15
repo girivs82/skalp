@@ -424,35 +424,26 @@ impl CombinedAnalysisResult {
 
     /// Get all errors
     pub fn all_errors(&self) -> Vec<&AnalysisError> {
-        self.pass_results
-            .iter()
-            .flat_map(|r| &r.errors)
-            .collect()
+        self.pass_results.iter().flat_map(|r| &r.errors).collect()
     }
 
     /// Get all warnings
     pub fn all_warnings(&self) -> Vec<&AnalysisWarning> {
-        self.pass_results
-            .iter()
-            .flat_map(|r| &r.warnings)
-            .collect()
+        self.pass_results.iter().flat_map(|r| &r.warnings).collect()
     }
 
     /// Generate summary report
     pub fn summary(&self) -> String {
         let mut output = String::new();
 
-        output.push_str(&format!("=== Safety Analysis Summary ===\n"));
+        output.push_str("=== Safety Analysis Summary ===\n");
         output.push_str(&format!("Target ASIL: {:?}\n", self.target_asil));
-        output.push_str(&format!(
-            "Status: {:?}\n",
-            self.overall_status
-        ));
+        output.push_str(&format!("Status: {:?}\n", self.overall_status));
         output.push_str(&format!("Errors: {}\n", self.total_errors));
         output.push_str(&format!("Warnings: {}\n", self.total_warnings));
 
         if let Some(ref metrics) = self.final_metrics {
-            output.push_str(&format!("\nMetrics:\n"));
+            output.push_str("\nMetrics:\n");
             output.push_str(&format!("  SPFM: {:.1}%\n", metrics.spfm));
             output.push_str(&format!("  LFM: {:.1}%\n", metrics.lfm));
             output.push_str(&format!("  PMHF: {:.1} FIT\n", metrics.pmhf));
@@ -463,13 +454,9 @@ impl CombinedAnalysisResult {
         }
 
         if self.can_generate_workproducts {
-            output.push_str(&format!(
-                "\n✓ Work products can be generated\n"
-            ));
+            output.push_str("\n✓ Work products can be generated\n");
         } else {
-            output.push_str(&format!(
-                "\n✗ Work products NOT available - fix errors first\n"
-            ));
+            output.push_str("\n✗ Work products NOT available - fix errors first\n");
         }
 
         output
@@ -497,8 +484,8 @@ mod tests {
 
     #[test]
     fn test_analysis_result_failure() {
-        let result = AnalysisResult::pass("test_pass")
-            .with_error(AnalysisError::new("E0001", "Test error"));
+        let result =
+            AnalysisResult::pass("test_pass").with_error(AnalysisError::new("E0001", "Test error"));
 
         assert!(result.is_fail());
         assert_eq!(result.error_count(), 1);
@@ -521,8 +508,7 @@ mod tests {
     fn test_combined_result() {
         let results = vec![
             AnalysisResult::pass("pass1"),
-            AnalysisResult::pass("pass2")
-                .with_warning(AnalysisWarning::new("W0001", "Warning")),
+            AnalysisResult::pass("pass2").with_warning(AnalysisWarning::new("W0001", "Warning")),
         ];
 
         let combined = CombinedAnalysisResult::from_results(AsilLevel::D, results);
@@ -530,20 +516,14 @@ mod tests {
         assert!(combined.passed());
         assert_eq!(combined.total_errors, 0);
         assert_eq!(combined.total_warnings, 1);
-        assert_eq!(
-            combined.overall_status,
-            AnalysisStatus::PassWithWarnings
-        );
+        assert_eq!(combined.overall_status, AnalysisStatus::PassWithWarnings);
     }
 
     #[test]
     fn test_combined_result_failure() {
         let results = vec![
             AnalysisResult::pass("pass1"),
-            AnalysisResult::fail(
-                "pass2",
-                vec![AnalysisError::new("E0001", "Error")],
-            ),
+            AnalysisResult::fail("pass2", vec![AnalysisError::new("E0001", "Error")]),
         ];
 
         let combined = CombinedAnalysisResult::from_results(AsilLevel::D, results);

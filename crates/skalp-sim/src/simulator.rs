@@ -182,7 +182,7 @@ impl Simulator {
         // Don't step if paused at a breakpoint
         if self.paused {
             return Err(SimulationError::BreakpointHit(
-                "Simulation is paused at a breakpoint. Call resume() to continue.".into()
+                "Simulation is paused at a breakpoint. Call resume() to continue.".into(),
             ));
         }
 
@@ -194,7 +194,9 @@ impl Simulator {
         }
 
         // Check breakpoints after step completes
-        let hits = self.breakpoint_manager.check_cycle(state.cycle, &state.signals);
+        let hits = self
+            .breakpoint_manager
+            .check_cycle(state.cycle, &state.signals);
 
         if !hits.is_empty() {
             self.last_breakpoint_hits = hits.clone();
@@ -303,7 +305,8 @@ impl Simulator {
         signal_name: &str,
         config: &skalp_frontend::hir::BreakpointConfig,
     ) -> u32 {
-        self.breakpoint_manager.register_from_config(signal_name, config)
+        self.breakpoint_manager
+            .register_from_config(signal_name, config)
     }
 
     /// Register a simple breakpoint that triggers when signal is non-zero

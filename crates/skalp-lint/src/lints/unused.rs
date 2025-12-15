@@ -101,7 +101,7 @@ fn is_variable_used(_var_name: &str, _body: &[skalp_frontend::hir::HirStatement]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_frontend::hir::{HirType, HirParameter};
+    use skalp_frontend::hir::{HirParameter, HirType};
 
     #[test]
     fn test_unused_variable_with_underscore_prefix() {

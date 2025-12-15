@@ -298,7 +298,8 @@ mod generate_block_tests {
         }
         "#;
 
-        let hir = parse_and_build_hir(source).expect("Failed to parse generate-for signal creation");
+        let hir =
+            parse_and_build_hir(source).expect("Failed to parse generate-for signal creation");
         println!("HIR generation successful for generate-for signal creation");
 
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);

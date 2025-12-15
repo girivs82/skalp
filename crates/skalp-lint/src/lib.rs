@@ -30,7 +30,7 @@
 //! ```
 
 use indexmap::IndexMap;
-use skalp_frontend::hir::{Hir, HirFunction, HirParameter, HirStatement, HirExpression};
+use skalp_frontend::hir::{Hir, HirExpression, HirFunction, HirParameter, HirStatement};
 use std::fmt;
 
 pub mod lints;
@@ -170,12 +170,7 @@ impl LintContext {
     }
 
     /// Emit a lint diagnostic
-    pub fn emit_lint(
-        &mut self,
-        lint: &'static Lint,
-        span: Option<Span>,
-        message: String,
-    ) {
+    pub fn emit_lint(&mut self, lint: &'static Lint, span: Option<Span>, message: String) {
         let level = self.get_lint_level(lint);
 
         if level == LintLevel::Allow {
@@ -221,9 +216,7 @@ impl LintContext {
 
     /// Check if any errors were emitted
     pub fn has_errors(&self) -> bool {
-        self.diagnostics
-            .iter()
-            .any(|d| d.level == LintLevel::Deny)
+        self.diagnostics.iter().any(|d| d.level == LintLevel::Deny)
     }
 
     /// Get count of warnings
@@ -340,11 +333,7 @@ mod tests {
     fn test_emit_lint() {
         let mut ctx = LintContext::new();
 
-        ctx.emit_lint(
-            &TEST_LINT,
-            None,
-            "test message".to_string(),
-        );
+        ctx.emit_lint(&TEST_LINT, None, "test message".to_string());
 
         assert_eq!(ctx.diagnostics().len(), 1);
         assert_eq!(ctx.warning_count(), 1);

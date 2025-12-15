@@ -211,17 +211,18 @@ async fn test_fp32_sqrt_non_perfect() {
     // sqrt(2.0) ≈ 1.414
     tb.set("x", 2.0f32);
     tb.step().await;
-    tb.expect_fp32("result", 1.41421356, 0.001).await;
+    tb.expect_fp32("result", std::f32::consts::SQRT_2, 0.001)
+        .await;
 
     // sqrt(3.0) ≈ 1.732
     tb.set("x", 3.0f32);
     tb.step().await;
-    tb.expect_fp32("result", 1.73205080, 0.001).await;
+    tb.expect_fp32("result", 1.732_050_8, 0.001).await;
 
     // sqrt(5.0) ≈ 2.236
     tb.set("x", 5.0f32);
     tb.step().await;
-    tb.expect_fp32("result", 2.2360679, 0.001).await;
+    tb.expect_fp32("result", 2.236_068, 0.001).await;
 }
 
 /// Test FP32 sqrt with small values
@@ -422,7 +423,8 @@ async fn test_fp32_distance_irrational() {
         .set("y2", 1.0f32);
     tb.step().await;
 
-    tb.expect_fp32("distance", 1.41421356, 0.001).await;
+    tb.expect_fp32("distance", std::f32::consts::SQRT_2, 0.001)
+        .await;
 }
 
 // ============================================================================

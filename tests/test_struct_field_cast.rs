@@ -55,8 +55,5 @@ pub fn test() -> Vec3 {
 "#;
 
     let result = parse_and_build_hir(source);
-    assert!(
-        result.is_ok(),
-        "Workaround approach should definitely work"
-    );
+    assert!(result.is_ok(), "Workaround approach should definitely work");
 }

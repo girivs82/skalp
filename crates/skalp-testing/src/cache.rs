@@ -94,7 +94,11 @@ impl CompilationCache {
     }
 
     /// Compute a cache key for a source file and its dependencies
-    pub fn compute_cache_key(&self, source_path: &Path, dependencies: &[PathBuf]) -> Result<String> {
+    pub fn compute_cache_key(
+        &self,
+        source_path: &Path,
+        dependencies: &[PathBuf],
+    ) -> Result<String> {
         let mut hasher = blake3::Hasher::new();
 
         // Hash the main source file
@@ -106,8 +110,9 @@ impl CompilationCache {
         let mut dep_contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for dep_path in dependencies {
             if dep_path.exists() {
-                let content = fs::read(dep_path)
-                    .with_context(|| format!("Failed to read dependency: {}", dep_path.display()))?;
+                let content = fs::read(dep_path).with_context(|| {
+                    format!("Failed to read dependency: {}", dep_path.display())
+                })?;
                 let key = dep_path.to_string_lossy().to_string();
                 dep_contents.insert(key, content);
             }
@@ -137,8 +142,9 @@ impl CompilationCache {
         let data = fs::read(&cache_path)
             .with_context(|| format!("Failed to read cache file: {}", cache_path.display()))?;
 
-        let sir: SirModule = bincode::deserialize(&data)
-            .with_context(|| format!("Failed to deserialize cached SIR: {}", cache_path.display()))?;
+        let sir: SirModule = bincode::deserialize(&data).with_context(|| {
+            format!("Failed to deserialize cached SIR: {}", cache_path.display())
+        })?;
 
         eprintln!(
             "⚡ [CACHE] Loaded SIR from cache in {:?} (key: {}...)",
@@ -156,14 +162,17 @@ impl CompilationCache {
         }
 
         let cache_entry_dir = self.cache_dir.join(cache_key);
-        fs::create_dir_all(&cache_entry_dir)
-            .with_context(|| format!("Failed to create cache directory: {}", cache_entry_dir.display()))?;
+        fs::create_dir_all(&cache_entry_dir).with_context(|| {
+            format!(
+                "Failed to create cache directory: {}",
+                cache_entry_dir.display()
+            )
+        })?;
 
         let cache_path = cache_entry_dir.join("sir.bin");
         let start = std::time::Instant::now();
 
-        let data = bincode::serialize(sir)
-            .context("Failed to serialize SIR for caching")?;
+        let data = bincode::serialize(sir).context("Failed to serialize SIR for caching")?;
 
         fs::write(&cache_path, &data)
             .with_context(|| format!("Failed to write cache file: {}", cache_path.display()))?;
@@ -181,8 +190,12 @@ impl CompilationCache {
     /// Clear the entire cache
     pub fn clear(&self) -> Result<()> {
         if self.cache_dir.exists() {
-            fs::remove_dir_all(&self.cache_dir)
-                .with_context(|| format!("Failed to clear cache directory: {}", self.cache_dir.display()))?;
+            fs::remove_dir_all(&self.cache_dir).with_context(|| {
+                format!(
+                    "Failed to clear cache directory: {}",
+                    self.cache_dir.display()
+                )
+            })?;
         }
         Ok(())
     }
@@ -246,9 +259,7 @@ pub fn collect_dependencies(source_path: &Path) -> Result<Vec<PathBuf>> {
 
         // Handle "use module::*" style
         if line.starts_with("use ") && line.contains("::") {
-            if let Some(module_name) = line
-                .strip_prefix("use ")
-                .and_then(|s| s.split("::").next())
+            if let Some(module_name) = line.strip_prefix("use ").and_then(|s| s.split("::").next())
             {
                 let module_name = module_name.trim();
                 // Try to find the module file
@@ -271,10 +282,7 @@ pub fn collect_dependencies(source_path: &Path) -> Result<Vec<PathBuf>> {
 
         // Handle "mod module" style
         if line.starts_with("mod ") && line.ends_with(';') {
-            if let Some(module_name) = line
-                .strip_prefix("mod ")
-                .and_then(|s| s.strip_suffix(';'))
-            {
+            if let Some(module_name) = line.strip_prefix("mod ").and_then(|s| s.strip_suffix(';')) {
                 let module_name = module_name.trim();
                 for ext in &["sk", "skalp"] {
                     let module_path = parent_dir.join(format!("{}.{}", module_name, ext));

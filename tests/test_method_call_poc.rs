@@ -42,10 +42,12 @@ mod test_method_call_poc {
                     println!("\n📋 Trait: {}", trait_def.name);
                     println!("   Methods: {}", trait_def.methods.len());
                     for method in &trait_def.methods {
-                        println!("     - {}({} params) -> {:?}",
-                                 method.name,
-                                 method.parameters.len(),
-                                 method.return_type);
+                        println!(
+                            "     - {}({} params) -> {:?}",
+                            method.name,
+                            method.parameters.len(),
+                            method.return_type
+                        );
                     }
                 }
 
@@ -54,13 +56,15 @@ mod test_method_call_poc {
                     println!("\n📦 Trait implementation found");
                     let trait_impl = &hir.trait_implementations[0];
                     println!("   Trait: {}", trait_impl.trait_name);
-                    println!("   Method impls: {}", trait_impl.method_implementations.len());
+                    println!(
+                        "   Method impls: {}",
+                        trait_impl.method_implementations.len()
+                    );
                 }
 
                 // Check function
                 if !hir.functions.is_empty() {
-                    let func = hir.functions.iter()
-                        .find(|f| f.name == "test_method");
+                    let func = hir.functions.iter().find(|f| f.name == "test_method");
 
                     if let Some(func) = func {
                         println!("\n🔧 Function: {}", func.name);

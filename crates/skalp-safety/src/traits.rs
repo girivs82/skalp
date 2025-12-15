@@ -123,9 +123,10 @@ impl TraitExpander {
 
         // Add timing constraints
         for timing_pattern in &trait_def.timing_patterns {
-            hsi.timing
-                .signal_latencies
-                .insert(timing_pattern.signal_pattern.clone(), timing_pattern.max_latency);
+            hsi.timing.signal_latencies.insert(
+                timing_pattern.signal_pattern.clone(),
+                timing_pattern.max_latency,
+            );
         }
 
         hsi
@@ -234,8 +235,8 @@ impl TraitExpander {
     /// Apply a member override to HSRs and LSMs
     fn apply_member_override(
         &self,
-        hsrs: &mut Vec<HardwareSafetyRequirement>,
-        lsms: &mut Vec<LatentSafetyMechanism>,
+        hsrs: &mut [HardwareSafetyRequirement],
+        lsms: &mut [LatentSafetyMechanism],
         override_spec: &MemberOverride,
     ) {
         match override_spec {
@@ -300,12 +301,10 @@ impl TraitExpander {
 
         if pattern.contains('*') {
             // Support patterns like "i2c_*" or "*_sda"
-            if pattern.starts_with('*') {
-                let suffix = &pattern[1..];
+            if let Some(suffix) = pattern.strip_prefix('*') {
                 return text.ends_with(suffix);
             }
-            if pattern.ends_with('*') {
-                let prefix = &pattern[..pattern.len() - 1];
+            if let Some(prefix) = pattern.strip_suffix('*') {
                 return text.starts_with(prefix);
             }
             // Pattern with * in middle: "prefix*suffix"
@@ -440,9 +439,7 @@ impl ConflictDetector {
     }
 
     /// Check for PSM definition conflicts with different DC values
-    pub fn check_psm_dc_conflicts(
-        hsrs: &[HardwareSafetyRequirement],
-    ) -> Vec<(String, f64, f64)> {
+    pub fn check_psm_dc_conflicts(hsrs: &[HardwareSafetyRequirement]) -> Vec<(String, f64, f64)> {
         let mut psm_dcs: HashMap<String, f64> = HashMap::new();
         let mut conflicts = Vec::new();
 
@@ -487,11 +484,7 @@ impl std::fmt::Display for ConflictError {
                 write!(f, "duplicate FMEA component: {}", ref_str)
             }
             ConflictError::ConflictingPsmDc { name, dc1, dc2 } => {
-                write!(
-                    f,
-                    "conflicting DC for PSM {}: {} vs {}",
-                    name, dc1, dc2
-                )
+                write!(f, "conflicting DC for PSM {}: {} vs {}", name, dc1, dc2)
             }
         }
     }
@@ -544,11 +537,8 @@ pub fn expand_all_traits(hierarchy: &mut SafetyHierarchy) -> Result<(), TraitExp
             // Expand FMEA traits
             if let Some(fmea_trait) = fmea_traits.get(&usage.trait_name) {
                 // Collect covered design refs
-                let covered_refs: Vec<DesignRef> = entity
-                    .fmea
-                    .iter()
-                    .map(|c| c.design_ref.clone())
-                    .collect();
+                let covered_refs: Vec<DesignRef> =
+                    entity.fmea.iter().map(|c| c.design_ref.clone()).collect();
 
                 let components = expander.expand_fmea_trait(fmea_trait, &covered_refs);
 
@@ -565,11 +555,8 @@ pub fn expand_all_traits(hierarchy: &mut SafetyHierarchy) -> Result<(), TraitExp
 
             // Expand HSI traits
             if let Some(hsi_trait) = hsi_traits.get(&usage.trait_name) {
-                let covered_refs: Vec<DesignRef> = entity
-                    .fmea
-                    .iter()
-                    .map(|c| c.design_ref.clone())
-                    .collect();
+                let covered_refs: Vec<DesignRef> =
+                    entity.fmea.iter().map(|c| c.design_ref.clone()).collect();
 
                 let expanded_hsi = expander.expand_hsi_trait(hsi_trait, &covered_refs);
 
@@ -798,22 +785,15 @@ mod tests {
         let mut expander = TraitExpander::new();
         let expanded = expander.expand_safety_trait(&trait_def, &usage).unwrap();
 
-        assert_eq!(
-            expanded.hsrs[0].psm.as_ref().unwrap().dc_target,
-            99.5
-        );
+        assert_eq!(expanded.hsrs[0].psm.as_ref().unwrap().dc_target, 99.5);
     }
 
     #[test]
     fn test_trait_expansion_with_removal() {
-        let hsr1 = HardwareSafetyRequirement::new(
-            "HSR_001".to_string(),
-            "Requirement 1".to_string(),
-        );
-        let hsr2 = HardwareSafetyRequirement::new(
-            "HSR_002".to_string(),
-            "Requirement 2".to_string(),
-        );
+        let hsr1 =
+            HardwareSafetyRequirement::new("HSR_001".to_string(), "Requirement 1".to_string());
+        let hsr2 =
+            HardwareSafetyRequirement::new("HSR_002".to_string(), "Requirement 2".to_string());
 
         let trait_def = SafetyTraitBuilder::new("MultiRequirement")
             .hsr(hsr1)
@@ -833,19 +813,13 @@ mod tests {
 
     #[test]
     fn test_trait_expansion_with_addition() {
-        let hsr1 = HardwareSafetyRequirement::new(
-            "HSR_001".to_string(),
-            "Requirement 1".to_string(),
-        );
+        let hsr1 =
+            HardwareSafetyRequirement::new("HSR_001".to_string(), "Requirement 1".to_string());
 
-        let trait_def = SafetyTraitBuilder::new("BaseRequirement")
-            .hsr(hsr1)
-            .build();
+        let trait_def = SafetyTraitBuilder::new("BaseRequirement").hsr(hsr1).build();
 
-        let new_hsr = HardwareSafetyRequirement::new(
-            "HSR_NEW".to_string(),
-            "New requirement".to_string(),
-        );
+        let new_hsr =
+            HardwareSafetyRequirement::new("HSR_NEW".to_string(), "New requirement".to_string());
 
         let usage = TraitUsageBuilder::new("BaseRequirement")
             .add_hsr(new_hsr)
@@ -873,7 +847,7 @@ mod tests {
     fn test_fmea_pattern_matching() {
         let expander = TraitExpander::new();
 
-        let design_ref = DesignRef::from_str("top.i2c_0::sda");
+        let design_ref = DesignRef::parse("top.i2c_0::sda");
 
         assert!(expander.matches_fmea_pattern("*::sda", &design_ref));
         assert!(expander.matches_fmea_pattern("top.i2c_*::sda", &design_ref));
@@ -888,11 +862,8 @@ mod tests {
         use crate::hierarchy::SafetyGoalId;
 
         let psm = PrimarySafetyMechanism::new("Voting".to_string(), 99.0);
-        let hsr = HardwareSafetyRequirement::new(
-            "HSR_001".to_string(),
-            "Requirement".to_string(),
-        )
-        .with_psm(psm);
+        let hsr = HardwareSafetyRequirement::new("HSR_001".to_string(), "Requirement".to_string())
+            .with_psm(psm);
 
         let goal = SafetyGoal {
             id: SafetyGoalId(1),
@@ -960,9 +931,9 @@ mod tests {
 
         let expander = TraitExpander::new();
         let covered_refs = vec![
-            DesignRef::from_str("top.i2c_0::sda"),
-            DesignRef::from_str("top.i2c_1::sda"),
-            DesignRef::from_str("top.spi_0::mosi"), // Should not match
+            DesignRef::parse("top.i2c_0::sda"),
+            DesignRef::parse("top.i2c_1::sda"),
+            DesignRef::parse("top.spi_0::mosi"), // Should not match
         ];
 
         let components = expander.expand_fmea_trait(&fmea_trait, &covered_refs);
@@ -982,11 +953,8 @@ mod tests {
 
         // Add a trait
         let psm = PrimarySafetyMechanism::new("Integrity".to_string(), 99.0);
-        let hsr = HardwareSafetyRequirement::new(
-            "HSR_TRAIT".to_string(),
-            "From trait".to_string(),
-        )
-        .with_psm(psm);
+        let hsr = HardwareSafetyRequirement::new("HSR_TRAIT".to_string(), "From trait".to_string())
+            .with_psm(psm);
 
         let trait_def = SafetyTraitBuilder::new("IntegrityProtection")
             .hsr(hsr)

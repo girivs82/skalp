@@ -312,12 +312,16 @@ impl HirBuilderContext {
 
     /// Check if we're inside an event block (on() block) - assignments should be non-blocking
     fn is_inside_event_block(&self) -> bool {
-        self.context_stack.iter().any(|ctx| matches!(ctx, BuilderContext::EventBlock))
+        self.context_stack
+            .iter()
+            .any(|ctx| matches!(ctx, BuilderContext::EventBlock))
     }
 
     /// Check if we're inside a function body - assignments should be blocking
     fn is_inside_function_body(&self) -> bool {
-        self.context_stack.iter().any(|ctx| matches!(ctx, BuilderContext::FunctionBody))
+        self.context_stack
+            .iter()
+            .any(|ctx| matches!(ctx, BuilderContext::FunctionBody))
     }
 
     /// Check if we're at impl level (not inside on() or function) - assignments should be combinational
@@ -627,9 +631,8 @@ impl HirBuilderContext {
                         eprintln!("[HIR_ENTITY_DEBUG] Processing entity body AssignmentStmt");
 
                         // Check if this is a tuple destructuring assignment (LHS is a TupleExpr)
-                        if let Some(tuple_expr) = child
-                            .children()
-                            .find(|n| n.kind() == SyntaxKind::TupleExpr)
+                        if let Some(tuple_expr) =
+                            child.children().find(|n| n.kind() == SyntaxKind::TupleExpr)
                         {
                             eprintln!("[HIR_ENTITY_DEBUG] Detected tuple destructuring");
                             // Extract signal names from tuple expression
@@ -655,7 +658,10 @@ impl HirBuilderContext {
 
                             // Build the RHS by combining IdentExpr + CallExpr siblings
                             let rhs_nodes: Vec<_> = child.children().skip(1).collect();
-                            eprintln!("[HIR_ENTITY_DEBUG] Building RHS from {} nodes", rhs_nodes.len());
+                            eprintln!(
+                                "[HIR_ENTITY_DEBUG] Building RHS from {} nodes",
+                                rhs_nodes.len()
+                            );
 
                             let rhs_expr = if rhs_nodes.len() == 2
                                 && rhs_nodes[0].kind() == SyntaxKind::IdentExpr
@@ -676,36 +682,42 @@ impl HirBuilderContext {
                                     .filter_map(|arg_node| self.build_expression(&arg_node))
                                     .collect();
 
-                                func_name.map(|name| HirExpression::Call(HirCallExpr {
-                                    function: name,
-                                    type_args: vec![],
-                                    named_type_args: std::collections::HashMap::new(),
-                                    args,
-                                    impl_style: ImplStyle::default(),
-                                }))
+                                func_name.map(|name| {
+                                    HirExpression::Call(HirCallExpr {
+                                        function: name,
+                                        type_args: vec![],
+                                        named_type_args: std::collections::HashMap::new(),
+                                        args,
+                                        impl_style: ImplStyle::default(),
+                                    })
+                                })
                             } else {
                                 None
                             };
 
                             if let Some(rhs_expr) = rhs_expr {
                                 eprintln!("[HIR_ENTITY_DEBUG] Expanding tuple destructuring into {} assignments", signal_names.len());
-                                eprintln!("[HIR_ENTITY_DEBUG] RHS expression type: {:?}", std::mem::discriminant(&rhs_expr));
-                                    // Create an assignment for each signal: signal_i = rhs.i
-                                    for (idx, signal_name) in signal_names.iter().enumerate() {
-                                        // Find the signal ID by name
-                                        if let Some(&signal_id) = self.symbols.signals.get(signal_name) {
-                                            let assignment = HirAssignment {
-                                                id: self.next_assignment_id(),
-                                                lhs: HirLValue::Signal(signal_id),
-                                                assignment_type: HirAssignmentType::Combinational,
-                                                rhs: HirExpression::FieldAccess {
-                                                    base: Box::new(rhs_expr.clone()),
-                                                    field: idx.to_string(),
-                                                },
-                                            };
-                                            assignments.push(assignment);
-                                        }
+                                eprintln!(
+                                    "[HIR_ENTITY_DEBUG] RHS expression type: {:?}",
+                                    std::mem::discriminant(&rhs_expr)
+                                );
+                                // Create an assignment for each signal: signal_i = rhs.i
+                                for (idx, signal_name) in signal_names.iter().enumerate() {
+                                    // Find the signal ID by name
+                                    if let Some(&signal_id) = self.symbols.signals.get(signal_name)
+                                    {
+                                        let assignment = HirAssignment {
+                                            id: self.next_assignment_id(),
+                                            lhs: HirLValue::Signal(signal_id),
+                                            assignment_type: HirAssignmentType::Combinational,
+                                            rhs: HirExpression::FieldAccess {
+                                                base: Box::new(rhs_expr.clone()),
+                                                field: idx.to_string(),
+                                            },
+                                        };
+                                        assignments.push(assignment);
                                     }
+                                }
                             }
                         } else if let Some(assignment) =
                             self.build_assignment(&child, HirAssignmentType::Combinational)
@@ -779,7 +791,12 @@ impl HirBuilderContext {
             }
         }
 
-        eprintln!("[HIR_ENTITY_DEBUG] Built entity '{}' with {} signals and {} assignments", name, signals.len(), assignments.len());
+        eprintln!(
+            "[HIR_ENTITY_DEBUG] Built entity '{}' with {} signals and {} assignments",
+            name,
+            signals.len(),
+            assignments.len()
+        );
 
         // Consume pending pipeline config (from #[pipeline(stages=N)] attribute)
         let pipeline_config = self.pending_pipeline_config.take();
@@ -1116,7 +1133,8 @@ impl HirBuilderContext {
 
                             if let Some(mut e) = expr {
                                 // Look up the parameter by name to get its type
-                                if let Some(param) = entity_generics.iter().find(|g| g.name == name) {
+                                if let Some(param) = entity_generics.iter().find(|g| g.name == name)
+                                {
                                     e = self.convert_generic_arg_expr(e, &param.param_type);
                                 }
                                 named_generic_args.insert(name, e);
@@ -1638,16 +1656,22 @@ impl HirBuilderContext {
                     let assignment_type = self.determine_assignment_type(&child);
                     eprintln!("[HIR_COLLECT] Found AssignmentStmt, calling build_assignment");
                     if let Some(assignment) = self.build_assignment(&child, assignment_type) {
-                        eprintln!("[HIR_COLLECT] ✓ build_assignment succeeded, added to statements");
+                        eprintln!(
+                            "[HIR_COLLECT] ✓ build_assignment succeeded, added to statements"
+                        );
                         statements.push(HirStatement::Assignment(assignment));
                     } else {
-                        eprintln!("[HIR_COLLECT] ❌ build_assignment returned None, assignment DROPPED!");
+                        eprintln!(
+                            "[HIR_COLLECT] ❌ build_assignment returned None, assignment DROPPED!"
+                        );
                     }
                 }
                 SyntaxKind::IfStmt => {
                     println!("[HIR_COLLECT] 🔍 Found IfStmt, calling build_if_statement");
                     if let Some(if_stmt) = self.build_if_statement(&child) {
-                        println!("[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements");
+                        println!(
+                            "[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements"
+                        );
                         statements.push(HirStatement::If(if_stmt));
                     } else {
                         println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
@@ -1758,16 +1782,16 @@ impl HirBuilderContext {
             SyntaxKind::MatchStmt => self.build_match_statement(node).map(HirStatement::Match),
             SyntaxKind::FlowStmt => self.build_flow_statement(node).map(HirStatement::Flow),
             SyntaxKind::AssertStmt => self.build_assert_statement(node).map(HirStatement::Assert),
-            SyntaxKind::AssumeMacroStmt => {
-                self.build_assume_macro_statement(node).map(HirStatement::Assume)
-            }
+            SyntaxKind::AssumeMacroStmt => self
+                .build_assume_macro_statement(node)
+                .map(HirStatement::Assume),
             SyntaxKind::PropertyStmt => self
                 .build_property_statement(node)
                 .map(HirStatement::Property),
             SyntaxKind::CoverStmt => self.build_cover_statement(node).map(HirStatement::Cover),
-            SyntaxKind::CoverMacroStmt => {
-                self.build_cover_macro_statement(node).map(HirStatement::Cover)
-            }
+            SyntaxKind::CoverMacroStmt => self
+                .build_cover_macro_statement(node)
+                .map(HirStatement::Cover),
             SyntaxKind::LetStmt => {
                 // Handle both simple let and tuple destructuring
                 let let_stmts = self.build_let_statements_from_node(node);
@@ -2092,9 +2116,17 @@ impl HirBuilderContext {
         };
 
         // Handle RHS - if there are multiple expressions, we need to combine them
-        eprintln!("[BUILD_ASSIGNMENT_DEBUG] rhs_start_idx={}, exprs.len()={}", rhs_start_idx, exprs.len());
+        eprintln!(
+            "[BUILD_ASSIGNMENT_DEBUG] rhs_start_idx={}, exprs.len()={}",
+            rhs_start_idx,
+            exprs.len()
+        );
         for (idx, expr) in exprs.iter().enumerate() {
-            eprintln!("[BUILD_ASSIGNMENT_DEBUG]   exprs[{}]: {:?}", idx, expr.kind());
+            eprintln!(
+                "[BUILD_ASSIGNMENT_DEBUG]   exprs[{}]: {:?}",
+                idx,
+                expr.kind()
+            );
         }
         let rhs = if rhs_start_idx >= exprs.len() {
             return None;
@@ -2153,7 +2185,9 @@ impl HirBuilderContext {
                     //   exprs[2] = BinaryExpr(&&c!=0) - starts with operator
                     // build_binary_expr on exprs[1] will incorporate exprs[2] via sibling chaining.
                     self.build_expression(&exprs[1])?
-                } else if second_expr.kind() == SyntaxKind::BinaryExpr && !third_starts_with_operator {
+                } else if second_expr.kind() == SyntaxKind::BinaryExpr
+                    && !third_starts_with_operator
+                {
                     // EXPR1 is already a complete BinaryExpr, and EXPR2 doesn't start with
                     // an operator (so it's a stray duplicate). Just use EXPR1.
                     self.build_expression(&exprs[1])?
@@ -2523,7 +2557,12 @@ impl HirBuilderContext {
                     SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr
                 );
 
-                println!("[build_if_statement] Checking child {:?} - is_complex={}, is_simple={}", child.kind(), is_complex, is_simple);
+                println!(
+                    "[build_if_statement] Checking child {:?} - is_complex={}, is_simple={}",
+                    child.kind(),
+                    is_complex,
+                    is_simple
+                );
                 if is_complex || (is_simple && found_condition.is_none()) {
                     println!("[build_if_statement] ✓ Selected as condition candidate");
                     found_condition = Some(child);
@@ -2534,7 +2573,10 @@ impl HirBuilderContext {
                 return None;
             }
             let cond_node = found_condition.unwrap();
-            println!("[build_if_statement] Building expression for condition {:?}", cond_node.kind());
+            println!(
+                "[build_if_statement] Building expression for condition {:?}",
+                cond_node.kind()
+            );
             let result = self.build_expression(&cond_node);
             if result.is_none() {
                 println!("[build_if_statement] ❌ build_expression returned None for condition!");
@@ -2609,14 +2651,19 @@ impl HirBuilderContext {
         // Create a variable ID for the iterator
         let iterator_var_id = self.next_variable_id();
         // Register the iterator variable in the current scope
-        self.symbols.variables.insert(iterator.clone(), iterator_var_id);
+        self.symbols
+            .variables
+            .insert(iterator.clone(), iterator_var_id);
 
         // Find and build the range expression
         let range_node = node
             .children()
             .find(|c| c.kind() == SyntaxKind::RangeExpr)?;
         let range = self.build_range_expression(&range_node)?;
-        println!("[build_for_statement] Built range: inclusive={}", range.inclusive);
+        println!(
+            "[build_for_statement] Built range: inclusive={}",
+            range.inclusive
+        );
 
         // Build the body statements from child statements within the for loop
         // The body statements are between LBrace and RBrace
@@ -2677,7 +2724,10 @@ impl HirBuilderContext {
             .collect();
 
         if expr_nodes.len() < 2 {
-            println!("[build_range_expression] Expected 2 expressions, found {}", expr_nodes.len());
+            println!(
+                "[build_range_expression] Expected 2 expressions, found {}",
+                expr_nodes.len()
+            );
             return None;
         }
 
@@ -2757,18 +2807,27 @@ impl HirBuilderContext {
             .find(|t| t.kind() == SyntaxKind::Ident)?
             .text()
             .to_string();
-        eprintln!("[build_generate_for_statement] Iterator variable: {}", iterator);
+        eprintln!(
+            "[build_generate_for_statement] Iterator variable: {}",
+            iterator
+        );
 
         // Create a variable ID for the iterator
         let iterator_var_id = self.next_variable_id();
-        self.symbols.variables.insert(iterator.clone(), iterator_var_id);
+        self.symbols
+            .variables
+            .insert(iterator.clone(), iterator_var_id);
 
         // Find and build the range expression (with optional step)
         let range_node = node
             .children()
             .find(|c| c.kind() == SyntaxKind::RangeExpr)?;
         let range = self.build_range_expression_with_step(&range_node, node)?;
-        eprintln!("[build_generate_for_statement] Built range: inclusive={}, has_step={}", range.inclusive, range.step.is_some());
+        eprintln!(
+            "[build_generate_for_statement] Built range: inclusive={}, has_step={}",
+            range.inclusive,
+            range.step.is_some()
+        );
 
         // Build the body statements
         let mut body_stmts = Vec::new();
@@ -2789,7 +2848,10 @@ impl HirBuilderContext {
                 _ => {}
             }
         }
-        eprintln!("[build_generate_for_statement] Built {} body statements", body_stmts.len());
+        eprintln!(
+            "[build_generate_for_statement] Built {} body statements",
+            body_stmts.len()
+        );
 
         if preserve_mode {
             // Preserve mode: return HirGenerateFor for Verilog generate block
@@ -2827,7 +2889,11 @@ impl HirBuilderContext {
         let end_val = self.try_eval_const_expr(&range.end)?;
 
         let mut expanded_stmts = Vec::new();
-        let end_exclusive = if range.inclusive { end_val + 1 } else { end_val };
+        let end_exclusive = if range.inclusive {
+            end_val + 1
+        } else {
+            end_val
+        };
 
         for _i in start_val..end_exclusive {
             // For each iteration, clone the body statements
@@ -2848,16 +2914,17 @@ impl HirBuilderContext {
 
     /// Try to evaluate a constant expression at compile time
     fn try_eval_const_expr(&self, expr: &HirExpression) -> Option<i64> {
+        Self::eval_const_expr_impl(expr)
+    }
+
+    /// Implementation of constant expression evaluation (static to avoid only_used_in_recursion warning)
+    fn eval_const_expr_impl(expr: &HirExpression) -> Option<i64> {
         match expr {
-            HirExpression::Literal(lit) => {
-                match lit {
-                    HirLiteral::Integer(n) => Some(*n as i64),
-                    _ => None,
-                }
-            }
+            HirExpression::Literal(HirLiteral::Integer(n)) => Some(*n as i64),
+            HirExpression::Literal(_) => None,
             HirExpression::Binary(bin) => {
-                let left = self.try_eval_const_expr(&bin.left)?;
-                let right = self.try_eval_const_expr(&bin.right)?;
+                let left = Self::eval_const_expr_impl(&bin.left)?;
+                let right = Self::eval_const_expr_impl(&bin.right)?;
                 match bin.op {
                     HirBinaryOp::Add => Some(left + right),
                     HirBinaryOp::Sub => Some(left - right),
@@ -2867,7 +2934,7 @@ impl HirBuilderContext {
                 }
             }
             HirExpression::Unary(un) => {
-                let operand = self.try_eval_const_expr(&un.operand)?;
+                let operand = Self::eval_const_expr_impl(&un.operand)?;
                 match un.op {
                     HirUnaryOp::Negate => Some(-operand),
                     _ => None,
@@ -2884,18 +2951,16 @@ impl HirBuilderContext {
         let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
 
         // Find the condition expression
-        let condition_node = node
-            .children()
-            .find(|c| {
-                matches!(
-                    c.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::ParenExpr
-                )
-            })?;
+        let condition_node = node.children().find(|c| {
+            matches!(
+                c.kind(),
+                SyntaxKind::LiteralExpr
+                    | SyntaxKind::IdentExpr
+                    | SyntaxKind::BinaryExpr
+                    | SyntaxKind::UnaryExpr
+                    | SyntaxKind::ParenExpr
+            )
+        })?;
         let condition = self.build_expression(&condition_node)?;
 
         // Build then and else branches
@@ -2989,51 +3054,49 @@ impl HirBuilderContext {
     fn try_eval_const_bool(&self, expr: &HirExpression) -> Option<bool> {
         match expr {
             HirExpression::Literal(HirLiteral::Boolean(b)) => Some(*b),
-            HirExpression::Binary(bin) => {
-                match bin.op {
-                    HirBinaryOp::Equal => {
-                        let left = self.try_eval_const_expr(&bin.left)?;
-                        let right = self.try_eval_const_expr(&bin.right)?;
-                        Some(left == right)
-                    }
-                    HirBinaryOp::NotEqual => {
-                        let left = self.try_eval_const_expr(&bin.left)?;
-                        let right = self.try_eval_const_expr(&bin.right)?;
-                        Some(left != right)
-                    }
-                    HirBinaryOp::Less => {
-                        let left = self.try_eval_const_expr(&bin.left)?;
-                        let right = self.try_eval_const_expr(&bin.right)?;
-                        Some(left < right)
-                    }
-                    HirBinaryOp::LessEqual => {
-                        let left = self.try_eval_const_expr(&bin.left)?;
-                        let right = self.try_eval_const_expr(&bin.right)?;
-                        Some(left <= right)
-                    }
-                    HirBinaryOp::Greater => {
-                        let left = self.try_eval_const_expr(&bin.left)?;
-                        let right = self.try_eval_const_expr(&bin.right)?;
-                        Some(left > right)
-                    }
-                    HirBinaryOp::GreaterEqual => {
-                        let left = self.try_eval_const_expr(&bin.left)?;
-                        let right = self.try_eval_const_expr(&bin.right)?;
-                        Some(left >= right)
-                    }
-                    HirBinaryOp::And => {
-                        let left = self.try_eval_const_bool(&bin.left)?;
-                        let right = self.try_eval_const_bool(&bin.right)?;
-                        Some(left && right)
-                    }
-                    HirBinaryOp::Or => {
-                        let left = self.try_eval_const_bool(&bin.left)?;
-                        let right = self.try_eval_const_bool(&bin.right)?;
-                        Some(left || right)
-                    }
-                    _ => None,
+            HirExpression::Binary(bin) => match bin.op {
+                HirBinaryOp::Equal => {
+                    let left = self.try_eval_const_expr(&bin.left)?;
+                    let right = self.try_eval_const_expr(&bin.right)?;
+                    Some(left == right)
                 }
-            }
+                HirBinaryOp::NotEqual => {
+                    let left = self.try_eval_const_expr(&bin.left)?;
+                    let right = self.try_eval_const_expr(&bin.right)?;
+                    Some(left != right)
+                }
+                HirBinaryOp::Less => {
+                    let left = self.try_eval_const_expr(&bin.left)?;
+                    let right = self.try_eval_const_expr(&bin.right)?;
+                    Some(left < right)
+                }
+                HirBinaryOp::LessEqual => {
+                    let left = self.try_eval_const_expr(&bin.left)?;
+                    let right = self.try_eval_const_expr(&bin.right)?;
+                    Some(left <= right)
+                }
+                HirBinaryOp::Greater => {
+                    let left = self.try_eval_const_expr(&bin.left)?;
+                    let right = self.try_eval_const_expr(&bin.right)?;
+                    Some(left > right)
+                }
+                HirBinaryOp::GreaterEqual => {
+                    let left = self.try_eval_const_expr(&bin.left)?;
+                    let right = self.try_eval_const_expr(&bin.right)?;
+                    Some(left >= right)
+                }
+                HirBinaryOp::And => {
+                    let left = self.try_eval_const_bool(&bin.left)?;
+                    let right = self.try_eval_const_bool(&bin.right)?;
+                    Some(left && right)
+                }
+                HirBinaryOp::Or => {
+                    let left = self.try_eval_const_bool(&bin.left)?;
+                    let right = self.try_eval_const_bool(&bin.right)?;
+                    Some(left || right)
+                }
+                _ => None,
+            },
             HirExpression::Unary(un) if matches!(un.op, HirUnaryOp::Not) => {
                 let operand = self.try_eval_const_bool(&un.operand)?;
                 Some(!operand)
@@ -3049,18 +3112,16 @@ impl HirBuilderContext {
         let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
 
         // Find the match expression
-        let expr_node = node
-            .children()
-            .find(|c| {
-                matches!(
-                    c.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::ParenExpr
-                )
-            })?;
+        let expr_node = node.children().find(|c| {
+            matches!(
+                c.kind(),
+                SyntaxKind::LiteralExpr
+                    | SyntaxKind::IdentExpr
+                    | SyntaxKind::BinaryExpr
+                    | SyntaxKind::UnaryExpr
+                    | SyntaxKind::ParenExpr
+            )
+        })?;
         let match_expr = self.build_expression(&expr_node)?;
 
         // Build match arms
@@ -3077,8 +3138,9 @@ impl HirBuilderContext {
             // Preserve mode: return HirGenerateMatch for Verilog generate case
             Some(HirStatement::GenerateMatch(HirGenerateMatch {
                 expr: match_expr,
-                arms: arms.into_iter().map(|(pattern, stmts)| {
-                    HirGenerateArm {
+                arms: arms
+                    .into_iter()
+                    .map(|(pattern, stmts)| HirGenerateArm {
                         pattern,
                         body: HirGenerateBody {
                             signals: Vec::new(),
@@ -3089,8 +3151,8 @@ impl HirBuilderContext {
                             assignments: Vec::new(),
                             generate_stmts: stmts,
                         },
-                    }
-                }).collect(),
+                    })
+                    .collect(),
                 mode: GenerateMode::Preserve,
             }))
         } else {
@@ -3111,7 +3173,8 @@ impl HirBuilderContext {
                 None
             } else {
                 self.errors.push(HirError {
-                    message: "generate match expression must be evaluable at compile time".to_string(),
+                    message: "generate match expression must be evaluable at compile time"
+                        .to_string(),
                     span: self.make_span(&expr_node),
                 });
                 None
@@ -3120,18 +3183,17 @@ impl HirBuilderContext {
     }
 
     /// Build a generate match arm
-    fn build_generate_match_arm(&mut self, node: &SyntaxNode) -> Option<(HirPattern, Vec<HirStatement>)> {
+    fn build_generate_match_arm(
+        &mut self,
+        node: &SyntaxNode,
+    ) -> Option<(HirPattern, Vec<HirStatement>)> {
         // Get the pattern
-        let pattern_node = node
-            .children()
-            .find(|c| {
-                matches!(
-                    c.kind(),
-                    SyntaxKind::LiteralPattern
-                        | SyntaxKind::IdentPattern
-                        | SyntaxKind::WildcardPattern
-                )
-            })?;
+        let pattern_node = node.children().find(|c| {
+            matches!(
+                c.kind(),
+                SyntaxKind::LiteralPattern | SyntaxKind::IdentPattern | SyntaxKind::WildcardPattern
+            )
+        })?;
         let pattern = self.build_pattern(&pattern_node)?;
 
         // Get the arm body statements
@@ -3160,12 +3222,8 @@ impl HirBuilderContext {
     /// Check if a pattern matches a value (for compile-time evaluation)
     fn pattern_matches(&self, pattern: &HirPattern, value: i64) -> bool {
         match pattern {
-            HirPattern::Literal(lit) => {
-                match lit {
-                    HirLiteral::Integer(n) => *n as i64 == value,
-                    _ => false,
-                }
-            }
+            HirPattern::Literal(HirLiteral::Integer(n)) => *n as i64 == value,
+            HirPattern::Literal(_) => false,
             HirPattern::Wildcard => true,
             HirPattern::Variable(_) => true, // Variable patterns always match
             _ => false,
@@ -4729,9 +4787,15 @@ impl HirBuilderContext {
         let mut type_args = Vec::new();
         let mut named_type_args = std::collections::HashMap::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
-            eprintln!("[HIR_TYPE_ARGS] Found ArgList with {} children", arg_list.children().count());
+            eprintln!(
+                "[HIR_TYPE_ARGS] Found ArgList with {} children",
+                arg_list.children().count()
+            );
             for arg_node in arg_list.children() {
-                eprintln!("[HIR_TYPE_ARGS] Processing arg_node kind: {:?}", arg_node.kind());
+                eprintln!(
+                    "[HIR_TYPE_ARGS] Processing arg_node kind: {:?}",
+                    arg_node.kind()
+                );
 
                 // Handle named generic arguments: NAME: value
                 if arg_node.kind() == SyntaxKind::NamedArg {
@@ -4774,7 +4838,9 @@ impl HirBuilderContext {
                 && i + 1 < call_children.len()
                 && call_children[i + 1].kind() == SyntaxKind::CallExpr
             {
-                eprintln!("[HIR_CALL_FIX] Skipping IdentExpr (function name for following CallExpr)");
+                eprintln!(
+                    "[HIR_CALL_FIX] Skipping IdentExpr (function name for following CallExpr)"
+                );
                 i += 1;
                 continue;
             }
@@ -4794,7 +4860,7 @@ impl HirBuilderContext {
             }
 
             // Process as argument
-            if let Some(expr) = self.build_expression(&child) {
+            if let Some(expr) = self.build_expression(child) {
                 args.push(expr);
             }
 
@@ -4806,7 +4872,7 @@ impl HirBuilderContext {
 
         Some(HirExpression::Call(HirCallExpr {
             function,
-            type_args, // Phase 1: Extracted from AST (positional)
+            type_args,       // Phase 1: Extracted from AST (positional)
             named_type_args, // Named generic arguments like func::<W: 32>()
             args,
             impl_style,
@@ -5259,7 +5325,10 @@ impl HirBuilderContext {
             };
             // Skip IdentExpr if followed by FieldExpr or CallExpr
             if expr_children[i].kind() == SyntaxKind::IdentExpr
-                && matches!(next_kind, Some(SyntaxKind::FieldExpr) | Some(SyntaxKind::CallExpr))
+                && matches!(
+                    next_kind,
+                    Some(SyntaxKind::FieldExpr) | Some(SyntaxKind::CallExpr)
+                )
             {
                 // Check if they're adjacent siblings (not separated by other nodes)
                 if let Some(parent) = expr_children[i].parent() {
@@ -5332,12 +5401,16 @@ impl HirBuilderContext {
 
                 // BUGFIX: Check if all children are BinaryExprs (no separate first operand)
                 // In this case, the first BinaryExpr contains both operands, not just op + right
-                let non_binary_count = expr_children.iter()
+                let non_binary_count = expr_children
+                    .iter()
                     .filter(|n| n.kind() != SyntaxKind::BinaryExpr)
                     .count();
 
                 let mut start_idx = 0;
-                if non_binary_count == 0 && !expr_children.is_empty() && expr_children[0].kind() == SyntaxKind::BinaryExpr {
+                if non_binary_count == 0
+                    && !expr_children.is_empty()
+                    && expr_children[0].kind() == SyntaxKind::BinaryExpr
+                {
                     // All children are BinaryExprs - first one is a complete binary expr
                     result_expr = self.build_binary_expr(&expr_children[0]);
                     start_idx = 1; // Start chaining from second BinaryExpr
@@ -5570,7 +5643,8 @@ impl HirBuilderContext {
                     for next in siblings.iter().skip(pos + 1) {
                         if next.kind() == SyntaxKind::BinaryExpr {
                             // Only add this sibling if it's a continuation (starts with an operator)
-                            let first_token = next.children_with_tokens()
+                            let first_token = next
+                                .children_with_tokens()
                                 .filter_map(|e| e.into_token())
                                 .next();
                             if let Some(tok) = first_token {
@@ -5609,7 +5683,8 @@ impl HirBuilderContext {
             return None;
         }
 
-        let node_tokens: Vec<_> = node.children_with_tokens()
+        let node_tokens: Vec<_> = node
+            .children_with_tokens()
             .filter_map(|e| e.into_token())
             .map(|t| (t.kind(), t.text().to_string()))
             .collect();
@@ -5617,7 +5692,9 @@ impl HirBuilderContext {
         // BUG FIX #145: For BinaryExprs with exactly 2 expression children and 1 operator token,
         // use the standard path directly. This is the common case for properly structured ASTs.
         // Skip the "chained operations" path which is only needed for parser workarounds.
-        if expr_children.len() == 2 && node_tokens.iter().filter(|(k, _)| k.is_operator()).count() == 1 {
+        if expr_children.len() == 2
+            && node_tokens.iter().filter(|(k, _)| k.is_operator()).count() == 1
+        {
             let left = Box::new(self.build_expression(&expr_children[0])?);
             let right = Box::new(self.build_expression(&expr_children[1])?);
 
@@ -6249,7 +6326,9 @@ impl HirBuilderContext {
                 SyntaxKind::IfStmt => {
                     println!("[HIR_COLLECT] 🔍 Found IfStmt, calling build_if_statement");
                     if let Some(if_stmt) = self.build_if_statement(&child) {
-                        println!("[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements");
+                        println!(
+                            "[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements"
+                        );
                         statements.push(HirStatement::If(if_stmt));
                     } else {
                         println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
@@ -6704,9 +6783,12 @@ impl HirBuilderContext {
                 self.intent_mux_styles.insert(name.clone(), mux_style);
             }
             // Extract pipeline_style (e.g., "pipeline_style::manual")
-            if let Some(pipeline_style) = self.extract_pipeline_style_from_intent_value(&intent_value) {
+            if let Some(pipeline_style) =
+                self.extract_pipeline_style_from_intent_value(&intent_value)
+            {
                 // Store this intent's pipeline_style for later lookup
-                self.intent_pipeline_styles.insert(name.clone(), pipeline_style);
+                self.intent_pipeline_styles
+                    .insert(name.clone(), pipeline_style);
             }
             // Extract impl_style (e.g., "impl_style::parallel")
             if let Some(impl_style) = self.extract_impl_style_from_intent_value(&intent_value) {
@@ -6937,7 +7019,10 @@ impl HirBuilderContext {
 
     /// Extract unroll config from an IntentValue node
     /// Handles: #[unroll] -> Full, #[unroll(4)] -> Factor(4)
-    fn extract_unroll_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<UnrollConfig> {
+    fn extract_unroll_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<UnrollConfig> {
         // Get all tokens from the intent value
         let tokens: Vec<_> = intent_value
             .children_with_tokens()
@@ -6945,9 +7030,9 @@ impl HirBuilderContext {
             .collect();
 
         // Look for "unroll" identifier
-        let has_unroll = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "unroll"
-        });
+        let has_unroll = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "unroll");
 
         if !has_unroll {
             return None;
@@ -6970,9 +7055,14 @@ impl HirBuilderContext {
 
     /// Extract pipeline config from an IntentValue node
     /// Handles: #[pipeline(stages=N)] -> PipelineConfig with N stages
-    fn extract_pipeline_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<PipelineConfig> {
+    fn extract_pipeline_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<PipelineConfig> {
         // Recursively collect all tokens from the intent value and its children
-        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
             let mut tokens = Vec::new();
             for elem in node.children_with_tokens() {
                 match elem {
@@ -6986,9 +7076,9 @@ impl HirBuilderContext {
         let tokens = collect_all_tokens(intent_value);
 
         // Look for "pipeline" identifier
-        let has_pipeline = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "pipeline"
-        });
+        let has_pipeline = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "pipeline");
 
         if !has_pipeline {
             return None;
@@ -7038,9 +7128,14 @@ impl HirBuilderContext {
 
     /// Extract memory config from an IntentValue node
     /// Handles: #[memory(depth=N)] or #[memory(depth=N, width=M, style=block)]
-    fn extract_memory_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<MemoryConfig> {
+    fn extract_memory_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<MemoryConfig> {
         // Recursively collect all tokens from the intent value and its children
-        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
             let mut tokens = Vec::new();
             for elem in node.children_with_tokens() {
                 match elem {
@@ -7054,9 +7149,9 @@ impl HirBuilderContext {
         let tokens = collect_all_tokens(intent_value);
 
         // Look for "memory" identifier
-        let has_memory = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "memory"
-        });
+        let has_memory = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "memory");
 
         if !has_memory {
             return None;
@@ -7151,9 +7246,14 @@ impl HirBuilderContext {
 
     /// Extract trace config from an IntentValue node
     /// Handles: #[trace] or #[trace(group="debug", radix=hex)]
-    fn extract_trace_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<TraceConfig> {
+    fn extract_trace_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<TraceConfig> {
         // Recursively collect all tokens from the intent value and its children
-        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
             let mut tokens = Vec::new();
             for elem in node.children_with_tokens() {
                 match elem {
@@ -7167,9 +7267,9 @@ impl HirBuilderContext {
         let tokens = collect_all_tokens(intent_value);
 
         // Look for "trace" identifier
-        let has_trace = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "trace"
-        });
+        let has_trace = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "trace");
 
         if !has_trace {
             return None;
@@ -7184,8 +7284,8 @@ impl HirBuilderContext {
 
         for token in tokens.iter() {
             // Handle both identifiers and keywords (like 'group')
-            let is_ident_or_keyword = token.kind() == SyntaxKind::Ident
-                || token.kind() == SyntaxKind::GroupKw;
+            let is_ident_or_keyword =
+                token.kind() == SyntaxKind::Ident || token.kind() == SyntaxKind::GroupKw;
 
             if is_ident_or_keyword {
                 let text = token.text();
@@ -7255,7 +7355,9 @@ impl HirBuilderContext {
     /// - `to = 'dst` references destination clock domain lifetime
     fn extract_cdc_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<CdcConfig> {
         // Recursively collect all tokens from the intent value and its children
-        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
             let mut tokens = Vec::new();
             for elem in node.children_with_tokens() {
                 match elem {
@@ -7269,9 +7371,9 @@ impl HirBuilderContext {
         let tokens = collect_all_tokens(intent_value);
 
         // Look for "cdc" identifier
-        let has_cdc = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "cdc"
-        });
+        let has_cdc = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "cdc");
 
         if !has_cdc {
             return None;
@@ -7335,19 +7437,17 @@ impl HirBuilderContext {
                         current_key = None;
                     }
                     // Identifier value for domain (e.g., from = fast without quote)
-                    _ => {
-                        match current_key {
-                            Some("from") => {
-                                from_domain = Some(text.to_string());
-                                current_key = None;
-                            }
-                            Some("to") => {
-                                to_domain = Some(text.to_string());
-                                current_key = None;
-                            }
-                            _ => {}
+                    _ => match current_key {
+                        Some("from") => {
+                            from_domain = Some(text.to_string());
+                            current_key = None;
                         }
-                    }
+                        Some("to") => {
+                            to_domain = Some(text.to_string());
+                            current_key = None;
+                        }
+                        _ => {}
+                    },
                 }
             } else if token.kind() == SyntaxKind::Lifetime {
                 // Lifetime token (e.g., 'fast, 'slow) - the lexer strips the leading '
@@ -7398,9 +7498,14 @@ impl HirBuilderContext {
     /// - `#[intel_ip("altera_fifo")]` - Simple Intel IP
     /// - `#[xilinx_ip(name = "xpm_memory_spram", library = "xpm")]` - With parameters
     /// - `#[vendor_ip(name = "my_ip", vendor = xilinx)]` - Generic with vendor
-    fn extract_vendor_ip_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<VendorIpConfig> {
+    fn extract_vendor_ip_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<VendorIpConfig> {
         // Recursively collect all tokens from the intent value and its children
-        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
             let mut tokens = Vec::new();
             for elem in node.children_with_tokens() {
                 match elem {
@@ -7433,7 +7538,7 @@ impl HirBuilderContext {
         let mut library: Option<String> = None;
         let mut version: Option<String> = None;
         let mut black_box = matches!(vendor, VendorType::Generic);
-        let mut parameters: Vec<(String, String)> = Vec::new();
+        let parameters: Vec<(String, String)> = Vec::new();
         let mut explicit_vendor: Option<VendorType> = None;
 
         let mut current_key: Option<&str> = None;
@@ -7514,11 +7619,11 @@ impl HirBuilderContext {
                     }
                     _ => {}
                 }
-            } else if token.kind() == SyntaxKind::TrueKw || token.kind() == SyntaxKind::FalseKw {
-                if current_key == Some("black_box") {
-                    black_box = token.kind() == SyntaxKind::TrueKw;
-                    current_key = None;
-                }
+            } else if (token.kind() == SyntaxKind::TrueKw || token.kind() == SyntaxKind::FalseKw)
+                && current_key == Some("black_box")
+            {
+                black_box = token.kind() == SyntaxKind::TrueKw;
+                current_key = None;
             }
         }
 
@@ -7543,7 +7648,9 @@ impl HirBuilderContext {
         intent_value: &SyntaxNode,
     ) -> Option<BreakpointConfig> {
         // Recursively collect all tokens from the intent value and its children
-        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
             let mut tokens = Vec::new();
             for elem in node.children_with_tokens() {
                 match elem {
@@ -7557,9 +7664,9 @@ impl HirBuilderContext {
         let tokens = collect_all_tokens(intent_value);
 
         // Look for "breakpoint" identifier
-        let has_breakpoint = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "breakpoint"
-        });
+        let has_breakpoint = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "breakpoint");
 
         if !has_breakpoint {
             return None;
@@ -7649,7 +7756,9 @@ impl HirBuilderContext {
         intent_value: &SyntaxNode,
     ) -> Option<PowerConfig> {
         // Recursively collect all tokens from the intent value and its children
-        fn collect_all_tokens(node: &SyntaxNode) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
             let mut tokens = Vec::new();
             for elem in node.children_with_tokens() {
                 match elem {
@@ -7664,19 +7773,19 @@ impl HirBuilderContext {
 
         // Determine which power attribute type this is
         // Note: 'isolation' is a keyword (IsolationKw), while others are identifiers
-        let has_retention = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "retention"
-        });
+        let has_retention = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "retention");
         let has_isolation = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::IsolationKw ||
-            (t.kind() == SyntaxKind::Ident && t.text() == "isolation")
+            t.kind() == SyntaxKind::IsolationKw
+                || (t.kind() == SyntaxKind::Ident && t.text() == "isolation")
         });
-        let has_pdc = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "pdc"
-        });
-        let has_level_shift = tokens.iter().any(|t| {
-            t.kind() == SyntaxKind::Ident && t.text() == "level_shift"
-        });
+        let has_pdc = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "pdc");
+        let has_level_shift = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "level_shift");
 
         // Must have at least one power attribute
         if !has_retention && !has_isolation && !has_pdc && !has_level_shift {
@@ -7747,19 +7856,17 @@ impl HirBuilderContext {
                             }
                         }
                         // Signal names as identifiers
-                        _ if text != "retention" => {
-                            match current_key {
-                                Some("save") => {
-                                    save_signal = Some(text.to_string());
-                                    current_key = None;
-                                }
-                                Some("restore") => {
-                                    restore_signal = Some(text.to_string());
-                                    current_key = None;
-                                }
-                                _ => {}
+                        _ if text != "retention" => match current_key {
+                            Some("save") => {
+                                save_signal = Some(text.to_string());
+                                current_key = None;
                             }
-                        }
+                            Some("restore") => {
+                                restore_signal = Some(text.to_string());
+                                current_key = None;
+                            }
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
@@ -7908,7 +8015,9 @@ impl HirBuilderContext {
                             }
                         }
                         // Domain names as identifiers
-                        _ if !["level_shift", "pdc", "isolation", "clamp", "enable"].contains(&text) => {
+                        _ if !["level_shift", "pdc", "isolation", "clamp", "enable"]
+                            .contains(&text) =>
+                        {
                             match current_key {
                                 Some("from") => {
                                     from_domain = Some(text.to_string());
@@ -7928,11 +8037,7 @@ impl HirBuilderContext {
                 SyntaxKind::Lifetime => {
                     let text = token.text();
                     // Strip leading quote from lifetime (e.g., "'core" -> "core")
-                    let domain_name = if text.starts_with('\'') {
-                        text[1..].to_string()
-                    } else {
-                        text.to_string()
-                    };
+                    let domain_name = text.strip_prefix('\'').unwrap_or(text).to_string();
                     match current_key {
                         Some("from") => {
                             from_domain = Some(domain_name);
@@ -9464,7 +9569,9 @@ impl HirBuilderContext {
 
             // Check if this is a type parameter with trait bounds
             // Look for TraitBoundList node which indicates trait bounds (T: FloatingPoint)
-            let param_type = if let Some(trait_bound_list) = node.first_child_of_kind(SyntaxKind::TraitBoundList) {
+            let param_type = if let Some(trait_bound_list) =
+                node.first_child_of_kind(SyntaxKind::TraitBoundList)
+            {
                 // Extract trait names from TraitBoundList
                 let mut trait_bounds = Vec::new();
 
