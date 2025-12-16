@@ -8207,10 +8207,31 @@ impl HirBuilderContext {
         })
     }
 
+    /// Known safety mechanism types for validation
+    const KNOWN_MECHANISM_TYPES: &'static [&'static str] = &[
+        "tmr",
+        "dmr",
+        "ecc",
+        "crc",
+        "lockstep",
+        "watchdog",
+        "comparator",
+        "parity",
+        "memory_bist",
+        "mbist",
+        "logic_bist",
+        "lbist",
+    ];
+
     /// Extract safety mechanism config from an IntentValue node
-    /// Handles: #[safety_mechanism(type: crc, dc: 99.0, lc: 90.0)]
+    /// Handles: #[safety_mechanism(type=crc, dc=99, lc=90)]
+    ///
+    /// Validates:
+    /// - Mechanism type is known (warning if custom)
+    /// - dc/lc values are in range [0, 100]
+    /// - At least one parameter is specified (warning if empty)
     fn extract_safety_mechanism_config_from_intent_value(
-        &self,
+        &mut self,
         intent_value: &SyntaxNode,
     ) -> Option<SafetyMechanismConfig> {
         // Recursively collect all tokens from the intent value and its children
@@ -8238,7 +8259,7 @@ impl HirBuilderContext {
             return None;
         }
 
-        // Parse key-value pairs: type: crc, dc: 99.0, lc: 90.0
+        // Parse key-value pairs: type=crc, dc=99, lc=90
         let mut mechanism_type: Option<String> = None;
         let mut dc: Option<f64> = None;
         let mut lc: Option<f64> = None;
@@ -8313,6 +8334,50 @@ impl HirBuilderContext {
             }
         }
 
+        let span = self.make_span(intent_value);
+
+        // Validate mechanism type
+        if let Some(ref mtype) = mechanism_type {
+            let mtype_lower = mtype.to_lowercase();
+            if !Self::KNOWN_MECHANISM_TYPES.contains(&mtype_lower.as_str()) {
+                // Emit warning for unknown mechanism type (not error, since custom types are allowed)
+                self.errors.push(HirError {
+                    message: format!(
+                        "Unknown safety mechanism type '{}'. Known types: {}. Custom types are allowed but may not be recognized by safety analysis tools.",
+                        mtype,
+                        Self::KNOWN_MECHANISM_TYPES.join(", ")
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+
+        // Validate dc is in range [0, 100]
+        if let Some(dc_value) = dc {
+            if !(0.0..=100.0).contains(&dc_value) {
+                self.errors.push(HirError {
+                    message: format!(
+                        "Invalid diagnostic coverage (dc) value: {}. Must be in range [0, 100].",
+                        dc_value
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+
+        // Validate lc is in range [0, 100]
+        if let Some(lc_value) = lc {
+            if !(0.0..=100.0).contains(&lc_value) {
+                self.errors.push(HirError {
+                    message: format!(
+                        "Invalid latent coverage (lc) value: {}. Must be in range [0, 100].",
+                        lc_value
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+
         // Only return Some if we found at least the mechanism type
         if mechanism_type.is_some() || dc.is_some() || lc.is_some() {
             Some(SafetyMechanismConfig {
@@ -8322,6 +8387,11 @@ impl HirBuilderContext {
                 description: None, // Description not parsed from attribute
             })
         } else {
+            // Emit warning for empty safety_mechanism attribute
+            self.errors.push(HirError {
+                message: "Empty #[safety_mechanism()] attribute. Specify at least 'type' parameter, e.g., #[safety_mechanism(type=watchdog)]".to_string(),
+                span,
+            });
             // Return a default config if safety_mechanism was found but no parameters
             Some(SafetyMechanismConfig::default())
         }

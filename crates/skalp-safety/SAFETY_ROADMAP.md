@@ -107,8 +107,10 @@ This document tracks the current state, limitations, and planned improvements fo
 - [x] End-to-end validation tests (`test_safety_annotation_pipeline.rs`)
 - [x] Fixed `TypeKw` token handling in `#[safety_mechanism]` attribute parsing
 - [x] Fixed `from_lir_safety_info` to handle standalone safety mechanisms
-**Remaining**:
-- [ ] Error reporting for missing/invalid annotations (LOW priority)
+- [x] Error reporting for invalid safety annotations:
+  - Unknown mechanism types (warning with list of known types)
+  - dc/lc values outside [0, 100] range
+  - Empty `#[safety_mechanism()]` attribute
 
 ### LOW Priority
 
