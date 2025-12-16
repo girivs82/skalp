@@ -14,7 +14,10 @@
 //! 2. Applies decomposition rules if no direct match
 //! 3. Creates GateNetlist with FIT rates from the library
 
-use crate::gate_netlist::{Cell, CellFailureMode, CellId, GateNet, GateNetId, GateNetlist};
+use crate::gate_netlist::{
+    Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
+};
+use crate::lir::LirSafetyInfo;
 use crate::tech_library::{
     CellFunction, DecompConnectivity, LibraryCell, LibraryFailureMode, TechLibrary,
 };
@@ -103,6 +106,9 @@ pub struct TechMapper<'a> {
     next_cell_id: u32,
     /// Next net ID
     next_net_id: u32,
+    /// Module-level safety info (from WordLir)
+    /// Applied to all cells during mapping
+    module_safety_info: Option<LirSafetyInfo>,
 }
 
 impl<'a> TechMapper<'a> {
@@ -116,6 +122,7 @@ impl<'a> TechMapper<'a> {
             warnings: Vec::new(),
             next_cell_id: 0,
             next_net_id: 0,
+            module_safety_info: None,
         }
     }
 
@@ -130,6 +137,9 @@ impl<'a> TechMapper<'a> {
     /// Map a WordLir to a GateNetlist
     pub fn map(&mut self, word_lir: &WordLir) -> TechMapResult {
         self.netlist.name = word_lir.name.clone();
+
+        // Store module-level safety info for propagation to cells
+        self.module_safety_info = word_lir.module_safety_info.clone();
 
         // Phase 1: Create nets for all signals
         for signal in &word_lir.signals {
@@ -997,8 +1007,13 @@ impl<'a> TechMapper<'a> {
         current_level[0]
     }
 
-    /// Add a cell to the netlist
-    fn add_cell(&mut self, cell: Cell) {
+    /// Add a cell to the netlist, applying module-level safety classification
+    fn add_cell(&mut self, mut cell: Cell) {
+        // Apply safety classification from module-level safety info
+        if let Some(ref safety_info) = self.module_safety_info {
+            cell.safety_classification =
+                CellSafetyClassification::from_lir_safety_info(safety_info);
+        }
         self.netlist.add_cell(cell);
         self.stats.cells_created += 1;
     }

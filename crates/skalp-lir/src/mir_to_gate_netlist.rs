@@ -20,12 +20,13 @@
 //! - This enables precise per-bit fault injection
 
 use crate::lir::{
-    HierarchyNode, Lir, LirNet, NetId, NetlistStats, Primitive, PrimitiveId, PrimitiveType,
+    HierarchyNode, Lir, LirNet, LirSafetyInfo, NetId, NetlistStats, Primitive, PrimitiveId,
+    PrimitiveType,
 };
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
-    ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, SensitivityList,
-    SignalId, Statement, UnaryOp, Value,
+    ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, SafetyContext,
+    SensitivityList, SignalId, Statement, UnaryOp, Value,
 };
 use std::collections::HashMap;
 
@@ -93,6 +94,9 @@ pub struct MirToLirTransform {
     reset_nets: Vec<NetId>,
     /// Cached constant 0 net (for padding shorter operands)
     const_zero_net: Option<NetId>,
+    /// Module-level safety context (from MIR)
+    /// Propagated to all primitives created in this module
+    module_safety_context: Option<SafetyContext>,
 }
 
 impl MirToLirTransform {
@@ -111,12 +115,42 @@ impl MirToLirTransform {
             clock_nets: Vec::new(),
             reset_nets: Vec::new(),
             const_zero_net: None,
+            module_safety_context: None,
         }
+    }
+
+    /// Convert MIR SafetyContext to LIR LirSafetyInfo
+    fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
+        LirSafetyInfo {
+            goal_name: ctx.implementing_goal.clone(),
+            mechanism_name: ctx.mechanism_name.clone(),
+            is_sm_of_sm: false, // SM-of-SM detection is done at safety analysis level
+            protected_sm_name: None,
+        }
+    }
+
+    /// Apply module-level safety context to a primitive
+    fn apply_safety_info(&self, mut prim: Primitive) -> Primitive {
+        if let Some(ref ctx) = self.module_safety_context {
+            if ctx.has_safety_annotation() {
+                prim.safety_info = Some(Self::safety_context_to_lir_info(ctx));
+            }
+        }
+        prim
+    }
+
+    /// Add a primitive to the LIR with safety context applied
+    fn add_primitive_with_safety(&mut self, prim: Primitive) {
+        let prim_with_safety = self.apply_safety_info(prim);
+        self.lir.add_primitive(prim_with_safety);
     }
 
     /// Transform a MIR module to Lir
     pub fn transform(&mut self, module: &Module) -> MirToLirResult {
         self.hierarchy_path = module.name.clone();
+
+        // Store module-level safety context for propagation to primitives
+        self.module_safety_context = module.safety_context.clone();
 
         // Add hierarchy root node
         self.lir.hierarchy.push(HierarchyNode {
@@ -267,7 +301,7 @@ impl MirToLirTransform {
                         vec![expr_net],
                         vec![target_net],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                 }
             }
         }
@@ -336,7 +370,7 @@ impl MirToLirTransform {
                                 prim.reset = Some(rst);
                             }
 
-                            self.lir.add_primitive(prim);
+                            self.add_primitive_with_safety(prim);
 
                             // Mark target net as state output
                             if let Some(net) = self.lir.get_net_mut(target_net) {
@@ -424,7 +458,7 @@ impl MirToLirTransform {
                                 prim.reset = Some(rst);
                             }
 
-                            self.lir.add_primitive(prim);
+                            self.add_primitive_with_safety(prim);
 
                             if let Some(net) = self.lir.get_net_mut(target_net) {
                                 net.is_state_output = true;
@@ -497,7 +531,7 @@ impl MirToLirTransform {
                                 vec![expr_net],
                                 vec![target_net],
                             );
-                            self.lir.add_primitive(prim);
+                            self.add_primitive_with_safety(prim);
                         }
                     }
                 }
@@ -588,7 +622,7 @@ impl MirToLirTransform {
                         vec![],
                         vec![net_id],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     nets.push(net_id);
                 }
                 if nets.is_empty() {
@@ -604,7 +638,7 @@ impl MirToLirTransform {
                         vec![],
                         vec![net_id],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     nets.push(net_id);
                 }
                 nets
@@ -624,7 +658,7 @@ impl MirToLirTransform {
                         vec![],
                         vec![net_id],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     nets.push(net_id);
                 }
                 nets
@@ -642,7 +676,7 @@ impl MirToLirTransform {
                     vec![],
                     vec![net_id],
                 );
-                self.lir.add_primitive(prim);
+                self.add_primitive_with_safety(prim);
                 vec![net_id]
             }
         }
@@ -664,7 +698,7 @@ impl MirToLirTransform {
                 vec![],
                 vec![net_id],
             );
-            self.lir.add_primitive(prim);
+            self.add_primitive_with_safety(prim);
             self.const_zero_net = Some(net_id);
             net_id
         }
@@ -697,7 +731,7 @@ impl MirToLirTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     result_nets.push(out);
                 }
             }
@@ -716,7 +750,7 @@ impl MirToLirTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     result_nets.push(out);
                 }
             }
@@ -735,7 +769,7 @@ impl MirToLirTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     result_nets.push(out);
                 }
             }
@@ -768,7 +802,7 @@ impl MirToLirTransform {
                         inputs,
                         vec![sum, cout],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     result_nets.push(sum);
                     carry = Some(cout);
                 }
@@ -796,7 +830,7 @@ impl MirToLirTransform {
                         vec![l, r],
                         vec![out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     xnor_outs.push(out);
                 }
 
@@ -814,7 +848,7 @@ impl MirToLirTransform {
                     xnor_outs,
                     vec![eq_out],
                 );
-                self.lir.add_primitive(prim);
+                self.add_primitive_with_safety(prim);
 
                 if matches!(op, BinaryOp::NotEqual) {
                     // Invert for NotEqual
@@ -829,7 +863,7 @@ impl MirToLirTransform {
                         vec![eq_out],
                         vec![neq_out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     result_nets.push(neq_out);
                 } else {
                     result_nets.push(eq_out);
@@ -872,7 +906,7 @@ impl MirToLirTransform {
                         vec![l, r],
                         vec![l_xnor_r],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
 
                     // NOT l
                     let not_l = self.alloc_net_id();
@@ -885,7 +919,7 @@ impl MirToLirTransform {
                         vec![l],
                         vec![not_l],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
 
                     // !l AND r (generate borrow when l=0, r=1)
                     let not_l_and_r = self.alloc_net_id();
@@ -898,7 +932,7 @@ impl MirToLirTransform {
                         vec![not_l, r],
                         vec![not_l_and_r],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
 
                     // (l XNOR r) AND borrow_in (propagate borrow when l==r)
                     let xnor_and_borrow = self.alloc_net_id();
@@ -911,7 +945,7 @@ impl MirToLirTransform {
                         vec![l_xnor_r, borrow],
                         vec![xnor_and_borrow],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
 
                     // borrow_out = (!l AND r) OR ((l XNOR r) AND borrow_in)
                     let borrow_out = self.alloc_net_id();
@@ -924,7 +958,7 @@ impl MirToLirTransform {
                         vec![not_l_and_r, xnor_and_borrow],
                         vec![borrow_out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
 
                     borrow = borrow_out;
                 }
@@ -950,7 +984,7 @@ impl MirToLirTransform {
                             vec![l, r],
                             vec![out],
                         );
-                        self.lir.add_primitive(prim);
+                        self.add_primitive_with_safety(prim);
                         xnor_outs.push(out);
                     }
 
@@ -968,7 +1002,7 @@ impl MirToLirTransform {
                         xnor_outs,
                         vec![eq_out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
 
                     // OR lt_result with eq_out
                     let le_result = self.alloc_net_id();
@@ -984,7 +1018,7 @@ impl MirToLirTransform {
                         vec![lt_result, eq_out],
                         vec![le_result],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
 
                     result_nets.push(le_result);
                 } else {
@@ -1023,7 +1057,7 @@ impl MirToLirTransform {
                         vec![net],
                         vec![out],
                     );
-                    self.lir.add_primitive(prim);
+                    self.add_primitive_with_safety(prim);
                     result_nets.push(out);
                 }
             }
@@ -1067,7 +1101,7 @@ impl MirToLirTransform {
                 vec![sel_net, d0, d1],
                 vec![out],
             );
-            self.lir.add_primitive(prim);
+            self.add_primitive_with_safety(prim);
             result_nets.push(out);
         }
 

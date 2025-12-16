@@ -18,6 +18,7 @@
 //! - Eager decomposition loses information needed for optimal mapping
 //! - Decomposition decisions are technology-dependent
 
+use crate::lir::LirSafetyInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -315,6 +316,10 @@ pub struct WordLir {
     pub resets: Vec<WordSignalId>,
     /// Signal name to ID mapping
     signal_map: HashMap<String, WordSignalId>,
+    /// Module-level safety information (from MIR SafetyContext)
+    /// Propagated to all cells during technology mapping
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_safety_info: Option<LirSafetyInfo>,
 }
 
 impl WordLir {
@@ -329,6 +334,7 @@ impl WordLir {
             clocks: Vec::new(),
             resets: Vec::new(),
             signal_map: HashMap::new(),
+            module_safety_info: None,
         }
     }
 

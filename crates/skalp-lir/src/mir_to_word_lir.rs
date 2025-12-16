@@ -13,13 +13,24 @@
 //! MIR → WordLir (word-level) → TechMapper → GateNetlist (gate-level)
 //! ```
 
+use crate::lir::LirSafetyInfo;
 use crate::word_lir::{WordLir, WordLirStats, WordOp, WordSignalId};
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
-    SensitivityList, SignalId, Statement, UnaryOp, Value,
+    SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value,
 };
 use std::collections::HashMap;
+
+/// Convert MIR SafetyContext to LIR LirSafetyInfo
+fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
+    LirSafetyInfo {
+        goal_name: ctx.implementing_goal.clone(),
+        mechanism_name: ctx.mechanism_name.clone(),
+        is_sm_of_sm: false,
+        protected_sm_name: None,
+    }
+}
 
 /// Result of MIR to WordLir transformation
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -75,6 +86,13 @@ impl MirToWordLirTransform {
     /// Transform a MIR module to WordLir
     pub fn transform(&mut self, module: &Module) -> MirToWordLirResult {
         self.hierarchy_path = module.name.clone();
+
+        // Propagate module-level safety context to WordLir
+        if let Some(ref ctx) = module.safety_context {
+            if ctx.has_safety_annotation() {
+                self.lir.module_safety_info = Some(safety_context_to_lir_info(ctx));
+            }
+        }
 
         // Phase 1: Create signals for all ports (preserving width)
         for port in &module.ports {
