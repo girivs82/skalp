@@ -54,6 +54,9 @@ pub struct Cell {
     pub reset: Option<GateNetId>,
     /// Source WordLir operation this came from (for debug/traceability)
     pub source_op: Option<String>,
+    /// Safety classification: Functional vs SafetyMechanism
+    /// Used for ISO 26262 FMEDA to track λSM (safety mechanism failure rate)
+    pub safety_classification: CellSafetyClassification,
 }
 
 impl Cell {
@@ -79,6 +82,7 @@ impl Cell {
             clock: None,
             reset: None,
             source_op: None,
+            safety_classification: CellSafetyClassification::default(),
         }
     }
 
@@ -107,7 +111,19 @@ impl Cell {
             clock: Some(clock),
             reset,
             source_op: None,
+            safety_classification: CellSafetyClassification::default(),
         }
+    }
+
+    /// Set the safety classification for this cell
+    pub fn with_safety_classification(mut self, classification: CellSafetyClassification) -> Self {
+        self.safety_classification = classification;
+        self
+    }
+
+    /// Check if this cell is part of a safety mechanism
+    pub fn is_safety_mechanism(&self) -> bool {
+        self.safety_classification.is_safety_mechanism()
     }
 
     /// Check if this is a sequential cell
@@ -155,6 +171,77 @@ pub enum FaultType {
     ClockPath,
     /// Reset path failure (sequential cells with reset)
     ResetPath,
+}
+
+// ============================================================================
+// Safety Classification
+// ============================================================================
+
+/// Classification of a cell's role in the safety architecture
+///
+/// Used for ISO 26262 FMEDA to distinguish between:
+/// - Functional logic cells (contribute to λSPF or λRF)
+/// - Safety mechanism cells (contribute to λSM)
+///
+/// Safety mechanism failures must be tracked separately because:
+/// 1. SM hardware can fail (voter gate stuck, watchdog FF fails)
+/// 2. SM failure eliminates protection for covered functional logic
+/// 3. SM failure combined with functional fault = hazard (dependent failure)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CellSafetyClassification {
+    /// Functional logic cell (not part of any safety mechanism)
+    /// Failures contribute to λSPF (if unprotected) or λRF (if protected)
+    #[default]
+    Functional,
+
+    /// Safety mechanism cell
+    /// Failures contribute to λSM in PMHF calculation
+    SafetyMechanism {
+        /// Safety goal this mechanism implements (e.g., "BrakingSafety")
+        goal_name: String,
+        /// Mechanism name within the goal (e.g., "TmrVoting")
+        mechanism_name: String,
+    },
+
+    /// Safety mechanism protecting another safety mechanism
+    /// Used for hierarchical SM structures (e.g., watchdog monitoring a TMR voter)
+    SafetyMechanismOfSm {
+        /// The SM being protected
+        protected_sm_name: String,
+        /// Safety goal of the protecting mechanism
+        goal_name: String,
+        /// Mechanism name of the protector
+        mechanism_name: String,
+    },
+}
+
+impl CellSafetyClassification {
+    /// Check if this cell is part of a safety mechanism
+    pub fn is_safety_mechanism(&self) -> bool {
+        !matches!(self, CellSafetyClassification::Functional)
+    }
+
+    /// Get the mechanism name if this is an SM cell
+    pub fn mechanism_name(&self) -> Option<&str> {
+        match self {
+            CellSafetyClassification::SafetyMechanism { mechanism_name, .. } => {
+                Some(mechanism_name)
+            }
+            CellSafetyClassification::SafetyMechanismOfSm { mechanism_name, .. } => {
+                Some(mechanism_name)
+            }
+            CellSafetyClassification::Functional => None,
+        }
+    }
+
+    /// Get the goal name if this is an SM cell
+    pub fn goal_name(&self) -> Option<&str> {
+        match self {
+            CellSafetyClassification::SafetyMechanism { goal_name, .. } => Some(goal_name),
+            CellSafetyClassification::SafetyMechanismOfSm { goal_name, .. } => Some(goal_name),
+            CellSafetyClassification::Functional => None,
+        }
+    }
 }
 
 // ============================================================================
@@ -399,6 +486,19 @@ pub struct GateNetlistStats {
     pub cell_types: HashMap<String, usize>,
     /// Library distribution
     pub libraries: HashMap<String, usize>,
+    // ===== Safety Mechanism Statistics (ISO 26262) =====
+    /// Number of cells classified as safety mechanisms
+    pub sm_cell_count: usize,
+    /// Number of cells classified as functional logic
+    pub functional_cell_count: usize,
+    /// Total FIT for safety mechanism cells (contributes to λSM)
+    pub sm_fit: f64,
+    /// Total FIT for functional cells (contributes to λSPF or λRF)
+    pub functional_fit: f64,
+    /// Breakdown of SM cells by mechanism name
+    pub sm_by_mechanism: HashMap<String, usize>,
+    /// FIT breakdown by mechanism name
+    pub sm_fit_by_mechanism: HashMap<String, f64>,
 }
 
 impl GateNetlistStats {
@@ -412,14 +512,37 @@ impl GateNetlistStats {
         };
 
         for cell in &netlist.cells {
+            // Sequential vs combinational
             if cell.is_sequential() {
                 stats.sequential_cells += 1;
             } else {
                 stats.combinational_cells += 1;
             }
 
+            // Cell type and library distribution
             *stats.cell_types.entry(cell.cell_type.clone()).or_insert(0) += 1;
             *stats.libraries.entry(cell.library.clone()).or_insert(0) += 1;
+
+            // Safety mechanism vs functional classification
+            if cell.safety_classification.is_safety_mechanism() {
+                stats.sm_cell_count += 1;
+                stats.sm_fit += cell.fit;
+
+                // Track per-mechanism breakdown
+                if let Some(mech_name) = cell.safety_classification.mechanism_name() {
+                    *stats
+                        .sm_by_mechanism
+                        .entry(mech_name.to_string())
+                        .or_insert(0) += 1;
+                    *stats
+                        .sm_fit_by_mechanism
+                        .entry(mech_name.to_string())
+                        .or_insert(0.0) += cell.fit;
+                }
+            } else {
+                stats.functional_cell_count += 1;
+                stats.functional_fit += cell.fit;
+            }
         }
 
         stats
@@ -578,5 +701,125 @@ mod tests {
         assert_eq!(cell.failure_modes.len(), 2);
         let total_failure_fit: f64 = cell.failure_modes.iter().map(|f| f.fit).sum();
         assert!((total_failure_fit - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_safety_classification_default() {
+        let cell = Cell::new_comb(
+            CellId(0),
+            "NAND2_X1".to_string(),
+            "generic_asic".to_string(),
+            0.1,
+            "top.nand".to_string(),
+            vec![GateNetId(0)],
+            vec![GateNetId(1)],
+        );
+
+        // Default classification should be Functional
+        assert_eq!(
+            cell.safety_classification,
+            CellSafetyClassification::Functional
+        );
+        assert!(!cell.is_safety_mechanism());
+    }
+
+    #[test]
+    fn test_safety_classification_sm() {
+        let cell = Cell::new_comb(
+            CellId(0),
+            "NAND2_X1".to_string(),
+            "generic_asic".to_string(),
+            0.1,
+            "top.tmr_voter.nand".to_string(),
+            vec![GateNetId(0)],
+            vec![GateNetId(1)],
+        )
+        .with_safety_classification(CellSafetyClassification::SafetyMechanism {
+            goal_name: "BrakingSafety".to_string(),
+            mechanism_name: "TmrVoting".to_string(),
+        });
+
+        assert!(cell.is_safety_mechanism());
+        assert_eq!(
+            cell.safety_classification.mechanism_name(),
+            Some("TmrVoting")
+        );
+        assert_eq!(
+            cell.safety_classification.goal_name(),
+            Some("BrakingSafety")
+        );
+    }
+
+    #[test]
+    fn test_safety_classification_sm_of_sm() {
+        let cell = Cell::new_comb(
+            CellId(0),
+            "NAND2_X1".to_string(),
+            "generic_asic".to_string(),
+            0.1,
+            "top.watchdog.nand".to_string(),
+            vec![GateNetId(0)],
+            vec![GateNetId(1)],
+        )
+        .with_safety_classification(CellSafetyClassification::SafetyMechanismOfSm {
+            protected_sm_name: "TmrVoting".to_string(),
+            goal_name: "BrakingSafety".to_string(),
+            mechanism_name: "Watchdog".to_string(),
+        });
+
+        assert!(cell.is_safety_mechanism());
+        assert_eq!(
+            cell.safety_classification.mechanism_name(),
+            Some("Watchdog")
+        );
+    }
+
+    #[test]
+    fn test_netlist_stats_with_sm() {
+        let mut netlist = GateNetlist::new("test".to_string(), "generic_asic".to_string());
+
+        let a = netlist.add_input("a".to_string());
+        let b = netlist.add_input("b".to_string());
+        let c = netlist.add_input("c".to_string());
+        let out = netlist.add_output("out".to_string());
+
+        // Add functional cell (FIT = 0.1)
+        let functional_cell = Cell::new_comb(
+            CellId(0),
+            "NAND2_X1".to_string(),
+            "generic_asic".to_string(),
+            0.1,
+            "top.functional.nand".to_string(),
+            vec![a, b],
+            vec![GateNetId(10)],
+        );
+        netlist.add_cell(functional_cell);
+
+        // Add SM cell (FIT = 0.2)
+        let sm_cell = Cell::new_comb(
+            CellId(0),
+            "NAND3_X1".to_string(),
+            "generic_asic".to_string(),
+            0.2,
+            "top.tmr.nand".to_string(),
+            vec![GateNetId(10), c],
+            vec![out],
+        )
+        .with_safety_classification(CellSafetyClassification::SafetyMechanism {
+            goal_name: "BrakingSafety".to_string(),
+            mechanism_name: "TmrVoting".to_string(),
+        });
+        netlist.add_cell(sm_cell);
+
+        netlist.update_stats();
+
+        // Check SM statistics
+        assert_eq!(netlist.stats.total_cells, 2);
+        assert_eq!(netlist.stats.functional_cell_count, 1);
+        assert_eq!(netlist.stats.sm_cell_count, 1);
+        assert!((netlist.stats.functional_fit - 0.1).abs() < 0.001);
+        assert!((netlist.stats.sm_fit - 0.2).abs() < 0.001);
+        assert_eq!(netlist.stats.sm_by_mechanism.get("TmrVoting"), Some(&1));
+        assert!((netlist.stats.sm_fit_by_mechanism.get("TmrVoting").unwrap() - 0.2).abs() < 0.001);
     }
 }

@@ -70,7 +70,8 @@ pub use mir_to_word_lir::{lower_mir_module_to_word_lir, MirToWordLirResult};
 
 // Gate-level netlist (output of technology mapping)
 pub use gate_netlist::{
-    Cell, CellFailureMode, CellId, FaultType, GateNet, GateNetId, GateNetlist, GateNetlistStats,
+    Cell, CellFailureMode, CellId, CellSafetyClassification, FaultType, GateNet, GateNetId,
+    GateNetlist, GateNetlistStats,
 };
 
 // Technology library

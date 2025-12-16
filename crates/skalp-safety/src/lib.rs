@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod pipeline;
 pub mod power_domains;
 pub mod requirements;
+pub mod sm_failure_analysis;
 pub mod traits;
 pub mod workproducts;
 

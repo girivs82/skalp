@@ -85,6 +85,11 @@ pub enum CcfCause {
     /// Shared interconnect/routing
     /// Typical beta: 0.01
     SharedRouting,
+    /// Safety mechanism failure affecting all protected logic
+    /// When the SM fails, all the functional logic it protects becomes
+    /// undetectable - creating a dependent failure path.
+    /// Typical beta: 1.0 (complete correlation - SM failure affects ALL protected faults)
+    SafetyMechanism,
 }
 
 impl CcfCause {
@@ -99,6 +104,7 @@ impl CcfCause {
             CcfCause::SharedDesign => 0.02,      // Systematic errors
             CcfCause::SharedModule => 0.03,      // Module-level correlation
             CcfCause::SharedRouting => 0.01,     // Routing correlation
+            CcfCause::SafetyMechanism => 1.0, // Complete correlation - SM failure affects all protected logic
         }
     }
 
@@ -112,6 +118,9 @@ impl CcfCause {
             CcfCause::SharedDesign => "Elements are the same cell type (systematic)",
             CcfCause::SharedModule => "Elements are in the same module instance",
             CcfCause::SharedRouting => "Elements share common routing resources",
+            CcfCause::SafetyMechanism => {
+                "Safety mechanism failure affects all protected functional logic"
+            }
         }
     }
 }
@@ -299,6 +308,40 @@ pub fn identify_ccf_groups(
             ));
             for cell in cells {
                 group.add_member(cell);
+            }
+            groups.push(group);
+        }
+    }
+
+    groups
+}
+
+/// Create CCF groups for safety mechanism failures
+///
+/// Each safety mechanism creates a dependent failure group where all
+/// protected functional logic fails to be detected if the SM fails.
+///
+/// # Arguments
+/// * `sm_to_protected` - Map of SM name -> list of protected cell paths
+///
+/// # Returns
+/// A vector of CCF groups where each group represents an SM and its protected cells
+pub fn create_sm_ccf_groups(sm_to_protected: &HashMap<String, Vec<String>>) -> Vec<CcfGroup> {
+    let mut groups = Vec::new();
+
+    for (sm_name, protected_cells) in sm_to_protected {
+        if !protected_cells.is_empty() {
+            let mut group = CcfGroup::new(
+                &format!("sm_{}", sm_name),
+                CcfCause::SafetyMechanism,
+                CcfCause::SafetyMechanism.typical_beta(),
+            );
+            group.description = Some(format!(
+                "Functional logic protected by SM '{}'. SM failure causes all faults to be undetected.",
+                sm_name
+            ));
+            for cell in protected_cells {
+                group.add_member(cell.clone());
             }
             groups.push(group);
         }

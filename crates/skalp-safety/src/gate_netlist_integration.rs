@@ -32,7 +32,8 @@ use crate::hierarchy::{
     DesignRef, DetectorRef, FailureClass, FailureMode, FmeaComponent, FmeaData, InstancePath,
     MechanismType, Severity,
 };
-use skalp_lir::{Cell, CellFailureMode, FaultType, GateNetlist};
+use crate::sm_failure_analysis::{SmCellMapping, SmFailureAnalysis};
+use skalp_lir::{Cell, CellFailureMode, CellSafetyClassification, FaultType, GateNetlist};
 use std::collections::HashMap;
 
 /// Configuration for gate netlist to FMEA conversion
@@ -60,7 +61,7 @@ impl Default for GateToFmeaConfig {
 /// Result of gate netlist to FMEA conversion
 #[derive(Debug, Clone)]
 pub struct GateToFmeaResult {
-    /// Generated FMEA data
+    /// Generated FMEA data for functional cells
     pub fmea_data: FmeaData,
     /// Safety mechanism coverage summary
     pub coverage_summary: CoverageSummary,
@@ -68,6 +69,21 @@ pub struct GateToFmeaResult {
     pub uncovered_cells: Vec<String>,
     /// Warnings generated during conversion
     pub warnings: Vec<String>,
+    /// FMEA data for safety mechanism cells
+    pub sm_fmea: SmFmeaData,
+    /// SM failure analysis results
+    pub sm_analysis: SmFailureAnalysis,
+}
+
+/// FMEA data specifically for safety mechanism cells
+#[derive(Debug, Clone, Default)]
+pub struct SmFmeaData {
+    /// FMEA components for SM cells
+    pub sm_components: Vec<FmeaComponent>,
+    /// Total FIT of all SM cells
+    pub total_sm_fit: f64,
+    /// Failure modes by mechanism name
+    pub by_mechanism: HashMap<String, Vec<FailureMode>>,
 }
 
 /// Summary of safety mechanism coverage
@@ -85,6 +101,14 @@ pub struct CoverageSummary {
     pub total_fit_residual: f64,
     /// Whether DC values are from simulation (true) or fallback (false)
     pub dc_from_simulation: bool,
+    /// Number of cells that are safety mechanisms (not functional)
+    pub sm_cell_count: usize,
+    /// Number of functional cells
+    pub functional_cell_count: usize,
+    /// Total FIT of SM cells
+    pub sm_fit: f64,
+    /// Total FIT of functional cells
+    pub functional_fit: f64,
 }
 
 /// Per-mechanism coverage summary
@@ -133,9 +157,13 @@ pub fn gate_netlist_to_fmea(
     config: &GateToFmeaConfig,
 ) -> GateToFmeaResult {
     let mut fmea_data = FmeaData::new();
+    let mut sm_fmea = SmFmeaData::default();
     let mut coverage_summary = CoverageSummary::default();
     let mut uncovered_cells = Vec::new();
     let mut warnings = Vec::new();
+
+    // Perform SM failure analysis
+    let sm_analysis = SmFailureAnalysis::analyze(netlist, annotations);
 
     // Build annotation lookup
     let annotation_map = build_annotation_map(annotations);
@@ -168,9 +196,19 @@ pub fn gate_netlist_to_fmea(
         let coverage = find_coverage_for_cell(&cell.path, &annotation_map, &dc_map);
 
         // Convert cell failure modes to FMEA failure modes
+        let mut failure_modes_for_sm: Vec<FailureMode> = Vec::new();
+
         for cell_fm in &cell.failure_modes {
             let (failure_mode, detector) =
                 convert_cell_failure_mode(cell_fm, coverage.as_ref(), config);
+
+            // Store failure mode for SM tracking if this is an SM cell
+            if !matches!(
+                cell.safety_classification,
+                CellSafetyClassification::Functional
+            ) {
+                failure_modes_for_sm.push(failure_mode.clone());
+            }
 
             match detector {
                 DetectorRef::Psm(psm_name) => {
@@ -189,6 +227,14 @@ pub fn gate_netlist_to_fmea(
         if cell.failure_modes.is_empty() && cell.fit > 0.0 {
             let default_modes = create_default_failure_modes(cell, coverage.as_ref(), config);
             for (fm, detector) in default_modes {
+                // Store failure mode for SM tracking if this is an SM cell
+                if !matches!(
+                    cell.safety_classification,
+                    CellSafetyClassification::Functional
+                ) {
+                    failure_modes_for_sm.push(fm.clone());
+                }
+
                 match detector {
                     DetectorRef::Psm(psm_name) => {
                         component.add_psm_failure_mode(&psm_name, fm);
@@ -203,32 +249,72 @@ pub fn gate_netlist_to_fmea(
             }
         }
 
-        // Update coverage statistics
+        // Update coverage statistics based on cell classification
         coverage_summary.total_fit_raw += cell.fit;
 
-        if let Some(cov) = &coverage {
-            coverage_summary.covered_cells += 1;
+        match &cell.safety_classification {
+            CellSafetyClassification::Functional => {
+                coverage_summary.functional_cell_count += 1;
+                coverage_summary.functional_fit += cell.fit;
 
-            let dc = cov.measured_dc.unwrap_or(config.fallback_dc);
+                if let Some(cov) = &coverage {
+                    coverage_summary.covered_cells += 1;
 
-            // Update per-mechanism summary
-            let mech_summary = coverage_summary
-                .by_mechanism
-                .entry(cov.mechanism.clone())
-                .or_default();
-            mech_summary.cell_count += 1;
-            if cov.measured_dc.is_some() {
-                mech_summary.measured_dc = cov.measured_dc;
+                    let dc = cov.measured_dc.unwrap_or(config.fallback_dc);
+
+                    // Update per-mechanism summary
+                    let mech_summary = coverage_summary
+                        .by_mechanism
+                        .entry(cov.mechanism.clone())
+                        .or_default();
+                    mech_summary.cell_count += 1;
+                    if cov.measured_dc.is_some() {
+                        mech_summary.measured_dc = cov.measured_dc;
+                    }
+
+                    // Residual FIT after DC
+                    coverage_summary.total_fit_residual += cell.fit * (1.0 - dc / 100.0);
+                } else {
+                    uncovered_cells.push(cell.path.clone());
+                    coverage_summary.total_fit_residual += cell.fit;
+                }
+
+                fmea_data.add_component(component);
             }
+            CellSafetyClassification::SafetyMechanism {
+                goal_name,
+                mechanism_name,
+            } => {
+                coverage_summary.sm_cell_count += 1;
+                coverage_summary.sm_fit += cell.fit;
+                sm_fmea.total_sm_fit += cell.fit;
 
-            // Residual FIT after DC
-            coverage_summary.total_fit_residual += cell.fit * (1.0 - dc / 100.0);
-        } else {
-            uncovered_cells.push(cell.path.clone());
-            coverage_summary.total_fit_residual += cell.fit;
+                // Track failure modes by mechanism
+                let mech_modes = sm_fmea
+                    .by_mechanism
+                    .entry(mechanism_name.clone())
+                    .or_default();
+                mech_modes.extend(failure_modes_for_sm);
+
+                sm_fmea.sm_components.push(component);
+            }
+            CellSafetyClassification::SafetyMechanismOfSm {
+                protected_sm_name,
+                goal_name,
+                mechanism_name,
+            } => {
+                coverage_summary.sm_cell_count += 1;
+                coverage_summary.sm_fit += cell.fit;
+                sm_fmea.total_sm_fit += cell.fit;
+
+                // Track failure modes by mechanism (SM-of-SM)
+                let sm_of_sm_key = format!("{}::protecting::{}", mechanism_name, protected_sm_name);
+                let mech_modes = sm_fmea.by_mechanism.entry(sm_of_sm_key).or_default();
+                mech_modes.extend(failure_modes_for_sm);
+
+                sm_fmea.sm_components.push(component);
+            }
         }
-
-        fmea_data.add_component(component);
     }
 
     // Generate warnings
@@ -246,11 +332,24 @@ pub fn gate_netlist_to_fmea(
         ));
     }
 
+    // Add SM-related warnings
+    if sm_fmea.total_sm_fit > 0.0 {
+        let sm_pmhf_contribution = sm_analysis.calculate_sm_pmhf_contribution();
+        if sm_pmhf_contribution > 1.0 {
+            warnings.push(format!(
+                "Safety mechanism hardware contributes {:.2} FIT to PMHF. Consider SM-of-SM protection.",
+                sm_pmhf_contribution
+            ));
+        }
+    }
+
     GateToFmeaResult {
         fmea_data,
         coverage_summary,
         uncovered_cells,
         warnings,
+        sm_fmea,
+        sm_analysis,
     }
 }
 

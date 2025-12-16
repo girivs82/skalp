@@ -89,6 +89,24 @@ pub struct SafetyMechanism {
     pub created_at: DateTime<Utc>,
     /// Last modified timestamp
     pub modified_at: DateTime<Utc>,
+    // ===== SM Failure Analysis Fields (ISO 26262) =====
+    /// FIT rate for the safety mechanism hardware itself (λSM)
+    /// This is the failure rate of the SM implementation, which contributes
+    /// to PMHF when the SM fails and can no longer provide protection.
+    /// If None, will be calculated from implementation_cells.
+    pub sm_failure_rate: Option<f64>,
+    /// Total FIT of all cells implementing this safety mechanism
+    /// Populated during gate netlist analysis
+    pub implementation_fit: f64,
+    /// Safety mechanism that protects THIS mechanism (SM-of-SM relationship)
+    /// Example: A watchdog might protect a TMR voter
+    /// Used to calculate effective λSM contribution: λSM × (1 - DC_protector)
+    pub protected_by: Option<String>,
+    /// DC of the protecting mechanism (if protected_by is Some)
+    pub protector_dc: Option<f64>,
+    /// Cell paths that implement this safety mechanism
+    /// Populated during gate netlist analysis for traceability
+    pub implementation_cells: Vec<String>,
 }
 
 /// Status of safety mechanism implementation
@@ -218,6 +236,12 @@ impl SafetyMechanism {
             hardware_implementation: None,
             created_at: now,
             modified_at: now,
+            // SM failure analysis fields (ISO 26262)
+            sm_failure_rate: None,
+            implementation_fit: 0.0,
+            protected_by: None,
+            protector_dc: None,
+            implementation_cells: vec![],
         }
     }
 
@@ -284,6 +308,71 @@ impl SafetyMechanism {
                 1.0 - (1.0 - self.fault_coverage / 100.0) * (1.0 - self.diagnostic_coverage / 100.0)
             }
         }
+    }
+
+    // ===== SM Failure Analysis Methods (ISO 26262) =====
+
+    /// Set the SM failure rate (λSM)
+    pub fn set_sm_failure_rate(&mut self, fit: f64) {
+        self.sm_failure_rate = Some(fit);
+        self.modified_at = Utc::now();
+    }
+
+    /// Set the implementation FIT (total FIT of all SM cells)
+    pub fn set_implementation_fit(&mut self, fit: f64) {
+        self.implementation_fit = fit;
+        self.modified_at = Utc::now();
+    }
+
+    /// Set the protecting SM (SM-of-SM relationship)
+    pub fn set_protected_by(&mut self, protector_name: String, protector_dc: f64) {
+        self.protected_by = Some(protector_name);
+        self.protector_dc = Some(protector_dc);
+        self.modified_at = Utc::now();
+    }
+
+    /// Add an implementation cell path
+    pub fn add_implementation_cell(&mut self, cell_path: String) {
+        if !self.implementation_cells.contains(&cell_path) {
+            self.implementation_cells.push(cell_path);
+            self.modified_at = Utc::now();
+        }
+    }
+
+    /// Get the effective SM failure rate
+    /// Returns the specified sm_failure_rate if set, otherwise uses implementation_fit
+    pub fn get_effective_sm_fit(&self) -> f64 {
+        self.sm_failure_rate.unwrap_or(self.implementation_fit)
+    }
+
+    /// Calculate the SM's contribution to PMHF
+    ///
+    /// Per ISO 26262-5:
+    /// - If SM is unprotected: λSM_contribution = λSM
+    /// - If SM is protected: λSM_contribution = λSM × (1 - DC_protector)
+    ///
+    /// This represents the portion of SM failures that are NOT detected
+    /// by a protecting SM (if any).
+    pub fn calculate_pmhf_contribution(&self) -> f64 {
+        let lambda_sm = self.get_effective_sm_fit();
+
+        if let Some(dc) = self.protector_dc {
+            // SM is protected: only undetected failures contribute
+            lambda_sm * (1.0 - dc / 100.0)
+        } else {
+            // SM is unprotected: all failures contribute
+            lambda_sm
+        }
+    }
+
+    /// Check if this SM is protected by another SM
+    pub fn is_protected(&self) -> bool {
+        self.protected_by.is_some()
+    }
+
+    /// Get the number of implementation cells
+    pub fn implementation_cell_count(&self) -> usize {
+        self.implementation_cells.len()
     }
 }
 

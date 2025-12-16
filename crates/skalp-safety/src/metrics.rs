@@ -65,6 +65,7 @@ pub struct HardwareArchitecturalMetrics {
     /// Latent Fault Metric (percentage)
     pub lf: f64,
     /// Probabilistic Metric for Hardware Failures (FIT)
+    /// Per ISO 26262-5: PMHF = λSPF + λRF + λSM
     pub pmhf: f64,
     /// Total failure rate (FIT)
     pub total_failure_rate: f64,
@@ -78,6 +79,29 @@ pub struct HardwareArchitecturalMetrics {
     pub multiple_point_failure_rate: f64,
     /// Detailed breakdown by component
     pub component_breakdown: HashMap<String, ComponentMetrics>,
+    // ===== SM Failure Analysis (ISO 26262) =====
+    /// Safety mechanism failure rate contribution to PMHF (λSM)
+    /// This is the effective SM FIT after accounting for SM-of-SM protection
+    pub sm_failure_rate: f64,
+    /// Per-mechanism breakdown of SM failures
+    pub sm_breakdown: HashMap<String, SmMetrics>,
+}
+
+/// Metrics for a single safety mechanism's failure contribution
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SmMetrics {
+    /// Mechanism name
+    pub name: String,
+    /// SM hardware FIT (λSM for this mechanism)
+    pub sm_fit: f64,
+    /// Number of cells implementing this SM
+    pub cell_count: usize,
+    /// Whether this SM is protected by another SM
+    pub is_protected: bool,
+    /// DC of protecting SM (if protected)
+    pub protector_dc: Option<f64>,
+    /// Effective contribution to PMHF
+    pub pmhf_contribution: f64,
 }
 
 /// Safety metrics for individual components
@@ -521,10 +545,36 @@ impl SafetyMetricsCalculator {
     }
 
     /// Calculate hardware architectural metrics
+    ///
+    /// # Arguments
+    /// * `fmea` - FMEA analysis containing failure mode data
+    /// * `mechanisms` - Safety mechanisms for effectiveness calculation
+    /// * `sm_analysis` - Optional SM failure analysis for λSM contribution
+    ///
+    /// # PMHF Formula (ISO 26262-5)
+    /// ```text
+    /// PMHF = λSPF + λRF + λSM
+    /// ```
+    /// Where:
+    /// - λSPF = Single Point Fault rate (unprotected functional logic)
+    /// - λRF = Residual Fault rate = λprotected × (1 - DC)
+    /// - λSM = Safety Mechanism failure rate (NEW - from sm_analysis)
     fn calculate_hardware_metrics(
         &self,
         fmea: &FmeaAnalysis,
         mechanisms: &[SafetyMechanism],
+    ) -> Result<HardwareArchitecturalMetrics, MetricsError> {
+        self.calculate_hardware_metrics_with_sm(fmea, mechanisms, None)
+    }
+
+    /// Calculate hardware architectural metrics with SM failure analysis
+    ///
+    /// This is the full ISO 26262-5 compliant version that includes λSM.
+    pub fn calculate_hardware_metrics_with_sm(
+        &self,
+        fmea: &FmeaAnalysis,
+        mechanisms: &[SafetyMechanism],
+        sm_analysis: Option<&crate::sm_failure_analysis::SmFailureAnalysis>,
     ) -> Result<HardwareArchitecturalMetrics, MetricsError> {
         let mut total_failure_rate = 0.0;
         let mut safe_failure_rate = 0.0;
@@ -581,9 +631,44 @@ impl SafetyMetricsCalculator {
             100.0
         };
 
-        // Calculate PMHF (Probabilistic Metric for Hardware Failures)
+        // Calculate λRF (Residual Failure rate)
         let residual_failure_rate = single_point_failure_rate * (1.0 - mechanism_effectiveness);
-        let pmhf = residual_failure_rate;
+
+        // Calculate λSM (Safety Mechanism failure rate) from SM analysis
+        let (sm_failure_rate, sm_breakdown) = if let Some(sm) = sm_analysis {
+            let sm_fit = sm.calculate_sm_pmhf_contribution();
+            let breakdown: HashMap<String, SmMetrics> = sm
+                .mechanisms
+                .iter()
+                .map(|m| {
+                    (
+                        m.mechanism_name.clone(),
+                        SmMetrics {
+                            name: m.mechanism_name.clone(),
+                            sm_fit: m.sm_fit,
+                            cell_count: m.cell_count,
+                            is_protected: m.protected_by.is_some(),
+                            protector_dc: m.protection_dc,
+                            pmhf_contribution: m.pmhf_contribution,
+                        },
+                    )
+                })
+                .collect();
+            (sm_fit, breakdown)
+        } else {
+            // No SM analysis: use sum of mechanism implementation_fit
+            let sm_fit: f64 = mechanisms
+                .iter()
+                .map(|m| m.calculate_pmhf_contribution())
+                .sum();
+            (sm_fit, HashMap::new())
+        };
+
+        // Calculate PMHF (ISO 26262-5 compliant)
+        // PMHF = λSPF + λRF + λSM
+        // Note: λSPF is already accounted for in single_point_failure_rate for unprotected logic
+        // Here we use residual (λRF) + SM failures (λSM)
+        let pmhf = residual_failure_rate + sm_failure_rate;
 
         Ok(HardwareArchitecturalMetrics {
             spfm,
@@ -592,9 +677,11 @@ impl SafetyMetricsCalculator {
             total_failure_rate,
             safe_failure_rate,
             single_point_failure_rate,
-            residual_failure_rate: pmhf,
+            residual_failure_rate,
             multiple_point_failure_rate: latent_fault_rate,
             component_breakdown,
+            sm_failure_rate,
+            sm_breakdown,
         })
     }
 
@@ -938,6 +1025,8 @@ mod tests {
             residual_failure_rate: 50.0,
             multiple_point_failure_rate: 50.0,
             component_breakdown: HashMap::new(),
+            sm_failure_rate: 0.0,
+            sm_breakdown: HashMap::new(),
         };
 
         let compliance = calculator
