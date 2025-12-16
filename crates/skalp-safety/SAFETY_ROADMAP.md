@@ -94,17 +94,19 @@ This document tracks the current state, limitations, and planned improvements fo
 
 ### HIGH Priority
 
-#### 1. Safety Annotation Parser (Partially Complete)
-**Location**: `skalp-frontend`
-**Current State**: HIR builder support added (commit `c6687cd`)
+#### 1. Safety Annotation Parser (Mostly Complete)
+**Location**: `skalp-frontend`, `skalp-mir`, `skalp-lir`
+**Current State**: Full pipeline propagation implemented
 **Completed**:
 - [x] Parser support for `safety_goal` and `safety_entity` CST nodes
 - [x] HIR builder processing for `SafetyGoalDecl` and `SafetyEntityDecl`
 - [x] `build_safety_goal()`, `build_hsr()`, `process_safety_entity()` functions
+- [x] HIR → MIR propagation of safety annotations (commit `49516ec`)
+- [x] MIR → LIR propagation via `add_primitive_with_safety()`
+- [x] MIR → WordLir → GateNetlist propagation via `add_cell()`
 **Remaining**:
-- [ ] HIR → MIR propagation of safety annotations
-- [ ] MIR → LIR propagation with auto-classification
-- [ ] End-to-end validation and error reporting
+- [ ] End-to-end validation tests
+- [ ] Error reporting for missing/invalid annotations
 
 ### LOW Priority
 
@@ -128,14 +130,14 @@ This document tracks the current state, limitations, and planned improvements fo
 
 ## Implementation Plan
 
-### Phase 1: Safety Annotation Parser (HIGH - Partially Complete)
+### Phase 1: Safety Annotation Parser (HIGH - Mostly Complete)
 
 | Item | Status | Files |
 |------|--------|-------|
 | 1.1 Parser support for `safety_goal` CST | ✅ | `skalp-frontend/src/parser.rs` |
 | 1.2 HIR builder for safety annotations | ✅ | `skalp-frontend/src/hir_builder.rs` |
-| 1.3 HIR → MIR propagation | TODO | `skalp-mir/src/hir_to_mir.rs` |
-| 1.4 MIR → LIR propagation | TODO | `skalp-lir/src/mir_to_gate_netlist.rs` |
+| 1.3 HIR → MIR propagation | ✅ | `skalp-mir/src/hir_to_mir.rs` |
+| 1.4 MIR → LIR propagation | ✅ | `skalp-lir/src/mir_to_gate_netlist.rs`, `mir_to_word_lir.rs`, `tech_mapper.rs` |
 | 1.5 Validation and error reporting | TODO | `skalp-safety/src/pipeline.rs` |
 
 ### Phase 2: Technology Derating (MEDIUM - Complete ✅)
@@ -157,6 +159,18 @@ This document tracks the current state, limitations, and planned improvements fo
 ---
 
 ## Recently Completed
+
+### Commit `49516ec` - Safety Annotation Pipeline Propagation
+1. **MIR → LIR Propagation** (`mir_to_gate_netlist.rs`)
+   - `module_safety_context` field in transformer
+   - `safety_context_to_lir_info()` conversion function
+   - `apply_safety_info()` and `add_primitive_with_safety()` helpers
+   - All primitives inherit module-level `SafetyContext`
+
+2. **MIR → WordLir → GateNetlist Propagation**
+   - `module_safety_info` field in `WordLir` struct (`word_lir.rs`)
+   - Safety context propagation in `mir_to_word_lir.rs`
+   - `CellSafetyClassification` applied in `tech_mapper.rs` `add_cell()`
 
 ### Commit `9e908f3` - FTA Export to Standard Tools
 1. **FTA Export Formats** (`fta.rs`)
