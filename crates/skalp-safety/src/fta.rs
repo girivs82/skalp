@@ -26,7 +26,7 @@ impl FtaNodeId {
 }
 
 /// FTA gate types for combining fault events
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GateType {
     /// AND gate: All inputs must fail for output to fail
     And,
@@ -35,12 +35,89 @@ pub enum GateType {
     /// K-of-N voting: At least K of N inputs must fail
     KofN { k: u32, n: u32 },
     /// Priority AND: Inputs must fail in sequence (order matters)
+    /// The first input must fail before the second, and so on.
     Pand,
     /// NOT gate: Output fails when input doesn't fail
     Not,
     /// XOR gate: Exactly one input must fail
     Xor,
+
+    // ===== Dynamic Fault Tree Gates =====
+    /// SPARE gate: Models standby redundancy with cold/warm/hot spares
+    ///
+    /// The primary input is normally active. When it fails, the next spare
+    /// takes over if the switching mechanism succeeds. The gate output fails
+    /// when all spares are exhausted or switching fails.
+    ///
+    /// Parameters:
+    /// - `primary`: The main component (always first input)
+    /// - `switching_probability`: P(successful switchover), typically 0.9-0.999
+    /// - `dormancy_factor`: Failure rate multiplier for dormant spares (0=cold, 1=hot)
+    Spare {
+        /// Probability of successful switchover (0.0 to 1.0)
+        switching_probability: f64,
+        /// Dormancy factor: 0.0 = cold spare (no failures while dormant)
+        /// 0.5 = warm spare (reduced failure rate), 1.0 = hot spare (same failure rate)
+        dormancy_factor: f64,
+    },
+
+    /// SEQ gate: Sequence enforcing gate
+    ///
+    /// Forces events to occur in a specific order. The gate output is true
+    /// only if all inputs fail and they fail in the specified order (left to right).
+    /// This is stricter than PAND as it prevents any out-of-order failures.
+    Seq,
+
+    /// FDEP gate: Functional Dependency
+    ///
+    /// Models a trigger event that causes all dependent events to fail.
+    /// When the trigger fires, all dependents are immediately considered failed.
+    /// The FDEP gate itself doesn't have an output - it modifies the behavior
+    /// of dependent basic events.
+    ///
+    /// Parameters:
+    /// - First input is the trigger
+    /// - Remaining inputs are dependent events
+    Fdep,
+
+    /// Inhibit gate: AND with a conditioning event
+    ///
+    /// Output fails only if the basic event fails AND the conditioning event
+    /// (probability) is satisfied. Useful for modeling partial coverage or
+    /// conditional failures.
+    Inhibit {
+        /// Probability that the inhibit condition allows fault propagation
+        condition_probability: f64,
+    },
 }
+
+// Manual implementation of Hash for GateType since f64 doesn't implement Hash
+impl std::hash::Hash for GateType {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            GateType::KofN { k, n } => {
+                k.hash(state);
+                n.hash(state);
+            }
+            GateType::Spare {
+                switching_probability,
+                dormancy_factor,
+            } => {
+                switching_probability.to_bits().hash(state);
+                dormancy_factor.to_bits().hash(state);
+            }
+            GateType::Inhibit {
+                condition_probability,
+            } => {
+                condition_probability.to_bits().hash(state);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Eq for GateType {}
 
 /// Type of fault tree node
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +289,130 @@ impl FaultTree {
     /// Count gates
     pub fn gate_count(&self) -> usize {
         self.nodes.iter().filter(|n| n.is_gate()).count()
+    }
+
+    // ===== Convenience Methods for Creating Gates =====
+
+    /// Add a SPARE gate for standby redundancy
+    ///
+    /// # Arguments
+    /// * `name` - Gate name
+    /// * `primary` - Primary component (must fail first)
+    /// * `spares` - Spare components that take over on primary failure
+    /// * `switching_probability` - Probability of successful switchover (0.0-1.0)
+    /// * `dormancy_factor` - 0.0 = cold spare, 0.5 = warm spare, 1.0 = hot spare
+    pub fn add_spare_gate(
+        &mut self,
+        name: &str,
+        primary: FtaNodeId,
+        spares: &[FtaNodeId],
+        switching_probability: f64,
+        dormancy_factor: f64,
+    ) -> FtaNodeId {
+        let mut inputs = vec![primary];
+        inputs.extend_from_slice(spares);
+        self.add_node(
+            name,
+            FtaNodeType::Gate {
+                gate_type: GateType::Spare {
+                    switching_probability,
+                    dormancy_factor,
+                },
+                inputs,
+            },
+        )
+    }
+
+    /// Add a SEQ (sequence) gate - events must fail in order
+    pub fn add_seq_gate(&mut self, name: &str, events_in_order: &[FtaNodeId]) -> FtaNodeId {
+        self.add_node(
+            name,
+            FtaNodeType::Gate {
+                gate_type: GateType::Seq,
+                inputs: events_in_order.to_vec(),
+            },
+        )
+    }
+
+    /// Add an FDEP (functional dependency) gate
+    ///
+    /// # Arguments
+    /// * `name` - Gate name
+    /// * `trigger` - The trigger event that causes all dependents to fail
+    /// * `dependents` - Events that fail when trigger fires
+    pub fn add_fdep_gate(
+        &mut self,
+        name: &str,
+        trigger: FtaNodeId,
+        dependents: &[FtaNodeId],
+    ) -> FtaNodeId {
+        let mut inputs = vec![trigger];
+        inputs.extend_from_slice(dependents);
+        self.add_node(
+            name,
+            FtaNodeType::Gate {
+                gate_type: GateType::Fdep,
+                inputs,
+            },
+        )
+    }
+
+    /// Add an INHIBIT gate - AND with conditioning probability
+    pub fn add_inhibit_gate(
+        &mut self,
+        name: &str,
+        inputs: &[FtaNodeId],
+        condition_probability: f64,
+    ) -> FtaNodeId {
+        self.add_node(
+            name,
+            FtaNodeType::Gate {
+                gate_type: GateType::Inhibit {
+                    condition_probability,
+                },
+                inputs: inputs.to_vec(),
+            },
+        )
+    }
+
+    /// Add a basic AND gate
+    pub fn add_and_gate(&mut self, name: &str, inputs: &[FtaNodeId]) -> FtaNodeId {
+        self.add_node(
+            name,
+            FtaNodeType::Gate {
+                gate_type: GateType::And,
+                inputs: inputs.to_vec(),
+            },
+        )
+    }
+
+    /// Add a basic OR gate
+    pub fn add_or_gate(&mut self, name: &str, inputs: &[FtaNodeId]) -> FtaNodeId {
+        self.add_node(
+            name,
+            FtaNodeType::Gate {
+                gate_type: GateType::Or,
+                inputs: inputs.to_vec(),
+            },
+        )
+    }
+
+    /// Add a basic event (elementary fault)
+    pub fn add_basic_event(
+        &mut self,
+        name: &str,
+        failure_rate: f64,
+        exposure_time: f64,
+        component: &str,
+    ) -> FtaNodeId {
+        self.add_node(
+            name,
+            FtaNodeType::BasicEvent {
+                failure_rate,
+                exposure_time,
+                component: component.to_string(),
+            },
+        )
     }
 }
 
@@ -470,6 +671,53 @@ impl Bdd {
                     GateType::Pand => {
                         // Priority AND: treat as AND for cut set analysis
                         // (temporal ordering doesn't affect cut sets)
+                        let mut result = input_bdds[0];
+                        for &input in &input_bdds[1..] {
+                            result = self.apply_and(result, input);
+                        }
+                        result
+                    }
+                    GateType::Seq => {
+                        // SEQ gate: all inputs must fail in sequence
+                        // For cut set analysis, this is equivalent to AND
+                        // (all must fail for output to fail)
+                        let mut result = input_bdds[0];
+                        for &input in &input_bdds[1..] {
+                            result = self.apply_and(result, input);
+                        }
+                        result
+                    }
+                    GateType::Spare { .. } => {
+                        // SPARE gate: for cut set analysis, all spares AND primary must fail
+                        // (conservative analysis - actual probability depends on temporal behavior)
+                        let mut result = input_bdds[0];
+                        for &input in &input_bdds[1..] {
+                            result = self.apply_and(result, input);
+                        }
+                        result
+                    }
+                    GateType::Fdep => {
+                        // FDEP: Functional Dependency
+                        // First input is trigger, rest are dependents
+                        // Output is true if trigger fires OR all dependents fail independently
+                        if input_bdds.is_empty() {
+                            BddNodeId::FALSE
+                        } else if input_bdds.len() == 1 {
+                            input_bdds[0] // Just the trigger
+                        } else {
+                            // Trigger causes all dependents to fail, so
+                            // output = trigger OR (all dependents fail independently)
+                            let trigger = input_bdds[0];
+                            let mut dependents_fail = input_bdds[1];
+                            for &input in &input_bdds[2..] {
+                                dependents_fail = self.apply_and(dependents_fail, input);
+                            }
+                            self.apply_or(trigger, dependents_fail)
+                        }
+                    }
+                    GateType::Inhibit { .. } => {
+                        // INHIBIT gate: AND with conditioning probability
+                        // For cut set analysis, treat as AND (condition is modeled separately)
                         let mut result = input_bdds[0];
                         for &input in &input_bdds[1..] {
                             result = self.apply_and(result, input);
@@ -1358,5 +1606,177 @@ mod tests {
         // 2-of-3 should produce 3 two-event cut sets: (A,B), (A,C), (B,C)
         assert_eq!(cut_sets.len(), 3);
         assert!(cut_sets.iter().all(|cs| cs.order == 2));
+    }
+
+    // ===== Dynamic Gate Tests =====
+
+    #[test]
+    fn test_spare_gate() {
+        let metadata = FtaMetadata {
+            id: "FTA-SPARE".to_string(),
+            name: "SPARE Gate Test".to_string(),
+            design_name: "test".to_string(),
+            target_asil: AsilLevel::D,
+            analysis_date: Utc::now(),
+            analyst: "test".to_string(),
+        };
+
+        let mut tree = FaultTree::new(metadata, "Test SPARE gate");
+
+        // Primary and spare components
+        let primary = tree.add_basic_event("Primary Unit", 100.0, 1000.0, "primary");
+        let spare1 = tree.add_basic_event("Spare Unit 1", 100.0, 1000.0, "spare1");
+        let spare2 = tree.add_basic_event("Spare Unit 2", 100.0, 1000.0, "spare2");
+
+        // SPARE gate: system fails when primary and all spares fail
+        let spare_gate = tree.add_spare_gate(
+            "Redundant System",
+            primary,
+            &[spare1, spare2],
+            0.99, // 99% switching probability
+            0.0,  // Cold spares
+        );
+
+        tree.set_top_event(spare_gate);
+        tree.rebuild_index();
+
+        let bdd = Bdd::from_fault_tree(&tree);
+        let cut_sets = bdd.extract_minimal_cut_sets(&tree);
+
+        // SPARE gate for cut set analysis: all must fail
+        // Should produce 1 three-event cut set
+        assert_eq!(cut_sets.len(), 1);
+        assert_eq!(cut_sets[0].order, 3);
+    }
+
+    #[test]
+    fn test_seq_gate() {
+        let metadata = FtaMetadata {
+            id: "FTA-SEQ".to_string(),
+            name: "SEQ Gate Test".to_string(),
+            design_name: "test".to_string(),
+            target_asil: AsilLevel::C,
+            analysis_date: Utc::now(),
+            analyst: "test".to_string(),
+        };
+
+        let mut tree = FaultTree::new(metadata, "Test SEQ gate");
+
+        let event1 = tree.add_basic_event("First Failure", 100.0, 1000.0, "first");
+        let event2 = tree.add_basic_event("Second Failure", 100.0, 1000.0, "second");
+        let event3 = tree.add_basic_event("Third Failure", 100.0, 1000.0, "third");
+
+        // SEQ gate: events must occur in order
+        let seq_gate = tree.add_seq_gate("Cascading Failure", &[event1, event2, event3]);
+
+        tree.set_top_event(seq_gate);
+        tree.rebuild_index();
+
+        let bdd = Bdd::from_fault_tree(&tree);
+        let cut_sets = bdd.extract_minimal_cut_sets(&tree);
+
+        // SEQ gate is AND for cut set analysis
+        assert_eq!(cut_sets.len(), 1);
+        assert_eq!(cut_sets[0].order, 3);
+    }
+
+    #[test]
+    fn test_fdep_gate() {
+        let metadata = FtaMetadata {
+            id: "FTA-FDEP".to_string(),
+            name: "FDEP Gate Test".to_string(),
+            design_name: "test".to_string(),
+            target_asil: AsilLevel::B,
+            analysis_date: Utc::now(),
+            analyst: "test".to_string(),
+        };
+
+        let mut tree = FaultTree::new(metadata, "Test FDEP gate");
+
+        // Trigger and dependent events
+        let trigger = tree.add_basic_event("Power Supply Failure", 50.0, 1000.0, "psu");
+        let dep1 = tree.add_basic_event("Component A", 100.0, 1000.0, "comp_a");
+        let dep2 = tree.add_basic_event("Component B", 100.0, 1000.0, "comp_b");
+
+        // FDEP: power supply failure causes A and B to fail
+        let fdep_gate = tree.add_fdep_gate("Power Dependency", trigger, &[dep1, dep2]);
+
+        tree.set_top_event(fdep_gate);
+        tree.rebuild_index();
+
+        let bdd = Bdd::from_fault_tree(&tree);
+        let cut_sets = bdd.extract_minimal_cut_sets(&tree);
+
+        // FDEP: trigger OR (all dependents)
+        // Cut sets: {trigger} or {dep1, dep2}
+        assert_eq!(cut_sets.len(), 2);
+        // One should be order 1 (trigger alone)
+        assert!(cut_sets.iter().any(|cs| cs.order == 1));
+        // One should be order 2 (both dependents)
+        assert!(cut_sets.iter().any(|cs| cs.order == 2));
+    }
+
+    #[test]
+    fn test_inhibit_gate() {
+        let metadata = FtaMetadata {
+            id: "FTA-INHIBIT".to_string(),
+            name: "INHIBIT Gate Test".to_string(),
+            design_name: "test".to_string(),
+            target_asil: AsilLevel::A,
+            analysis_date: Utc::now(),
+            analyst: "test".to_string(),
+        };
+
+        let mut tree = FaultTree::new(metadata, "Test INHIBIT gate");
+
+        let event = tree.add_basic_event("Fault", 100.0, 1000.0, "fault");
+        let condition = tree.add_basic_event("Condition", 50.0, 1000.0, "condition");
+
+        // INHIBIT: fault occurs AND condition is satisfied (probability 0.5)
+        let inhibit_gate = tree.add_inhibit_gate("Conditional Fault", &[event, condition], 0.5);
+
+        tree.set_top_event(inhibit_gate);
+        tree.rebuild_index();
+
+        let bdd = Bdd::from_fault_tree(&tree);
+        let cut_sets = bdd.extract_minimal_cut_sets(&tree);
+
+        // INHIBIT is AND for cut sets
+        assert_eq!(cut_sets.len(), 1);
+        assert_eq!(cut_sets[0].order, 2);
+    }
+
+    #[test]
+    fn test_convenience_methods() {
+        let metadata = FtaMetadata {
+            id: "FTA-CONV".to_string(),
+            name: "Convenience Test".to_string(),
+            design_name: "test".to_string(),
+            target_asil: AsilLevel::B,
+            analysis_date: Utc::now(),
+            analyst: "test".to_string(),
+        };
+
+        let mut tree = FaultTree::new(metadata, "Test convenience methods");
+
+        let e1 = tree.add_basic_event("Event 1", 100.0, 1000.0, "e1");
+        let e2 = tree.add_basic_event("Event 2", 100.0, 1000.0, "e2");
+        let e3 = tree.add_basic_event("Event 3", 100.0, 1000.0, "e3");
+
+        let and_gate = tree.add_and_gate("AND Gate", &[e1, e2]);
+        let or_gate = tree.add_or_gate("OR Gate", &[and_gate, e3]);
+
+        tree.set_top_event(or_gate);
+        tree.rebuild_index();
+
+        assert_eq!(tree.node_count(), 5); // 3 events + 2 gates
+        assert_eq!(tree.basic_event_count(), 3);
+        assert_eq!(tree.gate_count(), 2);
+
+        let bdd = Bdd::from_fault_tree(&tree);
+        let cut_sets = bdd.extract_minimal_cut_sets(&tree);
+
+        // Should have {e1, e2} and {e3}
+        assert_eq!(cut_sets.len(), 2);
     }
 }

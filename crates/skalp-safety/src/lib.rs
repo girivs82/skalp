@@ -33,6 +33,7 @@ pub mod safety_case;
 pub mod sm_failure_analysis;
 pub mod tool_qualification;
 pub mod traits;
+pub mod uncertainty;
 pub mod workproducts;
 
 // Re-export fault simulation integration functions when sim-integration feature is enabled

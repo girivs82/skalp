@@ -1421,6 +1421,711 @@ pub fn format_power_domain_report(analysis: &PowerDomainAnalysis) -> String {
     output
 }
 
+// ============================================================================
+// Power Domain Isolation Verification (ISO 26262 Compliance)
+// ============================================================================
+
+/// Result of isolation cell verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IsolationCellVerification {
+    /// Total domain boundary crossings
+    pub total_crossings: usize,
+    /// Crossings with proper isolation cells
+    pub protected_crossings: usize,
+    /// Crossings missing isolation cells
+    pub missing_isolation: Vec<MissingIsolationCell>,
+    /// Verification status
+    pub compliant: bool,
+    /// Coverage percentage
+    pub coverage_percentage: f64,
+    /// Recommendations
+    pub recommendations: Vec<String>,
+}
+
+/// Missing isolation cell warning
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingIsolationCell {
+    /// Source domain
+    pub source_domain: String,
+    /// Target domain
+    pub target_domain: String,
+    /// Signal path affected
+    pub signal_path: String,
+    /// Source domain voltage
+    pub source_voltage: f64,
+    /// Target domain voltage
+    pub target_voltage: f64,
+    /// Safety impact assessment
+    pub safety_impact: SafetyImpact,
+}
+
+/// Safety impact level for missing isolation
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SafetyImpact {
+    /// Low impact - same voltage, same safety level
+    Low,
+    /// Medium impact - voltage mismatch or different safety levels
+    Medium,
+    /// High impact - significant voltage mismatch or ASIL mismatch
+    High,
+    /// Critical - safety critical signal without isolation
+    Critical,
+}
+
+/// Result of level shifter verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LevelShifterVerification {
+    /// Total voltage level crossings
+    pub total_voltage_crossings: usize,
+    /// Crossings with proper level shifters
+    pub shifters_present: usize,
+    /// Missing level shifters
+    pub missing_shifters: Vec<MissingLevelShifter>,
+    /// Verification status
+    pub compliant: bool,
+    /// Coverage percentage
+    pub coverage_percentage: f64,
+    /// Voltage domain pairs analyzed
+    pub voltage_pairs: Vec<VoltageDomainPair>,
+}
+
+/// Missing level shifter warning
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingLevelShifter {
+    /// Source domain
+    pub source_domain: String,
+    /// Target domain
+    pub target_domain: String,
+    /// Source voltage (V)
+    pub source_voltage: f64,
+    /// Target voltage (V)
+    pub target_voltage: f64,
+    /// Affected signals
+    pub affected_signals: Vec<String>,
+    /// Risk of damage (overvoltage to target)
+    pub damage_risk: bool,
+    /// Risk of incorrect operation (undervoltage)
+    pub logic_risk: bool,
+}
+
+/// Voltage domain pair analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoltageDomainPair {
+    /// Domain A name
+    pub domain_a: String,
+    /// Domain B name
+    pub domain_b: String,
+    /// Voltage A (V)
+    pub voltage_a: f64,
+    /// Voltage B (V)
+    pub voltage_b: f64,
+    /// Number of crossings between them
+    pub crossing_count: usize,
+    /// Level shifters present
+    pub shifters_present: usize,
+    /// Direction-aware analysis
+    pub directions: Vec<CrossingDirection>,
+}
+
+/// Direction of cross-domain signal
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossingDirection {
+    /// From high to low voltage
+    pub high_to_low: bool,
+    /// Signal count in this direction
+    pub signal_count: usize,
+    /// Level shifter present
+    pub shifter_present: bool,
+}
+
+/// Complete cross-domain signal analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossDomainSignalAnalysis {
+    /// Total signals crossing domains
+    pub total_cross_domain_signals: usize,
+    /// Signals with proper protection
+    pub properly_protected: usize,
+    /// Detailed analysis per crossing
+    pub crossings: Vec<CrossDomainSignalInfo>,
+    /// Safety-critical signals crossing domains
+    pub safety_critical_crossings: Vec<CrossDomainSignalInfo>,
+    /// Timing violations found
+    pub timing_issues: Vec<TimingIssue>,
+    /// Overall compliance status
+    pub compliance_status: ComplianceStatus,
+}
+
+/// Information about a cross-domain signal
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossDomainSignalInfo {
+    /// Signal path
+    pub signal_path: String,
+    /// Source domain
+    pub source_domain: String,
+    /// Target domain
+    pub target_domain: String,
+    /// Is this a safety-critical signal
+    pub safety_critical: bool,
+    /// Protection mechanisms present
+    pub protection: CrossingProtection,
+    /// Compliance status for this signal
+    pub compliant: bool,
+    /// Issues found
+    pub issues: Vec<String>,
+}
+
+/// Protection mechanisms for cross-domain signals
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CrossingProtection {
+    /// Isolation cell present
+    pub isolation_cell: bool,
+    /// Level shifter present
+    pub level_shifter: bool,
+    /// Synchronizer present (for clock domain crossing)
+    pub synchronizer: bool,
+    /// ESD protection present
+    pub esd_protection: bool,
+    /// Glitch filter present
+    pub glitch_filter: bool,
+}
+
+/// Timing issue for cross-domain signal
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimingIssue {
+    /// Signal path
+    pub signal_path: String,
+    /// Issue description
+    pub description: String,
+    /// Maximum allowed delay
+    pub max_delay_ns: Option<f64>,
+    /// Actual delay (if known)
+    pub actual_delay_ns: Option<f64>,
+}
+
+/// Overall compliance status
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComplianceStatus {
+    /// Fully compliant with all requirements
+    Compliant,
+    /// Minor issues, acceptable with documentation
+    AcceptableWithWarnings,
+    /// Major issues requiring resolution
+    NonCompliant,
+    /// Cannot determine compliance (missing information)
+    Unknown,
+}
+
+/// Verify isolation cells exist at all domain boundaries
+///
+/// Per ISO 26262-5 Section 7.4.11, power domain boundaries must have proper
+/// isolation to prevent fault propagation between domains.
+pub fn verify_isolation_cells(
+    domains: &[PowerDomainInfo],
+    connectivity: &HashMap<String, Vec<String>>,
+) -> IsolationCellVerification {
+    let mut total_crossings = 0;
+    let mut protected_crossings = 0;
+    let mut missing_isolation = Vec::new();
+    let mut recommendations = Vec::new();
+
+    // Build domain lookup
+    let domain_lookup: HashMap<&str, &PowerDomainInfo> = domains
+        .iter()
+        .flat_map(|d| d.cells.iter().map(move |c| (c.as_str(), d)))
+        .collect();
+
+    // Analyze connectivity for cross-domain signals
+    for (source_cell, targets) in connectivity {
+        let source_domain = domain_lookup.get(source_cell.as_str());
+
+        for target_cell in targets {
+            let target_domain = domain_lookup.get(target_cell.as_str());
+
+            // Check if this is a cross-domain signal
+            if let (Some(src_domain), Some(tgt_domain)) = (source_domain, target_domain) {
+                if src_domain.name != tgt_domain.name {
+                    total_crossings += 1;
+
+                    // Check if there's an isolation cell on this path
+                    let has_isolation = src_domain.isolation_cells.iter().any(|ic| {
+                        connectivity.get(ic).is_some_and(|ic_targets| {
+                            ic_targets.contains(target_cell)
+                                || ic_targets.iter().any(|t| t == source_cell)
+                        })
+                    }) || tgt_domain.isolation_cells.iter().any(|ic| {
+                        connectivity
+                            .get(source_cell)
+                            .is_some_and(|src_targets| src_targets.contains(ic))
+                    });
+
+                    if has_isolation
+                        || !src_domain.isolation_cells.is_empty()
+                            && !tgt_domain.isolation_cells.is_empty()
+                    {
+                        protected_crossings += 1;
+                    } else {
+                        let safety_impact = assess_safety_impact(src_domain, tgt_domain);
+                        missing_isolation.push(MissingIsolationCell {
+                            source_domain: src_domain.name.clone(),
+                            target_domain: tgt_domain.name.clone(),
+                            signal_path: format!("{} -> {}", source_cell, target_cell),
+                            source_voltage: src_domain.voltage,
+                            target_voltage: tgt_domain.voltage,
+                            safety_impact,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let coverage_percentage = if total_crossings > 0 {
+        (protected_crossings as f64 / total_crossings as f64) * 100.0
+    } else {
+        100.0 // No crossings = fully compliant
+    };
+
+    // Generate recommendations
+    if !missing_isolation.is_empty() {
+        let critical_count = missing_isolation
+            .iter()
+            .filter(|m| m.safety_impact == SafetyImpact::Critical)
+            .count();
+        if critical_count > 0 {
+            recommendations.push(format!(
+                "CRITICAL: {} safety-critical domain crossings lack isolation cells",
+                critical_count
+            ));
+        }
+
+        let voltage_mismatches: Vec<_> = missing_isolation
+            .iter()
+            .filter(|m| (m.source_voltage - m.target_voltage).abs() > 0.5)
+            .collect();
+        if !voltage_mismatches.is_empty() {
+            recommendations.push(format!(
+                "Add isolation cells for {} voltage-mismatched crossings to prevent damage",
+                voltage_mismatches.len()
+            ));
+        }
+    }
+
+    let compliant = missing_isolation
+        .iter()
+        .all(|m| m.safety_impact != SafetyImpact::Critical)
+        && coverage_percentage >= 90.0;
+
+    IsolationCellVerification {
+        total_crossings,
+        protected_crossings,
+        missing_isolation,
+        compliant,
+        coverage_percentage,
+        recommendations,
+    }
+}
+
+/// Assess safety impact of missing isolation
+fn assess_safety_impact(source: &PowerDomainInfo, target: &PowerDomainInfo) -> SafetyImpact {
+    let voltage_diff = (source.voltage - target.voltage).abs();
+
+    // High voltage difference is critical
+    if voltage_diff > 1.5 {
+        return SafetyImpact::Critical;
+    }
+
+    // Check based on number of cells (larger domains = higher risk)
+    let total_cells = source.cells.len() + target.cells.len();
+    if total_cells > 100 {
+        SafetyImpact::High
+    } else if voltage_diff > 0.5 || total_cells > 20 {
+        SafetyImpact::Medium
+    } else {
+        SafetyImpact::Low
+    }
+}
+
+/// Verify level shifters exist for voltage level crossings
+///
+/// Level shifters are required when signals cross between domains with
+/// different voltage levels to ensure proper signal integrity.
+pub fn verify_level_shifters(
+    domains: &[PowerDomainInfo],
+    connectivity: &HashMap<String, Vec<String>>,
+) -> LevelShifterVerification {
+    let mut total_voltage_crossings = 0;
+    let mut shifters_present = 0;
+    let mut missing_shifters = Vec::new();
+    let mut voltage_pairs: HashMap<(String, String), VoltageDomainPair> = HashMap::new();
+
+    // Build domain lookup
+    let domain_lookup: HashMap<&str, &PowerDomainInfo> = domains
+        .iter()
+        .flat_map(|d| d.cells.iter().map(move |c| (c.as_str(), d)))
+        .collect();
+
+    // Level shifter cell paths
+    let shifter_cells: std::collections::HashSet<&str> = domains
+        .iter()
+        .flat_map(|d| d.level_shifters.iter().map(|s| s.as_str()))
+        .collect();
+
+    // Analyze voltage crossings
+    for (source_cell, targets) in connectivity {
+        let source_domain = domain_lookup.get(source_cell.as_str());
+
+        for target_cell in targets {
+            let target_domain = domain_lookup.get(target_cell.as_str());
+
+            if let (Some(src_domain), Some(tgt_domain)) = (source_domain, target_domain) {
+                // Check for voltage mismatch (>0.1V difference)
+                if (src_domain.voltage - tgt_domain.voltage).abs() > 0.1 {
+                    total_voltage_crossings += 1;
+
+                    // Check if there's a level shifter on this path
+                    let has_shifter = shifter_cells.contains(source_cell.as_str())
+                        || shifter_cells.contains(target_cell.as_str())
+                        || connectivity.get(source_cell).is_some_and(|t| {
+                            t.iter().any(|cell| shifter_cells.contains(cell.as_str()))
+                        });
+
+                    if has_shifter {
+                        shifters_present += 1;
+                    } else {
+                        let damage_risk = src_domain.voltage > tgt_domain.voltage + 0.3;
+                        let logic_risk = src_domain.voltage < tgt_domain.voltage - 0.3;
+
+                        // Find existing entry or create new
+                        let key = if src_domain.name < tgt_domain.name {
+                            (src_domain.name.clone(), tgt_domain.name.clone())
+                        } else {
+                            (tgt_domain.name.clone(), src_domain.name.clone())
+                        };
+
+                        let pair =
+                            voltage_pairs
+                                .entry(key.clone())
+                                .or_insert_with(|| VoltageDomainPair {
+                                    domain_a: key.0.clone(),
+                                    domain_b: key.1.clone(),
+                                    voltage_a: if src_domain.name < tgt_domain.name {
+                                        src_domain.voltage
+                                    } else {
+                                        tgt_domain.voltage
+                                    },
+                                    voltage_b: if src_domain.name < tgt_domain.name {
+                                        tgt_domain.voltage
+                                    } else {
+                                        src_domain.voltage
+                                    },
+                                    crossing_count: 0,
+                                    shifters_present: 0,
+                                    directions: Vec::new(),
+                                });
+                        pair.crossing_count += 1;
+
+                        missing_shifters.push(MissingLevelShifter {
+                            source_domain: src_domain.name.clone(),
+                            target_domain: tgt_domain.name.clone(),
+                            source_voltage: src_domain.voltage,
+                            target_voltage: tgt_domain.voltage,
+                            affected_signals: vec![format!("{} -> {}", source_cell, target_cell)],
+                            damage_risk,
+                            logic_risk,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let coverage_percentage = if total_voltage_crossings > 0 {
+        (shifters_present as f64 / total_voltage_crossings as f64) * 100.0
+    } else {
+        100.0
+    };
+
+    let compliant = missing_shifters.iter().all(|m| !m.damage_risk) && coverage_percentage >= 95.0;
+
+    LevelShifterVerification {
+        total_voltage_crossings,
+        shifters_present,
+        missing_shifters,
+        compliant,
+        coverage_percentage,
+        voltage_pairs: voltage_pairs.into_values().collect(),
+    }
+}
+
+/// Analyze all cross-domain signals comprehensively
+pub fn analyze_cross_domain_signals(
+    domains: &[PowerDomainInfo],
+    connectivity: &HashMap<String, Vec<String>>,
+    safety_critical_paths: &[String],
+) -> CrossDomainSignalAnalysis {
+    let mut crossings = Vec::new();
+    let mut safety_critical_crossings = Vec::new();
+    let timing_issues = Vec::new();
+    let mut properly_protected = 0;
+
+    // Build domain lookup
+    let domain_lookup: HashMap<&str, &PowerDomainInfo> = domains
+        .iter()
+        .flat_map(|d| d.cells.iter().map(move |c| (c.as_str(), d)))
+        .collect();
+
+    // Level shifter and isolation cell lookups
+    let shifter_cells: std::collections::HashSet<&str> = domains
+        .iter()
+        .flat_map(|d| d.level_shifters.iter().map(|s| s.as_str()))
+        .collect();
+    let isolation_cells: std::collections::HashSet<&str> = domains
+        .iter()
+        .flat_map(|d| d.isolation_cells.iter().map(|s| s.as_str()))
+        .collect();
+
+    for (source_cell, targets) in connectivity {
+        let source_domain = domain_lookup.get(source_cell.as_str());
+
+        for target_cell in targets {
+            let target_domain = domain_lookup.get(target_cell.as_str());
+
+            if let (Some(src_domain), Some(tgt_domain)) = (source_domain, target_domain) {
+                if src_domain.name != tgt_domain.name {
+                    let signal_path = format!("{} -> {}", source_cell, target_cell);
+                    let is_safety_critical = safety_critical_paths
+                        .iter()
+                        .any(|p| signal_path.contains(p) || p.contains(&signal_path));
+
+                    let voltage_mismatch = (src_domain.voltage - tgt_domain.voltage).abs() > 0.1;
+
+                    let protection = CrossingProtection {
+                        isolation_cell: isolation_cells.contains(source_cell.as_str())
+                            || isolation_cells.contains(target_cell.as_str()),
+                        level_shifter: !voltage_mismatch
+                            || shifter_cells.contains(source_cell.as_str())
+                            || shifter_cells.contains(target_cell.as_str()),
+                        synchronizer: false,   // Would need clock domain info
+                        esd_protection: false, // Would need pad info
+                        glitch_filter: false,
+                    };
+
+                    let mut issues = Vec::new();
+                    if !protection.isolation_cell {
+                        issues.push("Missing isolation cell".to_string());
+                    }
+                    if voltage_mismatch && !protection.level_shifter {
+                        issues.push(format!(
+                            "Missing level shifter ({:.1}V -> {:.1}V)",
+                            src_domain.voltage, tgt_domain.voltage
+                        ));
+                    }
+
+                    let compliant = issues.is_empty() || (!is_safety_critical && issues.len() == 1);
+
+                    if compliant {
+                        properly_protected += 1;
+                    }
+
+                    let info = CrossDomainSignalInfo {
+                        signal_path: signal_path.clone(),
+                        source_domain: src_domain.name.clone(),
+                        target_domain: tgt_domain.name.clone(),
+                        safety_critical: is_safety_critical,
+                        protection,
+                        compliant,
+                        issues,
+                    };
+
+                    if is_safety_critical {
+                        safety_critical_crossings.push(info.clone());
+                    }
+                    crossings.push(info);
+                }
+            }
+        }
+    }
+
+    let total_cross_domain_signals = crossings.len();
+    let compliance_status = if safety_critical_crossings.iter().all(|c| c.compliant) {
+        if crossings.iter().all(|c| c.compliant) {
+            ComplianceStatus::Compliant
+        } else {
+            ComplianceStatus::AcceptableWithWarnings
+        }
+    } else {
+        ComplianceStatus::NonCompliant
+    };
+
+    CrossDomainSignalAnalysis {
+        total_cross_domain_signals,
+        properly_protected,
+        crossings,
+        safety_critical_crossings,
+        timing_issues,
+        compliance_status,
+    }
+}
+
+/// Format isolation verification report
+pub fn format_isolation_verification_report(
+    isolation: &IsolationCellVerification,
+    level_shifters: &LevelShifterVerification,
+    signals: &CrossDomainSignalAnalysis,
+) -> String {
+    let mut output = String::new();
+
+    output.push_str("Power Domain Isolation Verification Report\n");
+    output.push_str("═══════════════════════════════════════════════════════════════\n\n");
+
+    // Overall status
+    let overall_status = match (
+        &isolation.compliant,
+        &level_shifters.compliant,
+        &signals.compliance_status,
+    ) {
+        (true, true, ComplianceStatus::Compliant) => "PASS",
+        (true, true, ComplianceStatus::AcceptableWithWarnings) => "PASS (with warnings)",
+        _ => "FAIL",
+    };
+    output.push_str(&format!("Overall Status: {}\n\n", overall_status));
+
+    // Isolation cell verification
+    output.push_str("ISOLATION CELL VERIFICATION\n");
+    output.push_str("───────────────────────────────────────────────────────────────\n");
+    output.push_str(&format!(
+        "Total domain crossings: {}\n",
+        isolation.total_crossings
+    ));
+    output.push_str(&format!(
+        "Protected crossings: {}\n",
+        isolation.protected_crossings
+    ));
+    output.push_str(&format!(
+        "Coverage: {:.1}%\n",
+        isolation.coverage_percentage
+    ));
+    output.push_str(&format!(
+        "Status: {}\n\n",
+        if isolation.compliant {
+            "COMPLIANT"
+        } else {
+            "NON-COMPLIANT"
+        }
+    ));
+
+    if !isolation.missing_isolation.is_empty() {
+        output.push_str("Missing isolation cells:\n");
+        for missing in &isolation.missing_isolation {
+            output.push_str(&format!(
+                "  {} -> {} ({:.1}V -> {:.1}V) [{:?}]\n",
+                missing.source_domain,
+                missing.target_domain,
+                missing.source_voltage,
+                missing.target_voltage,
+                missing.safety_impact
+            ));
+        }
+        output.push('\n');
+    }
+
+    // Level shifter verification
+    output.push_str("LEVEL SHIFTER VERIFICATION\n");
+    output.push_str("───────────────────────────────────────────────────────────────\n");
+    output.push_str(&format!(
+        "Total voltage crossings: {}\n",
+        level_shifters.total_voltage_crossings
+    ));
+    output.push_str(&format!(
+        "Shifters present: {}\n",
+        level_shifters.shifters_present
+    ));
+    output.push_str(&format!(
+        "Coverage: {:.1}%\n",
+        level_shifters.coverage_percentage
+    ));
+    output.push_str(&format!(
+        "Status: {}\n\n",
+        if level_shifters.compliant {
+            "COMPLIANT"
+        } else {
+            "NON-COMPLIANT"
+        }
+    ));
+
+    if !level_shifters.missing_shifters.is_empty() {
+        output.push_str("Missing level shifters:\n");
+        for missing in level_shifters.missing_shifters.iter().take(10) {
+            output.push_str(&format!(
+                "  {} -> {} ({:.1}V -> {:.1}V) {}{}\n",
+                missing.source_domain,
+                missing.target_domain,
+                missing.source_voltage,
+                missing.target_voltage,
+                if missing.damage_risk {
+                    "[DAMAGE RISK] "
+                } else {
+                    ""
+                },
+                if missing.logic_risk {
+                    "[LOGIC RISK]"
+                } else {
+                    ""
+                }
+            ));
+        }
+        if level_shifters.missing_shifters.len() > 10 {
+            output.push_str(&format!(
+                "  ... and {} more\n",
+                level_shifters.missing_shifters.len() - 10
+            ));
+        }
+        output.push('\n');
+    }
+
+    // Cross-domain signal analysis
+    output.push_str("CROSS-DOMAIN SIGNAL ANALYSIS\n");
+    output.push_str("───────────────────────────────────────────────────────────────\n");
+    output.push_str(&format!(
+        "Total signals: {}\n",
+        signals.total_cross_domain_signals
+    ));
+    output.push_str(&format!(
+        "Properly protected: {}\n",
+        signals.properly_protected
+    ));
+    output.push_str(&format!(
+        "Safety-critical signals: {}\n",
+        signals.safety_critical_crossings.len()
+    ));
+    output.push_str(&format!("Compliance: {:?}\n\n", signals.compliance_status));
+
+    if !signals.safety_critical_crossings.is_empty() {
+        output.push_str("Safety-critical crossings:\n");
+        for crossing in &signals.safety_critical_crossings {
+            let status = if crossing.compliant { "[OK]" } else { "[FAIL]" };
+            output.push_str(&format!(
+                "  {} {} {} -> {}\n",
+                status, crossing.signal_path, crossing.source_domain, crossing.target_domain
+            ));
+            for issue in &crossing.issues {
+                output.push_str(&format!("    - {}\n", issue));
+            }
+        }
+    }
+
+    // Recommendations
+    if !isolation.recommendations.is_empty() {
+        output.push_str("\nRECOMMENDATIONS\n");
+        output.push_str("───────────────────────────────────────────────────────────────\n");
+        for rec in &isolation.recommendations {
+            output.push_str(&format!("• {}\n", rec));
+        }
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

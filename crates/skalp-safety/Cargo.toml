@@ -12,6 +12,8 @@ uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.0", features = ["serde"] }
 petgraph = { version = "0.6", features = ["serde"] }
+rand = "0.8"
+rand_distr = "0.4"
 skalp-mir = { path = "../skalp-mir" }
 skalp-frontend = { path = "../skalp-frontend" }
 skalp-lir = { path = "../skalp-lir" }

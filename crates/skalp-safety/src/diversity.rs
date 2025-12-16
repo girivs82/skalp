@@ -722,6 +722,11 @@ pub fn detect_single_points(
                 continue;
             }
 
+            // Safety outputs are observation points, not potential failure sources
+            if safety_outputs.contains(cell) {
+                continue;
+            }
+
             // Check if this cell has redundancy (multiple paths to output)
             let fanout_count = connectivity.get(cell).map(|f| f.len()).unwrap_or(0);
 

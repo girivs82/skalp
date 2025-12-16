@@ -3059,6 +3059,8 @@ dependencies = [
  "chrono",
  "indexmap",
  "petgraph",
+ "rand 0.8.5",
+ "rand_distr",
  "serde",
  "skalp-frontend",
  "skalp-lir",
