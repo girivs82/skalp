@@ -4,6 +4,9 @@
 
 use crate::hir::*;
 use crate::lexer::{parse_binary, parse_float, parse_hex};
+use crate::safety_attributes::{
+    AsilLevel, HsrAllocation, HsrDef, SafetyGoalDef, SafetyMechanismDef, VerificationMethod,
+};
 use crate::span::{LineIndex, SourceSpan};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
@@ -556,6 +559,16 @@ impl HirBuilderContext {
                     if let Some(type_alias) = self.build_type_alias(&child) {
                         hir.type_aliases.push(type_alias);
                     }
+                }
+                SyntaxKind::SafetyGoalDecl => {
+                    if let Some(safety_goal) = self.build_safety_goal(&child) {
+                        hir.safety_definitions.add_safety_goal(safety_goal);
+                    }
+                }
+                SyntaxKind::SafetyEntityDecl => {
+                    // Safety entities define implementation details for safety goals
+                    // They are processed but their data flows into safety_definitions
+                    self.process_safety_entity(&child, &mut hir);
                 }
                 _ => {}
             }
@@ -8400,6 +8413,256 @@ impl HirBuilderContext {
             description: String::new(),
             verification: HirVerificationMethod::Simulation,
         })
+    }
+
+    // === Safety Analysis (ISO 26262) Builder Methods ===
+
+    /// Build safety goal from SafetyGoalDecl CST node
+    ///
+    /// Parses: `safety_goal Name: ASIL_LEVEL { ... }`
+    fn build_safety_goal(&mut self, node: &SyntaxNode) -> Option<SafetyGoalDef> {
+        let name = self.extract_name(node)?;
+
+        // Extract ASIL level from the declaration
+        let asil = self.extract_asil_level(node);
+
+        let mut goal = SafetyGoalDef::new(name).with_asil(asil);
+
+        // Process key-value pairs from tokens in the body
+        self.extract_safety_kv_pairs(node, |k, v| match k.as_str() {
+            "id" => goal.id = v,
+            "description" => goal.description = v,
+            "ftti" => {
+                if let Ok(ns) = v.replace('_', "").parse::<u64>() {
+                    goal.ftti_ns = Some(ns);
+                }
+            }
+            "mechanism" | "mechanisms" => {
+                goal.mechanism_refs.push(v);
+            }
+            "hsi" => {
+                goal.hsi_refs.push(v);
+            }
+            _ => {}
+        });
+
+        // Process child nodes (HSR declarations, target blocks)
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::HsrDecl => {
+                    if let Some(hsr) = self.build_hsr(&child) {
+                        goal.hsrs.push(hsr);
+                    }
+                }
+                SyntaxKind::SafetyTargetBlock => {
+                    // target { spfm: 99%, lfm: 90%, ... }
+                    self.process_safety_target_block(&child, &mut goal);
+                }
+                _ => {}
+            }
+        }
+
+        Some(goal)
+    }
+
+    /// Extract ASIL level from a safety_goal declaration
+    fn extract_asil_level(&self, node: &SyntaxNode) -> AsilLevel {
+        // Look for ASIL identifier after the colon (before the brace)
+        let mut found_colon = false;
+        for elem in node.children_with_tokens() {
+            if let Some(token) = elem.as_token() {
+                if token.kind() == SyntaxKind::Colon {
+                    found_colon = true;
+                } else if token.kind() == SyntaxKind::LBrace {
+                    break; // Stop at body
+                } else if found_colon && token.kind() == SyntaxKind::Ident {
+                    let text = token.text();
+                    return text.parse().unwrap_or(AsilLevel::Qm);
+                }
+            }
+        }
+        AsilLevel::Qm
+    }
+
+    /// Extract key-value pairs from a node's token stream
+    ///
+    /// Parses patterns like: `key: value,` or `key: "string",`
+    fn extract_safety_kv_pairs<F>(&self, node: &SyntaxNode, mut handler: F)
+    where
+        F: FnMut(String, String),
+    {
+        let mut key: Option<String> = None;
+        let mut after_colon = false;
+
+        for elem in node.children_with_tokens() {
+            if let Some(token) = elem.as_token() {
+                match token.kind() {
+                    SyntaxKind::Ident if key.is_none() && !after_colon => {
+                        key = Some(token.text().to_string());
+                    }
+                    SyntaxKind::Colon => {
+                        after_colon = true;
+                    }
+                    SyntaxKind::StringLiteral if after_colon => {
+                        if let Some(k) = key.take() {
+                            let text = token.text();
+                            let value = text.trim_matches('"').to_string();
+                            handler(k, value);
+                        }
+                        after_colon = false;
+                    }
+                    SyntaxKind::IntLiteral | SyntaxKind::FloatLiteral if after_colon => {
+                        if let Some(k) = key.take() {
+                            handler(k, token.text().to_string());
+                        }
+                        after_colon = false;
+                    }
+                    SyntaxKind::Comma => {
+                        key = None;
+                        after_colon = false;
+                    }
+                    SyntaxKind::LBrace | SyntaxKind::RBrace => {
+                        // Don't reset on braces - they delimit the body
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Process target block with metric targets
+    fn process_safety_target_block(&self, node: &SyntaxNode, goal: &mut SafetyGoalDef) {
+        // target { spfm: 99%, lfm: 90%, pmhf: 10 }
+        let mut targets = Vec::new();
+
+        self.extract_safety_kv_pairs(node, |k, v| {
+            targets.push(format!("{}={}", k, v));
+        });
+
+        if !targets.is_empty() {
+            if goal.description.is_empty() {
+                goal.description = format!("Targets: {}", targets.join(", "));
+            } else {
+                goal.description
+                    .push_str(&format!(" | Targets: {}", targets.join(", ")));
+            }
+        }
+    }
+
+    /// Build Hardware Safety Requirement from HsrDecl
+    fn build_hsr(&self, node: &SyntaxNode) -> Option<HsrDef> {
+        let name = self.extract_name(node)?;
+        let mut hsr = HsrDef::new(name);
+
+        // Process HSR body key-value pairs
+        self.extract_safety_kv_pairs(node, |k, v| match k.as_str() {
+            "id" => hsr.id = v,
+            "description" => hsr.description = v,
+            "verification" => {
+                hsr.verification_methods.push(match v.as_str() {
+                    "review" => VerificationMethod::Review,
+                    "analysis" => VerificationMethod::Analysis,
+                    "simulation" => VerificationMethod::Simulation,
+                    "formal" => VerificationMethod::FormalVerification,
+                    "test" => VerificationMethod::HardwareTest,
+                    "fault_injection" => VerificationMethod::FaultInjection,
+                    _ => VerificationMethod::Custom(v),
+                });
+            }
+            "allocation" => {
+                hsr.allocation = match v.as_str() {
+                    "hardware" | "hw" => HsrAllocation::Hardware,
+                    "software" | "sw" => HsrAllocation::Software,
+                    "both" => HsrAllocation::Both,
+                    _ => HsrAllocation::Hardware,
+                };
+            }
+            _ => {}
+        });
+
+        Some(hsr)
+    }
+
+    /// Process safety_entity declaration
+    ///
+    /// Parses: `safety_entity Name implements GoalName { ... }`
+    /// This connects design instances to safety goals.
+    fn process_safety_entity(&mut self, node: &SyntaxNode, hir: &mut Hir) {
+        let _entity_name = match self.extract_name(node) {
+            Some(name) => name,
+            None => return,
+        };
+
+        // Extract the goal name from 'implements GoalName'
+        let mut goal_name: Option<String> = None;
+        let mut found_implements = false;
+        for elem in node.children_with_tokens() {
+            if let Some(token) = elem.as_token() {
+                if token.kind() == SyntaxKind::ImplementsKw {
+                    found_implements = true;
+                } else if found_implements && token.kind() == SyntaxKind::Ident {
+                    goal_name = Some(token.text().to_string());
+                    break;
+                }
+            }
+        }
+
+        let _goal_ref = goal_name.unwrap_or_default();
+
+        // Process safety entity body - covers, PSM overrides, etc.
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::CoversBlock => {
+                    // covers { top.brake_main, top.brake_aux }
+                    // These define which design instances implement this safety entity
+                    // For now, we note them but don't process further
+                    // Full implementation would link to actual instances
+                }
+                SyntaxKind::PsmOverride => {
+                    // PSM overrides for safety mechanisms
+                    if let Some(mechanism) = self.build_safety_mechanism_from_psm(&child) {
+                        hir.safety_definitions.add_safety_mechanism(mechanism);
+                    }
+                }
+                SyntaxKind::FmeaBlock => {
+                    // FMEA definitions
+                    // Full implementation would process FMEA entries
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Build safety mechanism from PSM override block
+    fn build_safety_mechanism_from_psm(&self, node: &SyntaxNode) -> Option<SafetyMechanismDef> {
+        let name = self.extract_name(node)?;
+        let mut mechanism = SafetyMechanismDef::new(name);
+
+        // Process PSM body key-value pairs
+        self.extract_safety_kv_pairs(node, |k, v| match k.as_str() {
+            "dc" => {
+                if let Ok(dc) = v.parse::<f64>() {
+                    mechanism.dc_target = dc;
+                }
+            }
+            "lc" => {
+                if let Ok(lc) = v.parse::<f64>() {
+                    mechanism.lc_target = Some(lc);
+                }
+            }
+            "type" => {
+                mechanism.mechanism_type = v.parse().unwrap_or_default();
+            }
+            "coverage" | "covers" => {
+                mechanism.coverage_patterns.push(v);
+            }
+            "description" => {
+                mechanism.description = Some(v);
+            }
+            _ => {}
+        });
+
+        Some(mechanism)
     }
 
     // === Helper methods ===
