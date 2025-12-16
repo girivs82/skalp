@@ -1091,6 +1091,336 @@ impl Default for SignalConstraints {
     }
 }
 
+// ============================================================================
+// CCF Integration for Power Domain Failures
+// ============================================================================
+
+use crate::common_cause::{CcfAnalysisResults, CcfCause, CcfGroup};
+
+/// Power domain information extracted from gate netlist analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PowerDomainInfo {
+    /// Domain name
+    pub name: String,
+    /// Nominal voltage (V)
+    pub voltage: f64,
+    /// Cell paths in this domain
+    pub cells: Vec<String>,
+    /// Total FIT for cells in this domain
+    pub total_fit: f64,
+    /// Level shifter cell paths (at domain boundaries)
+    pub level_shifters: Vec<String>,
+    /// Isolation cell paths (at domain boundaries)
+    pub isolation_cells: Vec<String>,
+}
+
+/// Results from power domain analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PowerDomainAnalysis {
+    /// Identified power domains
+    pub domains: Vec<PowerDomainInfo>,
+    /// CCF groups created from power domain analysis
+    pub ccf_groups: Vec<CcfGroup>,
+    /// Level shifter coverage (number of boundary crossings with level shifters)
+    pub level_shifter_coverage: usize,
+    /// Isolation cell coverage
+    pub isolation_cell_coverage: usize,
+    /// Total boundary crossings identified
+    pub total_boundary_crossings: usize,
+    /// Unprotected boundary crossings
+    pub unprotected_crossings: Vec<UnprotectedCrossing>,
+    /// Summary statistics
+    pub summary: PowerDomainSummary,
+}
+
+/// Unprotected boundary crossing warning
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnprotectedCrossing {
+    /// Source domain
+    pub source_domain: String,
+    /// Target domain
+    pub target_domain: String,
+    /// Signal path
+    pub signal_path: String,
+    /// Crossing type (voltage level mismatch, etc.)
+    pub crossing_type: CrossingType,
+    /// Risk level
+    pub risk_level: CrossingRisk,
+}
+
+/// Type of domain boundary crossing
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrossingType {
+    /// Voltage level mismatch
+    VoltageMismatch,
+    /// Safety level mismatch
+    SafetyLevelMismatch,
+    /// Missing isolation
+    MissingIsolation,
+    /// Clock domain crossing
+    ClockDomainCrossing,
+}
+
+/// Risk level for unprotected crossings
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CrossingRisk {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Summary statistics for power domain analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PowerDomainSummary {
+    /// Number of domains identified
+    pub domain_count: usize,
+    /// Total cells across all domains
+    pub total_cells: usize,
+    /// Total FIT across all domains
+    pub total_fit: f64,
+    /// Total CCF contribution from power domains
+    pub total_ccf_fit: f64,
+    /// Coverage percentage (protected crossings / total crossings)
+    pub boundary_protection_percentage: f64,
+}
+
+/// Create CCF groups from power domain analysis
+///
+/// Each power domain becomes a CCF group because a power supply failure
+/// affects all cells in that domain simultaneously (common cause failure).
+pub fn power_domain_ccf_groups(domains: &[PowerDomainInfo]) -> Vec<CcfGroup> {
+    domains
+        .iter()
+        .map(|domain| {
+            // Calculate CCF FIT using beta factor model
+            // Beta factor for power supply failure is typically high (~10-30%)
+            // because all cells share the same power rail
+            let beta_factor = 0.2; // 20% beta factor for power domain failures
+
+            let mut group = CcfGroup::new(
+                &format!("power_domain_{}", domain.name),
+                CcfCause::SharedPower,
+                beta_factor,
+            );
+            group.members = domain.cells.clone();
+            group.description = Some(format!(
+                "Power domain {} with {} cells at {:.2}V. \
+                 Power supply failure affects all cells in domain.",
+                domain.name,
+                domain.cells.len(),
+                domain.voltage
+            ));
+            group
+        })
+        .collect()
+}
+
+/// Analyze power domains from hierarchical cell paths
+///
+/// This function identifies power domains by analyzing cell paths for
+/// common prefixes that indicate power domain boundaries.
+/// In real designs, power domain annotations would come from design tools.
+pub fn analyze_power_domains_from_paths(
+    cell_paths: &[(String, f64)], // (path, fit)
+    domain_patterns: &[PowerDomainPattern],
+) -> PowerDomainAnalysis {
+    let mut domains: HashMap<String, PowerDomainInfo> = HashMap::new();
+    let mut unassigned_cells = Vec::new();
+
+    // Classify cells by domain based on path patterns
+    for (path, fit) in cell_paths {
+        let mut assigned = false;
+        for pattern in domain_patterns {
+            if path.contains(&pattern.path_pattern) {
+                let domain =
+                    domains
+                        .entry(pattern.name.clone())
+                        .or_insert_with(|| PowerDomainInfo {
+                            name: pattern.name.clone(),
+                            voltage: pattern.voltage,
+                            cells: Vec::new(),
+                            total_fit: 0.0,
+                            level_shifters: Vec::new(),
+                            isolation_cells: Vec::new(),
+                        });
+                domain.cells.push(path.clone());
+                domain.total_fit += fit;
+                assigned = true;
+                break;
+            }
+        }
+        if !assigned {
+            unassigned_cells.push((path.clone(), *fit));
+        }
+    }
+
+    // Identify level shifters and isolation cells from naming conventions
+    for domain in domains.values_mut() {
+        for cell in &domain.cells {
+            let lower = cell.to_lowercase();
+            if lower.contains("level_shift") || lower.contains("lvl_shift") || lower.contains("ls_")
+            {
+                domain.level_shifters.push(cell.clone());
+            }
+            if lower.contains("isolation") || lower.contains("iso_") || lower.contains("isolate") {
+                domain.isolation_cells.push(cell.clone());
+            }
+        }
+    }
+
+    // Create CCF groups from domains
+    let domain_list: Vec<PowerDomainInfo> = domains.into_values().collect();
+    let ccf_groups = power_domain_ccf_groups(&domain_list);
+
+    // Calculate summary statistics
+    let total_cells: usize = domain_list.iter().map(|d| d.cells.len()).sum();
+    let total_fit: f64 = domain_list.iter().map(|d| d.total_fit).sum();
+    // CCF FIT = total FIT * average beta factor (approximation)
+    let total_ccf_fit: f64 = domain_list.iter().map(|d| d.total_fit * 0.2).sum(); // 20% beta
+    let level_shifter_coverage: usize = domain_list.iter().map(|d| d.level_shifters.len()).sum();
+    let isolation_cell_coverage: usize = domain_list.iter().map(|d| d.isolation_cells.len()).sum();
+
+    PowerDomainAnalysis {
+        domains: domain_list,
+        ccf_groups,
+        level_shifter_coverage,
+        isolation_cell_coverage,
+        total_boundary_crossings: 0, // Would need connectivity analysis
+        unprotected_crossings: Vec::new(),
+        summary: PowerDomainSummary {
+            domain_count: 0,
+            total_cells,
+            total_fit,
+            total_ccf_fit,
+            boundary_protection_percentage: 100.0, // Placeholder
+        },
+    }
+}
+
+/// Pattern for identifying power domains from cell paths
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PowerDomainPattern {
+    /// Domain name
+    pub name: String,
+    /// Path pattern to match
+    pub path_pattern: String,
+    /// Nominal voltage
+    pub voltage: f64,
+    /// Is this a safety-critical domain?
+    pub safety_critical: bool,
+}
+
+impl PowerDomainPattern {
+    /// Create a new power domain pattern
+    pub fn new(name: &str, path_pattern: &str, voltage: f64, safety_critical: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            path_pattern: path_pattern.to_string(),
+            voltage,
+            safety_critical,
+        }
+    }
+}
+
+/// Merge power domain CCF results into existing CCF analysis
+pub fn merge_power_domain_ccf(
+    existing: &mut CcfAnalysisResults,
+    power_analysis: &PowerDomainAnalysis,
+) {
+    for group in &power_analysis.ccf_groups {
+        existing.groups.push(group.clone());
+    }
+    // Add total CCF contribution from power domains
+    existing.total_common_cause_fit += power_analysis.summary.total_ccf_fit;
+}
+
+/// Generate human-readable power domain analysis report
+pub fn format_power_domain_report(analysis: &PowerDomainAnalysis) -> String {
+    let mut output = String::new();
+
+    output.push_str("Power Domain Analysis Report\n");
+    output.push_str("═══════════════════════════════════════════════════════════════\n\n");
+
+    // Summary
+    output.push_str("SUMMARY\n");
+    output.push_str("───────────────────────────────────────────────────────────────\n");
+    output.push_str(&format!(
+        "Power domains identified: {}\n",
+        analysis.domains.len()
+    ));
+    output.push_str(&format!(
+        "Total cells analyzed: {}\n",
+        analysis.summary.total_cells
+    ));
+    output.push_str(&format!(
+        "Total FIT: {:.4} FIT\n",
+        analysis.summary.total_fit
+    ));
+    output.push_str(&format!(
+        "CCF contribution (λDPF_power): {:.4} FIT\n",
+        analysis.summary.total_ccf_fit
+    ));
+    output.push_str(&format!(
+        "Level shifters: {}\n",
+        analysis.level_shifter_coverage
+    ));
+    output.push_str(&format!(
+        "Isolation cells: {}\n\n",
+        analysis.isolation_cell_coverage
+    ));
+
+    // Per-domain breakdown
+    output.push_str("PER-DOMAIN BREAKDOWN\n");
+    output.push_str("───────────────────────────────────────────────────────────────\n");
+
+    for domain in &analysis.domains {
+        output.push_str(&format!("{}:\n", domain.name));
+        output.push_str(&format!("  Voltage: {:.2}V\n", domain.voltage));
+        output.push_str(&format!("  Cells: {}\n", domain.cells.len()));
+        output.push_str(&format!("  Total FIT: {:.4} FIT\n", domain.total_fit));
+        output.push_str(&format!(
+            "  Level shifters: {}\n",
+            domain.level_shifters.len()
+        ));
+        output.push_str(&format!(
+            "  Isolation cells: {}\n\n",
+            domain.isolation_cells.len()
+        ));
+    }
+
+    // CCF groups
+    output.push_str("CCF GROUPS CREATED\n");
+    output.push_str("───────────────────────────────────────────────────────────────\n");
+
+    for group in &analysis.ccf_groups {
+        // Calculate CCF FIT for display (we don't have direct access to cell FIT here)
+        output.push_str(&format!(
+            "{}: β={:.2} ({} cells)\n",
+            group.name,
+            group.beta_factor,
+            group.members.len()
+        ));
+    }
+
+    // Unprotected crossings
+    if !analysis.unprotected_crossings.is_empty() {
+        output.push_str("\nWARNINGS: UNPROTECTED BOUNDARY CROSSINGS\n");
+        output.push_str("───────────────────────────────────────────────────────────────\n");
+        for crossing in &analysis.unprotected_crossings {
+            output.push_str(&format!(
+                "  {} -> {}: {:?} (Risk: {:?})\n",
+                crossing.source_domain,
+                crossing.target_domain,
+                crossing.crossing_type,
+                crossing.risk_level
+            ));
+        }
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1497,5 +1827,132 @@ mod tests {
         assert_eq!(report.total_power_consumption, 6.6); // 3.3V * 2A
         assert!(report.power_by_domain.contains_key("test_domain"));
         assert!(report.power_by_state.contains_key(&PowerState::Active));
+    }
+
+    // ======================================================================
+    // CCF Integration Tests
+    // ======================================================================
+
+    #[test]
+    fn test_power_domain_ccf_groups() {
+        let domains = vec![
+            PowerDomainInfo {
+                name: "core_1v".to_string(),
+                voltage: 1.0,
+                cells: vec!["top.core.cell1".to_string(), "top.core.cell2".to_string()],
+                total_fit: 0.5,
+                level_shifters: vec![],
+                isolation_cells: vec![],
+            },
+            PowerDomainInfo {
+                name: "io_3v3".to_string(),
+                voltage: 3.3,
+                cells: vec!["top.io.cell1".to_string()],
+                total_fit: 0.3,
+                level_shifters: vec![],
+                isolation_cells: vec![],
+            },
+        ];
+
+        let ccf_groups = power_domain_ccf_groups(&domains);
+
+        assert_eq!(ccf_groups.len(), 2);
+
+        // Check first CCF group
+        let core_group = ccf_groups
+            .iter()
+            .find(|g| g.name.contains("core_1v"))
+            .unwrap();
+        assert_eq!(core_group.members.len(), 2);
+        assert_eq!(core_group.cause, CcfCause::SharedPower);
+        assert!((core_group.beta_factor - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_analyze_power_domains_from_paths() {
+        let cell_paths = vec![
+            ("top.core_1v.alu.add".to_string(), 0.1),
+            ("top.core_1v.alu.mul".to_string(), 0.15),
+            ("top.io_3v3.uart.tx".to_string(), 0.08),
+            ("top.io_3v3.uart.rx".to_string(), 0.07),
+            ("top.io_3v3.lvl_shift_1".to_string(), 0.02),
+            ("top.misc.other".to_string(), 0.05),
+        ];
+
+        let patterns = vec![
+            PowerDomainPattern::new("core_1v", "core_1v", 1.0, true),
+            PowerDomainPattern::new("io_3v3", "io_3v3", 3.3, false),
+        ];
+
+        let analysis = analyze_power_domains_from_paths(&cell_paths, &patterns);
+
+        // Should identify 2 domains
+        assert_eq!(analysis.domains.len(), 2);
+
+        // Check core domain
+        let core = analysis
+            .domains
+            .iter()
+            .find(|d| d.name == "core_1v")
+            .unwrap();
+        assert_eq!(core.cells.len(), 2);
+        assert!((core.total_fit - 0.25).abs() < 0.001);
+
+        // Check IO domain
+        let io = analysis
+            .domains
+            .iter()
+            .find(|d| d.name == "io_3v3")
+            .unwrap();
+        assert_eq!(io.cells.len(), 3);
+        assert_eq!(io.level_shifters.len(), 1); // lvl_shift_1
+
+        // CCF groups should be created
+        assert_eq!(analysis.ccf_groups.len(), 2);
+    }
+
+    #[test]
+    fn test_power_domain_pattern() {
+        let pattern = PowerDomainPattern::new("vdd_core", "top.vdd_core", 0.8, true);
+
+        assert_eq!(pattern.name, "vdd_core");
+        assert!((pattern.voltage - 0.8).abs() < 0.001);
+        assert!(pattern.safety_critical);
+    }
+
+    #[test]
+    fn test_power_domain_report_format() {
+        let domains = vec![PowerDomainInfo {
+            name: "test_domain".to_string(),
+            voltage: 1.2,
+            cells: vec!["cell1".to_string()],
+            total_fit: 0.1,
+            level_shifters: vec![],
+            isolation_cells: vec![],
+        }];
+
+        let ccf_groups = power_domain_ccf_groups(&domains);
+
+        let analysis = PowerDomainAnalysis {
+            domains,
+            ccf_groups,
+            level_shifter_coverage: 0,
+            isolation_cell_coverage: 0,
+            total_boundary_crossings: 0,
+            unprotected_crossings: vec![],
+            summary: PowerDomainSummary {
+                domain_count: 1,
+                total_cells: 1,
+                total_fit: 0.1,
+                total_ccf_fit: 0.02,
+                boundary_protection_percentage: 100.0,
+            },
+        };
+
+        let report = format_power_domain_report(&analysis);
+
+        assert!(report.contains("Power Domain Analysis Report"));
+        assert!(report.contains("test_domain"));
+        assert!(report.contains("CCF GROUPS CREATED"));
     }
 }

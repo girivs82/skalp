@@ -81,6 +81,55 @@ impl LibraryCell {
         ];
         self
     }
+
+    /// Calculate derated FIT rate for specific operating conditions
+    ///
+    /// Applies Arrhenius temperature acceleration, voltage stress,
+    /// and process corner factors to the base FIT rate.
+    ///
+    /// # Arguments
+    /// * `conditions` - Target operating conditions
+    /// * `ref_temp_c` - Library reference temperature (default 25°C if None)
+    /// * `ref_voltage_v` - Library reference voltage (default 1.0V if None)
+    pub fn derated_fit(
+        &self,
+        conditions: &OperatingConditions,
+        ref_temp_c: Option<f64>,
+        ref_voltage_v: Option<f64>,
+    ) -> f64 {
+        let ref_temp = ref_temp_c.unwrap_or(25.0);
+        let ref_voltage = ref_voltage_v.unwrap_or(1.0);
+        let factors = DeratingFactors::calculate(conditions, ref_temp, ref_voltage);
+        self.fit * factors.combined_factor
+    }
+
+    /// Calculate derated FIT with derating factors struct
+    pub fn derated_fit_with_factors(&self, factors: &DeratingFactors) -> f64 {
+        self.fit * factors.combined_factor
+    }
+
+    /// Calculate derated failure modes for specific operating conditions
+    ///
+    /// Returns failure modes with FIT rates adjusted for operating conditions.
+    pub fn derated_failure_modes(
+        &self,
+        conditions: &OperatingConditions,
+        ref_temp_c: Option<f64>,
+        ref_voltage_v: Option<f64>,
+    ) -> Vec<LibraryFailureMode> {
+        let ref_temp = ref_temp_c.unwrap_or(25.0);
+        let ref_voltage = ref_voltage_v.unwrap_or(1.0);
+        let factors = DeratingFactors::calculate(conditions, ref_temp, ref_voltage);
+
+        self.failure_modes
+            .iter()
+            .map(|fm| {
+                let mut derated = fm.clone();
+                derated.fit *= factors.combined_factor;
+                derated
+            })
+            .collect()
+    }
 }
 
 /// Cell function type
@@ -304,6 +353,248 @@ impl LibraryFailureMode {
 }
 
 // ============================================================================
+// Operating Conditions and Derating
+// ============================================================================
+
+/// Operating conditions for FIT derating calculations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatingConditions {
+    /// Operating temperature in Celsius
+    pub temperature_c: f64,
+    /// Operating voltage in volts
+    pub voltage_v: f64,
+    /// Process corner
+    pub corner: ProcessCorner,
+}
+
+impl Default for OperatingConditions {
+    fn default() -> Self {
+        Self {
+            temperature_c: 25.0, // Room temperature
+            voltage_v: 1.0,      // Nominal voltage
+            corner: ProcessCorner::Typical,
+        }
+    }
+}
+
+impl OperatingConditions {
+    /// Create operating conditions for junction temperature and supply voltage
+    pub fn new(temperature_c: f64, voltage_v: f64, corner: ProcessCorner) -> Self {
+        Self {
+            temperature_c,
+            voltage_v,
+            corner,
+        }
+    }
+
+    /// Automotive junction temperature (125°C)
+    pub fn automotive_junction() -> Self {
+        Self {
+            temperature_c: 125.0,
+            voltage_v: 1.0,
+            corner: ProcessCorner::Worst,
+        }
+    }
+
+    /// Industrial conditions (85°C)
+    pub fn industrial() -> Self {
+        Self {
+            temperature_c: 85.0,
+            voltage_v: 1.0,
+            corner: ProcessCorner::Typical,
+        }
+    }
+
+    /// Consumer electronics (70°C)
+    pub fn consumer() -> Self {
+        Self {
+            temperature_c: 70.0,
+            voltage_v: 1.0,
+            corner: ProcessCorner::Typical,
+        }
+    }
+}
+
+/// Process corner for manufacturing variations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProcessCorner {
+    /// Best case (fast process)
+    Best,
+    /// Typical (nominal process)
+    Typical,
+    /// Worst case (slow process)
+    Worst,
+}
+
+/// Derating factors calculated for specific operating conditions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeratingFactors {
+    /// Temperature acceleration factor (Arrhenius model)
+    pub temperature_factor: f64,
+    /// Voltage stress factor
+    pub voltage_factor: f64,
+    /// Process variation factor (±3σ)
+    pub process_factor: f64,
+    /// Combined derating factor (product of all factors)
+    pub combined_factor: f64,
+}
+
+impl DeratingFactors {
+    /// Calculate derating factors from operating conditions
+    ///
+    /// # Arguments
+    /// * `conditions` - Target operating conditions
+    /// * `ref_temp_c` - Reference temperature (typically 25°C or 55°C)
+    /// * `ref_voltage_v` - Reference voltage (typically nominal)
+    pub fn calculate(
+        conditions: &OperatingConditions,
+        ref_temp_c: f64,
+        ref_voltage_v: f64,
+    ) -> Self {
+        let temperature_factor =
+            arrhenius_acceleration_factor(conditions.temperature_c, ref_temp_c);
+        let voltage_factor = voltage_acceleration_factor(conditions.voltage_v, ref_voltage_v);
+        let process_factor = process_corner_factor(conditions.corner);
+
+        Self {
+            temperature_factor,
+            voltage_factor,
+            process_factor,
+            combined_factor: temperature_factor * voltage_factor * process_factor,
+        }
+    }
+
+    /// Calculate derating with default reference conditions (25°C, 1.0V)
+    pub fn calculate_from_defaults(conditions: &OperatingConditions) -> Self {
+        Self::calculate(conditions, 25.0, 1.0)
+    }
+}
+
+/// Calculate temperature acceleration factor using Arrhenius equation
+///
+/// The Arrhenius equation models failure rate acceleration with temperature:
+/// AF = exp(Ea/k × (1/T_ref - 1/T_op))
+///
+/// # Arguments
+/// * `operating_temp_c` - Operating temperature in Celsius
+/// * `reference_temp_c` - Reference temperature in Celsius
+///
+/// # Returns
+/// Temperature acceleration factor (1.0 at reference temperature)
+pub fn arrhenius_acceleration_factor(operating_temp_c: f64, reference_temp_c: f64) -> f64 {
+    // Activation energy (Ea) in eV - typical value for CMOS
+    // Oxide breakdown: ~0.3-0.4 eV
+    // Electromigration: ~0.7-0.8 eV
+    // Using conservative average for general CMOS failure mechanisms
+    const ACTIVATION_ENERGY_EV: f64 = 0.7;
+
+    // Boltzmann constant in eV/K
+    const BOLTZMANN_EV_PER_K: f64 = 8.617e-5;
+
+    // Convert to Kelvin
+    let t_op_k = operating_temp_c + 273.15;
+    let t_ref_k = reference_temp_c + 273.15;
+
+    // Arrhenius equation: AF = exp(Ea/k × (1/T_ref - 1/T_op))
+    let exponent = (ACTIVATION_ENERGY_EV / BOLTZMANN_EV_PER_K) * (1.0 / t_ref_k - 1.0 / t_op_k);
+
+    exponent.exp()
+}
+
+/// Calculate voltage acceleration factor
+///
+/// Higher voltage increases stress on gate oxide and accelerates failure.
+/// Using exponential model: AF = exp(γ × (V_op - V_ref) / V_ref)
+///
+/// # Arguments
+/// * `operating_voltage_v` - Operating voltage in volts
+/// * `reference_voltage_v` - Reference (nominal) voltage in volts
+///
+/// # Returns
+/// Voltage acceleration factor (1.0 at reference voltage)
+pub fn voltage_acceleration_factor(operating_voltage_v: f64, reference_voltage_v: f64) -> f64 {
+    // Voltage acceleration coefficient (typical range: 2-4)
+    const VOLTAGE_ACCELERATION_COEFFICIENT: f64 = 3.0;
+
+    if reference_voltage_v <= 0.0 {
+        return 1.0;
+    }
+
+    let voltage_ratio = operating_voltage_v / reference_voltage_v;
+
+    // Exponential model for voltage stress
+    // Factor > 1 for overvoltage, < 1 for undervoltage
+    (VOLTAGE_ACCELERATION_COEFFICIENT * (voltage_ratio - 1.0)).exp()
+}
+
+/// Get process corner factor
+///
+/// Returns multiplier for FIT rate based on process variation:
+/// - Best corner (fast process): Lower defect density, fewer failures
+/// - Typical: Nominal process, baseline FIT
+/// - Worst corner (slow process): Higher defect density, more failures
+pub fn process_corner_factor(corner: ProcessCorner) -> f64 {
+    match corner {
+        ProcessCorner::Best => 0.7,    // -30% FIT
+        ProcessCorner::Typical => 1.0, // Nominal
+        ProcessCorner::Worst => 1.5,   // +50% FIT
+    }
+}
+
+/// Convenience struct for common derating scenarios
+#[derive(Debug, Clone, Copy)]
+pub struct DeratingPreset {
+    /// Preset name
+    pub name: &'static str,
+    /// Temperature in Celsius
+    pub temperature_c: f64,
+    /// Process corner
+    pub corner: ProcessCorner,
+}
+
+impl DeratingPreset {
+    /// ISO 26262 automotive grade (ASIL D worst case)
+    pub const AUTOMOTIVE_ASILD: DeratingPreset = DeratingPreset {
+        name: "automotive_asild",
+        temperature_c: 150.0, // Junction at max automotive grade 0
+        corner: ProcessCorner::Worst,
+    };
+
+    /// ISO 26262 automotive grade (typical)
+    pub const AUTOMOTIVE_TYPICAL: DeratingPreset = DeratingPreset {
+        name: "automotive_typical",
+        temperature_c: 105.0, // Junction at automotive grade 1
+        corner: ProcessCorner::Typical,
+    };
+
+    /// Industrial application
+    pub const INDUSTRIAL: DeratingPreset = DeratingPreset {
+        name: "industrial",
+        temperature_c: 85.0,
+        corner: ProcessCorner::Typical,
+    };
+
+    /// Consumer electronics
+    pub const CONSUMER: DeratingPreset = DeratingPreset {
+        name: "consumer",
+        temperature_c: 70.0,
+        corner: ProcessCorner::Typical,
+    };
+
+    /// Data center / server
+    pub const DATACENTER: DeratingPreset = DeratingPreset {
+        name: "datacenter",
+        temperature_c: 55.0,
+        corner: ProcessCorner::Best,
+    };
+
+    /// Convert to operating conditions with nominal voltage
+    pub fn to_operating_conditions(self, voltage_v: f64) -> OperatingConditions {
+        OperatingConditions::new(self.temperature_c, voltage_v, self.corner)
+    }
+}
+
+// ============================================================================
 // Technology Library
 // ============================================================================
 
@@ -401,6 +692,147 @@ impl TechLibrary {
     /// Get the number of cells in the library
     pub fn cell_count(&self) -> usize {
         self.cells.len()
+    }
+
+    // ====== Derating Methods ======
+
+    /// Set reference conditions for the library
+    pub fn with_reference_conditions(mut self, temp_c: f64, voltage_v: f64) -> Self {
+        self.reference_temperature = Some(temp_c);
+        self.reference_voltage = Some(voltage_v);
+        self
+    }
+
+    /// Calculate derating factors for operating conditions relative to library reference
+    pub fn calculate_derating(&self, conditions: &OperatingConditions) -> DeratingFactors {
+        let ref_temp = self.reference_temperature.unwrap_or(25.0);
+        let ref_voltage = self.reference_voltage.unwrap_or(1.0);
+        DeratingFactors::calculate(conditions, ref_temp, ref_voltage)
+    }
+
+    /// Get derated FIT for a cell under specific operating conditions
+    pub fn get_derated_fit(
+        &self,
+        cell_name: &str,
+        conditions: &OperatingConditions,
+    ) -> Option<f64> {
+        let cell = self.cells.get(cell_name)?;
+        Some(cell.derated_fit(
+            conditions,
+            self.reference_temperature,
+            self.reference_voltage,
+        ))
+    }
+
+    /// Calculate total derated FIT for all cells in the library
+    pub fn total_derated_fit(&self, conditions: &OperatingConditions) -> f64 {
+        let factors = self.calculate_derating(conditions);
+        self.cells
+            .values()
+            .map(|c| c.fit * factors.combined_factor)
+            .sum()
+    }
+
+    /// Get summary of FIT derating across the library
+    pub fn derating_summary(&self, conditions: &OperatingConditions) -> LibraryDeratingSummary {
+        let factors = self.calculate_derating(conditions);
+        let base_total_fit: f64 = self.cells.values().map(|c| c.fit).sum();
+        let derated_total_fit = base_total_fit * factors.combined_factor;
+
+        LibraryDeratingSummary {
+            library_name: self.name.clone(),
+            reference_temperature_c: self.reference_temperature.unwrap_or(25.0),
+            reference_voltage_v: self.reference_voltage.unwrap_or(1.0),
+            operating_conditions: conditions.clone(),
+            derating_factors: factors,
+            base_total_fit,
+            derated_total_fit,
+            cell_count: self.cells.len(),
+        }
+    }
+}
+
+/// Summary of derating calculations for a library
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryDeratingSummary {
+    /// Library name
+    pub library_name: String,
+    /// Reference temperature
+    pub reference_temperature_c: f64,
+    /// Reference voltage
+    pub reference_voltage_v: f64,
+    /// Operating conditions used
+    pub operating_conditions: OperatingConditions,
+    /// Calculated derating factors
+    pub derating_factors: DeratingFactors,
+    /// Total FIT at reference conditions
+    pub base_total_fit: f64,
+    /// Total FIT at operating conditions
+    pub derated_total_fit: f64,
+    /// Number of cells in library
+    pub cell_count: usize,
+}
+
+impl LibraryDeratingSummary {
+    /// Format a human-readable summary
+    pub fn format_report(&self) -> String {
+        let mut output = String::new();
+        output.push_str(&format!(
+            "FIT Derating Summary for: {}\n",
+            self.library_name
+        ));
+        output.push_str("═══════════════════════════════════════════════════════════════\n\n");
+
+        output.push_str("Reference Conditions:\n");
+        output.push_str(&format!(
+            "  Temperature: {:.1}°C\n",
+            self.reference_temperature_c
+        ));
+        output.push_str(&format!("  Voltage: {:.2}V\n\n", self.reference_voltage_v));
+
+        output.push_str("Operating Conditions:\n");
+        output.push_str(&format!(
+            "  Temperature: {:.1}°C\n",
+            self.operating_conditions.temperature_c
+        ));
+        output.push_str(&format!(
+            "  Voltage: {:.2}V\n",
+            self.operating_conditions.voltage_v
+        ));
+        output.push_str(&format!(
+            "  Process Corner: {:?}\n\n",
+            self.operating_conditions.corner
+        ));
+
+        output.push_str("Derating Factors:\n");
+        output.push_str(&format!(
+            "  Temperature (Arrhenius): {:.3}×\n",
+            self.derating_factors.temperature_factor
+        ));
+        output.push_str(&format!(
+            "  Voltage stress: {:.3}×\n",
+            self.derating_factors.voltage_factor
+        ));
+        output.push_str(&format!(
+            "  Process corner: {:.3}×\n",
+            self.derating_factors.process_factor
+        ));
+        output.push_str(&format!(
+            "  Combined: {:.3}×\n\n",
+            self.derating_factors.combined_factor
+        ));
+
+        output.push_str(&format!("Library: {} cells\n", self.cell_count));
+        output.push_str(&format!(
+            "Base Total FIT (at ref): {:.4} FIT\n",
+            self.base_total_fit
+        ));
+        output.push_str(&format!(
+            "Derated Total FIT (at op): {:.4} FIT\n",
+            self.derated_total_fit
+        ));
+
+        output
     }
 }
 
@@ -590,5 +1022,179 @@ mod tests {
         assert!(CellFunction::Latch.is_sequential());
         assert!(!CellFunction::Nand2.is_sequential());
         assert!(!CellFunction::FullAdder.is_sequential());
+    }
+
+    // ======================================================================
+    // Derating Tests
+    // ======================================================================
+
+    #[test]
+    fn test_arrhenius_at_reference() {
+        // At reference temperature, factor should be 1.0
+        let factor = arrhenius_acceleration_factor(25.0, 25.0);
+        assert!((factor - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_arrhenius_higher_temp() {
+        // At higher temperature, factor should be > 1
+        let factor = arrhenius_acceleration_factor(85.0, 25.0);
+        assert!(factor > 1.0);
+
+        // At automotive junction temperature (125°C), should be significantly higher
+        let auto_factor = arrhenius_acceleration_factor(125.0, 25.0);
+        assert!(auto_factor > factor);
+    }
+
+    #[test]
+    fn test_arrhenius_lower_temp() {
+        // At lower temperature, factor should be < 1
+        let factor = arrhenius_acceleration_factor(0.0, 25.0);
+        assert!(factor < 1.0);
+    }
+
+    #[test]
+    fn test_voltage_at_reference() {
+        // At reference voltage, factor should be 1.0
+        let factor = voltage_acceleration_factor(1.0, 1.0);
+        assert!((factor - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_voltage_overvoltage() {
+        // At 10% overvoltage, factor should be > 1
+        let factor = voltage_acceleration_factor(1.1, 1.0);
+        assert!(factor > 1.0);
+    }
+
+    #[test]
+    fn test_voltage_undervoltage() {
+        // At undervoltage, factor should be < 1
+        let factor = voltage_acceleration_factor(0.9, 1.0);
+        assert!(factor < 1.0);
+    }
+
+    #[test]
+    fn test_process_corner_factors() {
+        assert!((process_corner_factor(ProcessCorner::Best) - 0.7).abs() < 0.001);
+        assert!((process_corner_factor(ProcessCorner::Typical) - 1.0).abs() < 0.001);
+        assert!((process_corner_factor(ProcessCorner::Worst) - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_derating_factors_combined() {
+        let conditions = OperatingConditions::new(85.0, 1.0, ProcessCorner::Typical);
+        let factors = DeratingFactors::calculate(&conditions, 25.0, 1.0);
+
+        // Combined should be product of individual factors
+        let expected = factors.temperature_factor * factors.voltage_factor * factors.process_factor;
+        assert!((factors.combined_factor - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cell_derated_fit() {
+        let cell = LibraryCell::new_comb("NAND2_X1", CellFunction::Nand2, 1.0);
+
+        // At reference conditions, derated FIT should equal base FIT
+        let ref_conditions = OperatingConditions::default();
+        let derated = cell.derated_fit(&ref_conditions, Some(25.0), Some(1.0));
+        assert!((derated - 1.0).abs() < 0.001);
+
+        // At elevated temperature, derated FIT should be higher
+        let hot_conditions = OperatingConditions::new(85.0, 1.0, ProcessCorner::Typical);
+        let derated_hot = cell.derated_fit(&hot_conditions, Some(25.0), Some(1.0));
+        assert!(derated_hot > 1.0);
+    }
+
+    #[test]
+    fn test_library_derating() {
+        let mut lib = TechLibrary::new("test_lib").with_reference_conditions(25.0, 1.0);
+
+        lib.add_cell(LibraryCell::new_comb("INV_X1", CellFunction::Inv, 0.05));
+        lib.add_cell(LibraryCell::new_comb("NAND2_X1", CellFunction::Nand2, 0.1));
+
+        let conditions = OperatingConditions::automotive_junction();
+        let derated_inv = lib.get_derated_fit("INV_X1", &conditions).unwrap();
+
+        // Should be higher than base FIT (0.05) due to elevated temp
+        assert!(derated_inv > 0.05);
+    }
+
+    #[test]
+    fn test_library_total_derated_fit() {
+        let mut lib = TechLibrary::new("test_lib").with_reference_conditions(25.0, 1.0);
+
+        lib.add_cell(LibraryCell::new_comb("INV_X1", CellFunction::Inv, 0.05));
+        lib.add_cell(LibraryCell::new_comb("NAND2_X1", CellFunction::Nand2, 0.1));
+
+        // At reference, total should be 0.15
+        let ref_conditions = OperatingConditions::default();
+        let ref_total = lib.total_derated_fit(&ref_conditions);
+        assert!((ref_total - 0.15).abs() < 0.001);
+
+        // At elevated temp, should be higher
+        let hot_conditions = OperatingConditions::industrial();
+        let hot_total = lib.total_derated_fit(&hot_conditions);
+        assert!(hot_total > ref_total);
+    }
+
+    #[test]
+    fn test_derating_presets() {
+        // Test that presets produce expected relative ordering
+        let automotive = DeratingPreset::AUTOMOTIVE_ASILD.to_operating_conditions(1.0);
+        let consumer = DeratingPreset::CONSUMER.to_operating_conditions(1.0);
+
+        let auto_factors = DeratingFactors::calculate_from_defaults(&automotive);
+        let consumer_factors = DeratingFactors::calculate_from_defaults(&consumer);
+
+        // Automotive should have higher derating factor than consumer
+        assert!(auto_factors.combined_factor > consumer_factors.combined_factor);
+    }
+
+    #[test]
+    fn test_derating_summary() {
+        let mut lib = TechLibrary::new("test_lib").with_reference_conditions(25.0, 1.0);
+
+        lib.add_cell(LibraryCell::new_comb("NAND2_X1", CellFunction::Nand2, 0.1));
+
+        let conditions = OperatingConditions::industrial();
+        let summary = lib.derating_summary(&conditions);
+
+        assert_eq!(summary.library_name, "test_lib");
+        assert_eq!(summary.cell_count, 1);
+        assert!((summary.base_total_fit - 0.1).abs() < 0.001);
+        assert!(summary.derated_total_fit > summary.base_total_fit);
+    }
+
+    #[test]
+    fn test_derating_report_format() {
+        let mut lib = TechLibrary::new("test_lib").with_reference_conditions(25.0, 1.0);
+
+        lib.add_cell(LibraryCell::new_comb("NAND2_X1", CellFunction::Nand2, 0.1));
+
+        let summary = lib.derating_summary(&OperatingConditions::automotive_junction());
+        let report = summary.format_report();
+
+        assert!(report.contains("FIT Derating Summary"));
+        assert!(report.contains("test_lib"));
+        assert!(report.contains("Temperature (Arrhenius)"));
+        assert!(report.contains("Combined:"));
+    }
+
+    #[test]
+    fn test_cell_derated_failure_modes() {
+        let cell = LibraryCell::new_comb("NAND2_X1", CellFunction::Nand2, 0.1)
+            .with_default_failure_modes();
+
+        let hot_conditions = OperatingConditions::new(100.0, 1.0, ProcessCorner::Worst);
+        let derated_modes = cell.derated_failure_modes(&hot_conditions, Some(25.0), Some(1.0));
+
+        // Should have same number of failure modes
+        assert_eq!(derated_modes.len(), cell.failure_modes.len());
+
+        // Each derated mode should be higher than base
+        for (base, derated) in cell.failure_modes.iter().zip(derated_modes.iter()) {
+            assert!(derated.fit > base.fit);
+        }
     }
 }

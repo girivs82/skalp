@@ -166,14 +166,103 @@ pub struct ResourceUtilization {
 }
 
 /// Timing constraints for safety mechanisms
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Per ISO 26262-5, safety mechanisms must meet specific timing requirements:
+/// - FDTI (Fault Detection Time Interval): Time from fault occurrence to detection
+/// - FRTI (Fault Reaction Time Interval): Time from detection to safe state
+/// - FTTI (Fault Tolerant Time Interval): Maximum time in faulted state before hazard
+///
+/// The fundamental timing requirement is: FDTI + FRTI < FTTI
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TimingConstraints {
-    /// Maximum detection time (nanoseconds)
+    /// Maximum detection time (nanoseconds) - legacy field
     pub max_detection_time: u64,
-    /// Maximum response time (nanoseconds)
+    /// Maximum response time (nanoseconds) - legacy field
     pub max_response_time: u64,
     /// Clock domain requirements
     pub clock_domains: Vec<String>,
+
+    // ===== ISO 26262-5 Timing Requirements =====
+    /// Fault Detection Time Interval (nanoseconds)
+    /// Time from fault occurrence to fault detection by this safety mechanism
+    /// Must be < FTTI for single-point fault tolerance
+    pub fdti: Option<u64>,
+
+    /// Fault Reaction Time Interval (nanoseconds)
+    /// Time from fault detection to transition to safe state
+    /// Includes notification, decision, and actuation time
+    pub frti: Option<u64>,
+
+    /// Fault Tolerant Time Interval (nanoseconds)
+    /// Maximum allowable time from fault occurrence to hazardous event
+    /// Specified at system level, flows down to mechanisms
+    pub ftti: Option<u64>,
+
+    /// Multiple Point Fault Detection Interval (nanoseconds)
+    /// For Latent Safety Mechanisms (LSM), the interval between tests
+    /// that detect latent faults (e.g., periodic BIST interval)
+    /// Must be justified against mission time and fault accumulation
+    pub mpfdi: Option<u64>,
+}
+
+impl TimingConstraints {
+    /// Create new timing constraints with ISO 26262 timing
+    pub fn new_iso26262(fdti: u64, frti: u64, ftti: u64) -> Self {
+        Self {
+            max_detection_time: fdti,
+            max_response_time: frti,
+            clock_domains: Vec::new(),
+            fdti: Some(fdti),
+            frti: Some(frti),
+            ftti: Some(ftti),
+            mpfdi: None,
+        }
+    }
+
+    /// Create timing constraints with MPFDI for latent fault detection
+    pub fn new_with_mpfdi(fdti: u64, frti: u64, ftti: u64, mpfdi: u64) -> Self {
+        Self {
+            max_detection_time: fdti,
+            max_response_time: frti,
+            clock_domains: Vec::new(),
+            fdti: Some(fdti),
+            frti: Some(frti),
+            ftti: Some(ftti),
+            mpfdi: Some(mpfdi),
+        }
+    }
+
+    /// Validate that FDTI + FRTI < FTTI
+    /// Returns (compliant, margin_ns) where margin is FTTI - (FDTI + FRTI)
+    pub fn validate_timing_compliance(&self) -> Option<(bool, i64)> {
+        match (self.fdti, self.frti, self.ftti) {
+            (Some(fdti), Some(frti), Some(ftti)) => {
+                let detection_plus_reaction = fdti.saturating_add(frti);
+                let compliant = detection_plus_reaction < ftti;
+                let margin = ftti as i64 - detection_plus_reaction as i64;
+                Some((compliant, margin))
+            }
+            _ => None, // Cannot validate without all timing parameters
+        }
+    }
+
+    /// Get the total fault handling time (FDTI + FRTI)
+    pub fn total_fault_handling_time(&self) -> Option<u64> {
+        match (self.fdti, self.frti) {
+            (Some(fdti), Some(frti)) => Some(fdti.saturating_add(frti)),
+            _ => None,
+        }
+    }
+
+    /// Check if MPFDI is appropriate for mission time
+    /// Rule of thumb: MPFDI should be < mission_time / 10 for adequate coverage
+    pub fn validate_mpfdi_coverage(&self, mission_time_ns: u64) -> Option<(bool, f64)> {
+        self.mpfdi.map(|mpfdi| {
+            let coverage_factor = mission_time_ns as f64 / mpfdi as f64;
+            let adequate = coverage_factor >= 10.0;
+            (adequate, coverage_factor)
+        })
+    }
 }
 
 /// Power consumption metrics
@@ -764,5 +853,67 @@ mod tests {
         assert_eq!(report.total_mechanisms, 2);
         assert_eq!(report.verified_mechanisms, 1);
         assert_eq!(report.verification_percentage, 50.0);
+    }
+
+    #[test]
+    fn test_timing_constraints_iso26262() {
+        // Test compliant timing: FDTI + FRTI < FTTI
+        let timing = TimingConstraints::new_iso26262(
+            1000, // FDTI = 1 µs
+            500,  // FRTI = 0.5 µs
+            5000, // FTTI = 5 µs
+        );
+
+        assert_eq!(timing.fdti, Some(1000));
+        assert_eq!(timing.frti, Some(500));
+        assert_eq!(timing.ftti, Some(5000));
+        assert_eq!(timing.total_fault_handling_time(), Some(1500));
+
+        let (compliant, margin) = timing.validate_timing_compliance().unwrap();
+        assert!(compliant);
+        assert_eq!(margin, 3500); // 5000 - 1500 = 3500
+
+        // Test non-compliant timing: FDTI + FRTI >= FTTI
+        let bad_timing = TimingConstraints::new_iso26262(
+            3000, // FDTI = 3 µs
+            3000, // FRTI = 3 µs
+            5000, // FTTI = 5 µs
+        );
+
+        let (compliant, margin) = bad_timing.validate_timing_compliance().unwrap();
+        assert!(!compliant);
+        assert_eq!(margin, -1000); // 5000 - 6000 = -1000
+    }
+
+    #[test]
+    fn test_timing_constraints_with_mpfdi() {
+        let timing = TimingConstraints::new_with_mpfdi(
+            1000,    // FDTI
+            500,     // FRTI
+            5000,    // FTTI
+            100_000, // MPFDI = 100 µs
+        );
+
+        assert_eq!(timing.mpfdi, Some(100_000));
+
+        // Test MPFDI coverage with 1 ms mission time (1_000_000 ns)
+        let (adequate, factor) = timing.validate_mpfdi_coverage(1_000_000).unwrap();
+        assert!(adequate); // 1_000_000 / 100_000 = 10, which is >= 10
+        assert!((factor - 10.0).abs() < 0.001);
+
+        // Test inadequate MPFDI coverage with shorter mission time
+        let (adequate, factor) = timing.validate_mpfdi_coverage(500_000).unwrap();
+        assert!(!adequate); // 500_000 / 100_000 = 5, which is < 10
+        assert!((factor - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_timing_constraints_default() {
+        let timing = TimingConstraints::default();
+        assert_eq!(timing.fdti, None);
+        assert_eq!(timing.frti, None);
+        assert_eq!(timing.ftti, None);
+        assert_eq!(timing.mpfdi, None);
+        assert!(timing.validate_timing_compliance().is_none());
     }
 }

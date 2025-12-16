@@ -76,8 +76,22 @@ pub use gate_netlist::{
 
 // Technology library
 pub use tech_library::{
-    CellFunction, DecompConnectivity, DecompSource, DecompositionRule, LibraryCell,
-    LibraryFailureMode, TechLibrary,
+    arrhenius_acceleration_factor,
+    process_corner_factor,
+    voltage_acceleration_factor,
+    CellFunction,
+    DecompConnectivity,
+    DecompSource,
+    DecompositionRule,
+    // Derating and operating conditions
+    DeratingFactors,
+    DeratingPreset,
+    LibraryCell,
+    LibraryDeratingSummary,
+    LibraryFailureMode,
+    OperatingConditions,
+    ProcessCorner,
+    TechLibrary,
 };
 
 // Technology mapper
