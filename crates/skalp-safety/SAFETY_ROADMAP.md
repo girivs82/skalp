@@ -94,9 +94,9 @@ This document tracks the current state, limitations, and planned improvements fo
 
 ### HIGH Priority
 
-#### 1. Safety Annotation Parser (Mostly Complete)
+#### 1. Safety Annotation Parser (Complete ✅)
 **Location**: `skalp-frontend`, `skalp-mir`, `skalp-lir`
-**Current State**: Full pipeline propagation implemented
+**Current State**: Full pipeline propagation implemented and validated
 **Completed**:
 - [x] Parser support for `safety_goal` and `safety_entity` CST nodes
 - [x] HIR builder processing for `SafetyGoalDecl` and `SafetyEntityDecl`
@@ -104,9 +104,11 @@ This document tracks the current state, limitations, and planned improvements fo
 - [x] HIR → MIR propagation of safety annotations (commit `49516ec`)
 - [x] MIR → LIR propagation via `add_primitive_with_safety()`
 - [x] MIR → WordLir → GateNetlist propagation via `add_cell()`
+- [x] End-to-end validation tests (`test_safety_annotation_pipeline.rs`)
+- [x] Fixed `TypeKw` token handling in `#[safety_mechanism]` attribute parsing
+- [x] Fixed `from_lir_safety_info` to handle standalone safety mechanisms
 **Remaining**:
-- [ ] End-to-end validation tests
-- [ ] Error reporting for missing/invalid annotations
+- [ ] Error reporting for missing/invalid annotations (LOW priority)
 
 ### LOW Priority
 
@@ -130,7 +132,7 @@ This document tracks the current state, limitations, and planned improvements fo
 
 ## Implementation Plan
 
-### Phase 1: Safety Annotation Parser (HIGH - Mostly Complete)
+### Phase 1: Safety Annotation Parser (Complete ✅)
 
 | Item | Status | Files |
 |------|--------|-------|
@@ -138,7 +140,8 @@ This document tracks the current state, limitations, and planned improvements fo
 | 1.2 HIR builder for safety annotations | ✅ | `skalp-frontend/src/hir_builder.rs` |
 | 1.3 HIR → MIR propagation | ✅ | `skalp-mir/src/hir_to_mir.rs` |
 | 1.4 MIR → LIR propagation | ✅ | `skalp-lir/src/mir_to_gate_netlist.rs`, `mir_to_word_lir.rs`, `tech_mapper.rs` |
-| 1.5 Validation and error reporting | TODO | `skalp-safety/src/pipeline.rs` |
+| 1.5 End-to-end validation tests | ✅ | `tests/test_safety_annotation_pipeline.rs` |
+| 1.6 Bug fixes (TypeKw, standalone SMs) | ✅ | `skalp-frontend/src/hir_builder.rs`, `skalp-lir/src/gate_netlist.rs` |
 
 ### Phase 2: Technology Derating (MEDIUM - Complete ✅)
 
@@ -212,6 +215,20 @@ This document tracks the current state, limitations, and planned improvements fo
    - `verify_isolation_cells()`
    - `verify_level_shifters()`
    - `analyze_cross_domain_signals()`
+
+### End-to-End Validation Tests and Bug Fixes
+1. **Validation Test Suite** (`tests/test_safety_annotation_pipeline.rs`)
+   - 10 comprehensive tests for safety annotation pipeline
+   - Tests HIR, MIR, WordLir, and GateNetlist propagation
+   - Tests `CellSafetyClassification` on cells
+   - Tests `ModuleSafetyDefinitions` container and validation
+
+2. **Bug Fixes**
+   - Fixed `TypeKw` token handling in `#[safety_mechanism]` attribute parsing
+     - `type` was being tokenized as `TypeKw` instead of `Ident`
+   - Fixed `from_lir_safety_info()` in `gate_netlist.rs`
+     - Now handles standalone safety mechanisms (mechanism_name only, no goal_name)
+     - Uses "unassigned" placeholder for goal_name when not specified
 
 ---
 

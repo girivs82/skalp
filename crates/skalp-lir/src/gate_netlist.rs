@@ -262,13 +262,25 @@ impl CellSafetyClassification {
             }
         }
 
-        // If this has mechanism name, it's a safety mechanism
-        if let (Some(goal), Some(mechanism)) =
-            (info.goal_name.as_ref(), info.mechanism_name.as_ref())
-        {
+        // If this has a mechanism name, it's a safety mechanism
+        // Note: goal_name may be None for standalone safety mechanisms not yet associated with a goal
+        if let Some(mechanism) = info.mechanism_name.as_ref() {
+            return CellSafetyClassification::SafetyMechanism {
+                // Use goal_name if provided, otherwise use a placeholder for standalone SMs
+                goal_name: info
+                    .goal_name
+                    .clone()
+                    .unwrap_or_else(|| "unassigned".to_string()),
+                mechanism_name: mechanism.clone(),
+            };
+        }
+
+        // If this has a goal_name but no mechanism, it's still a safety mechanism
+        // (e.g., signals marked with #[implements(GoalName)])
+        if let Some(goal) = info.goal_name.as_ref() {
             return CellSafetyClassification::SafetyMechanism {
                 goal_name: goal.clone(),
-                mechanism_name: mechanism.clone(),
+                mechanism_name: "unspecified".to_string(),
             };
         }
 

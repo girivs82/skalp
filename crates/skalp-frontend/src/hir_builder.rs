@@ -8247,11 +8247,15 @@ impl HirBuilderContext {
 
         for token in tokens.iter() {
             match token.kind() {
+                // Handle 'type' keyword specifically (tokenized as TypeKw, not Ident)
+                SyntaxKind::TypeKw => {
+                    current_key = Some("type");
+                }
                 SyntaxKind::Ident => {
                     let text = token.text();
                     // Check if this is a key or a value
                     match text {
-                        "type" | "mechanism_type" => current_key = Some("type"),
+                        "mechanism_type" => current_key = Some("type"),
                         "dc" | "diagnostic_coverage" => current_key = Some("dc"),
                         "lc" | "latent_coverage" => current_key = Some("lc"),
                         "safety_mechanism" => {
