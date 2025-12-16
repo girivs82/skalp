@@ -114,13 +114,15 @@ This document tracks the current state, limitations, and planned improvements fo
 
 ### LOW Priority
 
-#### 2. Enhanced GSN Export
+#### 2. Enhanced GSN Export (Complete ✅)
 **Location**: `safety_case.rs`
-**Impact**: Basic GSN structure exists but limited export
-**Required**:
-- ASCE tool format export
-- Astah GSN format export
-- Better evidence linking
+**Current State**: Multiple export formats implemented
+**Completed**:
+- [x] GSN XML format (compatible with ASCE and other tools)
+- [x] SACM XMI format (OMG Structured Assurance Case Metamodel 2.3)
+- [x] Astah GSN compatible XML format
+- [x] XML special character escaping
+- [x] Tests for all new export formats
 
 #### 3. Comprehensive Validation Test Suite
 **Location**: `tool_qualification.rs`

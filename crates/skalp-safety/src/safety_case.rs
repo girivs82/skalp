@@ -565,6 +565,459 @@ impl GsnDiagram {
         output
     }
 
+    /// Export to GSN XML format (compatible with ASCE and other tools)
+    ///
+    /// This format follows common GSN XML conventions for tool interoperability.
+    pub fn to_gsn_xml(&self) -> String {
+        let mut output = String::new();
+        output.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        output.push_str("<gsn:SafetyCase\n");
+        output.push_str("    xmlns:gsn=\"http://www.goalstructuringnotation.info/gsn\"\n");
+        output.push_str("    xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n");
+
+        // Metadata
+        output.push_str("  <gsn:metadata>\n");
+        output.push_str(&format!(
+            "    <gsn:title>{}</gsn:title>\n",
+            escape_xml(&self.title)
+        ));
+        output.push_str(&format!(
+            "    <gsn:system>{}</gsn:system>\n",
+            escape_xml(&self.system_name)
+        ));
+        output.push_str(&format!(
+            "    <gsn:asil>{:?}</gsn:asil>\n",
+            self.target_asil
+        ));
+        output.push_str(&format!(
+            "    <gsn:author>{}</gsn:author>\n",
+            escape_xml(&self.metadata.author)
+        ));
+        output.push_str(&format!(
+            "    <gsn:version>{}</gsn:version>\n",
+            self.metadata.version
+        ));
+        output.push_str(&format!(
+            "    <gsn:status>{:?}</gsn:status>\n",
+            self.metadata.status
+        ));
+        output.push_str("  </gsn:metadata>\n\n");
+
+        // Elements
+        output.push_str("  <gsn:elements>\n");
+        for element in self.elements.values() {
+            match element {
+                GsnElement::Goal {
+                    id,
+                    description,
+                    undeveloped,
+                    asil,
+                } => {
+                    output.push_str(&format!("    <gsn:goal id=\"{}\"", escape_xml(id)));
+                    if *undeveloped {
+                        output.push_str(" undeveloped=\"true\"");
+                    }
+                    if let Some(a) = asil {
+                        output.push_str(&format!(" asil=\"{:?}\"", a));
+                    }
+                    output.push_str(">\n");
+                    output.push_str(&format!(
+                        "      <gsn:description>{}</gsn:description>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("    </gsn:goal>\n");
+                }
+                GsnElement::Strategy { id, description } => {
+                    output.push_str(&format!("    <gsn:strategy id=\"{}\">\n", escape_xml(id)));
+                    output.push_str(&format!(
+                        "      <gsn:description>{}</gsn:description>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("    </gsn:strategy>\n");
+                }
+                GsnElement::Solution {
+                    id,
+                    evidence,
+                    artifact,
+                } => {
+                    output.push_str(&format!("    <gsn:solution id=\"{}\">\n", escape_xml(id)));
+                    output.push_str(&format!(
+                        "      <gsn:evidence>{}</gsn:evidence>\n",
+                        escape_xml(evidence)
+                    ));
+                    if let Some(art) = artifact {
+                        output.push_str(&format!(
+                            "      <gsn:artifact>{}</gsn:artifact>\n",
+                            escape_xml(art)
+                        ));
+                    }
+                    output.push_str("    </gsn:solution>\n");
+                }
+                GsnElement::Context { id, description } => {
+                    output.push_str(&format!("    <gsn:context id=\"{}\">\n", escape_xml(id)));
+                    output.push_str(&format!(
+                        "      <gsn:description>{}</gsn:description>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("    </gsn:context>\n");
+                }
+                GsnElement::Assumption {
+                    id,
+                    description,
+                    validated,
+                } => {
+                    output.push_str(&format!(
+                        "    <gsn:assumption id=\"{}\" validated=\"{}\">\n",
+                        escape_xml(id),
+                        validated
+                    ));
+                    output.push_str(&format!(
+                        "      <gsn:description>{}</gsn:description>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("    </gsn:assumption>\n");
+                }
+                GsnElement::Justification { id, description } => {
+                    output.push_str(&format!(
+                        "    <gsn:justification id=\"{}\">\n",
+                        escape_xml(id)
+                    ));
+                    output.push_str(&format!(
+                        "      <gsn:description>{}</gsn:description>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("    </gsn:justification>\n");
+                }
+            }
+        }
+        output.push_str("  </gsn:elements>\n\n");
+
+        // Links
+        output.push_str("  <gsn:links>\n");
+        for link in &self.links {
+            let link_type = match link.link_type {
+                GsnLinkType::SupportedBy => "supportedBy",
+                GsnLinkType::InContextOf => "inContextOf",
+            };
+            output.push_str(&format!(
+                "    <gsn:link from=\"{}\" to=\"{}\" type=\"{}\"/>\n",
+                escape_xml(&link.from),
+                escape_xml(&link.to),
+                link_type
+            ));
+        }
+        output.push_str("  </gsn:links>\n");
+
+        output.push_str("</gsn:SafetyCase>\n");
+        output
+    }
+
+    /// Export to SACM XMI format (OMG Structured Assurance Case Metamodel)
+    ///
+    /// This format follows the SACM 2.x specification for tool interoperability
+    /// with SACM-compliant tools like Astah System Safety.
+    pub fn to_sacm_xmi(&self) -> String {
+        let mut output = String::new();
+        output.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        output.push_str("<xmi:XMI xmlns:xmi=\"http://www.omg.org/XMI\"\n");
+        output.push_str("         xmlns:sacm=\"http://www.omg.org/SACM/2.3\"\n");
+        output.push_str("         xmi:version=\"2.0\">\n");
+
+        // AssuranceCase package
+        output.push_str(&format!(
+            "  <sacm:AssuranceCase xmi:id=\"AC1\" gid=\"{}\">\n",
+            escape_xml(&self.system_name)
+        ));
+        output.push_str(&format!("    <name>{}</name>\n", escape_xml(&self.title)));
+        output.push_str(&format!(
+            "    <description>{}</description>\n",
+            escape_xml(&self.description)
+        ));
+
+        // ArgumentPackage
+        output.push_str("    <argumentPackage xmi:id=\"AP1\">\n");
+        output.push_str(&format!(
+            "      <name>{} Arguments</name>\n",
+            escape_xml(&self.system_name)
+        ));
+
+        // Convert elements to SACM Claims, Arguments, etc.
+        for element in self.elements.values() {
+            match element {
+                GsnElement::Goal {
+                    id,
+                    description,
+                    undeveloped,
+                    asil,
+                } => {
+                    // Goals become Claims in SACM
+                    output.push_str(&format!(
+                        "      <claim xmi:id=\"{}\" assumed=\"{}\"",
+                        escape_xml(id),
+                        !undeveloped
+                    ));
+                    if let Some(a) = asil {
+                        output.push_str(&format!(" criticality=\"{:?}\"", a));
+                    }
+                    output.push_str(">\n");
+                    output.push_str(&format!(
+                        "        <content>{}</content>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("      </claim>\n");
+                }
+                GsnElement::Strategy { id, description } => {
+                    // Strategies become ArgumentReasoning in SACM
+                    output.push_str(&format!(
+                        "      <argumentReasoning xmi:id=\"{}\">\n",
+                        escape_xml(id)
+                    ));
+                    output.push_str(&format!(
+                        "        <content>{}</content>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("      </argumentReasoning>\n");
+                }
+                GsnElement::Solution {
+                    id,
+                    evidence,
+                    artifact,
+                } => {
+                    // Solutions become ArtifactReference in SACM
+                    output.push_str(&format!(
+                        "      <artifactReference xmi:id=\"{}\">\n",
+                        escape_xml(id)
+                    ));
+                    output.push_str(&format!(
+                        "        <content>{}</content>\n",
+                        escape_xml(evidence)
+                    ));
+                    if let Some(art) = artifact {
+                        output.push_str(&format!(
+                            "        <referencedArtifact>{}</referencedArtifact>\n",
+                            escape_xml(art)
+                        ));
+                    }
+                    output.push_str("      </artifactReference>\n");
+                }
+                GsnElement::Context { id, description } => {
+                    // Context becomes InformationElement in SACM
+                    output.push_str(&format!(
+                        "      <informationElement xmi:id=\"{}\">\n",
+                        escape_xml(id)
+                    ));
+                    output.push_str(&format!(
+                        "        <content>{}</content>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("      </informationElement>\n");
+                }
+                GsnElement::Assumption {
+                    id,
+                    description,
+                    validated,
+                } => {
+                    // Assumptions become Claim with assertionDeclaration="assumed"
+                    output.push_str(&format!(
+                        "      <claim xmi:id=\"{}\" assertionDeclaration=\"{}\">\n",
+                        escape_xml(id),
+                        if *validated {
+                            "assumed"
+                        } else {
+                            "needsSupport"
+                        }
+                    ));
+                    output.push_str(&format!(
+                        "        <content>{}</content>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("      </claim>\n");
+                }
+                GsnElement::Justification { id, description } => {
+                    // Justifications become ArgumentReasoning with justification flag
+                    output.push_str(&format!(
+                        "      <argumentReasoning xmi:id=\"{}\" isJustification=\"true\">\n",
+                        escape_xml(id)
+                    ));
+                    output.push_str(&format!(
+                        "        <content>{}</content>\n",
+                        escape_xml(description)
+                    ));
+                    output.push_str("      </argumentReasoning>\n");
+                }
+            }
+        }
+
+        // Convert links to SACM AssertedRelationship
+        for (idx, link) in self.links.iter().enumerate() {
+            let rel_type = match link.link_type {
+                GsnLinkType::SupportedBy => "AssertedInference",
+                GsnLinkType::InContextOf => "AssertedContext",
+            };
+            output.push_str(&format!(
+                "      <{} xmi:id=\"rel{}\" source=\"{}\" target=\"{}\"/>\n",
+                rel_type,
+                idx,
+                escape_xml(&link.from),
+                escape_xml(&link.to)
+            ));
+        }
+
+        output.push_str("    </argumentPackage>\n");
+        output.push_str("  </sacm:AssuranceCase>\n");
+        output.push_str("</xmi:XMI>\n");
+        output
+    }
+
+    /// Export to Astah GSN compatible format (simplified XML)
+    ///
+    /// Produces XML that can be imported by Astah GSN via text import
+    /// or converted using the Something2GSN plugin.
+    pub fn to_astah_xml(&self) -> String {
+        let mut output = String::new();
+        output.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        output.push_str("<astah-gsn version=\"1.0\">\n");
+
+        // Project info
+        output.push_str("  <project>\n");
+        output.push_str(&format!("    <name>{}</name>\n", escape_xml(&self.title)));
+        output.push_str(&format!(
+            "    <system>{}</system>\n",
+            escape_xml(&self.system_name)
+        ));
+        output.push_str(&format!("    <asil>{:?}</asil>\n", self.target_asil));
+        output.push_str("  </project>\n\n");
+
+        // GSN diagram
+        output.push_str("  <diagram name=\"Main\">\n");
+
+        // Goals
+        output.push_str("    <goals>\n");
+        for element in self.elements.values() {
+            if let GsnElement::Goal {
+                id,
+                description,
+                undeveloped,
+                asil,
+            } = element
+            {
+                output.push_str(&format!(
+                    "      <goal id=\"{}\" undeveloped=\"{}\"",
+                    escape_xml(id),
+                    undeveloped
+                ));
+                if let Some(a) = asil {
+                    output.push_str(&format!(" asil=\"{:?}\"", a));
+                }
+                output.push_str(&format!(">{}</goal>\n", escape_xml(description)));
+            }
+        }
+        output.push_str("    </goals>\n");
+
+        // Strategies
+        output.push_str("    <strategies>\n");
+        for element in self.elements.values() {
+            if let GsnElement::Strategy { id, description } = element {
+                output.push_str(&format!(
+                    "      <strategy id=\"{}\">{}</strategy>\n",
+                    escape_xml(id),
+                    escape_xml(description)
+                ));
+            }
+        }
+        output.push_str("    </strategies>\n");
+
+        // Solutions
+        output.push_str("    <solutions>\n");
+        for element in self.elements.values() {
+            if let GsnElement::Solution {
+                id,
+                evidence,
+                artifact,
+            } = element
+            {
+                output.push_str(&format!("      <solution id=\"{}\">\n", escape_xml(id)));
+                output.push_str(&format!(
+                    "        <evidence>{}</evidence>\n",
+                    escape_xml(evidence)
+                ));
+                if let Some(art) = artifact {
+                    output.push_str(&format!(
+                        "        <artifact>{}</artifact>\n",
+                        escape_xml(art)
+                    ));
+                }
+                output.push_str("      </solution>\n");
+            }
+        }
+        output.push_str("    </solutions>\n");
+
+        // Contexts
+        output.push_str("    <contexts>\n");
+        for element in self.elements.values() {
+            if let GsnElement::Context { id, description } = element {
+                output.push_str(&format!(
+                    "      <context id=\"{}\">{}</context>\n",
+                    escape_xml(id),
+                    escape_xml(description)
+                ));
+            }
+        }
+        output.push_str("    </contexts>\n");
+
+        // Assumptions
+        output.push_str("    <assumptions>\n");
+        for element in self.elements.values() {
+            if let GsnElement::Assumption {
+                id,
+                description,
+                validated,
+            } = element
+            {
+                output.push_str(&format!(
+                    "      <assumption id=\"{}\" validated=\"{}\">{}</assumption>\n",
+                    escape_xml(id),
+                    validated,
+                    escape_xml(description)
+                ));
+            }
+        }
+        output.push_str("    </assumptions>\n");
+
+        // Justifications
+        output.push_str("    <justifications>\n");
+        for element in self.elements.values() {
+            if let GsnElement::Justification { id, description } = element {
+                output.push_str(&format!(
+                    "      <justification id=\"{}\">{}</justification>\n",
+                    escape_xml(id),
+                    escape_xml(description)
+                ));
+            }
+        }
+        output.push_str("    </justifications>\n");
+
+        // Links
+        output.push_str("    <links>\n");
+        for link in &self.links {
+            let link_type = match link.link_type {
+                GsnLinkType::SupportedBy => "supported-by",
+                GsnLinkType::InContextOf => "in-context-of",
+            };
+            output.push_str(&format!(
+                "      <link type=\"{}\" from=\"{}\" to=\"{}\"/>\n",
+                link_type,
+                escape_xml(&link.from),
+                escape_xml(&link.to)
+            ));
+        }
+        output.push_str("    </links>\n");
+
+        output.push_str("  </diagram>\n");
+        output.push_str("</astah-gsn>\n");
+        output
+    }
+
     /// Export to Markdown format
     pub fn to_markdown(&self) -> String {
         let mut output = String::new();
@@ -656,6 +1109,15 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &text[..max_len - 3])
     }
+}
+
+/// Helper to escape XML special characters
+fn escape_xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 // ============================================================================
@@ -1126,5 +1588,101 @@ mod tests {
 
         let context = GsnLink::in_context_of("G1", "C1");
         assert_eq!(context.link_type, GsnLinkType::InContextOf);
+    }
+
+    #[test]
+    fn test_gsn_to_gsn_xml() {
+        let mut gsn = GsnDiagram::new("Test Safety Case", "TestDesign", AsilLevel::C);
+        gsn.add_element(GsnElement::goal("G1", "System is safe"));
+        gsn.add_element(GsnElement::strategy("S1", "Argue over metrics"));
+        gsn.add_element(GsnElement::solution("Sn1", "FMEA Report"));
+        gsn.add_element(GsnElement::context("C1", "ISO 26262"));
+        gsn.add_link(GsnLink::supported_by("G1", "S1"));
+        gsn.add_link(GsnLink::supported_by("S1", "Sn1"));
+        gsn.add_link(GsnLink::in_context_of("G1", "C1"));
+
+        let xml = gsn.to_gsn_xml();
+
+        // Check XML structure
+        assert!(xml.contains("<?xml version=\"1.0\""));
+        assert!(xml.contains("xmlns:gsn=\"http://www.goalstructuringnotation.info/gsn\""));
+        assert!(xml.contains("<gsn:SafetyCase"));
+        assert!(xml.contains("<gsn:metadata>"));
+        assert!(xml.contains("<gsn:title>Test Safety Case</gsn:title>"));
+        assert!(xml.contains("<gsn:goal id=\"G1\""));
+        assert!(xml.contains("<gsn:strategy id=\"S1\""));
+        assert!(xml.contains("<gsn:solution id=\"Sn1\""));
+        assert!(xml.contains("<gsn:context id=\"C1\""));
+        assert!(xml.contains("<gsn:link"));
+        assert!(xml.contains("type=\"supportedBy\""));
+        assert!(xml.contains("type=\"inContextOf\""));
+    }
+
+    #[test]
+    fn test_gsn_to_sacm_xmi() {
+        let mut gsn = GsnDiagram::new("Safety Case", "Design", AsilLevel::D);
+        gsn.description = "Test safety case".to_string();
+        gsn.add_element(GsnElement::goal("G1", "Top goal"));
+        gsn.add_element(GsnElement::strategy("S1", "Strategy"));
+        gsn.add_element(GsnElement::solution("Sn1", "Evidence"));
+        gsn.add_element(GsnElement::assumption("A1", "Assumption"));
+        gsn.add_element(GsnElement::justification("J1", "Justification"));
+        gsn.add_link(GsnLink::supported_by("G1", "S1"));
+
+        let xmi = gsn.to_sacm_xmi();
+
+        // Check SACM XMI structure
+        assert!(xmi.contains("xmlns:xmi=\"http://www.omg.org/XMI\""));
+        assert!(xmi.contains("xmlns:sacm=\"http://www.omg.org/SACM/2.3\""));
+        assert!(xmi.contains("<sacm:AssuranceCase"));
+        assert!(xmi.contains("<argumentPackage"));
+        assert!(xmi.contains("<claim xmi:id=\"G1\"")); // Goals → Claims
+        assert!(xmi.contains("<argumentReasoning xmi:id=\"S1\"")); // Strategies → ArgumentReasoning
+        assert!(xmi.contains("<artifactReference xmi:id=\"Sn1\"")); // Solutions → ArtifactReference
+        assert!(xmi.contains("<AssertedInference")); // SupportedBy links
+    }
+
+    #[test]
+    fn test_gsn_to_astah_xml() {
+        let mut gsn = GsnDiagram::new("Astah Test", "TestSystem", AsilLevel::B);
+        gsn.add_element(GsnElement::goal("G1", "Goal"));
+        gsn.add_element(GsnElement::strategy("S1", "Strategy"));
+        gsn.add_element(GsnElement::solution("Sn1", "Solution"));
+        gsn.add_element(GsnElement::context("C1", "Context"));
+        gsn.add_element(GsnElement::assumption("A1", "Assumption"));
+        gsn.add_element(GsnElement::justification("J1", "Justification"));
+        gsn.add_link(GsnLink::supported_by("G1", "S1"));
+        gsn.add_link(GsnLink::in_context_of("G1", "C1"));
+
+        let xml = gsn.to_astah_xml();
+
+        // Check Astah XML structure
+        assert!(xml.contains("<astah-gsn version=\"1.0\">"));
+        assert!(xml.contains("<project>"));
+        assert!(xml.contains("<name>Astah Test</name>"));
+        assert!(xml.contains("<diagram name=\"Main\">"));
+        assert!(xml.contains("<goals>"));
+        assert!(xml.contains("<goal id=\"G1\""));
+        assert!(xml.contains("<strategies>"));
+        assert!(xml.contains("<strategy id=\"S1\""));
+        assert!(xml.contains("<solutions>"));
+        assert!(xml.contains("<contexts>"));
+        assert!(xml.contains("<assumptions>"));
+        assert!(xml.contains("<justifications>"));
+        assert!(xml.contains("<links>"));
+        assert!(xml.contains("type=\"supported-by\""));
+        assert!(xml.contains("type=\"in-context-of\""));
+    }
+
+    #[test]
+    fn test_xml_escaping() {
+        let mut gsn = GsnDiagram::new("Test & <Special> \"Chars\"", "System", AsilLevel::A);
+        gsn.add_element(GsnElement::goal("G1", "Goal with <special> & \"chars\""));
+
+        let xml = gsn.to_gsn_xml();
+
+        // Check that special characters are escaped
+        assert!(xml.contains("Test &amp; &lt;Special&gt; &quot;Chars&quot;"));
+        assert!(xml.contains("Goal with &lt;special&gt; &amp; &quot;chars&quot;"));
     }
 }
