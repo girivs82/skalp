@@ -24,6 +24,7 @@ This document tracks the current state, limitations, and planned improvements fo
 - [x] Probability propagation
 - [x] Importance measures (Birnbaum, Fussell-Vesely)
 - [x] ISO 26262 compliance checking
+- [x] Export to standard tools (OpenFTA, Isograph, JSON, Galileo)
 
 ### FMEA/FMEDA Infrastructure ✅
 - [x] Complete FMEA entry structure (failure modes, effects, detection)
@@ -34,7 +35,11 @@ This document tracks the current state, limitations, and planned improvements fo
 - [x] FMEDA generation from gate netlist
 - [x] Technology library failure mode mappings
 - [x] Export to CSV for assessor review
-- [x] Temperature derating support (reference_temperature, derating_factor)
+- [x] Full technology derating model:
+  - [x] Arrhenius temperature acceleration: `AF = exp(Ea/k * (1/T_ref - 1/T_use))`
+  - [x] Voltage stress factors: `AF = (V/V_nom)^n`
+  - [x] Process corner variation (±3σ)
+  - [x] Typical/worst-case FIT bounds
 
 ### Safety Mechanisms ✅
 - [x] SM types: Primary, Latent, Dual
@@ -89,39 +94,21 @@ This document tracks the current state, limitations, and planned improvements fo
 
 ### HIGH Priority
 
-#### 1. Safety Annotation Parser
-**Location**: `skalp-frontend` (not yet implemented)
-**Impact**: Requires manual annotation in gate netlist
-**Current State**: Must set `CellSafetyClassification` manually
-**Required**:
-- Parser support for `#[safety_goal(...)]` attribute
-- Parser support for `#[implements(goal, mechanism)]` attribute
-- Propagation through HIR → MIR → LIR → Gate Netlist
-- Validation of goal/mechanism references
-
-### MEDIUM Priority
-
-#### 2. Full Technology Derating Model
-**Location**: `fmeda_library.rs`
-**Impact**: FIT values have basic derating but no full Arrhenius model
-**Current State**: Has `derating_factor` and `reference_temperature` fields
-**Required**:
-- Complete Arrhenius temperature acceleration model
-- Voltage stress factors
-- Process corner variation (±3σ)
-- Typical/worst-case FIT bounds
-
-#### 3. Export to Standard FTA Tools
-**Location**: `fta.rs`
-**Impact**: Cannot export to external tools
-**Required**:
-- OpenFTA format export
-- Isograph format export
-- Standard XML/JSON interchange formats
+#### 1. Safety Annotation Parser (Partially Complete)
+**Location**: `skalp-frontend`
+**Current State**: HIR builder support added (commit `c6687cd`)
+**Completed**:
+- [x] Parser support for `safety_goal` and `safety_entity` CST nodes
+- [x] HIR builder processing for `SafetyGoalDecl` and `SafetyEntityDecl`
+- [x] `build_safety_goal()`, `build_hsr()`, `process_safety_entity()` functions
+**Remaining**:
+- [ ] HIR → MIR propagation of safety annotations
+- [ ] MIR → LIR propagation with auto-classification
+- [ ] End-to-end validation and error reporting
 
 ### LOW Priority
 
-#### 4. Enhanced GSN Export
+#### 2. Enhanced GSN Export
 **Location**: `safety_case.rs`
 **Impact**: Basic GSN structure exists but limited export
 **Required**:
@@ -129,7 +116,7 @@ This document tracks the current state, limitations, and planned improvements fo
 - Astah GSN format export
 - Better evidence linking
 
-#### 5. Comprehensive Validation Test Suite
+#### 3. Comprehensive Validation Test Suite
 **Location**: `tool_qualification.rs`
 **Impact**: TCL documentation exists but limited test suite
 **Required**:
@@ -141,38 +128,60 @@ This document tracks the current state, limitations, and planned improvements fo
 
 ## Implementation Plan
 
-### Phase 1: Safety Annotation Parser (HIGH)
+### Phase 1: Safety Annotation Parser (HIGH - Partially Complete)
 
-| Item | Effort | Files |
+| Item | Status | Files |
 |------|--------|-------|
-| 1.1 Parser support for `#[safety_goal()]` | Medium | `skalp-frontend/src/safety_attributes.rs` |
-| 1.2 Parser support for `#[implements()]` | Medium | `skalp-frontend/src/hir_builder.rs` |
-| 1.3 HIR → MIR propagation | Medium | `skalp-mir/src/hir_to_mir.rs` |
-| 1.4 MIR → LIR propagation | Medium | `skalp-lir/src/mir_to_gate_netlist.rs` |
-| 1.5 Validation and error reporting | Small | `skalp-safety/src/pipeline.rs` |
+| 1.1 Parser support for `safety_goal` CST | ✅ | `skalp-frontend/src/parser.rs` |
+| 1.2 HIR builder for safety annotations | ✅ | `skalp-frontend/src/hir_builder.rs` |
+| 1.3 HIR → MIR propagation | TODO | `skalp-mir/src/hir_to_mir.rs` |
+| 1.4 MIR → LIR propagation | TODO | `skalp-lir/src/mir_to_gate_netlist.rs` |
+| 1.5 Validation and error reporting | TODO | `skalp-safety/src/pipeline.rs` |
 
-### Phase 2: Technology Derating (MEDIUM)
+### Phase 2: Technology Derating (MEDIUM - Complete ✅)
 
-| Item | Effort | Files |
+| Item | Status | Files |
 |------|--------|-------|
-| 2.1 Arrhenius model implementation | Medium | `fmeda_library.rs` |
-| 2.2 Voltage stress factors | Small | `fmeda_library.rs` |
-| 2.3 Process corner variation | Small | `fmeda_library.rs` |
+| 2.1 Arrhenius model implementation | ✅ | `fmeda_library.rs` |
+| 2.2 Voltage stress factors | ✅ | `fmeda_library.rs` |
+| 2.3 Process corner variation | ✅ | `fmeda_library.rs` |
 
-### Phase 3: Tool Integration (LOW)
+### Phase 3: Tool Integration (LOW - Partially Complete)
 
-| Item | Effort | Files |
+| Item | Status | Files |
 |------|--------|-------|
-| 3.1 OpenFTA export | Medium | `fta.rs` |
-| 3.2 GSN tool export | Medium | `safety_case.rs` |
-| 3.3 Validation test suite | Medium | `tool_qualification.rs` |
+| 3.1 OpenFTA/Isograph/JSON export | ✅ | `fta.rs` |
+| 3.2 GSN tool export | TODO | `safety_case.rs` |
+| 3.3 Validation test suite | TODO | `tool_qualification.rs` |
 
 ---
 
-## Recently Completed (Phase 2)
+## Recently Completed
 
-The following items were completed in commit `29bfa69`:
+### Commit `9e908f3` - FTA Export to Standard Tools
+1. **FTA Export Formats** (`fta.rs`)
+   - OpenFTA XML format export
+   - Isograph Reliability Workbench XML format
+   - Generic JSON interchange format with analysis results
+   - Galileo text format for academic tools
+   - `FtaExportFormat` enum with unified `export_fta()` function
 
+### Commit `03fd2e4` - Technology Derating Model
+1. **Full Arrhenius Derating** (`fmeda_library.rs`)
+   - Temperature acceleration: `AF = exp(Ea/k * (1/T_ref - 1/T_use))`
+   - Voltage stress factors: `AF = (V/V_nom)^n`
+   - Process corner variation (±3σ)
+   - Preset parameters (gate_oxide, electromigration, hot_carrier, soft_error)
+   - `DeratingCalculator` with `fit_bounds()` for typical/worst-case
+
+### Commit `c6687cd` - Safety Annotation Parser (HIR)
+1. **HIR Builder Support** (`hir_builder.rs`)
+   - `build_safety_goal()` for SafetyGoalDecl processing
+   - `build_hsr()` for Hardware Safety Requirements
+   - `process_safety_entity()` for entity declarations
+   - ASIL level extraction and validation
+
+### Commit `29bfa69` - Phase 2 Safety Features
 1. **Uncertainty Quantification** (`uncertainty.rs`)
    - Monte Carlo simulation for PMHF, SPFM, LF
    - 5 distribution types (LogNormal, Exponential, Weibull, Normal, Uniform)
