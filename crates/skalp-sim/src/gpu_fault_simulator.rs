@@ -1004,6 +1004,7 @@ mod tests {
             reset: None,
             enable: None,
             bit_index: None,
+            safety_info: None,
         });
 
         let sir_result = convert_lir_to_sir(&lir);
@@ -1066,6 +1067,7 @@ mod tests {
             reset: None,
             enable: None,
             bit_index: None,
+            safety_info: None,
         });
 
         let sir_result = convert_lir_to_sir(&lir);

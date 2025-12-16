@@ -7017,6 +7017,14 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract safety mechanism config (e.g., #[safety_mechanism(type: crc, dc: 99.0)])
+            if let Some(config) =
+                self.extract_safety_mechanism_config_from_intent_value(&intent_value)
+            {
+                self.pending_safety_mechanism_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -8184,6 +8192,122 @@ impl HirBuilderContext {
             dc_override: None,   // DC is ALWAYS measured, never specified
             lc_override: None,   // LC is ALWAYS measured, never specified
         })
+    }
+
+    /// Extract safety mechanism config from an IntentValue node
+    /// Handles: #[safety_mechanism(type: crc, dc: 99.0, lc: 90.0)]
+    fn extract_safety_mechanism_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<SafetyMechanismConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Look for "safety_mechanism" identifier
+        let has_safety_mechanism = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "safety_mechanism");
+
+        if !has_safety_mechanism {
+            return None;
+        }
+
+        // Parse key-value pairs: type: crc, dc: 99.0, lc: 90.0
+        let mut mechanism_type: Option<String> = None;
+        let mut dc: Option<f64> = None;
+        let mut lc: Option<f64> = None;
+
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            match token.kind() {
+                SyntaxKind::Ident => {
+                    let text = token.text();
+                    // Check if this is a key or a value
+                    match text {
+                        "type" | "mechanism_type" => current_key = Some("type"),
+                        "dc" | "diagnostic_coverage" => current_key = Some("dc"),
+                        "lc" | "latent_coverage" => current_key = Some("lc"),
+                        "safety_mechanism" => {
+                            // Skip the attribute name itself
+                        }
+                        _ => {
+                            // This might be the value for mechanism_type
+                            if current_key == Some("type") {
+                                mechanism_type = Some(text.to_string());
+                                current_key = None;
+                            }
+                        }
+                    }
+                }
+                SyntaxKind::IntLiteral => {
+                    // Handle integer literals (for dc/lc as percentages like 99)
+                    if let Some(key) = current_key {
+                        let text = token.text().replace('_', "");
+                        if let Ok(value) = text.parse::<u64>() {
+                            let float_value = value as f64;
+                            match key {
+                                "dc" => dc = Some(float_value),
+                                "lc" => lc = Some(float_value),
+                                _ => {}
+                            }
+                            current_key = None;
+                        }
+                    }
+                }
+                SyntaxKind::FloatLiteral => {
+                    // Handle float literals (for dc/lc as decimals like 99.0)
+                    if let Some(key) = current_key {
+                        let text = token.text().replace('_', "");
+                        if let Ok(value) = text.parse::<f64>() {
+                            match key {
+                                "dc" => dc = Some(value),
+                                "lc" => lc = Some(value),
+                                _ => {}
+                            }
+                            current_key = None;
+                        }
+                    }
+                }
+                SyntaxKind::StringLiteral => {
+                    // Handle string literals for type: "crc"
+                    if current_key == Some("type") {
+                        // Remove quotes from string literal
+                        let text = token.text();
+                        let unquoted = text.trim_matches('"').trim_matches('\'');
+                        mechanism_type = Some(unquoted.to_string());
+                        current_key = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Only return Some if we found at least the mechanism type
+        if mechanism_type.is_some() || dc.is_some() || lc.is_some() {
+            Some(SafetyMechanismConfig {
+                mechanism_type,
+                dc,
+                lc,
+                description: None, // Description not parsed from attribute
+            })
+        } else {
+            // Return a default config if safety_mechanism was found but no parameters
+            Some(SafetyMechanismConfig::default())
+        }
     }
 
     /// Build intent constraint from syntax node

@@ -1,5 +1,6 @@
 use crate::pipeline::insert_pipeline_registers;
 use crate::sir::*;
+use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 use skalp_mir::mir::PortDirection as MirPortDirection;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::{
@@ -21,6 +22,7 @@ pub fn convert_mir_to_sir(mir_module: &Module) -> SirModule {
     let mir = Mir {
         name: "design".to_string(),
         modules: vec![mir_module.clone()],
+        safety_definitions: ModuleSafetyDefinitions::default(),
     };
     convert_mir_to_sir_with_hierarchy(&mir, mir_module)
 }

@@ -158,6 +158,7 @@ fn format_type(data_type: &DataType) -> String {
 mod tests {
     use super::*;
     use crate::mir::{Module, ModuleId, Port, PortDirection, PortId, Signal, SignalId};
+    use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 
     #[test]
     fn test_validate_scalar_types_ok() {
@@ -195,6 +196,7 @@ mod tests {
                 cdc_config: None,
                 breakpoint_config: None,
                 power_config: None,
+                safety_context: None,
             }],
             variables: vec![],
             processes: vec![],
@@ -207,11 +209,13 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: vec![],
+            safety_context: None,
         };
 
         let mir = Mir {
             name: "test_design".to_string(),
             modules: vec![module],
+            safety_definitions: ModuleSafetyDefinitions::default(),
         };
 
         assert!(validate_mir(&mir).is_ok());
@@ -260,11 +264,13 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: vec![],
+            safety_context: None,
         };
 
         let mir = Mir {
             name: "test_design".to_string(),
             modules: vec![module],
+            safety_definitions: ModuleSafetyDefinitions::default(),
         };
 
         let result = validate_mir(&mir);
@@ -302,6 +308,7 @@ mod tests {
                 cdc_config: None,
                 breakpoint_config: None,
                 power_config: None,
+                safety_context: None,
             }],
             variables: vec![],
             processes: vec![],
@@ -314,11 +321,13 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: vec![],
+            safety_context: None,
         };
 
         let mir = Mir {
             name: "test_design".to_string(),
             modules: vec![module],
+            safety_definitions: ModuleSafetyDefinitions::default(),
         };
 
         let result = validate_mir(&mir);
@@ -364,6 +373,7 @@ mod tests {
                 cdc_config: None,
                 breakpoint_config: None,
                 power_config: None,
+                safety_context: None,
             }],
             variables: vec![],
             processes: vec![],
@@ -376,11 +386,13 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: vec![],
+            safety_context: None,
         };
 
         let mir = Mir {
             name: "test_design".to_string(),
             modules: vec![module],
+            safety_definitions: ModuleSafetyDefinitions::default(),
         };
 
         // Should pass - arrays of scalars are allowed
@@ -417,11 +429,13 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: vec![],
+            safety_context: None,
         };
 
         let mir = Mir {
             name: "test_design".to_string(),
             modules: vec![module],
+            safety_definitions: ModuleSafetyDefinitions::default(),
         };
 
         let result = validate_mir(&mir);

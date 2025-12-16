@@ -902,6 +902,7 @@ mod tests {
             reset: None,
             enable: None,
             bit_index: None,
+            safety_info: None,
         });
 
         lir

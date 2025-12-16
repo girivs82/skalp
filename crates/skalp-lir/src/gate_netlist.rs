@@ -14,6 +14,7 @@
 //! Unlike `Lir` (technology-independent), `GateNetlist` uses specific library
 //! cells with known FIT rates and failure modes from the technology library.
 
+use crate::lir::LirSafetyInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -241,6 +242,38 @@ impl CellSafetyClassification {
             CellSafetyClassification::SafetyMechanismOfSm { goal_name, .. } => Some(goal_name),
             CellSafetyClassification::Functional => None,
         }
+    }
+
+    /// Create CellSafetyClassification from LirSafetyInfo
+    /// Used during technology mapping to propagate safety annotations from LIR to gate-level cells
+    pub fn from_lir_safety_info(info: &LirSafetyInfo) -> Self {
+        // If this is a safety mechanism of another SM
+        if info.is_sm_of_sm {
+            if let (Some(goal), Some(mechanism), Some(protected)) = (
+                info.goal_name.as_ref(),
+                info.mechanism_name.as_ref(),
+                info.protected_sm_name.as_ref(),
+            ) {
+                return CellSafetyClassification::SafetyMechanismOfSm {
+                    protected_sm_name: protected.clone(),
+                    goal_name: goal.clone(),
+                    mechanism_name: mechanism.clone(),
+                };
+            }
+        }
+
+        // If this has mechanism name, it's a safety mechanism
+        if let (Some(goal), Some(mechanism)) =
+            (info.goal_name.as_ref(), info.mechanism_name.as_ref())
+        {
+            return CellSafetyClassification::SafetyMechanism {
+                goal_name: goal.clone(),
+                mechanism_name: mechanism.clone(),
+            };
+        }
+
+        // Default to Functional if no safety information
+        CellSafetyClassification::Functional
     }
 }
 

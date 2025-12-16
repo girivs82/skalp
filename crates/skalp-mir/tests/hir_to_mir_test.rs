@@ -1,6 +1,7 @@
 //! Tests for HIR to MIR transformation
 
 use skalp_frontend::hir::*;
+use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 use skalp_mir::hir_to_mir::HirToMir;
 
 /// Helper function to create a simple entity HIR
@@ -20,6 +21,7 @@ fn create_simple_entity() -> Hir {
         modules: vec![],
         imports: vec![],
         functions: vec![],
+        safety_definitions: ModuleSafetyDefinitions::default(),
     };
 
     // Create entity

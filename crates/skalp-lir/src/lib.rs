@@ -43,8 +43,8 @@ pub mod word_lir;
 
 // Primary LIR types
 pub use lir::{
-    FitOverrides, HierarchyNode, Lir, LirNet, NetId, NetlistStats, Primitive, PrimitiveId,
-    PrimitiveType,
+    FitOverrides, HierarchyNode, Lir, LirNet, LirSafetyInfo, NetId, NetlistStats, Primitive,
+    PrimitiveId, PrimitiveType,
 };
 
 // MIR to LIR transformation

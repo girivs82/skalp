@@ -1033,6 +1033,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         }
     }
 
@@ -1132,6 +1133,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_word_lir(&module);
@@ -1229,6 +1231,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_word_lir(&module);

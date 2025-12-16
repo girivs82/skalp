@@ -19,6 +19,7 @@ pub mod module_resolver;
 pub mod monomorphization;
 pub mod parse;
 pub mod parser;
+pub mod safety_attributes;
 pub mod semantic;
 pub mod span;
 pub mod syntax;
@@ -1073,6 +1074,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         modules: Vec::new(),
         imports: Vec::new(),
         functions: Vec::new(),
+        safety_definitions: safety_attributes::ModuleSafetyDefinitions::default(),
     })
 }
 

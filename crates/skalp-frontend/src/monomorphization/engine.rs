@@ -112,6 +112,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 modules: hir.modules.clone(),
                 imports: hir.imports.clone(),
                 functions: hir.functions.clone(),
+                safety_definitions: hir.safety_definitions.clone(),
             };
 
             // Collect instantiations from current state
@@ -248,6 +249,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             modules: hir.modules.clone(),
             imports: hir.imports.clone(),
             functions: hir.functions.clone(),
+            safety_definitions: hir.safety_definitions.clone(),
         }
     }
 

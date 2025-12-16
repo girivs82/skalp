@@ -205,6 +205,18 @@ impl ModuleSynthesisContext {
     }
 }
 
+/// Convert HIR SafetyConfig to MIR SafetyContext
+fn convert_safety_config(config: &hir::SafetyConfig) -> SafetyContext {
+    SafetyContext {
+        implementing_goal: config.goal.clone(),
+        // If there's an implements_path, this is a safety-related signal
+        is_sm_signal: config.implements_path.is_some(),
+        mechanism_name: config.mechanism.clone(),
+        dc_override: config.dc_override,
+        lc_override: config.lc_override,
+    }
+}
+
 impl<'hir> HirToMir<'hir> {
     /// Create a new transformer
     pub fn new() -> Self {
@@ -272,6 +284,9 @@ impl<'hir> HirToMir<'hir> {
 
         let mut mir = Mir::new(hir.name.clone());
 
+        // Propagate safety definitions from HIR to MIR
+        mir.safety_definitions = hir.safety_definitions.clone();
+
         // First pass: create modules for entities
         eprintln!("⏱️  [PERF] Processing {} entities...", hir.entities.len());
         for entity in &hir.entities {
@@ -301,6 +316,17 @@ impl<'hir> HirToMir<'hir> {
             // Propagate power domains from HIR entity to MIR module
             if !entity.power_domains.is_empty() {
                 module.power_domains = entity.power_domains.clone();
+            }
+
+            // Propagate safety mechanism config from HIR entity to MIR module
+            if let Some(ref sm_config) = entity.safety_mechanism_config {
+                module.safety_context = Some(SafetyContext {
+                    implementing_goal: None, // Mechanism itself doesn't implement a goal
+                    is_sm_signal: true,      // Entity marked as safety mechanism
+                    mechanism_name: sm_config.mechanism_type.clone(),
+                    dc_override: sm_config.dc,
+                    lc_override: sm_config.lc,
+                });
             }
 
             // Convert generic parameters
@@ -420,6 +446,10 @@ impl<'hir> HirToMir<'hir> {
                     // Propagate power config from HIR signal to MIR signal
                     if hir_signal.power_config.is_some() {
                         signal.power_config = hir_signal.power_config.clone();
+                    }
+                    // Propagate safety config from HIR signal to MIR signal
+                    if let Some(ref safety_config) = hir_signal.safety_config {
+                        signal.safety_context = Some(convert_safety_config(safety_config));
                     }
                     module.signals.push(signal);
                 }
@@ -591,6 +621,10 @@ impl<'hir> HirToMir<'hir> {
                             if hir_signal.power_config.is_some() {
                                 signal.power_config = hir_signal.power_config.clone();
                             }
+                            // Propagate safety config from HIR signal to MIR signal
+                            if let Some(ref safety_config) = hir_signal.safety_config {
+                                signal.safety_context = Some(convert_safety_config(safety_config));
+                            }
                             module.signals.push(signal);
                         }
 
@@ -746,6 +780,7 @@ impl<'hir> HirToMir<'hir> {
                                         cdc_config: None,
                                         breakpoint_config: None,
                                         power_config: None,
+                                        safety_context: None,
                                     };
                                     module.signals.push(signal);
 
@@ -1381,6 +1416,7 @@ impl<'hir> HirToMir<'hir> {
                                     connections,
                                     parameters: std::collections::HashMap::new(),
                                     span: None,
+                                    safety_context: None,
                                 };
 
                                 // Collect output signals for the module
@@ -3117,6 +3153,7 @@ impl<'hir> HirToMir<'hir> {
                             connections,
                             parameters: std::collections::HashMap::new(),
                             span: None,
+                            safety_context: None,
                         };
 
                         // Push to pending list - will be drained when processing module
@@ -3597,12 +3634,16 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
+        // Convert safety config from HIR instance to MIR safety context
+        let safety_context = instance.safety_config.as_ref().map(convert_safety_config);
+
         Some(ModuleInstance {
             name: instance.name.clone(),
             module: module_id,
             connections,
             parameters,
             span: None,
+            safety_context,
         })
     }
 
@@ -16254,6 +16295,7 @@ impl<'hir> HirToMir<'hir> {
                 cdc_config: None,
                 breakpoint_config: None,
                 power_config: None,
+                safety_context: None,
             };
             module.signals.push(signal);
 
@@ -16493,6 +16535,7 @@ impl<'hir> HirToMir<'hir> {
                                 cdc_config: None,
                                 breakpoint_config: None,
                                 power_config: None,
+                                safety_context: None,
                             };
                             module.signals.push(signal);
 
@@ -16810,6 +16853,7 @@ impl<'hir> HirToMir<'hir> {
                         cdc_config: None,
                         breakpoint_config: None,
                         power_config: None,
+                        safety_context: None,
                     };
                     module.signals.push(signal);
                     println!(
@@ -16850,6 +16894,7 @@ impl<'hir> HirToMir<'hir> {
                     cdc_config: None,
                     breakpoint_config: None,
                     power_config: None,
+                    safety_context: None,
                 };
                 module.signals.push(signal);
                 eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
@@ -16876,6 +16921,7 @@ impl<'hir> HirToMir<'hir> {
                 connections,
                 parameters: HashMap::new(),
                 span: None,
+                safety_context: None,
             };
 
             module.instances.push(instance);
@@ -16936,6 +16982,7 @@ impl<'hir> HirToMir<'hir> {
                     cdc_config: None,
                     breakpoint_config: None,
                     power_config: None,
+                    safety_context: None,
                 };
                 eprintln!(
                     "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output",

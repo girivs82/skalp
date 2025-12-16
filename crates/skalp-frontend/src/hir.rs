@@ -3,6 +3,7 @@
 //! Converts the AST into a simplified IR suitable for further processing
 
 use crate::ast::SourceFile;
+use crate::safety_attributes::ModuleSafetyDefinitions;
 use crate::span::SourceSpan;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +38,10 @@ pub struct Hir {
     pub imports: Vec<HirImport>,
     /// Top-level functions (including const functions)
     pub functions: Vec<HirFunction>,
+    /// Module-level safety definitions (safety goals, mechanisms, HSI)
+    /// ISO 26262 compliance support
+    #[serde(default, skip_serializing_if = "ModuleSafetyDefinitions::is_empty")]
+    pub safety_definitions: ModuleSafetyDefinitions,
 }
 
 /// Entity in HIR
@@ -1950,6 +1955,7 @@ impl HirBuilder {
             modules: Vec::new(),
             imports: Vec::new(),
             functions: Vec::new(),
+            safety_definitions: ModuleSafetyDefinitions::default(),
         }
     }
 
@@ -2041,6 +2047,7 @@ impl Hir {
             modules: Vec::new(),
             imports: Vec::new(),
             functions: Vec::new(),
+            safety_definitions: ModuleSafetyDefinitions::default(),
         }
     }
 }

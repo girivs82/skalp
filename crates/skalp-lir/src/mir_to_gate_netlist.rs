@@ -1294,6 +1294,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         }
     }
 
@@ -1316,6 +1317,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1370,6 +1372,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1409,6 +1412,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1488,6 +1492,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1558,6 +1563,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1617,6 +1623,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1687,6 +1694,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1771,6 +1779,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1841,6 +1850,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);
@@ -1894,6 +1904,7 @@ mod tests {
                 cdc_config: None,
                 breakpoint_config: None,
                 power_config: None,
+                safety_context: None,
             }],
             variables: Vec::new(),
             processes: Vec::new(),
@@ -1906,6 +1917,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         };
 
         let result = lower_mir_module_to_lir(&module);

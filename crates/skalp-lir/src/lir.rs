@@ -304,6 +304,24 @@ pub struct Primitive {
     pub enable: Option<NetId>,
     /// Bit index within multi-bit signal (for traceability)
     pub bit_index: Option<u32>,
+    /// Safety classification: If this primitive implements a safety mechanism
+    /// Contains (goal_name, mechanism_name, is_sm_of_sm) if safety-relevant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_info: Option<LirSafetyInfo>,
+}
+
+/// Safety information for LIR primitives
+/// Used to propagate safety context from MIR to gate-level cells
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LirSafetyInfo {
+    /// Safety goal this primitive helps implement
+    pub goal_name: Option<String>,
+    /// Name of the safety mechanism
+    pub mechanism_name: Option<String>,
+    /// True if this is a safety mechanism of another safety mechanism
+    pub is_sm_of_sm: bool,
+    /// Protected mechanism name (for SM-of-SM)
+    pub protected_sm_name: Option<String>,
 }
 
 impl Primitive {
@@ -325,6 +343,7 @@ impl Primitive {
             reset: None,
             enable: None,
             bit_index: None,
+            safety_info: None,
         }
     }
 
@@ -348,7 +367,14 @@ impl Primitive {
             reset,
             enable: None,
             bit_index: None,
+            safety_info: None,
         }
+    }
+
+    /// Set safety information for this primitive
+    pub fn with_safety_info(mut self, info: LirSafetyInfo) -> Self {
+        self.safety_info = Some(info);
+        self
     }
 
     /// Returns the FIT rate for this primitive

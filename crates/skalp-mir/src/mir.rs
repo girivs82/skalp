@@ -9,8 +9,59 @@
 
 use crate::Type;
 use serde::{Deserialize, Serialize};
+use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 use skalp_frontend::SourceSpan;
 use std::collections::HashMap;
+
+// ============================================================================
+// Safety Context Types (ISO 26262 Support)
+// ============================================================================
+
+/// Safety context for signals, modules, and instances
+/// Tracks which safety goal(s) a hardware element implements
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SafetyContext {
+    /// Safety goal this element implements (if any)
+    pub implementing_goal: Option<String>,
+    /// If true, this element is part of a safety mechanism
+    pub is_sm_signal: bool,
+    /// Name of the safety mechanism this element belongs to
+    pub mechanism_name: Option<String>,
+    /// Diagnostic coverage override (measured value)
+    pub dc_override: Option<f64>,
+    /// Latent coverage override (measured value)
+    pub lc_override: Option<f64>,
+}
+
+impl SafetyContext {
+    /// Create a new empty safety context
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a context for a goal implementation
+    pub fn for_goal(goal_id: impl Into<String>) -> Self {
+        Self {
+            implementing_goal: Some(goal_id.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create a context for a safety mechanism
+    pub fn for_mechanism(mechanism_name: impl Into<String>, goal_id: Option<String>) -> Self {
+        Self {
+            implementing_goal: goal_id,
+            is_sm_signal: true,
+            mechanism_name: Some(mechanism_name.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Check if this context has any safety annotation
+    pub fn has_safety_annotation(&self) -> bool {
+        self.implementing_goal.is_some() || self.is_sm_signal || self.mechanism_name.is_some()
+    }
+}
 
 /// Mid-level Intermediate Representation for a design
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +70,10 @@ pub struct Mir {
     pub name: String,
     /// Top-level modules
     pub modules: Vec<Module>,
+    /// Module-level safety definitions (safety goals, mechanisms, HSI)
+    /// Propagated from HIR for downstream analysis
+    #[serde(default, skip_serializing_if = "ModuleSafetyDefinitions::is_empty")]
+    pub safety_definitions: ModuleSafetyDefinitions,
 }
 
 /// A hardware module (corresponds to entity in SKALP)
@@ -59,6 +114,10 @@ pub struct Module {
     pub vendor_ip_config: Option<skalp_frontend::hir::VendorIpConfig>,
     /// Power domain declarations (mirrors clock_domains pattern)
     pub power_domains: Vec<skalp_frontend::hir::HirPowerDomain>,
+    /// Safety context (from #[implements(...)] or #[safety_mechanism(...)] attribute)
+    /// Indicates which safety goal/mechanism this module implements
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_context: Option<SafetyContext>,
 }
 
 /// Module identifier
@@ -133,6 +192,10 @@ pub struct Signal {
     /// When present, specifies power domain crossing, retention, or isolation requirements.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub power_config: Option<skalp_frontend::hir::PowerConfig>,
+    /// Safety context (from #[implements(...)] attribute on signal)
+    /// Indicates which safety goal/mechanism this signal implements
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_context: Option<SafetyContext>,
 }
 
 /// Signal identifier
@@ -883,6 +946,10 @@ pub struct ModuleInstance {
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+    /// Safety context (from #[implements(...)] attribute on instance)
+    /// Indicates which safety goal/mechanism this instance implements
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_context: Option<SafetyContext>,
 }
 
 /// Synthesis-resolved conditional assignment
@@ -1157,6 +1224,7 @@ impl Mir {
         Self {
             name,
             modules: Vec::new(),
+            safety_definitions: ModuleSafetyDefinitions::default(),
         }
     }
 
@@ -1186,6 +1254,7 @@ impl Module {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            safety_context: None,
         }
     }
 }

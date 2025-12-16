@@ -660,6 +660,7 @@ impl TypeFlattener {
             cdc_config: None,
             breakpoint_config: None,
             power_config: None,
+            safety_context: None,
         };
         signals.push(signal);
 
