@@ -1539,6 +1539,412 @@ pub fn create_tech_primitive_library() -> TechLibrary {
 }
 
 // ============================================================================
+// Technology Derating Model (ISO 26262 Compliant)
+// ============================================================================
+
+/// Boltzmann constant in eV/K
+const BOLTZMANN_EV: f64 = 8.617e-5;
+
+/// Operating conditions for FIT derating
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatingConditions {
+    /// Junction temperature in °C
+    pub temperature_c: f64,
+    /// Supply voltage in V
+    pub voltage: f64,
+    /// Voltage specification (nominal) in V
+    pub voltage_nominal: f64,
+}
+
+impl Default for OperatingConditions {
+    fn default() -> Self {
+        Self {
+            temperature_c: 85.0, // Typical automotive junction temp
+            voltage: 0.9,
+            voltage_nominal: 0.9,
+        }
+    }
+}
+
+/// Technology derating parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeratingParameters {
+    /// Activation energy in eV (typical 0.3-0.7 for semiconductors)
+    pub activation_energy_ev: f64,
+    /// Reference temperature in °C (FIT data temperature)
+    pub reference_temperature_c: f64,
+    /// Voltage acceleration exponent (typically 2-4)
+    pub voltage_exponent: f64,
+    /// Process corner: -3σ to +3σ (0.0 = typical)
+    pub process_sigma: f64,
+    /// Process variation coefficient (σ/mean for FIT)
+    pub process_cv: f64,
+}
+
+impl Default for DeratingParameters {
+    fn default() -> Self {
+        Self {
+            activation_energy_ev: 0.7, // Typical for oxide breakdown
+            reference_temperature_c: 55.0,
+            voltage_exponent: 2.5,
+            process_sigma: 0.0, // Typical corner
+            process_cv: 0.15,   // 15% coefficient of variation
+        }
+    }
+}
+
+impl DeratingParameters {
+    /// Create parameters for CMOS gate oxide failures
+    /// Activation energy ~0.7 eV, high voltage sensitivity
+    pub fn gate_oxide() -> Self {
+        Self {
+            activation_energy_ev: 0.7,
+            reference_temperature_c: 55.0,
+            voltage_exponent: 3.0,
+            process_sigma: 0.0,
+            process_cv: 0.20,
+        }
+    }
+
+    /// Create parameters for electromigration failures
+    /// Activation energy ~0.5-0.9 eV
+    pub fn electromigration() -> Self {
+        Self {
+            activation_energy_ev: 0.6,
+            reference_temperature_c: 55.0,
+            voltage_exponent: 2.0, // Current density driven
+            process_sigma: 0.0,
+            process_cv: 0.25,
+        }
+    }
+
+    /// Create parameters for hot carrier injection
+    /// Activation energy ~0.1-0.3 eV (negative temp dependence)
+    pub fn hot_carrier() -> Self {
+        Self {
+            activation_energy_ev: -0.2, // Negative = increases at low temp
+            reference_temperature_c: 55.0,
+            voltage_exponent: 4.0, // High voltage sensitivity
+            process_sigma: 0.0,
+            process_cv: 0.30,
+        }
+    }
+
+    /// Create parameters for soft errors (SEU)
+    /// Minimal temperature dependence
+    pub fn soft_error() -> Self {
+        Self {
+            activation_energy_ev: 0.0, // No Arrhenius dependence
+            reference_temperature_c: 55.0,
+            voltage_exponent: 0.0, // No voltage dependence
+            process_sigma: 0.0,
+            process_cv: 0.50, // High variation due to environment
+        }
+    }
+
+    /// Create worst-case parameters (+3σ)
+    pub fn worst_case() -> Self {
+        Self {
+            activation_energy_ev: 0.7,
+            reference_temperature_c: 55.0,
+            voltage_exponent: 2.5,
+            process_sigma: 3.0, // +3σ
+            process_cv: 0.15,
+        }
+    }
+
+    /// Create best-case parameters (-3σ)
+    pub fn best_case() -> Self {
+        Self {
+            activation_energy_ev: 0.7,
+            reference_temperature_c: 55.0,
+            voltage_exponent: 2.5,
+            process_sigma: -3.0, // -3σ
+            process_cv: 0.15,
+        }
+    }
+}
+
+/// Technology derating calculator
+#[derive(Debug, Clone)]
+pub struct DeratingCalculator {
+    /// Derating parameters
+    pub params: DeratingParameters,
+    /// Operating conditions
+    pub conditions: OperatingConditions,
+}
+
+impl DeratingCalculator {
+    /// Create a new derating calculator
+    pub fn new(params: DeratingParameters, conditions: OperatingConditions) -> Self {
+        Self { params, conditions }
+    }
+
+    /// Calculate the Arrhenius temperature acceleration factor
+    ///
+    /// AF_temp = exp(Ea/k * (1/T_ref - 1/T_use))
+    ///
+    /// Where:
+    /// - Ea = Activation energy (eV)
+    /// - k = Boltzmann constant (8.617×10⁻⁵ eV/K)
+    /// - T_ref = Reference temperature (K)
+    /// - T_use = Operating temperature (K)
+    pub fn arrhenius_factor(&self) -> f64 {
+        let t_ref_k = self.params.reference_temperature_c + 273.15;
+        let t_use_k = self.conditions.temperature_c + 273.15;
+
+        let exponent =
+            self.params.activation_energy_ev / BOLTZMANN_EV * (1.0 / t_ref_k - 1.0 / t_use_k);
+
+        exponent.exp()
+    }
+
+    /// Calculate voltage stress factor
+    ///
+    /// AF_voltage = (V_use / V_nom)^n
+    ///
+    /// Where n is the voltage acceleration exponent
+    pub fn voltage_factor(&self) -> f64 {
+        if self.conditions.voltage_nominal <= 0.0 {
+            return 1.0;
+        }
+
+        let voltage_ratio = self.conditions.voltage / self.conditions.voltage_nominal;
+        voltage_ratio.powf(self.params.voltage_exponent)
+    }
+
+    /// Calculate process corner factor
+    ///
+    /// AF_process = 1 + σ * CV
+    ///
+    /// Where:
+    /// - σ = Process corner (-3 to +3)
+    /// - CV = Coefficient of variation
+    pub fn process_factor(&self) -> f64 {
+        1.0 + self.params.process_sigma * self.params.process_cv
+    }
+
+    /// Calculate combined acceleration factor
+    ///
+    /// AF_total = AF_temp × AF_voltage × AF_process
+    pub fn total_acceleration_factor(&self) -> f64 {
+        self.arrhenius_factor() * self.voltage_factor() * self.process_factor()
+    }
+
+    /// Apply derating to a base FIT value
+    pub fn derate_fit(&self, base_fit: f64) -> f64 {
+        base_fit * self.total_acceleration_factor()
+    }
+
+    /// Calculate FIT bounds for uncertainty analysis
+    ///
+    /// Returns (typical, worst_case, best_case) FIT values
+    pub fn fit_bounds(&self, base_fit: f64) -> FitBounds {
+        // Typical (current corner)
+        let typical = self.derate_fit(base_fit);
+
+        // Worst case (+3σ, max temp in range)
+        let mut worst_calc = self.clone();
+        worst_calc.params.process_sigma = 3.0;
+        let worst_case = worst_calc.derate_fit(base_fit);
+
+        // Best case (-3σ)
+        let mut best_calc = self.clone();
+        best_calc.params.process_sigma = -3.0;
+        let best_case = best_calc.derate_fit(base_fit).max(0.0); // Clamp to non-negative
+
+        FitBounds {
+            typical,
+            worst_case,
+            best_case,
+            acceleration_factor: self.total_acceleration_factor(),
+        }
+    }
+}
+
+/// FIT bounds from derating analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FitBounds {
+    /// Typical (nominal) FIT value
+    pub typical: f64,
+    /// Worst-case FIT (+3σ, high temp)
+    pub worst_case: f64,
+    /// Best-case FIT (-3σ)
+    pub best_case: f64,
+    /// Total acceleration factor applied
+    pub acceleration_factor: f64,
+}
+
+impl FitBounds {
+    /// Calculate the uncertainty range as a percentage
+    pub fn uncertainty_percent(&self) -> f64 {
+        if self.typical > 0.0 {
+            (self.worst_case - self.best_case) / self.typical * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Get the 90% confidence upper bound (approximation)
+    pub fn upper_90_percent(&self) -> f64 {
+        // Assuming normal distribution, 90% is ~1.645σ
+        self.typical + (self.worst_case - self.typical) * 1.645 / 3.0
+    }
+}
+
+/// Apply derating to a technology library
+pub fn derate_tech_library(
+    library: &TechLibrary,
+    operating_temp_c: f64,
+    operating_voltage: f64,
+) -> HashMap<String, FitBounds> {
+    let conditions = OperatingConditions {
+        temperature_c: operating_temp_c,
+        voltage: operating_voltage,
+        voltage_nominal: library.reference_voltage,
+    };
+
+    let params = DeratingParameters {
+        reference_temperature_c: library.reference_temperature,
+        ..Default::default()
+    };
+
+    let calculator = DeratingCalculator::new(params, conditions);
+
+    library
+        .primitives
+        .iter()
+        .map(|(name, prim)| {
+            let bounds = calculator.fit_bounds(prim.base_fit);
+            (name.clone(), bounds)
+        })
+        .collect()
+}
+
+/// Apply derating to a component library
+pub fn derate_component_library(
+    library: &FmedaLibrary,
+    operating_temp_c: f64,
+) -> HashMap<String, FitBounds> {
+    let conditions = OperatingConditions {
+        temperature_c: operating_temp_c,
+        voltage: 1.0, // Assume nominal
+        voltage_nominal: 1.0,
+    };
+
+    let params = DeratingParameters {
+        reference_temperature_c: library.reference_temperature,
+        ..Default::default()
+    };
+
+    let calculator = DeratingCalculator::new(params, conditions);
+
+    library
+        .components
+        .iter()
+        .map(|(name, comp)| {
+            let bounds = calculator.fit_bounds(comp.base_fit);
+            (name.clone(), bounds)
+        })
+        .collect()
+}
+
+/// Temperature sensitivity analysis
+///
+/// Calculates FIT at multiple temperature points for plotting
+pub fn temperature_sensitivity(
+    base_fit: f64,
+    params: &DeratingParameters,
+    temp_range: std::ops::Range<f64>,
+    num_points: usize,
+) -> Vec<(f64, f64)> {
+    let step = (temp_range.end - temp_range.start) / (num_points - 1) as f64;
+
+    (0..num_points)
+        .map(|i| {
+            let temp = temp_range.start + step * i as f64;
+            let conditions = OperatingConditions {
+                temperature_c: temp,
+                ..Default::default()
+            };
+            let calc = DeratingCalculator::new(params.clone(), conditions);
+            (temp, calc.derate_fit(base_fit))
+        })
+        .collect()
+}
+
+/// Generate derating report
+pub fn format_derating_report(
+    base_fit: f64,
+    params: &DeratingParameters,
+    conditions: &OperatingConditions,
+) -> String {
+    let calc = DeratingCalculator::new(params.clone(), conditions.clone());
+    let bounds = calc.fit_bounds(base_fit);
+
+    let mut report = String::new();
+    report.push_str("=== Technology Derating Report ===\n\n");
+
+    report.push_str("Operating Conditions:\n");
+    report.push_str(&format!(
+        "  Temperature: {:.1}°C (ref: {:.1}°C)\n",
+        conditions.temperature_c, params.reference_temperature_c
+    ));
+    report.push_str(&format!(
+        "  Voltage: {:.3}V (nom: {:.3}V)\n",
+        conditions.voltage, conditions.voltage_nominal
+    ));
+    report.push_str(&format!(
+        "  Process Corner: {:.1}σ\n\n",
+        params.process_sigma
+    ));
+
+    report.push_str("Derating Parameters:\n");
+    report.push_str(&format!(
+        "  Activation Energy: {:.2} eV\n",
+        params.activation_energy_ev
+    ));
+    report.push_str(&format!(
+        "  Voltage Exponent: {:.1}\n",
+        params.voltage_exponent
+    ));
+    report.push_str(&format!(
+        "  Process CV: {:.1}%\n\n",
+        params.process_cv * 100.0
+    ));
+
+    report.push_str("Acceleration Factors:\n");
+    report.push_str(&format!(
+        "  Arrhenius (temp): {:.3}x\n",
+        calc.arrhenius_factor()
+    ));
+    report.push_str(&format!(
+        "  Voltage stress: {:.3}x\n",
+        calc.voltage_factor()
+    ));
+    report.push_str(&format!(
+        "  Process corner: {:.3}x\n",
+        calc.process_factor()
+    ));
+    report.push_str(&format!(
+        "  Total: {:.3}x\n\n",
+        calc.total_acceleration_factor()
+    ));
+
+    report.push_str("FIT Values:\n");
+    report.push_str(&format!("  Base FIT: {:.2}\n", base_fit));
+    report.push_str(&format!("  Derated FIT (typical): {:.2}\n", bounds.typical));
+    report.push_str(&format!("  Worst case (+3σ): {:.2}\n", bounds.worst_case));
+    report.push_str(&format!("  Best case (-3σ): {:.2}\n", bounds.best_case));
+    report.push_str(&format!(
+        "  Uncertainty: ±{:.1}%\n",
+        bounds.uncertainty_percent() / 2.0
+    ));
+
+    report
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1899,5 +2305,185 @@ mod tests {
 
         assert_eq!(detector.mechanism_type, DetectorType::Psm);
         assert_eq!(detector.dc, 95.0);
+    }
+
+    // === Technology Derating Tests ===
+
+    #[test]
+    fn test_arrhenius_factor_higher_temp() {
+        // Higher temperature than reference should increase FIT
+        let params = DeratingParameters::default();
+        let conditions = OperatingConditions {
+            temperature_c: 105.0, // 50°C above 55°C reference
+            voltage: 0.9,
+            voltage_nominal: 0.9,
+        };
+
+        let calc = DeratingCalculator::new(params, conditions);
+        let af = calc.arrhenius_factor();
+
+        // With Ea=0.7eV, temp increase should significantly increase failure rate
+        assert!(af > 1.0, "Higher temp should increase AF");
+        assert!(af < 100.0, "AF should be reasonable");
+    }
+
+    #[test]
+    fn test_arrhenius_factor_lower_temp() {
+        // Lower temperature than reference should decrease FIT
+        let params = DeratingParameters::default();
+        let conditions = OperatingConditions {
+            temperature_c: 25.0, // 30°C below 55°C reference
+            voltage: 0.9,
+            voltage_nominal: 0.9,
+        };
+
+        let calc = DeratingCalculator::new(params, conditions);
+        let af = calc.arrhenius_factor();
+
+        assert!(af < 1.0, "Lower temp should decrease AF");
+        assert!(af > 0.01, "AF should be reasonable");
+    }
+
+    #[test]
+    fn test_arrhenius_factor_same_temp() {
+        // Same temperature as reference should give AF = 1.0
+        let params = DeratingParameters {
+            reference_temperature_c: 85.0,
+            ..Default::default()
+        };
+        let conditions = OperatingConditions {
+            temperature_c: 85.0,
+            ..Default::default()
+        };
+
+        let calc = DeratingCalculator::new(params, conditions);
+        let af = calc.arrhenius_factor();
+
+        assert!((af - 1.0).abs() < 0.001, "Same temp should give AF=1.0");
+    }
+
+    #[test]
+    fn test_voltage_factor() {
+        let params = DeratingParameters {
+            voltage_exponent: 2.5,
+            ..Default::default()
+        };
+
+        // 10% overvoltage
+        let conditions = OperatingConditions {
+            voltage: 0.99,
+            voltage_nominal: 0.9,
+            ..Default::default()
+        };
+
+        let calc = DeratingCalculator::new(params, conditions);
+        let vf = calc.voltage_factor();
+
+        // (1.1)^2.5 ≈ 1.27
+        assert!(vf > 1.0, "Overvoltage should increase factor");
+        assert!((vf - 1.27).abs() < 0.05, "Voltage factor calculation");
+    }
+
+    #[test]
+    fn test_process_corner_factor() {
+        // +3σ worst case
+        let params = DeratingParameters {
+            process_sigma: 3.0,
+            process_cv: 0.15, // 15% CV
+            ..Default::default()
+        };
+        let conditions = OperatingConditions::default();
+
+        let calc = DeratingCalculator::new(params, conditions);
+        let pf = calc.process_factor();
+
+        // 1 + 3 * 0.15 = 1.45
+        assert!((pf - 1.45).abs() < 0.001, "Process factor calculation");
+    }
+
+    #[test]
+    fn test_fit_bounds() {
+        let params = DeratingParameters::default();
+        let conditions = OperatingConditions::default();
+
+        let calc = DeratingCalculator::new(params, conditions);
+        let bounds = calc.fit_bounds(100.0);
+
+        // Worst case should be higher than typical
+        assert!(bounds.worst_case > bounds.typical);
+        // Best case should be lower than typical
+        assert!(bounds.best_case < bounds.typical);
+        // Bounds should be in reasonable range
+        assert!(bounds.best_case > 0.0);
+    }
+
+    #[test]
+    fn test_derating_presets() {
+        // Gate oxide should have high Ea
+        let oxide = DeratingParameters::gate_oxide();
+        assert_eq!(oxide.activation_energy_ev, 0.7);
+
+        // Electromigration
+        let em = DeratingParameters::electromigration();
+        assert_eq!(em.activation_energy_ev, 0.6);
+
+        // Hot carrier has negative Ea
+        let hci = DeratingParameters::hot_carrier();
+        assert!(hci.activation_energy_ev < 0.0);
+
+        // Soft error has no temperature dependence
+        let seu = DeratingParameters::soft_error();
+        assert_eq!(seu.activation_energy_ev, 0.0);
+    }
+
+    #[test]
+    fn test_derate_fit() {
+        let params = DeratingParameters::default();
+        let conditions = OperatingConditions {
+            temperature_c: 105.0, // Higher than 55°C reference
+            voltage: 0.9,
+            voltage_nominal: 0.9,
+        };
+
+        let calc = DeratingCalculator::new(params, conditions);
+        let base_fit = 10.0;
+        let derated = calc.derate_fit(base_fit);
+
+        // Higher temp should increase FIT
+        assert!(derated > base_fit);
+    }
+
+    #[test]
+    fn test_temperature_sensitivity() {
+        let params = DeratingParameters::default();
+        let base_fit = 100.0;
+
+        let sensitivity = temperature_sensitivity(base_fit, &params, 25.0..125.0, 5);
+
+        assert_eq!(sensitivity.len(), 5);
+        // FIT should increase with temperature
+        for i in 1..sensitivity.len() {
+            assert!(
+                sensitivity[i].1 > sensitivity[i - 1].1,
+                "FIT should increase with temp"
+            );
+        }
+    }
+
+    #[test]
+    fn test_derating_report() {
+        let params = DeratingParameters::default();
+        let conditions = OperatingConditions {
+            temperature_c: 85.0,
+            voltage: 0.9,
+            voltage_nominal: 0.9,
+        };
+
+        let report = format_derating_report(100.0, &params, &conditions);
+
+        assert!(report.contains("Derating Report"));
+        assert!(report.contains("Arrhenius"));
+        assert!(report.contains("Voltage"));
+        assert!(report.contains("FIT"));
     }
 }
