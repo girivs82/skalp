@@ -2011,8 +2011,8 @@ fn run_fi_driven_safety(
         anyhow::bail!("No gate-level netlists generated");
     }
 
-    // Get primary module
-    let primary_result = &gate_results[0];
+    // Get top-level module (last module in HDL convention)
+    let primary_result = gate_results.last().unwrap();
     let lir = &primary_result.lir;
     let total_primitives = lir.primitives.len();
     let total_fit: f64 = lir.primitives.iter().map(|p| p.ptype.base_fit()).sum();

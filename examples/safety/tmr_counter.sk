@@ -1,0 +1,101 @@
+// TMR-Protected Counter - Safety Mechanism Example
+// Demonstrates FI-driven DC measurement with actual safety mechanisms
+
+// Simple 8-bit counter channel (functional logic)
+entity CounterChannel {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+}
+
+impl CounterChannel {
+    signal counter: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else if (enable) {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+}
+
+// TMR Voter - Safety Mechanism
+// Detects single faults by comparing three redundant channels
+entity TmrVoter {
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out voted: bit[8]
+    out fault_detected: bit
+}
+
+impl TmrVoter {
+    // Majority voting: if 2 or more agree, use that value
+    signal ab_match: bit = if a == b { 1 } else { 0 }
+    signal bc_match: bit = if b == c { 1 } else { 0 }
+    signal ac_match: bit = if a == c { 1 } else { 0 }
+
+    // Voted output: majority wins
+    voted = if ab_match { a } else if bc_match { b } else if ac_match { a } else { a }
+
+    // Fault detection: any disagreement indicates a fault
+    signal all_match: bit = ab_match & bc_match & ac_match
+    fault_detected = if all_match { 0 } else { 1 }
+}
+
+// Top-level TMR Counter System
+entity TmrCounter {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+    out fault: bit
+}
+
+impl TmrCounter {
+    // Signals for instance outputs
+    signal count_a: bit[8]
+    signal count_b: bit[8]
+    signal count_c: bit[8]
+    signal voted_out: bit[8]
+    signal fault_out: bit
+
+    // Instantiate three redundant counter channels
+    let ch_a = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_a
+    }
+
+    let ch_b = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_b
+    }
+
+    let ch_c = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_c
+    }
+
+    // TMR voter for fault detection and correction
+    let voter = TmrVoter {
+        a: count_a,
+        b: count_b,
+        c: count_c,
+        voted: voted_out,
+        fault_detected: fault_out
+    }
+
+    // Outputs
+    count = voted_out
+    fault = fault_out
+}
