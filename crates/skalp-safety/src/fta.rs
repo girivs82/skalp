@@ -1360,6 +1360,558 @@ pub fn format_fta_report(tree: &FaultTree, analysis: &CutSetAnalysis) -> String 
 }
 
 // ============================================================================
+// Export Formats for Standard FTA Tools
+// ============================================================================
+
+/// OpenFTA XML export format
+///
+/// OpenFTA is an open-source FTA tool. This export generates XML compatible
+/// with OpenFTA's import format.
+pub fn export_openfta_xml(tree: &FaultTree) -> String {
+    let mut xml = String::new();
+
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    xml.push_str("<openfta-model>\n");
+    xml.push_str(&format!(
+        "  <model name=\"{}\">\n",
+        escape_xml(&tree.metadata.name)
+    ));
+    xml.push_str(&format!(
+        "    <description>{}</description>\n",
+        escape_xml(&tree.safety_goal)
+    ));
+
+    // Primary events (basic events)
+    xml.push_str("    <primary-events>\n");
+    for node in &tree.nodes {
+        if let FtaNodeType::BasicEvent {
+            failure_rate,
+            exposure_time,
+            component,
+        } = &node.node_type
+        {
+            xml.push_str(&format!(
+                "      <primary-event id=\"{}\" name=\"{}\">\n",
+                node.id.0,
+                escape_xml(&node.name)
+            ));
+            xml.push_str(&format!(
+                "        <probability>{:.6e}</probability>\n",
+                failure_rate * exposure_time
+            ));
+            xml.push_str(&format!(
+                "        <failure-rate>{:.6e}</failure-rate>\n",
+                failure_rate
+            ));
+            xml.push_str(&format!(
+                "        <exposure-time>{}</exposure-time>\n",
+                exposure_time
+            ));
+            if let Some(desc) = &node.description {
+                xml.push_str(&format!(
+                    "        <description>{}</description>\n",
+                    escape_xml(desc)
+                ));
+            }
+            xml.push_str(&format!(
+                "        <component>{}</component>\n",
+                escape_xml(component)
+            ));
+            xml.push_str("      </primary-event>\n");
+        }
+    }
+    xml.push_str("    </primary-events>\n");
+
+    // Gates
+    xml.push_str("    <gates>\n");
+    for node in &tree.nodes {
+        if let FtaNodeType::Gate { gate_type, inputs } = &node.node_type {
+            let gate_str = match gate_type {
+                GateType::And => "AND",
+                GateType::Or => "OR",
+                GateType::KofN { k, n } => &format!("{}-of-{}", k, n),
+                GateType::Pand => "PAND",
+                GateType::Not => "NOT",
+                GateType::Xor => "XOR",
+                GateType::Spare { .. } => "SPARE",
+                GateType::Seq => "SEQ",
+                GateType::Fdep => "FDEP",
+                GateType::Inhibit { .. } => "INHIBIT",
+            };
+
+            xml.push_str(&format!(
+                "      <gate id=\"{}\" name=\"{}\" type=\"{}\">\n",
+                node.id.0,
+                escape_xml(&node.name),
+                gate_str
+            ));
+
+            // Add gate-specific parameters
+            match gate_type {
+                GateType::KofN { k, n } => {
+                    xml.push_str(&format!("        <k>{}</k>\n", k));
+                    xml.push_str(&format!("        <n>{}</n>\n", n));
+                }
+                GateType::Spare {
+                    switching_probability,
+                    dormancy_factor,
+                } => {
+                    xml.push_str(&format!(
+                        "        <switching-probability>{}</switching-probability>\n",
+                        switching_probability
+                    ));
+                    xml.push_str(&format!(
+                        "        <dormancy-factor>{}</dormancy-factor>\n",
+                        dormancy_factor
+                    ));
+                }
+                GateType::Inhibit {
+                    condition_probability,
+                } => {
+                    xml.push_str(&format!(
+                        "        <condition-probability>{}</condition-probability>\n",
+                        condition_probability
+                    ));
+                }
+                _ => {}
+            }
+
+            xml.push_str("        <inputs>\n");
+            for input in inputs {
+                xml.push_str(&format!("          <input ref=\"{}\"/>\n", input.0));
+            }
+            xml.push_str("        </inputs>\n");
+
+            if let Some(desc) = &node.description {
+                xml.push_str(&format!(
+                    "        <description>{}</description>\n",
+                    escape_xml(desc)
+                ));
+            }
+            xml.push_str("      </gate>\n");
+        }
+    }
+    xml.push_str("    </gates>\n");
+
+    // Top event reference
+    xml.push_str(&format!("    <top-event ref=\"{}\"/>\n", tree.top_event.0));
+
+    xml.push_str("  </model>\n");
+    xml.push_str("</openfta-model>\n");
+
+    xml
+}
+
+/// Isograph FTA export format (simplified XML)
+///
+/// Isograph Reliability Workbench uses a proprietary format.
+/// This export provides a compatible subset.
+pub fn export_isograph_xml(tree: &FaultTree) -> String {
+    let mut xml = String::new();
+
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    xml.push_str("<fault-tree xmlns=\"http://www.isograph.com/fta\">\n");
+    xml.push_str(&format!(
+        "  <name>{}</name>\n",
+        escape_xml(&tree.metadata.name)
+    ));
+    xml.push_str(&format!(
+        "  <description>{}</description>\n",
+        escape_xml(&tree.safety_goal)
+    ));
+    xml.push_str(&format!(
+        "  <design>{}</design>\n",
+        escape_xml(&tree.metadata.design_name)
+    ));
+    xml.push_str(&format!(
+        "  <analysis-date>{}</analysis-date>\n",
+        tree.metadata.analysis_date.format("%Y-%m-%d")
+    ));
+
+    xml.push_str("  <events>\n");
+    for node in &tree.nodes {
+        match &node.node_type {
+            FtaNodeType::BasicEvent {
+                failure_rate,
+                exposure_time,
+                component,
+            } => {
+                xml.push_str(&format!(
+                    "    <basic-event id=\"BE{}\" name=\"{}\">\n",
+                    node.id.0,
+                    escape_xml(&node.name)
+                ));
+                xml.push_str(&format!(
+                    "      <failure-rate unit=\"per-hour\">{:.6e}</failure-rate>\n",
+                    failure_rate
+                ));
+                xml.push_str(&format!(
+                    "      <mission-time unit=\"hours\">{}</mission-time>\n",
+                    exposure_time
+                ));
+                xml.push_str(&format!(
+                    "      <component>{}</component>\n",
+                    escape_xml(component)
+                ));
+                xml.push_str("    </basic-event>\n");
+            }
+            FtaNodeType::UndevelopedEvent { description } => {
+                xml.push_str(&format!(
+                    "    <undeveloped-event id=\"UE{}\" name=\"{}\">\n",
+                    node.id.0,
+                    escape_xml(&node.name)
+                ));
+                xml.push_str(&format!(
+                    "      <description>{}</description>\n",
+                    escape_xml(description)
+                ));
+                xml.push_str("    </undeveloped-event>\n");
+            }
+            FtaNodeType::HouseEvent { state } => {
+                xml.push_str(&format!(
+                    "    <house-event id=\"HE{}\" name=\"{}\" state=\"{}\"/>\n",
+                    node.id.0,
+                    escape_xml(&node.name),
+                    if *state { "true" } else { "false" }
+                ));
+            }
+            _ => {}
+        }
+    }
+    xml.push_str("  </events>\n");
+
+    xml.push_str("  <gates>\n");
+    for node in &tree.nodes {
+        if let FtaNodeType::Gate { gate_type, inputs } = &node.node_type {
+            let (gate_str, attrs) = match gate_type {
+                GateType::And => ("and-gate", String::new()),
+                GateType::Or => ("or-gate", String::new()),
+                GateType::KofN { k, n } => ("voting-gate", format!(" k=\"{}\" n=\"{}\"", k, n)),
+                GateType::Pand => ("pand-gate", String::new()),
+                GateType::Not => ("not-gate", String::new()),
+                GateType::Xor => ("xor-gate", String::new()),
+                GateType::Spare {
+                    switching_probability,
+                    dormancy_factor,
+                } => (
+                    "spare-gate",
+                    format!(
+                        " switch-prob=\"{}\" dormancy=\"{}\"",
+                        switching_probability, dormancy_factor
+                    ),
+                ),
+                GateType::Seq => ("seq-gate", String::new()),
+                GateType::Fdep => ("fdep-gate", String::new()),
+                GateType::Inhibit {
+                    condition_probability,
+                } => (
+                    "inhibit-gate",
+                    format!(" condition=\"{}\"", condition_probability),
+                ),
+            };
+
+            xml.push_str(&format!(
+                "    <{} id=\"G{}\" name=\"{}\"{}>\n",
+                gate_str,
+                node.id.0,
+                escape_xml(&node.name),
+                attrs
+            ));
+            xml.push_str("      <inputs>\n");
+            for input in inputs {
+                let input_node = tree.get_node(*input);
+                let prefix = if input_node.is_some_and(|n| n.is_basic_event()) {
+                    "BE"
+                } else {
+                    "G"
+                };
+                xml.push_str(&format!("        <input ref=\"{}{}\"/>\n", prefix, input.0));
+            }
+            xml.push_str("      </inputs>\n");
+            xml.push_str(&format!("    </{}>\n", gate_str));
+        }
+    }
+    xml.push_str("  </gates>\n");
+
+    let top_prefix = if tree
+        .get_node(tree.top_event)
+        .is_some_and(|n| n.is_basic_event())
+    {
+        "BE"
+    } else {
+        "G"
+    };
+    xml.push_str(&format!(
+        "  <top-event ref=\"{}{}\"/>\n",
+        top_prefix, tree.top_event.0
+    ));
+
+    xml.push_str("</fault-tree>\n");
+
+    xml
+}
+
+/// Generic JSON interchange format for FTA
+///
+/// This is a tool-agnostic JSON format that preserves all FTA information
+/// and can be easily parsed by any tool or script.
+pub fn export_json(tree: &FaultTree, analysis: Option<&CutSetAnalysis>) -> String {
+    let mut json_tree = serde_json::json!({
+        "format": "skalp-fta-v1",
+        "metadata": {
+            "id": tree.metadata.id,
+            "name": tree.metadata.name,
+            "design": tree.metadata.design_name,
+            "safety_goal": tree.safety_goal,
+            "target_asil": format!("{:?}", tree.metadata.target_asil),
+            "analysis_date": tree.metadata.analysis_date.to_rfc3339(),
+            "analyst": tree.metadata.analyst,
+        },
+        "top_event_id": tree.top_event.0,
+        "nodes": tree.nodes.iter().map(|n| {
+            let mut node = serde_json::json!({
+                "id": n.id.0,
+                "name": n.name,
+            });
+
+            if let Some(desc) = &n.description {
+                node["description"] = serde_json::json!(desc);
+            }
+
+            if let Some(prob) = n.probability {
+                node["probability"] = serde_json::json!(prob);
+            }
+
+            match &n.node_type {
+                FtaNodeType::BasicEvent { failure_rate, exposure_time, component } => {
+                    node["type"] = serde_json::json!("basic_event");
+                    node["failure_rate"] = serde_json::json!(failure_rate);
+                    node["exposure_time"] = serde_json::json!(exposure_time);
+                    node["component"] = serde_json::json!(component);
+                }
+                FtaNodeType::Gate { gate_type, inputs } => {
+                    node["type"] = serde_json::json!("gate");
+                    node["gate_type"] = serde_json::json!(format!("{:?}", gate_type));
+                    node["inputs"] = serde_json::json!(inputs.iter().map(|i| i.0).collect::<Vec<_>>());
+                }
+                FtaNodeType::UndevelopedEvent { description } => {
+                    node["type"] = serde_json::json!("undeveloped");
+                    node["event_description"] = serde_json::json!(description);
+                }
+                FtaNodeType::HouseEvent { state } => {
+                    node["type"] = serde_json::json!("house");
+                    node["state"] = serde_json::json!(state);
+                }
+                FtaNodeType::TransferIn { target_tree, target_node } => {
+                    node["type"] = serde_json::json!("transfer");
+                    node["target_tree"] = serde_json::json!(target_tree);
+                    node["target_node"] = serde_json::json!(target_node.0);
+                }
+                FtaNodeType::TopEvent { description, safety_goal_id } => {
+                    node["type"] = serde_json::json!("top_event");
+                    node["event_description"] = serde_json::json!(description);
+                    if let Some(sg_id) = safety_goal_id {
+                        node["safety_goal_id"] = serde_json::json!(sg_id);
+                    }
+                }
+            }
+
+            node
+        }).collect::<Vec<_>>(),
+    });
+
+    if let Some(analysis) = analysis {
+        json_tree["analysis"] = serde_json::json!({
+            "top_event_probability": analysis.top_event_probability,
+            "total_cut_sets": analysis.total_cut_sets(),
+            "max_order": analysis.max_order(),
+            "cut_sets_by_order": analysis.cut_sets_by_order,
+            "single_point_failures": analysis.single_point_failures.iter().map(|cs| {
+                serde_json::json!({
+                    "events": cs.event_names,
+                    "probability": cs.probability,
+                    "contribution_percentage": cs.contribution_percentage,
+                })
+            }).collect::<Vec<_>>(),
+            "dominant_cut_sets": analysis.dominant_cut_sets.iter().map(|cs| {
+                serde_json::json!({
+                    "events": cs.event_names,
+                    "order": cs.order,
+                    "probability": cs.probability,
+                    "contribution_percentage": cs.contribution_percentage,
+                })
+            }).collect::<Vec<_>>(),
+            "importance_measures": analysis.importance_measures.iter().map(|(name, im)| {
+                serde_json::json!({
+                    "event": name,
+                    "fussell_vesely": im.fussell_vesely,
+                    "birnbaum": im.birnbaum,
+                    "criticality": im.criticality,
+                })
+            }).collect::<Vec<_>>(),
+        });
+    }
+
+    serde_json::to_string_pretty(&json_tree).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Galileo FTA format (text-based)
+///
+/// Galileo is a format used by several academic FTA tools.
+/// It uses a simple textual representation.
+pub fn export_galileo(tree: &FaultTree) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!("// Galileo FTA export: {}\n", tree.metadata.name));
+    output.push_str(&format!("// Safety Goal: {}\n", tree.safety_goal));
+    output.push_str(&format!("// Design: {}\n\n", tree.metadata.design_name));
+
+    // Top level declaration
+    let top_node = tree.get_node(tree.top_event);
+    if let Some(top) = top_node {
+        output.push_str(&format!("toplevel \"{}\";\n\n", top.name));
+    }
+
+    // Basic events
+    output.push_str("// Basic Events\n");
+    for node in &tree.nodes {
+        if let FtaNodeType::BasicEvent {
+            failure_rate,
+            exposure_time,
+            ..
+        } = &node.node_type
+        {
+            let prob = failure_rate * exposure_time;
+            output.push_str(&format!("basic \"{}\" prob={:.6e};\n", node.name, prob));
+        }
+    }
+
+    output.push('\n');
+
+    // Gates
+    output.push_str("// Gates\n");
+    for node in &tree.nodes {
+        if let FtaNodeType::Gate { gate_type, inputs } = &node.node_type {
+            let gate_str = match gate_type {
+                GateType::And => "and",
+                GateType::Or => "or",
+                GateType::KofN { k, .. } => {
+                    // Galileo uses atleast for voting gates
+                    output.push_str(&format!("\"{}\" atleast {} ", node.name, k));
+                    let input_names: Vec<String> = inputs
+                        .iter()
+                        .filter_map(|id| tree.get_node(*id).map(|n| format!("\"{}\"", n.name)))
+                        .collect();
+                    output.push_str(&input_names.join(" "));
+                    output.push_str(";\n");
+                    continue;
+                }
+                GateType::Pand => "pand",
+                GateType::Not => "not",
+                GateType::Xor => "xor",
+                GateType::Spare { .. } => "wsp", // warm spare
+                GateType::Seq => "seq",
+                GateType::Fdep => "fdep",
+                GateType::Inhibit { .. } => "inhibit",
+            };
+
+            let input_names: Vec<String> = inputs
+                .iter()
+                .filter_map(|id| tree.get_node(*id).map(|n| format!("\"{}\"", n.name)))
+                .collect();
+
+            output.push_str(&format!(
+                "\"{}\" {} {};\n",
+                node.name,
+                gate_str,
+                input_names.join(" ")
+            ));
+        }
+    }
+
+    output
+}
+
+/// Helper function to escape XML special characters
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Export format enum for convenience
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtaExportFormat {
+    /// OpenFTA XML format
+    OpenFtaXml,
+    /// Isograph XML format
+    IsographXml,
+    /// Generic JSON interchange
+    Json,
+    /// Galileo text format
+    Galileo,
+    /// Human-readable report
+    Report,
+}
+
+impl std::str::FromStr for FtaExportFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "openfta" | "openfta-xml" | "openfta_xml" => Ok(FtaExportFormat::OpenFtaXml),
+            "isograph" | "isograph-xml" | "isograph_xml" => Ok(FtaExportFormat::IsographXml),
+            "json" => Ok(FtaExportFormat::Json),
+            "galileo" | "gal" => Ok(FtaExportFormat::Galileo),
+            "report" | "txt" | "text" => Ok(FtaExportFormat::Report),
+            _ => Err(format!("Unknown FTA export format: {}", s)),
+        }
+    }
+}
+
+/// Export fault tree in the specified format
+pub fn export_fta(
+    tree: &FaultTree,
+    format: FtaExportFormat,
+    analysis: Option<&CutSetAnalysis>,
+) -> String {
+    match format {
+        FtaExportFormat::OpenFtaXml => export_openfta_xml(tree),
+        FtaExportFormat::IsographXml => export_isograph_xml(tree),
+        FtaExportFormat::Json => export_json(tree, analysis),
+        FtaExportFormat::Galileo => export_galileo(tree),
+        FtaExportFormat::Report => {
+            if let Some(analysis) = analysis {
+                format_fta_report(tree, analysis)
+            } else {
+                // Basic report without analysis
+                format!(
+                    "=== Fault Tree: {} ===\nSafety Goal: {}\nNodes: {}\nBasic Events: {}\nGates: {}\n",
+                    tree.metadata.name,
+                    tree.safety_goal,
+                    tree.node_count(),
+                    tree.basic_event_count(),
+                    tree.gate_count()
+                )
+            }
+        }
+    }
+}
+
+/// Get the file extension for an export format
+pub fn export_format_extension(format: FtaExportFormat) -> &'static str {
+    match format {
+        FtaExportFormat::OpenFtaXml => "xml",
+        FtaExportFormat::IsographXml => "xml",
+        FtaExportFormat::Json => "json",
+        FtaExportFormat::Galileo => "gal",
+        FtaExportFormat::Report => "txt",
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1778,5 +2330,155 @@ mod tests {
 
         // Should have {e1, e2} and {e3}
         assert_eq!(cut_sets.len(), 2);
+    }
+
+    // ========== Export Format Tests ==========
+
+    #[test]
+    fn test_export_openfta_xml() {
+        let tree = create_test_tree();
+        let xml = export_openfta_xml(&tree);
+
+        // Check basic XML structure
+        assert!(xml.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assert!(xml.contains("<openfta-model>"));
+        assert!(xml.contains("<primary-events>"));
+        assert!(xml.contains("<gates>"));
+        assert!(xml.contains("<primary-event"));
+        assert!(xml.contains("<gate"));
+        assert!(xml.contains("</openfta-model>"));
+
+        // Check content
+        assert!(xml.contains("Throttle sensor fault"));
+        assert!(xml.contains("ECU fault"));
+        assert!(xml.contains("Actuator fault"));
+    }
+
+    #[test]
+    fn test_export_isograph_xml() {
+        let tree = create_test_tree();
+        let xml = export_isograph_xml(&tree);
+
+        // Check Isograph XML structure
+        assert!(xml.contains("<?xml version=\"1.0\""));
+        assert!(xml.contains("<fault-tree"));
+        assert!(xml.contains("<events>"));
+        assert!(xml.contains("<gates>"));
+        assert!(xml.contains("<basic-event"));
+        assert!(xml.contains("<or-gate"));
+        assert!(xml.contains("</fault-tree>"));
+
+        // Check that failure rates are included
+        assert!(xml.contains("<failure-rate"));
+    }
+
+    #[test]
+    fn test_export_json() {
+        let tree = create_test_tree();
+        let json = export_json(&tree, None);
+
+        // Parse the JSON to verify structure
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Valid JSON");
+
+        assert_eq!(parsed["format"], "skalp-fta-v1");
+        assert!(parsed["metadata"]["id"].is_string());
+        assert!(parsed["metadata"]["name"].is_string());
+        assert!(parsed["nodes"].is_array());
+        assert!(parsed["top_event_id"].is_number());
+
+        // Check nodes array has content
+        let nodes = parsed["nodes"].as_array().unwrap();
+        assert!(!nodes.is_empty());
+    }
+
+    #[test]
+    fn test_export_json_with_analysis() {
+        let tree = create_test_tree();
+        let analysis = analyze_fault_tree(&tree);
+
+        let json = export_json(&tree, Some(&analysis));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Valid JSON");
+
+        // Should have analysis section
+        assert!(parsed["analysis"].is_object());
+        assert!(parsed["analysis"]["top_event_probability"].is_number());
+        assert!(parsed["analysis"]["total_cut_sets"].is_number());
+    }
+
+    #[test]
+    fn test_export_galileo() {
+        let tree = create_test_tree();
+        let output = export_galileo(&tree);
+
+        // Check Galileo format structure
+        assert!(output.contains("toplevel"));
+        assert!(output.contains("basic"));
+        assert!(output.contains("prob="));
+        assert!(output.contains("or"));
+
+        // Check event names are quoted
+        assert!(output.contains("\"Throttle sensor fault\""));
+        assert!(output.contains("\"ECU fault\""));
+    }
+
+    #[test]
+    fn test_export_format_enum() {
+        // Test FromStr
+        assert_eq!(
+            "openfta".parse::<FtaExportFormat>().unwrap(),
+            FtaExportFormat::OpenFtaXml
+        );
+        assert_eq!(
+            "isograph-xml".parse::<FtaExportFormat>().unwrap(),
+            FtaExportFormat::IsographXml
+        );
+        assert_eq!(
+            "json".parse::<FtaExportFormat>().unwrap(),
+            FtaExportFormat::Json
+        );
+        assert_eq!(
+            "galileo".parse::<FtaExportFormat>().unwrap(),
+            FtaExportFormat::Galileo
+        );
+        assert_eq!(
+            "report".parse::<FtaExportFormat>().unwrap(),
+            FtaExportFormat::Report
+        );
+
+        // Test file extensions
+        assert_eq!(export_format_extension(FtaExportFormat::OpenFtaXml), "xml");
+        assert_eq!(export_format_extension(FtaExportFormat::Json), "json");
+        assert_eq!(export_format_extension(FtaExportFormat::Galileo), "gal");
+    }
+
+    #[test]
+    fn test_export_fta_unified() {
+        let tree = create_test_tree();
+
+        // Test each format through unified interface
+        let xml = export_fta(&tree, FtaExportFormat::OpenFtaXml, None);
+        assert!(xml.contains("<openfta-model>"));
+
+        let isograph = export_fta(&tree, FtaExportFormat::IsographXml, None);
+        assert!(isograph.contains("<fault-tree"));
+
+        let json = export_fta(&tree, FtaExportFormat::Json, None);
+        assert!(json.contains("\"format\": \"skalp-fta-v1\""));
+
+        let galileo = export_fta(&tree, FtaExportFormat::Galileo, None);
+        assert!(galileo.contains("toplevel"));
+
+        let report = export_fta(&tree, FtaExportFormat::Report, None);
+        assert!(report.contains("Fault Tree:"));
+    }
+
+    #[test]
+    fn test_xml_escape() {
+        // Test XML special character escaping
+        let escaped = escape_xml("a < b & c > d \"quote\" 'apos'");
+        assert_eq!(
+            escaped,
+            "a &lt; b &amp; c &gt; d &quot;quote&quot; &apos;apos&apos;"
+        );
     }
 }
