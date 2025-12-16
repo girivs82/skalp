@@ -302,7 +302,17 @@ pub fn builtin_fpga_lut6() -> TechLibrary {
 // Helper Functions
 // ============================================================================
 
-/// Create a combinational cell with default failure modes
+/// Create a combinational cell with realistic failure mode distributions
+///
+/// Failure mode distribution for combinational logic:
+/// - Stuck-at faults: 60% (symmetric between 0 and 1)
+/// - Transient (soft error): 15% - particle strikes, voltage glitches
+/// - Bridge (short): 10% - manufacturing defects, electromigration
+/// - Open circuit: 8% - via/contact failures, electromigration
+/// - Delay: 7% - process variation, aging effects
+///
+/// These distributions are based on typical ASIC failure mechanisms
+/// and are suitable for ISO 26262 FMEDA analysis.
 fn make_cell(
     name: &str,
     function: CellFunction,
@@ -320,26 +330,35 @@ fn make_cell(
         inputs,
         outputs,
         failure_modes: vec![
-            LibraryFailureMode {
-                name: "stuck_at_0".to_string(),
-                fit: fit * 0.45,
-                fault_type: FaultType::StuckAt0,
-            },
-            LibraryFailureMode {
-                name: "stuck_at_1".to_string(),
-                fit: fit * 0.45,
-                fault_type: FaultType::StuckAt1,
-            },
-            LibraryFailureMode {
-                name: "transient".to_string(),
-                fit: fit * 0.10,
-                fault_type: FaultType::Transient,
-            },
+            LibraryFailureMode::new("stuck_at_0", fit * 0.30, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.30, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            LibraryFailureMode::new("transient", fit * 0.15, FaultType::Transient)
+                .with_mechanism("radiation_seu")
+                .with_recovery_time_ns(1.0),
+            LibraryFailureMode::new("bridge", fit * 0.10, FaultType::Bridge)
+                .with_mechanism("metal_bridge"),
+            LibraryFailureMode::new("open", fit * 0.08, FaultType::Open)
+                .with_mechanism("via_failure"),
+            LibraryFailureMode::new("delay", fit * 0.07, FaultType::Delay)
+                .with_mechanism("process_variation"),
         ],
     }
 }
 
-/// Create a sequential cell with default failure modes
+/// Create a sequential cell with realistic failure mode distributions
+///
+/// Failure mode distribution for sequential elements (flip-flops, latches):
+/// - Stuck-at faults: 40% (data path failures)
+/// - Timing (setup/hold): 20% - critical for sequential elements
+/// - Clock path: 15% - clock buffer, routing failures
+/// - Data retention: 10% - soft errors in storage node
+/// - Transient: 8% - particle strikes
+/// - Reset path: 7% - reset buffer, routing failures (if applicable)
+///
+/// Sequential cells have more complex failure mechanisms due to
+/// feedback paths, clock/data timing relationships, and state retention.
 fn make_seq_cell(
     name: &str,
     function: CellFunction,
@@ -357,31 +376,39 @@ fn make_seq_cell(
         inputs,
         outputs,
         failure_modes: vec![
-            LibraryFailureMode {
-                name: "stuck_at_0".to_string(),
-                fit: fit * 0.35,
-                fault_type: FaultType::StuckAt0,
-            },
-            LibraryFailureMode {
-                name: "stuck_at_1".to_string(),
-                fit: fit * 0.35,
-                fault_type: FaultType::StuckAt1,
-            },
-            LibraryFailureMode {
-                name: "setup_violation".to_string(),
-                fit: fit * 0.15,
-                fault_type: FaultType::Timing,
-            },
-            LibraryFailureMode {
-                name: "hold_violation".to_string(),
-                fit: fit * 0.15,
-                fault_type: FaultType::Timing,
-            },
+            LibraryFailureMode::new("stuck_at_0", fit * 0.20, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.20, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            LibraryFailureMode::new("setup_violation", fit * 0.10, FaultType::Timing)
+                .with_mechanism("setup_slack_violation"),
+            LibraryFailureMode::new("hold_violation", fit * 0.10, FaultType::Timing)
+                .with_mechanism("hold_slack_violation"),
+            LibraryFailureMode::new("clock_path", fit * 0.15, FaultType::ClockPath)
+                .with_mechanism("clock_buffer_failure"),
+            LibraryFailureMode::new("data_retention", fit * 0.10, FaultType::DataRetention)
+                .with_mechanism("sram_bit_flip")
+                .with_soft_error_cross_section(1.2e-15),
+            LibraryFailureMode::new("transient", fit * 0.08, FaultType::Transient)
+                .with_mechanism("single_event_upset")
+                .with_recovery_time_ns(1.0),
+            LibraryFailureMode::new("reset_path", fit * 0.07, FaultType::ResetPath)
+                .with_mechanism("reset_buffer_failure"),
         ],
     }
 }
 
-/// Create an FPGA LUT cell
+/// Create an FPGA LUT cell with realistic failure mode distributions
+///
+/// FPGA failure modes are dominated by SRAM configuration memory upsets:
+/// - Configuration upset: 50% - radiation-induced bit flips in SRAM
+/// - Stuck-at: 20% - permanent logic failures
+/// - Transient: 15% - single-event transients in logic
+/// - Routing: 10% - interconnect failures (open/bridge)
+/// - Delay: 5% - timing degradation
+///
+/// FPGAs have higher soft error rates than ASICs due to SRAM configuration,
+/// but failures can often be recovered by scrubbing/reconfiguration.
 fn make_fpga_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCell {
     let (inputs, outputs) = function.default_pins();
     LibraryCell {
@@ -393,31 +420,34 @@ fn make_fpga_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCell {
         inputs,
         outputs,
         failure_modes: vec![
-            LibraryFailureMode {
-                name: "config_upset".to_string(),
-                fit: fit * 0.60,                 // SRAM upsets dominate in FPGAs
-                fault_type: FaultType::StuckAt0, // Config bit flip
-            },
-            LibraryFailureMode {
-                name: "stuck_at_0".to_string(),
-                fit: fit * 0.15,
-                fault_type: FaultType::StuckAt0,
-            },
-            LibraryFailureMode {
-                name: "stuck_at_1".to_string(),
-                fit: fit * 0.15,
-                fault_type: FaultType::StuckAt1,
-            },
-            LibraryFailureMode {
-                name: "transient".to_string(),
-                fit: fit * 0.10,
-                fault_type: FaultType::Transient,
-            },
+            LibraryFailureMode::new("config_upset", fit * 0.50, FaultType::DataRetention)
+                .with_mechanism("sram_soft_error")
+                .with_soft_error_cross_section(2.5e-14),
+            LibraryFailureMode::new("stuck_at_0", fit * 0.10, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.10, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            LibraryFailureMode::new("transient", fit * 0.15, FaultType::Transient)
+                .with_mechanism("single_event_transient")
+                .with_recovery_time_ns(1.0),
+            LibraryFailureMode::new("routing_open", fit * 0.05, FaultType::Open)
+                .with_mechanism("interconnect_failure"),
+            LibraryFailureMode::new("routing_bridge", fit * 0.05, FaultType::Bridge)
+                .with_mechanism("interconnect_bridge"),
+            LibraryFailureMode::new("delay", fit * 0.05, FaultType::Delay)
+                .with_mechanism("process_variation"),
         ],
     }
 }
 
-/// Create an FPGA flip-flop cell
+/// Create an FPGA flip-flop cell with realistic failure mode distributions
+///
+/// FPGA sequential elements have unique failure modes:
+/// - Configuration upset: 35% - SRAM control bit flips
+/// - Data retention: 20% - storage node upsets
+/// - Timing: 20% - setup/hold violations
+/// - Stuck-at: 15% - permanent logic failures
+/// - Clock routing: 10% - clock distribution failures
 fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCell {
     let (inputs, outputs) = function.default_pins();
     LibraryCell {
@@ -429,26 +459,20 @@ fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCe
         inputs,
         outputs,
         failure_modes: vec![
-            LibraryFailureMode {
-                name: "config_upset".to_string(),
-                fit: fit * 0.40,
-                fault_type: FaultType::StuckAt0,
-            },
-            LibraryFailureMode {
-                name: "stuck_at_0".to_string(),
-                fit: fit * 0.20,
-                fault_type: FaultType::StuckAt0,
-            },
-            LibraryFailureMode {
-                name: "stuck_at_1".to_string(),
-                fit: fit * 0.20,
-                fault_type: FaultType::StuckAt1,
-            },
-            LibraryFailureMode {
-                name: "timing".to_string(),
-                fit: fit * 0.20,
-                fault_type: FaultType::Timing,
-            },
+            LibraryFailureMode::new("config_upset", fit * 0.35, FaultType::DataRetention)
+                .with_mechanism("sram_soft_error")
+                .with_soft_error_cross_section(2.5e-14),
+            LibraryFailureMode::new("data_retention", fit * 0.20, FaultType::DataRetention)
+                .with_mechanism("storage_node_upset")
+                .with_soft_error_cross_section(1.5e-14),
+            LibraryFailureMode::new("timing", fit * 0.20, FaultType::Timing)
+                .with_mechanism("setup_hold_violation"),
+            LibraryFailureMode::new("stuck_at_0", fit * 0.07, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.08, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            LibraryFailureMode::new("clock_path", fit * 0.10, FaultType::ClockPath)
+                .with_mechanism("clock_routing_failure"),
         ],
     }
 }

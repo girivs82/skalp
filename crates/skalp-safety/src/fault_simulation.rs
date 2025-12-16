@@ -1358,6 +1358,223 @@ impl SafetyAnalysisError {
 }
 
 // ============================================================================
+// Fault Campaign Conversion (skalp-sim integration)
+// ============================================================================
+
+/// Convert fault simulation results from skalp-sim to safety analysis format.
+///
+/// This function bridges the gap between the simulation engine (skalp-sim) and
+/// the safety analysis framework (skalp-safety). It transforms raw fault injection
+/// results into structured safety metrics.
+///
+/// # Arguments
+///
+/// * `campaign` - Fault simulation results from skalp-sim
+/// * `primitive_to_path` - Mapping from PrimitiveId to cell path (from GateNetlist)
+/// * `annotations` - Safety mechanism annotations (which mechanisms cover which paths)
+/// * `goal_name` - Name of the safety goal being analyzed
+/// * `design_name` - Name of the design being analyzed
+///
+/// # Returns
+///
+/// `SimulationCampaignResults` with per-mechanism detection metrics and overall SPFM/LFM.
+///
+/// # Example Flow
+///
+/// ```ignore
+/// // 1. Compile design to GateNetlist
+/// let netlist = compile_to_gate_netlist(&source)?;
+///
+/// // 2. Convert to SIR for simulation
+/// let mut converter = GateNetlistToSirConverter::new();
+/// let sir_result = converter.convert(&netlist);
+///
+/// // 3. Build primitive-to-path mapping
+/// let primitive_to_path = build_primitive_path_map(&netlist, &converter);
+///
+/// // 4. Run fault simulation
+/// let campaign_results = simulator.run_fault_campaign(&config)?;
+///
+/// // 5. Convert to safety analysis format
+/// let safety_results = fault_campaign_to_safety_results(
+///     &campaign_results,
+///     &primitive_to_path,
+///     &annotations,
+///     "BrakingSafety",
+///     "BrakeController",
+/// );
+/// ```
+#[cfg(feature = "sim-integration")]
+pub fn fault_campaign_to_safety_results(
+    campaign: &skalp_sim::FaultCampaignResults,
+    primitive_to_path: &std::collections::HashMap<skalp_lir::lir::PrimitiveId, String>,
+    annotations: &[crate::design_resolver::SafetyAnnotation],
+    goal_name: &str,
+    design_name: &str,
+) -> SimulationCampaignResults {
+    use crate::design_resolver::SafetyAnnotation;
+    use std::time::Duration;
+
+    let mut results = SimulationCampaignResults::new(goal_name, design_name);
+    results.total_primitives = primitive_to_path.len() as u64;
+    results.faults_simulated = campaign.total_faults as u64;
+
+    // Create a default effect analysis for the safety goal
+    // In a more complete implementation, effects would come from SafetyGoal definitions
+    let default_effect = format!("{}_violation", goal_name);
+    results.effect_analyses.insert(
+        default_effect.clone(),
+        EffectAnalysis::new(&default_effect, Severity::S3, 0.99), // Default to S3 severity, 99% DC target
+    );
+
+    // Build a map from path prefix to mechanism name for quick lookup
+    let mut path_to_mechanism: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for annotation in annotations {
+        if annotation.goal_name == goal_name {
+            path_to_mechanism.insert(
+                annotation.design_ref.to_string(),
+                annotation.mechanism_name.clone(),
+            );
+        }
+    }
+
+    // Process each fault result
+    for fault_result in &campaign.fault_results {
+        let primitive_id = fault_result.fault.target_primitive;
+
+        // Get the cell path for this primitive
+        let cell_path = match primitive_to_path.get(&primitive_id) {
+            Some(path) => path.clone(),
+            None => format!("unknown_primitive_{}", primitive_id.0),
+        };
+
+        // Find which mechanism covers this cell (if any)
+        let mechanism = find_covering_mechanism(&cell_path, &path_to_mechanism);
+
+        // Update effect analysis
+        if let Some(effect_analysis) = results.effect_analyses.get_mut(&default_effect) {
+            // Every fault potentially causes this effect (conservative assumption)
+            effect_analysis.total_faults_causing += 1;
+
+            if fault_result.detected {
+                effect_analysis.faults_detected += 1;
+
+                // Credit the mechanism if found
+                if let Some(mech_name) = &mechanism {
+                    *effect_analysis
+                        .detection_by_mechanism
+                        .entry(mech_name.clone())
+                        .or_insert(0) += 1;
+                }
+            } else {
+                // Record undetected fault site
+                let fault_type = convert_sim_fault_type(fault_result.fault.fault_type);
+                effect_analysis
+                    .undetected_sites
+                    .push(FaultSite::new(DesignRef::parse(&cell_path), fault_type));
+            }
+
+            // Track contributors
+            *effect_analysis.contributors.entry(cell_path).or_insert(0) += 1;
+        }
+    }
+
+    // Calculate measured DC for each effect
+    for effect_analysis in results.effect_analyses.values_mut() {
+        if effect_analysis.total_faults_causing > 0 {
+            effect_analysis.measured_dc = effect_analysis.faults_detected as f64
+                / effect_analysis.total_faults_causing as f64;
+        }
+        effect_analysis.meets_target = effect_analysis.measured_dc >= effect_analysis.target_dc;
+    }
+
+    // Update overall metrics
+    results.update_metrics();
+
+    results
+}
+
+/// Find which safety mechanism covers a given cell path
+#[cfg(feature = "sim-integration")]
+fn find_covering_mechanism(
+    cell_path: &str,
+    path_to_mechanism: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    // Check for exact match first
+    if let Some(mechanism) = path_to_mechanism.get(cell_path) {
+        return Some(mechanism.clone());
+    }
+
+    // Check for prefix matches (hierarchical coverage)
+    for (annotated_path, mechanism) in path_to_mechanism {
+        if cell_path.starts_with(annotated_path) {
+            return Some(mechanism.clone());
+        }
+    }
+
+    None
+}
+
+/// Convert skalp-sim FaultType to skalp-safety FaultType
+#[cfg(feature = "sim-integration")]
+fn convert_sim_fault_type(sim_fault: skalp_sim::sir::FaultType) -> FaultType {
+    match sim_fault {
+        // Permanent faults
+        skalp_sim::sir::FaultType::StuckAt0 => FaultType::StuckAt0,
+        skalp_sim::sir::FaultType::StuckAt1 => FaultType::StuckAt1,
+        skalp_sim::sir::FaultType::Bridge { .. } => FaultType::Bridging,
+        skalp_sim::sir::FaultType::Open { .. } => FaultType::Open,
+
+        // Transient faults
+        skalp_sim::sir::FaultType::Transient => FaultType::Transient,
+        skalp_sim::sir::FaultType::BitFlip => FaultType::Transient,
+        skalp_sim::sir::FaultType::MultiBitUpset { .. } => FaultType::MultiBitUpset,
+
+        // Timing violations
+        skalp_sim::sir::FaultType::SetupViolation => FaultType::SetupViolation,
+        skalp_sim::sir::FaultType::HoldViolation => FaultType::HoldViolation,
+        skalp_sim::sir::FaultType::Metastability { .. } => FaultType::Metastability,
+        skalp_sim::sir::FaultType::TimingDelay { .. } => FaultType::SetupViolation, // Model as setup violation
+
+        // Power-related faults
+        skalp_sim::sir::FaultType::VoltageDropout => FaultType::VoltageDropout,
+        skalp_sim::sir::FaultType::GroundBounce => FaultType::GroundBounce,
+        skalp_sim::sir::FaultType::CrosstalkGlitch => FaultType::CrosstalkGlitch,
+        skalp_sim::sir::FaultType::ClockGlitch => FaultType::ClockGlitch,
+        skalp_sim::sir::FaultType::ClockStretch { .. } => FaultType::ClockGlitch,
+    }
+}
+
+/// Helper function to build primitive-to-path mapping from GateNetlist and converter.
+///
+/// This should be called after converting GateNetlist to SIR to build the mapping
+/// needed by `fault_campaign_to_safety_results`.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut converter = GateNetlistToSirConverter::new();
+/// let _sir_result = converter.convert(&netlist);
+/// let primitive_to_path = build_primitive_path_map(&netlist, &converter);
+/// ```
+#[cfg(feature = "sim-integration")]
+pub fn build_primitive_path_map(
+    netlist: &skalp_lir::GateNetlist,
+    converter: &skalp_sim::GateNetlistToSirConverter,
+) -> std::collections::HashMap<skalp_lir::lir::PrimitiveId, String> {
+    let mut map = std::collections::HashMap::new();
+
+    for cell in &netlist.cells {
+        if let Some(primitive_id) = converter.get_primitive_id(cell.id) {
+            map.insert(primitive_id, cell.path.clone());
+        }
+    }
+
+    map
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

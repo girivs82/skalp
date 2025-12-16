@@ -128,18 +128,33 @@ pub struct CellFailureMode {
 }
 
 /// Types of faults for simulation
+///
+/// These fault types align with ISO 26262 failure mode categories for FMEDA analysis.
+/// Each fault type has different implications for safety:
+/// - Permanent faults (StuckAt, Open, Bridge) require hardware safety mechanisms
+/// - Transient faults (Transient, Delay) may be masked by temporal redundancy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FaultType {
-    /// Output stuck at 0
+    /// Output stuck at 0 (permanent)
     StuckAt0,
-    /// Output stuck at 1
+    /// Output stuck at 1 (permanent)
     StuckAt1,
-    /// Single-cycle transient glitch
+    /// Single-cycle transient glitch (soft error)
     Transient,
-    /// Timing violation (setup/hold)
+    /// Timing violation (setup/hold failure)
     Timing,
-    /// Bridge fault (short between nets)
+    /// Bridge fault (short between nets, permanent)
     Bridge,
+    /// Open circuit fault (high impedance, permanent)
+    Open,
+    /// Delay fault (signal arrives late but correct value)
+    Delay,
+    /// Data retention failure (sequential cells)
+    DataRetention,
+    /// Clock path failure (sequential cells)
+    ClockPath,
+    /// Reset path failure (sequential cells with reset)
+    ResetPath,
 }
 
 // ============================================================================

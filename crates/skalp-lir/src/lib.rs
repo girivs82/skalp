@@ -34,6 +34,7 @@ pub mod lir;
 pub mod mir_to_gate_netlist;
 pub mod mir_to_word_lir;
 pub mod netlist;
+pub mod pattern_detector;
 pub mod primitives;
 pub mod tech_library;
 pub mod tech_mapper;
@@ -85,6 +86,12 @@ pub use tech_mapper::{map_word_lir_to_gates, TechMapResult, TechMapStats, TechMa
 pub use builtin_libraries::{
     builtin_asic_28nm, builtin_asic_7nm, builtin_fpga_lut4, builtin_fpga_lut6,
     builtin_generic_asic, get_builtin_library, list_builtin_libraries,
+};
+
+// Structural pattern detection for safety mechanisms
+pub use pattern_detector::{
+    DetectedPatterns, DmrPattern, PatternDetector, TmrPattern, VoterPattern, VoterType,
+    WatchdogPattern,
 };
 
 use anyhow::Result;

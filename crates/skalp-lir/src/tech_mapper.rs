@@ -15,9 +15,51 @@
 //! 3. Creates GateNetlist with FIT rates from the library
 
 use crate::gate_netlist::{Cell, CellFailureMode, CellId, GateNet, GateNetId, GateNetlist};
-use crate::tech_library::{CellFunction, DecompConnectivity, TechLibrary};
+use crate::tech_library::{
+    CellFunction, DecompConnectivity, LibraryCell, LibraryFailureMode, TechLibrary,
+};
 use crate::word_lir::{WordLir, WordNode, WordOp, WordSignalId};
 use std::collections::HashMap;
+
+/// Information extracted from a library cell for tech mapping
+struct LibraryCellInfo {
+    name: String,
+    fit: f64,
+    failure_modes: Vec<CellFailureMode>,
+}
+
+impl LibraryCellInfo {
+    /// Create from a library cell reference
+    fn from_library_cell(cell: &LibraryCell) -> Self {
+        Self {
+            name: cell.name.clone(),
+            fit: cell.fit,
+            failure_modes: cell
+                .failure_modes
+                .iter()
+                .map(convert_failure_mode)
+                .collect(),
+        }
+    }
+
+    /// Create a default fallback when no library cell is found
+    fn fallback(name: String, fit: f64) -> Self {
+        Self {
+            name,
+            fit,
+            failure_modes: Vec::new(),
+        }
+    }
+}
+
+/// Convert a library failure mode to a cell failure mode
+fn convert_failure_mode(fm: &LibraryFailureMode) -> CellFailureMode {
+    CellFailureMode {
+        name: fm.name.clone(),
+        fit: fm.fit,
+        fault_type: fm.fault_type,
+    }
+}
 
 /// Result of technology mapping
 #[derive(Debug)]
@@ -75,6 +117,14 @@ impl<'a> TechMapper<'a> {
             next_cell_id: 0,
             next_net_id: 0,
         }
+    }
+
+    /// Get library cell info for a function, with fallback
+    fn get_cell_info(&self, function: &CellFunction, default_fit: f64) -> LibraryCellInfo {
+        self.library
+            .find_best_cell(function)
+            .map(LibraryCellInfo::from_library_cell)
+            .unwrap_or_else(|| LibraryCellInfo::fallback(format!("{:?}", function), default_fit))
     }
 
     /// Map a WordLir to a GateNetlist
@@ -366,10 +416,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let cell = self.library.find_best_cell(&function);
-        let (cell_name, fit) = cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| (format!("{:?}", function), 0.1));
+        let cell_info = self.get_cell_info(&function, 0.1);
 
         for bit in 0..width as usize {
             let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
@@ -378,14 +425,15 @@ impl<'a> TechMapper<'a> {
 
             let mut gate_cell = Cell::new_comb(
                 CellId(0),
-                cell_name.clone(),
+                cell_info.name.clone(),
                 self.library.name.clone(),
-                fit,
+                cell_info.fit,
                 format!("{}.bit{}", path, bit),
                 vec![a, b],
                 vec![y],
             );
             gate_cell.source_op = Some(format!("{:?}", function));
+            gate_cell.failure_modes = cell_info.failure_modes.clone();
             self.add_cell(gate_cell);
         }
 
@@ -406,10 +454,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let cell = self.library.find_best_cell(&function);
-        let (cell_name, fit) = cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| (format!("{:?}", function), 0.05));
+        let cell_info = self.get_cell_info(&function, 0.05);
 
         for bit in 0..width as usize {
             let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
@@ -417,14 +462,15 @@ impl<'a> TechMapper<'a> {
 
             let mut gate_cell = Cell::new_comb(
                 CellId(0),
-                cell_name.clone(),
+                cell_info.name.clone(),
                 self.library.name.clone(),
-                fit,
+                cell_info.fit,
                 format!("{}.bit{}", path, bit),
                 vec![a],
                 vec![y],
             );
             gate_cell.source_op = Some(format!("{:?}", function));
+            gate_cell.failure_modes = cell_info.failure_modes.clone();
             self.add_cell(gate_cell);
         }
 
@@ -448,35 +494,30 @@ impl<'a> TechMapper<'a> {
 
         // Try to find a multi-bit adder first
         if let Some(adder) = self.library.find_best_cell(&CellFunction::Adder(width)) {
+            let adder_info = LibraryCellInfo::from_library_cell(adder);
             // Use the compound adder cell
             let all_inputs: Vec<GateNetId> =
                 inputs[0].iter().chain(inputs[1].iter()).copied().collect();
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                adder.name.clone(),
+                adder_info.name,
                 self.library.name.clone(),
-                adder.fit,
+                adder_info.fit,
                 path.to_string(),
                 all_inputs,
                 outputs.to_vec(),
             );
             cell.source_op = Some("Adder".to_string());
+            cell.failure_modes = adder_info.failure_modes;
             self.add_cell(cell);
             self.stats.direct_mappings += 1;
             return;
         }
 
         // Otherwise, decompose to half adder + full adders
-        let ha_cell = self.library.find_best_cell(&CellFunction::HalfAdder);
-        let fa_cell = self.library.find_best_cell(&CellFunction::FullAdder);
-
-        let (ha_name, ha_fit) = ha_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| ("HalfAdder".to_string(), 0.2));
-        let (fa_name, fa_fit) = fa_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| ("FullAdder".to_string(), 0.3));
+        let ha_info = self.get_cell_info(&CellFunction::HalfAdder, 0.2);
+        let fa_info = self.get_cell_info(&CellFunction::FullAdder, 0.3);
 
         let mut carry_net: Option<GateNetId> = None;
 
@@ -495,27 +536,29 @@ impl<'a> TechMapper<'a> {
                 // Full adder
                 let mut cell = Cell::new_comb(
                     CellId(0),
-                    fa_name.clone(),
+                    fa_info.name.clone(),
                     self.library.name.clone(),
-                    fa_fit,
+                    fa_info.fit,
                     format!("{}.fa{}", path, bit),
                     vec![a, b, cin],
                     vec![sum, cout],
                 );
                 cell.source_op = Some("FullAdder".to_string());
+                cell.failure_modes = fa_info.failure_modes.clone();
                 self.add_cell(cell);
             } else {
                 // Half adder for first bit
                 let mut cell = Cell::new_comb(
                     CellId(0),
-                    ha_name.clone(),
+                    ha_info.name.clone(),
                     self.library.name.clone(),
-                    ha_fit,
+                    ha_info.fit,
                     format!("{}.ha{}", path, bit),
                     vec![a, b],
                     vec![sum, cout],
                 );
                 cell.source_op = Some("HalfAdder".to_string());
+                cell.failure_modes = ha_info.failure_modes.clone();
                 self.add_cell(cell);
             }
 
@@ -540,15 +583,8 @@ impl<'a> TechMapper<'a> {
         }
 
         // Invert b, then add with carry_in=1
-        let inv_cell = self.library.find_best_cell(&CellFunction::Inv);
-        let (inv_name, inv_fit) = inv_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| ("INV".to_string(), 0.05));
-
-        let fa_cell = self.library.find_best_cell(&CellFunction::FullAdder);
-        let (fa_name, fa_fit) = fa_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| ("FullAdder".to_string(), 0.3));
+        let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
+        let fa_info = self.get_cell_info(&CellFunction::FullAdder, 0.3);
 
         // Create inverted b nets
         let mut inv_b: Vec<GateNetId> = Vec::new();
@@ -561,14 +597,15 @@ impl<'a> TechMapper<'a> {
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                inv_name.clone(),
+                inv_info.name.clone(),
                 self.library.name.clone(),
-                inv_fit,
+                inv_info.fit,
                 format!("{}.inv_b{}", path, bit),
                 vec![b],
                 vec![not_b],
             );
             cell.source_op = Some("Inverter".to_string());
+            cell.failure_modes = inv_info.failure_modes.clone();
             self.add_cell(cell);
             inv_b.push(not_b);
         }
@@ -593,14 +630,15 @@ impl<'a> TechMapper<'a> {
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                fa_name.clone(),
+                fa_info.name.clone(),
                 self.library.name.clone(),
-                fa_fit,
+                fa_info.fit,
                 format!("{}.sub_fa{}", path, bit),
                 vec![a, not_b, carry_net],
                 vec![diff, cout],
             );
             cell.source_op = Some("FullAdder".to_string());
+            cell.failure_modes = fa_info.failure_modes.clone();
             self.add_cell(cell);
 
             carry_net = cout;
@@ -625,10 +663,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let mux_cell = self.library.find_best_cell(&CellFunction::Mux2);
-        let (mux_name, mux_fit) = mux_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| ("MUX2".to_string(), 0.15));
+        let mux_info = self.get_cell_info(&CellFunction::Mux2, 0.15);
 
         let sel = inputs[0].first().copied().unwrap_or(GateNetId(0));
 
@@ -639,14 +674,15 @@ impl<'a> TechMapper<'a> {
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                mux_name.clone(),
+                mux_info.name.clone(),
                 self.library.name.clone(),
-                mux_fit,
+                mux_info.fit,
                 format!("{}.bit{}", path, bit),
                 vec![sel, d0, d1],
                 vec![y],
             );
             cell.source_op = Some("Mux2".to_string());
+            cell.failure_modes = mux_info.failure_modes.clone();
             self.add_cell(cell);
         }
 
@@ -668,15 +704,8 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let xnor_cell = self.library.find_best_cell(&CellFunction::Xnor2);
-        let (xnor_name, xnor_fit) = xnor_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| ("XNOR2".to_string(), 0.1));
-
-        let and_cell = self.library.find_best_cell(&CellFunction::And2);
-        let (and_name, and_fit) = and_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| ("AND2".to_string(), 0.1));
+        let xnor_info = self.get_cell_info(&CellFunction::Xnor2, 0.1);
+        let and_info = self.get_cell_info(&CellFunction::And2, 0.1);
 
         // XNOR each bit pair
         let mut xnor_outs: Vec<GateNetId> = Vec::new();
@@ -691,59 +720,56 @@ impl<'a> TechMapper<'a> {
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                xnor_name.clone(),
+                xnor_info.name.clone(),
                 self.library.name.clone(),
-                xnor_fit,
+                xnor_info.fit,
                 format!("{}.xnor{}", path, bit),
                 vec![a, b],
                 vec![xnor_out],
             );
             cell.source_op = Some("XNOR2".to_string());
+            cell.failure_modes = xnor_info.failure_modes.clone();
             self.add_cell(cell);
             xnor_outs.push(xnor_out);
         }
 
         // AND tree to combine
-        let eq_out = self.reduce_tree(&xnor_outs, &and_name, and_fit, path, "eq_and");
+        let eq_out = self.reduce_tree(&xnor_outs, &and_info, path, "eq_and");
 
         // Optionally invert for NotEqual
         if invert {
-            let inv_cell = self.library.find_best_cell(&CellFunction::Inv);
-            let (inv_name, inv_fit) = inv_cell
-                .map(|c| (c.name.clone(), c.fit))
-                .unwrap_or_else(|| ("INV".to_string(), 0.05));
+            let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
 
             let y = outputs.first().copied().unwrap_or(GateNetId(0));
             let mut cell = Cell::new_comb(
                 CellId(0),
-                inv_name,
+                inv_info.name,
                 self.library.name.clone(),
-                inv_fit,
+                inv_info.fit,
                 format!("{}.ne_inv", path),
                 vec![eq_out],
                 vec![y],
             );
             cell.source_op = Some("Inverter".to_string());
+            cell.failure_modes = inv_info.failure_modes;
             self.add_cell(cell);
         } else {
             // Connect eq_out to output (add buffer if needed)
             let y = outputs.first().copied().unwrap_or(GateNetId(0));
             if eq_out != y {
-                let buf_cell = self.library.find_best_cell(&CellFunction::Buf);
-                let (buf_name, buf_fit) = buf_cell
-                    .map(|c| (c.name.clone(), c.fit))
-                    .unwrap_or_else(|| ("BUF".to_string(), 0.05));
+                let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
 
                 let mut cell = Cell::new_comb(
                     CellId(0),
-                    buf_name,
+                    buf_info.name,
                     self.library.name.clone(),
-                    buf_fit,
+                    buf_info.fit,
                     format!("{}.eq_buf", path),
                     vec![eq_out],
                     vec![y],
                 );
                 cell.source_op = Some("Buffer".to_string());
+                cell.failure_modes = buf_info.failure_modes;
                 self.add_cell(cell);
             }
         }
@@ -811,10 +837,7 @@ impl<'a> TechMapper<'a> {
             CellFunction::Dff
         };
 
-        let dff_cell = self.library.find_best_cell(&dff_func);
-        let (dff_name, dff_fit) = dff_cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| (format!("{:?}", dff_func), 0.2));
+        let dff_info = self.get_cell_info(&dff_func, 0.2);
 
         let clk = clock.unwrap_or(GateNetId(0));
 
@@ -829,9 +852,9 @@ impl<'a> TechMapper<'a> {
 
             let mut cell = Cell::new_seq(
                 CellId(0),
-                dff_name.clone(),
+                dff_info.name.clone(),
                 self.library.name.clone(),
-                dff_fit,
+                dff_info.fit,
                 format!("{}.bit{}", path, bit),
                 dff_inputs,
                 vec![q],
@@ -839,6 +862,7 @@ impl<'a> TechMapper<'a> {
                 reset,
             );
             cell.source_op = Some("Register".to_string());
+            cell.failure_modes = dff_info.failure_modes.clone();
             self.add_cell(cell);
         }
 
@@ -887,35 +911,30 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let cell = self.library.find_best_cell(&function);
-        let (cell_name, fit) = cell
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or_else(|| (format!("{:?}", function), 0.1));
+        let cell_info = self.get_cell_info(&function, 0.1);
 
         // Get all input bits
         let input_bits: Vec<GateNetId> = inputs[0].iter().take(width as usize).copied().collect();
 
         // Build reduction tree
-        let result = self.reduce_tree(&input_bits, &cell_name, fit, path, "reduce");
+        let result = self.reduce_tree(&input_bits, &cell_info, path, "reduce");
 
         // Connect to output
         let y = outputs.first().copied().unwrap_or(GateNetId(0));
         if result != y {
-            let buf_cell = self.library.find_best_cell(&CellFunction::Buf);
-            let (buf_name, buf_fit) = buf_cell
-                .map(|c| (c.name.clone(), c.fit))
-                .unwrap_or_else(|| ("BUF".to_string(), 0.05));
+            let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                buf_name,
+                buf_info.name,
                 self.library.name.clone(),
-                buf_fit,
+                buf_info.fit,
                 format!("{}.reduce_buf", path),
                 vec![result],
                 vec![y],
             );
             cell.source_op = Some("Buffer".to_string());
+            cell.failure_modes = buf_info.failure_modes;
             self.add_cell(cell);
         }
 
@@ -926,8 +945,7 @@ impl<'a> TechMapper<'a> {
     fn reduce_tree(
         &mut self,
         inputs: &[GateNetId],
-        cell_name: &str,
-        fit: f64,
+        cell_info: &LibraryCellInfo,
         path: &str,
         prefix: &str,
     ) -> GateNetId {
@@ -955,14 +973,15 @@ impl<'a> TechMapper<'a> {
 
                     let mut cell = Cell::new_comb(
                         CellId(0),
-                        cell_name.to_string(),
+                        cell_info.name.clone(),
                         self.library.name.clone(),
-                        fit,
+                        cell_info.fit,
                         format!("{}.{}_l{}_{}", path, prefix, level, pair_idx),
                         vec![chunk[0], chunk[1]],
                         vec![out],
                     );
-                    cell.source_op = Some(cell_name.to_string());
+                    cell.source_op = Some(cell_info.name.clone());
+                    cell.failure_modes = cell_info.failure_modes.clone();
                     self.add_cell(cell);
                     next_level.push(out);
                 } else {
@@ -1149,5 +1168,49 @@ mod tests {
 
         // 4 inverters at 0.05 FIT each = 0.2 total
         assert!((result.netlist.total_fit() - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_failure_modes_copied() {
+        use crate::gate_netlist::FaultType;
+        use crate::tech_library::LibraryFailureMode;
+
+        // Create library with cells that have failure modes
+        let mut lib = TechLibrary::new("test_lib_with_fm");
+        let mut and_cell = LibraryCell::new_comb("AND2_FM", CellFunction::And2, 0.1);
+        and_cell.failure_modes = vec![
+            LibraryFailureMode::new("stuck_at_0", 0.03, FaultType::StuckAt0),
+            LibraryFailureMode::new("stuck_at_1", 0.03, FaultType::StuckAt1),
+            LibraryFailureMode::new("transient", 0.015, FaultType::Transient),
+        ];
+        lib.add_cell(and_cell);
+
+        // Map an AND gate
+        let mut word_lir = WordLir::new("test".to_string());
+        let a = word_lir.add_input("a".to_string(), 1);
+        let b = word_lir.add_input("b".to_string(), 1);
+        let y = word_lir.add_output("y".to_string(), 1);
+        word_lir.add_node(
+            WordOp::And { width: 1 },
+            vec![a, b],
+            y,
+            "test.and".to_string(),
+        );
+
+        let result = map_word_lir_to_gates(&word_lir, &lib);
+
+        // Verify cell was created
+        assert_eq!(result.netlist.cells.len(), 1);
+        let cell = &result.netlist.cells[0];
+
+        // Verify failure modes were copied
+        assert_eq!(cell.failure_modes.len(), 3);
+        assert_eq!(cell.failure_modes[0].name, "stuck_at_0");
+        assert_eq!(cell.failure_modes[0].fault_type, FaultType::StuckAt0);
+        assert!((cell.failure_modes[0].fit - 0.03).abs() < 0.001);
+
+        assert_eq!(cell.failure_modes[1].name, "stuck_at_1");
+        assert_eq!(cell.failure_modes[2].name, "transient");
+        assert_eq!(cell.failure_modes[2].fault_type, FaultType::Transient);
     }
 }

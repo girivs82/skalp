@@ -9,11 +9,14 @@ use thiserror::Error;
 
 pub mod analysis;
 pub mod asil;
+pub mod common_cause;
+pub mod coverage_verification;
 pub mod design_resolver;
 pub mod do254;
 pub mod fault_simulation;
 pub mod fmea;
 pub mod fmeda_library;
+pub mod gate_netlist_integration;
 pub mod hierarchy;
 pub mod iec61508;
 pub mod mechanisms;
@@ -23,6 +26,10 @@ pub mod power_domains;
 pub mod requirements;
 pub mod traits;
 pub mod workproducts;
+
+// Re-export fault simulation integration functions when sim-integration feature is enabled
+#[cfg(feature = "sim-integration")]
+pub use fault_simulation::{build_primitive_path_map, fault_campaign_to_safety_results};
 
 /// Safety-related errors
 #[derive(Error, Debug)]

@@ -906,6 +906,10 @@ impl HirBuilderContext {
         // Build implementation items
         for child in node.children() {
             match child.kind() {
+                SyntaxKind::Attribute => {
+                    // Process attribute to set pending configs (e.g., #[implements(...)])
+                    self.process_attribute(&child);
+                }
                 SyntaxKind::SignalDecl => {
                     if let Some(signal) = self.build_signal(&child) {
                         signals.push(signal);
@@ -1013,12 +1017,20 @@ impl HirBuilderContext {
         }
 
         // Build instances BEFORE exiting scope so signals are still accessible
+        // Process Attributes again in this loop for #[implements(...)] on instances
         let mut instances = Vec::new();
         for child in node.children() {
-            if child.kind() == SyntaxKind::InstanceDecl {
-                if let Some(instance) = self.build_instance(&child) {
-                    instances.push(instance);
+            match child.kind() {
+                SyntaxKind::Attribute => {
+                    // Process attribute to set pending configs (e.g., #[implements(...)])
+                    self.process_attribute(&child);
                 }
+                SyntaxKind::InstanceDecl => {
+                    if let Some(instance) = self.build_instance(&child) {
+                        instances.push(instance);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -1431,6 +1443,7 @@ impl HirBuilderContext {
 
     /// Build event block
     fn build_event_block(&mut self, node: &SyntaxNode) -> Option<HirEventBlock> {
+        eprintln!("[HIR_EVENT] Building event block");
         let id = self.next_block_id();
 
         // Build triggers
@@ -1438,10 +1451,12 @@ impl HirBuilderContext {
         if let Some(trigger_list) = node.first_child_of_kind(SyntaxKind::EventTriggerList) {
             for trigger_node in trigger_list.children_of_kind(SyntaxKind::EventTrigger) {
                 if let Some(trigger) = self.build_event_trigger(&trigger_node) {
+                    eprintln!("[HIR_EVENT]   Found trigger: {:?}", trigger.edge);
                     triggers.push(trigger);
                 }
             }
         }
+        eprintln!("[HIR_EVENT] Built {} triggers", triggers.len());
 
         // Build statements - push EventBlock context for unified assignment operator
         // Assignments inside on() blocks should be non-blocking (generates <=)
@@ -1451,6 +1466,10 @@ impl HirBuilderContext {
             statements = self.build_statements(&block);
         }
         self.pop_context();
+        eprintln!(
+            "[HIR_EVENT] Built {} statements in event block",
+            statements.len()
+        );
 
         Some(HirEventBlock {
             id,
@@ -6992,6 +7011,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract safety config (e.g., #[implements(GoalName::MechanismName)])
+            if let Some(config) = self.extract_safety_config_from_intent_value(&intent_value) {
+                self.pending_safety_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -8069,6 +8094,95 @@ impl HirBuilderContext {
             from_domain,
             to_domain,
             shifter_type,
+        })
+    }
+
+    /// Extract SafetyConfig from an IntentValue node
+    ///
+    /// Parses: `#[implements(GoalName::MechanismName)]`
+    ///
+    /// The annotation declares which safety mechanism covers this element.
+    /// DC is always measured from fault injection simulation, never specified in annotations.
+    ///
+    /// # Examples
+    ///
+    /// ```skalp
+    /// #[implements(BrakingSafety::SensorVoting)]
+    /// signal voted_output: bit[12] = voter(sensor_a, sensor_b, sensor_c);
+    ///
+    /// #[implements(SteeringSafety::DataIntegrity)]
+    /// instance controller: MotorController { ... };
+    /// ```
+    fn extract_safety_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<SafetyConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Look for "implements" keyword (ImplementsKw token)
+        let has_implements = tokens.iter().any(|t| {
+            t.kind() == SyntaxKind::ImplementsKw
+                || (t.kind() == SyntaxKind::Ident && t.text() == "implements")
+        });
+
+        if !has_implements {
+            return None;
+        }
+
+        // Extract identifiers after "implements" to find GoalName::MechanismName
+        // We look for a pattern like: implements ( GoalName :: MechanismName )
+        // Note: implements is ImplementsKw, not Ident, so we filter for Ident tokens
+        let identifiers: Vec<String> = tokens
+            .iter()
+            .filter(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())
+            .collect();
+
+        // Check for ColonColon (::) token to separate goal from mechanism
+        let has_double_colon = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::ColonColon || t.text() == "::");
+
+        // Parse the identifiers
+        let (goal, mechanism, implements_path) = if has_double_colon && identifiers.len() >= 2 {
+            // GoalName::MechanismName format
+            let goal = identifiers.first().cloned();
+            let mechanism = identifiers.get(1).cloned();
+            let path = format!(
+                "{}::{}",
+                goal.as_deref().unwrap_or(""),
+                mechanism.as_deref().unwrap_or("")
+            );
+            (goal, mechanism, Some(path))
+        } else if !identifiers.is_empty() {
+            // Just a mechanism name or goal name
+            let name = identifiers.first().cloned();
+            (None, name.clone(), name)
+        } else {
+            return None;
+        };
+
+        Some(SafetyConfig {
+            goal,
+            mechanism,
+            implements_path,
+            asil_override: None, // ASIL comes from safety goal, not annotation
+            dc_override: None,   // DC is ALWAYS measured, never specified
+            lc_override: None,   // LC is ALWAYS measured, never specified
         })
     }
 
@@ -10279,5 +10393,112 @@ mod tests {
         assert_eq!(hir.implementations.len(), 1);
         assert_eq!(hir.implementations[0].signals.len(), 1);
         assert_eq!(hir.implementations[0].event_blocks.len(), 1);
+    }
+
+    #[test]
+    fn test_implements_attribute_on_signal() {
+        let source = r#"
+            entity VotedOutput {
+                in clk: clock
+                out voted: bit[12]
+            }
+
+            impl VotedOutput {
+                signal a: bit[12] = 0
+                signal b: bit[12] = 0
+                signal c: bit[12] = 0
+
+                #[implements(BrakingSafety::Voting)]
+                signal voted_result: bit[12] = (a & b) | (b & c) | (a & c)
+
+                voted = voted_result
+            }
+        "#;
+
+        let tree = parse(source);
+        let result = build_hir(&tree);
+
+        assert!(result.is_ok());
+        let hir = result.unwrap();
+        assert_eq!(hir.implementations.len(), 1);
+
+        // Find the voted_result signal
+        let impl_block = &hir.implementations[0];
+        let voted_signal = impl_block
+            .signals
+            .iter()
+            .find(|s| s.name == "voted_result")
+            .expect("voted_result signal not found");
+
+        // Verify it has safety config
+        assert!(
+            voted_signal.safety_config.is_some(),
+            "Safety config should be present on signal with #[implements(...)] attribute"
+        );
+
+        let safety_config = voted_signal.safety_config.as_ref().unwrap();
+        assert_eq!(safety_config.goal, Some("BrakingSafety".to_string()));
+        assert_eq!(safety_config.mechanism, Some("Voting".to_string()));
+        // DC should always be None (measured from simulation, never specified)
+        assert!(safety_config.dc_override.is_none());
+    }
+
+    #[test]
+    fn test_implements_attribute_on_instance() {
+        let source = r#"
+            entity SafetyMechanism {
+                in clk: clock
+                in data: bit[8]
+                out protected: bit[8]
+            }
+
+            entity TopLevel {
+                in clk: clock
+                in raw_data: bit[8]
+                out safe_data: bit[8]
+            }
+
+            impl TopLevel {
+                #[implements(SystemSafety::CrcProtection)]
+                let protector = SafetyMechanism {
+                    clk: clk,
+                    data: raw_data,
+                    protected: safe_data
+                }
+            }
+        "#;
+
+        let tree = parse(source);
+        let result = build_hir(&tree);
+
+        assert!(result.is_ok());
+        let hir = result.unwrap();
+
+        // Find TopLevel implementation
+        let top_impl = hir
+            .implementations
+            .iter()
+            .find(|i| {
+                hir.entities
+                    .iter()
+                    .find(|e| e.id == i.entity)
+                    .map(|e| e.name == "TopLevel")
+                    .unwrap_or(false)
+            })
+            .expect("TopLevel implementation not found");
+
+        assert_eq!(top_impl.instances.len(), 1);
+        let instance = &top_impl.instances[0];
+        assert_eq!(instance.name, "protector");
+
+        // Verify it has safety config
+        assert!(
+            instance.safety_config.is_some(),
+            "Safety config should be present on instance with #[implements(...)] attribute"
+        );
+
+        let safety_config = instance.safety_config.as_ref().unwrap();
+        assert_eq!(safety_config.goal, Some("SystemSafety".to_string()));
+        assert_eq!(safety_config.mechanism, Some("CrcProtection".to_string()));
     }
 }

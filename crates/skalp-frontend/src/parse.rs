@@ -2825,6 +2825,16 @@ impl<'a> ParseState<'a> {
                         self.bump(); // consume identifier/keyword
                         self.skip_trivia();
 
+                        // Handle path continuation with :: (e.g., BrakingSafety::Voting)
+                        while self.at(SyntaxKind::ColonColon) {
+                            self.bump(); // consume '::'
+                            self.skip_trivia();
+                            if self.at(SyntaxKind::Ident) || self.at_keyword_as_ident() {
+                                self.bump(); // consume next identifier
+                                self.skip_trivia();
+                            }
+                        }
+
                         // Check for '=' indicating key-value pair
                         // Note: '=' is tokenized as Assign, not Eq
                         if self.at(SyntaxKind::Assign) {
@@ -5219,6 +5229,8 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::MediumKw)
                 // Power intent keywords that can be used as attribute names
                 | Some(SyntaxKind::IsolationKw)
+                // Safety annotation keyword that can be used as attribute name
+                | Some(SyntaxKind::ImplementsKw)
         )
     }
 

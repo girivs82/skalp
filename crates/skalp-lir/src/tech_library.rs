@@ -76,16 +76,8 @@ impl LibraryCell {
     /// Create a cell with default stuck-at failure modes
     pub fn with_default_failure_modes(mut self) -> Self {
         self.failure_modes = vec![
-            LibraryFailureMode {
-                name: "stuck_at_0".to_string(),
-                fit: self.fit * 0.5,
-                fault_type: FaultType::StuckAt0,
-            },
-            LibraryFailureMode {
-                name: "stuck_at_1".to_string(),
-                fit: self.fit * 0.5,
-                fault_type: FaultType::StuckAt1,
-            },
+            LibraryFailureMode::new("stuck_at_0", self.fit * 0.5, FaultType::StuckAt0),
+            LibraryFailureMode::new("stuck_at_1", self.fit * 0.5, FaultType::StuckAt1),
         ];
         self
     }
@@ -237,14 +229,78 @@ impl CellFunction {
 }
 
 /// Failure mode in a library cell
+///
+/// This structure supports detailed failure mode characterization from foundry data.
+/// The optional fields can be populated with technology-specific information when available.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryFailureMode {
-    /// Failure mode name
+    /// Failure mode name (e.g., "stuck_at_0", "transient", "timing_violation")
     pub name: String,
-    /// FIT contribution
+    /// FIT contribution for this failure mode
     pub fit: f64,
     /// Fault type for simulation
     pub fault_type: FaultType,
+
+    // === Extended fields for detailed characterization ===
+    /// Physical failure mechanism (e.g., "oxide_breakdown", "electromigration", "radiation_seu")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanism: Option<String>,
+
+    /// Detection method for this failure mode (e.g., "logic_bist", "parity_check", "comparator")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection_method: Option<String>,
+
+    /// Recovery time in nanoseconds (for transient faults)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_time_ns: Option<f64>,
+
+    /// Soft error cross-section in cm²/bit (for radiation-induced upsets)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_error_cross_section: Option<f64>,
+
+    /// Affected nets/pins for this failure mode
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_pins: Vec<String>,
+}
+
+impl LibraryFailureMode {
+    /// Create a simple failure mode with just name, FIT, and fault type
+    pub fn new(name: &str, fit: f64, fault_type: FaultType) -> Self {
+        Self {
+            name: name.to_string(),
+            fit,
+            fault_type,
+            mechanism: None,
+            detection_method: None,
+            recovery_time_ns: None,
+            soft_error_cross_section: None,
+            affected_pins: Vec::new(),
+        }
+    }
+
+    /// Builder: set physical mechanism
+    pub fn with_mechanism(mut self, mechanism: &str) -> Self {
+        self.mechanism = Some(mechanism.to_string());
+        self
+    }
+
+    /// Builder: set detection method
+    pub fn with_detection_method(mut self, method: &str) -> Self {
+        self.detection_method = Some(method.to_string());
+        self
+    }
+
+    /// Builder: set recovery time for transient faults
+    pub fn with_recovery_time_ns(mut self, ns: f64) -> Self {
+        self.recovery_time_ns = Some(ns);
+        self
+    }
+
+    /// Builder: set soft error cross-section
+    pub fn with_soft_error_cross_section(mut self, cross_section: f64) -> Self {
+        self.soft_error_cross_section = Some(cross_section);
+        self
+    }
 }
 
 // ============================================================================
