@@ -30,6 +30,7 @@ pub mod pipeline;
 pub mod power_domains;
 pub mod requirements;
 pub mod safety_case;
+pub mod safety_driven_fmea;
 pub mod sm_failure_analysis;
 pub mod tool_qualification;
 pub mod traits;
@@ -38,7 +39,17 @@ pub mod workproducts;
 
 // Re-export fault simulation integration functions when sim-integration feature is enabled
 #[cfg(feature = "sim-integration")]
-pub use fault_simulation::{build_primitive_path_map, fault_campaign_to_safety_results};
+pub use fault_simulation::{
+    build_primitive_path_map, fault_campaign_to_safety_results, fault_campaign_with_effects,
+};
+
+// Re-export FI-driven FMEA types
+pub use safety_driven_fmea::{
+    EffectMonitor, FaultEffectResult, FiDrivenConfig, FiDrivenFmeaResult, SafetyDrivenFmeaGenerator,
+};
+
+#[cfg(feature = "sim-integration")]
+pub use safety_driven_fmea::convert_campaign_to_effect_results;
 
 /// Safety-related errors
 #[derive(Error, Debug)]

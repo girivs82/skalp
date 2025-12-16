@@ -1546,6 +1546,190 @@ fn convert_sim_fault_type(sim_fault: skalp_sim::sir::FaultType) -> FaultType {
     }
 }
 
+/// Run effect-aware fault campaign - the "double advantage" implementation
+///
+/// This is the key innovation: the same simulation cycle provides BOTH:
+/// 1. Failure effect identification - which faults cause which safety goal violations
+/// 2. Measured diagnostic coverage - which faults are detected by which mechanisms
+///
+/// # Arguments
+/// * `campaign` - Raw fault campaign results from skalp-sim
+/// * `primitive_to_path` - Mapping from primitive IDs to design paths
+/// * `spec` - Safety goal specification with effect conditions
+/// * `annotations` - Safety annotations for mechanism mapping
+///
+/// # Returns
+/// `SimulationCampaignResults` with properly classified effects and measured DC
+#[cfg(feature = "sim-integration")]
+pub fn fault_campaign_with_effects(
+    campaign: &skalp_sim::FaultCampaignResults,
+    primitive_to_path: &std::collections::HashMap<skalp_lir::lir::PrimitiveId, String>,
+    spec: &SafetyGoalSimSpec,
+    annotations: &[crate::design_resolver::SafetyAnnotation],
+) -> SimulationCampaignResults {
+    use crate::safety_driven_fmea::EffectMonitor;
+
+    let mut results = SimulationCampaignResults::new(&spec.goal_name, "design");
+    results.total_primitives = primitive_to_path.len() as u64;
+    results.faults_simulated = campaign.total_faults as u64;
+
+    // Initialize effect analyses from the safety goal specification
+    for effect in &spec.failure_effects {
+        results.effect_analyses.insert(
+            effect.name.clone(),
+            EffectAnalysis::new(&effect.name, effect.severity, effect.target_dc),
+        );
+    }
+
+    // Add a catch-all effect for output corruption not matching specific effects
+    results.effect_analyses.insert(
+        "_output_corruption".to_string(),
+        EffectAnalysis::new("_output_corruption", Severity::S2, 0.95),
+    );
+
+    // Build mechanism lookup from annotations
+    let mut path_to_mechanism: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for annotation in annotations {
+        if annotation.goal_name == spec.goal_name {
+            path_to_mechanism.insert(
+                annotation.design_ref.to_string(),
+                annotation.mechanism_name.clone(),
+            );
+        }
+    }
+
+    // Create the effect monitor
+    let monitor = EffectMonitor::new(spec);
+
+    // Process each fault result
+    for fault_result in &campaign.fault_results {
+        let primitive_id = fault_result.fault.target_primitive;
+        let cell_path = primitive_to_path
+            .get(&primitive_id)
+            .cloned()
+            .unwrap_or_else(|| format!("unknown_primitive_{}", primitive_id.0));
+
+        // Convert output differences to signal values for effect evaluation
+        let signal_values = extract_signal_values_from_diffs(&fault_result.output_diffs);
+
+        // Check which effects were triggered by this fault
+        let triggered_effects = if signal_values.is_empty() {
+            // No output corruption - safe fault
+            vec![]
+        } else {
+            // Evaluate effect conditions
+            let effects = monitor.check_effects(&signal_values);
+            if effects.is_empty() {
+                // Output corruption but no specific effect - record as generic
+                vec!["_output_corruption".to_string()]
+            } else {
+                effects
+            }
+        };
+
+        // Skip safe faults (no effects)
+        if triggered_effects.is_empty() {
+            continue;
+        }
+
+        // Find covering mechanism
+        let mechanism = find_covering_mechanism(&cell_path, &path_to_mechanism);
+
+        // Update effect analyses with the double advantage:
+        // - Effect identification: which effect was triggered
+        // - Detection tracking: was it detected, by which mechanism
+        for effect_name in &triggered_effects {
+            if let Some(analysis) = results.effect_analyses.get_mut(effect_name) {
+                analysis.total_faults_causing += 1;
+
+                if fault_result.detected {
+                    analysis.faults_detected += 1;
+                    if let Some(mech_name) = &mechanism {
+                        *analysis
+                            .detection_by_mechanism
+                            .entry(mech_name.clone())
+                            .or_insert(0) += 1;
+                    }
+                } else {
+                    // Record undetected fault site
+                    let fault_type = convert_sim_fault_type(fault_result.fault.fault_type);
+                    analysis.undetected_sites.push(FaultSite::new(
+                        crate::hierarchy::DesignRef::parse(&cell_path),
+                        fault_type,
+                    ));
+                }
+
+                // Track contributing cells
+                *analysis.contributors.entry(cell_path.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Update measured DC for all effects
+    for analysis in results.effect_analyses.values_mut() {
+        analysis.update_dc();
+    }
+
+    // Calculate overall metrics
+    let mut total_dangerous = 0u64;
+    let mut total_detected = 0u64;
+    let mut total_latent = 0u64;
+    for analysis in results.effect_analyses.values() {
+        total_dangerous += analysis.total_faults_causing;
+        total_detected += analysis.faults_detected;
+        total_latent += analysis.undetected_sites.len() as u64;
+    }
+
+    // SPFM = detected / total_dangerous
+    results.spfm = if total_dangerous > 0 {
+        total_detected as f64 / total_dangerous as f64
+    } else {
+        1.0
+    };
+
+    // LFM = detected / (detected + latent)
+    results.lfm = if total_detected + total_latent > 0 {
+        total_detected as f64 / (total_detected + total_latent) as f64
+    } else {
+        1.0
+    };
+
+    // Check if meets ASIL requirements
+    results.meets_asil = results
+        .effect_analyses
+        .values()
+        .filter(|a| !a.effect_name.starts_with('_'))
+        .all(|a| a.meets_target);
+
+    results
+}
+
+/// Extract signal values from output differences for effect condition evaluation
+#[cfg(feature = "sim-integration")]
+fn extract_signal_values_from_diffs(
+    output_diffs: &std::collections::HashMap<String, (Vec<bool>, Vec<bool>)>,
+) -> std::collections::HashMap<String, u64> {
+    let mut values = std::collections::HashMap::new();
+
+    for (signal_name, (_normal, faulty)) in output_diffs {
+        // Convert boolean vector to u64 value (faulty value)
+        let value = faulty.iter().enumerate().fold(
+            0u64,
+            |acc, (i, &bit)| {
+                if bit {
+                    acc | (1 << i)
+                } else {
+                    acc
+                }
+            },
+        );
+        values.insert(signal_name.clone(), value);
+    }
+
+    values
+}
+
 /// Helper function to build primitive-to-path mapping from GateNetlist and converter.
 ///
 /// This should be called after converting GateNetlist to SIR to build the mapping

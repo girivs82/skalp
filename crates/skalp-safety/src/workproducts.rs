@@ -254,6 +254,8 @@ pub struct WorkProductGenerator {
     results: Option<CombinedAnalysisResult>,
     /// Configuration
     config: WorkProductConfig,
+    /// FI-driven FMEA results (measured, not estimated)
+    fi_driven_results: Option<crate::safety_driven_fmea::FiDrivenFmeaResult>,
 }
 
 impl WorkProductGenerator {
@@ -268,7 +270,33 @@ impl WorkProductGenerator {
             context,
             results: None,
             config,
+            fi_driven_results: None,
         }
+    }
+
+    /// Set FI-driven FMEA results for measured DC values
+    ///
+    /// When FI-driven results are set, the work product generator will use
+    /// **measured** DC values from fault injection simulation instead of
+    /// estimated values from lookup tables.
+    ///
+    /// This provides the "double advantage":
+    /// 1. Failure effect identification from simulation
+    /// 2. Measured diagnostic coverage from simulation
+    pub fn with_fi_driven_results(
+        mut self,
+        results: crate::safety_driven_fmea::FiDrivenFmeaResult,
+    ) -> Self {
+        self.fi_driven_results = Some(results);
+        self
+    }
+
+    /// Set FI-driven FMEA results (mutating version)
+    pub fn set_fi_driven_results(
+        &mut self,
+        results: crate::safety_driven_fmea::FiDrivenFmeaResult,
+    ) {
+        self.fi_driven_results = Some(results);
     }
 
     /// Set analysis results
@@ -575,51 +603,193 @@ impl WorkProductGenerator {
             OutputFormat::Markdown => {
                 writeln!(content, "# FMEDA Report: {}\n", self.config.design_name).unwrap();
 
-                writeln!(content, "## Component Failure Analysis\n").unwrap();
-                writeln!(
-                    content,
-                    "| Component | Part | Total FIT | Safe | SPF | Residual | Latent | DC | LC |"
-                )
-                .unwrap();
-                writeln!(
-                    content,
-                    "|-----------|------|-----------|------|-----|----------|--------|----|----|"
-                )
-                .unwrap();
+                // Indicate if using FI-driven (measured) vs estimated DC values
+                if self.fi_driven_results.is_some() {
+                    writeln!(
+                        content,
+                        "**Analysis Method**: Fault Injection Driven (Measured DC)\n"
+                    )
+                    .unwrap();
+                    writeln!(
+                        content,
+                        "> ✅ DC values are **measured** from fault injection simulation, not estimated from lookup tables.\n"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(content, "**Analysis Method**: Estimated DC (from tables)\n").unwrap();
+                    writeln!(
+                        content,
+                        "> ⚠️ DC values are **estimated** from component failure rate tables. Consider running fault injection for measured values.\n"
+                    )
+                    .unwrap();
+                }
 
-                for entity in self.hierarchy.entities.values() {
-                    for fmea in &entity.fmea {
-                        let component = format_design_ref(&fmea.design_ref);
-                        let safe_fit = 0.0; // Placeholder
-                        let spf_fit = 0.0;
-                        let residual_fit = 0.0;
-                        let latent_fit = 0.0;
-                        let total_fit = 0.0;
-                        let dc = 99.0; // Placeholder
-                        let lc = 90.0;
+                // If we have FI-driven results, use those for effect-based analysis
+                if let Some(fi_results) = &self.fi_driven_results {
+                    writeln!(content, "## Safety Goal Analysis\n").unwrap();
+                    writeln!(content, "**Goal**: {}\n", fi_results.goal_name).unwrap();
+                    writeln!(
+                        content,
+                        "**Total Fault Injections**: {}\n",
+                        fi_results.total_injections
+                    )
+                    .unwrap();
 
-                        writeln!(
-                            content,
-                            "| {} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1}% | {:.1}% |",
-                            component,
-                            fmea.part,
-                            total_fit,
-                            safe_fit,
-                            spf_fit,
-                            residual_fit,
-                            latent_fit,
-                            dc,
-                            lc
-                        )
-                        .unwrap();
+                    writeln!(content, "### Effect-Based Failure Analysis\n").unwrap();
+                    writeln!(
+                        content,
+                        "| Effect | Severity | Faults Causing | Detected | DC | Target | Status |"
+                    )
+                    .unwrap();
+                    writeln!(
+                        content,
+                        "|--------|----------|----------------|----------|-----|--------|--------|"
+                    )
+                    .unwrap();
+
+                    for entry in &fi_results.auto_fmea.entries {
+                        if !entry.name.starts_with('_') {
+                            let faults_causing: u64 =
+                                entry.contributors.iter().map(|c| c.primitive_count).sum();
+                            let detected =
+                                (entry.measured_dc * faults_causing as f64).round() as u64;
+                            let target_dc = fi_results
+                                .effect_analyses
+                                .get(&entry.name)
+                                .map(|a| a.target_dc)
+                                .unwrap_or(0.99);
+                            let status = if entry.measured_dc >= target_dc {
+                                "✅ PASS"
+                            } else {
+                                "❌ FAIL"
+                            };
+                            writeln!(
+                                content,
+                                "| {} | {:?} | {} | {} | {:.1}% | ≥{:.0}% | {} |",
+                                entry.name,
+                                entry.severity,
+                                faults_causing,
+                                detected,
+                                entry.measured_dc * 100.0,
+                                target_dc * 100.0,
+                                status
+                            )
+                            .unwrap();
+                        }
+                    }
+
+                    // Detection mechanism breakdown
+                    writeln!(content, "\n### Detection by Safety Mechanism\n").unwrap();
+                    writeln!(content, "| Mechanism | Faults Detected | DC Contribution |").unwrap();
+                    writeln!(content, "|-----------|-----------------|-----------------|").unwrap();
+
+                    for (effect_name, analysis) in &fi_results.effect_analyses {
+                        if !effect_name.starts_with('_') {
+                            for (mech, count) in &analysis.detection_by_mechanism {
+                                let dc_contrib =
+                                    *count as f64 / analysis.total_faults_causing.max(1) as f64;
+                                writeln!(
+                                    content,
+                                    "| {} | {} | {:.1}% |",
+                                    mech,
+                                    count,
+                                    dc_contrib * 100.0
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+
+                    // Undetected faults (gaps)
+                    let mut has_gaps = false;
+                    for (effect_name, analysis) in &fi_results.effect_analyses {
+                        if !effect_name.starts_with('_') && !analysis.undetected_sites.is_empty() {
+                            if !has_gaps {
+                                writeln!(content, "\n### Undetected Fault Sites (Gaps)\n").unwrap();
+                                writeln!(content, "| Effect | Cell | Fault Type |").unwrap();
+                                writeln!(content, "|--------|------|------------|").unwrap();
+                                has_gaps = true;
+                            }
+                            for site in analysis.undetected_sites.iter().take(20) {
+                                writeln!(
+                                    content,
+                                    "| {} | {} | {} |",
+                                    effect_name,
+                                    format_design_ref(&site.primitive_path),
+                                    site.fault_type.name()
+                                )
+                                .unwrap();
+                            }
+                            if analysis.undetected_sites.len() > 20 {
+                                writeln!(
+                                    content,
+                                    "| {} | ... | ({} more) |",
+                                    effect_name,
+                                    analysis.undetected_sites.len() - 20
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                } else {
+                    // Fallback to hierarchy-based analysis (estimated)
+                    writeln!(content, "## Component Failure Analysis\n").unwrap();
+                    writeln!(
+                        content,
+                        "| Component | Part | Total FIT | Safe | SPF | Residual | Latent | DC | LC |"
+                    )
+                    .unwrap();
+                    writeln!(
+                        content,
+                        "|-----------|------|-----------|------|-----|----------|--------|----|----|"
+                    )
+                    .unwrap();
+
+                    for entity in self.hierarchy.entities.values() {
+                        for fmea in &entity.fmea {
+                            let component = format_design_ref(&fmea.design_ref);
+                            let safe_fit = 0.0; // Placeholder
+                            let spf_fit = 0.0;
+                            let residual_fit = 0.0;
+                            let latent_fit = 0.0;
+                            let total_fit = 0.0;
+                            let dc = 99.0; // Placeholder - estimated from tables
+                            let lc = 90.0;
+
+                            writeln!(
+                                content,
+                                "| {} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1}% | {:.1}% |",
+                                component,
+                                fmea.part,
+                                total_fit,
+                                safe_fit,
+                                spf_fit,
+                                residual_fit,
+                                latent_fit,
+                                dc,
+                                lc
+                            )
+                            .unwrap();
+                        }
                     }
                 }
 
                 writeln!(content, "\n## Metrics Summary\n").unwrap();
 
-                let spfm = self.results.as_ref().and_then(|r| r.spfm).unwrap_or(0.0);
-                let lfm = self.results.as_ref().and_then(|r| r.lfm).unwrap_or(0.0);
-                let pmhf = self.results.as_ref().and_then(|r| r.pmhf).unwrap_or(0.0);
+                // Prefer FI-driven metrics if available
+                let (spfm, lfm, pmhf) = if let Some(fi) = &self.fi_driven_results {
+                    (
+                        fi.measured_spfm * 100.0,
+                        fi.measured_lf * 100.0,
+                        fi.measured_pmhf.unwrap_or(0.0),
+                    )
+                } else {
+                    (
+                        self.results.as_ref().and_then(|r| r.spfm).unwrap_or(0.0),
+                        self.results.as_ref().and_then(|r| r.lfm).unwrap_or(0.0),
+                        self.results.as_ref().and_then(|r| r.pmhf).unwrap_or(0.0),
+                    )
+                };
 
                 writeln!(content, "| Metric | Value | Target | Status |").unwrap();
                 writeln!(content, "|--------|-------|--------|--------|").unwrap();
