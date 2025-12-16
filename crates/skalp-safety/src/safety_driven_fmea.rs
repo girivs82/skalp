@@ -542,7 +542,7 @@ impl SafetyDrivenFmeaGenerator {
         }
 
         // Calculate overall metrics
-        let (spfm, lf, pmhf) = self.calculate_metrics(&effect_analyses, total_fit);
+        let (spfm, lf, pmhf) = self.calculate_metrics(&effect_analyses, results.len(), total_fit);
 
         // Check if meets ASIL requirements
         let meets_asil = effect_analyses
@@ -576,39 +576,57 @@ impl SafetyDrivenFmeaGenerator {
     }
 
     /// Calculate SPFM, LF, and PMHF from effect analyses
+    ///
+    /// ISO 26262-5 definitions:
+    /// - SPFM = 1 - (λSPF / λ) = (safe + detected) / total
+    /// - LFM = 1 - (λMPF_latent / (λ - λSPF))
+    /// - PMHF = Σ(λ × (1 - DC))
     fn calculate_metrics(
         &self,
         analyses: &HashMap<String, EffectAnalysis>,
+        total_injections: usize,
         total_fit: f64,
     ) -> (f64, f64, f64) {
         let mut total_dangerous = 0u64;
         let mut total_detected = 0u64;
-        let mut total_latent = 0u64;
 
         for analysis in analyses.values() {
             total_dangerous += analysis.total_faults_causing;
             total_detected += analysis.faults_detected;
-            total_latent += analysis.undetected_sites.len() as u64;
         }
 
-        // SPFM = detected / total_dangerous
-        let spfm = if total_dangerous > 0 {
+        let total = total_injections as u64;
+        let safe_faults = total.saturating_sub(total_dangerous);
+        let _undetected_dangerous = total_dangerous.saturating_sub(total_detected);
+
+        // SPFM = 1 - (SPF / total) = (safe + detected) / total
+        // SPF = single point faults = dangerous faults not covered by any SM
+        let spfm = if total > 0 {
+            (safe_faults + total_detected) as f64 / total as f64
+        } else {
+            1.0
+        };
+
+        // LFM = 1 - (latent_MPF / (total - SPF))
+        // For designs without redundancy, all undetected dangerous faults are SPF
+        // So residual (non-SPF) = safe + detected
+        // Latent = faults that could combine with others to cause violation
+        // Simplified: LFM ≈ SPFM for non-redundant designs
+        let lf = if total > 0 {
+            // For non-redundant: LFM = (safe + detected) / total
+            (safe_faults + total_detected) as f64 / total as f64
+        } else {
+            1.0
+        };
+
+        // PMHF = λ × (1 - DC_avg)
+        // DC_avg = detected / dangerous (fraction of dangerous faults detected)
+        let dc_avg = if total_dangerous > 0 {
             total_detected as f64 / total_dangerous as f64
         } else {
             1.0
         };
-
-        // LF = 1 - (latent / (total - safe))
-        // Simplified: detected / (detected + latent)
-        let lf = if total_detected + total_latent > 0 {
-            total_detected as f64 / (total_detected + total_latent) as f64
-        } else {
-            1.0
-        };
-
-        // PMHF = total_fit * (1 - DC)
-        let avg_dc = spfm;
-        let pmhf = total_fit * (1.0 - avg_dc);
+        let pmhf = total_fit * (1.0 - dc_avg);
 
         (spfm, lf, pmhf)
     }
@@ -692,7 +710,7 @@ impl SafetyDrivenFmeaGenerator {
         }
 
         // Calculate summary
-        let (spfm, lf, pmhf) = self.calculate_metrics(analyses, total_fit);
+        let (spfm, lf, pmhf) = self.calculate_metrics(analyses, faults_injected, total_fit);
         let meets = entries
             .iter()
             .all(|e| e.measured_dc >= 0.99 * e.total_fit.signum());
