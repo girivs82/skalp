@@ -1,0 +1,223 @@
+// =============================================================================
+// ECC Memory Test Design
+// =============================================================================
+// This design tests the ECC memory component's diagnostic coverage
+// by measuring actual fault detection via fault injection, not assumed DC.
+// =============================================================================
+
+// =============================================================================
+// ECC Memory (8-bit) - Hamming SEC-DED
+// =============================================================================
+#[safety_mechanism(type = ecc)]
+entity EccMemory8 {
+    in clk: clock
+    in rst: bit
+    in write_en: bit
+    in data_in: bit[8]
+    out data_out: bit[8]
+    #[detection_signal]
+    out single_bit_error: bit
+    #[detection_signal]
+    out double_bit_error: bit
+    #[detection_signal]
+    out ecc_error: bit
+}
+
+impl EccMemory8 {
+    // Storage includes ECC bits: 8 data + 4 hamming + 1 overall = 13 bits
+    signal stored_data: bit[8] = 0
+    signal stored_p1: bit = 0
+    signal stored_p2: bit = 0
+    signal stored_p4: bit = 0
+    signal stored_p8: bit = 0
+    signal stored_p0: bit = 0
+
+    // Extract individual bits from data_in using shift+mask
+    signal din0: bit = (data_in & 1) as bit
+    signal din1: bit = ((data_in >> 1) & 1) as bit
+    signal din2: bit = ((data_in >> 2) & 1) as bit
+    signal din3: bit = ((data_in >> 3) & 1) as bit
+    signal din4: bit = ((data_in >> 4) & 1) as bit
+    signal din5: bit = ((data_in >> 5) & 1) as bit
+    signal din6: bit = ((data_in >> 6) & 1) as bit
+    signal din7: bit = ((data_in >> 7) & 1) as bit
+
+    // Encoder: Calculate parity bits from input data
+    signal enc_p1: bit = din0 ^ din1 ^ din3 ^ din4 ^ din6
+    signal enc_p2: bit = din0 ^ din2 ^ din3 ^ din5 ^ din6
+    signal enc_p4: bit = din1 ^ din2 ^ din3 ^ din7
+    signal enc_p8: bit = din4 ^ din5 ^ din6 ^ din7
+    signal enc_p0: bit = din0 ^ din1 ^ din2 ^ din3 ^ din4 ^ din5 ^ din6 ^ din7 ^
+                        enc_p1 ^ enc_p2 ^ enc_p4 ^ enc_p8
+
+    // Write logic
+    on(clk.rise) {
+        if (rst) {
+            stored_data = 0
+            stored_p1 = 0
+            stored_p2 = 0
+            stored_p4 = 0
+            stored_p8 = 0
+            stored_p0 = 0
+        } else if (write_en) {
+            stored_data = data_in
+            stored_p1 = enc_p1
+            stored_p2 = enc_p2
+            stored_p4 = enc_p4
+            stored_p8 = enc_p8
+            stored_p0 = enc_p0
+        }
+    }
+
+    // Extract bits from stored_data for decoder
+    signal sd0: bit = (stored_data & 1) as bit
+    signal sd1: bit = ((stored_data >> 1) & 1) as bit
+    signal sd2: bit = ((stored_data >> 2) & 1) as bit
+    signal sd3: bit = ((stored_data >> 3) & 1) as bit
+    signal sd4: bit = ((stored_data >> 4) & 1) as bit
+    signal sd5: bit = ((stored_data >> 5) & 1) as bit
+    signal sd6: bit = ((stored_data >> 6) & 1) as bit
+    signal sd7: bit = ((stored_data >> 7) & 1) as bit
+
+    // Decoder: Calculate syndrome from stored data
+    signal syn_p1: bit = stored_p1 ^ sd0 ^ sd1 ^ sd3 ^ sd4 ^ sd6
+    signal syn_p2: bit = stored_p2 ^ sd0 ^ sd2 ^ sd3 ^ sd5 ^ sd6
+    signal syn_p4: bit = stored_p4 ^ sd1 ^ sd2 ^ sd3 ^ sd7
+    signal syn_p8: bit = stored_p8 ^ sd4 ^ sd5 ^ sd6 ^ sd7
+
+    // Syndrome value
+    signal syndrome: bit[4] = (syn_p8 as bit[4]) * 8 + (syn_p4 as bit[4]) * 4 +
+                              (syn_p2 as bit[4]) * 2 + (syn_p1 as bit[4])
+
+    // Overall parity check
+    signal calc_p0: bit = sd0 ^ sd1 ^ sd2 ^ sd3 ^ sd4 ^ sd5 ^ sd6 ^ sd7 ^
+                         stored_p1 ^ stored_p2 ^ stored_p4 ^ stored_p8
+    signal overall_parity_error: bit = calc_p0 ^ stored_p0
+
+    // Error detection logic (SEC-DED)
+    signal syndrome_nonzero: bit = if syndrome != 0 { 1 } else { 0 }
+    signal is_single_bit: bit = syndrome_nonzero & overall_parity_error
+    signal is_double_bit: bit = syndrome_nonzero & ~overall_parity_error
+
+    // Correction logic (simplified - just output stored data for now)
+    data_out = stored_data
+
+    // Detection signals
+    single_bit_error = is_single_bit
+    double_bit_error = is_double_bit
+    ecc_error = is_single_bit | is_double_bit
+}
+
+// =============================================================================
+// Simple register file with ECC protection
+// =============================================================================
+#[implements(SG001::DataIntegrity)]
+entity EccProtectedRegisterFile {
+    in clk: clock
+    in rst: bit
+    in write_en: bit
+    in write_addr: bit[2]
+    in write_data: bit[8]
+    in read_addr: bit[2]
+    out read_data: bit[8]
+    #[detection_signal]
+    out any_sbe: bit
+    #[detection_signal]
+    out any_dbe: bit
+    #[detection_signal]
+    out ecc_fault: bit
+}
+
+impl EccProtectedRegisterFile {
+    signal reg0_out: bit[8]
+    signal reg1_out: bit[8]
+    signal reg2_out: bit[8]
+    signal reg3_out: bit[8]
+
+    signal sbe0: bit
+    signal sbe1: bit
+    signal sbe2: bit
+    signal sbe3: bit
+    signal dbe0: bit
+    signal dbe1: bit
+    signal dbe2: bit
+    signal dbe3: bit
+    signal err0: bit
+    signal err1: bit
+    signal err2: bit
+    signal err3: bit
+
+    signal we0: bit = write_en & (write_addr == 0)
+    signal we1: bit = write_en & (write_addr == 1)
+    signal we2: bit = write_en & (write_addr == 2)
+    signal we3: bit = write_en & (write_addr == 3)
+
+    let r0 = EccMemory8 {
+        clk: clk, rst: rst, write_en: we0, data_in: write_data,
+        data_out: reg0_out, single_bit_error: sbe0, double_bit_error: dbe0, ecc_error: err0
+    }
+
+    let r1 = EccMemory8 {
+        clk: clk, rst: rst, write_en: we1, data_in: write_data,
+        data_out: reg1_out, single_bit_error: sbe1, double_bit_error: dbe1, ecc_error: err1
+    }
+
+    let r2 = EccMemory8 {
+        clk: clk, rst: rst, write_en: we2, data_in: write_data,
+        data_out: reg2_out, single_bit_error: sbe2, double_bit_error: dbe2, ecc_error: err2
+    }
+
+    let r3 = EccMemory8 {
+        clk: clk, rst: rst, write_en: we3, data_in: write_data,
+        data_out: reg3_out, single_bit_error: sbe3, double_bit_error: dbe3, ecc_error: err3
+    }
+
+    read_data = if read_addr == 0 { reg0_out }
+                else if read_addr == 1 { reg1_out }
+                else if read_addr == 2 { reg2_out }
+                else { reg3_out }
+
+    any_sbe = sbe0 | sbe1 | sbe2 | sbe3
+    any_dbe = dbe0 | dbe1 | dbe2 | dbe3
+    ecc_fault = err0 | err1 | err2 | err3
+}
+
+// =============================================================================
+// Top-level test design
+// =============================================================================
+entity EccTestDesign {
+    in clk: clock
+    in rst: bit
+    in reg_write_en: bit
+    in reg_write_addr: bit[2]
+    in reg_write_data: bit[8]
+    in reg_read_addr: bit[2]
+    out reg_read_data: bit[8]
+    out system_healthy: bit
+    #[detection_signal]
+    out det_sbe: bit
+    #[detection_signal]
+    out det_dbe: bit
+    #[detection_signal]
+    out det_ecc: bit
+}
+
+impl EccTestDesign {
+    signal reg_out: bit[8]
+    signal sbe_flag: bit
+    signal dbe_flag: bit
+    signal ecc_flag: bit
+
+    let regfile = EccProtectedRegisterFile {
+        clk: clk, rst: rst,
+        write_en: reg_write_en, write_addr: reg_write_addr, write_data: reg_write_data,
+        read_addr: reg_read_addr, read_data: reg_out,
+        any_sbe: sbe_flag, any_dbe: dbe_flag, ecc_fault: ecc_flag
+    }
+
+    reg_read_data = reg_out
+    system_healthy = ~ecc_flag
+    det_sbe = sbe_flag
+    det_dbe = dbe_flag
+    det_ecc = ecc_flag
+}

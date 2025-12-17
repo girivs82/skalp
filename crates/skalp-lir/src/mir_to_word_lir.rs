@@ -144,12 +144,23 @@ impl MirToWordLirTransform {
                 }
                 id
             }
-            PortDirection::Output => self.lir.add_output(port.name.clone(), width),
+            PortDirection::Output => {
+                // Check if this is a detection signal output
+                if port.is_detection_signal() {
+                    self.lir.add_detection_output(port.name.clone(), width)
+                } else {
+                    self.lir.add_output(port.name.clone(), width)
+                }
+            }
             PortDirection::InOut => {
                 // InOut is both input and output
                 let id = self.lir.add_input(port.name.clone(), width);
                 self.lir.outputs.push(id);
                 self.lir.signals[id.0 as usize].is_output = true;
+                // Propagate detection signal flag for InOut ports
+                if port.is_detection_signal() {
+                    self.lir.mark_as_detection(id);
+                }
                 id
             }
         };
@@ -164,6 +175,17 @@ impl MirToWordLirTransform {
 
         let signal_id = self.lir.add_signal(signal.name.clone(), width);
         self.signal_to_word_signal.insert(signal.id, signal_id);
+
+        // Propagate detection signal flag from MIR internal signals
+        // This is critical for hierarchical flattening where sub-module output ports
+        // marked with #[detection_signal] become internal signals in the flattened design
+        if signal.is_detection_signal() {
+            println!(
+                "✅ [WORD_LIR_DETECTION] Marking internal signal '{}' as detection",
+                signal.name
+            );
+            self.lir.mark_as_detection(signal_id);
+        }
     }
 
     /// Transform a continuous assignment
@@ -1009,6 +1031,7 @@ mod tests {
                     port_type: DataType::Bit(8),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
                 Port {
                     id: PortId(1),
@@ -1017,6 +1040,7 @@ mod tests {
                     port_type: DataType::Bit(8),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
                 Port {
                     id: PortId(2),
@@ -1025,6 +1049,7 @@ mod tests {
                     port_type: DataType::Bit(8),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
             ],
             signals: Vec::new(),
@@ -1109,6 +1134,7 @@ mod tests {
                     port_type: DataType::Bit(8),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
                 Port {
                     id: PortId(1),
@@ -1117,6 +1143,7 @@ mod tests {
                     port_type: DataType::Bit(8),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
                 Port {
                     id: PortId(2),
@@ -1125,6 +1152,7 @@ mod tests {
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
             ],
             signals: Vec::new(),
@@ -1197,6 +1225,7 @@ mod tests {
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
                 Port {
                     id: PortId(1),
@@ -1205,6 +1234,7 @@ mod tests {
                     port_type: DataType::Bit(16),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
                 Port {
                     id: PortId(2),
@@ -1213,6 +1243,7 @@ mod tests {
                     port_type: DataType::Bit(16),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
                 Port {
                     id: PortId(3),
@@ -1221,6 +1252,7 @@ mod tests {
                     port_type: DataType::Bit(16),
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 },
             ],
             signals: Vec::new(),

@@ -33,8 +33,11 @@ use crate::hierarchy::{
     MechanismType, Severity,
 };
 use crate::sm_failure_analysis::{SmCellMapping, SmFailureAnalysis};
-use skalp_lir::{Cell, CellFailureMode, CellSafetyClassification, FaultType, GateNetlist};
-use std::collections::HashMap;
+use skalp_frontend::hir::DetectionMode;
+use skalp_lir::{
+    Cell, CellFailureMode, CellSafetyClassification, FaultType, GateNetId, GateNetlist,
+};
+use std::collections::{HashMap, HashSet};
 
 /// Configuration for gate netlist to FMEA conversion
 #[derive(Debug, Clone)]
@@ -109,6 +112,20 @@ pub struct CoverageSummary {
     pub sm_fit: f64,
     /// Total FIT of functional cells
     pub functional_fit: f64,
+    /// Number of detection signal outputs in the design
+    pub detection_signal_count: usize,
+    /// Cells covered by detection signal propagation (not just annotations)
+    pub detection_covered_cells: usize,
+    /// DC derived from detection signal coverage (%)
+    pub detection_based_dc: f64,
+    /// Runtime DC (continuous detection only) - for SPFM calculation
+    pub runtime_dc: f64,
+    /// Boot DC (boot-time detection) - for LFM calculation
+    pub boot_dc: f64,
+    /// Cells covered by continuous (runtime) detection
+    pub continuous_detection_cells: usize,
+    /// Cells covered by boot-time detection
+    pub boot_detection_cells: usize,
 }
 
 /// Per-mechanism coverage summary
@@ -172,12 +189,33 @@ pub fn gate_netlist_to_fmea(
     let dc_map = build_dc_map_from_simulation(sim_results);
     coverage_summary.dc_from_simulation = sim_results.is_some() && !dc_map.is_empty();
 
+    // Analyze detection signal coverage from LIR
+    let detection_coverage = analyze_detection_coverage(netlist);
+    coverage_summary.detection_signal_count = detection_coverage.detection_nets.len();
+    coverage_summary.detection_covered_cells = detection_coverage.detection_covered_cells.len();
+    coverage_summary.detection_based_dc = detection_coverage.calculated_dc;
+    // Mode-based DC breakdown
+    coverage_summary.runtime_dc = detection_coverage.runtime_dc;
+    coverage_summary.boot_dc = detection_coverage.boot_dc;
+    coverage_summary.continuous_detection_cells = detection_coverage.continuous_covered_cells.len();
+    coverage_summary.boot_detection_cells = detection_coverage.boot_covered_cells.len();
+
     if !coverage_summary.dc_from_simulation && sim_results.is_none() {
-        warnings.push(
-            "No fault injection results provided. Using fallback DC of 0%. \
-             Run fault simulation for accurate FMEDA."
-                .to_string(),
-        );
+        if coverage_summary.detection_signal_count > 0 {
+            warnings.push(format!(
+                "No fault injection results provided. Using detection-based DC of {:.1}% \
+                 from {} detection signals covering {} cells.",
+                coverage_summary.detection_based_dc,
+                coverage_summary.detection_signal_count,
+                coverage_summary.detection_covered_cells
+            ));
+        } else {
+            warnings.push(
+                "No fault injection results and no detection signals found. Using fallback DC of 0%. \
+                 Run fault simulation or add #[detection_signal] annotations for accurate FMEDA."
+                    .to_string(),
+            );
+        }
     }
 
     coverage_summary.total_cells = netlist.cells.len();
@@ -192,8 +230,9 @@ pub fn gate_netlist_to_fmea(
             part_name.clone(),
         );
 
-        // Find coverage from annotations
-        let coverage = find_coverage_for_cell(&cell.path, &annotation_map, &dc_map);
+        // Find coverage from annotations and detection signals
+        let coverage =
+            find_coverage_for_cell(&cell.path, &annotation_map, &dc_map, &detection_coverage);
 
         // Convert cell failure modes to FMEA failure modes
         let mut failure_modes_for_sm: Vec<FailureMode> = Vec::new();
@@ -390,11 +429,231 @@ fn build_dc_map_from_simulation(
     dc_map
 }
 
-/// Find safety coverage for a cell by matching against annotations
+/// Detection coverage information derived from LIR detection signals
+#[derive(Debug, Clone, Default)]
+pub struct DetectionCoverageInfo {
+    /// Set of net IDs that are marked as detection signals
+    pub detection_nets: HashSet<u32>,
+    /// Names of detection signal outputs
+    pub detection_signal_names: Vec<String>,
+    /// Cells whose outputs directly connect to detection signals
+    pub detection_driver_cells: HashSet<String>,
+    /// All cells that can propagate faults to detection outputs (via cone of influence)
+    pub detection_covered_cells: HashSet<String>,
+    /// Calculated DC based on detection coverage (%)
+    pub calculated_dc: f64,
+
+    // === Detection Mode Classification (ISO 26262 SPFM vs LFM) ===
+    /// Cells covered by continuous (runtime) detection → contributes to SPFM
+    pub continuous_covered_cells: HashSet<String>,
+    /// Cells covered by boot-time detection → contributes to LFM only
+    pub boot_covered_cells: HashSet<String>,
+    /// Cells covered by periodic detection → contributes to LFM with timing factor
+    pub periodic_covered_cells: HashSet<String>,
+    /// Map of net ID to detection mode
+    pub net_detection_modes: HashMap<u32, DetectionMode>,
+    /// Runtime DC (continuous detection only) - for SPFM calculation
+    pub runtime_dc: f64,
+    /// Boot DC (boot-time detection) - for LFM calculation
+    pub boot_dc: f64,
+}
+
+/// Analyze detection signal coverage in the gate netlist
+///
+/// This function identifies detection signals (marked with `#[detection_signal]`)
+/// and traces back which cells feed into them, enabling DC calculation.
+///
+/// Per ISO 26262, detection signals are outputs from safety mechanisms that
+/// indicate fault detection. Cells that can propagate faults to these outputs
+/// are considered "detected" by the safety mechanism.
+///
+/// ## Detection Mode Classification
+///
+/// - **Continuous**: Runtime detection → contributes to SPFM (Single Point Fault Metric)
+/// - **Boot**: Boot-time detection (BIST) → contributes to LFM (Latent Fault Metric) only
+/// - **Periodic**: Periodic detection → contributes to LFM with timing factor
+/// - **OnDemand**: Software-triggered → requires SW analysis, not included in HW metrics
+fn analyze_detection_coverage(netlist: &GateNetlist) -> DetectionCoverageInfo {
+    let mut info = DetectionCoverageInfo::default();
+
+    // 1. Find all detection output nets and categorize by mode
+    for net in &netlist.nets {
+        if net.is_detection {
+            info.detection_nets.insert(net.id.0);
+            info.detection_signal_names.push(net.name.clone());
+
+            // Extract detection mode from config (default to Continuous if not specified)
+            let mode = net
+                .detection_config
+                .as_ref()
+                .map(|c| c.mode)
+                .unwrap_or(DetectionMode::Continuous);
+
+            info.net_detection_modes.insert(net.id.0, mode);
+
+            println!(
+                "✅ [DETECTION_ANALYSIS] Found detection net: {} (id={}) mode={:?}",
+                net.name, net.id.0, mode
+            );
+        }
+    }
+
+    if info.detection_nets.is_empty() {
+        println!("⚠️ [DETECTION_ANALYSIS] No detection signals found in netlist");
+        return info;
+    }
+
+    // 2. For each detection mode, trace backward to find covered cells
+    // We trace separately so cells can be categorized by which mode detects them
+    for (&net_id, &mode) in &info.net_detection_modes.clone() {
+        let covered_cells = trace_detection_cone(netlist, net_id, &info.detection_nets);
+
+        // Categorize by mode
+        for cell_path in covered_cells {
+            info.detection_covered_cells.insert(cell_path.clone());
+
+            match mode {
+                DetectionMode::Continuous => {
+                    info.continuous_covered_cells.insert(cell_path);
+                }
+                DetectionMode::Boot => {
+                    info.boot_covered_cells.insert(cell_path);
+                }
+                DetectionMode::Periodic => {
+                    info.periodic_covered_cells.insert(cell_path);
+                }
+                DetectionMode::OnDemand => {
+                    // OnDemand detection requires SW analysis, track separately if needed
+                    // For now, treat as boot-time (conservative)
+                    info.boot_covered_cells.insert(cell_path);
+                }
+            }
+        }
+    }
+
+    // 3. Find cells that directly drive detection outputs
+    for cell in &netlist.cells {
+        for &output_net_id in &cell.outputs {
+            if info.detection_nets.contains(&output_net_id.0) {
+                info.detection_driver_cells.insert(cell.path.clone());
+            }
+        }
+    }
+
+    // 4. Calculate DC values by mode
+    let functional_cells: Vec<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.safety_classification,
+                CellSafetyClassification::Functional
+            )
+        })
+        .collect();
+
+    let total_functional = functional_cells.len();
+    let covered_count = info.detection_covered_cells.len();
+    let continuous_count = info.continuous_covered_cells.len();
+    let boot_count = info.boot_covered_cells.len();
+
+    if total_functional > 0 {
+        // Overall DC (all detection modes)
+        info.calculated_dc = (covered_count as f64 / total_functional as f64) * 100.0;
+        // Runtime DC (continuous only) - for SPFM
+        info.runtime_dc = (continuous_count as f64 / total_functional as f64) * 100.0;
+        // Boot DC (boot-time) - for LFM
+        info.boot_dc = (boot_count as f64 / total_functional as f64) * 100.0;
+    }
+
+    println!("✅ [DETECTION_ANALYSIS] Detection coverage summary:");
+    println!(
+        "   Total: {}/{} cells = {:.1}% DC",
+        covered_count, total_functional, info.calculated_dc
+    );
+    println!(
+        "   Runtime (SPFM): {}/{} cells = {:.1}% DC",
+        continuous_count, total_functional, info.runtime_dc
+    );
+    println!(
+        "   Boot (LFM): {}/{} cells = {:.1}% DC",
+        boot_count, total_functional, info.boot_dc
+    );
+
+    info
+}
+
+/// Trace the cone of influence from a detection net backward
+/// Returns all functional cells that can propagate faults to this detection output
+fn trace_detection_cone(
+    netlist: &GateNetlist,
+    detection_net_id: u32,
+    all_detection_nets: &HashSet<u32>,
+) -> HashSet<String> {
+    let mut covered_cells = HashSet::new();
+    let mut frontier: Vec<GateNetId> = Vec::new();
+    let mut visited_nets: HashSet<u32> = HashSet::new();
+
+    // Find the cell that drives this detection net
+    if let Some(net) = netlist.nets.get(detection_net_id as usize) {
+        if let Some(driver_cell_id) = net.driver {
+            if let Some(driver_cell) = netlist.cells.get(driver_cell_id.0 as usize) {
+                // Initialize frontier with input nets of the detection driver cell
+                for &input_net_id in &driver_cell.inputs {
+                    if !visited_nets.contains(&input_net_id.0) {
+                        frontier.push(input_net_id);
+                        visited_nets.insert(input_net_id.0);
+                    }
+                }
+            }
+        }
+    }
+
+    // BFS to find all cells in the cone of influence
+    while let Some(net_id) = frontier.pop() {
+        // Skip other detection nets (don't cross into other detection cones)
+        if all_detection_nets.contains(&net_id.0) && net_id.0 != detection_net_id {
+            continue;
+        }
+
+        // Find the cell that drives this net
+        if let Some(net) = netlist.nets.get(net_id.0 as usize) {
+            if let Some(driver_cell_id) = net.driver {
+                if let Some(driver_cell) = netlist.cells.get(driver_cell_id.0 as usize) {
+                    // Only include functional cells (not SM cells themselves)
+                    if matches!(
+                        driver_cell.safety_classification,
+                        CellSafetyClassification::Functional
+                    ) {
+                        covered_cells.insert(driver_cell.path.clone());
+                    }
+
+                    // Add this cell's inputs to the frontier
+                    for &input_net_id in &driver_cell.inputs {
+                        if !visited_nets.contains(&input_net_id.0) {
+                            frontier.push(input_net_id);
+                            visited_nets.insert(input_net_id.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    covered_cells
+}
+
+/// Find safety coverage for a cell by matching against annotations and detection signals
+///
+/// Coverage is determined in priority order:
+/// 1. Explicit annotation match (exact or prefix)
+/// 2. Detection signal coverage (cell in cone of influence)
+/// 3. None (no coverage)
 fn find_coverage_for_cell(
     cell_path: &str,
     annotation_map: &HashMap<String, &SafetyAnnotation>,
     dc_map: &HashMap<String, f64>,
+    detection_coverage: &DetectionCoverageInfo,
 ) -> Option<CellSafetyCoverage> {
     // Exact match first
     if let Some(annotation) = annotation_map.get(cell_path) {
@@ -413,7 +672,26 @@ fn find_coverage_for_cell(
         }
     }
 
-    best_match.map(|(annotation, _)| annotation_to_coverage(annotation, dc_map))
+    if let Some((annotation, _)) = best_match {
+        return Some(annotation_to_coverage(annotation, dc_map));
+    }
+
+    // Check if cell is covered by detection signals
+    if detection_coverage
+        .detection_covered_cells
+        .contains(cell_path)
+    {
+        // Create synthetic coverage based on detection signal analysis
+        return Some(CellSafetyCoverage {
+            goal: "DetectionSignalCoverage".to_string(),
+            mechanism: "HierarchicalDetection".to_string(),
+            // Use calculated DC from detection coverage analysis
+            measured_dc: Some(detection_coverage.calculated_dc),
+            level: AnnotationLevel::Signal,
+        });
+    }
+
+    None
 }
 
 /// Convert a SafetyAnnotation to CellSafetyCoverage with measured DC

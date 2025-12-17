@@ -194,6 +194,17 @@ impl<'a> TechMapper<'a> {
             }
         }
 
+        // Mark detection signal nets (for safety analysis)
+        for &detection_id in &word_lir.detection_signals {
+            if let Some(nets) = self.signal_to_net.get(&detection_id) {
+                for &net_id in nets {
+                    if let Some(net) = self.netlist.get_net_mut(net_id) {
+                        net.is_detection = true;
+                    }
+                }
+            }
+        }
+
         // Phase 2: Map each node to cells
         for node in &word_lir.nodes {
             self.map_node(node, word_lir);

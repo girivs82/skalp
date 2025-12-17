@@ -7,7 +7,7 @@ use crate::mir::*;
 use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
 use crate::{ExpressionKind, Type};
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
-use skalp_frontend::hir::{self as hir, Hir};
+use skalp_frontend::hir::{self as hir, DetectionConfig, Hir};
 use skalp_frontend::span::SourceSpan;
 use skalp_frontend::types::Width;
 use std::collections::HashMap;
@@ -147,7 +147,11 @@ pub struct HirToMir<'hir> {
     entity_instance_info: HashMap<hir::VariableId, (String, ModuleId)>,
     /// Pending entity instances from let bindings (Bug #13-16, #21-23 fix)
     /// Format: (ModuleInstance, Vec<(SignalId, signal_name, DataType)>)
-    pending_entity_instances: Vec<(ModuleInstance, Vec<(SignalId, String, DataType)>)>,
+    /// Pending entity instances: (instance, Vec<(signal_id, name, type, detection_config)>)
+    pending_entity_instances: Vec<(
+        ModuleInstance,
+        Vec<(SignalId, String, DataType, Option<DetectionConfig>)>,
+    )>,
     /// Instance output signals by name for hierarchical elaboration (Bug #13-16, #21-23 fix)
     /// Maps instance name (String) -> port name -> SignalId
     /// This is used when FieldAccess has GenericParam("instance_name") as base
@@ -372,8 +376,10 @@ impl<'hir> HirToMir<'hir> {
                     self.port_map.insert(hir_port.id, first_port.id);
                 }
 
-                // Add all flattened ports to the module
-                for port in flattened_ports {
+                // Add all flattened ports to the module, propagating detection_config
+                for mut port in flattened_ports {
+                    // Propagate the detection config from HIR
+                    port.detection_config = hir_port.detection_config.clone();
                     module.ports.push(port);
                 }
             }
@@ -747,24 +753,44 @@ impl<'hir> HirToMir<'hir> {
                     // BUG FIX #13-16, #21-23: Pre-process instances BEFORE assignments
                     // This creates signals for instance output ports so FieldAccess can resolve them
                     self.instance_outputs_by_name.clear();
+                    println!(
+                        "🔍 [INSTANCE_PRE] impl_block for module '{}' has {} instances",
+                        module.name,
+                        impl_block.instances.len()
+                    );
                     for hir_instance in &impl_block.instances {
+                        println!(
+                            "🔍 [INSTANCE_LOOP] Processing instance '{}' of entity {:?}",
+                            hir_instance.name, hir_instance.entity
+                        );
                         // Find the entity to get its output ports
                         if let Some(entity) = self
                             .hir
                             .as_ref()
                             .and_then(|h| h.entities.iter().find(|e| e.id == hir_instance.entity))
                         {
+                            println!(
+                                "🔍 [INSTANCE_LOOP] Found entity '{}' with {} ports",
+                                entity.name,
+                                entity.ports.len()
+                            );
                             let mut output_ports: HashMap<String, SignalId> = HashMap::new();
 
                             // Create signals for each output port
                             for port in &entity.ports {
                                 if matches!(port.direction, hir::HirPortDirection::Output) {
+                                    println!(
+                                        "🔍 [OUTPUT_PORT] Port '{}' is_detection={}",
+                                        port.name,
+                                        port.is_detection_signal()
+                                    );
                                     let signal_id = self.next_signal_id();
                                     let signal_name =
                                         format!("{}_{}", hir_instance.name, port.name);
                                     let signal_type = self.convert_type(&port.port_type);
 
                                     // Create the signal and add to module
+                                    // Propagate detection signal config from sub-module port
                                     let signal = Signal {
                                         id: signal_id,
                                         name: signal_name.clone(),
@@ -778,10 +804,47 @@ impl<'hir> HirToMir<'hir> {
                                         breakpoint_config: None,
                                         power_config: None,
                                         safety_context: None,
+                                        detection_config: port.detection_config.clone(),
                                     };
                                     module.signals.push(signal);
 
                                     output_ports.insert(port.name.clone(), signal_id);
+
+                                    // BUG FIX: Also propagate detection flag to the connected signal
+                                    // in the parent module (if this output port connects to a local signal)
+                                    if port.is_detection_signal() {
+                                        // Find the connection to this port
+                                        for conn in &hir_instance.connections {
+                                            if conn.port == port.name {
+                                                // Get the signal ID from the RHS expression
+                                                if let hir::HirExpression::Signal(hir_sig_id) =
+                                                    &conn.expr
+                                                {
+                                                    if let Some(&mir_sig_id) =
+                                                        self.signal_map.get(hir_sig_id)
+                                                    {
+                                                        // Mark the parent's connected signal
+                                                        if let Some(parent_signal) = module
+                                                            .signals
+                                                            .iter_mut()
+                                                            .find(|s| s.id == mir_sig_id)
+                                                        {
+                                                            println!(
+                                                                "✅ [DETECTION_PROP] Marking '{}' (id={}) as detection from {}.{}",
+                                                                parent_signal.name,
+                                                                mir_sig_id.0,
+                                                                hir_instance.name,
+                                                                port.name
+                                                            );
+                                                            // Propagate detection config from port
+                                                            parent_signal.detection_config =
+                                                                port.detection_config.clone();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -1046,9 +1109,66 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Convert module instances
+                    eprintln!(
+                        "[INSTANCE_DEBUG] impl_block for '{}' has {} instances",
+                        entity.name,
+                        impl_block.instances.len()
+                    );
                     for hir_instance in &impl_block.instances {
+                        eprintln!(
+                            "[INSTANCE_DEBUG] Processing instance '{}' of entity {:?}",
+                            hir_instance.name, hir_instance.entity
+                        );
                         if let Some(instance) = self.convert_instance(hir_instance) {
                             module.instances.push(instance);
+                        }
+
+                        // BUG FIX: Propagate detection signal flags from sub-module output ports
+                        // to connected signals in the parent module
+                        if let Some(hir) = self.hir.as_ref() {
+                            if let Some(entity) =
+                                hir.entities.iter().find(|e| e.id == hir_instance.entity)
+                            {
+                                for port in &entity.ports {
+                                    // Only process output ports with detection_signal flag
+                                    if port.is_detection_signal()
+                                        && matches!(port.direction, hir::HirPortDirection::Output)
+                                    {
+                                        // Find the connection to this port
+                                        for conn in &hir_instance.connections {
+                                            if conn.port == port.name {
+                                                // Get the signal ID from the RHS expression
+                                                let signal_id = match &conn.expr {
+                                                    hir::HirExpression::Signal(id) => {
+                                                        self.signal_map.get(id).copied()
+                                                    }
+                                                    _ => None,
+                                                };
+
+                                                if let Some(mir_signal_id) = signal_id {
+                                                    // Mark this signal as detection signal
+                                                    if let Some(signal) = module
+                                                        .signals
+                                                        .iter_mut()
+                                                        .find(|s| s.id == mir_signal_id)
+                                                    {
+                                                        eprintln!(
+                                                            "[DETECTION_PROPAGATE] Marking signal '{}' (id={}) as detection signal (from {}.{})",
+                                                            signal.name,
+                                                            mir_signal_id.0,
+                                                            hir_instance.name,
+                                                            port.name
+                                                        );
+                                                        // Propagate detection config from port
+                                                        signal.detection_config =
+                                                            port.detection_config.clone();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1424,10 +1544,13 @@ impl<'hir> HirToMir<'hir> {
                                             let signal_name =
                                                 format!("{}_{}", instance_name, port.name);
                                             let signal_type = self.convert_type(&port.port_type);
+                                            // Propagate detection config from port
+                                            let detection_cfg = port.detection_config.clone();
                                             output_signals.push((
                                                 signal_id,
                                                 signal_name,
                                                 signal_type,
+                                                detection_cfg,
                                             ));
                                         }
                                     }
@@ -3113,15 +3236,22 @@ impl<'hir> HirToMir<'hir> {
                                 let signal_id = self.next_signal_id();
                                 let signal_name = format!("{}_{}", instance_name, port.name);
                                 let signal_type = self.convert_type(&port.port_type);
+                                // Propagate detection config from sub-module port
+                                let detection_cfg = port.detection_config.clone();
 
                                 eprintln!(
-                                    "[HIERARCHICAL] Creating output signal '{}' (id={}) for port '{}'",
-                                    signal_name, signal_id.0, port.name
+                                    "[HIERARCHICAL] Creating output signal '{}' (id={}) for port '{}' (detection={})",
+                                    signal_name, signal_id.0, port.name, detection_cfg.is_some()
                                 );
 
                                 // Track this output port
                                 output_ports.insert(port.name.clone(), signal_id);
-                                output_signals.push((signal_id, signal_name, signal_type));
+                                output_signals.push((
+                                    signal_id,
+                                    signal_name,
+                                    signal_type,
+                                    detection_cfg,
+                                ));
 
                                 // Add connection from instance output to signal
                                 connections.insert(
@@ -15994,6 +16124,7 @@ impl<'hir> HirToMir<'hir> {
                 port_type,
                 physical_constraints: None,
                 span: None,
+                detection_config: None,
             };
 
             module.ports.push(port);
@@ -16023,6 +16154,7 @@ impl<'hir> HirToMir<'hir> {
                         port_type,
                         physical_constraints: None,
                         span: None,
+                        detection_config: None,
                     };
 
                     module.ports.push(port);
@@ -16041,6 +16173,7 @@ impl<'hir> HirToMir<'hir> {
                     port_type,
                     physical_constraints: None,
                     span: None,
+                    detection_config: None,
                 };
 
                 module.ports.push(port);
@@ -16293,6 +16426,7 @@ impl<'hir> HirToMir<'hir> {
                 breakpoint_config: None,
                 power_config: None,
                 safety_context: None,
+                detection_config: None,
             };
             module.signals.push(signal);
 
@@ -16533,6 +16667,7 @@ impl<'hir> HirToMir<'hir> {
                                 breakpoint_config: None,
                                 power_config: None,
                                 safety_context: None,
+                                detection_config: None,
                             };
                             module.signals.push(signal);
 
@@ -16851,6 +16986,7 @@ impl<'hir> HirToMir<'hir> {
                         breakpoint_config: None,
                         power_config: None,
                         safety_context: None,
+                        detection_config: None,
                     };
                     module.signals.push(signal);
                     println!(
@@ -16892,6 +17028,7 @@ impl<'hir> HirToMir<'hir> {
                     breakpoint_config: None,
                     power_config: None,
                     safety_context: None,
+                    detection_config: None,
                 };
                 module.signals.push(signal);
                 eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
@@ -16966,7 +17103,7 @@ impl<'hir> HirToMir<'hir> {
             );
 
             // Create output signals for this instance
-            for (signal_id, signal_name, signal_type) in output_signals {
+            for (signal_id, signal_name, signal_type, detection_cfg) in output_signals {
                 let signal = Signal {
                     id: signal_id,
                     name: signal_name.clone(),
@@ -16980,10 +17117,11 @@ impl<'hir> HirToMir<'hir> {
                     breakpoint_config: None,
                     power_config: None,
                     safety_context: None,
+                    detection_config: detection_cfg.clone(),
                 };
                 eprintln!(
-                    "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output",
-                    signal_name, signal_id.0
+                    "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output (detection={})",
+                    signal_name, signal_id.0, detection_cfg.is_some()
                 );
                 module.signals.push(signal);
             }

@@ -30,8 +30,8 @@
 use crate::gate_eval::{evaluate_primitive, evaluate_primitive_with_fault};
 use crate::gate_simulator::{FaultCampaignResults, FaultSimResult};
 use crate::sir::{
-    FaultInjectionConfig, FaultType, PrimitiveId, PrimitiveType, Sir, SirOperation,
-    SirPortDirection, SirSignalId, SirSignalType,
+    FaultInjectionConfig, FaultType, PrimitiveId, PrimitiveType, Sir, SirDetectionMode,
+    SirOperation, SirPortDirection, SirSignalId, SirSignalType,
 };
 use metal::{
     Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
@@ -59,6 +59,8 @@ pub struct GpuFaultSimulator {
     output_ports: Vec<SirSignalId>,
     /// Detection signal IDs
     detection_signals: Vec<SirSignalId>,
+    /// Detection modes for each detection signal (parallel to detection_signals)
+    detection_modes: Vec<SirDetectionMode>,
     /// Compiled fault simulation pipeline
     fault_sim_pipeline: Option<ComputePipelineState>,
     /// All primitives in the design (flattened for GPU)
@@ -123,8 +125,8 @@ struct GpuFaultResult {
     detection_cycle: u32,
     /// Did fault cause output corruption?
     caused_corruption: u32,
-    /// Padding
-    _pad: u32,
+    /// Index of detection signal that detected (0xFFFFFFFF if none)
+    detecting_signal_idx: u32,
 }
 
 /// Configuration for GPU fault campaign
@@ -174,6 +176,7 @@ impl GpuFaultSimulator {
             input_ports: Vec::new(),
             output_ports: Vec::new(),
             detection_signals: Vec::new(),
+            detection_modes: Vec::new(),
             fault_sim_pipeline: None,
             primitives: Vec::new(),
             total_fit: 0.0,
@@ -206,11 +209,19 @@ impl GpuFaultSimulator {
                     }
                     SirPortDirection::Output => {
                         self.output_ports.push(signal.id);
-                        if signal.name.contains("fault")
+                        // Check if it's a detection signal (explicit annotation preferred)
+                        if signal.is_detection {
+                            // Explicit #[detection_signal] annotation
+                            self.detection_signals.push(signal.id);
+                            self.detection_modes.push(signal.detection_mode);
+                        } else if signal.name.contains("fault")
                             || signal.name.contains("error")
                             || signal.name.contains("detect")
                         {
+                            // Fallback: name-based heuristic (deprecated, for backwards compatibility)
+                            // Default to Continuous mode for heuristic-detected signals
                             self.detection_signals.push(signal.id);
+                            self.detection_modes.push(SirDetectionMode::Continuous);
                         }
                     }
                     SirPortDirection::InOut => {
@@ -416,7 +427,7 @@ struct FaultResult {
     uint detected;
     uint detection_cycle;
     uint caused_corruption;
-    uint _pad;
+    uint detecting_signal_idx;  // Index of detection signal (0xFFFFFFFF = none)
 };
 
 // Evaluate a primitive gate
@@ -522,6 +533,7 @@ kernel void fault_sim_kernel(
 
     uint detected = 0;
     uint detection_cycle = 0;
+    uint detecting_signal_idx = 0xFFFFFFFF;  // Invalid index = no detection
 
     // Simulate for num_cycles
     for (uint cycle = 0; cycle < num_cycles; cycle++) {{
@@ -552,6 +564,7 @@ kernel void fault_sim_kernel(
                 if (sig_id < {} && signals[sig_id] != 0) {{
                     detected = 1;
                     detection_cycle = cycle;
+                    detecting_signal_idx = d;  // Store which detection signal fired
                     break;
                 }}
             }}
@@ -571,6 +584,7 @@ kernel void fault_sim_kernel(
     results[tid].detected = detected;
     results[tid].detection_cycle = detection_cycle;
     results[tid].caused_corruption = caused_corruption;
+    results[tid].detecting_signal_idx = detecting_signal_idx;
 }}
 "#,
             num_signals.max(1),
@@ -751,21 +765,33 @@ kernel void fault_sim_kernel(
         let fault_results: Vec<FaultSimResult> = faults
             .iter()
             .zip(results.iter())
-            .map(|(fault, gpu_result)| FaultSimResult {
-                fault: fault.clone(),
-                detected: gpu_result.detected != 0,
-                output_diffs: if gpu_result.caused_corruption != 0 {
-                    let mut diffs = HashMap::new();
-                    diffs.insert("output".to_string(), (vec![false], vec![true]));
-                    diffs
-                } else {
-                    HashMap::new()
-                },
-                detection_cycle: if gpu_result.detected != 0 {
-                    Some(gpu_result.detection_cycle as u64)
+            .map(|(fault, gpu_result)| {
+                // Look up detection mode from detecting signal index
+                let detection_mode = if gpu_result.detected != 0
+                    && (gpu_result.detecting_signal_idx as usize) < self.detection_modes.len()
+                {
+                    Some(self.detection_modes[gpu_result.detecting_signal_idx as usize])
                 } else {
                     None
-                },
+                };
+
+                FaultSimResult {
+                    fault: fault.clone(),
+                    detected: gpu_result.detected != 0,
+                    output_diffs: if gpu_result.caused_corruption != 0 {
+                        let mut diffs = HashMap::new();
+                        diffs.insert("output".to_string(), (vec![false], vec![true]));
+                        diffs
+                    } else {
+                        HashMap::new()
+                    },
+                    detection_cycle: if gpu_result.detected != 0 {
+                        Some(gpu_result.detection_cycle as u64)
+                    } else {
+                        None
+                    },
+                    detection_mode,
+                }
             })
             .collect();
 
@@ -852,14 +878,19 @@ kernel void fault_sim_kernel(
         }
 
         let mut detection_cycle = None;
+        let mut detection_mode = None;
         for cycle in 0..cycles {
             self.evaluate_cycle(&mut state, Some((fault, cycle)));
 
             if detection_cycle.is_none() {
-                for det_id in &self.detection_signals {
+                for (idx, det_id) in self.detection_signals.iter().enumerate() {
                     if let Some(value) = state.get(&det_id.0) {
                         if value.first().copied().unwrap_or(false) {
                             detection_cycle = Some(cycle);
+                            // Look up detection mode for this signal
+                            if idx < self.detection_modes.len() {
+                                detection_mode = Some(self.detection_modes[idx]);
+                            }
                             break;
                         }
                     }
@@ -886,6 +917,7 @@ kernel void fault_sim_kernel(
             detected: detection_cycle.is_some(),
             output_diffs,
             detection_cycle,
+            detection_mode,
         }
     }
 
@@ -974,6 +1006,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -985,6 +1019,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -996,6 +1032,8 @@ mod tests {
             is_primary_input: false,
             is_primary_output: true,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -1037,6 +1075,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -1048,6 +1088,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -1059,6 +1101,8 @@ mod tests {
             is_primary_input: false,
             is_primary_output: true,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 

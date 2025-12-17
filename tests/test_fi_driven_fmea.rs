@@ -210,6 +210,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(10),
                 detection_cycle: Some(5),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             // Fault 2: Stuck-at-1 on TMR voter - DETECTED by TMR
             FaultEffectResult {
@@ -224,6 +225,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(8),
                 detection_cycle: Some(4),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             // Fault 3: Watchdog counter fault - DETECTED by watchdog
             FaultEffectResult {
@@ -238,6 +240,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(1000),
                 detection_cycle: Some(1000),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             // Fault 4: Safe state controller - NOT DETECTED (dangerous!)
             FaultEffectResult {
@@ -252,6 +255,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(15),
                 detection_cycle: None,
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             // Fault 5: Motor driver - DETECTED by comparator
             FaultEffectResult {
@@ -266,6 +270,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(5),
                 detection_cycle: Some(5),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             // Fault 6: Safe fault - no effect triggered
             FaultEffectResult {
@@ -280,6 +285,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: None,
                 detection_cycle: None,
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
         ];
 
@@ -397,6 +403,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(50),
                 detection_cycle: Some(30),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             // Fault causes brake_asymmetry
             FaultEffectResult {
@@ -411,6 +418,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(100),
                 detection_cycle: Some(80),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             // Fault causes BOTH effects (severe!)
             FaultEffectResult {
@@ -425,6 +433,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(10),
                 detection_cycle: None,
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
         ];
 
@@ -516,6 +525,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(1),
                 detection_cycle: Some(1),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_1"), FaultType::StuckAt0),
@@ -526,6 +536,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(1),
                 detection_cycle: Some(1),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_2"), FaultType::StuckAt0),
@@ -536,6 +547,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(1),
                 detection_cycle: Some(1),
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_3"), FaultType::StuckAt0),
@@ -546,6 +558,7 @@ mod fi_driven_fmea_tests {
                 effect_cycle: Some(1),
                 detection_cycle: None,
                 is_safety_mechanism: false,
+                detection_mode: None,
             },
         ];
 

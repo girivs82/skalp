@@ -80,6 +80,9 @@ pub struct FaultSimResult {
     pub output_diffs: HashMap<String, (Vec<bool>, Vec<bool>)>,
     /// Cycle at which detection occurred (if detected)
     pub detection_cycle: Option<u64>,
+    /// Detection mode of the signal that detected the fault (if detected)
+    /// Used to calculate separate runtime_dc (Continuous) vs boot_dc (Boot/Periodic/OnDemand)
+    pub detection_mode: Option<crate::sir::SirDetectionMode>,
 }
 
 /// Configuration for fault campaign
@@ -199,11 +202,15 @@ impl GateLevelSimulator {
                     }
                     SirPortDirection::Output => {
                         self.output_ports.push(signal.id);
-                        // Check if it's a detection signal
-                        if signal.name.contains("fault")
+                        // Check if it's a detection signal (explicit annotation preferred)
+                        if signal.is_detection {
+                            // Explicit #[detection_signal] annotation
+                            self.detection_signals.push(signal.id);
+                        } else if signal.name.contains("fault")
                             || signal.name.contains("error")
                             || signal.name.contains("detect")
                         {
+                            // Fallback: name-based heuristic (deprecated, for backwards compatibility)
                             self.detection_signals.push(signal.id);
                         }
                     }
@@ -656,6 +663,7 @@ impl GateLevelSimulator {
             detected: detection_cycle.is_some(),
             output_diffs,
             detection_cycle,
+            detection_mode: None, // Gate-level simulator doesn't track detection mode
         }
     }
 
@@ -866,6 +874,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -877,6 +887,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -888,6 +900,8 @@ mod tests {
             is_primary_input: false,
             is_primary_output: true,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 

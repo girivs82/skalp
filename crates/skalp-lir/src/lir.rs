@@ -15,6 +15,7 @@
 //! - `NetId`, `PrimitiveId` - Numeric IDs for efficient lookup
 
 use serde::{Deserialize, Serialize};
+use skalp_frontend::hir::DetectionConfig;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -402,6 +403,13 @@ pub struct LirNet {
     pub is_primary_output: bool,
     /// Is this driven by a state element (flip-flop output)?
     pub is_state_output: bool,
+    /// Is this a detection signal (for safety analysis)?
+    /// Set via #[detection_signal] attribute on port or propagated from hierarchical instances
+    pub is_detection: bool,
+    /// Detection signal configuration (temporal mode for safety analysis)
+    /// Includes mode (continuous/boot/periodic) and optional interval
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection_config: Option<DetectionConfig>,
     /// Bit width (usually 1 for gate-level)
     pub width: u8,
 }
@@ -417,6 +425,8 @@ impl LirNet {
             is_primary_input: false,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         }
     }
@@ -431,6 +441,8 @@ impl LirNet {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         }
     }
@@ -445,6 +457,8 @@ impl LirNet {
             is_primary_input: false,
             is_primary_output: true,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         }
     }

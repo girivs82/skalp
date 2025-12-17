@@ -9,6 +9,7 @@
 
 use crate::Type;
 use serde::{Deserialize, Serialize};
+use skalp_frontend::hir::DetectionConfig;
 use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 use skalp_frontend::SourceSpan;
 use std::collections::HashMap;
@@ -141,6 +142,17 @@ pub struct Port {
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+    /// Detection signal configuration (for safety analysis)
+    /// Set via #[detection_signal] or #[detection_signal(mode = "boot")] attribute
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection_config: Option<DetectionConfig>,
+}
+
+impl Port {
+    /// Returns true if this port is a detection signal
+    pub fn is_detection_signal(&self) -> bool {
+        self.detection_config.is_some()
+    }
 }
 
 /// Port identifier
@@ -196,6 +208,17 @@ pub struct Signal {
     /// Indicates which safety goal/mechanism this signal implements
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_context: Option<SafetyContext>,
+    /// Detection signal configuration (for safety analysis)
+    /// Propagated from sub-module output ports marked with #[detection_signal]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection_config: Option<DetectionConfig>,
+}
+
+impl Signal {
+    /// Returns true if this signal is a detection signal
+    pub fn is_detection_signal(&self) -> bool {
+        self.detection_config.is_some()
+    }
 }
 
 /// Signal identifier

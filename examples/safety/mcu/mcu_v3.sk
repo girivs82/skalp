@@ -1,0 +1,590 @@
+// =============================================================================
+// Motor Control Unit (MCU) v3 - Full Redundancy
+// =============================================================================
+// Changes from v2:
+//   - TMR on CurrentMonitor (SG-003)
+//   - Dual Watchdog with comparison
+//   - Dual PWM with comparison (output path protection)
+//   - SM-of-SM: Dual voters on SafeStateController
+// =============================================================================
+
+// =============================================================================
+// Command Processor (unchanged - rate limiting only)
+// =============================================================================
+#[safety_mechanism(type=comparator)]
+entity CommandProcessor {
+    in clk: clock
+    in rst: bit
+    in cmd_valid: bit
+    in cmd_throttle: bit[8]
+    in cmd_enable: bit
+    out validated_throttle: bit[8]
+    out validated_enable: bit
+    #[detection_signal]
+    out cmd_error: bit
+}
+
+impl CommandProcessor {
+    signal throttle_reg: bit[8] = 0
+    signal enable_reg: bit = 0
+    signal error_reg: bit = 0
+
+    signal throttle_diff: bit[8] = if cmd_throttle > throttle_reg {
+        cmd_throttle - throttle_reg
+    } else {
+        throttle_reg - cmd_throttle
+    }
+    signal rate_ok: bit = if throttle_diff > 16 { 0 } else { 1 }
+
+    on(clk.rise) {
+        if (rst) {
+            throttle_reg = 0
+            enable_reg = 0
+            error_reg = 0
+        } else if (cmd_valid) {
+            if (rate_ok) {
+                throttle_reg = cmd_throttle
+                enable_reg = cmd_enable
+                error_reg = 0
+            } else {
+                error_reg = 1
+            }
+        }
+    }
+
+    validated_throttle = throttle_reg
+    validated_enable = enable_reg
+    cmd_error = error_reg
+}
+
+// =============================================================================
+// PWM Generator - Single channel (used by dual PWM)
+// =============================================================================
+entity PWMChannel {
+    in clk: clock
+    in rst: bit
+    in throttle: bit[8]
+    in enable: bit
+    in force_off: bit
+    out pwm_out: bit
+    out pwm_active: bit
+}
+
+impl PWMChannel {
+    signal counter: bit[8] = 0
+    signal pwm_reg: bit = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+            pwm_reg = 0
+        } else {
+            counter = counter + 1
+            if (force_off) {
+                pwm_reg = 0
+            } else if (enable) {
+                pwm_reg = if counter < throttle { 1 } else { 0 }
+            } else {
+                pwm_reg = 0
+            }
+        }
+    }
+
+    pwm_out = pwm_reg
+    pwm_active = enable & ~force_off
+}
+
+// =============================================================================
+// Dual PWM Generator with Comparison
+// =============================================================================
+#[safety_mechanism(type=comparator)]
+entity DualPWMGenerator {
+    in clk: clock
+    in rst: bit
+    in throttle: bit[8]
+    in enable: bit
+    in force_off: bit
+    out pwm_out: bit
+    out pwm_active: bit
+    #[detection_signal]
+    out pwm_fault: bit
+}
+
+impl DualPWMGenerator {
+    signal pwm_a: bit
+    signal pwm_b: bit
+    signal active_a: bit
+    signal active_b: bit
+
+    let ch_a = PWMChannel {
+        clk: clk,
+        rst: rst,
+        throttle: throttle,
+        enable: enable,
+        force_off: force_off,
+        pwm_out: pwm_a,
+        pwm_active: active_a
+    }
+
+    let ch_b = PWMChannel {
+        clk: clk,
+        rst: rst,
+        throttle: throttle,
+        enable: enable,
+        force_off: force_off,
+        pwm_out: pwm_b,
+        pwm_active: active_b
+    }
+
+    pwm_out = pwm_a
+    pwm_active = active_a
+
+    // Comparison: detect if channels disagree
+    signal pwm_mismatch: bit = if pwm_a == pwm_b { 0 } else { 1 }
+    signal active_mismatch: bit = if active_a == active_b { 0 } else { 1 }
+    pwm_fault = pwm_mismatch | active_mismatch
+}
+
+// =============================================================================
+// Current Monitor - Single channel (used by TMR)
+// =============================================================================
+entity CurrentChannel {
+    in clk: clock
+    in rst: bit
+    in current_adc: bit[10]
+    in threshold: bit[10]
+    out overcurrent: bit
+    out current_valid: bit
+}
+
+impl CurrentChannel {
+    signal oc_reg: bit = 0
+    signal valid_reg: bit = 0
+    signal filter_count: bit[4] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            oc_reg = 0
+            valid_reg = 0
+            filter_count = 0
+        } else {
+            valid_reg = 1
+            if (current_adc > threshold) {
+                if (filter_count < 8) {
+                    filter_count = filter_count + 1
+                }
+                if (filter_count >= 8) {
+                    oc_reg = 1
+                }
+            } else {
+                filter_count = 0
+                oc_reg = 0
+            }
+        }
+    }
+
+    overcurrent = oc_reg
+    current_valid = valid_reg
+}
+
+// =============================================================================
+// Bit Voter (for current monitor TMR)
+// =============================================================================
+#[safety_mechanism(type=tmr)]
+entity BitVoter {
+    in a: bit
+    in b: bit
+    in c: bit
+    out voted: bit
+    #[detection_signal]
+    out fault: bit
+}
+
+impl BitVoter {
+    signal ab: bit = a & b
+    signal bc: bit = b & c
+    signal ac: bit = a & c
+    voted = ab | bc | ac
+
+    signal all_same: bit = if a == b { if b == c { 1 } else { 0 } } else { 0 }
+    fault = if all_same { 0 } else { 1 }
+}
+
+// =============================================================================
+// TMR Current Monitor
+// =============================================================================
+#[implements(SG003::OvercurrentDetection)]
+#[safety_mechanism(type=tmr)]
+entity TmrCurrentMonitor {
+    in clk: clock
+    in rst: bit
+    in current_adc: bit[10]
+    in threshold: bit[10]
+    #[detection_signal]
+    out overcurrent: bit
+    out current_valid: bit
+    #[detection_signal]
+    out tmr_fault: bit
+}
+
+impl TmrCurrentMonitor {
+    signal oc_a: bit
+    signal oc_b: bit
+    signal oc_c: bit
+    signal valid_a: bit
+    signal valid_b: bit
+    signal valid_c: bit
+    signal voted_oc: bit
+    signal voted_valid: bit
+    signal fault_oc: bit
+    signal fault_valid: bit
+
+    let ch_a = CurrentChannel {
+        clk: clk, rst: rst,
+        current_adc: current_adc, threshold: threshold,
+        overcurrent: oc_a, current_valid: valid_a
+    }
+
+    let ch_b = CurrentChannel {
+        clk: clk, rst: rst,
+        current_adc: current_adc, threshold: threshold,
+        overcurrent: oc_b, current_valid: valid_b
+    }
+
+    let ch_c = CurrentChannel {
+        clk: clk, rst: rst,
+        current_adc: current_adc, threshold: threshold,
+        overcurrent: oc_c, current_valid: valid_c
+    }
+
+    let voter_oc = BitVoter {
+        a: oc_a, b: oc_b, c: oc_c,
+        voted: voted_oc, fault: fault_oc
+    }
+
+    let voter_valid = BitVoter {
+        a: valid_a, b: valid_b, c: valid_c,
+        voted: voted_valid, fault: fault_valid
+    }
+
+    overcurrent = voted_oc
+    current_valid = voted_valid
+    tmr_fault = fault_oc | fault_valid
+}
+
+// =============================================================================
+// Watchdog - Single channel
+// =============================================================================
+entity WatchdogChannel {
+    in clk: clock
+    in rst: bit
+    in kick: bit
+    in timeout_limit: bit[8]
+    out timeout: bit
+    out healthy: bit
+}
+
+impl WatchdogChannel {
+    signal counter: bit[8] = 0
+    signal timeout_reg: bit = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+            timeout_reg = 0
+        } else if (kick) {
+            counter = 0
+            timeout_reg = 0
+        } else {
+            if (counter < timeout_limit) {
+                counter = counter + 1
+            } else {
+                timeout_reg = 1
+            }
+        }
+    }
+
+    timeout = timeout_reg
+    healthy = ~timeout_reg
+}
+
+// =============================================================================
+// Dual Watchdog with Comparison
+// =============================================================================
+#[safety_mechanism(type=comparator)]
+entity DualWatchdog {
+    in clk: clock
+    in rst: bit
+    in kick: bit
+    in timeout_limit: bit[8]
+    #[detection_signal]
+    out timeout: bit
+    out healthy: bit
+    #[detection_signal]
+    out watchdog_fault: bit
+}
+
+impl DualWatchdog {
+    signal timeout_a: bit
+    signal timeout_b: bit
+    signal healthy_a: bit
+    signal healthy_b: bit
+
+    let wd_a = WatchdogChannel {
+        clk: clk, rst: rst, kick: kick, timeout_limit: timeout_limit,
+        timeout: timeout_a, healthy: healthy_a
+    }
+
+    let wd_b = WatchdogChannel {
+        clk: clk, rst: rst, kick: kick, timeout_limit: timeout_limit,
+        timeout: timeout_b, healthy: healthy_b
+    }
+
+    // Use channel A as primary, but flag if they disagree
+    timeout = timeout_a
+    healthy = healthy_a
+
+    signal mismatch: bit = if timeout_a == timeout_b { 0 } else { 1 }
+    watchdog_fault = mismatch
+}
+
+// =============================================================================
+// Safe State Channel (single instance for TMR)
+// =============================================================================
+entity SafeStateChannel {
+    in clk: clock
+    in rst: bit
+    in fault_cmd: bit
+    in fault_overcurrent: bit
+    in fault_watchdog: bit
+    in fault_clear: bit
+    out safe_state: bit
+    out force_motor_off: bit
+    out fault_latched: bit
+}
+
+impl SafeStateChannel {
+    signal fault_latch: bit = 0
+    signal safe_state_reg: bit = 1
+
+    signal any_fault: bit = fault_cmd | fault_overcurrent | fault_watchdog
+
+    on(clk.rise) {
+        if (rst) {
+            fault_latch = 0
+            safe_state_reg = 1
+        } else {
+            if (any_fault) {
+                fault_latch = 1
+                safe_state_reg = 1
+            } else if (fault_clear & ~any_fault) {
+                fault_latch = 0
+                safe_state_reg = 0
+            }
+        }
+    }
+
+    safe_state = safe_state_reg
+    force_motor_off = safe_state_reg | any_fault
+    fault_latched = fault_latch
+}
+
+// =============================================================================
+// Safe State Voter with Dual Implementation (SM-of-SM)
+// =============================================================================
+#[safety_mechanism(type=tmr)]
+entity SafeStateVoterDual {
+    in a: bit
+    in b: bit
+    in c: bit
+    out voted: bit
+    #[detection_signal]
+    out fault: bit
+}
+
+impl SafeStateVoterDual {
+    // Voter 1: AND-OR majority
+    signal ab1: bit = a & b
+    signal bc1: bit = b & c
+    signal ac1: bit = a & c
+    signal voted1: bit = ab1 | bc1 | ac1
+
+    // Voter 2: Conditional majority (different structure)
+    signal voted2: bit = if a == b { a } else { c }
+
+    // Use voter1 as primary
+    voted = voted1
+
+    // Check: all same means no fault in channels, voters agree means no voter fault
+    signal all_same: bit = if a == b { if b == c { 1 } else { 0 } } else { 0 }
+    signal voter_agree: bit = if voted1 == voted2 { 1 } else { 0 }
+
+    // Fault if channels disagree OR voters disagree
+    fault = if all_same { if voter_agree { 0 } else { 1 } } else { 1 }
+}
+
+// =============================================================================
+// TMR Safe State Controller with SM-of-SM Voters
+// =============================================================================
+#[implements(SG001::SafeStateManagement)]
+#[implements(SG002::SafeStateManagement)]
+#[safety_mechanism(type=tmr)]
+entity TmrSafeStateController {
+    in clk: clock
+    in rst: bit
+    in fault_cmd: bit
+    in fault_overcurrent: bit
+    in fault_watchdog: bit
+    in fault_clear: bit
+    out safe_state: bit
+    out force_motor_off: bit
+    #[detection_signal]
+    out fault_latched: bit
+    #[detection_signal]
+    out tmr_fault: bit
+}
+
+impl TmrSafeStateController {
+    signal ss_a: bit
+    signal ss_b: bit
+    signal ss_c: bit
+    signal fmo_a: bit
+    signal fmo_b: bit
+    signal fmo_c: bit
+    signal fl_a: bit
+    signal fl_b: bit
+    signal fl_c: bit
+
+    signal voted_ss: bit
+    signal voted_fmo: bit
+    signal voted_fl: bit
+    signal fault_ss: bit
+    signal fault_fmo: bit
+    signal fault_fl: bit
+
+    let ch_a = SafeStateChannel {
+        clk: clk, rst: rst,
+        fault_cmd: fault_cmd, fault_overcurrent: fault_overcurrent,
+        fault_watchdog: fault_watchdog, fault_clear: fault_clear,
+        safe_state: ss_a, force_motor_off: fmo_a, fault_latched: fl_a
+    }
+
+    let ch_b = SafeStateChannel {
+        clk: clk, rst: rst,
+        fault_cmd: fault_cmd, fault_overcurrent: fault_overcurrent,
+        fault_watchdog: fault_watchdog, fault_clear: fault_clear,
+        safe_state: ss_b, force_motor_off: fmo_b, fault_latched: fl_b
+    }
+
+    let ch_c = SafeStateChannel {
+        clk: clk, rst: rst,
+        fault_cmd: fault_cmd, fault_overcurrent: fault_overcurrent,
+        fault_watchdog: fault_watchdog, fault_clear: fault_clear,
+        safe_state: ss_c, force_motor_off: fmo_c, fault_latched: fl_c
+    }
+
+    // SM-of-SM voters (dual implementation)
+    let voter_ss = SafeStateVoterDual {
+        a: ss_a, b: ss_b, c: ss_c,
+        voted: voted_ss, fault: fault_ss
+    }
+
+    let voter_fmo = SafeStateVoterDual {
+        a: fmo_a, b: fmo_b, c: fmo_c,
+        voted: voted_fmo, fault: fault_fmo
+    }
+
+    let voter_fl = SafeStateVoterDual {
+        a: fl_a, b: fl_b, c: fl_c,
+        voted: voted_fl, fault: fault_fl
+    }
+
+    safe_state = voted_ss
+    force_motor_off = voted_fmo
+    fault_latched = voted_fl
+    tmr_fault = fault_ss | fault_fmo | fault_fl
+}
+
+// =============================================================================
+// Top-Level: Motor Control Unit v3
+// =============================================================================
+entity MotorControlUnitV3 {
+    in clk: clock
+    in rst: bit
+    in cmd_valid: bit
+    in cmd_throttle: bit[8]
+    in cmd_enable: bit
+    in current_adc: bit[10]
+    in overcurrent_threshold: bit[10]
+    in watchdog_timeout: bit[8]
+    in watchdog_kick: bit
+    in fault_clear: bit
+
+    out motor_pwm: bit
+    out motor_active: bit
+    out system_healthy: bit
+    out in_safe_state: bit
+    #[detection_signal]
+    out fault_status: bit
+}
+
+impl MotorControlUnitV3 {
+    signal val_throttle: bit[8]
+    signal val_enable: bit
+    signal cmd_err: bit
+
+    signal pwm_signal: bit
+    signal pwm_is_active: bit
+    signal pwm_err: bit
+
+    signal oc_detected: bit
+    signal current_ok: bit
+    signal curr_tmr_err: bit
+
+    signal wd_timeout: bit
+    signal wd_healthy: bit
+    signal wd_err: bit
+
+    signal safe_state: bit
+    signal force_off: bit
+    signal fault_latch: bit
+    signal ss_tmr_err: bit
+
+    let cmd_proc = CommandProcessor {
+        clk: clk, rst: rst,
+        cmd_valid: cmd_valid, cmd_throttle: cmd_throttle, cmd_enable: cmd_enable,
+        validated_throttle: val_throttle, validated_enable: val_enable, cmd_error: cmd_err
+    }
+
+    let pwm_gen = DualPWMGenerator {
+        clk: clk, rst: rst,
+        throttle: val_throttle, enable: val_enable, force_off: force_off,
+        pwm_out: pwm_signal, pwm_active: pwm_is_active, pwm_fault: pwm_err
+    }
+
+    let curr_mon = TmrCurrentMonitor {
+        clk: clk, rst: rst,
+        current_adc: current_adc, threshold: overcurrent_threshold,
+        overcurrent: oc_detected, current_valid: current_ok, tmr_fault: curr_tmr_err
+    }
+
+    let watchdog = DualWatchdog {
+        clk: clk, rst: rst,
+        kick: watchdog_kick, timeout_limit: watchdog_timeout,
+        timeout: wd_timeout, healthy: wd_healthy, watchdog_fault: wd_err
+    }
+
+    let safe_ctrl = TmrSafeStateController {
+        clk: clk, rst: rst,
+        fault_cmd: cmd_err, fault_overcurrent: oc_detected, fault_watchdog: wd_timeout,
+        fault_clear: fault_clear,
+        safe_state: safe_state, force_motor_off: force_off,
+        fault_latched: fault_latch, tmr_fault: ss_tmr_err
+    }
+
+    motor_pwm = pwm_signal
+    motor_active = pwm_is_active
+    system_healthy = wd_healthy & current_ok & ~cmd_err & ~pwm_err & ~curr_tmr_err & ~wd_err & ~ss_tmr_err
+    in_safe_state = safe_state
+    fault_status = fault_latch | pwm_err | curr_tmr_err | wd_err | ss_tmr_err
+}

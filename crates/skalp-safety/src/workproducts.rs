@@ -835,6 +835,31 @@ impl WorkProductGenerator {
                     )
                     .unwrap();
                 }
+
+                // Add detection mode breakdown if available
+                if let Some(fi) = &self.fi_driven_results {
+                    if fi.runtime_dc.is_some() || fi.boot_dc.is_some() {
+                        writeln!(content, "\n### Detection Mode Breakdown\n").unwrap();
+                        writeln!(content, "| Mode | DC | Description |").unwrap();
+                        writeln!(content, "|------|-----|-------------|").unwrap();
+                        if let Some(runtime_dc) = fi.runtime_dc {
+                            writeln!(
+                                content,
+                                "| Runtime (Continuous) | {:.1}% | Contributes to SPFM |",
+                                runtime_dc
+                            )
+                            .unwrap();
+                        }
+                        if let Some(boot_dc) = fi.boot_dc {
+                            writeln!(
+                                content,
+                                "| Boot-time (BIST) | {:.1}% | Contributes to LFM only |",
+                                boot_dc
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
             }
             OutputFormat::Html => {
                 let md = self.generate_fmeda_report(OutputFormat::Markdown)?;

@@ -157,6 +157,11 @@ pub struct HirBuilderContext {
     /// Set when we see `#[safety_mechanism(...)]` before an entity declaration
     pending_safety_mechanism_config: Option<SafetyMechanismConfig>,
 
+    /// Pending detection signal config from most recent attribute
+    /// Set when we see `#[detection_signal]` or `#[detection_signal(mode = "...")]`
+    /// before a port declaration
+    pending_detection_config: Option<DetectionConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -271,6 +276,7 @@ impl HirBuilderContext {
             pending_power_config: None,
             pending_safety_config: None,
             pending_safety_mechanism_config: None,
+            pending_detection_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -621,19 +627,28 @@ impl HirBuilderContext {
         let mut assignments = Vec::new();
 
         if let Some(port_list) = node.first_child_of_kind(SyntaxKind::PortList) {
-            // First pass: build ports
-            for port_node in port_list.children_of_kind(SyntaxKind::PortDecl) {
-                if let Some(port) = self.build_port(&port_node) {
-                    ports.push(port);
+            // Single pass: process attributes AND build ports in order
+            // This ensures #[detection_signal] applies to the port that follows it
+            for child in port_list.children() {
+                match child.kind() {
+                    SyntaxKind::Attribute => {
+                        // Process attribute to set pending flags (detection_signal, memory_config, etc.)
+                        self.process_attribute(&child);
+                    }
+                    SyntaxKind::PortDecl => {
+                        if let Some(port) = self.build_port(&child) {
+                            ports.push(port);
+                        }
+                    }
+                    _ => {}
                 }
             }
 
             // Second pass: build entity body items (signals, assignments, let bindings)
             for child in port_list.children() {
                 match child.kind() {
-                    SyntaxKind::Attribute => {
-                        // Process attribute to set pending_memory_config (or other pending configs)
-                        self.process_attribute(&child);
+                    SyntaxKind::Attribute | SyntaxKind::PortDecl => {
+                        // Already processed in first pass
                     }
                     SyntaxKind::SignalDecl => {
                         if let Some(signal) = self.build_signal(&child) {
@@ -874,12 +889,25 @@ impl HirBuilderContext {
                                                                // Also add to general scope for lookup
         self.symbols.add_to_scope(&name, SymbolId::Port(id));
 
+        // Consume pending detection_config from #[detection_signal(...)] attribute
+        let detection_config = self.pending_detection_config.take();
+        let is_detection = detection_config.is_some();
+        let mode_str = detection_config
+            .as_ref()
+            .map(|c| format!("{:?}", c.mode))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "🔍 [BUILD_PORT] Port '{}' direction={:?} is_detection={} mode={}",
+            name, direction, is_detection, mode_str
+        );
+
         Some(HirPort {
             id,
             name,
             direction,
             port_type,
             physical_constraints,
+            detection_config,
         })
     }
 
@@ -7042,6 +7070,16 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Check for #[detection_signal] or #[detection_signal(mode = "...")] attribute on ports
+            if let Some(config) = self.extract_detection_config_from_intent_value(&intent_value) {
+                println!(
+                    "✅ [DETECTION_ATTR] Setting pending_detection_config mode={:?}",
+                    config.mode
+                );
+                self.pending_detection_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -7792,6 +7830,85 @@ impl HirBuilderContext {
             message,
             is_error,
         })
+    }
+
+    /// Extract detection config from #[detection_signal] or #[detection_signal(mode = "...")]
+    ///
+    /// Used to mark output ports as fault detection signals for safety analysis.
+    /// The mode parameter determines when the detection is active:
+    /// - "continuous" (default): Runtime detection, contributes to SPFM
+    /// - "boot": Boot-time detection (e.g., BIST), contributes to LFM only
+    /// - "periodic": Periodic detection, contributes to LFM with interval factor
+    /// - "on_demand": On-demand detection, requires SW trigger
+    ///
+    /// Examples:
+    /// - `#[detection_signal]` - defaults to continuous
+    /// - `#[detection_signal(mode = "boot")]`
+    /// - `#[detection_signal(mode = "periodic", interval_ms = 100)]`
+    fn extract_detection_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<DetectionConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Check if this is a detection_signal attribute
+        let is_detection = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "detection_signal");
+
+        if !is_detection {
+            return None;
+        }
+
+        // Default config (continuous mode)
+        let mut config = DetectionConfig::default();
+
+        // Look for mode parameter: mode = "continuous" | "boot" | "periodic" | "on_demand"
+        let mut i = 0;
+        while i < tokens.len() {
+            if tokens[i].kind() == SyntaxKind::Ident && tokens[i].text() == "mode" {
+                // Look for = and then the string value
+                if i + 2 < tokens.len() && tokens[i + 1].kind() == SyntaxKind::Assign {
+                    let mode_str = tokens[i + 2].text().trim_matches('"');
+                    config.mode = match mode_str {
+                        "continuous" => DetectionMode::Continuous,
+                        "boot" => DetectionMode::Boot,
+                        "periodic" => DetectionMode::Periodic,
+                        "on_demand" => DetectionMode::OnDemand,
+                        _ => DetectionMode::Continuous, // default
+                    };
+                }
+            }
+
+            // Look for interval_ms parameter
+            if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "interval_ms"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                if let Ok(interval) = tokens[i + 2].text().parse::<u32>() {
+                    config.interval_ms = Some(interval);
+                }
+            }
+
+            i += 1;
+        }
+
+        Some(config)
     }
 
     // ========================================================================

@@ -2094,7 +2094,8 @@ fn run_fi_driven_safety(
         #[cfg(target_os = "macos")]
         {
             use skalp_safety::fault_simulation::FaultType;
-            use skalp_sim::sir::FaultType as SimFaultType;
+            use skalp_frontend::hir::DetectionMode;
+            use skalp_sim::sir::{FaultType as SimFaultType, SirDetectionMode};
             use skalp_sim::{GpuFaultCampaignConfig, GpuFaultSimulator};
 
             if use_gpu {
@@ -2136,6 +2137,14 @@ fn run_fi_driven_safety(
                                 _ => FaultType::StuckAt0, // Default for complex fault types
                             };
 
+                            // Convert detection mode from SIR to HIR enum
+                            let detection_mode = fault_result.detection_mode.map(|m| match m {
+                                SirDetectionMode::Continuous => DetectionMode::Continuous,
+                                SirDetectionMode::Boot => DetectionMode::Boot,
+                                SirDetectionMode::Periodic => DetectionMode::Periodic,
+                                SirDetectionMode::OnDemand => DetectionMode::OnDemand,
+                            });
+
                             results.push(FaultEffectResult {
                                 fault_site: skalp_safety::fault_simulation::FaultSite::new(
                                     DesignRef::parse(&prim_path),
@@ -2152,6 +2161,7 @@ fn run_fi_driven_safety(
                                 effect_cycle: None,
                                 detection_cycle: fault_result.detection_cycle,
                                 is_safety_mechanism: sm_primitives.contains(&prim_id),
+                                detection_mode,
                             });
                         }
                     }
@@ -2200,6 +2210,9 @@ fn run_fi_driven_safety(
         &lir.name,
         total_fit,
     );
+
+    // runtime_dc and boot_dc are now calculated from FI results in the FMEA generator
+    // using actual fault injection data, not static analysis approximations
 
     // Print results summary
     println!("\n📈 Results Summary:");
@@ -2266,9 +2279,10 @@ fn run_cpu_fi_campaign(
     primitive_paths: &std::collections::HashMap<u32, String>,
     sm_primitives: &std::collections::HashSet<u32>,
 ) -> Result<Vec<skalp_safety::safety_driven_fmea::FaultEffectResult>> {
+    use skalp_frontend::hir::DetectionMode;
     use skalp_safety::fault_simulation::FaultType;
     use skalp_safety::hierarchy::DesignRef;
-    use skalp_sim::sir::FaultType as SimFaultType;
+    use skalp_sim::sir::{FaultType as SimFaultType, SirDetectionMode};
     use skalp_sim::{FaultCampaignConfig, GateLevelSimulator};
 
     let mut simulator = GateLevelSimulator::new(sir);
@@ -2307,6 +2321,14 @@ fn run_cpu_fi_campaign(
             _ => FaultType::StuckAt0, // Default for complex fault types
         };
 
+        // Convert detection mode from SIR to HIR enum
+        let detection_mode = fault_result.detection_mode.map(|m| match m {
+            SirDetectionMode::Continuous => DetectionMode::Continuous,
+            SirDetectionMode::Boot => DetectionMode::Boot,
+            SirDetectionMode::Periodic => DetectionMode::Periodic,
+            SirDetectionMode::OnDemand => DetectionMode::OnDemand,
+        });
+
         results.push(skalp_safety::safety_driven_fmea::FaultEffectResult {
             fault_site: skalp_safety::fault_simulation::FaultSite::new(
                 DesignRef::parse(&prim_path),
@@ -2323,6 +2345,7 @@ fn run_cpu_fi_campaign(
             effect_cycle: None,
             detection_cycle: fault_result.detection_cycle,
             is_safety_mechanism: sm_primitives.contains(&prim_id),
+            detection_mode,
         });
     }
 
@@ -2413,6 +2436,25 @@ fn generate_fi_driven_fmeda_md(
             "| PMHF | {:.2} FIT | ≤{:.0} FIT | {} |\n",
             pmhf, pmhf_target, pmhf_status
         ));
+    }
+
+    // Detection mode breakdown (if available)
+    if result.runtime_dc.is_some() || result.boot_dc.is_some() {
+        md.push_str("\n### Detection Mode Breakdown\n\n");
+        md.push_str("| Mode | DC | Impact |\n");
+        md.push_str("|------|-----|--------|\n");
+        if let Some(runtime_dc) = result.runtime_dc {
+            md.push_str(&format!(
+                "| Runtime (Continuous) | {:.1}% | Contributes to SPFM |\n",
+                runtime_dc
+            ));
+        }
+        if let Some(boot_dc) = result.boot_dc {
+            md.push_str(&format!(
+                "| Boot-time (BIST) | {:.1}% | Contributes to LFM only |\n",
+                boot_dc
+            ));
+        }
     }
 
     md.push_str(&format!(
@@ -2597,3 +2639,6 @@ fn generate_fi_driven_yaml(
 
     yaml
 }
+
+// Detection mode DC breakdown (runtime_dc, boot_dc) is now calculated from FI results
+// in the FMEA generator (calculate_mode_specific_dc), not from static LIR analysis.

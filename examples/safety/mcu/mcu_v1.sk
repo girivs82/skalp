@@ -1,0 +1,330 @@
+// =============================================================================
+// Motor Control Unit (MCU) v1 - With Safety Annotations
+// =============================================================================
+// Changes from v0:
+//   - Added #[detection_signal] annotations to all fault detection outputs
+//   - Added #[safety_mechanism] annotations to safety-relevant components
+//   - Added #[implements(...)] annotations linking to safety goals
+// =============================================================================
+
+// =============================================================================
+// Command Processor - Validates and filters incoming throttle commands
+// Implements rate limiting as a safety mechanism
+// =============================================================================
+#[implements(SG001::RateLimiting)]
+#[safety_mechanism(type=comparator)]
+entity CommandProcessor {
+    in clk: clock
+    in rst: bit
+    in cmd_valid: bit
+    in cmd_throttle: bit[8]
+    in cmd_enable: bit
+    out validated_throttle: bit[8]
+    out validated_enable: bit
+    #[detection_signal]
+    out cmd_error: bit
+}
+
+impl CommandProcessor {
+    signal throttle_reg: bit[8] = 0
+    signal enable_reg: bit = 0
+    signal error_reg: bit = 0
+
+    signal throttle_diff: bit[8] = if cmd_throttle > throttle_reg {
+        cmd_throttle - throttle_reg
+    } else {
+        throttle_reg - cmd_throttle
+    }
+
+    signal rate_ok: bit = if throttle_diff > 16 { 0 } else { 1 }
+
+    on(clk.rise) {
+        if (rst) {
+            throttle_reg = 0
+            enable_reg = 0
+            error_reg = 0
+        } else if (cmd_valid) {
+            if (rate_ok) {
+                throttle_reg = cmd_throttle
+                enable_reg = cmd_enable
+                error_reg = 0
+            } else {
+                error_reg = 1
+            }
+        }
+    }
+
+    validated_throttle = throttle_reg
+    validated_enable = enable_reg
+    cmd_error = error_reg
+}
+
+// =============================================================================
+// PWM Generator - Converts throttle to PWM duty cycle
+// Has force_off override for safe state
+// =============================================================================
+entity PWMGenerator {
+    in clk: clock
+    in rst: bit
+    in throttle: bit[8]
+    in enable: bit
+    in force_off: bit
+    out pwm_out: bit
+    out pwm_active: bit
+}
+
+impl PWMGenerator {
+    signal counter: bit[8] = 0
+    signal pwm_reg: bit = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+            pwm_reg = 0
+        } else {
+            counter = counter + 1
+
+            if (force_off) {
+                pwm_reg = 0
+            } else if (enable) {
+                pwm_reg = if counter < throttle { 1 } else { 0 }
+            } else {
+                pwm_reg = 0
+            }
+        }
+    }
+
+    pwm_out = pwm_reg
+    pwm_active = enable & ~force_off
+}
+
+// =============================================================================
+// Current Monitor - Monitors motor current for overcurrent
+// Implements filtered overcurrent detection
+// =============================================================================
+#[implements(SG003::OvercurrentDetection)]
+#[safety_mechanism(type=comparator)]
+entity CurrentMonitor {
+    in clk: clock
+    in rst: bit
+    in current_adc: bit[10]
+    in threshold: bit[10]
+    #[detection_signal]
+    out overcurrent: bit
+    out current_valid: bit
+}
+
+impl CurrentMonitor {
+    signal oc_reg: bit = 0
+    signal valid_reg: bit = 0
+    signal filter_count: bit[4] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            oc_reg = 0
+            valid_reg = 0
+            filter_count = 0
+        } else {
+            valid_reg = 1
+
+            if (current_adc > threshold) {
+                if (filter_count < 8) {
+                    filter_count = filter_count + 1
+                }
+                if (filter_count >= 8) {
+                    oc_reg = 1
+                }
+            } else {
+                filter_count = 0
+                oc_reg = 0
+            }
+        }
+    }
+
+    overcurrent = oc_reg
+    current_valid = valid_reg
+}
+
+// =============================================================================
+// Watchdog - System health monitoring
+// Implements timeout detection
+// =============================================================================
+#[implements(SG001::WatchdogMonitoring)]
+#[safety_mechanism(type=watchdog)]
+entity Watchdog {
+    in clk: clock
+    in rst: bit
+    in kick: bit
+    in timeout_limit: bit[8]
+    #[detection_signal]
+    out timeout: bit
+    out healthy: bit
+}
+
+impl Watchdog {
+    signal counter: bit[8] = 0
+    signal timeout_reg: bit = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+            timeout_reg = 0
+        } else if (kick) {
+            counter = 0
+            timeout_reg = 0
+        } else {
+            if (counter < timeout_limit) {
+                counter = counter + 1
+            } else {
+                timeout_reg = 1
+            }
+        }
+    }
+
+    timeout = timeout_reg
+    healthy = ~timeout_reg
+}
+
+// =============================================================================
+// Safe State Controller - Manages transition to safe state
+// Central safety decision logic
+// =============================================================================
+#[implements(SG001::SafeStateManagement)]
+#[implements(SG002::SafeStateManagement)]
+entity SafeStateController {
+    in clk: clock
+    in rst: bit
+    in fault_cmd: bit
+    in fault_overcurrent: bit
+    in fault_watchdog: bit
+    in fault_clear: bit
+    out safe_state: bit
+    out force_motor_off: bit
+    #[detection_signal]
+    out fault_latched: bit
+}
+
+impl SafeStateController {
+    signal fault_latch: bit = 0
+    signal safe_state_reg: bit = 1
+
+    signal any_fault: bit = fault_cmd | fault_overcurrent | fault_watchdog
+
+    on(clk.rise) {
+        if (rst) {
+            fault_latch = 0
+            safe_state_reg = 1
+        } else {
+            if (any_fault) {
+                fault_latch = 1
+                safe_state_reg = 1
+            } else if (fault_clear & ~any_fault) {
+                fault_latch = 0
+                safe_state_reg = 0
+            }
+        }
+    }
+
+    safe_state = safe_state_reg
+    force_motor_off = safe_state_reg | any_fault
+    fault_latched = fault_latch
+}
+
+// =============================================================================
+// Top-Level: Motor Control Unit v1
+// =============================================================================
+entity MotorControlUnitV1 {
+    in clk: clock
+    in rst: bit
+    in cmd_valid: bit
+    in cmd_throttle: bit[8]
+    in cmd_enable: bit
+    in current_adc: bit[10]
+    in overcurrent_threshold: bit[10]
+    in watchdog_timeout: bit[8]
+    in watchdog_kick: bit
+    in fault_clear: bit
+
+    out motor_pwm: bit
+    out motor_active: bit
+    out system_healthy: bit
+    out in_safe_state: bit
+    #[detection_signal]
+    out fault_status: bit
+}
+
+impl MotorControlUnitV1 {
+    signal val_throttle: bit[8]
+    signal val_enable: bit
+    signal cmd_err: bit
+
+    signal pwm_signal: bit
+    signal pwm_is_active: bit
+
+    signal oc_detected: bit
+    signal current_ok: bit
+
+    signal wd_timeout: bit
+    signal wd_healthy: bit
+
+    signal safe_state: bit
+    signal force_off: bit
+    signal fault_latch: bit
+
+    let cmd_proc = CommandProcessor {
+        clk: clk,
+        rst: rst,
+        cmd_valid: cmd_valid,
+        cmd_throttle: cmd_throttle,
+        cmd_enable: cmd_enable,
+        validated_throttle: val_throttle,
+        validated_enable: val_enable,
+        cmd_error: cmd_err
+    }
+
+    let pwm_gen = PWMGenerator {
+        clk: clk,
+        rst: rst,
+        throttle: val_throttle,
+        enable: val_enable,
+        force_off: force_off,
+        pwm_out: pwm_signal,
+        pwm_active: pwm_is_active
+    }
+
+    let curr_mon = CurrentMonitor {
+        clk: clk,
+        rst: rst,
+        current_adc: current_adc,
+        threshold: overcurrent_threshold,
+        overcurrent: oc_detected,
+        current_valid: current_ok
+    }
+
+    let watchdog = Watchdog {
+        clk: clk,
+        rst: rst,
+        kick: watchdog_kick,
+        timeout_limit: watchdog_timeout,
+        timeout: wd_timeout,
+        healthy: wd_healthy
+    }
+
+    let safe_ctrl = SafeStateController {
+        clk: clk,
+        rst: rst,
+        fault_cmd: cmd_err,
+        fault_overcurrent: oc_detected,
+        fault_watchdog: wd_timeout,
+        fault_clear: fault_clear,
+        safe_state: safe_state,
+        force_motor_off: force_off,
+        fault_latched: fault_latch
+    }
+
+    motor_pwm = pwm_signal
+    motor_active = pwm_is_active
+    system_healthy = wd_healthy & current_ok & ~cmd_err
+    in_safe_state = safe_state
+    fault_status = fault_latch
+}

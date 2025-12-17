@@ -16,6 +16,7 @@
 
 use crate::lir::LirSafetyInfo;
 use serde::{Deserialize, Serialize};
+use skalp_frontend::hir::DetectionConfig;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -314,6 +315,13 @@ pub struct GateNet {
     pub is_clock: bool,
     /// Is this a reset net?
     pub is_reset: bool,
+    /// Is this a detection signal (for safety analysis)?
+    /// Set via #[detection_signal] attribute on port
+    pub is_detection: bool,
+    /// Detection signal configuration (temporal mode for safety analysis)
+    /// Includes mode (continuous/boot/periodic) and optional interval
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detection_config: Option<DetectionConfig>,
 }
 
 impl GateNet {
@@ -329,6 +337,8 @@ impl GateNet {
             is_output: false,
             is_clock: false,
             is_reset: false,
+            is_detection: false,
+            detection_config: None,
         }
     }
 
@@ -344,6 +354,8 @@ impl GateNet {
             is_output: false,
             is_clock: false,
             is_reset: false,
+            is_detection: false,
+            detection_config: None,
         }
     }
 
@@ -359,6 +371,46 @@ impl GateNet {
             is_output: true,
             is_clock: false,
             is_reset: false,
+            is_detection: false,
+            detection_config: None,
+        }
+    }
+
+    /// Create a new detection signal output net
+    pub fn new_detection_output(id: GateNetId, name: String) -> Self {
+        Self {
+            id,
+            name,
+            driver: None,
+            driver_pin: None,
+            fanout: Vec::new(),
+            is_input: false,
+            is_output: true,
+            is_clock: false,
+            is_reset: false,
+            is_detection: true,
+            detection_config: Some(DetectionConfig::default()), // Default to continuous mode
+        }
+    }
+
+    /// Create a new detection signal output net with specific config
+    pub fn new_detection_output_with_config(
+        id: GateNetId,
+        name: String,
+        config: DetectionConfig,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            driver: None,
+            driver_pin: None,
+            fanout: Vec::new(),
+            is_input: false,
+            is_output: true,
+            is_clock: false,
+            is_reset: false,
+            is_detection: true,
+            detection_config: Some(config),
         }
     }
 }

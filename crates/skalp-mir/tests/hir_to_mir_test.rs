@@ -38,6 +38,7 @@ fn create_simple_entity() -> Hir {
                 direction: HirPortDirection::Input,
                 port_type: HirType::Clock(None),
                 physical_constraints: None,
+                detection_config: None,
             },
             HirPort {
                 id: PortId(2),
@@ -48,6 +49,7 @@ fn create_simple_entity() -> Hir {
                     clock_domain: None,
                 },
                 physical_constraints: None,
+                detection_config: None,
             },
             HirPort {
                 id: PortId(3),
@@ -55,6 +57,7 @@ fn create_simple_entity() -> Hir {
                 direction: HirPortDirection::Output,
                 port_type: HirType::Bit(8),
                 physical_constraints: None,
+                detection_config: None,
             },
         ],
         signals: vec![],

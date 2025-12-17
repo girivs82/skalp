@@ -7,6 +7,40 @@ use crate::safety_attributes::ModuleSafetyDefinitions;
 use crate::span::SourceSpan;
 use serde::{Deserialize, Serialize};
 
+// ============================================================================
+// Detection Signal Configuration (ISO 26262 Safety Analysis)
+// ============================================================================
+
+/// Detection mode for safety mechanism signals
+/// Determines when the detection is active and how it contributes to metrics
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DetectionMode {
+    /// Continuous runtime detection - contributes to SPFM
+    /// Faults are detected immediately during operation
+    #[default]
+    Continuous,
+    /// Boot-time detection (e.g., BIST) - contributes to LFM only
+    /// Faults are detected at power-on before operation begins
+    Boot,
+    /// Periodic detection - contributes to LFM with interval factor
+    /// Faults are detected within the specified interval
+    Periodic,
+    /// On-demand detection - requires software trigger
+    /// Does not automatically contribute to metrics
+    OnDemand,
+}
+
+/// Configuration for detection signals
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DetectionConfig {
+    /// When this detection is active
+    pub mode: DetectionMode,
+    /// For Periodic mode: detection interval in milliseconds
+    /// Used for PMHF calculation with time-dependent coverage
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u32>,
+}
+
 /// High-level Intermediate Representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hir {
@@ -199,6 +233,24 @@ pub struct HirPort {
     pub port_type: HirType,
     /// Physical constraints (pin mapping, I/O characteristics)
     pub physical_constraints: Option<PhysicalConstraints>,
+    /// Detection signal configuration (for safety analysis)
+    /// Set via #[detection_signal] or #[detection_signal(mode = "...")] attribute
+    /// None = not a detection signal, Some = detection signal with config
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection_config: Option<DetectionConfig>,
+}
+
+impl HirPort {
+    /// Check if this port is a detection signal (any mode)
+    /// Backward compatibility helper
+    pub fn is_detection_signal(&self) -> bool {
+        self.detection_config.is_some()
+    }
+
+    /// Get the detection mode if this is a detection signal
+    pub fn detection_mode(&self) -> Option<DetectionMode> {
+        self.detection_config.as_ref().map(|c| c.mode)
+    }
 }
 
 /// Port direction in HIR

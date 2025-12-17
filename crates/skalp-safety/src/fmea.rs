@@ -1150,6 +1150,7 @@ mod tests {
                     direction: skalp_frontend::hir::HirPortDirection::Input,
                     port_type: skalp_frontend::hir::HirType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                 },
                 skalp_frontend::hir::HirPort {
                     id: skalp_frontend::hir::PortId(1),
@@ -1157,6 +1158,7 @@ mod tests {
                     direction: skalp_frontend::hir::HirPortDirection::Output,
                     port_type: skalp_frontend::hir::HirType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                 },
             ],
             generics: vec![],

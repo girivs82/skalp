@@ -16,6 +16,7 @@ fn create_module_with_unused() -> Mir {
         port_type: DataType::Logic(8),
         physical_constraints: None,
         span: None,
+        detection_config: None,
     });
     module.ports.push(Port {
         id: PortId(1),
@@ -24,6 +25,7 @@ fn create_module_with_unused() -> Mir {
         port_type: DataType::Logic(8),
         physical_constraints: None,
         span: None,
+        detection_config: None,
     });
 
     // Add signals - some used, some unused
@@ -40,6 +42,7 @@ fn create_module_with_unused() -> Mir {
         breakpoint_config: None,
         power_config: None,
         safety_context: None,
+        detection_config: None,
     });
     module.signals.push(Signal {
         id: SignalId(1),
@@ -54,6 +57,7 @@ fn create_module_with_unused() -> Mir {
         breakpoint_config: None,
         power_config: None,
         safety_context: None,
+        detection_config: None,
     });
 
     // Add variables - some used, some unused
@@ -125,6 +129,7 @@ fn create_module_with_constants() -> Mir {
         port_type: DataType::Logic(8),
         physical_constraints: None,
         span: None,
+        detection_config: None,
     });
 
     // Add signal
@@ -141,6 +146,7 @@ fn create_module_with_constants() -> Mir {
         breakpoint_config: None,
         power_config: None,
         safety_context: None,
+        detection_config: None,
     });
 
     // Create process with constant expressions
@@ -262,6 +268,7 @@ fn test_constant_folding_arithmetic() {
         breakpoint_config: None,
         power_config: None,
         safety_context: None,
+        detection_config: None,
     });
 
     // Test various arithmetic operations
@@ -376,6 +383,7 @@ fn test_constant_folding_conditional() {
         breakpoint_config: None,
         power_config: None,
         safety_context: None,
+        detection_config: None,
     });
 
     // Test conditional expression with constant condition

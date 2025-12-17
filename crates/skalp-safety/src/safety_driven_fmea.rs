@@ -54,6 +54,7 @@ use crate::fault_simulation::{
 };
 use crate::hierarchy::{DesignRef, FailureClass, InstancePath, Severity};
 use serde::{Deserialize, Serialize};
+use skalp_frontend::hir::DetectionMode;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -334,6 +335,9 @@ pub struct FaultEffectResult {
     pub detection_cycle: Option<u64>,
     /// Is this primitive part of a safety mechanism (from #[implements(...)] annotation)?
     pub is_safety_mechanism: bool,
+    /// Detection mode of the signal that detected the fault (Continuous, Boot, Periodic, OnDemand)
+    /// Used to calculate separate runtime_dc (Continuous) vs boot_dc (Boot/Periodic/OnDemand)
+    pub detection_mode: Option<DetectionMode>,
 }
 
 impl FaultEffectResult {
@@ -379,6 +383,10 @@ pub struct FiDrivenFmeaResult {
     pub wall_time: Duration,
     /// Meets ASIL requirements?
     pub meets_asil: bool,
+    /// Runtime DC (continuous detection only) - for SPFM calculation
+    pub runtime_dc: Option<f64>,
+    /// Boot DC (boot-time detection) - for LFM calculation
+    pub boot_dc: Option<f64>,
 }
 
 // ============================================================================
@@ -561,6 +569,11 @@ impl SafetyDrivenFmeaGenerator {
             total_fit,
         );
 
+        // Calculate runtime_dc and boot_dc from FI results based on detection mode
+        // runtime_dc = faults detected by Continuous mode / total dangerous faults
+        // boot_dc = faults detected by Boot/Periodic/OnDemand modes / total dangerous faults
+        let (runtime_dc, boot_dc) = self.calculate_mode_specific_dc(results);
+
         FiDrivenFmeaResult {
             goal_name: self.spec.goal_name.clone(),
             design_name: design_name.to_string(),
@@ -574,7 +587,63 @@ impl SafetyDrivenFmeaGenerator {
             measured_pmhf: Some(pmhf),
             wall_time: start.elapsed(),
             meets_asil,
+            runtime_dc,
+            boot_dc,
         }
+    }
+
+    /// Calculate detection mode specific DC values from FI results
+    ///
+    /// ISO 26262 distinguishes between:
+    /// - Runtime (Continuous) detection: Contributes to SPFM calculation
+    /// - Boot-time/Periodic detection: Contributes to LFM calculation only
+    fn calculate_mode_specific_dc(&self, results: &[FaultEffectResult]) -> (Option<f64>, Option<f64>) {
+        // Count faults that caused dangerous effects (not safe faults)
+        let dangerous_faults: Vec<_> = results
+            .iter()
+            .filter(|r| !r.triggered_effects.is_empty())
+            .collect();
+
+        if dangerous_faults.is_empty() {
+            return (None, None);
+        }
+
+        let total_dangerous = dangerous_faults.len();
+
+        // Count faults detected by each mode
+        let mut continuous_detected = 0usize;
+        let mut boot_detected = 0usize;
+
+        for result in &dangerous_faults {
+            if result.detected {
+                match result.detection_mode {
+                    Some(DetectionMode::Continuous) | None => {
+                        // Default to Continuous if not specified (backwards compatibility)
+                        continuous_detected += 1;
+                    }
+                    Some(DetectionMode::Boot)
+                    | Some(DetectionMode::Periodic)
+                    | Some(DetectionMode::OnDemand) => {
+                        boot_detected += 1;
+                    }
+                }
+            }
+        }
+
+        // Calculate DC percentages
+        let runtime_dc = if continuous_detected > 0 {
+            Some((continuous_detected as f64 / total_dangerous as f64) * 100.0)
+        } else {
+            Some(0.0)
+        };
+
+        let boot_dc = if boot_detected > 0 {
+            Some((boot_detected as f64 / total_dangerous as f64) * 100.0)
+        } else {
+            Some(0.0)
+        };
+
+        (runtime_dc, boot_dc)
     }
 
     /// Calculate SPFM, LF, and PMHF from effect analyses
@@ -807,6 +876,17 @@ pub fn convert_campaign_to_effect_results(
 
         let fault_type = convert_fault_type(fault_result.fault.fault_type);
 
+        // Convert detection mode from SIR to HIR enum
+        let detection_mode = fault_result.detection_mode.map(|m| {
+            use skalp_sim::sir::SirDetectionMode;
+            match m {
+                SirDetectionMode::Continuous => DetectionMode::Continuous,
+                SirDetectionMode::Boot => DetectionMode::Boot,
+                SirDetectionMode::Periodic => DetectionMode::Periodic,
+                SirDetectionMode::OnDemand => DetectionMode::OnDemand,
+            }
+        });
+
         results.push(FaultEffectResult {
             fault_site: FaultSite::new(DesignRef::parse(&path), fault_type),
             primitive_path: path,
@@ -816,6 +896,7 @@ pub fn convert_campaign_to_effect_results(
             effect_cycle: None, // Would need cycle-accurate monitoring
             detection_cycle: fault_result.detection_cycle,
             is_safety_mechanism: false, // Set by caller from annotations
+            detection_mode,
         });
     }
 
@@ -962,6 +1043,7 @@ mod tests {
                 effect_cycle: Some(10),
                 detection_cycle: Some(5),
                 is_safety_mechanism: false,
+            detection_mode: None,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("top.brake.reg1"), FaultType::StuckAt1),
@@ -972,6 +1054,7 @@ mod tests {
                 effect_cycle: Some(15),
                 detection_cycle: None,
                 is_safety_mechanism: false,
+            detection_mode: None,
             },
         ];
 
@@ -1006,6 +1089,7 @@ mod tests {
             effect_cycle: Some(10),
             detection_cycle: None,
             is_safety_mechanism: false,
+            detection_mode: None,
         };
         assert!(dangerous.is_dangerous_undetected());
 
@@ -1018,6 +1102,7 @@ mod tests {
             effect_cycle: Some(10),
             detection_cycle: Some(5), // Detected before effect
             is_safety_mechanism: false,
+            detection_mode: None,
         };
         assert!(!safe.is_dangerous_undetected());
         assert!(safe.is_safe_detection());

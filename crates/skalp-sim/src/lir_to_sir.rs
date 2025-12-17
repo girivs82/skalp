@@ -13,12 +13,13 @@
 
 use crate::sir::{
     CombBlockId, CombinationalBlock, EdgeType, ResetSpec, SeqBlockId, SequentialBlock, Sir,
-    SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId, SirSignalType,
-    StructuralBlockInfo,
+    SirDetectionMode, SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId,
+    SirSignalType, StructuralBlockInfo,
 };
 use bitvec::prelude::*;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
+use skalp_frontend::hir::DetectionMode;
 use skalp_lir::lir::{Lir, LirNet, NetId, Primitive, PrimitiveId};
 use std::collections::HashMap;
 
@@ -174,12 +175,26 @@ impl LirToSirConverter {
                 SirSignalType::Wire
             };
 
+            // Convert detection mode from LIR to SIR
+            let detection_mode = net
+                .detection_config
+                .as_ref()
+                .map(|c| match c.mode {
+                    DetectionMode::Continuous => SirDetectionMode::Continuous,
+                    DetectionMode::Boot => SirDetectionMode::Boot,
+                    DetectionMode::Periodic => SirDetectionMode::Periodic,
+                    DetectionMode::OnDemand => SirDetectionMode::OnDemand,
+                })
+                .unwrap_or(SirDetectionMode::Continuous);
+
             signals.push(SirSignal {
                 id: signal_id,
                 name: net.name.clone(),
                 width: net.width as usize,
                 signal_type,
                 initial_value: Some(bitvec![0; net.width as usize]),
+                is_detection: net.is_detection, // Propagate detection signal flag from LIR
+                detection_mode,                 // Propagate detection mode for FI analysis
             });
         }
 

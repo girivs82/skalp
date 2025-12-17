@@ -443,6 +443,8 @@ impl FaultDiagnostics {
     }
 
     /// Classify all undetected faults and generate summary
+    /// Note: This uses heuristics only. For accurate CCF classification,
+    /// use `classify_with_ccf()` which uses actual netlist connectivity.
     pub fn classify_all(
         &self,
         faults: &[FaultSite],
@@ -454,10 +456,15 @@ impl FaultDiagnostics {
             classified.push(cf);
         }
 
-        // Identify common cause potential (legacy: based on name matching)
-        self.identify_common_cause(&mut classified);
+        // NOTE: We no longer call identify_common_cause() here.
+        // The primitive name matching heuristic was misleading - it grouped
+        // independent faults as "CCF potential" just because they had the same
+        // primitive type (e.g., all assign statements).
+        //
+        // True CCF classification requires actual netlist connectivity analysis,
+        // which is done in classify_with_ccf().
 
-        // Build summary from final classified list (after all modifications)
+        // Build summary from final classified list
         let summary = Self::build_summary(&classified);
 
         (classified, summary)
@@ -699,9 +706,29 @@ fn extract_component(path: &str) -> String {
 fn extract_primitive_name(path: &str) -> String {
     let parts: Vec<&str> = path.split('.').collect();
     if let Some(last) = parts.last() {
-        // Remove numeric suffix (e.g., "mux_0" -> "mux")
-        let name = last.split('_').next().unwrap_or(last);
-        return name.to_string();
+        // Handle underscore-prefixed names (e.g., "_safe_state_buf" -> "buf")
+        let trimmed = last.trim_start_matches('_');
+        if trimmed.is_empty() {
+            return last.to_string();
+        }
+        // Extract the type suffix (e.g., "_safe_state_buf" -> "buf", "mux_0" -> "mux")
+        // For buffer names like "_foo_buf", get the last meaningful part
+        let parts_inner: Vec<&str> = trimmed.split('_').collect();
+        if parts_inner.len() > 1 {
+            // Check if last part is a number (index) - if so, use second-to-last
+            if let Some(last_part) = parts_inner.last() {
+                if last_part.chars().all(|c| c.is_ascii_digit()) {
+                    // It's an index, return the type before it
+                    if parts_inner.len() > 1 {
+                        return parts_inner[parts_inner.len() - 2].to_string();
+                    }
+                }
+                // Otherwise return the last non-empty part (e.g., "buf" from "safe_state_buf")
+                return last_part.to_string();
+            }
+        }
+        // Single part - return it
+        return trimmed.to_string();
     }
     path.to_string()
 }
@@ -1719,6 +1746,12 @@ mod tests {
     fn test_extract_primitive_name() {
         assert_eq!(extract_primitive_name("top.voter.mux_0"), "mux");
         assert_eq!(extract_primitive_name("top.ch_a.dff_10"), "dff");
+        // Test underscore-prefixed buffer names
+        assert_eq!(extract_primitive_name("top.safe_ctrl._safe_state_buf"), "buf");
+        assert_eq!(extract_primitive_name("top.bist._bist_pass_buf"), "buf");
+        assert_eq!(extract_primitive_name("top.cmd_proc._clk_buf"), "buf");
+        // Test regular assign
+        assert_eq!(extract_primitive_name("top.cmd_proc.CommandProcessor.assign_20"), "assign");
     }
 
     #[test]

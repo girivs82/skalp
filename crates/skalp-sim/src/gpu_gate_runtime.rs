@@ -983,6 +983,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -994,6 +996,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -1005,6 +1009,8 @@ mod tests {
             is_primary_input: false,
             is_primary_output: true,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -1045,6 +1051,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -1056,6 +1064,8 @@ mod tests {
             is_primary_input: true,
             is_primary_output: false,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 
@@ -1067,6 +1077,8 @@ mod tests {
             is_primary_input: false,
             is_primary_output: true,
             is_state_output: false,
+            is_detection: false,
+            detection_config: None,
             width: 1,
         });
 

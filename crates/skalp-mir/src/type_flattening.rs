@@ -469,6 +469,7 @@ impl TypeFlattener {
             port_type: port_type.clone(),
             physical_constraints: physical_constraints.cloned(),
             span,
+            detection_config: None, // Will be set by hir_to_mir if annotated
         };
         ports.push(port);
 
@@ -661,6 +662,7 @@ impl TypeFlattener {
             breakpoint_config: None,
             power_config: None,
             safety_context: None,
+            detection_config: None,
         };
         signals.push(signal);
 

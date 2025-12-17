@@ -295,6 +295,10 @@ pub struct WordSignal {
     pub is_input: bool,
     /// Is this a primary output?
     pub is_output: bool,
+    /// Is this a detection signal (for safety analysis)?
+    /// Set via #[detection_signal] attribute on port
+    #[serde(default)]
+    pub is_detection: bool,
 }
 
 /// Word-level intermediate representation
@@ -314,6 +318,10 @@ pub struct WordLir {
     pub clocks: Vec<WordSignalId>,
     /// Reset signals
     pub resets: Vec<WordSignalId>,
+    /// Detection signals (for safety analysis)
+    /// These are output signals marked with #[detection_signal]
+    #[serde(default)]
+    pub detection_signals: Vec<WordSignalId>,
     /// Signal name to ID mapping
     signal_map: HashMap<String, WordSignalId>,
     /// Module-level safety information (from MIR SafetyContext)
@@ -333,6 +341,7 @@ impl WordLir {
             outputs: Vec::new(),
             clocks: Vec::new(),
             resets: Vec::new(),
+            detection_signals: Vec::new(),
             signal_map: HashMap::new(),
             module_safety_info: None,
         }
@@ -349,6 +358,7 @@ impl WordLir {
             driver: None,
             is_input: false,
             is_output: false,
+            is_detection: false,
         });
         id
     }
@@ -367,6 +377,24 @@ impl WordLir {
         self.signals[id.0 as usize].is_output = true;
         self.outputs.push(id);
         id
+    }
+
+    /// Add a detection signal output (for safety analysis)
+    pub fn add_detection_output(&mut self, name: String, width: u32) -> WordSignalId {
+        let id = self.add_output(name, width);
+        self.signals[id.0 as usize].is_detection = true;
+        self.detection_signals.push(id);
+        id
+    }
+
+    /// Mark an existing signal as a detection signal
+    pub fn mark_as_detection(&mut self, id: WordSignalId) {
+        if let Some(signal) = self.signals.get_mut(id.0 as usize) {
+            signal.is_detection = true;
+            if !self.detection_signals.contains(&id) {
+                self.detection_signals.push(id);
+            }
+        }
     }
 
     /// Add a node (operation) and return its ID

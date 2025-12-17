@@ -63,6 +63,28 @@ pub struct SirSignal {
     pub signal_type: SirSignalType,
     /// Initial value (for registers)
     pub initial_value: Option<BitVec>,
+    /// Whether this signal is a detection signal (for safety analysis)
+    /// Set via #[detection_signal] attribute on port
+    #[serde(default)]
+    pub is_detection: bool,
+    /// Detection mode for safety analysis (Continuous, Boot, Periodic, OnDemand)
+    /// Continuous contributes to SPFM, Boot/Periodic/OnDemand contribute to LFM only
+    #[serde(default)]
+    pub detection_mode: SirDetectionMode,
+}
+
+/// Detection mode for safety signals - mirrors HIR DetectionMode for FI simulation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SirDetectionMode {
+    /// Continuous runtime detection - contributes to SPFM
+    #[default]
+    Continuous,
+    /// Boot-time detection (BIST) - contributes to LFM only
+    Boot,
+    /// Periodic detection - contributes to LFM with interval factor
+    Periodic,
+    /// On-demand detection (software-triggered) - contributes to LFM only
+    OnDemand,
 }
 
 /// Signal ID type

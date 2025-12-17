@@ -203,9 +203,18 @@ impl MirToLirTransform {
     }
 
     /// Create nets for a port (one per bit)
-    fn create_port_nets(&mut self, port: &skalp_mir::mir::Port, module: &Module) {
+    fn create_port_nets(&mut self, port: &skalp_mir::mir::Port, _module: &Module) {
         let width = Self::get_type_width(&port.port_type);
         self.port_widths.insert(port.id, width);
+
+        // BUG FIX: Propagate detection signal flag from MIR port to LIR
+        let is_detection = port.is_detection_signal();
+        if is_detection {
+            println!(
+                "✅ [LIR_DETECTION] Port '{}' is marked as detection signal",
+                port.name
+            );
+        }
 
         for bit in 0..width {
             let net_name = if width == 1 {
@@ -215,7 +224,7 @@ impl MirToLirTransform {
             };
 
             let net_id = self.alloc_net_id();
-            let net = match port.direction {
+            let mut net = match port.direction {
                 PortDirection::Input => {
                     self.lir.inputs.push(net_id);
                     // Check if this is a clock
@@ -245,6 +254,12 @@ impl MirToLirTransform {
                 }
             };
 
+            // Propagate detection signal flag and config
+            if is_detection {
+                net.is_detection = true;
+                net.detection_config = port.detection_config.clone();
+            }
+
             self.lir.add_net(net);
             self.lvalue_to_net
                 .insert((0, port.id.0, bit as u32), net_id);
@@ -257,6 +272,16 @@ impl MirToLirTransform {
     fn create_signal_nets(&mut self, signal: &skalp_mir::mir::Signal) {
         let width = Self::get_type_width(&signal.signal_type);
         self.signal_widths.insert(signal.id, width);
+
+        // BUG FIX: Propagate detection signal flag from MIR to LIR
+        // This is critical for hierarchical detection signal propagation
+        let is_detection = signal.is_detection_signal();
+        if is_detection {
+            println!(
+                "✅ [LIR_DETECTION] Signal '{}' is marked as detection signal",
+                signal.name
+            );
+        }
 
         for bit in 0..width {
             let net_name = if width == 1 {
@@ -271,6 +296,12 @@ impl MirToLirTransform {
             // If signal has initial value, it's a register output
             if signal.initial.is_some() {
                 net.is_state_output = true;
+            }
+
+            // Propagate detection signal flag and config
+            if is_detection {
+                net.is_detection = true;
+                net.detection_config = signal.detection_config.clone();
             }
 
             self.lir.add_net(net);
@@ -1285,6 +1316,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1293,6 +1325,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1301,6 +1334,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1392,6 +1426,7 @@ mod tests {
                 direction: PortDirection::Input,
                 port_type: DataType::Bit(8),
                 physical_constraints: None,
+                detection_config: None,
                 span: None,
             }],
             signals: Vec::new(),
@@ -1428,6 +1463,7 @@ mod tests {
                 direction: PortDirection::Output,
                 port_type: DataType::Bit(1),
                 physical_constraints: None,
+                detection_config: None,
                 span: None,
             }],
             signals: Vec::new(),
@@ -1483,6 +1519,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1491,6 +1528,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1499,6 +1537,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1554,6 +1593,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1562,6 +1602,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1570,6 +1611,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1625,6 +1667,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1633,6 +1676,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1685,6 +1729,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(4),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1693,6 +1738,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(4),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1701,6 +1747,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(4),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1760,6 +1807,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1768,6 +1816,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1776,6 +1825,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1784,6 +1834,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1841,6 +1892,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(4),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1849,6 +1901,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(4),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1857,6 +1910,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(1),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1915,6 +1969,7 @@ mod tests {
                     direction: PortDirection::Input,
                     port_type: DataType::Bit(4),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
                 Port {
@@ -1923,6 +1978,7 @@ mod tests {
                     direction: PortDirection::Output,
                     port_type: DataType::Bit(4),
                     physical_constraints: None,
+                    detection_config: None,
                     span: None,
                 },
             ],
@@ -1939,6 +1995,7 @@ mod tests {
                 breakpoint_config: None,
                 power_config: None,
                 safety_context: None,
+                detection_config: None,
             }],
             variables: Vec::new(),
             processes: Vec::new(),

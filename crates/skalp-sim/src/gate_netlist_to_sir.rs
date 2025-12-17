@@ -17,9 +17,10 @@
 
 use crate::sir::{
     CombBlockId, CombinationalBlock, EdgeType, ResetSpec, SeqBlockId, SequentialBlock, Sir,
-    SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId, SirSignalType,
-    StructuralBlockInfo,
+    SirDetectionMode, SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId,
+    SirSignalType, StructuralBlockInfo,
 };
+use skalp_frontend::hir::DetectionMode;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use skalp_lir::lir::{PrimitiveId, PrimitiveType};
 use std::collections::HashMap;
@@ -109,12 +110,26 @@ impl GateNetlistToSirConverter {
                 SirSignalType::Wire
             };
 
+            // Convert detection mode from HIR DetectionMode to SIR SirDetectionMode
+            let detection_mode = net
+                .detection_config
+                .as_ref()
+                .map(|c| match c.mode {
+                    DetectionMode::Continuous => SirDetectionMode::Continuous,
+                    DetectionMode::Boot => SirDetectionMode::Boot,
+                    DetectionMode::Periodic => SirDetectionMode::Periodic,
+                    DetectionMode::OnDemand => SirDetectionMode::OnDemand,
+                })
+                .unwrap_or(SirDetectionMode::Continuous);
+
             let signal = SirSignal {
                 id: signal_id,
                 name: net.name.clone(),
                 width: 1, // Gate-level nets are typically single-bit
                 signal_type,
                 initial_value: None,
+                is_detection: net.is_detection, // Propagate detection signal flag
+                detection_mode,                 // Propagate detection mode for FI analysis
             };
 
             module.signals.push(signal);
