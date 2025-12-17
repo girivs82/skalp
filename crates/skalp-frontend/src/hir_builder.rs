@@ -819,6 +819,10 @@ impl HirBuilderContext {
 
         // Consume pending safety mechanism config (from #[safety_mechanism(...)] attribute)
         let safety_mechanism_config = self.pending_safety_mechanism_config.take();
+        eprintln!(
+            "🔍 [BUILD_ENTITY] Entity '{}' - safety_mechanism_config = {:?}",
+            name, safety_mechanism_config
+        );
 
         Some(HirEntity {
             id,
@@ -8255,6 +8259,16 @@ impl HirBuilderContext {
             .iter()
             .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "safety_mechanism");
 
+        // Debug: show all tokens in the attribute
+        eprintln!(
+            "🔍 [ATTR] Checking attribute tokens: {:?}",
+            tokens
+                .iter()
+                .map(|t| (t.kind(), t.text()))
+                .collect::<Vec<_>>()
+        );
+        eprintln!("🔍 [ATTR] has_safety_mechanism = {}", has_safety_mechanism);
+
         if !has_safety_mechanism {
             return None;
         }
@@ -8379,7 +8393,12 @@ impl HirBuilderContext {
         }
 
         // Only return Some if we found at least the mechanism type
+        eprintln!(
+            "🔍 [ATTR] Parsed: mechanism_type={:?}, dc={:?}, lc={:?}",
+            mechanism_type, dc, lc
+        );
         if mechanism_type.is_some() || dc.is_some() || lc.is_some() {
+            eprintln!("🔍 [ATTR] ✅ Returning SafetyMechanismConfig");
             Some(SafetyMechanismConfig {
                 mechanism_type,
                 dc,

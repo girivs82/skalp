@@ -275,7 +275,6 @@ impl<'hir> HirToMir<'hir> {
     pub fn transform(&mut self, hir: &'hir Hir) -> Mir {
         use std::time::Instant;
         let transform_start = Instant::now();
-        eprintln!("⏱️  [PERF] Starting HIR→MIR transform...");
 
         self.hir = Some(hir);
 
@@ -288,10 +287,8 @@ impl<'hir> HirToMir<'hir> {
         mir.safety_definitions = hir.safety_definitions.clone();
 
         // First pass: create modules for entities
-        eprintln!("⏱️  [PERF] Processing {} entities...", hir.entities.len());
         for entity in &hir.entities {
             let entity_start = Instant::now();
-            eprintln!("⏱️  [PERF]   Starting entity '{}'...", entity.name);
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
 

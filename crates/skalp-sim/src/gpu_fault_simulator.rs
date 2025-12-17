@@ -505,7 +505,8 @@ kernel void fault_sim_kernel(
     constant uint& num_primitives [[buffer(4)]],
     constant uint& num_cycles [[buffer(5)]],
     constant uint& num_outputs [[buffer(6)]],
-    constant uint& detection_mask [[buffer(7)]],
+    device const uint* detection_signal_ids [[buffer(7)]],
+    constant uint& num_detection_signals [[buffer(8)]],
     uint tid [[thread_position_in_grid]]
 ) {{
     // Each thread simulates one fault
@@ -544,16 +545,14 @@ kernel void fault_sim_kernel(
             signals[prim.output] = result;
         }}
 
-        // Check detection signals (bitmask)
-        if (detected == 0 && detection_mask != 0) {{
-            // Check if any detection signal is high
-            for (uint d = 0; d < 32; d++) {{
-                if ((detection_mask >> d) & 1) {{
-                    if (signals[d] != 0) {{
-                        detected = 1;
-                        detection_cycle = cycle;
-                        break;
-                    }}
+        // Check detection signals (array-based - supports any signal ID)
+        if (detected == 0 && num_detection_signals > 0) {{
+            for (uint d = 0; d < num_detection_signals; d++) {{
+                uint sig_id = detection_signal_ids[d];
+                if (sig_id < {} && signals[sig_id] != 0) {{
+                    detected = 1;
+                    detection_cycle = cycle;
+                    break;
                 }}
             }}
         }}
@@ -576,7 +575,8 @@ kernel void fault_sim_kernel(
 "#,
             num_signals.max(1),
             num_signals.max(1),
-            num_signals.max(1)
+            num_signals.max(1),
+            num_signals.max(1) // For sig_id bounds check
         ));
 
         shader
@@ -687,12 +687,16 @@ kernel void fault_sim_kernel(
         let num_cycles = config.cycles_per_fault as u32;
         let num_outputs = self.output_ports.len() as u32;
 
-        // Detection mask (bitmask of detection signal indices)
-        let detection_mask: u32 = self
-            .detection_signals
-            .iter()
-            .filter(|id| id.0 < 32)
-            .fold(0u32, |acc, id| acc | (1 << id.0));
+        // Detection signal IDs (array-based instead of bitmask - supports any signal ID)
+        let detection_signal_ids: Vec<u32> = self.detection_signals.iter().map(|id| id.0).collect();
+        let num_detection_signals = detection_signal_ids.len() as u32;
+
+        // Create detection signals buffer
+        let detection_buffer = self.device.new_buffer_with_data(
+            detection_signal_ids.as_ptr() as _,
+            (detection_signal_ids.len().max(1) * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
 
         // Execute kernel
         let pipeline = self.fault_sim_pipeline.as_ref().unwrap();
@@ -721,10 +725,11 @@ kernel void fault_sim_kernel(
             std::mem::size_of::<u32>() as u64,
             &num_outputs as *const u32 as _,
         );
+        encoder.set_buffer(7, Some(&detection_buffer), 0);
         encoder.set_bytes(
-            7,
+            8,
             std::mem::size_of::<u32>() as u64,
-            &detection_mask as *const u32 as _,
+            &num_detection_signals as *const u32 as _,
         );
 
         let thread_group_size = MTLSize::new(64, 1, 1);

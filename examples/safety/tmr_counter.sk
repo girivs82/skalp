@@ -1,5 +1,10 @@
 // TMR-Protected Counter - Safety Mechanism Example
 // Demonstrates FI-driven DC measurement with actual safety mechanisms
+//
+// Safety Architecture:
+// - SG-001: Safety goal for counter integrity
+// - TmrVoting: Safety mechanism implementing TMR voter
+// - CounterChannel: Functional logic (protected by TMR)
 
 // Simple 8-bit counter channel (functional logic)
 entity CounterChannel {
@@ -25,6 +30,8 @@ impl CounterChannel {
 
 // TMR Voter - Safety Mechanism
 // Detects single faults by comparing three redundant channels
+#[implements(SG001::TmrVoting)]
+#[safety_mechanism(type=tmr)]
 entity TmrVoter {
     in a: bit[8]
     in b: bit[8]
