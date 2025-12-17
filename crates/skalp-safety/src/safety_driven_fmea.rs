@@ -332,6 +332,8 @@ pub struct FaultEffectResult {
     pub effect_cycle: Option<u64>,
     /// Cycle at which detection occurred
     pub detection_cycle: Option<u64>,
+    /// Is this primitive part of a safety mechanism (from #[implements(...)] annotation)?
+    pub is_safety_mechanism: bool,
 }
 
 impl FaultEffectResult {
@@ -813,6 +815,7 @@ pub fn convert_campaign_to_effect_results(
             detected_by,
             effect_cycle: None, // Would need cycle-accurate monitoring
             detection_cycle: fault_result.detection_cycle,
+            is_safety_mechanism: false, // Set by caller from annotations
         });
     }
 
@@ -958,6 +961,7 @@ mod tests {
                 detected_by: Some("TmrVoter".to_string()),
                 effect_cycle: Some(10),
                 detection_cycle: Some(5),
+                is_safety_mechanism: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("top.brake.reg1"), FaultType::StuckAt1),
@@ -967,6 +971,7 @@ mod tests {
                 detected_by: None,
                 effect_cycle: Some(15),
                 detection_cycle: None,
+                is_safety_mechanism: false,
             },
         ];
 
@@ -1000,6 +1005,7 @@ mod tests {
             detected_by: None,
             effect_cycle: Some(10),
             detection_cycle: None,
+            is_safety_mechanism: false,
         };
         assert!(dangerous.is_dangerous_undetected());
 
@@ -1011,6 +1017,7 @@ mod tests {
             detected_by: Some("SM".to_string()),
             effect_cycle: Some(10),
             detection_cycle: Some(5), // Detected before effect
+            is_safety_mechanism: false,
         };
         assert!(!safe.is_dangerous_undetected());
         assert!(safe.is_safe_detection());

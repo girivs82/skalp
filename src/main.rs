@@ -1959,7 +1959,7 @@ fn run_fi_driven_safety(
     skip_fi: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::lower_to_lir;
+    use skalp_lir::lower_to_flattened_lir;
     use skalp_safety::asil::AsilLevel;
     use skalp_safety::fault_simulation::{EffectCondition, FailureEffectDef, SafetyGoalSimSpec};
     use skalp_safety::hierarchy::{DesignRef, Severity};
@@ -2003,17 +2003,10 @@ fn run_fi_driven_safety(
         .compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
-    // Lower to gate-level netlist
-    println!("🔩 Converting to gate-level netlist...");
-    let gate_results = lower_to_lir(&mir)?;
-
-    if gate_results.is_empty() {
-        anyhow::bail!("No gate-level netlists generated");
-    }
-
-    // Get top-level module (last module in HDL convention)
-    let primary_result = gate_results.last().unwrap();
-    let lir = &primary_result.lir;
+    // Lower to flattened gate-level netlist (inlines all module instances)
+    println!("🔩 Converting to flattened gate-level netlist...");
+    let flattened_result = lower_to_flattened_lir(&mir, None)?;
+    let lir = &flattened_result.lir;
     let total_primitives = lir.primitives.len();
     let total_fit: f64 = lir.primitives.iter().map(|p| p.ptype.base_fit()).sum();
 
@@ -2077,6 +2070,25 @@ fn run_fi_driven_safety(
         // Convert to SIR for simulation
         let sir_result = convert_lir_to_sir(lir);
 
+        // Build map of primitive ID -> (hierarchical path, is_safety_mechanism) for diagnostics
+        let primitive_paths: std::collections::HashMap<u32, String> = lir
+            .primitives
+            .iter()
+            .map(|p| (p.id.0, p.path.clone()))
+            .collect();
+
+        // Build set of primitive IDs that are safety mechanisms (from annotations)
+        let sm_primitives: std::collections::HashSet<u32> = lir
+            .primitives
+            .iter()
+            .filter(|p| {
+                p.safety_info
+                    .as_ref()
+                    .is_some_and(|s| s.mechanism_name.is_some())
+            })
+            .map(|p| p.id.0)
+            .collect();
+
         let mut results = Vec::new();
 
         #[cfg(target_os = "macos")]
@@ -2106,24 +2118,30 @@ fn run_fi_driven_safety(
 
                         // Convert to FaultEffectResult format
                         for fault_result in &campaign.fault_results {
+                            let prim_id = fault_result.fault.target_primitive.0;
+                            let prim_path = primitive_paths
+                                .get(&prim_id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("prim_{}", prim_id));
+
                             let triggered = if !fault_result.output_diffs.is_empty() {
                                 vec!["output_corruption".to_string()]
                             } else {
                                 vec![]
                             };
 
+                            let fault_type = match fault_result.fault.fault_type {
+                                SimFaultType::StuckAt0 => FaultType::StuckAt0,
+                                SimFaultType::StuckAt1 => FaultType::StuckAt1,
+                                _ => FaultType::StuckAt0, // Default for complex fault types
+                            };
+
                             results.push(FaultEffectResult {
                                 fault_site: skalp_safety::fault_simulation::FaultSite::new(
-                                    DesignRef::parse(&format!(
-                                        "prim_{}",
-                                        fault_result.fault.target_primitive.0
-                                    )),
-                                    FaultType::StuckAt0,
+                                    DesignRef::parse(&prim_path),
+                                    fault_type,
                                 ),
-                                primitive_path: format!(
-                                    "prim_{}",
-                                    fault_result.fault.target_primitive.0
-                                ),
+                                primitive_path: prim_path,
                                 triggered_effects: triggered,
                                 detected: fault_result.detected,
                                 detected_by: if fault_result.detected {
@@ -2133,23 +2151,42 @@ fn run_fi_driven_safety(
                                 },
                                 effect_cycle: None,
                                 detection_cycle: fault_result.detection_cycle,
+                                is_safety_mechanism: sm_primitives.contains(&prim_id),
                             });
                         }
                     }
                     Err(e) => {
                         println!("   GPU init failed: {}. Using CPU.", e);
-                        results = run_cpu_fi_campaign(&sir_result.sir, cycles, max_faults)?;
+                        results = run_cpu_fi_campaign(
+                            &sir_result.sir,
+                            cycles,
+                            max_faults,
+                            &primitive_paths,
+                            &sm_primitives,
+                        )?;
                     }
                 }
             } else {
-                results = run_cpu_fi_campaign(&sir_result.sir, cycles, max_faults)?;
+                results = run_cpu_fi_campaign(
+                    &sir_result.sir,
+                    cycles,
+                    max_faults,
+                    &primitive_paths,
+                    &sm_primitives,
+                )?;
             }
         }
 
         #[cfg(not(target_os = "macos"))]
         {
             let _ = use_gpu; // Suppress unused warning
-            results = run_cpu_fi_campaign(&sir_result.sir, cycles, max_faults)?;
+            results = run_cpu_fi_campaign(
+                &sir_result.sir,
+                cycles,
+                max_faults,
+                &primitive_paths,
+                &sm_primitives,
+            )?;
         }
 
         results
@@ -2226,6 +2263,8 @@ fn run_cpu_fi_campaign(
     sir: &skalp_sim::sir::Sir,
     cycles: u64,
     max_faults: usize,
+    primitive_paths: &std::collections::HashMap<u32, String>,
+    sm_primitives: &std::collections::HashSet<u32>,
 ) -> Result<Vec<skalp_safety::safety_driven_fmea::FaultEffectResult>> {
     use skalp_safety::fault_simulation::FaultType;
     use skalp_safety::hierarchy::DesignRef;
@@ -2249,18 +2288,31 @@ fn run_cpu_fi_campaign(
 
     let mut results = Vec::new();
     for fault_result in &campaign.fault_results {
+        let prim_id = fault_result.fault.target_primitive.0;
+        let prim_path = primitive_paths
+            .get(&prim_id)
+            .cloned()
+            .unwrap_or_else(|| format!("prim_{}", prim_id));
+
         let triggered = if !fault_result.output_diffs.is_empty() {
             vec!["output_corruption".to_string()]
         } else {
             vec![]
         };
 
+        // Determine fault type from the actual fault
+        let fault_type = match fault_result.fault.fault_type {
+            SimFaultType::StuckAt0 => FaultType::StuckAt0,
+            SimFaultType::StuckAt1 => FaultType::StuckAt1,
+            _ => FaultType::StuckAt0, // Default for complex fault types
+        };
+
         results.push(skalp_safety::safety_driven_fmea::FaultEffectResult {
             fault_site: skalp_safety::fault_simulation::FaultSite::new(
-                DesignRef::parse(&format!("prim_{}", fault_result.fault.target_primitive.0)),
-                FaultType::StuckAt0,
+                DesignRef::parse(&prim_path),
+                fault_type,
             ),
-            primitive_path: format!("prim_{}", fault_result.fault.target_primitive.0),
+            primitive_path: prim_path,
             triggered_effects: triggered,
             detected: fault_result.detected,
             detected_by: if fault_result.detected {
@@ -2270,6 +2322,7 @@ fn run_cpu_fi_campaign(
             },
             effect_cycle: None,
             detection_cycle: fault_result.detection_cycle,
+            is_safety_mechanism: sm_primitives.contains(&prim_id),
         });
     }
 
@@ -2388,6 +2441,87 @@ fn generate_fi_driven_fmeda_md(
                 status
             ));
         }
+    }
+
+    // Add diagnostics section for undetected faults
+    let mut has_undetected = false;
+    for (name, analysis) in &result.effect_analyses {
+        if !name.starts_with('_') && !analysis.undetected_sites.is_empty() {
+            has_undetected = true;
+            break;
+        }
+    }
+
+    if has_undetected {
+        md.push_str("\n## Diagnostic Analysis: Undetected Faults\n\n");
+        md.push_str("The following faults caused safety-relevant effects but were **not detected** by any safety mechanism.\n\n");
+        md.push_str("> **Note**: Safety mechanism classification requires `#[implements(...)]` annotations on components.\n\n");
+
+        for (name, analysis) in &result.effect_analyses {
+            if !name.starts_with('_') && !analysis.undetected_sites.is_empty() {
+                md.push_str(&format!(
+                    "### Effect: {} ({} undetected)\n\n",
+                    name,
+                    analysis.undetected_sites.len()
+                ));
+
+                // Group by hierarchy (top-level component)
+                let mut by_component: std::collections::HashMap<
+                    String,
+                    Vec<&skalp_safety::fault_simulation::FaultSite>,
+                > = std::collections::HashMap::new();
+
+                for site in &analysis.undetected_sites {
+                    let path = site.primitive_path.to_string();
+                    // Extract top-level component (e.g., "top.voter" -> "voter", "top.ch_a" -> "ch_a")
+                    let component = path
+                        .strip_prefix("top.")
+                        .unwrap_or(&path)
+                        .split('.')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    by_component.entry(component).or_default().push(site);
+                }
+
+                // Sort components by fault count (descending)
+                let mut components: Vec<_> = by_component.iter().collect();
+                components.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+                for (component, faults) in components {
+                    md.push_str(&format!(
+                        "#### Component: `{}` ({} faults)\n\n",
+                        component,
+                        faults.len()
+                    ));
+
+                    md.push_str("| Fault Site | Type |\n");
+                    md.push_str("|------------|------|\n");
+                    for site in faults.iter().take(10) {
+                        md.push_str(&format!(
+                            "| `{}` | {} |\n",
+                            site.primitive_path,
+                            site.fault_type.name()
+                        ));
+                    }
+                    if faults.len() > 10 {
+                        md.push_str(&format!("| ... | ({} more) |\n", faults.len() - 10));
+                    }
+                    md.push('\n');
+                }
+            }
+        }
+
+        // Add recommendations
+        md.push_str("## Recommendations to Improve SPFM\n\n");
+        md.push_str("1. **Protect the voter**: Add dual-voter or self-checking logic to detect faults in the SM itself\n");
+        md.push_str(
+            "2. **Extend simulation**: Increase `--cycles` to give faults more time to propagate\n",
+        );
+        md.push_str("3. **Add watchdog**: Monitor voter output for unexpected values\n");
+        md.push_str(
+            "4. **Review common paths**: Ensure inputs are not shared before redundancy split\n",
+        );
     }
 
     md

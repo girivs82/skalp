@@ -209,6 +209,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("TmrVoter".to_string()),
                 effect_cycle: Some(10),
                 detection_cycle: Some(5),
+                is_safety_mechanism: false,
             },
             // Fault 2: Stuck-at-1 on TMR voter - DETECTED by TMR
             FaultEffectResult {
@@ -222,6 +223,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("TmrVoter".to_string()),
                 effect_cycle: Some(8),
                 detection_cycle: Some(4),
+                is_safety_mechanism: false,
             },
             // Fault 3: Watchdog counter fault - DETECTED by watchdog
             FaultEffectResult {
@@ -235,6 +237,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("WatchdogTimer".to_string()),
                 effect_cycle: Some(1000),
                 detection_cycle: Some(1000),
+                is_safety_mechanism: false,
             },
             // Fault 4: Safe state controller - NOT DETECTED (dangerous!)
             FaultEffectResult {
@@ -248,6 +251,7 @@ mod fi_driven_fmea_tests {
                 detected_by: None,
                 effect_cycle: Some(15),
                 detection_cycle: None,
+                is_safety_mechanism: false,
             },
             // Fault 5: Motor driver - DETECTED by comparator
             FaultEffectResult {
@@ -261,6 +265,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("TorqueComparator".to_string()),
                 effect_cycle: Some(5),
                 detection_cycle: Some(5),
+                is_safety_mechanism: false,
             },
             // Fault 6: Safe fault - no effect triggered
             FaultEffectResult {
@@ -274,6 +279,7 @@ mod fi_driven_fmea_tests {
                 detected_by: None,
                 effect_cycle: None,
                 detection_cycle: None,
+                is_safety_mechanism: false,
             },
         ];
 
@@ -390,6 +396,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("PressureSensor".to_string()),
                 effect_cycle: Some(50),
                 detection_cycle: Some(30),
+                is_safety_mechanism: false,
             },
             // Fault causes brake_asymmetry
             FaultEffectResult {
@@ -403,6 +410,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("WheelSpeedMonitor".to_string()),
                 effect_cycle: Some(100),
                 detection_cycle: Some(80),
+                is_safety_mechanism: false,
             },
             // Fault causes BOTH effects (severe!)
             FaultEffectResult {
@@ -416,6 +424,7 @@ mod fi_driven_fmea_tests {
                 detected_by: None,
                 effect_cycle: Some(10),
                 detection_cycle: None,
+                is_safety_mechanism: false,
             },
         ];
 
@@ -506,6 +515,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("CRC_Checker".to_string()),
                 effect_cycle: Some(1),
                 detection_cycle: Some(1),
+                is_safety_mechanism: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_1"), FaultType::StuckAt0),
@@ -515,6 +525,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("CRC_Checker".to_string()),
                 effect_cycle: Some(1),
                 detection_cycle: Some(1),
+                is_safety_mechanism: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_2"), FaultType::StuckAt0),
@@ -524,6 +535,7 @@ mod fi_driven_fmea_tests {
                 detected_by: Some("TMR_Voter".to_string()),
                 effect_cycle: Some(1),
                 detection_cycle: Some(1),
+                is_safety_mechanism: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_3"), FaultType::StuckAt0),
@@ -533,6 +545,7 @@ mod fi_driven_fmea_tests {
                 detected_by: None,
                 effect_cycle: Some(1),
                 detection_cycle: None,
+                is_safety_mechanism: false,
             },
         ];
 
