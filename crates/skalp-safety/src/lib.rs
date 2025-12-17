@@ -15,6 +15,7 @@ pub mod design_resolver;
 pub mod design_rules;
 pub mod diversity;
 pub mod do254;
+pub mod fault_diagnostics;
 pub mod fault_simulation;
 pub mod fmea;
 pub mod fmeda;
@@ -46,6 +47,12 @@ pub use fault_simulation::{
 // Re-export FI-driven FMEA types
 pub use safety_driven_fmea::{
     EffectMonitor, FaultEffectResult, FiDrivenConfig, FiDrivenFmeaResult, SafetyDrivenFmeaGenerator,
+};
+
+// Re-export fault diagnostics types
+pub use fault_diagnostics::{
+    generate_diagnostic_report, ClassifiedFault, FaultClassificationSummary, FaultDiagnostics,
+    UndetectedReason,
 };
 
 #[cfg(feature = "sim-integration")]

@@ -2453,8 +2453,28 @@ fn generate_fi_driven_fmeda_md(
     }
 
     if has_undetected {
-        md.push_str("\n## Diagnostic Analysis: Undetected Faults\n\n");
-        md.push_str("The following faults caused safety-relevant effects but were **not detected** by any safety mechanism.\n\n");
+        // Collect all undetected fault sites
+        let mut all_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
+        for (name, analysis) in &result.effect_analyses {
+            if !name.starts_with('_') {
+                all_undetected.extend(analysis.undetected_sites.clone());
+            }
+        }
+
+        // Use enhanced fault diagnostics
+        let diagnostics = skalp_safety::FaultDiagnostics::new();
+        let (classified, summary) = diagnostics.classify_all(&all_undetected);
+        let total_undetected = all_undetected.len();
+
+        // Generate enhanced diagnostic report
+        md.push_str(&skalp_safety::generate_diagnostic_report(
+            &classified,
+            &summary,
+            total_undetected,
+        ));
+
+        // Also include the original component breakdown for reference
+        md.push_str("\n## Detailed Fault List by Component\n\n");
         md.push_str("> **Note**: Safety mechanism classification requires `#[implements(...)]` annotations on components.\n\n");
 
         for (name, analysis) in &result.effect_analyses {
@@ -2511,17 +2531,6 @@ fn generate_fi_driven_fmeda_md(
                 }
             }
         }
-
-        // Add recommendations
-        md.push_str("## Recommendations to Improve SPFM\n\n");
-        md.push_str("1. **Protect the voter**: Add dual-voter or self-checking logic to detect faults in the SM itself\n");
-        md.push_str(
-            "2. **Extend simulation**: Increase `--cycles` to give faults more time to propagate\n",
-        );
-        md.push_str("3. **Add watchdog**: Monitor voter output for unexpected values\n");
-        md.push_str(
-            "4. **Review common paths**: Ensure inputs are not shared before redundancy split\n",
-        );
     }
 
     md
