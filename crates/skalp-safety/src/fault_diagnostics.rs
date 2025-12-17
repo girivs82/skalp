@@ -5,6 +5,7 @@
 
 use crate::fault_simulation::{FaultSite, FaultType};
 use serde::{Deserialize, Serialize};
+use skalp_lir::Lir;
 use std::collections::{HashMap, HashSet};
 
 /// Classification of WHY a fault is undetected
@@ -99,6 +100,148 @@ pub struct FaultClassificationSummary {
     pub fit_by_reason: HashMap<UndetectedReason, f64>,
     /// Top contributors to PMHF
     pub top_pmhf_contributors: Vec<(String, f64)>,
+}
+
+// ============================================================================
+// Common Cause Failure (CCF) Analysis
+// ============================================================================
+
+/// Type of common cause failure source
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CcfSourceType {
+    /// Shared input signal before redundancy split (TRUE CCF)
+    /// e.g., clk, rst, enable feeding all channels
+    SharedInput {
+        /// Signal name
+        signal_name: String,
+        /// Channels it feeds
+        affected_channels: Vec<String>,
+    },
+    /// Same design pattern replicated (Design CCF)
+    /// Systematic design fault could affect all copies
+    ReplicatedDesign {
+        /// Primitive type/pattern
+        pattern: String,
+        /// Instances in each channel
+        instances: Vec<String>,
+    },
+    /// Shared clock domain (all channels use same clock)
+    SharedClock {
+        clock_name: String,
+        affected_channels: Vec<String>,
+    },
+    /// Shared reset (all channels use same reset)
+    SharedReset {
+        reset_name: String,
+        affected_channels: Vec<String>,
+    },
+}
+
+impl CcfSourceType {
+    /// Human-readable name
+    pub fn name(&self) -> &str {
+        match self {
+            CcfSourceType::SharedInput { .. } => "Shared Input",
+            CcfSourceType::ReplicatedDesign { .. } => "Replicated Design",
+            CcfSourceType::SharedClock { .. } => "Shared Clock",
+            CcfSourceType::SharedReset { .. } => "Shared Reset",
+        }
+    }
+
+    /// Risk level (1-5, 5 being highest)
+    pub fn risk_level(&self) -> u8 {
+        match self {
+            CcfSourceType::SharedInput {
+                affected_channels, ..
+            } => {
+                if affected_channels.len() >= 3 {
+                    5
+                } else {
+                    4
+                }
+            }
+            CcfSourceType::SharedClock { .. } => 5, // Clock failure is catastrophic
+            CcfSourceType::SharedReset { .. } => 4,
+            CcfSourceType::ReplicatedDesign { .. } => 3, // Design CCF is systematic
+        }
+    }
+
+    /// ISO 26262 reference
+    pub fn iso_reference(&self) -> &'static str {
+        match self {
+            CcfSourceType::SharedInput { .. } => "ISO 26262-9:7.4.1 (Dependent failure initiators)",
+            CcfSourceType::ReplicatedDesign { .. } => "ISO 26262-9:7.4.3 (Systematic failures)",
+            CcfSourceType::SharedClock { .. } => "ISO 26262-9:7.4.2 (Common cause initiators)",
+            CcfSourceType::SharedReset { .. } => "ISO 26262-9:7.4.2 (Common cause initiators)",
+        }
+    }
+
+    /// Recommended mitigation
+    pub fn mitigation(&self) -> &'static str {
+        match self {
+            CcfSourceType::SharedInput { .. } => {
+                "Add input validation/voting before redundancy split, or use diverse input sources"
+            }
+            CcfSourceType::ReplicatedDesign { .. } => {
+                "Use diverse implementations (different algorithms/architectures per channel)"
+            }
+            CcfSourceType::SharedClock { .. } => {
+                "Add clock monitor, use redundant clock sources, or add temporal diversity"
+            }
+            CcfSourceType::SharedReset { .. } => {
+                "Add reset monitor, use sequenced/diverse reset generation"
+            }
+        }
+    }
+}
+
+/// A single CCF source with its affected primitives
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcfSource {
+    /// Type of CCF
+    pub source_type: CcfSourceType,
+    /// Signal/net name that is the source
+    pub source_signal: String,
+    /// Primitives directly affected by this CCF source
+    pub affected_primitives: Vec<String>,
+    /// Number of redundant channels affected
+    pub channels_affected: usize,
+    /// Estimated FIT contribution if this CCF occurs
+    pub fit_impact: f64,
+    /// Failure mode if this signal fails
+    pub failure_modes: Vec<String>,
+}
+
+/// Complete CCF analysis result
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CcfAnalysis {
+    /// All identified CCF sources
+    pub sources: Vec<CcfSource>,
+    /// Shared signals that feed multiple channels
+    pub shared_signals: HashMap<String, SharedSignalInfo>,
+    /// Summary statistics
+    pub total_ccf_sources: usize,
+    pub high_risk_sources: usize,
+    pub total_fit_at_risk: f64,
+}
+
+/// Information about a shared signal
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedSignalInfo {
+    /// Signal name
+    pub name: String,
+    /// Is this a primary input?
+    pub is_primary_input: bool,
+    /// Is this a clock signal?
+    pub is_clock: bool,
+    /// Is this a reset signal?
+    pub is_reset: bool,
+    /// Channels this signal feeds
+    pub feeds_channels: Vec<String>,
+    /// Total fanout (number of primitives driven)
+    pub fanout: usize,
+    /// Primitives driven by this signal
+    pub driven_primitives: Vec<String>,
 }
 
 /// Fault diagnostic analyzer
@@ -410,6 +553,383 @@ fn path_matches(path: &str, pattern: &str) -> bool {
     } else {
         path == pattern || path.starts_with(&format!("{}.", pattern))
     }
+}
+
+// ============================================================================
+// CCF Analysis from LIR Netlist
+// ============================================================================
+
+/// Analyze the LIR netlist for common cause failure sources
+///
+/// This traces the actual signal connectivity to identify:
+/// 1. Shared input signals that feed multiple redundant channels
+/// 2. Shared clock/reset signals
+/// 3. Same design patterns replicated across channels
+pub fn analyze_ccf(lir: &Lir, _channel_patterns: &[&str]) -> CcfAnalysis {
+    let mut analysis = CcfAnalysis::default();
+
+    // Build connectivity map: net_id -> primitives that use this net as input
+    // (Since loads aren't populated during MIR-to-LIR, we build it here)
+    let mut net_to_prims: HashMap<u32, Vec<&skalp_lir::Primitive>> = HashMap::new();
+    for prim in &lir.primitives {
+        // Track all input nets
+        for input_net in &prim.inputs {
+            net_to_prims.entry(input_net.0).or_default().push(prim);
+        }
+        // Track clock/reset connections
+        if let Some(clk) = prim.clock {
+            net_to_prims.entry(clk.0).or_default().push(prim);
+        }
+        if let Some(rst) = prim.reset {
+            net_to_prims.entry(rst.0).or_default().push(prim);
+        }
+        if let Some(en) = prim.enable {
+            net_to_prims.entry(en.0).or_default().push(prim);
+        }
+    }
+
+    // Step 1: Find all primary inputs and analyze their fanout
+    for net in &lir.nets {
+        if !net.is_primary_input {
+            continue;
+        }
+
+        // Get all primitives driven by this input using our connectivity map
+        let driven_prims: Vec<String> = net_to_prims
+            .get(&net.id.0)
+            .map(|prims| prims.iter().map(|p| p.path.clone()).collect())
+            .unwrap_or_default();
+
+        if driven_prims.is_empty() {
+            continue;
+        }
+
+        // Identify which channels this signal feeds
+        let mut channels_fed: HashSet<String> = HashSet::new();
+        for prim_path in &driven_prims {
+            let channel = extract_channel(prim_path);
+            if channel != "unknown" && channel != "top" {
+                channels_fed.insert(channel);
+            }
+        }
+
+        // Check if this is a clock or reset signal
+        let is_clock = net.name.contains("clk")
+            || net.name.contains("clock")
+            || lir.clocks.iter().any(|c| c.0 == net.id.0);
+        let is_reset = net.name.contains("rst")
+            || net.name.contains("reset")
+            || lir.resets.iter().any(|r| r.0 == net.id.0);
+
+        // Only interested in signals that feed multiple channels
+        if channels_fed.len() >= 2 {
+            let channels_vec: Vec<String> = channels_fed.into_iter().collect();
+
+            // Create SharedSignalInfo
+            let shared_info = SharedSignalInfo {
+                name: net.name.clone(),
+                is_primary_input: true,
+                is_clock,
+                is_reset,
+                feeds_channels: channels_vec.clone(),
+                fanout: driven_prims.len(),
+                driven_primitives: driven_prims.clone(),
+            };
+
+            analysis
+                .shared_signals
+                .insert(net.name.clone(), shared_info);
+
+            // Create CcfSource based on type
+            let (source_type, failure_modes) = if is_clock {
+                (
+                    CcfSourceType::SharedClock {
+                        clock_name: net.name.clone(),
+                        affected_channels: channels_vec.clone(),
+                    },
+                    vec![
+                        "Clock stuck low → all channels frozen".to_string(),
+                        "Clock stuck high → all channels frozen".to_string(),
+                        "Clock glitch → all channels corrupt simultaneously".to_string(),
+                    ],
+                )
+            } else if is_reset {
+                (
+                    CcfSourceType::SharedReset {
+                        reset_name: net.name.clone(),
+                        affected_channels: channels_vec.clone(),
+                    },
+                    vec![
+                        "Reset stuck active → all channels held in reset".to_string(),
+                        "Reset stuck inactive → all channels miss initialization".to_string(),
+                        "Reset glitch → all channels reset simultaneously".to_string(),
+                    ],
+                )
+            } else {
+                (
+                    CcfSourceType::SharedInput {
+                        signal_name: net.name.clone(),
+                        affected_channels: channels_vec.clone(),
+                    },
+                    vec![
+                        format!(
+                            "Signal '{}' stuck-at-0 → affects all {} channels",
+                            net.name,
+                            channels_vec.len()
+                        ),
+                        format!(
+                            "Signal '{}' stuck-at-1 → affects all {} channels",
+                            net.name,
+                            channels_vec.len()
+                        ),
+                    ],
+                )
+            };
+
+            // Estimate FIT impact (all primitives driven by this signal)
+            let fit_impact: f64 = driven_prims
+                .iter()
+                .filter_map(|path| lir.primitives.iter().find(|p| &p.path == path))
+                .map(|p| p.ptype.base_fit())
+                .sum();
+
+            let ccf_source = CcfSource {
+                source_type,
+                source_signal: net.name.clone(),
+                affected_primitives: driven_prims,
+                channels_affected: channels_vec.len(),
+                fit_impact,
+                failure_modes,
+            };
+
+            if ccf_source.source_type.risk_level() >= 4 {
+                analysis.high_risk_sources += 1;
+            }
+            analysis.total_fit_at_risk += fit_impact;
+            analysis.sources.push(ccf_source);
+        }
+    }
+
+    // Step 2: Find replicated design patterns (same primitive instantiated in all channels)
+    let mut prim_by_base_name: HashMap<String, Vec<&skalp_lir::Primitive>> = HashMap::new();
+    for prim in &lir.primitives {
+        // Extract base name (remove channel prefix and numeric suffix)
+        let base = extract_primitive_base_name(&prim.path);
+        prim_by_base_name.entry(base).or_default().push(prim);
+    }
+
+    for (base_name, prims) in &prim_by_base_name {
+        if prims.len() < 2 {
+            continue;
+        }
+
+        // Check if these primitives are in different channels
+        let channels: HashSet<String> = prims
+            .iter()
+            .map(|p| extract_channel(&p.path))
+            .filter(|c| c != "unknown" && c != "top")
+            .collect();
+
+        if channels.len() >= 2 {
+            let instances: Vec<String> = prims.iter().map(|p| p.path.clone()).collect();
+            let channels_vec: Vec<String> = channels.into_iter().collect();
+
+            // Only add if not already covered by a shared input
+            let already_covered = analysis.sources.iter().any(|s| {
+                matches!(
+                    &s.source_type,
+                    CcfSourceType::SharedInput { .. }
+                        | CcfSourceType::SharedClock { .. }
+                        | CcfSourceType::SharedReset { .. }
+                ) && s
+                    .affected_primitives
+                    .iter()
+                    .any(|ap| instances.contains(ap))
+            });
+
+            if !already_covered && !base_name.is_empty() {
+                let fit_impact: f64 = prims.iter().map(|p| p.ptype.base_fit()).sum();
+
+                let ccf_source = CcfSource {
+                    source_type: CcfSourceType::ReplicatedDesign {
+                        pattern: base_name.clone(),
+                        instances: instances.clone(),
+                    },
+                    source_signal: format!("design_pattern:{}", base_name),
+                    affected_primitives: instances,
+                    channels_affected: channels_vec.len(),
+                    fit_impact,
+                    failure_modes: vec![format!(
+                        "Systematic design bug in '{}' affects all channels",
+                        base_name
+                    )],
+                };
+
+                analysis.sources.push(ccf_source);
+            }
+        }
+    }
+
+    analysis.total_ccf_sources = analysis.sources.len();
+
+    // Sort by risk level (highest first)
+    analysis.sources.sort_by(|a, b| {
+        b.source_type
+            .risk_level()
+            .cmp(&a.source_type.risk_level())
+            .then_with(|| {
+                b.fit_impact
+                    .partial_cmp(&a.fit_impact)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    analysis
+}
+
+/// Extract base name for pattern matching (removes channel and index suffixes)
+fn extract_primitive_base_name(path: &str) -> String {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.len() >= 3 {
+        // Get the primitive name part
+        if let Some(last) = parts.last() {
+            // Remove numeric suffix but keep type (e.g., "dff_3" -> "dff")
+            let base = last.split('_').next().unwrap_or(last);
+            // Include module type for better matching
+            if parts.len() >= 3 {
+                let module_type = parts.get(parts.len() - 2).unwrap_or(&"");
+                return format!("{}.{}", module_type, base);
+            }
+            return base.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Generate CCF analysis report section
+pub fn generate_ccf_report(analysis: &CcfAnalysis) -> String {
+    let mut report = String::new();
+
+    if analysis.sources.is_empty() {
+        report.push_str("\n## Common Cause Failure Analysis\n\n");
+        report.push_str("No significant CCF sources identified.\n\n");
+        return report;
+    }
+
+    report.push_str("\n## Common Cause Failure Analysis\n\n");
+    report.push_str("Analysis of signals and patterns that could cause simultaneous failures across redundant channels.\n\n");
+
+    // Summary
+    report.push_str("### CCF Summary\n\n");
+    report.push_str("| Metric | Value |\n");
+    report.push_str("|--------|-------|\n");
+    report.push_str(&format!(
+        "| Total CCF Sources | {} |\n",
+        analysis.total_ccf_sources
+    ));
+    report.push_str(&format!(
+        "| High Risk Sources (≥4) | {} |\n",
+        analysis.high_risk_sources
+    ));
+    report.push_str(&format!(
+        "| Total FIT at Risk | {:.2} FIT |\n",
+        analysis.total_fit_at_risk
+    ));
+
+    // Shared Signals Table
+    if !analysis.shared_signals.is_empty() {
+        report.push_str("\n### Shared Input Signals\n\n");
+        report.push_str("These primary inputs feed multiple redundant channels. A fault on any of these signals affects ALL channels simultaneously.\n\n");
+        report.push_str("| Signal | Type | Channels | Fanout | Risk |\n");
+        report.push_str("|--------|------|----------|--------|------|\n");
+
+        let mut signals: Vec<_> = analysis.shared_signals.values().collect();
+        signals.sort_by(|a, b| b.fanout.cmp(&a.fanout));
+
+        for sig in signals {
+            let sig_type = if sig.is_clock {
+                "🕐 Clock"
+            } else if sig.is_reset {
+                "🔄 Reset"
+            } else {
+                "📥 Input"
+            };
+
+            let risk = if sig.is_clock {
+                "⚠️ CRITICAL"
+            } else if sig.is_reset || sig.feeds_channels.len() >= 3 {
+                "⚠️ HIGH"
+            } else {
+                "Medium"
+            };
+
+            report.push_str(&format!(
+                "| `{}` | {} | {} | {} | {} |\n",
+                sig.name,
+                sig_type,
+                sig.feeds_channels.join(", "),
+                sig.fanout,
+                risk
+            ));
+        }
+    }
+
+    // Detailed CCF Sources
+    report.push_str("\n### CCF Source Details\n\n");
+
+    for (i, source) in analysis.sources.iter().enumerate() {
+        let risk_emoji = match source.source_type.risk_level() {
+            5 => "🔴",
+            4 => "🟠",
+            3 => "🟡",
+            _ => "🟢",
+        };
+
+        report.push_str(&format!(
+            "#### {}. {} `{}` (Risk: {}/5)\n\n",
+            i + 1,
+            risk_emoji,
+            source.source_signal,
+            source.source_type.risk_level()
+        ));
+
+        report.push_str(&format!("**Type**: {}\n\n", source.source_type.name()));
+        report.push_str(&format!(
+            "**ISO Reference**: {}\n\n",
+            source.source_type.iso_reference()
+        ));
+        report.push_str(&format!(
+            "**Channels Affected**: {}\n\n",
+            source.channels_affected
+        ));
+        report.push_str(&format!("**FIT Impact**: {:.2} FIT\n\n", source.fit_impact));
+
+        report.push_str("**Failure Modes**:\n");
+        for fm in &source.failure_modes {
+            report.push_str(&format!("- {}\n", fm));
+        }
+
+        report.push_str(&format!(
+            "\n**Affected Primitives** ({}):\n",
+            source.affected_primitives.len()
+        ));
+        for prim in source.affected_primitives.iter().take(5) {
+            report.push_str(&format!("- `{}`\n", prim));
+        }
+        if source.affected_primitives.len() > 5 {
+            report.push_str(&format!(
+                "- ... and {} more\n",
+                source.affected_primitives.len() - 5
+            ));
+        }
+
+        report.push_str(&format!(
+            "\n**Recommended Mitigation**: {}\n\n",
+            source.source_type.mitigation()
+        ));
+    }
+
+    report
 }
 
 /// Generate enhanced diagnostic report

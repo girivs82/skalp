@@ -2225,7 +2225,7 @@ fn run_fi_driven_safety(
     // Generate FMEDA report
     if format_list.contains(&"md") || format_list.contains(&"all") {
         let fmeda_path = output_dir.join("fmeda_report.md");
-        let fmeda_content = generate_fi_driven_fmeda_md(&fi_result, &lir.name, target_asil);
+        let fmeda_content = generate_fi_driven_fmeda_md(&fi_result, &lir.name, target_asil, lir);
         fs::write(&fmeda_path, fmeda_content)?;
         println!("   ✅ {}", fmeda_path.display());
     }
@@ -2334,6 +2334,7 @@ fn generate_fi_driven_fmeda_md(
     result: &skalp_safety::safety_driven_fmea::FiDrivenFmeaResult,
     design_name: &str,
     target_asil: skalp_safety::asil::AsilLevel,
+    lir: &skalp_lir::Lir,
 ) -> String {
     let mut md = String::new();
 
@@ -2532,6 +2533,10 @@ fn generate_fi_driven_fmeda_md(
             }
         }
     }
+
+    // Add CCF Analysis using LIR netlist connectivity
+    let ccf_analysis = skalp_safety::analyze_ccf(lir, &["ch_*", "channel_*"]);
+    md.push_str(&skalp_safety::generate_ccf_report(&ccf_analysis));
 
     md
 }

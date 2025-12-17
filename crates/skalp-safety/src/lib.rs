@@ -51,7 +51,8 @@ pub use safety_driven_fmea::{
 
 // Re-export fault diagnostics types
 pub use fault_diagnostics::{
-    generate_diagnostic_report, ClassifiedFault, FaultClassificationSummary, FaultDiagnostics,
+    analyze_ccf, generate_ccf_report, generate_diagnostic_report, CcfAnalysis, CcfSource,
+    CcfSourceType, ClassifiedFault, FaultClassificationSummary, FaultDiagnostics, SharedSignalInfo,
     UndetectedReason,
 };
 
