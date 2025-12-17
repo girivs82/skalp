@@ -2534,6 +2534,10 @@ fn generate_fi_driven_fmeda_md(
         }
     }
 
+    // Add SM Diversity Analysis (detects identical SM replication that defeats comparison)
+    let sm_diversity = skalp_safety::analyze_sm_diversity(lir);
+    md.push_str(&skalp_safety::generate_sm_diversity_report(&sm_diversity));
+
     // Add CCF Analysis using LIR netlist connectivity
     let ccf_analysis = skalp_safety::analyze_ccf(lir, &["ch_*", "channel_*"]);
     md.push_str(&skalp_safety::generate_ccf_report(&ccf_analysis));

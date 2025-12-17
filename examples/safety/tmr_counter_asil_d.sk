@@ -1,0 +1,173 @@
+// TMR-Protected Counter with Dual-Voter SM-of-SM - ASIL D Compliant
+// Demonstrates SM-of-SM pattern for achieving ASIL D SPFM requirements
+//
+// Safety Architecture:
+// - SG-001: Safety goal for counter integrity (ASIL D)
+// - TmrVoter A/B: Two independent TMR voters (safety mechanism)
+// - VoterComparator: SM-of-SM that monitors the voters themselves
+// - CounterChannel: Functional logic (protected by TMR)
+//
+// Key insight: Single voter is a single point of failure. The voter's internal
+// logic (mux, xnor comparators) can fail silently. Dual voter with comparator
+// detects faults WITHIN the safety mechanism itself.
+
+// Simple 8-bit counter channel (functional logic)
+entity CounterChannel {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+}
+
+impl CounterChannel {
+    signal counter: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else if (enable) {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+}
+
+// TMR Voter - Safety Mechanism
+// Detects single faults by comparing three redundant channels
+#[implements(SG001::TmrVoting)]
+#[safety_mechanism(type=tmr)]
+entity TmrVoter {
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out voted: bit[8]
+    out fault_detected: bit
+}
+
+impl TmrVoter {
+    // Majority voting: if 2 or more agree, use that value
+    signal ab_match: bit = if a == b { 1 } else { 0 }
+    signal bc_match: bit = if b == c { 1 } else { 0 }
+    signal ac_match: bit = if a == c { 1 } else { 0 }
+
+    // Voted output: majority wins
+    voted = if ab_match { a } else if bc_match { b } else if ac_match { a } else { a }
+
+    // Fault detection: any disagreement indicates a fault
+    signal all_match: bit = ab_match & bc_match & ac_match
+    fault_detected = if all_match { 0 } else { 1 }
+}
+
+// Voter Comparator - Safety Mechanism of Safety Mechanism (SM-of-SM)
+// Detects faults within the voters themselves by comparing their outputs
+// ISO 26262-5:7.4.4 - Safety mechanism coverage
+#[implements(SG001::SmOfSm)]
+#[safety_mechanism(type=comparator, protects=TmrVoter)]
+entity VoterComparator {
+    in voter_a_out: bit[8]
+    in voter_b_out: bit[8]
+    in voter_a_fault: bit
+    in voter_b_fault: bit
+    out final_out: bit[8]
+    out voter_mismatch: bit
+    out combined_fault: bit
+}
+
+impl VoterComparator {
+    // Compare the two voter outputs - any disagreement means a voter has failed
+    signal voters_agree: bit = if voter_a_out == voter_b_out { 1 } else { 0 }
+
+    // Mismatch detection - this catches faults IN the voter logic itself
+    voter_mismatch = if voters_agree { 0 } else { 1 }
+
+    // When voters agree, use either output (they're the same)
+    // When they disagree, we have detected a voter fault - output is potentially corrupt
+    // but at least we KNOW it's corrupt (fail-safe detection)
+    final_out = voter_a_out
+
+    // Combined fault: either a channel fault OR a voter fault
+    combined_fault = voter_a_fault | voter_b_fault | voter_mismatch
+}
+
+// Top-level TMR Counter System with Dual-Voter SM-of-SM (ASIL D)
+entity TmrCounterAsilD {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+    out fault: bit
+    out voter_fault: bit  // New: specifically indicates voter failure
+}
+
+impl TmrCounterAsilD {
+    // Signals for instance outputs
+    signal count_a: bit[8]
+    signal count_b: bit[8]
+    signal count_c: bit[8]
+    signal voted_out_a: bit[8]
+    signal voted_out_b: bit[8]
+    signal fault_out_a: bit
+    signal fault_out_b: bit
+    signal final_count: bit[8]
+    signal voter_mismatch: bit
+    signal combined_fault: bit
+
+    // Instantiate three redundant counter channels
+    let ch_a = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_a
+    }
+
+    let ch_b = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_b
+    }
+
+    let ch_c = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_c
+    }
+
+    // Dual TMR voters - independent implementations
+    // Voter A: Primary voter
+    let voter_a = TmrVoter {
+        a: count_a,
+        b: count_b,
+        c: count_c,
+        voted: voted_out_a,
+        fault_detected: fault_out_a
+    }
+
+    // Voter B: Secondary voter (identical implementation, but independent instance)
+    // In a real ASIL-D design, this would ideally have a diverse implementation
+    let voter_b = TmrVoter {
+        a: count_a,
+        b: count_b,
+        c: count_c,
+        voted: voted_out_b,
+        fault_detected: fault_out_b
+    }
+
+    // Voter comparator: SM-of-SM that catches voter failures
+    let voter_check = VoterComparator {
+        voter_a_out: voted_out_a,
+        voter_b_out: voted_out_b,
+        voter_a_fault: fault_out_a,
+        voter_b_fault: fault_out_b,
+        final_out: final_count,
+        voter_mismatch: voter_mismatch,
+        combined_fault: combined_fault
+    }
+
+    // Outputs
+    count = final_count
+    fault = combined_fault
+    voter_fault = voter_mismatch
+}

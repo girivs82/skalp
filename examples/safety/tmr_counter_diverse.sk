@@ -1,0 +1,210 @@
+// TMR-Protected Counter with DIVERSE Dual-Voter SM-of-SM - ASIL D Compliant
+// Demonstrates DIVERSE SM-of-SM pattern per ISO 26262-9:7.4.3
+//
+// KEY INSIGHT: Identical voters cause the same failures - diversity is REQUIRED!
+// This design uses two DIFFERENT voting algorithms:
+//   - TmrVoterLogical: Conditional pair-wise comparison
+//   - TmrVoterBitwise: Boolean algebra majority gate per bit
+//
+// Safety Architecture:
+// - SG-001: Safety goal for counter integrity (ASIL D)
+// - TmrVoterLogical: Primary voter using conditional logic
+// - TmrVoterBitwise: Secondary voter using boolean algebra (DIVERSE!)
+// - VoterComparator: SM-of-SM that monitors the diverse voters
+// - CounterChannel: Functional logic (protected by TMR)
+
+// Simple 8-bit counter channel (functional logic)
+entity CounterChannel {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+}
+
+impl CounterChannel {
+    signal counter: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else if (enable) {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+}
+
+// TMR Voter using CONDITIONAL LOGIC (Voter A)
+// Algorithm: Pair-wise comparison with if-else chain
+#[implements(SG001::TmrVoting)]
+#[safety_mechanism(type=tmr)]
+entity TmrVoterLogical {
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out voted: bit[8]
+    out fault_detected: bit
+}
+
+impl TmrVoterLogical {
+    // Majority voting using conditional comparisons
+    signal ab_match: bit = if a == b { 1 } else { 0 }
+    signal bc_match: bit = if b == c { 1 } else { 0 }
+    signal ac_match: bit = if a == c { 1 } else { 0 }
+
+    // Voted output: first pair that matches wins
+    voted = if ab_match { a } else if bc_match { b } else if ac_match { a } else { a }
+
+    // Fault detection: any disagreement indicates a fault
+    signal all_match: bit = ab_match & bc_match & ac_match
+    fault_detected = if all_match { 0 } else { 1 }
+}
+
+// TMR Voter using BOOLEAN ALGEBRA (Voter B) - DIVERSE IMPLEMENTATION!
+// Algorithm: Bitwise majority gate: maj(a,b,c) = (a & b) | (b & c) | (a & c)
+// This is algorithmically different from conditional comparison!
+#[implements(SG001::TmrVotingDiverse)]
+#[safety_mechanism(type=tmr)]
+entity TmrVoterBitwise {
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out voted: bit[8]
+    out fault_detected: bit
+}
+
+impl TmrVoterBitwise {
+    // Boolean algebra majority: each bit independently voted
+    // maj(x,y,z) = (x & y) | (y & z) | (x & z)
+    signal ab: bit[8] = a & b
+    signal bc: bit[8] = b & c
+    signal ac: bit[8] = a & c
+
+    // Bitwise OR of all pairs gives majority for each bit
+    voted = ab | bc | ac
+
+    // Fault detection: XOR all inputs, if any bit differs we have a fault
+    signal a_xor_b: bit[8] = a ^ b
+    signal b_xor_c: bit[8] = b ^ c
+
+    // If any bit position has a disagreement, fault is detected
+    // Reduce 8-bit to single bit: any non-zero means fault
+    signal any_ab_diff: bit = if a_xor_b == 0 { 0 } else { 1 }
+    signal any_bc_diff: bit = if b_xor_c == 0 { 0 } else { 1 }
+
+    fault_detected = any_ab_diff | any_bc_diff
+}
+
+// Voter Comparator - Safety Mechanism of Safety Mechanism (SM-of-SM)
+// Compares outputs of DIVERSE voters - they should match if both are correct
+// ISO 26262-5:7.4.4 - Safety mechanism coverage
+#[implements(SG001::SmOfSm)]
+#[safety_mechanism(type=comparator, protects=TmrVoter)]
+entity VoterComparator {
+    in voter_a_out: bit[8]
+    in voter_b_out: bit[8]
+    in voter_a_fault: bit
+    in voter_b_fault: bit
+    out final_out: bit[8]
+    out voter_mismatch: bit
+    out combined_fault: bit
+}
+
+impl VoterComparator {
+    // Compare the two diverse voter outputs
+    // Any disagreement means one voter has failed (systematic or random fault)
+    signal voters_agree: bit = if voter_a_out == voter_b_out { 1 } else { 0 }
+
+    // Mismatch detection - catches faults that affect one voter but not the other
+    voter_mismatch = if voters_agree { 0 } else { 1 }
+
+    // When voters agree, use either output (they're the same)
+    // When they disagree, we've detected a fault - output could be corrupt
+    // but we KNOW it's corrupt (fail-safe detection)
+    final_out = voter_a_out
+
+    // Combined fault: either a channel fault OR a voter fault
+    combined_fault = voter_a_fault | voter_b_fault | voter_mismatch
+}
+
+// Top-level TMR Counter System with DIVERSE Dual-Voter SM-of-SM (ASIL D)
+entity TmrCounterDiverse {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+    out fault: bit
+    out voter_fault: bit  // Specifically indicates voter failure
+}
+
+impl TmrCounterDiverse {
+    // Signals for instance outputs
+    signal count_a: bit[8]
+    signal count_b: bit[8]
+    signal count_c: bit[8]
+    signal voted_out_a: bit[8]
+    signal voted_out_b: bit[8]
+    signal fault_out_a: bit
+    signal fault_out_b: bit
+    signal final_count: bit[8]
+    signal voter_mismatch: bit
+    signal combined_fault: bit
+
+    // Instantiate three redundant counter channels
+    let ch_a = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_a
+    }
+
+    let ch_b = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_b
+    }
+
+    let ch_c = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_c
+    }
+
+    // Diverse TMR voters - DIFFERENT algorithms!
+    // Voter A: Conditional logic (pair-wise comparison)
+    let voter_a = TmrVoterLogical {
+        a: count_a,
+        b: count_b,
+        c: count_c,
+        voted: voted_out_a,
+        fault_detected: fault_out_a
+    }
+
+    // Voter B: Boolean algebra (bitwise majority gate) - DIVERSE!
+    let voter_b = TmrVoterBitwise {
+        a: count_a,
+        b: count_b,
+        c: count_c,
+        voted: voted_out_b,
+        fault_detected: fault_out_b
+    }
+
+    // Voter comparator: SM-of-SM that catches voter failures
+    let voter_check = VoterComparator {
+        voter_a_out: voted_out_a,
+        voter_b_out: voted_out_b,
+        voter_a_fault: fault_out_a,
+        voter_b_fault: fault_out_b,
+        final_out: final_count,
+        voter_mismatch: voter_mismatch,
+        combined_fault: combined_fault
+    }
+
+    // Outputs
+    count = final_count
+    fault = combined_fault
+    voter_fault = voter_mismatch
+}

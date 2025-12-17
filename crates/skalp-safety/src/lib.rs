@@ -51,9 +51,10 @@ pub use safety_driven_fmea::{
 
 // Re-export fault diagnostics types
 pub use fault_diagnostics::{
-    analyze_ccf, generate_ccf_report, generate_diagnostic_report, CcfAnalysis, CcfSource,
-    CcfSourceType, ClassifiedFault, FaultClassificationSummary, FaultDiagnostics, SharedSignalInfo,
-    UndetectedReason,
+    analyze_ccf, analyze_sm_diversity, generate_ccf_report, generate_diagnostic_report,
+    generate_sm_diversity_report, CcfAnalysis, CcfSource, CcfSourceType, ClassifiedFault,
+    FaultClassificationSummary, FaultDiagnostics, IdenticalSmPair, MatchingPrimitivePair,
+    SharedSignalInfo, SmDiversityAnalysis, SmDiversityWarning, UndetectedReason, WarningSeverity,
 };
 
 #[cfg(feature = "sim-integration")]

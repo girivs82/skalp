@@ -23,6 +23,9 @@ pub enum UndetectedReason {
     CommonCausePotential,
     /// SM detected but detection came too late (after FTTI)
     LateDetection,
+    /// Identical SM implementations defeat comparison-based detection
+    /// (two voters of same type will produce same wrong output)
+    IdenticalSmReplication,
     /// Unknown classification
     Unknown,
 }
@@ -37,6 +40,7 @@ impl UndetectedReason {
             UndetectedReason::CoverageGap => "Coverage Gap",
             UndetectedReason::CommonCausePotential => "Common Cause",
             UndetectedReason::LateDetection => "Late Detection",
+            UndetectedReason::IdenticalSmReplication => "Identical SM Replication",
             UndetectedReason::Unknown => "Unknown",
         }
     }
@@ -52,6 +56,9 @@ impl UndetectedReason {
                 "Add diversity or independence between channels"
             }
             UndetectedReason::LateDetection => "Reduce detection latency or increase FTTI budget",
+            UndetectedReason::IdenticalSmReplication => {
+                "Use DIVERSE SM implementations (different algorithms) - identical SMs produce same wrong output, defeating comparison"
+            }
             UndetectedReason::Unknown => "Manual analysis required",
         }
     }
@@ -65,6 +72,9 @@ impl UndetectedReason {
             UndetectedReason::CoverageGap => "ISO 26262-5:8.4.5 (DC evaluation)",
             UndetectedReason::CommonCausePotential => "ISO 26262-9:7.4 (CCF analysis)",
             UndetectedReason::LateDetection => "ISO 26262-5:7.4.2 (FTTI)",
+            UndetectedReason::IdenticalSmReplication => {
+                "ISO 26262-9:7.4.3 (Diversity for SM-of-SM)"
+            }
             UndetectedReason::Unknown => "ISO 26262-5:8 (Safety analysis)",
         }
     }
@@ -242,6 +252,101 @@ pub struct SharedSignalInfo {
     pub fanout: usize,
     /// Primitives driven by this signal
     pub driven_primitives: Vec<String>,
+}
+
+// ============================================================================
+// Safety Mechanism Diversity Analysis
+// ============================================================================
+
+/// Analysis result for SM diversity (detects identical SM replication)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SmDiversityAnalysis {
+    /// Pairs of identical SM instances (same entity type)
+    pub identical_sm_pairs: Vec<IdenticalSmPair>,
+    /// Whether any comparator exists that compares these identical SMs
+    pub has_comparator: bool,
+    /// Overall diversity score (0.0 = no diversity, 1.0 = full diversity)
+    pub diversity_score: f64,
+    /// Detailed warnings about diversity issues
+    pub warnings: Vec<SmDiversityWarning>,
+    /// Total FIT at risk due to identical SM replication
+    pub fit_at_risk: f64,
+}
+
+/// A pair of SM instances that are identical (same entity type)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdenticalSmPair {
+    /// Instance A path (e.g., "top.voter_a")
+    pub instance_a: String,
+    /// Instance B path (e.g., "top.voter_b")
+    pub instance_b: String,
+    /// Entity type name (e.g., "TmrVoter")
+    pub entity_type: String,
+    /// Whether these are being compared by another SM
+    pub outputs_compared: bool,
+    /// Matching primitives in both instances (same relative path)
+    pub matching_primitives: Vec<MatchingPrimitivePair>,
+    /// FIT contribution from faults that will produce identical wrong outputs
+    pub identical_failure_fit: f64,
+}
+
+/// A pair of primitives that match across identical SM instances
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchingPrimitivePair {
+    /// Path in instance A
+    pub path_a: String,
+    /// Path in instance B
+    pub path_b: String,
+    /// Primitive type (e.g., "mux", "and", "dff")
+    pub primitive_type: String,
+    /// Relative path within the SM (e.g., "mux_92")
+    pub relative_path: String,
+}
+
+/// Warning about SM diversity issues
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmDiversityWarning {
+    /// Severity (Critical, High, Medium, Low)
+    pub severity: WarningSeverity,
+    /// Warning message
+    pub message: String,
+    /// Detailed explanation
+    pub explanation: String,
+    /// Affected SM instances
+    pub affected_instances: Vec<String>,
+    /// ISO 26262 reference
+    pub iso_reference: String,
+    /// Recommended fix
+    pub recommendation: String,
+}
+
+/// Severity level for warnings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WarningSeverity {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+impl WarningSeverity {
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            WarningSeverity::Critical => "🔴",
+            WarningSeverity::High => "🟠",
+            WarningSeverity::Medium => "🟡",
+            WarningSeverity::Low => "🟢",
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            WarningSeverity::Critical => "CRITICAL",
+            WarningSeverity::High => "HIGH",
+            WarningSeverity::Medium => "MEDIUM",
+            WarningSeverity::Low => "LOW",
+        }
+    }
 }
 
 /// Fault diagnostic analyzer
@@ -806,6 +911,423 @@ fn extract_primitive_base_name(path: &str) -> String {
     String::new()
 }
 
+// ============================================================================
+// SM Diversity Analysis
+// ============================================================================
+
+/// Analyze the LIR netlist for identical SM replication patterns
+///
+/// This detects when:
+/// 1. Multiple SM instances are of the same entity type (e.g., two TmrVoter instances)
+/// 2. These identical SMs are being compared by a comparator
+/// 3. This defeats the comparison because identical implementations produce identical wrong outputs
+pub fn analyze_sm_diversity(lir: &Lir) -> SmDiversityAnalysis {
+    let mut analysis = SmDiversityAnalysis::default();
+
+    // Step 1: Identify all SM instances by looking for SM-related names
+    // Group primitives by their parent module instance
+    let mut instances_by_type: HashMap<String, Vec<String>> = HashMap::new();
+    let mut primitives_by_instance: HashMap<String, Vec<&skalp_lir::Primitive>> = HashMap::new();
+
+    for prim in &lir.primitives {
+        // Extract the instance path (e.g., "top.voter_a.TmrVoter" from "top.voter_a.TmrVoter.mux_0")
+        let parts: Vec<&str> = prim.path.split('.').collect();
+        if parts.len() >= 3 {
+            // Get instance path (everything except the primitive name)
+            let instance_path = parts[..parts.len() - 1].join(".");
+            // Get entity type (second to last part, e.g., "TmrVoter")
+            let entity_type = parts[parts.len() - 2].to_string();
+
+            // Only track SM-like instances
+            if is_safety_mechanism_type(&entity_type) || is_safety_mechanism_type(&instance_path) {
+                instances_by_type
+                    .entry(entity_type.clone())
+                    .or_default()
+                    .push(instance_path.clone());
+                primitives_by_instance
+                    .entry(instance_path)
+                    .or_default()
+                    .push(prim);
+            }
+        }
+    }
+
+    // Deduplicate instance lists
+    for instances in instances_by_type.values_mut() {
+        instances.sort();
+        instances.dedup();
+    }
+
+    // Step 2: Find identical SM pairs (same entity type, multiple instances)
+    for (entity_type, instances) in &instances_by_type {
+        if instances.len() < 2 {
+            continue;
+        }
+
+        // Check if there's a comparator that compares these instances
+        let has_comparator = check_for_comparator(lir, instances);
+
+        // Generate pairs
+        for i in 0..instances.len() {
+            for j in (i + 1)..instances.len() {
+                let instance_a = &instances[i];
+                let instance_b = &instances[j];
+
+                // Find matching primitives in both instances
+                let prims_a = primitives_by_instance.get(instance_a);
+                let prims_b = primitives_by_instance.get(instance_b);
+
+                let mut matching_primitives = Vec::new();
+                let mut identical_failure_fit = 0.0;
+
+                if let (Some(prims_a), Some(prims_b)) = (prims_a, prims_b) {
+                    // Create a map of relative paths for instance B
+                    let b_relative: HashMap<String, &skalp_lir::Primitive> = prims_b
+                        .iter()
+                        .map(|p| {
+                            let rel = p.path.strip_prefix(instance_b).unwrap_or(&p.path);
+                            let rel = rel.strip_prefix('.').unwrap_or(rel);
+                            (rel.to_string(), *p)
+                        })
+                        .collect();
+
+                    // Find matching primitives
+                    for prim_a in prims_a {
+                        let rel_a = prim_a.path.strip_prefix(instance_a).unwrap_or(&prim_a.path);
+                        let rel_a = rel_a.strip_prefix('.').unwrap_or(rel_a);
+
+                        if let Some(prim_b) = b_relative.get(rel_a) {
+                            // This primitive exists in both instances with same relative path
+                            // A fault here will produce identical wrong outputs in both!
+                            matching_primitives.push(MatchingPrimitivePair {
+                                path_a: prim_a.path.clone(),
+                                path_b: prim_b.path.clone(),
+                                primitive_type: format!("{:?}", prim_a.ptype),
+                                relative_path: rel_a.to_string(),
+                            });
+                            identical_failure_fit += prim_a.ptype.base_fit();
+                        }
+                    }
+                }
+
+                if !matching_primitives.is_empty() {
+                    let pair = IdenticalSmPair {
+                        instance_a: instance_a.clone(),
+                        instance_b: instance_b.clone(),
+                        entity_type: entity_type.clone(),
+                        outputs_compared: has_comparator,
+                        matching_primitives,
+                        identical_failure_fit,
+                    };
+
+                    analysis.fit_at_risk += identical_failure_fit;
+                    analysis.identical_sm_pairs.push(pair);
+                }
+            }
+        }
+    }
+
+    // Step 3: Generate warnings
+    for pair in &analysis.identical_sm_pairs {
+        if pair.outputs_compared {
+            // Critical warning: identical SMs with comparator
+            analysis.warnings.push(SmDiversityWarning {
+                severity: WarningSeverity::Critical,
+                message: format!(
+                    "Identical SM instances '{}' and '{}' defeat comparison-based detection",
+                    extract_instance_name(&pair.instance_a),
+                    extract_instance_name(&pair.instance_b)
+                ),
+                explanation: format!(
+                    "Both instances are of type '{}' with identical implementations. \
+                     A fault in '{}' (e.g., mux stuck-at) will cause the same wrong output \
+                     in BOTH instances. The comparator will see matching outputs and NOT detect the fault. \
+                     This affects {} primitives with {:.2} FIT at risk.",
+                    pair.entity_type,
+                    pair.instance_a,
+                    pair.matching_primitives.len(),
+                    pair.identical_failure_fit
+                ),
+                affected_instances: vec![pair.instance_a.clone(), pair.instance_b.clone()],
+                iso_reference: "ISO 26262-9:7.4.3 (Diversity requirements for SM-of-SM)".to_string(),
+                recommendation: "Replace one instance with a DIVERSE implementation using a different algorithm. \
+                     For voters: use conditional logic in one, bitwise majority in the other. \
+                     Example: TmrVoterLogical vs TmrVoterBitwise.".to_string(),
+            });
+            analysis.has_comparator = true;
+        } else {
+            // Medium warning: identical SMs without comparator (redundant but not compared)
+            analysis.warnings.push(SmDiversityWarning {
+                severity: WarningSeverity::Medium,
+                message: format!(
+                    "Identical SM instances '{}' and '{}' share same implementation",
+                    extract_instance_name(&pair.instance_a),
+                    extract_instance_name(&pair.instance_b)
+                ),
+                explanation: format!(
+                    "Both instances are of type '{}'. While not currently compared, \
+                     this represents potential systematic failure vulnerability.",
+                    pair.entity_type
+                ),
+                affected_instances: vec![pair.instance_a.clone(), pair.instance_b.clone()],
+                iso_reference: "ISO 26262-9:7.4.3 (Systematic failures)".to_string(),
+                recommendation: "Consider using diverse implementations for ASIL C/D requirements."
+                    .to_string(),
+            });
+        }
+    }
+
+    // Calculate diversity score
+    // 0.0 = all SMs are identical, 1.0 = all SMs are diverse
+    let total_sm_instances: usize = instances_by_type.values().map(|v| v.len()).sum();
+    let identical_pairs = analysis.identical_sm_pairs.len();
+    if total_sm_instances > 1 && identical_pairs > 0 {
+        // Penalize heavily for identical pairs with comparator
+        let critical_pairs = analysis
+            .identical_sm_pairs
+            .iter()
+            .filter(|p| p.outputs_compared)
+            .count();
+        analysis.diversity_score = if critical_pairs > 0 {
+            0.0 // No diversity credit if identical SMs are being compared
+        } else {
+            0.5 // Partial credit if not compared
+        };
+    } else {
+        analysis.diversity_score = 1.0; // Full diversity (no identical pairs)
+    }
+
+    analysis
+}
+
+/// Check if a path represents a safety mechanism type
+fn is_safety_mechanism_type(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("voter")
+        || lower.contains("tmr")
+        || lower.contains("dmr")
+        || lower.contains("watchdog")
+        || lower.contains("checker")
+        || lower.contains("comparator")
+        || lower.contains("monitor")
+        || lower.contains("ecc")
+        || lower.contains("crc")
+        || lower.contains("parity")
+}
+
+/// Check if there's a comparator that compares the outputs of the given instances
+fn check_for_comparator(lir: &Lir, instances: &[String]) -> bool {
+    // Look for comparator-like components in the design
+    for prim in &lir.primitives {
+        let lower_path = prim.path.to_lowercase();
+        if lower_path.contains("comparator")
+            || lower_path.contains("checker")
+            || lower_path.contains("voter_check")
+            || lower_path.contains("sm_check")
+        {
+            return true;
+        }
+    }
+
+    // Also check for eq/xnor primitives that might be comparing voter outputs
+    // This is a heuristic - if we see eq primitives at the top level comparing
+    // signals that include instance names, it's likely a comparison
+    for prim in &lir.primitives {
+        if prim.path.contains("eq") || prim.path.contains("xnor") {
+            // Check if this is at a level that suggests output comparison
+            let parts: Vec<&str> = prim.path.split('.').collect();
+            if parts.len() <= 3 {
+                // Top-level comparison
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Extract the instance name from a full path
+fn extract_instance_name(path: &str) -> String {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.len() >= 2 {
+        // Return "voter_a" from "top.voter_a.TmrVoter"
+        let start = if parts[0] == "top" { 1 } else { 0 };
+        if parts.len() > start {
+            return parts[start].to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Generate SM diversity analysis report section
+pub fn generate_sm_diversity_report(analysis: &SmDiversityAnalysis) -> String {
+    let mut report = String::new();
+
+    if analysis.identical_sm_pairs.is_empty() && analysis.warnings.is_empty() {
+        report.push_str("\n## Safety Mechanism Diversity Analysis\n\n");
+        report.push_str(
+            "✅ No identical SM replication detected. SM diversity requirements satisfied.\n\n",
+        );
+        return report;
+    }
+
+    report.push_str("\n## Safety Mechanism Diversity Analysis\n\n");
+    report.push_str("Analysis of SM implementation diversity to detect patterns that defeat comparison-based detection.\n\n");
+
+    // Summary
+    report.push_str("### Diversity Summary\n\n");
+    report.push_str("| Metric | Value | Status |\n");
+    report.push_str("|--------|-------|--------|\n");
+    report.push_str(&format!(
+        "| Diversity Score | {:.0}% | {} |\n",
+        analysis.diversity_score * 100.0,
+        if analysis.diversity_score >= 0.9 {
+            "✅ GOOD"
+        } else if analysis.diversity_score >= 0.5 {
+            "⚠️ PARTIAL"
+        } else {
+            "❌ INSUFFICIENT"
+        }
+    ));
+    report.push_str(&format!(
+        "| Identical SM Pairs | {} | {} |\n",
+        analysis.identical_sm_pairs.len(),
+        if analysis.identical_sm_pairs.is_empty() {
+            "✅"
+        } else {
+            "⚠️"
+        }
+    ));
+    report.push_str(&format!(
+        "| FIT at Risk | {:.2} FIT | {} |\n",
+        analysis.fit_at_risk,
+        if analysis.fit_at_risk < 1.0 {
+            "✅"
+        } else {
+            "❌"
+        }
+    ));
+
+    // Critical warnings first
+    let critical_warnings: Vec<_> = analysis
+        .warnings
+        .iter()
+        .filter(|w| w.severity == WarningSeverity::Critical)
+        .collect();
+
+    if !critical_warnings.is_empty() {
+        report.push_str("\n### 🔴 CRITICAL: Identical SM Replication Detected\n\n");
+        report.push_str(
+            "**These identical SM instances DEFEAT comparison-based fault detection!**\n\n",
+        );
+
+        for warning in critical_warnings {
+            report.push_str(&format!(
+                "#### {} {}\n\n",
+                warning.severity.emoji(),
+                warning.message
+            ));
+            report.push_str(&format!("**Problem**: {}\n\n", warning.explanation));
+            report.push_str(&format!("**ISO Reference**: {}\n\n", warning.iso_reference));
+            report.push_str(&format!("**Fix**: {}\n\n", warning.recommendation));
+        }
+    }
+
+    // Identical SM pair details
+    if !analysis.identical_sm_pairs.is_empty() {
+        report.push_str("\n### Identical SM Instance Details\n\n");
+
+        for pair in &analysis.identical_sm_pairs {
+            report.push_str(&format!(
+                "#### `{}` ↔ `{}` (Type: {})\n\n",
+                extract_instance_name(&pair.instance_a),
+                extract_instance_name(&pair.instance_b),
+                pair.entity_type
+            ));
+
+            report.push_str(&format!(
+                "- **Outputs Compared**: {}\n",
+                if pair.outputs_compared {
+                    "Yes (defeats detection!)"
+                } else {
+                    "No"
+                }
+            ));
+            report.push_str(&format!(
+                "- **Matching Primitives**: {} (identical implementation)\n",
+                pair.matching_primitives.len()
+            ));
+            report.push_str(&format!(
+                "- **FIT at Risk**: {:.2} FIT\n\n",
+                pair.identical_failure_fit
+            ));
+
+            if pair.outputs_compared {
+                report.push_str("**Why this defeats detection**:\n");
+                report.push_str("```\n");
+                report.push_str(&format!(
+                    "Fault in {}.mux_X (stuck-at-1)\n",
+                    pair.instance_a
+                ));
+                report.push_str(&format!(
+                    "  → {} produces wrong output Y\n",
+                    pair.instance_a
+                ));
+                report.push_str(&format!(
+                    "  → {} produces SAME wrong output Y (identical logic!)\n",
+                    pair.instance_b
+                ));
+                report.push_str("  → Comparator sees Y == Y → NO FAULT DETECTED\n");
+                report.push_str("```\n\n");
+            }
+
+            // Show some matching primitives
+            report.push_str(
+                "**Sample matching primitives** (same relative path in both instances):\n\n",
+            );
+            report.push_str("| Relative Path | Type | Instance A | Instance B |\n");
+            report.push_str("|---------------|------|------------|------------|\n");
+            for mp in pair.matching_primitives.iter().take(5) {
+                report.push_str(&format!(
+                    "| `{}` | {} | `{}` | `{}` |\n",
+                    mp.relative_path,
+                    mp.primitive_type,
+                    mp.path_a.split('.').next_back().unwrap_or(&mp.path_a),
+                    mp.path_b.split('.').next_back().unwrap_or(&mp.path_b)
+                ));
+            }
+            if pair.matching_primitives.len() > 5 {
+                report.push_str(&format!(
+                    "| ... | | ({} more) | |\n",
+                    pair.matching_primitives.len() - 5
+                ));
+            }
+            report.push('\n');
+        }
+    }
+
+    // Other warnings
+    let other_warnings: Vec<_> = analysis
+        .warnings
+        .iter()
+        .filter(|w| w.severity != WarningSeverity::Critical)
+        .collect();
+
+    if !other_warnings.is_empty() {
+        report.push_str("\n### Other Diversity Warnings\n\n");
+        for warning in other_warnings {
+            report.push_str(&format!(
+                "- {} **{}**: {}\n",
+                warning.severity.emoji(),
+                warning.severity.name(),
+                warning.message
+            ));
+        }
+    }
+
+    report
+}
+
 /// Generate CCF analysis report section
 pub fn generate_ccf_report(analysis: &CcfAnalysis) -> String {
     let mut report = String::new();
@@ -991,6 +1513,7 @@ pub fn generate_diagnostic_report(
     }
 
     for reason in [
+        UndetectedReason::IdenticalSmReplication,
         UndetectedReason::SmInternal,
         UndetectedReason::OutputPath,
         UndetectedReason::InputPath,
