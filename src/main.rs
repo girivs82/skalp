@@ -2453,6 +2453,9 @@ fn generate_fi_driven_fmeda_md(
         }
     }
 
+    // Run CCF analysis (needed for both diagnostics and CCF report)
+    let ccf_analysis = skalp_safety::analyze_ccf(lir, &["ch_*", "channel_*"]);
+
     if has_undetected {
         // Collect all undetected fault sites
         let mut all_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
@@ -2462,9 +2465,9 @@ fn generate_fi_driven_fmeda_md(
             }
         }
 
-        // Use enhanced fault diagnostics
+        // Use enhanced fault diagnostics with CCF integration
         let diagnostics = skalp_safety::FaultDiagnostics::new();
-        let (classified, summary) = diagnostics.classify_all(&all_undetected);
+        let (classified, summary) = diagnostics.classify_with_ccf(&all_undetected, &ccf_analysis);
         let total_undetected = all_undetected.len();
 
         // Generate enhanced diagnostic report
@@ -2538,8 +2541,7 @@ fn generate_fi_driven_fmeda_md(
     let sm_diversity = skalp_safety::analyze_sm_diversity(lir);
     md.push_str(&skalp_safety::generate_sm_diversity_report(&sm_diversity));
 
-    // Add CCF Analysis using LIR netlist connectivity
-    let ccf_analysis = skalp_safety::analyze_ccf(lir, &["ch_*", "channel_*"]);
+    // Add CCF Analysis report (ccf_analysis was computed earlier for fault classification)
     md.push_str(&skalp_safety::generate_ccf_report(&ccf_analysis));
 
     md

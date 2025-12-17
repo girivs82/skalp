@@ -19,7 +19,14 @@ pub enum UndetectedReason {
     InputPath,
     /// Fault is in functional logic but SM doesn't detect it (coverage gap)
     CoverageGap,
+    /// TRUE CCF: Fault on shared signal BEFORE redundancy split (clk, rst, enable)
+    /// This is the most dangerous - affects ALL channels simultaneously
+    SharedInputCcf,
+    /// DESIGN CCF: Same design pattern replicated across channels
+    /// Systematic design bug could affect all copies
+    ReplicatedDesignCcf,
     /// Same fault in all redundant channels (common cause failure potential)
+    /// NOTE: This is a weaker classification based on primitive name matching
     CommonCausePotential,
     /// SM detected but detection came too late (after FTTI)
     LateDetection,
@@ -38,6 +45,8 @@ impl UndetectedReason {
             UndetectedReason::OutputPath => "Output Path",
             UndetectedReason::InputPath => "Input Path",
             UndetectedReason::CoverageGap => "Coverage Gap",
+            UndetectedReason::SharedInputCcf => "Shared Input CCF",
+            UndetectedReason::ReplicatedDesignCcf => "Replicated Design CCF",
             UndetectedReason::CommonCausePotential => "Common Cause",
             UndetectedReason::LateDetection => "Late Detection",
             UndetectedReason::IdenticalSmReplication => "Identical SM Replication",
@@ -52,6 +61,12 @@ impl UndetectedReason {
             UndetectedReason::OutputPath => "Add output protection (e.g., encoding, E2E check)",
             UndetectedReason::InputPath => "Add input validation or move redundancy split earlier",
             UndetectedReason::CoverageGap => "Extend SM coverage pattern or add additional SM",
+            UndetectedReason::SharedInputCcf => {
+                "Add input protection BEFORE redundancy split (voting, validation, redundant sources)"
+            }
+            UndetectedReason::ReplicatedDesignCcf => {
+                "Use diverse implementations per channel (different algorithms/architectures)"
+            }
             UndetectedReason::CommonCausePotential => {
                 "Add diversity or independence between channels"
             }
@@ -70,6 +85,8 @@ impl UndetectedReason {
             UndetectedReason::OutputPath => "ISO 26262-5:7.4.3 (Residual faults)",
             UndetectedReason::InputPath => "ISO 26262-9:7 (Dependent failures)",
             UndetectedReason::CoverageGap => "ISO 26262-5:8.4.5 (DC evaluation)",
+            UndetectedReason::SharedInputCcf => "ISO 26262-9:7.4.1 (Dependent failure initiators)",
+            UndetectedReason::ReplicatedDesignCcf => "ISO 26262-9:7.4.3 (Systematic failures)",
             UndetectedReason::CommonCausePotential => "ISO 26262-9:7.4 (CCF analysis)",
             UndetectedReason::LateDetection => "ISO 26262-5:7.4.2 (FTTI)",
             UndetectedReason::IdenticalSmReplication => {
@@ -431,25 +448,37 @@ impl FaultDiagnostics {
         faults: &[FaultSite],
     ) -> (Vec<ClassifiedFault>, FaultClassificationSummary) {
         let mut classified = Vec::new();
-        let mut summary = FaultClassificationSummary::default();
 
         for fault in faults {
             let cf = self.classify_fault(fault);
+            classified.push(cf);
+        }
 
-            // Update summary
+        // Identify common cause potential (legacy: based on name matching)
+        self.identify_common_cause(&mut classified);
+
+        // Build summary from final classified list (after all modifications)
+        let summary = Self::build_summary(&classified);
+
+        (classified, summary)
+    }
+
+    /// Build summary from classified faults
+    fn build_summary(classified: &[ClassifiedFault]) -> FaultClassificationSummary {
+        let mut summary = FaultClassificationSummary::default();
+
+        for cf in classified {
             *summary.by_reason.entry(cf.reason).or_insert(0) += 1;
             *summary
                 .by_component
                 .entry(cf.component.clone())
                 .or_insert(0) += 1;
             *summary.fit_by_reason.entry(cf.reason).or_insert(0.0) += cf.fit_contribution;
-
-            classified.push(cf);
         }
 
         // Sort by FIT contribution to find top PMHF contributors
         let mut fit_by_path: HashMap<String, f64> = HashMap::new();
-        for cf in &classified {
+        for cf in classified {
             *fit_by_path
                 .entry(cf.fault_site.primitive_path.to_string())
                 .or_insert(0.0) += cf.fit_contribution;
@@ -458,8 +487,61 @@ impl FaultDiagnostics {
         contributors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         summary.top_pmhf_contributors = contributors.into_iter().take(10).collect();
 
-        // Identify common cause potential
-        self.identify_common_cause(&mut classified);
+        summary
+    }
+
+    /// Classify all undetected faults using actual CCF analysis results
+    /// This provides more accurate classification by using LIR connectivity data
+    pub fn classify_with_ccf(
+        &self,
+        faults: &[FaultSite],
+        ccf_analysis: &CcfAnalysis,
+    ) -> (Vec<ClassifiedFault>, FaultClassificationSummary) {
+        let (mut classified, _) = self.classify_all(faults);
+
+        // Build lookup of primitives affected by shared inputs
+        let mut shared_input_prims: HashSet<String> = HashSet::new();
+        let mut replicated_design_prims: HashSet<String> = HashSet::new();
+
+        for source in &ccf_analysis.sources {
+            match &source.source_type {
+                CcfSourceType::SharedInput { .. }
+                | CcfSourceType::SharedClock { .. }
+                | CcfSourceType::SharedReset { .. } => {
+                    for prim in &source.affected_primitives {
+                        shared_input_prims.insert(prim.clone());
+                    }
+                }
+                CcfSourceType::ReplicatedDesign { .. } => {
+                    for prim in &source.affected_primitives {
+                        replicated_design_prims.insert(prim.clone());
+                    }
+                }
+            }
+        }
+
+        // Reclassify faults based on actual CCF sources
+        for cf in &mut classified {
+            let path = cf.fault_site.primitive_path.to_string();
+
+            // Check if this fault is on a shared input path (TRUE CCF)
+            if shared_input_prims.contains(&path) {
+                // Only reclassify if not already SM Internal (SM faults take priority)
+                if cf.reason != UndetectedReason::SmInternal {
+                    cf.reason = UndetectedReason::SharedInputCcf;
+                }
+            }
+            // Check if this fault is in a replicated design pattern
+            else if replicated_design_prims.contains(&path)
+                && (cf.reason == UndetectedReason::CommonCausePotential
+                    || cf.reason == UndetectedReason::CoverageGap)
+            {
+                cf.reason = UndetectedReason::ReplicatedDesignCcf;
+            }
+        }
+
+        // Rebuild summary from final classified list
+        let summary = Self::build_summary(&classified);
 
         (classified, summary)
     }
@@ -1513,6 +1595,8 @@ pub fn generate_diagnostic_report(
     }
 
     for reason in [
+        UndetectedReason::SharedInputCcf,
+        UndetectedReason::ReplicatedDesignCcf,
         UndetectedReason::IdenticalSmReplication,
         UndetectedReason::SmInternal,
         UndetectedReason::OutputPath,
