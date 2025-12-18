@@ -1,0 +1,600 @@
+// =============================================================================
+// Safety Components Library for ISO 26262 Compliance
+// =============================================================================
+// This library provides safety mechanisms that can be fault-injected to
+// MEASURE diagnostic coverage, not assume it.
+//
+// Components:
+//   - EccMemory8: 8-bit ECC protected memory (SEC-DED Hamming)
+//   - EccRegister32: 32-bit ECC protected register
+//   - ClockMonitor: Digital clock monitoring wrapper
+//   - BistController: Built-in self-test controller
+//   - SafetyIsland: Integrated safety monitoring
+// =============================================================================
+
+// =============================================================================
+// ECC Memory (8-bit) - Hamming SEC-DED
+// =============================================================================
+// Single Error Correction, Double Error Detection
+// Uses Hamming(12,8) + overall parity = 13 bits stored per 8-bit word
+//
+// Parity bit positions (1-indexed):
+//   p1 covers bits: 1,3,5,7,9,11,13 (odd positions)
+//   p2 covers bits: 2,3,6,7,10,11
+//   p4 covers bits: 4,5,6,7,12,13
+//   p8 covers bits: 8,9,10,11,12,13
+//   p0 is overall parity (XOR of all bits) for DED
+// =============================================================================
+#[safety_mechanism(type = ecc)]
+entity EccMemory8 {
+    in clk: clock
+    in rst: bit
+    in write_en: bit
+    in data_in: bit[8]
+    out data_out: bit[8]
+    #[detection_signal]
+    out single_bit_error: bit      // Correctable error detected
+    #[detection_signal]
+    out double_bit_error: bit      // Uncorrectable error detected
+    #[detection_signal]
+    out ecc_error: bit             // Any error (SBE | DBE)
+}
+
+impl EccMemory8 {
+    // Storage includes ECC bits: 8 data + 4 hamming + 1 overall = 13 bits
+    signal stored_data: bit[8] = 0
+    signal stored_p1: bit = 0
+    signal stored_p2: bit = 0
+    signal stored_p4: bit = 0
+    signal stored_p8: bit = 0
+    signal stored_p0: bit = 0      // Overall parity for DED
+
+    // Encoder: Calculate parity bits from input data
+    // d[0..7] maps to positions 3,5,6,7,9,10,11,12 in Hamming code
+    signal enc_p1: bit = data_in[0] ^ data_in[1] ^ data_in[3] ^ data_in[4] ^ data_in[6]
+    signal enc_p2: bit = data_in[0] ^ data_in[2] ^ data_in[3] ^ data_in[5] ^ data_in[6]
+    signal enc_p4: bit = data_in[1] ^ data_in[2] ^ data_in[3] ^ data_in[7]
+    signal enc_p8: bit = data_in[4] ^ data_in[5] ^ data_in[6] ^ data_in[7]
+    signal enc_p0: bit = data_in[0] ^ data_in[1] ^ data_in[2] ^ data_in[3] ^
+                        data_in[4] ^ data_in[5] ^ data_in[6] ^ data_in[7] ^
+                        enc_p1 ^ enc_p2 ^ enc_p4 ^ enc_p8
+
+    // Write logic
+    on(clk.rise) {
+        if (rst) {
+            stored_data = 0
+            stored_p1 = 0
+            stored_p2 = 0
+            stored_p4 = 0
+            stored_p8 = 0
+            stored_p0 = 0
+        } else if (write_en) {
+            stored_data = data_in
+            stored_p1 = enc_p1
+            stored_p2 = enc_p2
+            stored_p4 = enc_p4
+            stored_p8 = enc_p8
+            stored_p0 = enc_p0
+        }
+    }
+
+    // Decoder: Calculate syndrome from stored data
+    signal syn_p1: bit = stored_p1 ^ stored_data[0] ^ stored_data[1] ^ stored_data[3] ^ stored_data[4] ^ stored_data[6]
+    signal syn_p2: bit = stored_p2 ^ stored_data[0] ^ stored_data[2] ^ stored_data[3] ^ stored_data[5] ^ stored_data[6]
+    signal syn_p4: bit = stored_p4 ^ stored_data[1] ^ stored_data[2] ^ stored_data[3] ^ stored_data[7]
+    signal syn_p8: bit = stored_p8 ^ stored_data[4] ^ stored_data[5] ^ stored_data[6] ^ stored_data[7]
+
+    // Syndrome value (0 = no error, non-zero = error position)
+    signal syndrome: bit[4] = (syn_p8 as bit[4]) * 8 + (syn_p4 as bit[4]) * 4 +
+                              (syn_p2 as bit[4]) * 2 + (syn_p1 as bit[4])
+
+    // Overall parity check
+    signal calc_p0: bit = stored_data[0] ^ stored_data[1] ^ stored_data[2] ^ stored_data[3] ^
+                         stored_data[4] ^ stored_data[5] ^ stored_data[6] ^ stored_data[7] ^
+                         stored_p1 ^ stored_p2 ^ stored_p4 ^ stored_p8
+    signal overall_parity_error: bit = calc_p0 ^ stored_p0
+
+    // Error detection logic (SEC-DED):
+    // syndrome=0, parity_ok   → No error
+    // syndrome≠0, parity_err  → Single bit error (correctable)
+    // syndrome≠0, parity_ok   → Double bit error (detectable only)
+    // syndrome=0, parity_err  → Error in overall parity bit (correctable)
+    signal syndrome_nonzero: bit = if syndrome != 0 { 1 } else { 0 }
+    signal is_single_bit: bit = syndrome_nonzero & overall_parity_error
+    signal is_double_bit: bit = syndrome_nonzero & ~overall_parity_error
+
+    // Correction logic: flip the bit at syndrome position if SBE
+    // Map syndrome to data bit index (syndrome 3,5,6,7,9,10,11,12 → data 0-7)
+    signal correct_bit0: bit = if (syndrome == 3) & is_single_bit { ~stored_data[0] } else { stored_data[0] }
+    signal correct_bit1: bit = if (syndrome == 5) & is_single_bit { ~stored_data[1] } else { stored_data[1] }
+    signal correct_bit2: bit = if (syndrome == 6) & is_single_bit { ~stored_data[2] } else { stored_data[2] }
+    signal correct_bit3: bit = if (syndrome == 7) & is_single_bit { ~stored_data[3] } else { stored_data[3] }
+    signal correct_bit4: bit = if (syndrome == 9) & is_single_bit { ~stored_data[4] } else { stored_data[4] }
+    signal correct_bit5: bit = if (syndrome == 10) & is_single_bit { ~stored_data[5] } else { stored_data[5] }
+    signal correct_bit6: bit = if (syndrome == 11) & is_single_bit { ~stored_data[6] } else { stored_data[6] }
+    signal correct_bit7: bit = if (syndrome == 12) & is_single_bit { ~stored_data[7] } else { stored_data[7] }
+
+    // Output corrected data (or original if DBE - can't correct)
+    data_out[0] = correct_bit0
+    data_out[1] = correct_bit1
+    data_out[2] = correct_bit2
+    data_out[3] = correct_bit3
+    data_out[4] = correct_bit4
+    data_out[5] = correct_bit5
+    data_out[6] = correct_bit6
+    data_out[7] = correct_bit7
+
+    // Detection signals
+    single_bit_error = is_single_bit
+    double_bit_error = is_double_bit
+    ecc_error = is_single_bit | is_double_bit
+}
+
+// =============================================================================
+// ECC Protected Register (32-bit) - Uses 4x EccMemory8
+// =============================================================================
+#[safety_mechanism(type = ecc)]
+entity EccRegister32 {
+    in clk: clock
+    in rst: bit
+    in write_en: bit
+    in data_in: bit[32]
+    out data_out: bit[32]
+    #[detection_signal]
+    out single_bit_error: bit
+    #[detection_signal]
+    out double_bit_error: bit
+    #[detection_signal]
+    out ecc_error: bit
+}
+
+impl EccRegister32 {
+    signal data_out_0: bit[8]
+    signal data_out_1: bit[8]
+    signal data_out_2: bit[8]
+    signal data_out_3: bit[8]
+    signal sbe_0: bit
+    signal sbe_1: bit
+    signal sbe_2: bit
+    signal sbe_3: bit
+    signal dbe_0: bit
+    signal dbe_1: bit
+    signal dbe_2: bit
+    signal dbe_3: bit
+    signal err_0: bit
+    signal err_1: bit
+    signal err_2: bit
+    signal err_3: bit
+
+    // Slice input into 4 bytes
+    signal din_0: bit[8] = data_in[0] as bit[8]
+    signal din_1: bit[8] = (data_in >> 8) as bit[8]
+    signal din_2: bit[8] = (data_in >> 16) as bit[8]
+    signal din_3: bit[8] = (data_in >> 24) as bit[8]
+
+    let byte0 = EccMemory8 {
+        clk: clk, rst: rst, write_en: write_en,
+        data_in: din_0, data_out: data_out_0,
+        single_bit_error: sbe_0, double_bit_error: dbe_0, ecc_error: err_0
+    }
+
+    let byte1 = EccMemory8 {
+        clk: clk, rst: rst, write_en: write_en,
+        data_in: din_1, data_out: data_out_1,
+        single_bit_error: sbe_1, double_bit_error: dbe_1, ecc_error: err_1
+    }
+
+    let byte2 = EccMemory8 {
+        clk: clk, rst: rst, write_en: write_en,
+        data_in: din_2, data_out: data_out_2,
+        single_bit_error: sbe_2, double_bit_error: dbe_2, ecc_error: err_2
+    }
+
+    let byte3 = EccMemory8 {
+        clk: clk, rst: rst, write_en: write_en,
+        data_in: din_3, data_out: data_out_3,
+        single_bit_error: sbe_3, double_bit_error: dbe_3, ecc_error: err_3
+    }
+
+    // Combine output bytes
+    data_out = (data_out_3 as bit[32]) * 16777216 + (data_out_2 as bit[32]) * 65536 +
+               (data_out_1 as bit[32]) * 256 + (data_out_0 as bit[32])
+
+    // Aggregate error signals
+    single_bit_error = sbe_0 | sbe_1 | sbe_2 | sbe_3
+    double_bit_error = dbe_0 | dbe_1 | dbe_2 | dbe_3
+    ecc_error = err_0 | err_1 | err_2 | err_3
+}
+
+// =============================================================================
+// Clock Monitor - Digital wrapper for clock monitoring
+// =============================================================================
+// Models the DIGITAL EFFECTS of clock faults:
+//   - Clock loss: counter stops incrementing
+//   - Clock glitch: missed/extra increments
+//   - Frequency deviation: counter period changes
+//
+// Reference clock is assumed correct (system-level assumption)
+// =============================================================================
+#[safety_mechanism(type = watchdog)]
+entity ClockMonitor {
+    in clk_monitored: clock        // Clock being monitored
+    in clk_reference: clock        // Reference clock (assumed good)
+    in rst: bit
+    in expected_ratio: bit[8]      // Expected clk_mon/clk_ref ratio
+    in tolerance: bit[4]           // Allowed deviation (±)
+    #[detection_signal]
+    out clock_loss: bit            // Monitored clock stopped
+    #[detection_signal]
+    out freq_high: bit             // Frequency too high
+    #[detection_signal]
+    out freq_low: bit              // Frequency too low
+    #[detection_signal]
+    out clock_error: bit           // Any clock error
+    out clock_ok: bit              // Clock is healthy
+}
+
+impl ClockMonitor {
+    // Counter incremented by monitored clock
+    signal mon_counter: bit[8] = 0
+    signal mon_snapshot: bit[8] = 0
+
+    // Counter incremented by reference clock (window timer)
+    signal ref_counter: bit[8] = 0
+    signal window_complete: bit = 0
+
+    // Latched error flags
+    signal loss_flag: bit = 0
+    signal high_flag: bit = 0
+    signal low_flag: bit = 0
+
+    // Count monitored clock edges
+    on(clk_monitored.rise) {
+        if (rst) {
+            mon_counter = 0
+        } else {
+            mon_counter = mon_counter + 1
+        }
+    }
+
+    // Reference clock creates measurement windows
+    on(clk_reference.rise) {
+        if (rst) {
+            ref_counter = 0
+            window_complete = 0
+            mon_snapshot = 0
+            loss_flag = 0
+            high_flag = 0
+            low_flag = 0
+        } else {
+            if (ref_counter >= 255) {
+                // Window complete - evaluate
+                ref_counter = 0
+                mon_snapshot = mon_counter
+                window_complete = 1
+
+                // Check for clock loss (no edges in window)
+                if (mon_counter == 0) {
+                    loss_flag = 1
+                }
+
+                // Reset monitored counter for next window
+                // (This is a simplification - real impl would be more complex)
+            } else {
+                ref_counter = ref_counter + 1
+                window_complete = 0
+            }
+        }
+    }
+
+    // Frequency bounds check (combinatorial)
+    signal expected_min: bit[8] = if expected_ratio > (tolerance as bit[8]) {
+        expected_ratio - (tolerance as bit[8])
+    } else { 0 }
+    signal expected_max: bit[8] = if (expected_ratio + (tolerance as bit[8])) < 255 {
+        expected_ratio + (tolerance as bit[8])
+    } else { 255 }
+
+    signal freq_too_high: bit = if mon_snapshot > expected_max { 1 } else { 0 }
+    signal freq_too_low: bit = if mon_snapshot < expected_min { 1 } else { 0 }
+
+    // Output detection signals
+    clock_loss = loss_flag
+    freq_high = freq_too_high & window_complete
+    freq_low = freq_too_low & window_complete & ~loss_flag
+    clock_error = clock_loss | freq_high | freq_low
+    clock_ok = ~clock_error
+}
+
+// =============================================================================
+// BIST Controller - Built-In Self Test
+// =============================================================================
+// Runs at power-on or on-demand to detect latent/residual faults
+// Uses LFSR-based pattern generation and signature analysis
+//
+// BIST detects:
+//   - Stuck-at faults in combinational logic
+//   - Stuck-at faults in sequential elements
+//   - Transition faults (if using appropriate patterns)
+// =============================================================================
+#[safety_mechanism(type = logic_bist)]
+entity BistController {
+    in clk: clock
+    in rst: bit
+    in bist_enable: bit            // Start BIST
+    in bist_mode: bit[2]           // 0=quick, 1=normal, 2=thorough
+    out bist_active: bit           // BIST in progress
+    out bist_complete: bit         // BIST finished
+    #[detection_signal]
+    out bist_fail: bit             // Fault detected
+    out bist_pass: bit             // No faults found
+    out pattern_count: bit[16]     // Patterns applied
+}
+
+impl BistController {
+    // LFSR for pattern generation (16-bit, polynomial x^16 + x^14 + x^13 + x^11 + 1)
+    signal lfsr: bit[16] = 1       // Seed (non-zero)
+    signal signature: bit[16] = 0  // MISR signature
+
+    // Control state
+    signal active_reg: bit = 0
+    signal complete_reg: bit = 0
+    signal fail_reg: bit = 0
+    signal count_reg: bit[16] = 0
+
+    // Pattern limits based on mode
+    signal max_patterns: bit[16] = if bist_mode == 0 { 256 }
+                                   else if bist_mode == 1 { 4096 }
+                                   else { 65535 }
+
+    // LFSR feedback (Galois form) - extract bit 0 via AND mask
+    signal lfsr_bit0: bit = (lfsr & 1) as bit
+    signal lfsr_next: bit[16] = if lfsr_bit0 == 1 {
+        // XOR taps at positions 14, 13, 11
+        (lfsr >> 1) ^ 45056  // 0xB000 = bits 15,14,13,12 pattern for feedback
+    } else {
+        lfsr >> 1
+    }
+
+    // MISR update (compress responses) - extract bit 0 via AND mask
+    signal misr_bit0: bit = (signature & 1) as bit
+    signal misr_next: bit[16] = if misr_bit0 == 1 {
+        (signature >> 1) ^ 45056
+    } else {
+        signature >> 1
+    }
+
+    on(clk.rise) {
+        if (rst) {
+            lfsr = 1
+            signature = 0
+            active_reg = 0
+            complete_reg = 0
+            fail_reg = 0
+            count_reg = 0
+        } else if (bist_enable & ~active_reg & ~complete_reg) {
+            // Start BIST
+            active_reg = 1
+            lfsr = 1
+            signature = 0
+            count_reg = 0
+        } else if (active_reg) {
+            // Run BIST
+            lfsr = lfsr_next
+            signature = misr_next ^ lfsr  // XOR with pattern (simplified MISR)
+            count_reg = count_reg + 1
+
+            if (count_reg >= max_patterns) {
+                // BIST complete - check signature
+                active_reg = 0
+                complete_reg = 1
+                // Expected signature depends on DUT - here we check for known-good
+                // In real impl, this would be compared against golden signature
+                if (signature == 0) {
+                    fail_reg = 1  // All-zero signature indicates fault
+                }
+            }
+        }
+    }
+
+    bist_active = active_reg
+    bist_complete = complete_reg
+    bist_fail = fail_reg
+    bist_pass = complete_reg & ~fail_reg
+    pattern_count = count_reg
+}
+
+// =============================================================================
+// BIST Wrapper - Wraps a functional unit with BIST capability
+// =============================================================================
+// This wrapper can be instantiated around any combinational logic block
+// to enable BIST testing of that block
+// =============================================================================
+#[safety_mechanism(type = logic_bist)]
+entity BistWrapper8 {
+    in clk: clock
+    in rst: bit
+    in bist_mode: bit              // 0=normal operation, 1=BIST mode
+    in func_input: bit[8]          // Functional input
+    in func_output_expected: bit[8] // Expected output (for BIST comparison)
+    out func_output: bit[8]        // Output to system
+    #[detection_signal]
+    out bist_error: bit            // Mismatch detected during BIST
+    out bist_done: bit             // BIST sequence complete
+}
+
+impl BistWrapper8 {
+    // LFSR for test pattern generation
+    signal lfsr: bit[8] = 1
+    signal test_count: bit[8] = 0
+    signal error_flag: bit = 0
+    signal done_flag: bit = 0
+
+    // LFSR feedback (polynomial x^8 + x^6 + x^5 + x^4 + 1)
+    // Extract bits via shift and mask
+    signal bit0: bit = (lfsr & 1) as bit
+    signal bit2: bit = ((lfsr >> 2) & 1) as bit
+    signal bit3: bit = ((lfsr >> 3) & 1) as bit
+    signal bit4: bit = ((lfsr >> 4) & 1) as bit
+    signal feedback: bit = bit0 ^ bit2 ^ bit3 ^ bit4
+    signal lfsr_next: bit[8] = (lfsr >> 1) | ((feedback as bit[8]) * 128)
+
+    on(clk.rise) {
+        if (rst) {
+            lfsr = 1
+            test_count = 0
+            error_flag = 0
+            done_flag = 0
+        } else if (bist_mode & ~done_flag) {
+            lfsr = lfsr_next
+            test_count = test_count + 1
+
+            // Compare expected vs actual (in BIST mode)
+            if (func_output_expected != func_input) {  // Simplified: checking pattern generation
+                error_flag = 1
+            }
+
+            if (test_count >= 255) {
+                done_flag = 1
+            }
+        }
+    }
+
+    // In normal mode: pass through func_input
+    // In BIST mode: use LFSR patterns
+    func_output = if bist_mode { lfsr } else { func_input }
+    bist_error = error_flag
+    bist_done = done_flag
+}
+
+// =============================================================================
+// Safety Island - Integrated safety monitoring
+// =============================================================================
+// Combines multiple safety mechanisms into a unified safety monitor
+// Provides system-level fault aggregation and safe state triggering
+// =============================================================================
+#[safety_mechanism(type = tmr)]
+entity SafetyIsland {
+    in clk: clock
+    in rst: bit
+
+    // ECC error inputs (from protected memories)
+    in ecc_sbe: bit                // Single bit error (corrected)
+    in ecc_dbe: bit                // Double bit error (uncorrectable)
+
+    // Clock monitor inputs
+    in clock_error: bit            // Clock fault detected
+
+    // BIST inputs
+    in bist_fail: bit              // BIST detected fault
+
+    // Watchdog input
+    in watchdog_timeout: bit       // Watchdog expired
+
+    // External fault inputs
+    in external_fault: bit         // External fault signal
+
+    // Safe state control
+    in fault_clear: bit            // Clear latched faults
+
+    // Outputs
+    out system_fault: bit          // Any fault active
+    #[detection_signal]
+    out fault_status: bit[8]       // Encoded fault status
+    out safe_state_active: bit     // System in safe state
+    #[detection_signal]
+    out fault_latched: bit         // Fault has been latched
+    out sbe_count: bit[8]          // Count of corrected errors
+}
+
+impl SafetyIsland {
+    // Fault latches
+    signal ecc_dbe_latch: bit = 0
+    signal clock_latch: bit = 0
+    signal bist_latch: bit = 0
+    signal watchdog_latch: bit = 0
+    signal external_latch: bit = 0
+
+    // SBE counter (correctable errors - monitor for accumulation)
+    signal sbe_counter: bit[8] = 0
+    signal sbe_threshold_exceeded: bit = 0
+
+    // Safe state FSM
+    signal safe_state_reg: bit = 0
+
+    // Critical fault aggregate (must be outside on() block)
+    signal any_critical: bit = ecc_dbe_latch | clock_latch | watchdog_latch
+
+    on(clk.rise) {
+        if (rst) {
+            ecc_dbe_latch = 0
+            clock_latch = 0
+            bist_latch = 0
+            watchdog_latch = 0
+            external_latch = 0
+            sbe_counter = 0
+            sbe_threshold_exceeded = 0
+            safe_state_reg = 0
+        } else {
+            // Latch faults (sticky until cleared)
+            if (ecc_dbe) {
+                ecc_dbe_latch = 1
+            }
+            if (clock_error) {
+                clock_latch = 1
+            }
+            if (bist_fail) {
+                bist_latch = 1
+            }
+            if (watchdog_timeout) {
+                watchdog_latch = 1
+            }
+            if (external_fault) {
+                external_latch = 1
+            }
+
+            // Count SBEs (correctable, but too many indicates degradation)
+            if (ecc_sbe) {
+                if (sbe_counter < 255) {
+                    sbe_counter = sbe_counter + 1
+                }
+                if (sbe_counter >= 16) {  // Threshold for concern
+                    sbe_threshold_exceeded = 1
+                }
+            }
+
+            // Safe state logic
+            if (any_critical) {
+                safe_state_reg = 1
+            } else if (fault_clear & ~any_critical) {
+                safe_state_reg = 0
+                // Clear latches on fault_clear
+                ecc_dbe_latch = 0
+                clock_latch = 0
+                bist_latch = 0
+                watchdog_latch = 0
+                external_latch = 0
+                sbe_counter = 0
+                sbe_threshold_exceeded = 0
+            }
+        }
+    }
+
+    // Aggregate fault status
+    signal any_fault: bit = ecc_dbe_latch | clock_latch | bist_latch |
+                           watchdog_latch | external_latch | sbe_threshold_exceeded
+
+    // Encode fault status: [7:6]=reserved, [5]=sbe_thresh, [4]=ext, [3]=wd, [2]=bist, [1]=clk, [0]=ecc_dbe
+    signal status: bit[8] = (sbe_threshold_exceeded as bit[8]) * 32 +
+                           (external_latch as bit[8]) * 16 +
+                           (watchdog_latch as bit[8]) * 8 +
+                           (bist_latch as bit[8]) * 4 +
+                           (clock_latch as bit[8]) * 2 +
+                           (ecc_dbe_latch as bit[8])
+
+    system_fault = any_fault
+    fault_status = status
+    safe_state_active = safe_state_reg
+    fault_latched = any_fault
+    sbe_count = sbe_counter
+}

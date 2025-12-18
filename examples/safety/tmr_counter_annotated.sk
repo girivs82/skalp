@@ -1,0 +1,101 @@
+// TMR Counter with Explicit Detection Signal Annotation
+// This version uses #[detection_signal] attribute instead of relying on naming heuristics
+
+// Simple counter channel
+entity CounterChannel {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+}
+
+impl CounterChannel {
+    signal counter: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else if (enable) {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+}
+
+// TMR Voter with explicit fault detection output
+#[implements(SG001::TmrVoting)]
+#[safety_mechanism(type=tmr)]
+entity TmrVoter {
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out voted: bit[8]
+    #[detection_signal]  // Explicit annotation for fault detection
+    out fault_detected: bit
+}
+
+impl TmrVoter {
+    signal ab_match: bit = if a == b { 1 } else { 0 }
+    signal bc_match: bit = if b == c { 1 } else { 0 }
+    signal ac_match: bit = if a == c { 1 } else { 0 }
+
+    // Majority voting
+    voted = if ab_match { a } else if bc_match { b } else if ac_match { a } else { a }
+
+    // Fault detection: any disagreement indicates fault
+    signal all_match: bit = ab_match & bc_match & ac_match
+    fault_detected = if all_match { 0 } else { 1 }
+}
+
+// Top-level TMR Counter
+entity TmrCounterAnnotated {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+    #[detection_signal]  // Explicit annotation for fault output
+    out fault: bit
+}
+
+impl TmrCounterAnnotated {
+    signal count_a: bit[8]
+    signal count_b: bit[8]
+    signal count_c: bit[8]
+    signal voted_out: bit[8]
+    signal fault_out: bit
+
+    // Three counter channels
+    let ch_a = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_a
+    }
+
+    let ch_b = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_b
+    }
+
+    let ch_c = CounterChannel {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_c
+    }
+
+    // TMR voter
+    let voter = TmrVoter {
+        a: count_a,
+        b: count_b,
+        c: count_c,
+        voted: voted_out,
+        fault_detected: fault_out
+    }
+
+    count = voted_out
+    fault = fault_out
+}

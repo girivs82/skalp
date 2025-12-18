@@ -1,0 +1,165 @@
+// TMR Counter v1 - Adding Output Encoding for ASIL-D
+// Strategy: Add parity bit to detect voter output corruption
+//
+// Key insight: TMR masks single-channel faults but voter itself is SPOF
+// Solution: Add parity encoding that survives through voter, checked at output
+
+// Counter channel with parity bit
+entity CounterChannelParity {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+    out parity: bit  // XOR of all count bits
+}
+
+impl CounterChannelParity {
+    signal counter: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else if (enable) {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+
+    // Calculate parity (XOR reduction of count bits)
+    signal p0: bit = counter[0] ^ counter[1]
+    signal p1: bit = counter[2] ^ counter[3]
+    signal p2: bit = counter[4] ^ counter[5]
+    signal p3: bit = counter[6] ^ counter[7]
+    signal p01: bit = p0 ^ p1
+    signal p23: bit = p2 ^ p3
+    parity = p01 ^ p23
+}
+
+// TMR Voter with parity
+#[implements(SG001::TmrVoting)]
+#[safety_mechanism(type=tmr)]
+entity TmrVoterParity {
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    in pa: bit  // parity from channel a
+    in pb: bit  // parity from channel b
+    in pc: bit  // parity from channel c
+    out voted: bit[8]
+    out voted_parity: bit
+    out fault_detected: bit
+}
+
+impl TmrVoterParity {
+    // Data voting
+    signal ab_match: bit = if a == b { 1 } else { 0 }
+    signal bc_match: bit = if b == c { 1 } else { 0 }
+    signal ac_match: bit = if a == c { 1 } else { 0 }
+
+    voted = if ab_match { a } else if bc_match { b } else if ac_match { a } else { a }
+
+    // Parity voting (separate from data)
+    signal pab_match: bit = if pa == pb { 1 } else { 0 }
+    signal pbc_match: bit = if pb == pc { 1 } else { 0 }
+    signal pac_match: bit = if pa == pc { 1 } else { 0 }
+
+    voted_parity = if pab_match { pa } else if pbc_match { pb } else if pac_match { pa } else { pa }
+
+    // Fault detection
+    signal all_match: bit = ab_match & bc_match & ac_match
+    fault_detected = if all_match { 0 } else { 1 }
+}
+
+// Output parity checker - verifies voted output matches voted parity
+#[implements(SG001::ParityCheck)]
+#[safety_mechanism(type=parity)]
+entity ParityChecker {
+    in data: bit[8]
+    in expected_parity: bit
+    out parity_error: bit
+}
+
+impl ParityChecker {
+    // Recalculate parity from data
+    signal p0: bit = data[0] ^ data[1]
+    signal p1: bit = data[2] ^ data[3]
+    signal p2: bit = data[4] ^ data[5]
+    signal p3: bit = data[6] ^ data[7]
+    signal p01: bit = p0 ^ p1
+    signal p23: bit = p2 ^ p3
+    signal calculated: bit = p01 ^ p23
+
+    // Error if calculated doesn't match expected
+    parity_error = if calculated == expected_parity { 0 } else { 1 }
+}
+
+// Top-level v1: TMR + Parity
+entity TmrCounterV1 {
+    in clk: clock
+    in rst: bit
+    in enable: bit
+    out count: bit[8]
+    out fault: bit
+}
+
+impl TmrCounterV1 {
+    signal count_a: bit[8]
+    signal count_b: bit[8]
+    signal count_c: bit[8]
+    signal parity_a: bit
+    signal parity_b: bit
+    signal parity_c: bit
+    signal voted_out: bit[8]
+    signal voted_parity: bit
+    signal tmr_fault: bit
+    signal parity_error: bit
+
+    // Three counter channels with parity
+    let ch_a = CounterChannelParity {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_a,
+        parity: parity_a
+    }
+
+    let ch_b = CounterChannelParity {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_b,
+        parity: parity_b
+    }
+
+    let ch_c = CounterChannelParity {
+        clk: clk,
+        rst: rst,
+        enable: enable,
+        count: count_c,
+        parity: parity_c
+    }
+
+    // TMR voter with parity
+    let voter = TmrVoterParity {
+        a: count_a,
+        b: count_b,
+        c: count_c,
+        pa: parity_a,
+        pb: parity_b,
+        pc: parity_c,
+        voted: voted_out,
+        voted_parity: voted_parity,
+        fault_detected: tmr_fault
+    }
+
+    // Parity checker on voter output
+    let checker = ParityChecker {
+        data: voted_out,
+        expected_parity: voted_parity,
+        parity_error: parity_error
+    }
+
+    count = voted_out
+    fault = tmr_fault | parity_error
+}
