@@ -117,12 +117,16 @@ impl Default for FaultCampaignConfig {
 pub struct FaultCampaignResults {
     /// Total faults simulated
     pub total_faults: usize,
-    /// Faults that were detected
+    /// Faults that were detected by safety mechanisms
     pub detected_faults: usize,
-    /// Faults that caused output corruption
+    /// Faults that caused output corruption (dangerous faults)
     pub corruption_faults: usize,
-    /// Diagnostic coverage (detected / corruption)
+    /// Faults that caused no output change (safe faults - masked by logic)
+    pub safe_faults: usize,
+    /// Diagnostic coverage (detected / corruption) as percentage
     pub diagnostic_coverage: f64,
+    /// Safe fault percentage (safe / total) as percentage
+    pub safe_fault_percentage: f64,
     /// Individual fault results
     pub fault_results: Vec<FaultSimResult>,
 }
@@ -722,17 +726,28 @@ impl GateLevelSimulator {
             results.push(result);
         }
 
+        // Safe faults = faults that caused no output change (masked by logic)
+        let safe_faults = total_faults - corruption_faults;
+
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0
         } else {
-            100.0 // No corruption = 100% coverage
+            100.0 // No corruption = no dangerous faults
+        };
+
+        let safe_pct = if total_faults > 0 {
+            (safe_faults as f64) / (total_faults as f64) * 100.0
+        } else {
+            0.0
         };
 
         FaultCampaignResults {
             total_faults,
             detected_faults,
             corruption_faults,
+            safe_faults,
             diagnostic_coverage: dc,
+            safe_fault_percentage: safe_pct,
             fault_results: results,
         }
     }
@@ -783,11 +798,13 @@ impl GateLevelSimulator {
 
                 let result = self.run_fault_sim(fault, config.cycles_per_fault, &config.clock_name);
                 total_faults += 1;
-                if result.detected {
-                    detected_faults += 1;
-                }
-                if !result.output_diffs.is_empty() {
+                let caused_corruption = !result.output_diffs.is_empty();
+                if caused_corruption {
                     corruption_faults += 1;
+                    // DC counts detected faults among corruption faults only
+                    if result.detected {
+                        detected_faults += 1;
+                    }
                 }
                 results.push(result);
             }
@@ -796,17 +813,28 @@ impl GateLevelSimulator {
             }
         }
 
+        // Safe faults = faults that caused no output change (masked by logic)
+        let safe_faults = total_faults - corruption_faults;
+
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0
         } else {
             100.0
         };
 
+        let safe_pct = if total_faults > 0 {
+            (safe_faults as f64) / (total_faults as f64) * 100.0
+        } else {
+            0.0
+        };
+
         FaultCampaignResults {
             total_faults,
             detected_faults,
             corruption_faults,
+            safe_faults,
             diagnostic_coverage: dc,
+            safe_fault_percentage: safe_pct,
             fault_results: results,
         }
     }

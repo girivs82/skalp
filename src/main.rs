@@ -1050,6 +1050,10 @@ fn analyze_design(
                             println!("   Detected: {}", results.detected_faults);
                             println!("   Corruption Faults: {}", results.corruption_faults);
                             println!(
+                                "   Safe Faults: {} ({:.1}%)",
+                                results.safe_faults, results.safe_fault_percentage
+                            );
+                            println!(
                                 "   Diagnostic Coverage: {:.2}%",
                                 results.diagnostic_coverage
                             );
@@ -1113,6 +1117,10 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
     println!("   Faults Tested: {}", results.total_faults);
     println!("   Detected: {}", results.detected_faults);
     println!("   Corruption Faults: {}", results.corruption_faults);
+    println!(
+        "   Safe Faults: {} ({:.1}%)",
+        results.safe_faults, results.safe_fault_percentage
+    );
     println!(
         "   Diagnostic Coverage: {:.2}%",
         results.diagnostic_coverage
@@ -2140,7 +2148,12 @@ fn run_fi_driven_safety(
 
                         let campaign_config = GpuFaultCampaignConfig {
                             cycles_per_fault: cycles,
-                            fault_types: vec![SimFaultType::StuckAt0, SimFaultType::StuckAt1],
+                            fault_types: vec![
+                                SimFaultType::StuckAt0,
+                                SimFaultType::StuckAt1,
+                                SimFaultType::BitFlip,
+                                SimFaultType::Transient,
+                            ],
                             max_faults,
                             use_gpu: true,
                             ..Default::default()
@@ -2150,6 +2163,10 @@ fn run_fi_driven_safety(
 
                         println!("   Faults simulated: {}", campaign.total_faults);
                         println!("   Detected: {}", campaign.detected_faults);
+                        println!(
+                            "   Safe faults: {} ({:.1}%)",
+                            campaign.safe_faults, campaign.safe_fault_percentage
+                        );
                         println!("   DC: {:.2}%", campaign.diagnostic_coverage);
 
                         // Convert to FaultEffectResult format
@@ -2169,7 +2186,10 @@ fn run_fi_driven_safety(
                             let fault_type = match fault_result.fault.fault_type {
                                 SimFaultType::StuckAt0 => FaultType::StuckAt0,
                                 SimFaultType::StuckAt1 => FaultType::StuckAt1,
-                                _ => FaultType::StuckAt0, // Default for complex fault types
+                                SimFaultType::BitFlip | SimFaultType::Transient => {
+                                    FaultType::Transient
+                                }
+                                _ => FaultType::StuckAt0, // Default for other complex fault types
                             };
 
                             // Convert detection mode from SIR to HIR enum
@@ -2479,7 +2499,12 @@ fn run_cpu_fi_campaign(
     let config = FaultCampaignConfig {
         cycles_per_fault: cycles,
         clock_name: "clk".to_string(),
-        fault_types: vec![SimFaultType::StuckAt0, SimFaultType::StuckAt1],
+        fault_types: vec![
+            SimFaultType::StuckAt0,
+            SimFaultType::StuckAt1,
+            SimFaultType::BitFlip,
+            SimFaultType::Transient,
+        ],
         max_faults,
     };
 
@@ -2487,6 +2512,10 @@ fn run_cpu_fi_campaign(
 
     println!("   Faults simulated: {}", campaign.total_faults);
     println!("   Detected: {}", campaign.detected_faults);
+    println!(
+        "   Safe faults: {} ({:.1}%)",
+        campaign.safe_faults, campaign.safe_fault_percentage
+    );
     println!("   DC: {:.2}%", campaign.diagnostic_coverage);
 
     let mut results = Vec::new();
@@ -2507,7 +2536,8 @@ fn run_cpu_fi_campaign(
         let fault_type = match fault_result.fault.fault_type {
             SimFaultType::StuckAt0 => FaultType::StuckAt0,
             SimFaultType::StuckAt1 => FaultType::StuckAt1,
-            _ => FaultType::StuckAt0, // Default for complex fault types
+            SimFaultType::BitFlip | SimFaultType::Transient => FaultType::Transient,
+            _ => FaultType::StuckAt0, // Default for other complex fault types
         };
 
         // Convert detection mode from SIR to HIR enum

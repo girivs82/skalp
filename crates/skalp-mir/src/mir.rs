@@ -115,6 +115,10 @@ pub struct Module {
     pub vendor_ip_config: Option<skalp_frontend::hir::VendorIpConfig>,
     /// Power domain declarations (mirrors clock_domains pattern)
     pub power_domains: Vec<skalp_frontend::hir::HirPowerDomain>,
+    /// Power domain configuration for CCF analysis (from #[power_domain("name")] attribute)
+    /// When set, all primitives in this module belong to this power domain
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_domain_config: Option<skalp_frontend::hir::PowerDomainConfig>,
     /// Safety context (from #[implements(...)] or #[safety_mechanism(...)] attribute)
     /// Indicates which safety goal/mechanism this module implements
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1282,6 +1286,7 @@ impl Module {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         }
     }

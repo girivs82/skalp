@@ -5229,6 +5229,7 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::MediumKw)
                 // Power intent keywords that can be used as attribute names
                 | Some(SyntaxKind::IsolationKw)
+                | Some(SyntaxKind::PowerDomainKw)
                 // Safety annotation keyword that can be used as attribute name
                 | Some(SyntaxKind::ImplementsKw)
         )

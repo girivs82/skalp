@@ -319,6 +319,15 @@ impl<'hir> HirToMir<'hir> {
                 module.power_domains = entity.power_domains.clone();
             }
 
+            // Propagate power domain config for CCF analysis (from #[power_domain("name")] attribute)
+            if let Some(ref config) = entity.power_domain_config {
+                module.power_domain_config = Some(config.clone());
+                eprintln!(
+                    "🔌 POWER_DOMAIN: Propagating power_domain_config (domain={}) to entity '{}'",
+                    config.domain_name, entity.name
+                );
+            }
+
             // Propagate safety mechanism config from HIR entity to MIR module
             if let Some(ref sm_config) = entity.safety_mechanism_config {
                 module.safety_context = Some(SafetyContext {

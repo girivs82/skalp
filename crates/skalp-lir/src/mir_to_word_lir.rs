@@ -1087,6 +1087,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         }
     }
@@ -1190,6 +1191,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1292,6 +1294,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 

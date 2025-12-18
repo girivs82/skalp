@@ -795,11 +795,19 @@ kernel void fault_sim_kernel(
             })
             .collect();
 
-        let detected_faults = fault_results.iter().filter(|r| r.detected).count();
+        // Count corruption faults (dangerous faults that affect outputs)
         let corruption_faults = fault_results
             .iter()
             .filter(|r| !r.output_diffs.is_empty())
             .count();
+        // DC only counts detected faults among corruption faults
+        let detected_faults = fault_results
+            .iter()
+            .filter(|r| !r.output_diffs.is_empty() && r.detected)
+            .count();
+
+        // Safe faults = faults that caused no output change (masked by logic)
+        let safe_faults = total_faults - corruption_faults;
 
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0
@@ -807,11 +815,19 @@ kernel void fault_sim_kernel(
             100.0
         };
 
+        let safe_pct = if total_faults > 0 {
+            (safe_faults as f64) / (total_faults as f64) * 100.0
+        } else {
+            0.0
+        };
+
         FaultCampaignResults {
             total_faults,
             detected_faults,
             corruption_faults,
+            safe_faults,
             diagnostic_coverage: dc,
+            safe_fault_percentage: safe_pct,
             fault_results,
         }
     }
@@ -829,11 +845,19 @@ kernel void fault_sim_kernel(
             .map(|fault| self.simulate_single_fault(fault, config.cycles_per_fault))
             .collect();
 
-        let detected_faults = results.iter().filter(|r| r.detected).count();
+        // Count corruption faults (dangerous faults that affect outputs)
         let corruption_faults = results
             .iter()
             .filter(|r| !r.output_diffs.is_empty())
             .count();
+        // DC only counts detected faults among corruption faults
+        let detected_faults = results
+            .iter()
+            .filter(|r| !r.output_diffs.is_empty() && r.detected)
+            .count();
+
+        // Safe faults = faults that caused no output change (masked by logic)
+        let safe_faults = total_faults - corruption_faults;
 
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0
@@ -841,11 +865,19 @@ kernel void fault_sim_kernel(
             100.0
         };
 
+        let safe_pct = if total_faults > 0 {
+            (safe_faults as f64) / (total_faults as f64) * 100.0
+        } else {
+            0.0
+        };
+
         FaultCampaignResults {
             total_faults,
             detected_faults,
             corruption_faults,
+            safe_faults,
             diagnostic_coverage: dc,
+            safe_fault_percentage: safe_pct,
             fault_results: results,
         }
     }

@@ -598,6 +598,10 @@ impl HirBuilderContext {
         let id = self.next_entity_id();
         let name = self.extract_name(node)?;
 
+        // IMPORTANT: Consume entity-level power_domain_config BEFORE processing ports
+        // Otherwise build_port() will steal it via its own .take()
+        let entity_power_domain_config = self.pending_power_domain_config.take();
+
         // Register in symbol table
         self.symbols.entities.insert(name.clone(), id);
 
@@ -845,6 +849,9 @@ impl HirBuilderContext {
             name, safety_mechanism_config
         );
 
+        // Use entity_power_domain_config captured at the top of this function
+        // (before processing ports, which also can consume pending_power_domain_config)
+
         Some(HirEntity {
             id,
             name,
@@ -858,6 +865,7 @@ impl HirBuilderContext {
             pipeline_config,
             vendor_ip_config,
             power_domains: Vec::new(), // Power domains will be populated later from declarations
+            power_domain_config: entity_power_domain_config,
             safety_mechanism_config,
         })
     }
@@ -7954,9 +7962,11 @@ impl HirBuilderContext {
         let tokens = collect_all_tokens(intent_value);
 
         // Check if this is a power_domain attribute
-        let is_power_domain = tokens
-            .iter()
-            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "power_domain");
+        // Note: power_domain is a keyword, so check for both Ident and PowerDomainKw
+        let is_power_domain = tokens.iter().any(|t| {
+            (t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::PowerDomainKw)
+                && t.text() == "power_domain"
+        });
 
         if !is_power_domain {
             return None;

@@ -124,6 +124,10 @@ pub struct HirEntity {
     pub vendor_ip_config: Option<VendorIpConfig>,
     /// Power domain declarations (mirrors clock_domains pattern)
     pub power_domains: Vec<HirPowerDomain>,
+    /// Power domain configuration for CCF analysis (from #[power_domain("name")] attribute)
+    /// When set on entity, all ports/signals inherit this domain unless overridden
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_domain_config: Option<PowerDomainConfig>,
     /// Safety mechanism configuration (from #[safety_mechanism(...)] attribute)
     /// When present, indicates this entity is a reusable safety mechanism.
     #[serde(skip_serializing_if = "Option::is_none")]

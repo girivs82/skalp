@@ -97,6 +97,9 @@ pub struct MirToLirTransform {
     /// Module-level safety context (from MIR)
     /// Propagated to all primitives created in this module
     module_safety_context: Option<SafetyContext>,
+    /// Module-level power domain (from MIR power_domain_config)
+    /// Propagated to all primitives created in this module for CCF analysis
+    module_power_domain: Option<String>,
 }
 
 impl MirToLirTransform {
@@ -116,6 +119,7 @@ impl MirToLirTransform {
             reset_nets: Vec::new(),
             const_zero_net: None,
             module_safety_context: None,
+            module_power_domain: None,
         }
     }
 
@@ -144,10 +148,15 @@ impl MirToLirTransform {
 
     /// Apply module-level safety context to a primitive
     fn apply_safety_info(&self, mut prim: Primitive) -> Primitive {
+        // Apply safety context (from #[implements(...)] or #[safety_mechanism(...)])
         if let Some(ref ctx) = self.module_safety_context {
             if ctx.has_safety_annotation() {
                 prim.safety_info = Some(Self::safety_context_to_lir_info(ctx));
             }
+        }
+        // Apply power domain (from #[power_domain("name")])
+        if let Some(ref domain) = self.module_power_domain {
+            prim.power_domain = Some(domain.clone());
         }
         prim
     }
@@ -164,6 +173,13 @@ impl MirToLirTransform {
 
         // Store module-level safety context for propagation to primitives
         self.module_safety_context = module.safety_context.clone();
+
+        // Store module-level power domain for CCF analysis
+        // All primitives in this module will belong to this power domain
+        self.module_power_domain = module
+            .power_domain_config
+            .as_ref()
+            .map(|config| config.domain_name.clone());
 
         // Add hierarchy root node
         self.lir.hierarchy.push(HierarchyNode {
@@ -1363,6 +1379,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         }
     }
@@ -1386,6 +1403,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1442,6 +1460,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1483,6 +1502,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1566,6 +1586,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1640,6 +1661,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1702,6 +1724,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1776,6 +1799,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1865,6 +1889,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -1939,6 +1964,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 
@@ -2010,6 +2036,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: Vec::new(),
+            power_domain_config: None,
             safety_context: None,
         };
 

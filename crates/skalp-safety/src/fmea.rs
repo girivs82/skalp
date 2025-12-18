@@ -1175,6 +1175,7 @@ mod tests {
             pipeline_config: None,
             vendor_ip_config: None,
             power_domains: vec![],
+            power_domain_config: None,
             safety_mechanism_config: None,
         };
 

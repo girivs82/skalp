@@ -308,6 +308,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             pipeline_config: entity.pipeline_config.clone(), // Preserve pipeline config
             vendor_ip_config: entity.vendor_ip_config.clone(), // Preserve vendor IP config
             power_domains: entity.power_domains.clone(), // Preserve power domains
+            power_domain_config: entity.power_domain_config.clone(), // Preserve power domain config for CCF
             safety_mechanism_config: entity.safety_mechanism_config.clone(), // Preserve safety config
         };
 
