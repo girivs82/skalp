@@ -55,6 +55,26 @@ pub struct LibraryCell {
     pub outputs: Vec<String>,
     /// Failure modes with FIT breakdown
     pub failure_modes: Vec<LibraryFailureMode>,
+    // === Drive Strength Characteristics ===
+    /// Drive strength multiplier (1 = X1, 2 = X2, 4 = X4, etc.)
+    #[serde(default = "default_drive_strength")]
+    pub drive_strength: u8,
+    /// Maximum output current in microamps (µA)
+    #[serde(default)]
+    pub max_output_current_ua: Option<u32>,
+    /// Output capacitance in femtofarads (fF)
+    #[serde(default)]
+    pub output_capacitance_ff: Option<u32>,
+    /// Input capacitance per pin in femtofarads (fF)
+    #[serde(default)]
+    pub input_capacitance_ff: Option<u32>,
+    /// Maximum fanout (number of standard loads)
+    #[serde(default)]
+    pub max_fanout: Option<u32>,
+}
+
+fn default_drive_strength() -> u8 {
+    1
 }
 
 impl LibraryCell {
@@ -70,7 +90,53 @@ impl LibraryCell {
             inputs,
             outputs,
             failure_modes: Vec::new(),
+            drive_strength: 1,
+            max_output_current_ua: None,
+            output_capacitance_ff: None,
+            input_capacitance_ff: None,
+            max_fanout: None,
         }
+    }
+
+    /// Create a cell with specified drive strength
+    pub fn with_drive_strength(mut self, strength: u8) -> Self {
+        self.drive_strength = strength;
+        // Scale max fanout and current with drive strength
+        if let Some(fanout) = self.max_fanout {
+            self.max_fanout = Some(fanout * strength as u32);
+        }
+        if let Some(current) = self.max_output_current_ua {
+            self.max_output_current_ua = Some(current * strength as u32);
+        }
+        self
+    }
+
+    /// Set electrical characteristics
+    pub fn with_electrical(
+        mut self,
+        max_current_ua: u32,
+        input_cap_ff: u32,
+        output_cap_ff: u32,
+        max_fanout: u32,
+    ) -> Self {
+        self.max_output_current_ua = Some(max_current_ua);
+        self.input_capacitance_ff = Some(input_cap_ff);
+        self.output_capacitance_ff = Some(output_cap_ff);
+        self.max_fanout = Some(max_fanout);
+        self
+    }
+
+    /// Calculate maximum fanout based on load capacitance
+    /// Returns number of loads this cell can drive
+    pub fn calculate_max_fanout(&self, load_cap_per_pin_ff: u32) -> u32 {
+        // If we have explicit max fanout, use it
+        if let Some(fanout) = self.max_fanout {
+            return fanout;
+        }
+        // Otherwise estimate from current capability
+        // Typical: 4 loads per X1 cell at 10fF per load
+        let base_fanout = 4u32;
+        base_fanout * self.drive_strength as u32
     }
 
     /// Create a cell with default stuck-at failure modes

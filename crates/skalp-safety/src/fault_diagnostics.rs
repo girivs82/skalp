@@ -37,6 +37,53 @@ pub enum UndetectedReason {
     Unknown,
 }
 
+/// Simplified fault classification for BIST generation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FaultClassification {
+    /// Fault in functional logic not covered by runtime SM (needs BIST)
+    CoverageGap,
+    /// Fault inside safety mechanism (needs SM-of-SM)
+    SmInternal,
+    /// Fault in output path after SM (needs output encoding)
+    OutputPath,
+    /// Fault is CCF source (needs input protection)
+    CommonCause,
+    /// Other/unknown classification
+    Other,
+}
+
+impl From<UndetectedReason> for FaultClassification {
+    fn from(reason: UndetectedReason) -> Self {
+        match reason {
+            UndetectedReason::CoverageGap => FaultClassification::CoverageGap,
+            UndetectedReason::SmInternal | UndetectedReason::IdenticalSmReplication => {
+                FaultClassification::SmInternal
+            }
+            UndetectedReason::OutputPath => FaultClassification::OutputPath,
+            UndetectedReason::SharedInputCcf
+            | UndetectedReason::ReplicatedDesignCcf
+            | UndetectedReason::CommonCausePotential
+            | UndetectedReason::InputPath => FaultClassification::CommonCause,
+            _ => FaultClassification::Other,
+        }
+    }
+}
+
+/// Information about an undetected fault for BIST generation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndetectedFaultInfo {
+    /// Fault site path
+    pub fault_site: String,
+    /// Fault type (stuck_at_0 or stuck_at_1)
+    pub fault_type: String,
+    /// Component containing the fault
+    pub component: String,
+    /// FIT contribution
+    pub fit_contribution: f64,
+    /// Classification for mitigation strategy
+    pub classification: FaultClassification,
+}
+
 impl UndetectedReason {
     /// Human-readable name
     pub fn name(&self) -> &'static str {
@@ -1747,11 +1794,17 @@ mod tests {
         assert_eq!(extract_primitive_name("top.voter.mux_0"), "mux");
         assert_eq!(extract_primitive_name("top.ch_a.dff_10"), "dff");
         // Test underscore-prefixed buffer names
-        assert_eq!(extract_primitive_name("top.safe_ctrl._safe_state_buf"), "buf");
+        assert_eq!(
+            extract_primitive_name("top.safe_ctrl._safe_state_buf"),
+            "buf"
+        );
         assert_eq!(extract_primitive_name("top.bist._bist_pass_buf"), "buf");
         assert_eq!(extract_primitive_name("top.cmd_proc._clk_buf"), "buf");
         // Test regular assign
-        assert_eq!(extract_primitive_name("top.cmd_proc.CommandProcessor.assign_20"), "assign");
+        assert_eq!(
+            extract_primitive_name("top.cmd_proc.CommandProcessor.assign_20"),
+            "assign"
+        );
     }
 
     #[test]

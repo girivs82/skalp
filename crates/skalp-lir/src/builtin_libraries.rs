@@ -332,6 +332,11 @@ fn make_cell(
         transistor_count: Some(transistor_count),
         inputs,
         outputs,
+        drive_strength: 1,
+        max_output_current_ua: None,
+        output_capacitance_ff: None,
+        input_capacitance_ff: None,
+        max_fanout: None,
         failure_modes: vec![
             LibraryFailureMode::new("stuck_at_0", fit * 0.30, FaultType::StuckAt0)
                 .with_mechanism("oxide_breakdown"),
@@ -378,6 +383,11 @@ fn make_seq_cell(
         transistor_count: Some(transistor_count),
         inputs,
         outputs,
+        drive_strength: 1,
+        max_output_current_ua: None,
+        output_capacitance_ff: None,
+        input_capacitance_ff: None,
+        max_fanout: None,
         failure_modes: vec![
             LibraryFailureMode::new("stuck_at_0", fit * 0.20, FaultType::StuckAt0)
                 .with_mechanism("oxide_breakdown"),
@@ -422,6 +432,11 @@ fn make_fpga_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCell {
         transistor_count: None,
         inputs,
         outputs,
+        drive_strength: 1,
+        max_output_current_ua: None,
+        output_capacitance_ff: None,
+        input_capacitance_ff: None,
+        max_fanout: None,
         failure_modes: vec![
             LibraryFailureMode::new("config_upset", fit * 0.50, FaultType::DataRetention)
                 .with_mechanism("sram_soft_error")
@@ -461,6 +476,11 @@ fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCe
         transistor_count: None,
         inputs,
         outputs,
+        drive_strength: 1,
+        max_output_current_ua: None,
+        output_capacitance_ff: None,
+        input_capacitance_ff: None,
+        max_fanout: None,
         failure_modes: vec![
             LibraryFailureMode::new("config_upset", fit * 0.35, FaultType::DataRetention)
                 .with_mechanism("sram_soft_error")
@@ -483,38 +503,88 @@ fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCe
 /// Add power infrastructure cells to a library
 fn add_power_cells(lib: &mut TechLibrary) {
     // Level shifters - analog circuitry, moderate FIT
-    lib.add_cell(make_power_cell(
-        "LVLSHIFT_LH_X1",
-        CellFunction::LevelShifterLH,
-        0.30,
-        "Low-to-High voltage level shifter",
-    ));
-    lib.add_cell(make_power_cell(
-        "LVLSHIFT_HL_X1",
-        CellFunction::LevelShifterHL,
-        0.30,
-        "High-to-Low voltage level shifter",
-    ));
+    // Add X1, X2, X4 drive strength variants
+    for (suffix, strength, fit_mult) in [("X1", 1u8, 1.0), ("X2", 2, 1.3), ("X4", 4, 1.8)] {
+        lib.add_cell(
+            make_power_cell_with_drive(
+                &format!("LVLSHIFT_LH_{}", suffix),
+                CellFunction::LevelShifterLH,
+                0.30 * fit_mult,
+                "Low-to-High voltage level shifter",
+                strength,
+            )
+            .with_electrical(
+                2000 * strength as u32, // 2mA base, scales with strength
+                15,                     // 15fF input cap
+                10 * strength as u32,   // Output cap scales
+                4 * strength as u32,    // 4 loads per X1
+            ),
+        );
+        lib.add_cell(
+            make_power_cell_with_drive(
+                &format!("LVLSHIFT_HL_{}", suffix),
+                CellFunction::LevelShifterHL,
+                0.30 * fit_mult,
+                "High-to-Low voltage level shifter",
+                strength,
+            )
+            .with_electrical(
+                2000 * strength as u32,
+                15,
+                10 * strength as u32,
+                4 * strength as u32,
+            ),
+        );
+    }
 
-    // Isolation cells - simple gates with enable
-    lib.add_cell(make_power_cell(
-        "ISO_AND_X1",
-        CellFunction::IsolationAnd,
-        0.15,
-        "Isolation cell (clamps to 0)",
-    ));
-    lib.add_cell(make_power_cell(
-        "ISO_OR_X1",
-        CellFunction::IsolationOr,
-        0.15,
-        "Isolation cell (clamps to 1)",
-    ));
-    lib.add_cell(make_power_cell(
-        "ISO_LATCH_X1",
-        CellFunction::IsolationLatch,
-        0.25,
-        "Isolation cell (holds last value)",
-    ));
+    // Isolation cells - add X1, X2, X4 variants
+    for (suffix, strength, fit_mult) in [("X1", 1u8, 1.0), ("X2", 2, 1.2), ("X4", 4, 1.5)] {
+        lib.add_cell(
+            make_power_cell_with_drive(
+                &format!("ISO_AND_{}", suffix),
+                CellFunction::IsolationAnd,
+                0.15 * fit_mult,
+                "Isolation cell (clamps to 0)",
+                strength,
+            )
+            .with_electrical(
+                1500 * strength as u32,
+                10,
+                8 * strength as u32,
+                5 * strength as u32,
+            ),
+        );
+        lib.add_cell(
+            make_power_cell_with_drive(
+                &format!("ISO_OR_{}", suffix),
+                CellFunction::IsolationOr,
+                0.15 * fit_mult,
+                "Isolation cell (clamps to 1)",
+                strength,
+            )
+            .with_electrical(
+                1500 * strength as u32,
+                10,
+                8 * strength as u32,
+                5 * strength as u32,
+            ),
+        );
+        lib.add_cell(
+            make_power_cell_with_drive(
+                &format!("ISO_LATCH_{}", suffix),
+                CellFunction::IsolationLatch,
+                0.25 * fit_mult,
+                "Isolation cell (holds last value)",
+                strength,
+            )
+            .with_electrical(
+                1500 * strength as u32,
+                12,
+                10 * strength as u32,
+                4 * strength as u32,
+            ),
+        );
+    }
 
     // Retention flip-flops - higher FIT due to balloon latch
     lib.add_cell(make_retention_cell(
@@ -529,37 +599,69 @@ fn add_power_cells(lib: &mut TechLibrary) {
     ));
 
     // Power switches - large transistors, electromigration concerns
-    lib.add_cell(make_power_cell(
-        "PWRSW_HDR_X1",
-        CellFunction::PowerSwitchHeader,
-        0.5,
-        "PMOS header power switch",
-    ));
-    lib.add_cell(make_power_cell(
-        "PWRSW_FTR_X1",
-        CellFunction::PowerSwitchFooter,
-        0.5,
-        "NMOS footer power switch",
-    ));
+    // Multiple sizes for different current requirements
+    for (suffix, strength, fit_mult) in [("X1", 1u8, 1.0), ("X4", 4, 1.5), ("X8", 8, 2.0)] {
+        lib.add_cell(make_power_cell_with_drive(
+            &format!("PWRSW_HDR_{}", suffix),
+            CellFunction::PowerSwitchHeader,
+            0.5 * fit_mult,
+            "PMOS header power switch",
+            strength,
+        ));
+        lib.add_cell(make_power_cell_with_drive(
+            &format!("PWRSW_FTR_{}", suffix),
+            CellFunction::PowerSwitchFooter,
+            0.5 * fit_mult,
+            "NMOS footer power switch",
+            strength,
+        ));
+    }
 
-    // Always-on buffer
-    lib.add_cell(make_power_cell(
-        "AONBUF_X1",
-        CellFunction::AlwaysOnBuf,
-        0.10,
-        "Always-on domain buffer",
-    ));
+    // Always-on buffers - multiple drive strengths
+    for (suffix, strength, fit_mult) in [
+        ("X1", 1u8, 1.0),
+        ("X2", 2, 1.2),
+        ("X4", 4, 1.5),
+        ("X8", 8, 2.0),
+    ] {
+        lib.add_cell(
+            make_power_cell_with_drive(
+                &format!("AONBUF_{}", suffix),
+                CellFunction::AlwaysOnBuf,
+                0.10 * fit_mult,
+                "Always-on domain buffer",
+                strength,
+            )
+            .with_electrical(
+                2000 * strength as u32,
+                8,
+                6 * strength as u32,
+                6 * strength as u32,
+            ),
+        );
+    }
 }
 
 /// Create a power infrastructure cell
 fn make_power_cell(name: &str, function: CellFunction, fit: f64, description: &str) -> LibraryCell {
+    make_power_cell_with_drive(name, function, fit, description, 1)
+}
+
+/// Create a power infrastructure cell with specified drive strength
+fn make_power_cell_with_drive(
+    name: &str,
+    function: CellFunction,
+    fit: f64,
+    description: &str,
+    drive_strength: u8,
+) -> LibraryCell {
     let (inputs, outputs) = function.default_pins();
     LibraryCell {
         name: name.to_string(),
         function,
         fit,
-        area: Some(3.0), // Power cells are typically larger
-        transistor_count: Some(12),
+        area: Some(3.0 * drive_strength as f64), // Area scales with drive strength
+        transistor_count: Some(12 * drive_strength as u32),
         inputs,
         outputs,
         failure_modes: vec![
@@ -572,6 +674,11 @@ fn make_power_cell(name: &str, function: CellFunction, fit: f64, description: &s
             LibraryFailureMode::new("delay", fit * 0.20, FaultType::Delay)
                 .with_mechanism("process_variation"),
         ],
+        drive_strength,
+        max_output_current_ua: Some(2000 * drive_strength as u32), // 2mA per X1
+        output_capacitance_ff: Some(10 * drive_strength as u32),
+        input_capacitance_ff: Some(10),
+        max_fanout: Some(4 * drive_strength as u32), // 4 loads per X1
     }
 }
 
@@ -600,6 +707,11 @@ fn make_retention_cell(name: &str, function: CellFunction, fit: f64) -> LibraryC
             LibraryFailureMode::new("transient", fit * 0.10, FaultType::Transient)
                 .with_mechanism("single_event_upset"),
         ],
+        drive_strength: 1,
+        max_output_current_ua: Some(1500),
+        output_capacitance_ff: Some(12),
+        input_capacitance_ff: Some(8),
+        max_fanout: Some(3), // Sequential outputs typically have lower fanout
     }
 }
 
