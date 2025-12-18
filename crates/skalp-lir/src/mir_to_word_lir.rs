@@ -24,11 +24,22 @@ use std::collections::HashMap;
 
 /// Convert MIR SafetyContext to LIR LirSafetyInfo
 fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
+    // Detect boot-time-only hardware by mechanism name pattern
+    let is_boot_time_only = ctx
+        .mechanism_name
+        .as_ref()
+        .map(|name| {
+            let lower = name.to_lowercase();
+            lower.contains("bist") || lower.contains("boot") || lower.contains("selftest")
+        })
+        .unwrap_or(false);
+
     LirSafetyInfo {
         goal_name: ctx.implementing_goal.clone(),
         mechanism_name: ctx.mechanism_name.clone(),
         is_sm_of_sm: false,
         protected_sm_name: None,
+        is_boot_time_only,
     }
 }
 

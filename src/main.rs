@@ -218,6 +218,14 @@ enum Commands {
         /// Skip fault injection (use for testing collateral generation only)
         #[arg(long)]
         skip_fi: bool,
+
+        /// Generate BIST for undetected coverage gap faults
+        #[arg(long)]
+        generate_bist: bool,
+
+        /// Enable dual-BIST for SM-of-SM protection
+        #[arg(long)]
+        dual_bist: bool,
     },
 
     /// Add a dependency to the project
@@ -405,6 +413,8 @@ fn main() -> Result<()> {
             effects,
             formats,
             skip_fi,
+            generate_bist,
+            dual_bist,
         } => {
             run_fi_driven_safety(
                 &source,
@@ -417,6 +427,8 @@ fn main() -> Result<()> {
                 effects.as_deref(),
                 &formats,
                 skip_fi,
+                generate_bist,
+                dual_bist,
             )?;
         }
 
@@ -1957,6 +1969,8 @@ fn run_fi_driven_safety(
     _effects_file: Option<&Path>,
     formats: &str,
     skip_fi: bool,
+    generate_bist: bool,
+    dual_bist: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::lower_to_flattened_lir;
@@ -2089,12 +2103,36 @@ fn run_fi_driven_safety(
             .map(|p| p.id.0)
             .collect();
 
+        // Build set of boot-time-only primitives (e.g., BIST hardware)
+        // These are inactive during steady-state operation and shouldn't contribute to PMHF
+        // Detection: either safety_info.is_boot_time_only is set, OR path contains BIST-related keywords
+        let boot_time_only_primitives: std::collections::HashSet<u32> = lir
+            .primitives
+            .iter()
+            .filter(|p| {
+                // Check safety_info flag
+                let from_annotation = p
+                    .safety_info
+                    .as_ref()
+                    .is_some_and(|s| s.is_boot_time_only);
+
+                // Check path for BIST-related keywords (case-insensitive)
+                let path_lower = p.path.to_lowercase();
+                let from_path = path_lower.contains("bist")
+                    || path_lower.contains(".bist_")
+                    || path_lower.contains("selftest");
+
+                from_annotation || from_path
+            })
+            .map(|p| p.id.0)
+            .collect();
+
         let mut results = Vec::new();
 
         #[cfg(target_os = "macos")]
         {
-            use skalp_safety::fault_simulation::FaultType;
             use skalp_frontend::hir::DetectionMode;
+            use skalp_safety::fault_simulation::FaultType;
             use skalp_sim::sir::{FaultType as SimFaultType, SirDetectionMode};
             use skalp_sim::{GpuFaultCampaignConfig, GpuFaultSimulator};
 
@@ -2162,6 +2200,7 @@ fn run_fi_driven_safety(
                                 detection_cycle: fault_result.detection_cycle,
                                 is_safety_mechanism: sm_primitives.contains(&prim_id),
                                 detection_mode,
+                                is_boot_time_only: boot_time_only_primitives.contains(&prim_id),
                             });
                         }
                     }
@@ -2173,6 +2212,7 @@ fn run_fi_driven_safety(
                             max_faults,
                             &primitive_paths,
                             &sm_primitives,
+                            &boot_time_only_primitives,
                         )?;
                     }
                 }
@@ -2183,6 +2223,7 @@ fn run_fi_driven_safety(
                     max_faults,
                     &primitive_paths,
                     &sm_primitives,
+                    &boot_time_only_primitives,
                 )?;
             }
         }
@@ -2196,6 +2237,7 @@ fn run_fi_driven_safety(
                 max_faults,
                 &primitive_paths,
                 &sm_primitives,
+                &boot_time_only_primitives,
             )?;
         }
 
@@ -2260,6 +2302,155 @@ fn run_fi_driven_safety(
         println!("   ✅ {}", json_path.display());
     }
 
+    // Generate BIST if requested and we have FI results
+    if generate_bist && !fault_results.is_empty() {
+        use skalp_safety::bist_generation::{BistGenerationConfig, BistGenerator};
+        use skalp_safety::fault_diagnostics::{FaultClassification, UndetectedFaultInfo};
+
+        println!("\n🔧 Generating Safety-Driven BIST...");
+
+        // Identify undetected dangerous faults (coverage gaps)
+        let mut undetected_faults = Vec::new();
+        for result in &fault_results {
+            // Only consider faults that triggered effects but weren't detected
+            if !result.triggered_effects.is_empty() && !result.detected {
+                // Skip SM internal faults - they need SM-of-SM, not BIST
+                if result.is_safety_mechanism {
+                    continue;
+                }
+
+                // This is a coverage gap - dangerous fault that needs BIST
+                undetected_faults.push(UndetectedFaultInfo {
+                    fault_site: result.primitive_path.clone(),
+                    fault_type: format!("{:?}", result.fault_site.fault_type),
+                    component: result
+                        .primitive_path
+                        .split('.')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    fit_contribution: lir
+                        .primitives
+                        .iter()
+                        .find(|p| p.path == result.primitive_path)
+                        .map(|p| p.ptype.base_fit())
+                        .unwrap_or(1.0),
+                    classification: FaultClassification::CoverageGap,
+                });
+            }
+        }
+
+        println!("   Coverage gap faults: {}", undetected_faults.len());
+
+        if !undetected_faults.is_empty() {
+            let bist_config = BistGenerationConfig {
+                entity_name: format!("{}Bist", lir.name),
+                enable_dual_bist: dual_bist,
+                enable_signature: true,
+                enable_self_test: true,
+                max_patterns: 0, // No limit
+                ..Default::default()
+            };
+
+            let mut generator = BistGenerator::new(bist_config);
+            generator.identify_candidates(&fi_result, &fault_results, &undetected_faults);
+            let bist_result = generator.generate();
+
+            // Write BIST Skalp source
+            let bist_path = output_dir.join("generated_bist.sk");
+            fs::write(&bist_path, &bist_result.skalp_source)?;
+            println!(
+                "   ✅ {} ({} patterns)",
+                bist_path.display(),
+                bist_result.num_patterns
+            );
+
+            // Write BIST summary
+            let bist_summary_path = output_dir.join("bist_summary.md");
+            let bist_summary = format!(
+                r#"# Safety-Driven BIST Report
+
+## Overview
+
+- **Entity**: `{}`
+- **Test Patterns**: {}
+- **Faults Covered**: {}
+- **FIT Covered**: {:.2}
+- **Estimated Gates**: {}
+
+## SM-of-SM Features
+
+{}
+
+## Usage
+
+Include the generated BIST entity in your top-level design:
+
+```skalp
+use generated_bist::{}{}
+
+entity TopWithBist {{
+    in clk: clock
+    in rst: bit
+    // ... your design ports ...
+    out bist_pass: bit
+    out bist_complete: bit
+}}
+
+impl TopWithBist {{
+    // Instantiate BIST
+    let bist = {}{} {{
+        clk: clk,
+        rst: rst,
+        start_bist: rst, // Run BIST after reset
+        dut_inputs: ...,
+        dut_outputs: ...,
+    }}
+
+    bist_pass = bist.bist_pass
+    bist_complete = bist.bist_complete
+}}
+```
+
+## Test Pattern Details
+
+| Pattern | Target Fault | Description |
+|---------|-------------|-------------|
+"#,
+                bist_result.entity_name,
+                bist_result.num_patterns,
+                bist_result.faults_covered,
+                bist_result.fit_covered,
+                bist_result.estimated_gates,
+                bist_result
+                    .sm_of_sm_features
+                    .iter()
+                    .map(|f| format!("- {}", f))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                bist_result.entity_name,
+                if dual_bist { "Dual" } else { "" },
+                bist_result.entity_name,
+                if dual_bist { "Dual" } else { "" },
+            );
+            let mut summary = bist_summary;
+            for pattern in &bist_result.test_patterns {
+                summary.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    pattern.test_id, pattern.target_fault, pattern.description
+                ));
+            }
+            fs::write(&bist_summary_path, summary)?;
+            println!("   ✅ {}", bist_summary_path.display());
+
+            if dual_bist {
+                println!("   🛡️  Dual BIST enabled (SM-of-SM protection)");
+            }
+        } else {
+            println!("   ℹ️  No coverage gaps found - BIST not needed");
+        }
+    }
+
     let elapsed = start.elapsed();
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!(
@@ -2278,6 +2469,7 @@ fn run_cpu_fi_campaign(
     max_faults: usize,
     primitive_paths: &std::collections::HashMap<u32, String>,
     sm_primitives: &std::collections::HashSet<u32>,
+    boot_time_only_primitives: &std::collections::HashSet<u32>,
 ) -> Result<Vec<skalp_safety::safety_driven_fmea::FaultEffectResult>> {
     use skalp_frontend::hir::DetectionMode;
     use skalp_safety::fault_simulation::FaultType;
@@ -2346,6 +2538,7 @@ fn run_cpu_fi_campaign(
             detection_cycle: fault_result.detection_cycle,
             is_safety_mechanism: sm_primitives.contains(&prim_id),
             detection_mode,
+            is_boot_time_only: boot_time_only_primitives.contains(&prim_id),
         });
     }
 
@@ -2486,6 +2679,15 @@ fn generate_fi_driven_fmeda_md(
         }
     }
 
+    // Build set of boot-time-only fault paths from fault_results
+    // These are faults in hardware that's only active during boot (e.g., BIST)
+    let boot_time_only_paths: std::collections::HashSet<String> = result
+        .fault_results
+        .iter()
+        .filter(|r| r.is_boot_time_only)
+        .map(|r| r.primitive_path.clone())
+        .collect();
+
     // Add diagnostics section for undetected faults
     let mut has_undetected = false;
     for (name, analysis) in &result.effect_analyses {
@@ -2499,83 +2701,106 @@ fn generate_fi_driven_fmeda_md(
     let ccf_analysis = skalp_safety::analyze_ccf(lir, &["ch_*", "channel_*"]);
 
     if has_undetected {
-        // Collect all undetected fault sites
-        let mut all_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
+        // Collect all undetected fault sites, separating runtime from boot-time-only
+        let mut runtime_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
+        let mut boot_time_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
+
         for (name, analysis) in &result.effect_analyses {
             if !name.starts_with('_') {
-                all_undetected.extend(analysis.undetected_sites.clone());
+                for site in &analysis.undetected_sites {
+                    let path = site.primitive_path.to_string();
+                    if boot_time_only_paths.contains(&path) {
+                        boot_time_undetected.push(site.clone());
+                    } else {
+                        runtime_undetected.push(site.clone());
+                    }
+                }
             }
         }
 
-        // Use enhanced fault diagnostics with CCF integration
-        let diagnostics = skalp_safety::FaultDiagnostics::new();
-        let (classified, summary) = diagnostics.classify_with_ccf(&all_undetected, &ccf_analysis);
-        let total_undetected = all_undetected.len();
+        let total_runtime_undetected = runtime_undetected.len();
+        let total_boot_time_undetected = boot_time_undetected.len();
 
-        // Generate enhanced diagnostic report
+        // Use enhanced fault diagnostics with CCF integration (runtime faults only)
+        let diagnostics = skalp_safety::FaultDiagnostics::new();
+        let (classified, summary) = diagnostics.classify_with_ccf(&runtime_undetected, &ccf_analysis);
+
+        // Generate enhanced diagnostic report for runtime faults
         md.push_str(&skalp_safety::generate_diagnostic_report(
             &classified,
             &summary,
-            total_undetected,
+            total_runtime_undetected,
         ));
 
-        // Also include the original component breakdown for reference
+        // Detailed fault list separated by operational mode
         md.push_str("\n## Detailed Fault List by Component\n\n");
         md.push_str("> **Note**: Safety mechanism classification requires `#[implements(...)]` annotations on components.\n\n");
 
-        for (name, analysis) in &result.effect_analyses {
-            if !name.starts_with('_') && !analysis.undetected_sites.is_empty() {
+        // Helper function to generate component breakdown
+        let generate_component_breakdown = |sites: &[skalp_safety::fault_simulation::FaultSite], md: &mut String| {
+            let mut by_component: std::collections::HashMap<
+                String,
+                Vec<&skalp_safety::fault_simulation::FaultSite>,
+            > = std::collections::HashMap::new();
+
+            for site in sites {
+                let path = site.primitive_path.to_string();
+                let component = path
+                    .strip_prefix("top.")
+                    .unwrap_or(&path)
+                    .split('.')
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string();
+                by_component.entry(component).or_default().push(site);
+            }
+
+            let mut components: Vec<_> = by_component.iter().collect();
+            components.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+            for (component, faults) in components {
                 md.push_str(&format!(
-                    "### Effect: {} ({} undetected)\n\n",
-                    name,
-                    analysis.undetected_sites.len()
+                    "#### Component: `{}` ({} faults)\n\n",
+                    component,
+                    faults.len()
                 ));
 
-                // Group by hierarchy (top-level component)
-                let mut by_component: std::collections::HashMap<
-                    String,
-                    Vec<&skalp_safety::fault_simulation::FaultSite>,
-                > = std::collections::HashMap::new();
-
-                for site in &analysis.undetected_sites {
-                    let path = site.primitive_path.to_string();
-                    // Extract top-level component (e.g., "top.voter" -> "voter", "top.ch_a" -> "ch_a")
-                    let component = path
-                        .strip_prefix("top.")
-                        .unwrap_or(&path)
-                        .split('.')
-                        .next()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    by_component.entry(component).or_default().push(site);
-                }
-
-                // Sort components by fault count (descending)
-                let mut components: Vec<_> = by_component.iter().collect();
-                components.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-
-                for (component, faults) in components {
+                md.push_str("| Fault Site | Type |\n");
+                md.push_str("|------------|------|\n");
+                for site in faults.iter().take(10) {
                     md.push_str(&format!(
-                        "#### Component: `{}` ({} faults)\n\n",
-                        component,
-                        faults.len()
+                        "| `{}` | {} |\n",
+                        site.primitive_path,
+                        site.fault_type.name()
                     ));
-
-                    md.push_str("| Fault Site | Type |\n");
-                    md.push_str("|------------|------|\n");
-                    for site in faults.iter().take(10) {
-                        md.push_str(&format!(
-                            "| `{}` | {} |\n",
-                            site.primitive_path,
-                            site.fault_type.name()
-                        ));
-                    }
-                    if faults.len() > 10 {
-                        md.push_str(&format!("| ... | ({} more) |\n", faults.len() - 10));
-                    }
-                    md.push('\n');
                 }
+                if faults.len() > 10 {
+                    md.push_str(&format!("| ... | ({} more) |\n", faults.len() - 10));
+                }
+                md.push('\n');
             }
+        };
+
+        // Runtime faults - these affect SPFM
+        if !runtime_undetected.is_empty() {
+            md.push_str(&format!(
+                "### Runtime Faults ({} undetected) - Affects SPFM\n\n",
+                total_runtime_undetected
+            ));
+            md.push_str("> ⚠️ These faults occur in hardware active during normal operation and directly affect SPFM.\n\n");
+            generate_component_breakdown(&runtime_undetected, &mut md);
+        }
+
+        // Boot-time-only faults - excluded from SPFM per ISO 26262
+        if !boot_time_undetected.is_empty() {
+            md.push_str(&format!(
+                "### Boot-Time-Only Faults ({} total) - Excluded from SPFM\n\n",
+                total_boot_time_undetected
+            ));
+            md.push_str("> ℹ️ These faults occur in hardware only active during boot/test (e.g., BIST).\n");
+            md.push_str("> Per ISO 26262-5, they are **excluded from SPFM** calculation since the hardware is inactive during operation.\n");
+            md.push_str("> They are detected at boot time and do not contribute to operational failure probability.\n\n");
+            generate_component_breakdown(&boot_time_undetected, &mut md);
         }
     }
 

@@ -121,11 +121,24 @@ impl MirToLirTransform {
 
     /// Convert MIR SafetyContext to LIR LirSafetyInfo
     fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
+        // Detect boot-time-only hardware by mechanism name pattern
+        // Note: is_boot_time_only can also be set based on hierarchy path
+        // in the apply_safety_info method
+        let is_boot_time_only = ctx
+            .mechanism_name
+            .as_ref()
+            .map(|name| {
+                let lower = name.to_lowercase();
+                lower.contains("bist") || lower.contains("boot") || lower.contains("selftest")
+            })
+            .unwrap_or(false);
+
         LirSafetyInfo {
             goal_name: ctx.implementing_goal.clone(),
             mechanism_name: ctx.mechanism_name.clone(),
             is_sm_of_sm: false, // SM-of-SM detection is done at safety analysis level
             protected_sm_name: None,
+            is_boot_time_only,
         }
     }
 
@@ -209,12 +222,6 @@ impl MirToLirTransform {
 
         // BUG FIX: Propagate detection signal flag from MIR port to LIR
         let is_detection = port.is_detection_signal();
-        if is_detection {
-            println!(
-                "✅ [LIR_DETECTION] Port '{}' is marked as detection signal",
-                port.name
-            );
-        }
 
         for bit in 0..width {
             let net_name = if width == 1 {
@@ -276,12 +283,6 @@ impl MirToLirTransform {
         // BUG FIX: Propagate detection signal flag from MIR to LIR
         // This is critical for hierarchical detection signal propagation
         let is_detection = signal.is_detection_signal();
-        if is_detection {
-            println!(
-                "✅ [LIR_DETECTION] Signal '{}' is marked as detection signal",
-                signal.name
-            );
-        }
 
         for bit in 0..width {
             let net_name = if width == 1 {

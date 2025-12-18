@@ -338,6 +338,11 @@ pub struct FaultEffectResult {
     /// Detection mode of the signal that detected the fault (Continuous, Boot, Periodic, OnDemand)
     /// Used to calculate separate runtime_dc (Continuous) vs boot_dc (Boot/Periodic/OnDemand)
     pub detection_mode: Option<DetectionMode>,
+    /// Is this primitive boot-time-only (e.g., BIST hardware)?
+    /// Boot-time-only hardware is inactive during steady-state operation, so its faults
+    /// don't contribute to steady-state PMHF. Default is false.
+    #[allow(dead_code)]
+    pub is_boot_time_only: bool,
 }
 
 impl FaultEffectResult {
@@ -552,7 +557,8 @@ impl SafetyDrivenFmeaGenerator {
         }
 
         // Calculate overall metrics
-        let (spfm, lf, pmhf) = self.calculate_metrics(&effect_analyses, results.len(), total_fit);
+        let (spfm, lf, pmhf) =
+            self.calculate_metrics(&effect_analyses, results, results.len(), total_fit);
 
         // Check if meets ASIL requirements
         let meets_asil = effect_analyses
@@ -563,6 +569,7 @@ impl SafetyDrivenFmeaGenerator {
         // Generate AutoFmeda
         let auto_fmea = self.generate_auto_fmea(
             &effect_analyses,
+            results,
             &detection_by_mechanism,
             design_name,
             results.len(),
@@ -597,7 +604,10 @@ impl SafetyDrivenFmeaGenerator {
     /// ISO 26262 distinguishes between:
     /// - Runtime (Continuous) detection: Contributes to SPFM calculation
     /// - Boot-time/Periodic detection: Contributes to LFM calculation only
-    fn calculate_mode_specific_dc(&self, results: &[FaultEffectResult]) -> (Option<f64>, Option<f64>) {
+    fn calculate_mode_specific_dc(
+        &self,
+        results: &[FaultEffectResult],
+    ) -> (Option<f64>, Option<f64>) {
         // Count faults that caused dangerous effects (not safe faults)
         let dangerous_faults: Vec<_> = results
             .iter()
@@ -646,66 +656,158 @@ impl SafetyDrivenFmeaGenerator {
         (runtime_dc, boot_dc)
     }
 
-    /// Calculate SPFM, LF, and PMHF from effect analyses
+    /// Calculate SPFM, LFM, and PMHF from effect analyses
     ///
     /// ISO 26262-5 definitions:
-    /// - SPFM = 1 - (λSPF / λ) = (safe + detected) / total
-    /// - LFM = 1 - (λMPF_latent / (λ - λSPF))
+    /// - SPFM = 1 - (λSPF / λ) where SPF = dangerous faults not detected at RUNTIME
+    ///   SPFM only counts Continuous (runtime) detections
+    ///   Boot-time-only hardware (e.g., BIST) is excluded - it's inactive during runtime
+    /// - LFM = 1 - (λMPF_latent / (λ - λSPF)) where latent = not detected by ANY mode
+    ///   LFM counts ALL detections (Continuous + Boot + Periodic + OnDemand)
+    ///   Boot-time-only hardware faults are detected at boot, so they're not latent
     /// - PMHF = Σ(λ × (1 - DC))
     fn calculate_metrics(
         &self,
         analyses: &HashMap<String, EffectAnalysis>,
+        results: &[FaultEffectResult],
         total_injections: usize,
         total_fit: f64,
     ) -> (f64, f64, f64) {
         let mut total_dangerous = 0u64;
-        let mut total_detected = 0u64;
 
         for analysis in analyses.values() {
             total_dangerous += analysis.total_faults_causing;
-            total_detected += analysis.faults_detected;
         }
 
         let total = total_injections as u64;
+
+        // Count boot-time-only faults - these are excluded from SPFM calculation
+        // because the hardware is inactive during runtime operation
+        let boot_time_only_faults = results
+            .iter()
+            .filter(|r| r.is_boot_time_only)
+            .count() as u64;
+
+        // For SPFM: exclude boot-time-only hardware entirely (not relevant to runtime)
+        let runtime_total = total.saturating_sub(boot_time_only_faults);
+
+        // Count dangerous faults excluding boot-time-only hardware
+        let boot_time_only_dangerous = results
+            .iter()
+            .filter(|r| r.is_boot_time_only && !r.triggered_effects.is_empty())
+            .count() as u64;
+        let runtime_dangerous = total_dangerous.saturating_sub(boot_time_only_dangerous);
+        let runtime_safe = runtime_total.saturating_sub(runtime_dangerous);
+
+        // For LFM: boot-time-only faults ARE detected (at boot), so they count as detected
         let safe_faults = total.saturating_sub(total_dangerous);
-        let _undetected_dangerous = total_dangerous.saturating_sub(total_detected);
 
-        // SPFM = 1 - (SPF / total) = (safe + detected) / total
-        // SPF = single point faults = dangerous faults not covered by any SM
-        let spfm = if total > 0 {
-            (safe_faults + total_detected) as f64 / total as f64
+        // Count faults by detection mode
+        // SPFM only counts Continuous (runtime) detections on runtime hardware
+        // LFM counts ALL detections
+        let mut continuous_detected = 0u64;
+        let mut all_detected = 0u64;
+
+        for result in results {
+            // Only count faults that triggered dangerous effects
+            if !result.triggered_effects.is_empty() && result.detected {
+                all_detected += 1;
+                // Count runtime (Continuous) detections for SPFM
+                // Exclude boot-time-only hardware from SPFM counting
+                if !result.is_boot_time_only {
+                    match result.detection_mode {
+                        Some(DetectionMode::Continuous) | None => {
+                            // Default to Continuous if not specified (backwards compatibility)
+                            continuous_detected += 1;
+                        }
+                        Some(DetectionMode::Boot)
+                        | Some(DetectionMode::Periodic)
+                        | Some(DetectionMode::OnDemand) => {
+                            // These count for LFM but not SPFM
+                        }
+                    }
+                }
+            }
+        }
+
+        // Boot-time-only faults are effectively "detected" for LFM purposes
+        // because BIST detects them at boot - they're not latent
+        let boot_time_only_detected = boot_time_only_dangerous; // All boot-time faults detected by BIST
+
+        // SPFM = 1 - (SPF / λ_runtime) = (safe + runtime_detected) / runtime_total
+        // SPF = single point faults = dangerous runtime faults not detected at RUNTIME
+        // Boot-time-only hardware is excluded from both numerator and denominator
+        let spfm = if runtime_total > 0 {
+            (runtime_safe + continuous_detected) as f64 / runtime_total as f64
         } else {
             1.0
         };
 
-        // LFM = 1 - (latent_MPF / (total - SPF))
-        // For designs without redundancy, all undetected dangerous faults are SPF
-        // So residual (non-SPF) = safe + detected
-        // Latent = faults that could combine with others to cause violation
-        // Simplified: LFM ≈ SPFM for non-redundant designs
-        let lf = if total > 0 {
-            // For non-redundant: LFM = (safe + detected) / total
-            (safe_faults + total_detected) as f64 / total as f64
+        // LFM = 1 - (latent / total) = (safe + all_detected) / total
+        // Latent faults = dangerous faults not detected by ANY mechanism (runtime OR test)
+        // Boot-time-only faults are detected at boot, so they're not latent
+        let lfm = if total > 0 {
+            (safe_faults + all_detected + boot_time_only_detected) as f64 / total as f64
         } else {
             1.0
         };
 
-        // PMHF = λ × (1 - DC_avg)
-        // DC_avg = detected / dangerous (fraction of dangerous faults detected)
-        let dc_avg = if total_dangerous > 0 {
-            total_detected as f64 / total_dangerous as f64
+        // PMHF = λ × (1 - DC_runtime)
+        // PMHF uses runtime DC because it represents probability of failure in operation
+        //
+        // IMPORTANT: Exclude boot-time-only hardware (e.g., BIST) from steady-state PMHF
+        // Boot-time hardware is inactive during normal operation, so its faults don't
+        // contribute to the probability of failure during operation.
+        let boot_time_only_faults = results
+            .iter()
+            .filter(|r| r.is_boot_time_only)
+            .count() as u64;
+
+        // Estimate FIT for boot-time-only hardware (proportional to fault count)
+        // This assumes uniform FIT distribution across primitives
+        let boot_time_only_fit = if total > 0 {
+            total_fit * (boot_time_only_faults as f64 / total as f64)
+        } else {
+            0.0
+        };
+
+        // Steady-state FIT excludes boot-time hardware
+        let steady_state_fit = total_fit - boot_time_only_fit;
+
+        // Filter dangerous faults to exclude boot-time-only for runtime DC
+        let steady_state_dangerous = results
+            .iter()
+            .filter(|r| !r.triggered_effects.is_empty() && !r.is_boot_time_only)
+            .count() as u64;
+
+        let steady_state_detected = results
+            .iter()
+            .filter(|r| {
+                !r.triggered_effects.is_empty()
+                    && r.detected
+                    && !r.is_boot_time_only
+                    && matches!(
+                        r.detection_mode,
+                        Some(DetectionMode::Continuous) | None
+                    )
+            })
+            .count() as u64;
+
+        let dc_runtime = if steady_state_dangerous > 0 {
+            steady_state_detected as f64 / steady_state_dangerous as f64
         } else {
             1.0
         };
-        let pmhf = total_fit * (1.0 - dc_avg);
+        let pmhf = steady_state_fit * (1.0 - dc_runtime);
 
-        (spfm, lf, pmhf)
+        (spfm, lfm, pmhf)
     }
 
     /// Generate AutoFmeda from analyses
     fn generate_auto_fmea(
         &self,
         analyses: &HashMap<String, EffectAnalysis>,
+        results: &[FaultEffectResult],
         detection_by_mechanism: &HashMap<String, usize>,
         design_name: &str,
         faults_injected: usize,
@@ -781,7 +883,8 @@ impl SafetyDrivenFmeaGenerator {
         }
 
         // Calculate summary
-        let (spfm, lf, pmhf) = self.calculate_metrics(analyses, faults_injected, total_fit);
+        let (spfm, lf, pmhf) =
+            self.calculate_metrics(analyses, results, faults_injected, total_fit);
         let meets = entries
             .iter()
             .all(|e| e.measured_dc >= 0.99 * e.total_fit.signum());
@@ -1043,7 +1146,8 @@ mod tests {
                 effect_cycle: Some(10),
                 detection_cycle: Some(5),
                 is_safety_mechanism: false,
-            detection_mode: None,
+                detection_mode: None,
+                is_boot_time_only: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("top.brake.reg1"), FaultType::StuckAt1),
@@ -1054,7 +1158,8 @@ mod tests {
                 effect_cycle: Some(15),
                 detection_cycle: None,
                 is_safety_mechanism: false,
-            detection_mode: None,
+                detection_mode: None,
+                is_boot_time_only: false,
             },
         ];
 
@@ -1090,6 +1195,7 @@ mod tests {
             detection_cycle: None,
             is_safety_mechanism: false,
             detection_mode: None,
+            is_boot_time_only: false,
         };
         assert!(dangerous.is_dangerous_undetected());
 
@@ -1103,6 +1209,7 @@ mod tests {
             detection_cycle: Some(5), // Detected before effect
             is_safety_mechanism: false,
             detection_mode: None,
+            is_boot_time_only: false,
         };
         assert!(!safe.is_dangerous_undetected());
         assert!(safe.is_safe_detection());

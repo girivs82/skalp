@@ -323,6 +323,11 @@ pub struct LirSafetyInfo {
     pub is_sm_of_sm: bool,
     /// Protected mechanism name (for SM-of-SM)
     pub protected_sm_name: Option<String>,
+    /// True if this hardware is only active during boot/test mode
+    /// When true, faults in this hardware don't contribute to steady-state PMHF
+    /// (e.g., BIST hardware that only runs at power-on)
+    #[serde(default)]
+    pub is_boot_time_only: bool,
 }
 
 impl Primitive {
