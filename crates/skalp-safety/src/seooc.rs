@@ -40,6 +40,23 @@ pub struct SeoocAnalysisResult {
     pub projected_spfm: f64,
     /// Whether target ASIL is achievable with current mechanisms
     pub target_achievable: bool,
+    /// Power domain CCF coverage (for mechanisms covering VoltageDropout/GroundBounce)
+    pub power_ccf_coverage: Option<PowerCcfCoverage>,
+}
+
+/// Power CCF coverage by an assumed mechanism
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PowerCcfCoverage {
+    /// Mechanism ID that covers power faults
+    pub mechanism_id: String,
+    /// Original CCF contribution (λDPF_power in FIT)
+    pub original_ccf_fit: f64,
+    /// Assumed DC for the mechanism
+    pub assumed_dc: f64,
+    /// Residual CCF after mechanism (FIT)
+    pub residual_ccf_fit: f64,
+    /// PMHF improvement from this coverage (FIT reduction)
+    pub pmhf_improvement_fit: f64,
 }
 
 /// Categorization of undetected faults for baseline analysis
@@ -154,6 +171,18 @@ pub struct FaultInjectionData {
     pub undetected_faults: Vec<UndetectedFault>,
 }
 
+/// Power domain CCF (Common Cause Failure) data for SEooC analysis
+/// Power faults are treated as CCF because they affect entire domains simultaneously
+#[derive(Debug, Clone, Default)]
+pub struct PowerDomainCcfData {
+    /// Total CCF contribution from power domains (λDPF_power in FIT)
+    pub ccf_fit: f64,
+    /// Number of power domains analyzed
+    pub domain_count: usize,
+    /// Whether this affects PMHF calculation
+    pub affects_pmhf: bool,
+}
+
 /// An undetected fault with its classification
 #[derive(Debug, Clone)]
 pub struct UndetectedFault {
@@ -165,10 +194,26 @@ pub struct UndetectedFault {
     pub fit: f64,
 }
 
+/// Check if a mechanism covers power fault types (VoltageDropout/GroundBounce)
+fn mechanism_covers_power_faults(mechanism: &AssumedMechanism) -> bool {
+    for cover in &mechanism.covers {
+        let cover_lower = cover.to_lowercase();
+        if cover_lower.contains("voltage")
+            || cover_lower.contains("ground")
+            || cover_lower.contains("power")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Analyze a SEooC design and derive external mechanism requirements
-pub fn analyze_seooc(
+/// This version supports power domain CCF coverage for voltage monitors
+pub fn analyze_seooc_with_ccf(
     config: &SeoocAnalysisConfig,
     fi_data: &FaultInjectionData,
+    power_ccf: Option<&PowerDomainCcfData>,
 ) -> SeoocAnalysisResult {
     // Get ASIL targets
     let (target_spfm, target_lfm) = get_asil_targets(config.target_asil);
@@ -188,15 +233,68 @@ pub fn analyze_seooc(
     let lfm_gap = (target_lfm - internal_lfm).max(0.0);
 
     // Categorize undetected faults
-    let undetected_by_category = categorize_undetected_faults(&fi_data.undetected_faults);
+    let mut undetected_by_category = categorize_undetected_faults(&fi_data.undetected_faults);
+
+    // Add power CCF to the undetected count if present
+    // Power CCF represents faults that would cause domain-wide failures
+    if let Some(ccf) = power_ccf {
+        if ccf.ccf_fit > 0.0 && ccf.affects_pmhf {
+            // Represent power CCF as "virtual" undetected power faults for display
+            // The actual impact is on PMHF, not SPFM
+            undetected_by_category.power = ccf.domain_count;
+        }
+    }
 
     // Calculate derived requirements for each assumed mechanism
     let mut derived_requirements = Vec::new();
     let mut cumulative_spfm = internal_spfm;
     let mut req_counter = 1;
+    let mut power_ccf_coverage = None;
 
     for mechanism in &config.assumed_mechanisms {
-        // Count faults this mechanism covers
+        // Check if this mechanism covers power faults (CCF path)
+        if mechanism_covers_power_faults(mechanism) {
+            if let Some(ccf) = power_ccf {
+                if ccf.ccf_fit > 0.0 {
+                    // This mechanism covers power CCF - calculate PMHF impact
+                    // For a voltage monitor with DC ≥ 99%, residual = CCF × (1 - DC)
+                    let assumed_dc = 99.0; // High DC assumed for voltage monitors
+                    let residual_ccf_fit = ccf.ccf_fit * (1.0 - assumed_dc / 100.0);
+                    let pmhf_improvement = ccf.ccf_fit - residual_ccf_fit;
+
+                    power_ccf_coverage = Some(PowerCcfCoverage {
+                        mechanism_id: mechanism.id.clone(),
+                        original_ccf_fit: ccf.ccf_fit,
+                        assumed_dc,
+                        residual_ccf_fit,
+                        pmhf_improvement_fit: pmhf_improvement,
+                    });
+
+                    // Create a derived requirement for the power CCF coverage
+                    let rationale = format!(
+                        "Voltage monitor covers power domain CCF ({:.2} FIT). With DC ≥ {:.0}%, reduces λDPF_CCF to {:.2} FIT.",
+                        ccf.ccf_fit, assumed_dc, residual_ccf_fit
+                    );
+
+                    derived_requirements.push(DerivedSafetyRequirement {
+                        id: format!("REQ-EXT-{:03}", req_counter),
+                        assumed_mechanism_id: mechanism.id.clone(),
+                        mechanism_type: mechanism.mechanism_type.clone(),
+                        fault_types_covered: mechanism.covers.clone(),
+                        fault_count: ccf.domain_count, // Number of power domains
+                        required_dc: assumed_dc,
+                        dc_category: DcCategory::High,
+                        spfm_contribution: 0.0, // CCF affects PMHF, not SPFM
+                        projected_cumulative_spfm: cumulative_spfm,
+                        rationale,
+                    });
+                    req_counter += 1;
+                    continue;
+                }
+            }
+        }
+
+        // Count faults this mechanism covers (non-power faults)
         let covered_faults: Vec<&UndetectedFault> = fi_data
             .undetected_faults
             .iter()
@@ -209,17 +307,15 @@ pub fn analyze_seooc(
         }
 
         // Calculate required DC to close the gap
-        // Required DC = (faults_needed_to_close_gap / covered_faults) × 100
-        // But capped at 99.9% (physical limit)
         let faults_still_needed = ((target_spfm - cumulative_spfm) / 100.0
             * fi_data.total_dangerous as f64)
             .ceil() as usize;
 
         let required_dc = if faults_still_needed > 0 && fault_count > 0 {
             let raw_dc = (faults_still_needed as f64 / fault_count as f64) * 100.0;
-            raw_dc.clamp(60.0, 99.9) // Clamp to reasonable range
+            raw_dc.clamp(60.0, 99.9)
         } else {
-            60.0 // Minimum useful DC
+            60.0
         };
 
         // Calculate SPFM contribution
@@ -267,7 +363,16 @@ pub fn analyze_seooc(
         derived_requirements,
         projected_spfm: cumulative_spfm,
         target_achievable,
+        power_ccf_coverage,
     }
+}
+
+/// Analyze a SEooC design and derive external mechanism requirements (legacy, no CCF)
+pub fn analyze_seooc(
+    config: &SeoocAnalysisConfig,
+    fi_data: &FaultInjectionData,
+) -> SeoocAnalysisResult {
+    analyze_seooc_with_ccf(config, fi_data, None)
 }
 
 /// Get SPFM and LFM targets for an ASIL level
@@ -535,6 +640,28 @@ pub fn format_seooc_report(result: &SeoocAnalysisResult) -> String {
         for suggestion in suggestions {
             output.push_str(&format!("   - {}\n", suggestion));
         }
+    }
+
+    // Power CCF coverage (if applicable)
+    if let Some(ref ccf_cov) = result.power_ccf_coverage {
+        output.push_str("\n⚡ Power Domain CCF Coverage:\n");
+        output.push_str(&format!(
+            "   Mechanism: {} (voltage_monitor)\n",
+            ccf_cov.mechanism_id
+        ));
+        output.push_str(&format!(
+            "   ├─ Original λDPF_CCF: {:.2} FIT\n",
+            ccf_cov.original_ccf_fit
+        ));
+        output.push_str(&format!("   ├─ Assumed DC: ≥ {:.0}%\n", ccf_cov.assumed_dc));
+        output.push_str(&format!(
+            "   ├─ Residual λDPF_CCF: {:.2} FIT\n",
+            ccf_cov.residual_ccf_fit
+        ));
+        output.push_str(&format!(
+            "   └─ PMHF Improvement: -{:.2} FIT\n",
+            ccf_cov.pmhf_improvement_fit
+        ));
     }
 
     // Integration checklist

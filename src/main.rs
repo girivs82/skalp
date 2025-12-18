@@ -2308,15 +2308,24 @@ fn run_fi_driven_safety(
 
     // Generate FI-driven FMEA
     println!("\n📋 Generating FI-Driven FMEA...");
-    let fi_result = generator.generate_from_campaign_results(
+    let mut fi_result = generator.generate_from_campaign_results(
         &fault_results,
         total_primitives,
         &lir.name,
         total_fit,
     );
 
-    // runtime_dc and boot_dc are now calculated from FI results in the FMEA generator
-    // using actual fault injection data, not static analysis approximations
+    // Apply power domain CCF contribution to PMHF
+    // Per ISO 26262-5 + ISO 26262-9: PMHF = λRF + λSM + λDPF_CCF
+    let power_domain_analysis = skalp_safety::power_domains::extract_power_domains_from_lir(lir);
+    let power_ccf_fit = power_domain_analysis.summary.total_ccf_fit;
+    if power_ccf_fit > 0.0 {
+        println!(
+            "   Adding power domain CCF: {:.2} FIT (λDPF_power)",
+            power_ccf_fit
+        );
+        fi_result.apply_ccf_contribution(power_ccf_fit);
+    }
 
     // Print results summary
     println!("\n📈 Results Summary:");
@@ -2324,6 +2333,15 @@ fn run_fi_driven_safety(
     println!("   LFM: {:.2}%", fi_result.measured_lf * 100.0);
     if let Some(pmhf) = fi_result.measured_pmhf {
         println!("   PMHF: {:.2} FIT", pmhf);
+        // Show PMHF breakdown if CCF was applied
+        if fi_result.ccf_contribution.is_some() {
+            let breakdown = fi_result.pmhf_breakdown();
+            println!("      ├─ λRF (residual): {:.2} FIT", breakdown.residual_fit);
+            println!(
+                "      └─ λDPF_CCF (power domains): {:.2} FIT",
+                breakdown.ccf_fit
+            );
+        }
     }
     println!(
         "   Meets {:?}: {}",
@@ -2406,13 +2424,43 @@ fn run_fi_driven_safety(
                 undetected_faults: undetected_faults_seooc,
             };
 
-            // Run SEooC analysis
-            let seooc_result = skalp_safety::analyze_seooc(&seooc_analysis_config, &fi_data);
+            // Prepare power domain CCF data for SEooC analysis
+            // Power faults (VoltageDropout/GroundBounce) are handled via CCF, not individual FI
+            let power_ccf_data = if power_ccf_fit > 0.0 {
+                Some(skalp_safety::PowerDomainCcfData {
+                    ccf_fit: power_ccf_fit,
+                    domain_count: power_domain_analysis.domains.len(),
+                    affects_pmhf: true,
+                })
+            } else {
+                None
+            };
+
+            // Run SEooC analysis with power CCF data
+            let seooc_result = skalp_safety::analyze_seooc_with_ccf(
+                &seooc_analysis_config,
+                &fi_data,
+                power_ccf_data.as_ref(),
+            );
 
             // Print summary
             println!("   Target ASIL: {:?}", seooc_result.target_asil);
             println!("   Internal SPFM: {:.1}%", seooc_result.internal_spfm);
             println!("   SPFM Gap: {:.1}%", seooc_result.spfm_gap);
+
+            // Show power CCF coverage if an assumed mechanism covers it
+            if let Some(ref ccf_cov) = seooc_result.power_ccf_coverage {
+                println!("   ⚡ Power CCF Coverage by {}:", ccf_cov.mechanism_id);
+                println!(
+                    "      Original λDPF_CCF: {:.2} FIT → Residual: {:.2} FIT",
+                    ccf_cov.original_ccf_fit, ccf_cov.residual_ccf_fit
+                );
+                println!(
+                    "      PMHF Improvement: -{:.2} FIT (DC ≥ {:.0}%)",
+                    ccf_cov.pmhf_improvement_fit, ccf_cov.assumed_dc
+                );
+            }
+
             if seooc_result.target_achievable {
                 println!("   Status: ✅ Target achievable with external mechanisms");
             } else {
@@ -2811,6 +2859,35 @@ fn generate_fi_driven_fmeda_md(
         ));
     }
 
+    // PMHF breakdown (if CCF contribution applied)
+    if result.ccf_contribution.is_some() {
+        let breakdown = result.pmhf_breakdown();
+        md.push_str("\n### PMHF Breakdown (ISO 26262-5 + ISO 26262-9)\n\n");
+        md.push_str("```\n");
+        md.push_str("PMHF = λRF + λSM + λDPF_CCF\n");
+        md.push_str("```\n\n");
+        md.push_str("| Component | FIT | Description |\n");
+        md.push_str("|-----------|-----|-------------|\n");
+        md.push_str(&format!(
+            "| λRF (Residual Faults) | {:.2} | Undetected dangerous faults |\n",
+            breakdown.residual_fit
+        ));
+        if breakdown.sm_fit > 0.0 {
+            md.push_str(&format!(
+                "| λSM (SM Failures) | {:.2} | Safety mechanism failures |\n",
+                breakdown.sm_fit
+            ));
+        }
+        md.push_str(&format!(
+            "| λDPF_CCF (Power Domains) | {:.2} | Common cause failures from power |\n",
+            breakdown.ccf_fit
+        ));
+        md.push_str(&format!(
+            "| **Total PMHF** | **{:.2}** | |\n",
+            breakdown.total_pmhf
+        ));
+    }
+
     // Detection mode breakdown (if available)
     if result.runtime_dc.is_some() || result.boot_dc.is_some() {
         md.push_str("\n### Detection Mode Breakdown\n\n");
@@ -3007,6 +3084,14 @@ fn generate_fi_driven_fmeda_md(
         &power_domain_analysis,
     ));
 
+    // Add Safety-Power Domain Verification
+    // Checks: detection signals with requires_always_on, isolation cells, level shifters
+    let safety_power_result = skalp_safety::verify_safety_power_domains(lir);
+    md.push_str("\n---\n\n");
+    md.push_str(&skalp_safety::format_verification_report(
+        &safety_power_result,
+    ));
+
     md
 }
 
@@ -3126,6 +3211,28 @@ fn generate_seooc_yaml(result: &skalp_safety::SeoocAnalysisResult) -> String {
                 req.projected_cumulative_spfm / 100.0
             ));
         }
+    }
+
+    // Power CCF coverage section (if applicable)
+    if let Some(ref ccf_cov) = result.power_ccf_coverage {
+        yaml.push_str("power_ccf_coverage:\n");
+        yaml.push_str(&format!("  mechanism_id: {}\n", ccf_cov.mechanism_id));
+        yaml.push_str(&format!(
+            "  original_ccf_fit: {:.2}\n",
+            ccf_cov.original_ccf_fit
+        ));
+        yaml.push_str(&format!(
+            "  assumed_dc: {:.4}\n",
+            ccf_cov.assumed_dc / 100.0
+        ));
+        yaml.push_str(&format!(
+            "  residual_ccf_fit: {:.2}\n",
+            ccf_cov.residual_ccf_fit
+        ));
+        yaml.push_str(&format!(
+            "  pmhf_improvement_fit: {:.2}\n\n",
+            ccf_cov.pmhf_improvement_fit
+        ));
     }
 
     yaml.push_str("summary:\n");

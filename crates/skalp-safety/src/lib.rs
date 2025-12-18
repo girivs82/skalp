@@ -57,7 +57,8 @@ pub use fault_simulation::{
 
 // Re-export FI-driven FMEA types
 pub use safety_driven_fmea::{
-    EffectMonitor, FaultEffectResult, FiDrivenConfig, FiDrivenFmeaResult, SafetyDrivenFmeaGenerator,
+    EffectMonitor, FaultEffectResult, FiDrivenConfig, FiDrivenFmeaResult, PmhfBreakdown,
+    SafetyDrivenFmeaGenerator,
 };
 
 // Re-export fault diagnostics types
@@ -77,9 +78,10 @@ pub use bist_generation::{
 
 // Re-export SEooC analysis types
 pub use seooc::{
-    analyze_seooc, format_seooc_report, from_hir_seooc_config, AssumedMechanism, DcCategory,
-    DerivedSafetyRequirement, FaultInjectionData, SeoocAnalysisConfig, SeoocAnalysisResult,
-    UndetectedFault, UndetectedFaultCategories,
+    analyze_seooc, analyze_seooc_with_ccf, format_seooc_report, from_hir_seooc_config,
+    AssumedMechanism, DcCategory, DerivedSafetyRequirement, FaultInjectionData, PowerCcfCoverage,
+    PowerDomainCcfData, SeoocAnalysisConfig, SeoocAnalysisResult, UndetectedFault,
+    UndetectedFaultCategories,
 };
 
 #[cfg(feature = "sim-integration")]

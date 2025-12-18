@@ -392,6 +392,70 @@ pub struct FiDrivenFmeaResult {
     pub runtime_dc: Option<f64>,
     /// Boot DC (boot-time detection) - for LFM calculation
     pub boot_dc: Option<f64>,
+    /// CCF contribution to PMHF (λDPF_CCF) - from power domains and other CCF sources
+    pub ccf_contribution: Option<f64>,
+    /// Safety mechanism failure contribution (λSM)
+    pub sm_contribution: Option<f64>,
+}
+
+impl FiDrivenFmeaResult {
+    /// Apply CCF contribution to PMHF calculation
+    ///
+    /// Per ISO 26262-5 + ISO 26262-9:
+    /// PMHF = λSPF + λRF + λSM + λDPF_CCF
+    ///
+    /// The FI-driven analysis gives us λRF (residual faults).
+    /// This method adds λDPF_CCF from CCF analysis (power domains, etc.)
+    pub fn apply_ccf_contribution(&mut self, ccf_fit: f64) {
+        self.ccf_contribution = Some(ccf_fit);
+        self.update_pmhf();
+    }
+
+    /// Apply safety mechanism failure contribution to PMHF
+    ///
+    /// λSM accounts for failures in the safety mechanisms themselves
+    pub fn apply_sm_contribution(&mut self, sm_fit: f64) {
+        self.sm_contribution = Some(sm_fit);
+        self.update_pmhf();
+    }
+
+    /// Recalculate PMHF with all contributions
+    ///
+    /// Full formula: PMHF = λRF + λSM + λDPF_CCF
+    /// Where λRF = base_pmhf from FI analysis (residual faults)
+    fn update_pmhf(&mut self) {
+        if let Some(base_pmhf) = self.measured_pmhf {
+            let ccf = self.ccf_contribution.unwrap_or(0.0);
+            let sm = self.sm_contribution.unwrap_or(0.0);
+            self.measured_pmhf = Some(base_pmhf + ccf + sm);
+        }
+    }
+
+    /// Get PMHF breakdown for reporting
+    pub fn pmhf_breakdown(&self) -> PmhfBreakdown {
+        let base = self.measured_pmhf.unwrap_or(0.0)
+            - self.ccf_contribution.unwrap_or(0.0)
+            - self.sm_contribution.unwrap_or(0.0);
+        PmhfBreakdown {
+            residual_fit: base,
+            ccf_fit: self.ccf_contribution.unwrap_or(0.0),
+            sm_fit: self.sm_contribution.unwrap_or(0.0),
+            total_pmhf: self.measured_pmhf.unwrap_or(0.0),
+        }
+    }
+}
+
+/// PMHF breakdown for detailed reporting
+#[derive(Debug, Clone, Default)]
+pub struct PmhfBreakdown {
+    /// λRF - Residual faults (undetected dangerous faults)
+    pub residual_fit: f64,
+    /// λDPF_CCF - Common cause failure contribution
+    pub ccf_fit: f64,
+    /// λSM - Safety mechanism failure contribution
+    pub sm_fit: f64,
+    /// Total PMHF = λRF + λDPF_CCF + λSM
+    pub total_pmhf: f64,
 }
 
 // ============================================================================
@@ -596,6 +660,8 @@ impl SafetyDrivenFmeaGenerator {
             meets_asil,
             runtime_dc,
             boot_dc,
+            ccf_contribution: None, // Set via apply_ccf_contribution()
+            sm_contribution: None,  // Set via apply_sm_contribution()
         }
     }
 

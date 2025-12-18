@@ -961,6 +961,11 @@ impl SafeStateVerifier {
 // =============================================================================
 // Top-Level: Motor Control Unit v12 - ASIL-D with Power Domain Analysis
 // =============================================================================
+// SEooC: This component is developed as a Safety Element out of Context
+// It assumes an external voltage monitor with DC≥99% for power fault coverage
+// =============================================================================
+#[seooc(asil = "D")]
+#[assumed_mechanism(id = "EXT_VM", mtype = "voltage_monitor", covers = "VoltageDropout,GroundBounce")]
 #[power_domain("vdd_core")]
 entity MotorControlUnitV12 {
     in clk: clock
