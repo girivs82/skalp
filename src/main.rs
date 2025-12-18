@@ -2167,7 +2167,47 @@ fn run_fi_driven_safety(
                             "   Safe faults: {} ({:.1}%)",
                             campaign.safe_faults, campaign.safe_fault_percentage
                         );
-                        println!("   DC: {:.2}%", campaign.diagnostic_coverage);
+                        println!("   DC (overall): {:.2}%", campaign.diagnostic_coverage);
+                        println!("   ┌─ Permanent faults (SA0/SA1):");
+                        println!(
+                            "   │  Total: {}, Corruption: {}, Safe: {} ({:.1}%)",
+                            campaign.permanent.total,
+                            campaign.permanent.corruption,
+                            campaign.permanent.safe,
+                            campaign.permanent.safe_pct
+                        );
+                        println!(
+                            "   │  DC: {:.2}%, Base FIT: {:.2}, Residual FIT: {:.3}",
+                            campaign.permanent.dc,
+                            campaign.permanent.base_fit,
+                            campaign.permanent.residual_fit
+                        );
+                        println!("   ├─ Transient faults (SEU/BitFlip):");
+                        println!(
+                            "   │  Total: {}, Corruption: {}, Safe: {} ({:.1}%)",
+                            campaign.transient.total,
+                            campaign.transient.corruption,
+                            campaign.transient.safe,
+                            campaign.transient.safe_pct
+                        );
+                        println!(
+                            "   │  DC: {:.2}%, Base FIT: {:.2}, Residual FIT: {:.3}",
+                            campaign.transient.dc,
+                            campaign.transient.base_fit,
+                            campaign.transient.residual_fit
+                        );
+                        println!("   └─ Power faults (VoltageDropout/GroundBounce):");
+                        println!(
+                            "      Total: {}, Corruption: {}, Safe: {} ({:.1}%)",
+                            campaign.power.total,
+                            campaign.power.corruption,
+                            campaign.power.safe,
+                            campaign.power.safe_pct
+                        );
+                        println!(
+                            "      DC: {:.2}%, Base FIT: {:.2}, Residual FIT: {:.3}",
+                            campaign.power.dc, campaign.power.base_fit, campaign.power.residual_fit
+                        );
 
                         // Convert to FaultEffectResult format
                         for fault_result in &campaign.fault_results {
@@ -2504,8 +2544,11 @@ fn run_cpu_fi_campaign(
             SimFaultType::StuckAt1,
             SimFaultType::BitFlip,
             SimFaultType::Transient,
+            SimFaultType::VoltageDropout,
+            SimFaultType::GroundBounce,
         ],
         max_faults,
+        ..Default::default()
     };
 
     let campaign = simulator.run_fault_campaign_with_config(&config);
@@ -2516,7 +2559,43 @@ fn run_cpu_fi_campaign(
         "   Safe faults: {} ({:.1}%)",
         campaign.safe_faults, campaign.safe_fault_percentage
     );
-    println!("   DC: {:.2}%", campaign.diagnostic_coverage);
+    println!("   DC (overall): {:.2}%", campaign.diagnostic_coverage);
+    println!("   ┌─ Permanent faults (SA0/SA1):");
+    println!(
+        "   │  Total: {}, Corruption: {}, Safe: {} ({:.1}%)",
+        campaign.permanent.total,
+        campaign.permanent.corruption,
+        campaign.permanent.safe,
+        campaign.permanent.safe_pct
+    );
+    println!(
+        "   │  DC: {:.2}%, Base FIT: {:.2}, Residual FIT: {:.3}",
+        campaign.permanent.dc, campaign.permanent.base_fit, campaign.permanent.residual_fit
+    );
+    println!("   ├─ Transient faults (SEU/BitFlip):");
+    println!(
+        "   │  Total: {}, Corruption: {}, Safe: {} ({:.1}%)",
+        campaign.transient.total,
+        campaign.transient.corruption,
+        campaign.transient.safe,
+        campaign.transient.safe_pct
+    );
+    println!(
+        "   │  DC: {:.2}%, Base FIT: {:.2}, Residual FIT: {:.3}",
+        campaign.transient.dc, campaign.transient.base_fit, campaign.transient.residual_fit
+    );
+    println!("   └─ Power faults (VoltageDropout/GroundBounce):");
+    println!(
+        "      Total: {}, Corruption: {}, Safe: {} ({:.1}%)",
+        campaign.power.total,
+        campaign.power.corruption,
+        campaign.power.safe,
+        campaign.power.safe_pct
+    );
+    println!(
+        "      DC: {:.2}%, Base FIT: {:.2}, Residual FIT: {:.3}",
+        campaign.power.dc, campaign.power.base_fit, campaign.power.residual_fit
+    );
 
     let mut results = Vec::new();
     for fault_result in &campaign.fault_results {

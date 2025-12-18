@@ -96,6 +96,86 @@ pub struct FaultCampaignConfig {
     pub fault_types: Vec<crate::sir::FaultType>,
     /// Maximum faults to test (0 = all)
     pub max_faults: usize,
+    /// FIT rates by category (from library/foundry)
+    pub fit_rates: FitRateConfig,
+}
+
+/// FIT rate configuration from library/foundry
+#[derive(Debug, Clone)]
+pub struct FitRateConfig {
+    /// Base FIT rate for permanent faults (per 10^9 hours per gate)
+    /// Typical: 0.1 FIT/gate for automotive-grade silicon
+    pub permanent_fit_per_gate: f64,
+    /// Base FIT rate for transient faults (SEU) (per 10^9 hours per gate)
+    /// Highly environment-dependent: ~0.001 FIT/gate at sea level,
+    /// ~1-10 FIT/gate in space/high altitude
+    pub transient_fit_per_gate: f64,
+    /// Base FIT rate for power faults (per 10^9 hours per power domain)
+    /// Includes voltage dropout, ground bounce, brownout
+    /// Typical: 1-10 FIT per power domain for automotive
+    pub power_fit_per_domain: f64,
+    /// Technology node (nm) - affects soft error rate
+    pub technology_node_nm: Option<u32>,
+    /// Environment factor for transient faults (1.0 = sea level automotive)
+    pub environment_factor: f64,
+}
+
+impl Default for FitRateConfig {
+    fn default() -> Self {
+        Self {
+            // Typical automotive-grade values (IEC 62380 / SN 29500)
+            permanent_fit_per_gate: 0.1,   // 0.1 FIT per gate (permanent)
+            transient_fit_per_gate: 0.001, // 0.001 FIT per gate (SEU at sea level)
+            power_fit_per_domain: 5.0,     // 5 FIT per power domain (automotive)
+            technology_node_nm: None,
+            environment_factor: 1.0, // Sea level automotive
+        }
+    }
+}
+
+impl FitRateConfig {
+    /// Create config for automotive environment at sea level
+    pub fn automotive_sea_level() -> Self {
+        Self::default()
+    }
+
+    /// Create config for automotive environment at high altitude (e.g., Denver)
+    pub fn automotive_high_altitude() -> Self {
+        Self {
+            permanent_fit_per_gate: 0.1,
+            transient_fit_per_gate: 0.001,
+            power_fit_per_domain: 5.0,
+            technology_node_nm: None,
+            environment_factor: 3.0, // ~3x SER at 1600m altitude
+        }
+    }
+
+    /// Create config for avionics (high altitude)
+    pub fn avionics() -> Self {
+        Self {
+            permanent_fit_per_gate: 0.1,
+            transient_fit_per_gate: 0.001,
+            power_fit_per_domain: 10.0, // Higher due to pressure/temp variations
+            technology_node_nm: None,
+            environment_factor: 100.0, // ~100x SER at aircraft altitude
+        }
+    }
+
+    /// Create config for space applications
+    pub fn space() -> Self {
+        Self {
+            permanent_fit_per_gate: 0.1,
+            transient_fit_per_gate: 0.001,
+            power_fit_per_domain: 20.0, // Higher due to radiation effects on power
+            technology_node_nm: None,
+            environment_factor: 1000.0, // ~1000x SER in LEO
+        }
+    }
+
+    /// Get effective transient FIT rate (with environment factor)
+    pub fn effective_transient_fit(&self) -> f64 {
+        self.transient_fit_per_gate * self.environment_factor
+    }
 }
 
 impl Default for FaultCampaignConfig {
@@ -108,6 +188,7 @@ impl Default for FaultCampaignConfig {
                 crate::sir::FaultType::StuckAt1,
             ],
             max_faults: 0,
+            fit_rates: FitRateConfig::default(),
         }
     }
 }
@@ -117,7 +198,7 @@ impl Default for FaultCampaignConfig {
 pub struct FaultCampaignResults {
     /// Total faults simulated
     pub total_faults: usize,
-    /// Faults that were detected by safety mechanisms
+    /// Faults that were detected by safety mechanisms (among corruption faults)
     pub detected_faults: usize,
     /// Faults that caused output corruption (dangerous faults)
     pub corruption_faults: usize,
@@ -129,6 +210,35 @@ pub struct FaultCampaignResults {
     pub safe_fault_percentage: f64,
     /// Individual fault results
     pub fault_results: Vec<FaultSimResult>,
+
+    // Category-specific metrics
+    /// Permanent fault metrics (SA0, SA1, Open, Bridging)
+    pub permanent: FaultCategoryMetrics,
+    /// Transient fault metrics (BitFlip, SEU, Transient)
+    pub transient: FaultCategoryMetrics,
+    /// Power fault metrics (VoltageDropout, GroundBounce)
+    pub power: FaultCategoryMetrics,
+}
+
+/// Metrics for a specific fault category
+#[derive(Debug, Clone, Default)]
+pub struct FaultCategoryMetrics {
+    /// Total faults in this category
+    pub total: usize,
+    /// Faults causing output corruption
+    pub corruption: usize,
+    /// Detected corruption faults
+    pub detected: usize,
+    /// Safe faults (no output change)
+    pub safe: usize,
+    /// Diagnostic coverage for this category (%)
+    pub dc: f64,
+    /// Safe fault percentage for this category (%)
+    pub safe_pct: f64,
+    /// Base FIT rate for this category (from library/foundry)
+    pub base_fit: f64,
+    /// Residual FIT after detection (base_fit * (1 - dc/100) * corruption_rate)
+    pub residual_fit: f64,
 }
 
 /// Gate-level simulator with fault injection support
@@ -613,23 +723,36 @@ impl GateLevelSimulator {
         cycles: u64,
         clock_name: &str,
     ) -> FaultSimResult {
-        // First run normal simulation to get golden outputs
+        // First run normal simulation and capture golden outputs at each cycle
         self.reset();
-        let _normal_states = self.run_clocked(cycles, clock_name);
-        let normal_outputs: HashMap<String, Vec<bool>> = self
-            .output_ports
-            .iter()
-            .filter_map(|id| {
-                let name = self.signal_id_to_name.get(&id.0)?;
-                let value = self.state.signals.get(&id.0)?;
-                Some((name.clone(), value.clone()))
-            })
-            .collect();
+        let mut golden_outputs_per_cycle: Vec<HashMap<String, Vec<bool>>> =
+            Vec::with_capacity((cycles * 2) as usize);
 
-        // Now run with fault injection
+        for cycle in 0..(cycles * 2) {
+            let clk_val = cycle % 2 == 1;
+            self.set_input(clock_name, &[clk_val]);
+            self.step();
+
+            // Capture golden outputs at this cycle
+            let outputs: HashMap<String, Vec<bool>> = self
+                .output_ports
+                .iter()
+                .filter_map(|id| {
+                    let name = self.signal_id_to_name.get(&id.0)?;
+                    let value = self.state.signals.get(&id.0)?;
+                    Some((name.clone(), value.clone()))
+                })
+                .collect();
+            golden_outputs_per_cycle.push(outputs);
+        }
+
+        // Now run with fault injection and compare at EACH cycle
+        // This properly captures transient faults that cause temporary corruption
         self.reset();
         self.inject_fault(fault.clone());
         let mut detection_cycle = None;
+        let mut output_diffs = HashMap::new();
+        let mut first_corruption_cycle: Option<u64> = None;
 
         for cycle in 0..(cycles * 2) {
             // Toggle clock
@@ -641,19 +764,22 @@ impl GateLevelSimulator {
             if detection_cycle.is_none() && self.is_fault_detected() {
                 detection_cycle = Some(self.state.cycle);
             }
-        }
 
-        // Compare outputs
-        let mut output_diffs = HashMap::new();
-        let mut any_diff = false;
-
-        for id in &self.output_ports {
-            if let Some(name) = self.signal_id_to_name.get(&id.0) {
-                if let Some(faulty) = self.state.signals.get(&id.0) {
-                    if let Some(normal) = normal_outputs.get(name) {
-                        if normal != faulty {
-                            output_diffs.insert(name.clone(), (normal.clone(), faulty.clone()));
-                            any_diff = true;
+            // Compare outputs at THIS cycle to golden (for transient fault detection)
+            if let Some(golden) = golden_outputs_per_cycle.get(cycle as usize) {
+                for id in &self.output_ports {
+                    if let Some(name) = self.signal_id_to_name.get(&id.0) {
+                        if let Some(faulty) = self.state.signals.get(&id.0) {
+                            if let Some(normal) = golden.get(name) {
+                                if normal != faulty && !output_diffs.contains_key(name) {
+                                    // Record first occurrence of corruption for this output
+                                    output_diffs
+                                        .insert(name.clone(), (normal.clone(), faulty.clone()));
+                                    if first_corruption_cycle.is_none() {
+                                        first_corruption_cycle = Some(cycle);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -699,17 +825,20 @@ impl GateLevelSimulator {
             }
         }
 
-        // Test SA0 and SA1 for each primitive
+        let num_primitives = primitives.len();
+
+        // Test SA0 and SA1 for each primitive (permanent faults only)
         for (prim_id, _ptype) in &primitives {
             // Stuck-at-0
             let fault_sa0 = FaultInjectionConfig::stuck_at_0(*prim_id, 0);
             let result = self.run_fault_sim(fault_sa0, cycles_per_fault, clock_name);
             total_faults += 1;
-            if result.detected {
-                detected_faults += 1;
-            }
-            if !result.output_diffs.is_empty() {
+            let caused_corruption = !result.output_diffs.is_empty();
+            if caused_corruption {
                 corruption_faults += 1;
+                if result.detected {
+                    detected_faults += 1;
+                }
             }
             results.push(result);
 
@@ -717,11 +846,12 @@ impl GateLevelSimulator {
             let fault_sa1 = FaultInjectionConfig::stuck_at_1(*prim_id, 0);
             let result = self.run_fault_sim(fault_sa1, cycles_per_fault, clock_name);
             total_faults += 1;
-            if result.detected {
-                detected_faults += 1;
-            }
-            if !result.output_diffs.is_empty() {
+            let caused_corruption = !result.output_diffs.is_empty();
+            if caused_corruption {
                 corruption_faults += 1;
+                if result.detected {
+                    detected_faults += 1;
+                }
             }
             results.push(result);
         }
@@ -741,6 +871,16 @@ impl GateLevelSimulator {
             0.0
         };
 
+        // Use default FIT rates for permanent faults
+        let fit_rates = FitRateConfig::default();
+        let perm_base_fit = fit_rates.permanent_fit_per_gate * num_primitives as f64;
+        let perm_corruption_rate = if total_faults > 0 {
+            corruption_faults as f64 / total_faults as f64
+        } else {
+            0.0
+        };
+        let perm_residual_fit = perm_base_fit * perm_corruption_rate * (1.0 - dc / 100.0);
+
         FaultCampaignResults {
             total_faults,
             detected_faults,
@@ -749,6 +889,21 @@ impl GateLevelSimulator {
             diagnostic_coverage: dc,
             safe_fault_percentage: safe_pct,
             fault_results: results,
+            // This campaign only tests permanent faults (SA0, SA1)
+            permanent: FaultCategoryMetrics {
+                total: total_faults,
+                corruption: corruption_faults,
+                detected: detected_faults,
+                safe: safe_faults,
+                dc,
+                safe_pct,
+                base_fit: perm_base_fit,
+                residual_fit: perm_residual_fit,
+            },
+            // No transient faults tested in this simple campaign
+            transient: FaultCategoryMetrics::default(),
+            // No power faults tested in this simple campaign
+            power: FaultCategoryMetrics::default(),
         }
     }
 
@@ -763,6 +918,17 @@ impl GateLevelSimulator {
         let mut total_faults = 0;
         let mut detected_faults = 0;
         let mut corruption_faults = 0;
+
+        // Category-specific counters
+        let mut perm_total = 0;
+        let mut perm_corruption = 0;
+        let mut perm_detected = 0;
+        let mut trans_total = 0;
+        let mut trans_corruption = 0;
+        let mut trans_detected = 0;
+        let mut power_total = 0;
+        let mut power_corruption = 0;
+        let mut power_detected = 0;
 
         // Collect all primitive IDs
         let mut primitives: Vec<(PrimitiveId, PrimitiveType)> = Vec::new();
@@ -781,6 +947,8 @@ impl GateLevelSimulator {
             }
         }
 
+        let num_primitives = primitives.len();
+
         // Test each configured fault type for each primitive
         for (prim_id, _ptype) in &primitives {
             for fault_type in &config.fault_types {
@@ -793,17 +961,50 @@ impl GateLevelSimulator {
                     FaultType::StuckAt1 => FaultInjectionConfig::stuck_at_1(*prim_id, 0),
                     FaultType::BitFlip => FaultInjectionConfig::bit_flip(*prim_id, 0, Some(1)),
                     FaultType::Transient => FaultInjectionConfig::transient(*prim_id, 0),
+                    FaultType::VoltageDropout => {
+                        FaultInjectionConfig::voltage_dropout(*prim_id, 0, 2)
+                    }
+                    FaultType::GroundBounce => FaultInjectionConfig::ground_bounce(*prim_id, 0),
                     _ => continue,
+                };
+
+                // Determine fault category
+                let category = match fault_type {
+                    FaultType::StuckAt0 | FaultType::StuckAt1 => "permanent",
+                    FaultType::BitFlip | FaultType::Transient => "transient",
+                    FaultType::VoltageDropout | FaultType::GroundBounce => "power",
+                    _ => "permanent", // default
                 };
 
                 let result = self.run_fault_sim(fault, config.cycles_per_fault, &config.clock_name);
                 total_faults += 1;
+
+                // Track by category
+                match category {
+                    "permanent" => perm_total += 1,
+                    "transient" => trans_total += 1,
+                    "power" => power_total += 1,
+                    _ => {}
+                }
+
                 let caused_corruption = !result.output_diffs.is_empty();
                 if caused_corruption {
                     corruption_faults += 1;
+                    match category {
+                        "permanent" => perm_corruption += 1,
+                        "transient" => trans_corruption += 1,
+                        "power" => power_corruption += 1,
+                        _ => {}
+                    }
                     // DC counts detected faults among corruption faults only
                     if result.detected {
                         detected_faults += 1;
+                        match category {
+                            "permanent" => perm_detected += 1,
+                            "transient" => trans_detected += 1,
+                            "power" => power_detected += 1,
+                            _ => {}
+                        }
                     }
                 }
                 results.push(result);
@@ -815,7 +1016,11 @@ impl GateLevelSimulator {
 
         // Safe faults = faults that caused no output change (masked by logic)
         let safe_faults = total_faults - corruption_faults;
+        let perm_safe = perm_total - perm_corruption;
+        let trans_safe = trans_total - trans_corruption;
+        let power_safe = power_total - power_corruption;
 
+        // Calculate overall DC
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0
         } else {
@@ -828,6 +1033,72 @@ impl GateLevelSimulator {
             0.0
         };
 
+        // Calculate category-specific DCs
+        let perm_dc = if perm_corruption > 0 {
+            (perm_detected as f64) / (perm_corruption as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let trans_dc = if trans_corruption > 0 {
+            (trans_detected as f64) / (trans_corruption as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let power_dc = if power_corruption > 0 {
+            (power_detected as f64) / (power_corruption as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let perm_safe_pct = if perm_total > 0 {
+            (perm_safe as f64) / (perm_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let trans_safe_pct = if trans_total > 0 {
+            (trans_safe as f64) / (trans_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let power_safe_pct = if power_total > 0 {
+            (power_safe as f64) / (power_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate FIT contributions based on library/foundry rates
+        let perm_base_fit = config.fit_rates.permanent_fit_per_gate * num_primitives as f64;
+        let trans_base_fit = config.fit_rates.effective_transient_fit() * num_primitives as f64;
+        // Power FIT is per-domain, estimate ~5 domains for typical design
+        let estimated_power_domains = 5.0;
+        let power_base_fit = config.fit_rates.power_fit_per_domain * estimated_power_domains;
+
+        // Corruption rate = fraction of faults that cause output corruption
+        let perm_corruption_rate = if perm_total > 0 {
+            perm_corruption as f64 / perm_total as f64
+        } else {
+            0.0
+        };
+        let trans_corruption_rate = if trans_total > 0 {
+            trans_corruption as f64 / trans_total as f64
+        } else {
+            0.0
+        };
+        let power_corruption_rate = if power_total > 0 {
+            power_corruption as f64 / power_total as f64
+        } else {
+            0.0
+        };
+
+        // Residual FIT = base_fit * corruption_rate * (1 - dc/100)
+        let perm_residual_fit = perm_base_fit * perm_corruption_rate * (1.0 - perm_dc / 100.0);
+        let trans_residual_fit = trans_base_fit * trans_corruption_rate * (1.0 - trans_dc / 100.0);
+        let power_residual_fit = power_base_fit * power_corruption_rate * (1.0 - power_dc / 100.0);
+
         FaultCampaignResults {
             total_faults,
             detected_faults,
@@ -836,6 +1107,36 @@ impl GateLevelSimulator {
             diagnostic_coverage: dc,
             safe_fault_percentage: safe_pct,
             fault_results: results,
+            permanent: FaultCategoryMetrics {
+                total: perm_total,
+                corruption: perm_corruption,
+                detected: perm_detected,
+                safe: perm_safe,
+                dc: perm_dc,
+                safe_pct: perm_safe_pct,
+                base_fit: perm_base_fit,
+                residual_fit: perm_residual_fit,
+            },
+            transient: FaultCategoryMetrics {
+                total: trans_total,
+                corruption: trans_corruption,
+                detected: trans_detected,
+                safe: trans_safe,
+                dc: trans_dc,
+                safe_pct: trans_safe_pct,
+                base_fit: trans_base_fit,
+                residual_fit: trans_residual_fit,
+            },
+            power: FaultCategoryMetrics {
+                total: power_total,
+                corruption: power_corruption,
+                detected: power_detected,
+                safe: power_safe,
+                dc: power_dc,
+                safe_pct: power_safe_pct,
+                base_fit: power_base_fit,
+                residual_fit: power_residual_fit,
+            },
         }
     }
 

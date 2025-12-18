@@ -144,6 +144,8 @@ pub struct GpuFaultCampaignConfig {
     pub batch_size: usize,
     /// Use GPU acceleration (false = CPU fallback)
     pub use_gpu: bool,
+    /// FIT rates by category (from library/foundry)
+    pub fit_rates: crate::gate_simulator::FitRateConfig,
 }
 
 impl Default for GpuFaultCampaignConfig {
@@ -155,6 +157,7 @@ impl Default for GpuFaultCampaignConfig {
             max_faults: 0,
             batch_size: 1024,
             use_gpu: true,
+            fit_rates: crate::gate_simulator::FitRateConfig::default(),
         }
     }
 }
@@ -795,19 +798,48 @@ kernel void fault_sim_kernel(
             })
             .collect();
 
-        // Count corruption faults (dangerous faults that affect outputs)
-        let corruption_faults = fault_results
-            .iter()
-            .filter(|r| !r.output_diffs.is_empty())
-            .count();
-        // DC only counts detected faults among corruption faults
-        let detected_faults = fault_results
-            .iter()
-            .filter(|r| !r.output_diffs.is_empty() && r.detected)
-            .count();
+        // Track by category
+        let mut perm_total = 0;
+        let mut perm_corruption = 0;
+        let mut perm_detected = 0;
+        let mut trans_total = 0;
+        let mut trans_corruption = 0;
+        let mut trans_detected = 0;
+
+        for result in &fault_results {
+            let is_permanent = matches!(
+                result.fault.fault_type,
+                FaultType::StuckAt0 | FaultType::StuckAt1
+            );
+            let caused_corruption = !result.output_diffs.is_empty();
+
+            if is_permanent {
+                perm_total += 1;
+                if caused_corruption {
+                    perm_corruption += 1;
+                    if result.detected {
+                        perm_detected += 1;
+                    }
+                }
+            } else {
+                trans_total += 1;
+                if caused_corruption {
+                    trans_corruption += 1;
+                    if result.detected {
+                        trans_detected += 1;
+                    }
+                }
+            }
+        }
+
+        // Count overall corruption faults (dangerous faults that affect outputs)
+        let corruption_faults = perm_corruption + trans_corruption;
+        let detected_faults = perm_detected + trans_detected;
 
         // Safe faults = faults that caused no output change (masked by logic)
         let safe_faults = total_faults - corruption_faults;
+        let perm_safe = perm_total - perm_corruption;
+        let trans_safe = trans_total - trans_corruption;
 
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0
@@ -821,6 +853,48 @@ kernel void fault_sim_kernel(
             0.0
         };
 
+        // Calculate category-specific DCs
+        let perm_dc = if perm_corruption > 0 {
+            (perm_detected as f64) / (perm_corruption as f64) * 100.0
+        } else {
+            100.0
+        };
+        let trans_dc = if trans_corruption > 0 {
+            (trans_detected as f64) / (trans_corruption as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let perm_safe_pct = if perm_total > 0 {
+            (perm_safe as f64) / (perm_total as f64) * 100.0
+        } else {
+            0.0
+        };
+        let trans_safe_pct = if trans_total > 0 {
+            (trans_safe as f64) / (trans_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate FIT contributions
+        let num_primitives = self.primitives.len();
+        let perm_base_fit = config.fit_rates.permanent_fit_per_gate * num_primitives as f64;
+        let trans_base_fit = config.fit_rates.effective_transient_fit() * num_primitives as f64;
+
+        let perm_corruption_rate = if perm_total > 0 {
+            perm_corruption as f64 / perm_total as f64
+        } else {
+            0.0
+        };
+        let trans_corruption_rate = if trans_total > 0 {
+            trans_corruption as f64 / trans_total as f64
+        } else {
+            0.0
+        };
+
+        let perm_residual_fit = perm_base_fit * perm_corruption_rate * (1.0 - perm_dc / 100.0);
+        let trans_residual_fit = trans_base_fit * trans_corruption_rate * (1.0 - trans_dc / 100.0);
+
         FaultCampaignResults {
             total_faults,
             detected_faults,
@@ -829,6 +903,28 @@ kernel void fault_sim_kernel(
             diagnostic_coverage: dc,
             safe_fault_percentage: safe_pct,
             fault_results,
+            permanent: crate::gate_simulator::FaultCategoryMetrics {
+                total: perm_total,
+                corruption: perm_corruption,
+                detected: perm_detected,
+                safe: perm_safe,
+                dc: perm_dc,
+                safe_pct: perm_safe_pct,
+                base_fit: perm_base_fit,
+                residual_fit: perm_residual_fit,
+            },
+            transient: crate::gate_simulator::FaultCategoryMetrics {
+                total: trans_total,
+                corruption: trans_corruption,
+                detected: trans_detected,
+                safe: trans_safe,
+                dc: trans_dc,
+                safe_pct: trans_safe_pct,
+                base_fit: trans_base_fit,
+                residual_fit: trans_residual_fit,
+            },
+            // GPU simulator doesn't test power faults currently
+            power: crate::gate_simulator::FaultCategoryMetrics::default(),
         }
     }
 
@@ -845,19 +941,48 @@ kernel void fault_sim_kernel(
             .map(|fault| self.simulate_single_fault(fault, config.cycles_per_fault))
             .collect();
 
-        // Count corruption faults (dangerous faults that affect outputs)
-        let corruption_faults = results
-            .iter()
-            .filter(|r| !r.output_diffs.is_empty())
-            .count();
-        // DC only counts detected faults among corruption faults
-        let detected_faults = results
-            .iter()
-            .filter(|r| !r.output_diffs.is_empty() && r.detected)
-            .count();
+        // Track by category
+        let mut perm_total = 0;
+        let mut perm_corruption = 0;
+        let mut perm_detected = 0;
+        let mut trans_total = 0;
+        let mut trans_corruption = 0;
+        let mut trans_detected = 0;
+
+        for result in &results {
+            let is_permanent = matches!(
+                result.fault.fault_type,
+                FaultType::StuckAt0 | FaultType::StuckAt1
+            );
+            let caused_corruption = !result.output_diffs.is_empty();
+
+            if is_permanent {
+                perm_total += 1;
+                if caused_corruption {
+                    perm_corruption += 1;
+                    if result.detected {
+                        perm_detected += 1;
+                    }
+                }
+            } else {
+                trans_total += 1;
+                if caused_corruption {
+                    trans_corruption += 1;
+                    if result.detected {
+                        trans_detected += 1;
+                    }
+                }
+            }
+        }
+
+        // Count overall metrics
+        let corruption_faults = perm_corruption + trans_corruption;
+        let detected_faults = perm_detected + trans_detected;
 
         // Safe faults = faults that caused no output change (masked by logic)
         let safe_faults = total_faults - corruption_faults;
+        let perm_safe = perm_total - perm_corruption;
+        let trans_safe = trans_total - trans_corruption;
 
         let dc = if corruption_faults > 0 {
             (detected_faults as f64) / (corruption_faults as f64) * 100.0
@@ -871,6 +996,48 @@ kernel void fault_sim_kernel(
             0.0
         };
 
+        // Calculate category-specific DCs
+        let perm_dc = if perm_corruption > 0 {
+            (perm_detected as f64) / (perm_corruption as f64) * 100.0
+        } else {
+            100.0
+        };
+        let trans_dc = if trans_corruption > 0 {
+            (trans_detected as f64) / (trans_corruption as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let perm_safe_pct = if perm_total > 0 {
+            (perm_safe as f64) / (perm_total as f64) * 100.0
+        } else {
+            0.0
+        };
+        let trans_safe_pct = if trans_total > 0 {
+            (trans_safe as f64) / (trans_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate FIT contributions
+        let num_primitives = self.primitives.len();
+        let perm_base_fit = config.fit_rates.permanent_fit_per_gate * num_primitives as f64;
+        let trans_base_fit = config.fit_rates.effective_transient_fit() * num_primitives as f64;
+
+        let perm_corruption_rate = if perm_total > 0 {
+            perm_corruption as f64 / perm_total as f64
+        } else {
+            0.0
+        };
+        let trans_corruption_rate = if trans_total > 0 {
+            trans_corruption as f64 / trans_total as f64
+        } else {
+            0.0
+        };
+
+        let perm_residual_fit = perm_base_fit * perm_corruption_rate * (1.0 - perm_dc / 100.0);
+        let trans_residual_fit = trans_base_fit * trans_corruption_rate * (1.0 - trans_dc / 100.0);
+
         FaultCampaignResults {
             total_faults,
             detected_faults,
@@ -879,6 +1046,28 @@ kernel void fault_sim_kernel(
             diagnostic_coverage: dc,
             safe_fault_percentage: safe_pct,
             fault_results: results,
+            permanent: crate::gate_simulator::FaultCategoryMetrics {
+                total: perm_total,
+                corruption: perm_corruption,
+                detected: perm_detected,
+                safe: perm_safe,
+                dc: perm_dc,
+                safe_pct: perm_safe_pct,
+                base_fit: perm_base_fit,
+                residual_fit: perm_residual_fit,
+            },
+            transient: crate::gate_simulator::FaultCategoryMetrics {
+                total: trans_total,
+                corruption: trans_corruption,
+                detected: trans_detected,
+                safe: trans_safe,
+                dc: trans_dc,
+                safe_pct: trans_safe_pct,
+                base_fit: trans_base_fit,
+                residual_fit: trans_residual_fit,
+            },
+            // CPU fallback doesn't test power faults currently
+            power: crate::gate_simulator::FaultCategoryMetrics::default(),
         }
     }
 
