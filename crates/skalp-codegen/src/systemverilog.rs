@@ -411,6 +411,11 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
                     // Clock domain parameters are not emitted as Verilog parameters
                     continue;
                 }
+                skalp_mir::GenericParameterType::PowerDomain => {
+                    // Power domain parameters are not emitted as Verilog parameters
+                    // They are used for safety analysis and power domain crossing checks
+                    continue;
+                }
                 skalp_mir::GenericParameterType::Intent => {
                     // Intent parameters are not emitted as Verilog parameters
                     // They are used for HLS optimization and synthesis directives
@@ -3128,6 +3133,7 @@ fn generate_vendor_ip_wrapper(
                     }
                 }
                 skalp_mir::GenericParameterType::ClockDomain
+                | skalp_mir::GenericParameterType::PowerDomain
                 | skalp_mir::GenericParameterType::Intent => continue,
             };
             params.push(param_str);
@@ -3200,9 +3206,10 @@ fn generate_vendor_ip_wrapper(
                 .parameters
                 .iter()
                 .filter_map(|p| {
-                    // Skip clock domain and intent parameters
+                    // Skip clock domain, power domain, and intent parameters
                     match p.param_type {
                         skalp_mir::GenericParameterType::ClockDomain
+                        | skalp_mir::GenericParameterType::PowerDomain
                         | skalp_mir::GenericParameterType::Intent => None,
                         _ => Some(format!("        .{}({})", p.name, p.name)),
                     }

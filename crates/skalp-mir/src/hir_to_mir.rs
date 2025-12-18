@@ -13063,6 +13063,7 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirGenericType::Width => GenericParameterType::Width,
             hir::HirGenericType::ClockDomain => GenericParameterType::ClockDomain,
+            hir::HirGenericType::PowerDomain { .. } => GenericParameterType::PowerDomain,
             hir::HirGenericType::Intent => GenericParameterType::Intent,
         }
     }

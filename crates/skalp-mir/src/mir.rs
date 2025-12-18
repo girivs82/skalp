@@ -909,6 +909,8 @@ pub enum GenericParameterType {
     Width,
     /// Clock domain parameter
     ClockDomain,
+    /// Power domain parameter (from entity<'core, 'aon> declarations)
+    PowerDomain,
     /// Intent parameter for HLS optimization
     Intent,
 }

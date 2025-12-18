@@ -1746,8 +1746,14 @@ pub enum HirGenericType {
     TypeWithBounds(Vec<String>), // trait bound names
     Const(HirType),
     Width,
-    ClockDomain, // Clock domain lifetime parameter
-    Intent,      // Intent parameter for HLS optimization
+    ClockDomain, // Clock domain lifetime parameter (from clock<'clk> types)
+    /// Power domain lifetime parameter (from entity<'core, 'aon> declarations)
+    /// First parameter is default if only one, otherwise signals must specify
+    PowerDomain {
+        /// True if this is the default power domain for the entity
+        is_default: bool,
+    },
+    Intent, // Intent parameter for HLS optimization
 }
 
 /// Clock domain in HIR

@@ -898,6 +898,39 @@ impl HirBuilderContext {
         // Use entity_power_domain_config captured at the top of this function
         // (before processing ports, which also can consume pending_power_domain_config)
 
+        // Build power domains from generic parameters with PowerDomain type
+        let mut power_domains = Vec::new();
+        let mut default_power_domain: Option<String> = None;
+
+        for (idx, generic) in generics.iter().enumerate() {
+            if let HirGenericType::PowerDomain { is_default } = &generic.param_type {
+                let domain_id = PowerDomainId(idx as u32);
+                power_domains.push(HirPowerDomain {
+                    id: domain_id,
+                    name: generic.name.clone(),
+                    domain_type: PowerDomainType::Switchable, // Default, can be overridden
+                    supply: None,
+                    voltage_mv: None,
+                });
+
+                // Track default power domain
+                if *is_default || (power_domains.len() == 1 && default_power_domain.is_none()) {
+                    // First power domain is default if only one, or explicit (default) marker
+                    default_power_domain = Some(generic.name.clone());
+                }
+            }
+        }
+
+        // Store default power domain in power_domain_config for inheritance
+        let entity_power_domain_config = if let Some(default_domain) = default_power_domain {
+            Some(PowerDomainConfig {
+                domain_name: default_domain,
+                ..Default::default()
+            })
+        } else {
+            entity_power_domain_config
+        };
+
         Some(HirEntity {
             id,
             name,
@@ -910,7 +943,7 @@ impl HirBuilderContext {
             span: self.make_span(node),
             pipeline_config,
             vendor_ip_config,
-            power_domains: Vec::new(), // Power domains will be populated later from declarations
+            power_domains,
             power_domain_config: entity_power_domain_config,
             safety_mechanism_config,
             seooc_config,
@@ -1358,6 +1391,9 @@ impl HirBuilderContext {
         let id = self.next_signal_id();
         let name = self.extract_name(node)?;
 
+        // Extract power domain from signal's lifetime parameter: signal data<'core>: type
+        let signal_power_domain = self.extract_signal_power_domain(node);
+
         // Get type - look for TypeAnnotation first
         let signal_type =
             if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
@@ -1387,7 +1423,12 @@ impl HirBuilderContext {
         let breakpoint_config = self.pending_breakpoint_config.take();
 
         // Consume any pending power config from preceding #[retention], #[isolation], #[pdc], #[level_shift] attributes
-        let power_config = self.pending_power_config.take();
+        // Merge with signal_power_domain from lifetime parameter
+        let mut power_config = self.pending_power_config.take();
+        if let Some(domain_name) = signal_power_domain {
+            let config = power_config.get_or_insert_with(Default::default);
+            config.domain_name = Some(domain_name);
+        }
 
         // Consume any pending safety config from preceding #[implements(...)] attribute
         let safety_config = self.pending_safety_config.take();
@@ -1406,6 +1447,25 @@ impl HirBuilderContext {
             power_config,
             safety_config,
         })
+    }
+
+    /// Extract power domain from signal's lifetime parameter
+    /// Syntax: signal name<'domain>: type
+    fn extract_signal_power_domain(&self, node: &SyntaxNode) -> Option<String> {
+        // Look for GenericParamList child containing lifetime
+        if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
+            // Find lifetime token in the generic param list
+            for child in generic_list.children() {
+                if child.kind() == SyntaxKind::GenericParam {
+                    if let Some(lifetime_token) = child.first_token_of_kind(SyntaxKind::Lifetime) {
+                        let domain_name =
+                            lifetime_token.text().trim_start_matches('\'').to_string();
+                        return Some(domain_name);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Build variable declaration
@@ -10596,21 +10656,27 @@ impl HirBuilderContext {
 
     /// Build generic parameter
     fn build_generic_param(&mut self, node: &SyntaxNode) -> Option<HirGeneric> {
-        // Check if it's a lifetime parameter ('clk)
+        // Check if it's a lifetime parameter ('core, 'aon, etc.)
+        // Entity-level lifetimes are power domains; clock domains come from clock<'clk> types
         if let Some(lifetime_token) = node.first_token_of_kind(SyntaxKind::Lifetime) {
-            // 'clk style lifetime parameter with new token
             // Strip the leading apostrophe from the lifetime name
             let name = lifetime_token.text().trim_start_matches('\'').to_string();
 
+            // Check for (default) marker after the lifetime
+            // Syntax: 'core (default) or 'core(default)
+            let is_default = node
+                .children_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "default");
+
             Some(HirGeneric {
                 name,
-                param_type: HirGenericType::ClockDomain,
+                param_type: HirGenericType::PowerDomain { is_default },
                 default_value: None,
             })
         }
         // Legacy support for apostrophe + ident
         else if node.first_token_of_kind(SyntaxKind::Apostrophe).is_some() {
-            // 'clk style lifetime parameter (legacy)
             let name = node
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
@@ -10619,7 +10685,7 @@ impl HirBuilderContext {
 
             Some(HirGeneric {
                 name,
-                param_type: HirGenericType::ClockDomain,
+                param_type: HirGenericType::PowerDomain { is_default: false },
                 default_value: None,
             })
         }

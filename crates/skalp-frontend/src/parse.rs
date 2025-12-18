@@ -525,6 +525,12 @@ impl<'a> ParseState<'a> {
 
         self.expect(SyntaxKind::SignalKw);
         self.expect(SyntaxKind::Ident);
+
+        // Optional power domain lifetime parameter: signal name<'domain>: type
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
         self.expect(SyntaxKind::Colon);
         self.parse_type();
 
