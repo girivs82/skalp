@@ -1096,6 +1096,9 @@ pub struct HirPowerDomain {
 pub struct PowerConfig {
     /// Power domain this signal belongs to (resolved from lifetime)
     pub domain: Option<PowerDomainId>,
+    /// Power domain name (from #[power('domain)] or #[pdc(from = 'domain)])
+    /// Used for safety analysis before ID resolution
+    pub domain_name: Option<String>,
     /// Retention configuration
     pub retention: Option<RetentionConfig>,
     /// Isolation configuration

@@ -68,6 +68,7 @@ pub struct HirBuilderContext {
     next_requirement_id: u32,
     next_instance_id: u32,
     next_clock_domain_id: u32,
+    next_power_domain_id: u32,
     next_assertion_id: u32,
     next_property_id: u32,
     next_cover_id: u32,
@@ -196,6 +197,7 @@ struct SymbolTable {
     variables: HashMap<String, VariableId>,
     constants: HashMap<String, ConstantId>,
     clock_domains: HashMap<String, ClockDomainId>,
+    power_domains: HashMap<String, PowerDomainId>,
 
     /// User-defined types (struct, enum, union)
     user_types: HashMap<String, HirType>,
@@ -265,6 +267,7 @@ impl HirBuilderContext {
             next_requirement_id: 0,
             next_instance_id: 0,
             next_clock_domain_id: 0,
+            next_power_domain_id: 0,
             next_assertion_id: 0,
             next_property_id: 0,
             next_cover_id: 0,
@@ -8316,9 +8319,13 @@ impl HirBuilderContext {
         let has_level_shift = tokens
             .iter()
             .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "level_shift");
+        // #[power('domain)] - simple power domain assignment
+        let has_power = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "power");
 
         // Must have at least one power attribute
-        if !has_retention && !has_isolation && !has_pdc && !has_level_shift {
+        if !has_retention && !has_isolation && !has_pdc && !has_level_shift && !has_power {
             return None;
         }
 
@@ -8339,6 +8346,37 @@ impl HirBuilderContext {
             }
             // Level shift config
             config.level_shift = self.extract_level_shift_from_tokens(&tokens);
+            // Extract domain_name from the "from" domain (signal's source domain)
+            if let Some(ref ls) = config.level_shift {
+                if let Some(ref from) = ls.from_domain {
+                    config.domain_name = Some(from.clone());
+                }
+            }
+        }
+
+        // #[power(domain = 'name)] - extract power domain name from lifetime
+        // Also support just a standalone lifetime after "power" keyword
+        if has_power {
+            let mut current_key: Option<&str> = None;
+            for token in tokens.iter() {
+                match token.kind() {
+                    SyntaxKind::Ident => {
+                        let text = token.text();
+                        if text == "domain" {
+                            current_key = Some("domain");
+                        }
+                    }
+                    SyntaxKind::Lifetime => {
+                        // Accept lifetime if we saw "domain =" OR just "power" with no key
+                        if current_key == Some("domain") || config.domain_name.is_none() {
+                            let domain_name = token.text().trim_start_matches('\'').to_string();
+                            config.domain_name = Some(domain_name);
+                            current_key = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
 
         Some(config)
@@ -10373,6 +10411,7 @@ impl SymbolTable {
             variables: HashMap::new(),
             constants: HashMap::new(),
             clock_domains: HashMap::new(),
+            power_domains: HashMap::new(),
             user_types: HashMap::new(),
             variable_types: HashMap::new(),
             signal_types: HashMap::new(),          // BUG FIX #5

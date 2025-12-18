@@ -851,6 +851,7 @@ mod tests {
             derived_requirements: vec![],
             projected_spfm: 45.0,
             target_achievable: false,
+            power_ccf_coverage: None,
         };
 
         let report = format_seooc_report(&result);

@@ -100,6 +100,9 @@ pub struct MirToLirTransform {
     /// Module-level power domain (from MIR power_domain_config)
     /// Propagated to all primitives created in this module for CCF analysis
     module_power_domain: Option<String>,
+    /// Signal-level power domains (from signal power_config.domain_name)
+    /// Maps signal names to their power domains for fine-grained CCF analysis
+    signal_power_domains: HashMap<String, String>,
 }
 
 impl MirToLirTransform {
@@ -120,6 +123,7 @@ impl MirToLirTransform {
             const_zero_net: None,
             module_safety_context: None,
             module_power_domain: None,
+            signal_power_domains: HashMap::new(),
         }
     }
 
@@ -154,7 +158,33 @@ impl MirToLirTransform {
                 prim.safety_info = Some(Self::safety_context_to_lir_info(ctx));
             }
         }
-        // Apply power domain (from #[power_domain("name")])
+
+        // Apply power domain - signal-level takes precedence over module-level
+        // Extract signal name from primitive path (e.g., "top.PowerDomainTest.core_data[0]")
+        // The signal name is the last component before any bit index
+        let path_signal = prim
+            .path
+            .rsplit('.')
+            .next()
+            .map(|s| {
+                // Strip bit index if present (e.g., "signal[0]" -> "signal")
+                if let Some(bracket_pos) = s.find('[') {
+                    &s[..bracket_pos]
+                } else {
+                    s
+                }
+            })
+            .unwrap_or("");
+
+        // Look up signal-level power domain
+        if !path_signal.is_empty() {
+            if let Some(domain) = self.signal_power_domains.get(path_signal) {
+                prim.power_domain = Some(domain.clone());
+                return prim;
+            }
+        }
+
+        // Fall back to module-level power domain (from #[power_domain("name")])
         if let Some(ref domain) = self.module_power_domain {
             prim.power_domain = Some(domain.clone());
         }
@@ -295,6 +325,22 @@ impl MirToLirTransform {
     fn create_signal_nets(&mut self, signal: &skalp_mir::mir::Signal) {
         let width = Self::get_type_width(&signal.signal_type);
         self.signal_widths.insert(signal.id, width);
+
+        // Extract signal-level power domain from power_config.domain_name
+        // This takes precedence over module-level power_domain for CCF analysis
+        if let Some(ref power_config) = signal.power_config {
+            if let Some(ref domain_name) = power_config.domain_name {
+                self.signal_power_domains
+                    .insert(signal.name.clone(), domain_name.clone());
+            }
+        }
+        // Also check signal.power_domain (from MIR) as fallback
+        if !self.signal_power_domains.contains_key(&signal.name) {
+            if let Some(ref domain) = signal.power_domain {
+                self.signal_power_domains
+                    .insert(signal.name.clone(), domain.clone());
+            }
+        }
 
         // BUG FIX: Propagate detection signal flag from MIR to LIR
         // This is critical for hierarchical detection signal propagation
