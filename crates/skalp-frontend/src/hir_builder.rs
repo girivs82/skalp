@@ -918,6 +918,8 @@ impl HirBuilderContext {
             physical_constraints,
             detection_config,
             power_domain_config,
+            isolation_config: None, // TODO: Extract from #[isolation] attribute
+            retention_config: None, // TODO: Extract from #[retention] attribute
         })
     }
 

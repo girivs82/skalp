@@ -230,6 +230,53 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             let data_in = inputs.first().copied().unwrap_or(false);
             vec![data_in]
         }
+
+        // === Power Infrastructure ===
+        PrimitiveType::LevelShifter { .. } => {
+            // Level shifter passes signal through with voltage translation
+            // Logic behavior is identical to buffer
+            let a = inputs.first().copied().unwrap_or(false);
+            vec![a]
+        }
+
+        PrimitiveType::IsolationCell {
+            clamp_value,
+            enable_active_high,
+        } => {
+            // inputs: [data_in, iso_en]
+            let data = inputs.first().copied().unwrap_or(false);
+            let iso_en = inputs.get(1).copied().unwrap_or(false);
+            let is_isolated = if *enable_active_high { iso_en } else { !iso_en };
+
+            if is_isolated {
+                // Clamp to specified value (0, 1, or 2=hold)
+                match clamp_value {
+                    0 => vec![false],
+                    1 => vec![true],
+                    _ => vec![data], // Hold last value (simplified - pass through)
+                }
+            } else {
+                vec![data]
+            }
+        }
+
+        PrimitiveType::RetentionDff { .. } => {
+            // inputs: [clk, d, save, restore] or [clk, d, rst, save, restore]
+            // Same as DFF for logic simulation - retention behavior is state management
+            let d = inputs.get(1).copied().unwrap_or(false);
+            vec![d]
+        }
+
+        PrimitiveType::PowerSwitch { .. } => {
+            // Power switches control power rails, no logic output
+            vec![]
+        }
+
+        PrimitiveType::AlwaysOnBuf => {
+            // Always-on buffer - same as regular buffer
+            let a = inputs.first().copied().unwrap_or(false);
+            vec![a]
+        }
     }
 }
 

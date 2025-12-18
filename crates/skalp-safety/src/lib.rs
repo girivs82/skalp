@@ -9,6 +9,7 @@ use thiserror::Error;
 
 pub mod analysis;
 pub mod asil;
+pub mod bist_generation;
 pub mod common_cause;
 pub mod coverage_verification;
 pub mod design_resolver;
@@ -29,6 +30,7 @@ pub mod mechanisms;
 pub mod metrics;
 pub mod pipeline;
 pub mod power_domains;
+pub mod power_infrastructure;
 pub mod requirements;
 pub mod safety_case;
 pub mod safety_driven_fmea;
@@ -53,8 +55,15 @@ pub use safety_driven_fmea::{
 pub use fault_diagnostics::{
     analyze_ccf, analyze_sm_diversity, generate_ccf_report, generate_diagnostic_report,
     generate_sm_diversity_report, CcfAnalysis, CcfSource, CcfSourceType, ClassifiedFault,
-    FaultClassificationSummary, FaultDiagnostics, IdenticalSmPair, MatchingPrimitivePair,
-    SharedSignalInfo, SmDiversityAnalysis, SmDiversityWarning, UndetectedReason, WarningSeverity,
+    FaultClassification, FaultClassificationSummary, FaultDiagnostics, IdenticalSmPair,
+    MatchingPrimitivePair, SharedSignalInfo, SmDiversityAnalysis, SmDiversityWarning,
+    UndetectedFaultInfo, UndetectedReason, WarningSeverity,
+};
+
+// Re-export BIST generation types
+pub use bist_generation::{
+    generate_bist_from_analysis, BistCandidate, BistGenerationConfig, BistGenerator,
+    BistTestPattern, GeneratedBist,
 };
 
 #[cfg(feature = "sim-integration")]

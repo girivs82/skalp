@@ -178,6 +178,28 @@ pub enum CellFunction {
     // Tristate
     Tristate,
 
+    // Power infrastructure
+    /// Level shifter: Low-to-High voltage translation
+    LevelShifterLH,
+    /// Level shifter: High-to-Low voltage translation
+    LevelShifterHL,
+    /// Isolation cell with AND (clamps to 0)
+    IsolationAnd,
+    /// Isolation cell with OR (clamps to 1)
+    IsolationOr,
+    /// Isolation cell with latch (holds last value)
+    IsolationLatch,
+    /// Retention flip-flop (with balloon latch)
+    RetentionDff,
+    /// Retention flip-flop with reset
+    RetentionDffR,
+    /// Power switch header (PMOS, VDD side)
+    PowerSwitchHeader,
+    /// Power switch footer (NMOS, VSS side)
+    PowerSwitchFooter,
+    /// Always-on buffer
+    AlwaysOnBuf,
+
     // Custom/vendor-specific
     Custom(String),
 }
@@ -260,6 +282,32 @@ impl CellFunction {
             ),
             CellFunction::Latch => (vec!["en".into(), "d".into()], vec!["q".into()]),
             CellFunction::Tristate => (vec!["a".into(), "en".into()], vec!["y".into()]),
+            // Power infrastructure
+            CellFunction::LevelShifterLH | CellFunction::LevelShifterHL => {
+                (vec!["a".into()], vec!["y".into()])
+            }
+            CellFunction::IsolationAnd | CellFunction::IsolationOr => {
+                (vec!["a".into(), "iso_en".into()], vec!["y".into()])
+            }
+            CellFunction::IsolationLatch => (vec!["a".into(), "iso_en".into()], vec!["y".into()]),
+            CellFunction::RetentionDff => (
+                vec!["clk".into(), "d".into(), "save".into(), "restore".into()],
+                vec!["q".into()],
+            ),
+            CellFunction::RetentionDffR => (
+                vec![
+                    "clk".into(),
+                    "d".into(),
+                    "rst".into(),
+                    "save".into(),
+                    "restore".into(),
+                ],
+                vec!["q".into()],
+            ),
+            CellFunction::PowerSwitchHeader | CellFunction::PowerSwitchFooter => {
+                (vec!["en".into()], Vec::new()) // Controls power rail, no logic output
+            }
+            CellFunction::AlwaysOnBuf => (vec!["a".into()], vec!["y".into()]),
             CellFunction::Custom(_) => (Vec::new(), Vec::new()),
         }
     }
@@ -273,6 +321,26 @@ impl CellFunction {
                 | CellFunction::DffE
                 | CellFunction::DffRE
                 | CellFunction::Latch
+                | CellFunction::RetentionDff
+                | CellFunction::RetentionDffR
+                | CellFunction::IsolationLatch
+        )
+    }
+
+    /// Check if this is a power infrastructure cell
+    pub fn is_power_infrastructure(&self) -> bool {
+        matches!(
+            self,
+            CellFunction::LevelShifterLH
+                | CellFunction::LevelShifterHL
+                | CellFunction::IsolationAnd
+                | CellFunction::IsolationOr
+                | CellFunction::IsolationLatch
+                | CellFunction::RetentionDff
+                | CellFunction::RetentionDffR
+                | CellFunction::PowerSwitchHeader
+                | CellFunction::PowerSwitchFooter
+                | CellFunction::AlwaysOnBuf
         )
     }
 }

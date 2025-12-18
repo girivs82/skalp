@@ -262,6 +262,14 @@ pub struct HirPort {
     /// None = default domain, Some = explicit domain assignment
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_domain_config: Option<PowerDomainConfig>,
+    /// Isolation cell configuration
+    /// Set via #[isolation(clamp = 0|1|hold)] attribute on output ports
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_config: Option<IsolationConfig>,
+    /// Retention flip-flop configuration
+    /// Set via #[retention] attribute on state registers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_config: Option<RetentionConfig>,
 }
 
 impl HirPort {

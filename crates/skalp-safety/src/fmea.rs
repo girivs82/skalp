@@ -1152,6 +1152,8 @@ mod tests {
                     physical_constraints: None,
                     detection_config: None,
                     power_domain_config: None,
+                    isolation_config: None,
+                    retention_config: None,
                 },
                 skalp_frontend::hir::HirPort {
                     id: skalp_frontend::hir::PortId(1),
@@ -1161,6 +1163,8 @@ mod tests {
                     physical_constraints: None,
                     detection_config: None,
                     power_domain_config: None,
+                    isolation_config: None,
+                    retention_config: None,
                 },
             ],
             generics: vec![],

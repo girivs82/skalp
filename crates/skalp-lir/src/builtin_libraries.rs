@@ -121,6 +121,9 @@ pub fn builtin_generic_asic() -> TechLibrary {
     // === Tristate ===
     lib.add_cell(make_cell("TBUF_X1", CellFunction::Tristate, 0.12, 6, 1.2));
 
+    // === Power Infrastructure ===
+    add_power_cells(&mut lib);
+
     // === Decomposition Rules ===
     add_standard_decomposition_rules(&mut lib);
 
@@ -473,6 +476,129 @@ fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCe
                 .with_mechanism("electromigration"),
             LibraryFailureMode::new("clock_path", fit * 0.10, FaultType::ClockPath)
                 .with_mechanism("clock_routing_failure"),
+        ],
+    }
+}
+
+/// Add power infrastructure cells to a library
+fn add_power_cells(lib: &mut TechLibrary) {
+    // Level shifters - analog circuitry, moderate FIT
+    lib.add_cell(make_power_cell(
+        "LVLSHIFT_LH_X1",
+        CellFunction::LevelShifterLH,
+        0.30,
+        "Low-to-High voltage level shifter",
+    ));
+    lib.add_cell(make_power_cell(
+        "LVLSHIFT_HL_X1",
+        CellFunction::LevelShifterHL,
+        0.30,
+        "High-to-Low voltage level shifter",
+    ));
+
+    // Isolation cells - simple gates with enable
+    lib.add_cell(make_power_cell(
+        "ISO_AND_X1",
+        CellFunction::IsolationAnd,
+        0.15,
+        "Isolation cell (clamps to 0)",
+    ));
+    lib.add_cell(make_power_cell(
+        "ISO_OR_X1",
+        CellFunction::IsolationOr,
+        0.15,
+        "Isolation cell (clamps to 1)",
+    ));
+    lib.add_cell(make_power_cell(
+        "ISO_LATCH_X1",
+        CellFunction::IsolationLatch,
+        0.25,
+        "Isolation cell (holds last value)",
+    ));
+
+    // Retention flip-flops - higher FIT due to balloon latch
+    lib.add_cell(make_retention_cell(
+        "RETDFF_X1",
+        CellFunction::RetentionDff,
+        1.5,
+    ));
+    lib.add_cell(make_retention_cell(
+        "RETDFFR_X1",
+        CellFunction::RetentionDffR,
+        1.8,
+    ));
+
+    // Power switches - large transistors, electromigration concerns
+    lib.add_cell(make_power_cell(
+        "PWRSW_HDR_X1",
+        CellFunction::PowerSwitchHeader,
+        0.5,
+        "PMOS header power switch",
+    ));
+    lib.add_cell(make_power_cell(
+        "PWRSW_FTR_X1",
+        CellFunction::PowerSwitchFooter,
+        0.5,
+        "NMOS footer power switch",
+    ));
+
+    // Always-on buffer
+    lib.add_cell(make_power_cell(
+        "AONBUF_X1",
+        CellFunction::AlwaysOnBuf,
+        0.10,
+        "Always-on domain buffer",
+    ));
+}
+
+/// Create a power infrastructure cell
+fn make_power_cell(name: &str, function: CellFunction, fit: f64, description: &str) -> LibraryCell {
+    let (inputs, outputs) = function.default_pins();
+    LibraryCell {
+        name: name.to_string(),
+        function,
+        fit,
+        area: Some(3.0), // Power cells are typically larger
+        transistor_count: Some(12),
+        inputs,
+        outputs,
+        failure_modes: vec![
+            LibraryFailureMode::new("stuck_at_0", fit * 0.30, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.30, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            LibraryFailureMode::new("open", fit * 0.20, FaultType::Open)
+                .with_mechanism(description),
+            LibraryFailureMode::new("delay", fit * 0.20, FaultType::Delay)
+                .with_mechanism("process_variation"),
+        ],
+    }
+}
+
+/// Create a retention flip-flop cell with specific failure modes
+fn make_retention_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCell {
+    let (inputs, outputs) = function.default_pins();
+    LibraryCell {
+        name: name.to_string(),
+        function,
+        fit,
+        area: Some(8.0), // Retention cells are larger due to balloon latch
+        transistor_count: Some(32),
+        inputs,
+        outputs,
+        failure_modes: vec![
+            LibraryFailureMode::new("stuck_at_0", fit * 0.15, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.15, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            LibraryFailureMode::new("retention_loss", fit * 0.30, FaultType::DataRetention)
+                .with_mechanism("balloon_latch_failure"),
+            LibraryFailureMode::new("save_restore_fail", fit * 0.20, FaultType::Timing)
+                .with_mechanism("save_restore_timing"),
+            LibraryFailureMode::new("clock_path", fit * 0.10, FaultType::ClockPath)
+                .with_mechanism("clock_buffer_failure"),
+            LibraryFailureMode::new("transient", fit * 0.10, FaultType::Transient)
+                .with_mechanism("single_event_upset"),
         ],
     }
 }

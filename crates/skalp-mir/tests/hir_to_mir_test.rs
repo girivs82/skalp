@@ -40,6 +40,8 @@ fn create_simple_entity() -> Hir {
                 physical_constraints: None,
                 detection_config: None,
                 power_domain_config: None,
+                isolation_config: None,
+                retention_config: None,
             },
             HirPort {
                 id: PortId(2),
@@ -52,6 +54,8 @@ fn create_simple_entity() -> Hir {
                 physical_constraints: None,
                 detection_config: None,
                 power_domain_config: None,
+                isolation_config: None,
+                retention_config: None,
             },
             HirPort {
                 id: PortId(3),
@@ -61,6 +65,8 @@ fn create_simple_entity() -> Hir {
                 physical_constraints: None,
                 detection_config: None,
                 power_domain_config: None,
+                isolation_config: None,
+                retention_config: None,
             },
         ],
         signals: vec![],

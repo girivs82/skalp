@@ -110,6 +110,39 @@ pub enum PrimitiveType {
         /// Value to drive
         value: bool,
     },
+
+    // === Power Infrastructure ===
+    /// Level shifter for voltage domain crossing
+    /// Translates signal from one voltage domain to another
+    LevelShifter {
+        /// Source voltage domain (e.g., 1.0 for 1.0V)
+        from_voltage: u16, // Stored as mV for precision without float
+        /// Target voltage domain (e.g., 3300 for 3.3V)
+        to_voltage: u16,
+    },
+    /// Isolation cell for power gating
+    /// Clamps output to a safe value when domain is powered down
+    IsolationCell {
+        /// Clamp value when isolated (0, 1, or 2 for hold-last-value)
+        clamp_value: u8,
+        /// Enable signal is active high if true
+        enable_active_high: bool,
+    },
+    /// Retention flip-flop for state preservation during power-down
+    /// Has save/restore signals for state backup/recovery
+    RetentionDff {
+        /// Has async reset
+        has_reset: bool,
+    },
+    /// Power switch (header or footer cell)
+    /// Controls power supply to a domain
+    PowerSwitch {
+        /// True for PMOS header (VDD side), false for NMOS footer (VSS side)
+        is_header: bool,
+    },
+    /// Always-on buffer for control signal routing
+    /// Routes signals through always-on power domain
+    AlwaysOnBuf,
 }
 
 impl PrimitiveType {
@@ -128,6 +161,19 @@ impl PrimitiveType {
                 | PrimitiveType::SRlatch
                 | PrimitiveType::MemCell
                 | PrimitiveType::RegCell
+                | PrimitiveType::RetentionDff { .. }
+        )
+    }
+
+    /// Returns true if this primitive is power infrastructure
+    pub fn is_power_infrastructure(&self) -> bool {
+        matches!(
+            self,
+            PrimitiveType::LevelShifter { .. }
+                | PrimitiveType::IsolationCell { .. }
+                | PrimitiveType::RetentionDff { .. }
+                | PrimitiveType::PowerSwitch { .. }
+                | PrimitiveType::AlwaysOnBuf
         )
     }
 
@@ -162,16 +208,29 @@ impl PrimitiveType {
             PrimitiveType::RegCell => 3,   // data_in, write_en, clk
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
+            // Power infrastructure
+            PrimitiveType::LevelShifter { .. } => 1, // data_in
+            PrimitiveType::IsolationCell { .. } => 2, // data_in, iso_en
+            PrimitiveType::RetentionDff { has_reset } => {
+                if *has_reset {
+                    5
+                } else {
+                    4
+                } // clk, d, save, restore, [rst]
+            }
+            PrimitiveType::PowerSwitch { .. } => 1, // enable
+            PrimitiveType::AlwaysOnBuf => 1,        // data_in
         }
     }
 
     /// Returns the number of output pins for this primitive type
     pub fn output_count(&self) -> u8 {
         match self {
-            PrimitiveType::HalfAdder => 2, // sum, carry
-            PrimitiveType::FullAdder => 2, // sum, cout
-            PrimitiveType::CompBit => 2,   // lt_out, eq_out
-            _ => 1,                        // All others have single output
+            PrimitiveType::HalfAdder => 2,          // sum, carry
+            PrimitiveType::FullAdder => 2,          // sum, cout
+            PrimitiveType::CompBit => 2,            // lt_out, eq_out
+            PrimitiveType::PowerSwitch { .. } => 0, // Controls power rail, no logic output
+            _ => 1,                                 // All others have single output
         }
     }
 
@@ -216,6 +275,13 @@ impl PrimitiveType {
             // Special
             PrimitiveType::ClkBuf => 0.1,
             PrimitiveType::Constant { .. } => 0.0, // No failures possible
+
+            // Power infrastructure - moderate to high FIT due to analog nature
+            PrimitiveType::LevelShifter { .. } => 0.3, // Analog circuitry
+            PrimitiveType::IsolationCell { .. } => 0.15, // Simple gate + control
+            PrimitiveType::RetentionDff { .. } => 1.5, // Higher due to balloon latch
+            PrimitiveType::PowerSwitch { .. } => 0.5,  // Large transistor, EM concerns
+            PrimitiveType::AlwaysOnBuf => 0.1,         // Same as regular buffer
         }
     }
 
@@ -255,6 +321,12 @@ impl PrimitiveType {
             PrimitiveType::RegCell => "REG",
             PrimitiveType::ClkBuf => "CLKBUF",
             PrimitiveType::Constant { .. } => "CONST",
+            // Power infrastructure
+            PrimitiveType::LevelShifter { .. } => "LVLSHIFT",
+            PrimitiveType::IsolationCell { .. } => "ISO",
+            PrimitiveType::RetentionDff { .. } => "RETDFF",
+            PrimitiveType::PowerSwitch { .. } => "PWRSW",
+            PrimitiveType::AlwaysOnBuf => "AONBUF",
         }
     }
 }
@@ -275,6 +347,34 @@ impl std::fmt::Display for PrimitiveType {
                 }
             }
             PrimitiveType::Constant { value } => write!(f, "CONST{}", if *value { 1 } else { 0 }),
+            PrimitiveType::LevelShifter {
+                from_voltage,
+                to_voltage,
+            } => {
+                write!(f, "LVLSHIFT_{}mV_{}mV", from_voltage, to_voltage)
+            }
+            PrimitiveType::IsolationCell { clamp_value, .. } => {
+                let clamp = match clamp_value {
+                    0 => "LO",
+                    1 => "HI",
+                    _ => "HOLD",
+                };
+                write!(f, "ISO_{}", clamp)
+            }
+            PrimitiveType::RetentionDff { has_reset } => {
+                if *has_reset {
+                    write!(f, "RETDFFR")
+                } else {
+                    write!(f, "RETDFF")
+                }
+            }
+            PrimitiveType::PowerSwitch { is_header } => {
+                if *is_header {
+                    write!(f, "PWRSW_HDR")
+                } else {
+                    write!(f, "PWRSW_FTR")
+                }
+            }
             _ => write!(f, "{}", self.short_name()),
         }
     }
@@ -399,6 +499,105 @@ impl Primitive {
     /// Returns the FIT rate for this primitive
     pub fn fit(&self) -> f64 {
         self.ptype.base_fit()
+    }
+
+    // === Power Infrastructure Constructors ===
+
+    /// Create a new level shifter primitive
+    pub fn new_level_shifter(
+        id: PrimitiveId,
+        path: String,
+        from_voltage_mv: u16,
+        to_voltage_mv: u16,
+        input: NetId,
+        output: NetId,
+    ) -> Self {
+        Self {
+            id,
+            ptype: PrimitiveType::LevelShifter {
+                from_voltage: from_voltage_mv,
+                to_voltage: to_voltage_mv,
+            },
+            path,
+            inputs: vec![input],
+            outputs: vec![output],
+            clock: None,
+            reset: None,
+            enable: None,
+            bit_index: None,
+            safety_info: None,
+            power_domain: None,
+        }
+    }
+
+    /// Create a new isolation cell primitive
+    pub fn new_isolation_cell(
+        id: PrimitiveId,
+        path: String,
+        clamp_value: u8,
+        enable_active_high: bool,
+        data_in: NetId,
+        iso_enable: NetId,
+        output: NetId,
+    ) -> Self {
+        Self {
+            id,
+            ptype: PrimitiveType::IsolationCell {
+                clamp_value,
+                enable_active_high,
+            },
+            path,
+            inputs: vec![data_in, iso_enable],
+            outputs: vec![output],
+            clock: None,
+            reset: None,
+            enable: Some(iso_enable),
+            bit_index: None,
+            safety_info: None,
+            power_domain: None,
+        }
+    }
+
+    /// Create a new retention flip-flop primitive
+    pub fn new_retention_dff(
+        id: PrimitiveId,
+        path: String,
+        has_reset: bool,
+        inputs: Vec<NetId>,
+        output: NetId,
+        clock: NetId,
+        reset: Option<NetId>,
+    ) -> Self {
+        Self {
+            id,
+            ptype: PrimitiveType::RetentionDff { has_reset },
+            path,
+            inputs,
+            outputs: vec![output],
+            clock: Some(clock),
+            reset,
+            enable: None,
+            bit_index: None,
+            safety_info: None,
+            power_domain: None,
+        }
+    }
+
+    /// Create a new always-on buffer primitive
+    pub fn new_always_on_buf(id: PrimitiveId, path: String, input: NetId, output: NetId) -> Self {
+        Self {
+            id,
+            ptype: PrimitiveType::AlwaysOnBuf,
+            path,
+            inputs: vec![input],
+            outputs: vec![output],
+            clock: None,
+            reset: None,
+            enable: None,
+            bit_index: None,
+            safety_info: None,
+            power_domain: Some("always_on".to_string()),
+        }
     }
 }
 
@@ -529,6 +728,17 @@ pub struct NetlistStats {
     pub total_fit: f64,
     /// Breakdown by primitive type
     pub primitive_counts: HashMap<String, u64>,
+    // Power infrastructure stats
+    /// Number of level shifters
+    pub level_shifters: u64,
+    /// Number of isolation cells
+    pub isolation_cells: u64,
+    /// Number of retention flip-flops
+    pub retention_flops: u64,
+    /// Number of power switches
+    pub power_switches: u64,
+    /// Number of always-on buffers
+    pub always_on_bufs: u64,
 }
 
 impl NetlistStats {
@@ -565,6 +775,23 @@ impl NetlistStats {
                 PrimitiveType::MemCell | PrimitiveType::RegCell => {
                     stats.mem_cells += 1;
                 }
+                // Power infrastructure
+                PrimitiveType::LevelShifter { .. } => {
+                    stats.level_shifters += 1;
+                }
+                PrimitiveType::IsolationCell { .. } => {
+                    stats.isolation_cells += 1;
+                }
+                PrimitiveType::RetentionDff { .. } => {
+                    stats.retention_flops += 1;
+                    stats.flip_flops += 1; // Also count as flip-flop
+                }
+                PrimitiveType::PowerSwitch { .. } => {
+                    stats.power_switches += 1;
+                }
+                PrimitiveType::AlwaysOnBuf => {
+                    stats.always_on_bufs += 1;
+                }
                 _ => {
                     stats.comb_gates += 1;
                 }
@@ -578,6 +805,15 @@ impl NetlistStats {
         }
 
         stats
+    }
+
+    /// Returns total power infrastructure cell count
+    pub fn power_infrastructure_count(&self) -> u64 {
+        self.level_shifters
+            + self.isolation_cells
+            + self.retention_flops
+            + self.power_switches
+            + self.always_on_bufs
     }
 }
 

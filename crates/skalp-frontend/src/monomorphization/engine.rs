@@ -288,6 +288,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     physical_constraints: port.physical_constraints.clone(),
                     detection_config: port.detection_config.clone(),
                     power_domain_config: port.power_domain_config.clone(),
+                    isolation_config: port.isolation_config.clone(),
+                    retention_config: port.retention_config.clone(),
                 }
             })
             .collect();
