@@ -211,7 +211,7 @@ impl GeometryProcessor<T: Numeric, const STAGES: nat, const INTENT: Optimization
                 // WriteOutput: Wait for output to be consumed
                 GeometryState::WriteOutput => {
                     if output_ready {
-                        pipeline_valid[STAGES-1] <= 1'b0;
+                        pipeline_valid[STAGES-1] = 1'b0;
                         state = GeometryState::Idle
                     } else {
                         // Output not ready - stall

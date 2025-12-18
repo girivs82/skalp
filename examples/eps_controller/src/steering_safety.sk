@@ -258,7 +258,7 @@ safety_goal SteeringTorqueSafety: ASIL_D {
         lfm: >= 90.0,
 
         // Probabilistic Metric for Hardware Failures: Max 10 FIT
-        pmhf: <= 10.0,
+        pmhf: = 10.0,
     }
 }
 
@@ -324,6 +324,6 @@ safety_goal ReturnToCenterSafety: ASIL_B {
     target {
         spfm: >= 90.0,  // 90% vs 99% for ASIL-D
         lfm: >= 80.0,   // 80% vs 90% for ASIL-D
-        pmhf: <= 100.0, // 100 FIT vs 10 FIT for ASIL-D
+        pmhf: = 100.0, // 100 FIT vs 10 FIT for ASIL-D
     }
 }

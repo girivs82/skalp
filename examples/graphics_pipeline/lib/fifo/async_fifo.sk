@@ -68,10 +68,10 @@ impl AsyncFifo<T, const DEPTH: nat> {
 
             // Write operation
             if wr_en && !wr_full {
-                mem[wr_ptr % DEPTH] <= wr_data
+                mem[wr_ptr % DEPTH] = wr_data
                 wr_ptr = wr_ptr + 1
                 // Convert to Gray code: G = B XOR (B >> 1)
-                wr_ptr_gray <= (wr_ptr + 1) ^ ((wr_ptr + 1) >> 1)
+                wr_ptr_gray = (wr_ptr + 1) ^ ((wr_ptr + 1) >> 1)
             }
         }
     }
@@ -101,7 +101,7 @@ impl AsyncFifo<T, const DEPTH: nat> {
             // Read operation
             if rd_en && !rd_empty {
                 rd_ptr = rd_ptr + 1
-                rd_ptr_gray <= (rd_ptr + 1) ^ ((rd_ptr + 1) >> 1)
+                rd_ptr_gray = (rd_ptr + 1) ^ ((rd_ptr + 1) >> 1)
             }
         }
     }

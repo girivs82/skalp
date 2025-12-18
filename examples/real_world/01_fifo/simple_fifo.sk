@@ -74,12 +74,12 @@ impl SimpleFifo {
                 } else {
                     mem3 = wr_data
                 }
-                wr_ptr <= (wr_ptr + 1) % 4
+                wr_ptr = (wr_ptr + 1) % 4
             }
 
             // Read operation
             if (rd_en && (data_count > 0)) {
-                rd_ptr <= (rd_ptr + 1) % 4
+                rd_ptr = (rd_ptr + 1) % 4
             }
 
             // Update count

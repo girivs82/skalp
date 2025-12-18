@@ -117,15 +117,15 @@ impl TmrVoter<WIDTH, TOLERANCE> {
 
     // A is outlier if A differs from both B and C, but B and C are close
     signal a_is_outlier: bit =
-        (a_to_b > TOLERANCE) && (a_to_c > TOLERANCE) && (b_to_c <= TOLERANCE);
+        (a_to_b > TOLERANCE) && (a_to_c > TOLERANCE) && (b_to_c = TOLERANCE);
 
     // B is outlier if B differs from both A and C, but A and C are close
     signal b_is_outlier: bit =
-        (a_to_b > TOLERANCE) && (b_to_c > TOLERANCE) && (a_to_c <= TOLERANCE);
+        (a_to_b > TOLERANCE) && (b_to_c > TOLERANCE) && (a_to_c = TOLERANCE);
 
     // C is outlier if C differs from both A and B, but A and B are close
     signal c_is_outlier: bit =
-        (a_to_c > TOLERANCE) && (b_to_c > TOLERANCE) && (a_to_b <= TOLERANCE);
+        (a_to_c > TOLERANCE) && (b_to_c > TOLERANCE) && (a_to_b = TOLERANCE);
 
     // Encode outlier as 2-bit value
     outlier = {
@@ -193,15 +193,15 @@ impl TmrVoterWithHistory<WIDTH, TOLERANCE, HISTORY_DEPTH, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            disagreement_count <= 0;
+            disagreement_count = 0;
         } else if voter.disagreement {
             // Increment counter, saturate at max
             if disagreement_count < 0xFFFF {
-                disagreement_count <= disagreement_count + 1;
+                disagreement_count = disagreement_count + 1;
             }
         } else {
             // Reset counter on agreement
-            disagreement_count <= 0;
+            disagreement_count = 0;
         }
     }
 

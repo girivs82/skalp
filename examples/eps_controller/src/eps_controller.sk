@@ -206,9 +206,9 @@ impl EpsController<'clk> {
 
     always @(posedge clk) {
         if reset {
-            fault_latch <= 0;
+            fault_latch = 0;
         } else if any_fault {
-            fault_latch <= 1;
+            fault_latch = 1;
         }
     }
 
@@ -225,13 +225,13 @@ impl EpsController<'clk> {
 
     always @(posedge clk) {
         if reset {
-            ctrl_state <= STATE_INIT;
+            ctrl_state = STATE_INIT;
         } else {
             case ctrl_state {
                 STATE_INIT: {
                     // Initialization: wait for sensors to stabilize
                     if !tmr.disagreement {
-                        ctrl_state <= STATE_NORMAL;
+                        ctrl_state = STATE_NORMAL;
                     }
                 }
 
@@ -239,20 +239,20 @@ impl EpsController<'clk> {
                     // Normal operation
                     if watchdog.timeout || torque_mismatch {
                         // Critical fault: go to safe state
-                        ctrl_state <= STATE_SAFE;
+                        ctrl_state = STATE_SAFE;
                     } else if tmr.persistent_disagreement {
                         // Sensor fault: go to degraded mode
-                        ctrl_state <= STATE_DEGRADED;
+                        ctrl_state = STATE_DEGRADED;
                     }
                 }
 
                 STATE_DEGRADED: {
                     // Degraded mode: continue with reduced performance
                     if watchdog.timeout || torque_mismatch {
-                        ctrl_state <= STATE_SAFE;
+                        ctrl_state = STATE_SAFE;
                     } else if !tmr.disagreement {
                         // Sensors recovered: return to normal
-                        ctrl_state <= STATE_NORMAL;
+                        ctrl_state = STATE_NORMAL;
                     }
                 }
 
@@ -286,7 +286,7 @@ impl EpsController<'clk> {
     reg comm_crc_reg: bit[8]<'clk> = 0;
 
     always @(posedge clk) {
-        comm_crc_reg <= crc_gen.crc;
+        comm_crc_reg = crc_gen.crc;
     }
 
     // ========================================================================
@@ -299,12 +299,12 @@ impl EpsController<'clk> {
     always @(posedge clk) {
         if reset || safe_mode {
             // In reset or safe mode: zero torque
-            motor_torque_reg <= 0;
+            motor_torque_reg = 0;
         } else if ctrl_state == STATE_NORMAL || ctrl_state == STATE_DEGRADED {
             // Active states: output calculated torque
-            motor_torque_reg <= primary_torque;
+            motor_torque_reg = primary_torque;
         } else {
-            motor_torque_reg <= 0;
+            motor_torque_reg = 0;
         }
     }
 

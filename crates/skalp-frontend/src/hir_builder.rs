@@ -665,12 +665,12 @@ impl HirBuilderContext {
             }
 
             // Second pass: build entity body items (signals, assignments, let bindings)
-            // Clear any pending attribute state from first pass before processing signals
+            // Clear only SIGNAL-LEVEL pending attribute state from first pass
+            // NOTE: Do NOT clear entity-level attributes (safety_mechanism_config, assumed_mechanisms)
+            // as they are consumed later when building the HirEntity
             self.pending_cdc_config = None;
             self.pending_trace_config = None;
             self.pending_detection_config = None;
-            self.pending_safety_mechanism_config = None;
-            self.pending_assumed_mechanisms.clear();
 
             for child in port_list.children() {
                 match child.kind() {

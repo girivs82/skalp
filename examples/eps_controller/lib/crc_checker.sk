@@ -155,14 +155,14 @@ impl CrcProtectedDataPath<WIDTH, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            stored_data <= 0;
-            stored_crc <= 0;
+            stored_data = 0;
+            stored_crc = 0;
         } else if write_enable {
             // Store data
-            stored_data <= write_data;
+            stored_data = write_data;
 
             // Calculate and store CRC
-            stored_crc <= crc8(write_data);
+            stored_crc = crc8(write_data);
         }
     }
 
@@ -187,10 +187,10 @@ impl CrcProtectedDataPath<WIDTH, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            error_cnt <= 0;
+            error_cnt = 0;
         } else if !crc_match && error_cnt < 0xFFFF {
             // Increment error counter (saturate at max)
-            error_cnt <= error_cnt + 1;
+            error_cnt = error_cnt + 1;
         }
     }
 

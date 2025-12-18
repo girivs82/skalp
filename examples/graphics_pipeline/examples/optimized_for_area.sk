@@ -114,7 +114,7 @@ impl SmallGraphicsPipeline {
     signal clk_div: bit;
 
     on(clk.rise) {
-        clk_div <= !clk_div
+        clk_div = !clk_div
     }
 
     assign video_clk = clk_div;  // 25 MHz video clock

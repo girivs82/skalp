@@ -42,11 +42,11 @@ fn test_normal_operation() {
     tb.reset(eps, 10_cycles);
 
     // Test case 1: Low torque request at low speed
-    eps.torque_sensor_a <= 1000;
-    eps.torque_sensor_b <= 1000;
-    eps.torque_sensor_c <= 1000;
-    eps.vehicle_speed <= 10;
-    eps.handwheel_angle <= 0;
+    eps.torque_sensor_a = 1000;
+    eps.torque_sensor_b = 1000;
+    eps.torque_sensor_c = 1000;
+    eps.vehicle_speed = 10;
+    eps.handwheel_angle = 0;
 
     tb.step(100_cycles);
 
@@ -61,11 +61,11 @@ fn test_normal_operation() {
     assert!(eps.motor_enable, "Motor should be enabled");
 
     // Test case 2: High torque request at high speed
-    eps.torque_sensor_a <= 5000;
-    eps.torque_sensor_b <= 5000;
-    eps.torque_sensor_c <= 5000;
-    eps.vehicle_speed <= 120;
-    eps.handwheel_angle <= 500;
+    eps.torque_sensor_a = 5000;
+    eps.torque_sensor_b = 5000;
+    eps.torque_sensor_c = 5000;
+    eps.vehicle_speed = 120;
+    eps.handwheel_angle = 500;
 
     tb.step(100_cycles);
 
@@ -98,11 +98,11 @@ fn test_single_sensor_fault() {
     tb.reset(eps, 10_cycles);
 
     // Normal operation: all sensors agree
-    eps.torque_sensor_a <= 2000;
-    eps.torque_sensor_b <= 2000;
-    eps.torque_sensor_c <= 2000;
-    eps.vehicle_speed <= 50;
-    eps.handwheel_angle <= 0;
+    eps.torque_sensor_a = 2000;
+    eps.torque_sensor_b = 2000;
+    eps.torque_sensor_c = 2000;
+    eps.vehicle_speed = 50;
+    eps.handwheel_angle = 0;
 
     tb.step(50_cycles);
 
@@ -110,9 +110,9 @@ fn test_single_sensor_fault() {
     assert!(!eps.fault_detected, "No fault yet");
 
     // Inject fault: Sensor A stuck at 0
-    eps.torque_sensor_a <= 0;
-    eps.torque_sensor_b <= 2000;
-    eps.torque_sensor_c <= 2000;
+    eps.torque_sensor_a = 0;
+    eps.torque_sensor_b = 2000;
+    eps.torque_sensor_c = 2000;
 
     tb.step(50_cycles);
 
@@ -147,18 +147,18 @@ fn test_double_sensor_fault() {
     tb.reset(eps, 10_cycles);
 
     // Normal operation
-    eps.torque_sensor_a <= 2000;
-    eps.torque_sensor_b <= 2000;
-    eps.torque_sensor_c <= 2000;
-    eps.vehicle_speed <= 50;
-    eps.handwheel_angle <= 0;
+    eps.torque_sensor_a = 2000;
+    eps.torque_sensor_b = 2000;
+    eps.torque_sensor_c = 2000;
+    eps.vehicle_speed = 50;
+    eps.handwheel_angle = 0;
 
     tb.step(50_cycles);
 
     // Inject double fault: Sensors A and B stuck at 0
-    eps.torque_sensor_a <= 0;
-    eps.torque_sensor_b <= 0;
-    eps.torque_sensor_c <= 2000;
+    eps.torque_sensor_a = 0;
+    eps.torque_sensor_b = 0;
+    eps.torque_sensor_c = 2000;
 
     tb.step(50_cycles);
 
@@ -191,11 +191,11 @@ fn test_computation_fault() {
     tb.reset(eps, 10_cycles);
 
     // Normal operation
-    eps.torque_sensor_a <= 1000;
-    eps.torque_sensor_b <= 1000;
-    eps.torque_sensor_c <= 1000;
-    eps.vehicle_speed <= 30;
-    eps.handwheel_angle <= 0;
+    eps.torque_sensor_a = 1000;
+    eps.torque_sensor_b = 1000;
+    eps.torque_sensor_c = 1000;
+    eps.vehicle_speed = 30;
+    eps.handwheel_angle = 0;
 
     tb.step(50_cycles);
 
@@ -227,11 +227,11 @@ fn test_watchdog_timeout() {
     tb.reset(eps, 10_cycles);
 
     // Normal operation
-    eps.torque_sensor_a <= 1000;
-    eps.torque_sensor_b <= 1000;
-    eps.torque_sensor_c <= 1000;
-    eps.vehicle_speed <= 30;
-    eps.handwheel_angle <= 0;
+    eps.torque_sensor_a = 1000;
+    eps.torque_sensor_b = 1000;
+    eps.torque_sensor_c = 1000;
+    eps.vehicle_speed = 30;
+    eps.handwheel_angle = 0;
 
     tb.step(50_cycles);
 
@@ -272,20 +272,20 @@ fn test_stress_multiple_faults() {
     tb.reset(eps, 10_cycles);
 
     // Start with normal operation
-    eps.torque_sensor_a <= 1000;
-    eps.torque_sensor_b <= 1000;
-    eps.torque_sensor_c <= 1000;
-    eps.vehicle_speed <= 30;
-    eps.handwheel_angle <= 0;
+    eps.torque_sensor_a = 1000;
+    eps.torque_sensor_b = 1000;
+    eps.torque_sensor_c = 1000;
+    eps.vehicle_speed = 30;
+    eps.handwheel_angle = 0;
 
     tb.step(50_cycles);
 
     // Apply stress: sudden large torque change + sensor fault + high speed
-    eps.torque_sensor_a <= 8000;
-    eps.torque_sensor_b <= 8000;
-    eps.torque_sensor_c <= 100;  // Sensor C fault (outlier)
-    eps.vehicle_speed <= 150;
-    eps.handwheel_angle <= 1000;
+    eps.torque_sensor_a = 8000;
+    eps.torque_sensor_b = 8000;
+    eps.torque_sensor_c = 100;  // Sensor C fault (outlier)
+    eps.vehicle_speed = 150;
+    eps.handwheel_angle = 1000;
 
     tb.step(100_cycles);
 
@@ -293,7 +293,7 @@ fn test_stress_multiple_faults() {
     // - TMR should detect disagreement
     // - System should handle gracefully (no crash, no undefined behavior)
     // - Output should be saturated at maximum safe value
-    assert!(eps.motor_torque <= 32000, "Output should be limited");
+    assert!(eps.motor_torque = 32000, "Output should be limited");
 
     // System should detect sensor C as outlier
     // Voted value should be median of [8000, 8000, 100] = 8000

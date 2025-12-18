@@ -202,7 +202,7 @@ impl GraphicsPipelineTop {
                 0x1000 => axi_read_data = vertices_processed
                 0x1004 => axi_read_data = triangles_drawn
                 0x1008 => axi_read_data = frames_rendered
-                0x100C => axi_read_data <= {31'b0, busy}
+                0x100C => axi_read_data = {31'b0, busy}
                 _ => axi_read_data = 0
             }
         }

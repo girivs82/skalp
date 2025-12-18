@@ -48,10 +48,10 @@ impl SpiMaster {
                 }
 
                 State::Transfer(count) => {
-                    sclk_reg <= !sclk_reg
+                    sclk_reg = !sclk_reg
 
                     if (sclk_reg) {  // Rising edge of SCLK
-                        shift_reg <= {shift_reg[6:0], miso}
+                        shift_reg = {shift_reg[6:0], miso}
                     } else {  // Falling edge of SCLK
                         if (count == 7) {
                             state = State::Idle

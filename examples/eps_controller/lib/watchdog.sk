@@ -51,13 +51,13 @@ impl Watchdog<TIMEOUT, 'clk> {
     always @(posedge clk) {
         if reset {
             // Reset: Load initial timeout value
-            counter <= TIMEOUT;
+            counter = TIMEOUT;
         } else if refresh {
             // Refresh: Reload counter
-            counter <= TIMEOUT;
+            counter = TIMEOUT;
         } else if counter > 0 {
             // Count down
-            counter <= counter - 1;
+            counter = counter - 1;
         }
         // else: counter stays at 0 (timeout condition)
     }
@@ -136,18 +136,18 @@ impl WindowWatchdog<WINDOW_MIN, WINDOW_MAX, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            counter <= WINDOW_MAX;
+            counter = WINDOW_MAX;
         } else if refresh {
             // Refresh occurred
             if in_window {
                 // Valid refresh: reload counter
-                counter <= WINDOW_MAX;
+                counter = WINDOW_MAX;
             }
             // else: invalid refresh (too early or too late)
             // Keep counter value to maintain error state
         } else if counter > 0 {
             // Count down
-            counter <= counter - 1;
+            counter = counter - 1;
         }
     }
 
@@ -160,9 +160,9 @@ impl WindowWatchdog<WINDOW_MIN, WINDOW_MAX, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            early_error <= 0;
+            early_error = 0;
         } else if refresh && is_early {
-            early_error <= 1;
+            early_error = 1;
         }
         // Once set, stays set until reset
     }
@@ -227,11 +227,11 @@ impl ChallengeResponseWatchdog<TIMEOUT, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            lfsr <= 0xACE1;
+            lfsr = 0xACE1;
         } else {
             // LFSR feedback: x^16 + x^15 + x^13 + x^4 + 1
             let feedback: bit = lfsr[15] ^ lfsr[14] ^ lfsr[12] ^ lfsr[3];
-            lfsr <= {lfsr[14:0], feedback};
+            lfsr = {lfsr[14:0], feedback};
         }
     }
 
@@ -263,15 +263,15 @@ impl ChallengeResponseWatchdog<TIMEOUT, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            counter <= TIMEOUT;
+            counter = TIMEOUT;
         } else if response_valid {
             if response_correct {
                 // Correct response: reload counter
-                counter <= TIMEOUT;
+                counter = TIMEOUT;
             }
             // Incorrect response: don't reload (will timeout)
         } else if counter > 0 {
-            counter <= counter - 1;
+            counter = counter - 1;
         }
     }
 
@@ -286,9 +286,9 @@ impl ChallengeResponseWatchdog<TIMEOUT, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            incorrect_resp <= 0;
+            incorrect_resp = 0;
         } else if response_valid && !response_correct {
-            incorrect_resp <= 1;
+            incorrect_resp = 1;
         }
     }
 
@@ -390,9 +390,9 @@ impl WatchdogWithSafeState<TIMEOUT, 'clk> {
 
     always @(posedge clk) {
         if reset {
-            safe_state <= 0;
+            safe_state = 0;
         } else if wd.timeout {
-            safe_state <= 1;
+            safe_state = 1;
         }
     }
 

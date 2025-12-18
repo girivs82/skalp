@@ -86,7 +86,7 @@ impl I2cMaster {
             if (clk_div == 124) {
                 clk_div = 0
                 scl_tick = 1
-                scl_phase <= (scl_phase + 1) % 4
+                scl_phase = (scl_phase + 1) % 4
             } else {
                 clk_div = clk_div + 1
                 scl_tick = 0
@@ -103,7 +103,7 @@ impl I2cMaster {
                 if (start) {
                     state = 1
                     // Prepare address + R/W bit
-                    shift_reg <= (addr * 2) + rw
+                    shift_reg = (addr * 2) + rw
                     bit_count = 0
                     scl_phase = 0
                 }
@@ -123,7 +123,7 @@ impl I2cMaster {
                     if (scl_phase == 0) {
                         // Setup phase: set SDA
                         if (bit_count < 8) {
-                            sda_out_reg <= (shift_reg / 128) % 2
+                            sda_out_reg = (shift_reg / 128) % 2
                         }
                         scl_reg = 0
                     } else if (scl_phase == 1) {
@@ -135,7 +135,7 @@ impl I2cMaster {
                     } else if (scl_phase == 3) {
                         // SCL falling
                         scl_reg = 0
-                        shift_reg <= (shift_reg * 2) % 256
+                        shift_reg = (shift_reg * 2) % 256
                         bit_count = bit_count + 1
 
                         if (bit_count == 7) {
@@ -153,7 +153,7 @@ impl I2cMaster {
                         scl_reg = 1
                     } else if (scl_phase == 2) {
                         // Sample ACK
-                        ack_reg <= (sda_in == 0)
+                        ack_reg = (sda_in == 0)
                         scl_reg = 1
                     } else if (scl_phase == 3) {
                         scl_reg = 0
@@ -177,7 +177,7 @@ impl I2cMaster {
                     if (scl_tick) {
                         if (scl_phase == 0) {
                             if (bit_count < 8) {
-                                sda_out_reg <= (shift_reg / 128) % 2
+                                sda_out_reg = (shift_reg / 128) % 2
                             }
                             scl_reg = 0
                         } else if (scl_phase == 1) {
@@ -186,7 +186,7 @@ impl I2cMaster {
                             scl_reg = 1
                         } else if (scl_phase == 3) {
                             scl_reg = 0
-                            shift_reg <= (shift_reg * 2) % 256
+                            shift_reg = (shift_reg * 2) % 256
                             bit_count = bit_count + 1
                             if (bit_count == 7) {
                                 state = 5
@@ -203,7 +203,7 @@ impl I2cMaster {
                             scl_reg = 1
                         } else if (scl_phase == 2) {
                             // Sample SDA
-                            shift_reg <= (shift_reg * 2) + sda_in
+                            shift_reg = (shift_reg * 2) + sda_in
                             scl_reg = 1
                         } else if (scl_phase == 3) {
                             scl_reg = 0
@@ -226,7 +226,7 @@ impl I2cMaster {
                         } else if (scl_phase == 1) {
                             scl_reg = 1
                         } else if (scl_phase == 2) {
-                            ack_reg <= (sda_in == 0)
+                            ack_reg = (sda_in == 0)
                             scl_reg = 1
                         } else if (scl_phase == 3) {
                             scl_reg = 0

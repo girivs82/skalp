@@ -59,26 +59,26 @@ impl<const WIDTH: nat[16], const DEPTH: nat[16]> Fifo<WIDTH, DEPTH> {
                 (true, true) => {
                     // Both read and write
                     if !wr_full {
-                        memory[wr_ptr[15:0]] <= wr_data
-                        wr_ptr <= (wr_ptr + 1) % (DEPTH + 1)
+                        memory[wr_ptr[15:0]] = wr_data
+                        wr_ptr = (wr_ptr + 1) % (DEPTH + 1)
                     }
                     if !rd_empty {
-                        rd_ptr <= (rd_ptr + 1) % (DEPTH + 1)
+                        rd_ptr = (rd_ptr + 1) % (DEPTH + 1)
                     }
                     // Count stays same if both succeed
                 }
                 (true, false) => {
                     // Write only
                     if !wr_full {
-                        memory[wr_ptr[15:0]] <= wr_data
-                        wr_ptr <= (wr_ptr + 1) % (DEPTH + 1)
+                        memory[wr_ptr[15:0]] = wr_data
+                        wr_ptr = (wr_ptr + 1) % (DEPTH + 1)
                         data_count = data_count + 1
                     }
                 }
                 (false, true) => {
                     // Read only
                     if !rd_empty {
-                        rd_ptr <= (rd_ptr + 1) % (DEPTH + 1)
+                        rd_ptr = (rd_ptr + 1) % (DEPTH + 1)
                         data_count = data_count - 1
                     }
                 }

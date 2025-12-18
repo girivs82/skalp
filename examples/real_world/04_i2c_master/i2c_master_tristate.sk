@@ -69,7 +69,7 @@ impl I2cMasterTristate {
             if (clk_div == 124) {
                 clk_div = 0
                 scl_tick = 1
-                scl_phase <= (scl_phase + 1) % 4
+                scl_phase = (scl_phase + 1) % 4
             } else {
                 clk_div = clk_div + 1
                 scl_tick = 0
@@ -83,7 +83,7 @@ impl I2cMasterTristate {
 
                 if (start) {
                     state = 1
-                    shift_reg <= (addr * 2) + rw
+                    shift_reg = (addr * 2) + rw
                     bit_count = 0
                     scl_phase = 0
                 }
@@ -106,7 +106,7 @@ impl I2cMasterTristate {
                         scl_reg = 0
                     } else if (scl_phase == 3) {
                         scl_reg = 0
-                        shift_reg <= (shift_reg * 2) % 256
+                        shift_reg = (shift_reg * 2) % 256
                         bit_count = bit_count + 1
                         if (bit_count == 7) {
                             state = 3
