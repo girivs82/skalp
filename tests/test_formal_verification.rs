@@ -448,7 +448,6 @@ mod formal_verification_tests {
 mod sva_generation_tests {
     use skalp_codegen::generate_systemverilog_from_mir;
     use skalp_frontend::parse_and_build_hir;
-    use skalp_lir::lower_to_lir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
 
     /// Test that assert! statements in event blocks generate immediate assertions
@@ -479,11 +478,9 @@ mod sva_generation_tests {
         let mir = compiler
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
-        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
-
         // Generate SystemVerilog
         let sv_code =
-            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
+            generate_systemverilog_from_mir(&mir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 
@@ -525,11 +522,9 @@ mod sva_generation_tests {
         let mir = compiler
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
-        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
-
         // Generate SystemVerilog
         let sv_code =
-            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
+            generate_systemverilog_from_mir(&mir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 
@@ -565,11 +560,9 @@ mod sva_generation_tests {
         let mir = compiler
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
-        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
-
         // Generate SystemVerilog
         let sv_code =
-            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
+            generate_systemverilog_from_mir(&mir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 
@@ -618,11 +611,9 @@ mod sva_generation_tests {
         let mir = compiler
             .compile_to_mir(&hir)
             .expect("Failed to compile to MIR");
-        let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
-
         // Generate SystemVerilog
         let sv_code =
-            generate_systemverilog_from_mir(&mir, &lir).expect("Failed to generate SystemVerilog");
+            generate_systemverilog_from_mir(&mir).expect("Failed to generate SystemVerilog");
 
         println!("Generated SystemVerilog:\n{}", sv_code);
 

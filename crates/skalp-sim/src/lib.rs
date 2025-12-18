@@ -13,8 +13,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(dead_code)]
 
-// Allow manual_is_multiple_of lint because is_multiple_of() is not yet stable
-
 // GLOBAL: Disable all debug output for performance
 macro_rules! eprintln {
     ($($arg:tt)*) => {{}};
@@ -33,7 +31,6 @@ pub mod gpu_fault_simulator;
 pub mod gpu_gate_runtime;
 #[cfg(target_os = "macos")]
 pub mod gpu_runtime;
-pub mod lir_to_sir;
 pub mod simulator;
 pub mod sir;
 pub mod testbench;
@@ -52,7 +49,7 @@ pub use gate_netlist_to_sir::{
     convert_gate_netlist_to_sir, ConversionStats as GateNetlistConversionStats,
     GateNetlistToSirConverter, GateNetlistToSirResult,
 };
-pub use gate_runtime::{GateLevelRuntime, SimulationMode};
+// NOTE: GateLevelRuntime needs to be reimplemented for GateNetlist
 pub use gate_simulator::{
     FaultCampaignConfig, FaultCampaignResults, FaultSimResult, GateLevelSimulator,
     GateSimulationState,
@@ -63,12 +60,8 @@ pub use gpu_fault_simulator::{GpuFaultCampaignConfig, GpuFaultSimulator};
 pub use gpu_gate_runtime::GpuGateRuntime;
 #[cfg(target_os = "macos")]
 pub use gpu_runtime::{GpuDevice, GpuRuntime};
-pub use lir_to_sir::{convert_lir_to_sir, ConversionStats, LirToSirConverter, LirToSirResult};
 pub use simulator::{SimulationConfig, SimulationResult, Simulator};
 pub use testbench::{TestResult, TestVector, Testbench};
 
-// Backward-compatible alias - convert_lir_to_sir renamed from convert_gate_netlist_to_sir
-// Note: The new `convert_gate_netlist_to_sir` function from gate_netlist_to_sir module
-// is the preferred way to convert GateNetlist to SIR for gate-level simulation.
 pub use unified_runtime::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 pub use waveform::{Signal as WaveformSignal, Waveform};

@@ -235,7 +235,6 @@ impl XpmFifoWrapper {
 
     use skalp_codegen::generate_systemverilog_from_mir;
     use skalp_frontend::parse_and_build_hir;
-    use skalp_lir::lower_to_lir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
 
     // Full pipeline
@@ -244,8 +243,7 @@ impl XpmFifoWrapper {
     let mir = compiler
         .compile_to_mir(&hir)
         .expect("Failed to compile to MIR");
-    let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
-    let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
+    let sv = generate_systemverilog_from_mir(&mir).expect("SV codegen should succeed");
 
     println!("Generated SystemVerilog:\n{}", sv);
 

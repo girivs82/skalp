@@ -1,12 +1,12 @@
 //! Technology Mapper
 //!
-//! Maps word-level operations (WordLir) to gate-level primitives (GateNetlist)
+//! Maps word-level operations (Lir) to gate-level primitives (GateNetlist)
 //! using a technology library.
 //!
 //! # Flow
 //!
 //! ```text
-//! WordLir (word-level) → TechMapper → GateNetlist (gate-level with library cells)
+//! Lir (word-level) → TechMapper → GateNetlist (gate-level with library cells)
 //! ```
 //!
 //! The mapper:
@@ -17,11 +17,10 @@
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
-use crate::lir::LirSafetyInfo;
+use crate::lir::{Lir, LirNode, LirOp, LirSafetyInfo, LirSignalId};
 use crate::tech_library::{
     CellFunction, DecompConnectivity, LibraryCell, LibraryFailureMode, TechLibrary,
 };
-use crate::word_lir::{WordLir, WordNode, WordOp, WordSignalId};
 use std::collections::HashMap;
 
 /// Information extracted from a library cell for tech mapping
@@ -96,8 +95,8 @@ pub struct TechMapper<'a> {
     library: &'a TechLibrary,
     /// Output netlist
     netlist: GateNetlist,
-    /// Mapping from WordSignalId to GateNetId (for multi-bit, maps to first bit)
-    signal_to_net: HashMap<WordSignalId, Vec<GateNetId>>,
+    /// Mapping from LirSignalId to GateNetId (for multi-bit, maps to first bit)
+    signal_to_net: HashMap<LirSignalId, Vec<GateNetId>>,
     /// Statistics
     stats: TechMapStats,
     /// Warnings
@@ -106,7 +105,7 @@ pub struct TechMapper<'a> {
     next_cell_id: u32,
     /// Next net ID
     next_net_id: u32,
-    /// Module-level safety info (from WordLir)
+    /// Module-level safety info (from Lir)
     /// Applied to all cells during mapping
     module_safety_info: Option<LirSafetyInfo>,
 }
@@ -134,8 +133,8 @@ impl<'a> TechMapper<'a> {
             .unwrap_or_else(|| LibraryCellInfo::fallback(format!("{:?}", function), default_fit))
     }
 
-    /// Map a WordLir to a GateNetlist
-    pub fn map(&mut self, word_lir: &WordLir) -> TechMapResult {
+    /// Map a Lir to a GateNetlist
+    pub fn map(&mut self, word_lir: &Lir) -> TechMapResult {
         self.netlist.name = word_lir.name.clone();
 
         // Store module-level safety info for propagation to cells
@@ -227,7 +226,7 @@ impl<'a> TechMapper<'a> {
     /// Create nets for a signal (one per bit)
     fn create_signal_nets(
         &mut self,
-        _signal_id: WordSignalId,
+        _signal_id: LirSignalId,
         name: &str,
         width: u32,
     ) -> Vec<GateNetId> {
@@ -247,13 +246,13 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Map a single node to cells
-    fn map_node(&mut self, node: &WordNode, word_lir: &WordLir) {
+    fn map_node(&mut self, node: &LirNode, word_lir: &Lir) {
         let input_nets = self.get_input_nets(&node.inputs);
         let output_nets = self.get_output_nets(node.output);
 
         match &node.op {
             // Simple logic gates - decompose to per-bit operations
-            WordOp::And { width } => {
+            LirOp::And { width } => {
                 self.map_bitwise_gate(
                     CellFunction::And2,
                     *width,
@@ -262,7 +261,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
-            WordOp::Or { width } => {
+            LirOp::Or { width } => {
                 self.map_bitwise_gate(
                     CellFunction::Or2,
                     *width,
@@ -271,7 +270,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
-            WordOp::Xor { width } => {
+            LirOp::Xor { width } => {
                 self.map_bitwise_gate(
                     CellFunction::Xor2,
                     *width,
@@ -280,7 +279,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
-            WordOp::Nand { width } => {
+            LirOp::Nand { width } => {
                 self.map_bitwise_gate(
                     CellFunction::Nand2,
                     *width,
@@ -289,7 +288,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
-            WordOp::Nor { width } => {
+            LirOp::Nor { width } => {
                 self.map_bitwise_gate(
                     CellFunction::Nor2,
                     *width,
@@ -298,7 +297,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
-            WordOp::Not { width } => {
+            LirOp::Not { width } => {
                 self.map_unary_gate(
                     CellFunction::Inv,
                     *width,
@@ -309,33 +308,33 @@ impl<'a> TechMapper<'a> {
             }
 
             // Adder - ripple carry chain
-            WordOp::Add { width, has_carry } => {
+            LirOp::Add { width, has_carry } => {
                 self.map_adder(*width, *has_carry, &input_nets, &output_nets, &node.path);
             }
 
             // Subtractor
-            WordOp::Sub { width, .. } => {
+            LirOp::Sub { width, .. } => {
                 self.map_subtractor(*width, &input_nets, &output_nets, &node.path);
             }
 
             // Multiplexer
-            WordOp::Mux2 { width } => {
+            LirOp::Mux2 { width } => {
                 self.map_mux2(*width, &input_nets, &output_nets, &node.path);
             }
 
             // Comparators
-            WordOp::Eq { width } => {
+            LirOp::Eq { width } => {
                 self.map_equality(*width, &input_nets, &output_nets, &node.path, false);
             }
-            WordOp::Ne { width } => {
+            LirOp::Ne { width } => {
                 self.map_equality(*width, &input_nets, &output_nets, &node.path, true);
             }
-            WordOp::Lt { width } => {
+            LirOp::Lt { width } => {
                 self.map_less_than(*width, &input_nets, &output_nets, &node.path);
             }
 
             // Register
-            WordOp::Reg {
+            LirOp::Reg {
                 width, has_reset, ..
             } => {
                 let clock_net = node
@@ -358,7 +357,7 @@ impl<'a> TechMapper<'a> {
             }
 
             // Buffer
-            WordOp::Buffer { width } => {
+            LirOp::Buffer { width } => {
                 self.map_unary_gate(
                     CellFunction::Buf,
                     *width,
@@ -369,12 +368,12 @@ impl<'a> TechMapper<'a> {
             }
 
             // Constant
-            WordOp::Constant { width, value } => {
+            LirOp::Constant { width, value } => {
                 self.map_constant(*width, *value, &output_nets, &node.path);
             }
 
             // Reductions
-            WordOp::RedAnd { width } => {
+            LirOp::RedAnd { width } => {
                 self.map_reduction(
                     CellFunction::And2,
                     *width,
@@ -383,7 +382,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
-            WordOp::RedOr { width } => {
+            LirOp::RedOr { width } => {
                 self.map_reduction(
                     CellFunction::Or2,
                     *width,
@@ -392,7 +391,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
-            WordOp::RedXor { width } => {
+            LirOp::RedXor { width } => {
                 self.map_reduction(
                     CellFunction::Xor2,
                     *width,
@@ -410,7 +409,7 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Get input nets from input signal IDs
-    fn get_input_nets(&self, inputs: &[WordSignalId]) -> Vec<Vec<GateNetId>> {
+    fn get_input_nets(&self, inputs: &[LirSignalId]) -> Vec<Vec<GateNetId>> {
         inputs
             .iter()
             .filter_map(|id| self.signal_to_net.get(id).cloned())
@@ -418,7 +417,7 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Get output nets for an output signal ID
-    fn get_output_nets(&self, output: WordSignalId) -> Vec<GateNetId> {
+    fn get_output_nets(&self, output: LirSignalId) -> Vec<GateNetId> {
         self.signal_to_net.get(&output).cloned().unwrap_or_default()
     }
 
@@ -1037,10 +1036,15 @@ impl<'a> TechMapper<'a> {
     }
 }
 
-/// Map a WordLir to GateNetlist using the given library
-pub fn map_word_lir_to_gates(word_lir: &WordLir, library: &TechLibrary) -> TechMapResult {
+/// Map a Lir to GateNetlist using the given library
+pub fn map_lir_to_gates(lir: &Lir, library: &TechLibrary) -> TechMapResult {
     let mut mapper = TechMapper::new(library);
-    mapper.map(word_lir)
+    mapper.map(lir)
+}
+
+/// Backward-compatible alias
+pub fn map_word_lir_to_gates(word_lir: &Lir, library: &TechLibrary) -> TechMapResult {
+    map_lir_to_gates(word_lir, library)
 }
 
 // ============================================================================
@@ -1050,8 +1054,8 @@ pub fn map_word_lir_to_gates(word_lir: &WordLir, library: &TechLibrary) -> TechM
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lir::Lir;
     use crate::tech_library::{LibraryCell, TechLibrary};
-    use crate::word_lir::WordLir;
 
     fn make_test_library() -> TechLibrary {
         let mut lib = TechLibrary::new("test_lib");
@@ -1073,14 +1077,14 @@ mod tests {
     #[test]
     fn test_map_and_gate() {
         let lib = make_test_library();
-        let mut word_lir = WordLir::new("test".to_string());
+        let mut word_lir = Lir::new("test".to_string());
 
         let a = word_lir.add_input("a".to_string(), 8);
         let b = word_lir.add_input("b".to_string(), 8);
         let y = word_lir.add_output("y".to_string(), 8);
 
         word_lir.add_node(
-            WordOp::And { width: 8 },
+            LirOp::And { width: 8 },
             vec![a, b],
             y,
             "test.and".to_string(),
@@ -1096,14 +1100,14 @@ mod tests {
     #[test]
     fn test_map_adder() {
         let lib = make_test_library();
-        let mut word_lir = WordLir::new("test".to_string());
+        let mut word_lir = Lir::new("test".to_string());
 
         let a = word_lir.add_input("a".to_string(), 4);
         let b = word_lir.add_input("b".to_string(), 4);
         let sum = word_lir.add_output("sum".to_string(), 4);
 
         word_lir.add_node(
-            WordOp::Add {
+            LirOp::Add {
                 width: 4,
                 has_carry: false,
             },
@@ -1121,7 +1125,7 @@ mod tests {
     #[test]
     fn test_map_mux() {
         let lib = make_test_library();
-        let mut word_lir = WordLir::new("test".to_string());
+        let mut word_lir = Lir::new("test".to_string());
 
         let sel = word_lir.add_input("sel".to_string(), 1);
         let d0 = word_lir.add_input("d0".to_string(), 16);
@@ -1129,7 +1133,7 @@ mod tests {
         let y = word_lir.add_output("y".to_string(), 16);
 
         word_lir.add_node(
-            WordOp::Mux2 { width: 16 },
+            LirOp::Mux2 { width: 16 },
             vec![sel, d0, d1],
             y,
             "test.mux".to_string(),
@@ -1144,7 +1148,7 @@ mod tests {
     #[test]
     fn test_map_register() {
         let lib = make_test_library();
-        let mut word_lir = WordLir::new("test".to_string());
+        let mut word_lir = Lir::new("test".to_string());
 
         let clk = word_lir.add_input("clk".to_string(), 1);
         word_lir.clocks.push(clk);
@@ -1152,7 +1156,7 @@ mod tests {
         let q = word_lir.add_output("q".to_string(), 8);
 
         word_lir.add_seq_node(
-            WordOp::Reg {
+            LirOp::Reg {
                 width: 8,
                 has_enable: false,
                 has_reset: false,
@@ -1183,12 +1187,12 @@ mod tests {
     #[test]
     fn test_total_fit() {
         let lib = make_test_library();
-        let mut word_lir = WordLir::new("test".to_string());
+        let mut word_lir = Lir::new("test".to_string());
 
         let a = word_lir.add_input("a".to_string(), 4);
         let y = word_lir.add_output("y".to_string(), 4);
 
-        word_lir.add_node(WordOp::Not { width: 4 }, vec![a], y, "test.not".to_string());
+        word_lir.add_node(LirOp::Not { width: 4 }, vec![a], y, "test.not".to_string());
 
         let result = map_word_lir_to_gates(&word_lir, &lib);
 
@@ -1212,12 +1216,12 @@ mod tests {
         lib.add_cell(and_cell);
 
         // Map an AND gate
-        let mut word_lir = WordLir::new("test".to_string());
+        let mut word_lir = Lir::new("test".to_string());
         let a = word_lir.add_input("a".to_string(), 1);
         let b = word_lir.add_input("b".to_string(), 1);
         let y = word_lir.add_output("y".to_string(), 1);
         word_lir.add_node(
-            WordOp::And { width: 1 },
+            LirOp::And { width: 1 },
             vec![a, b],
             y,
             "test.and".to_string(),

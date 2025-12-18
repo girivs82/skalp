@@ -7,7 +7,6 @@ use anyhow::Result;
 use skalp_frontend::hir::{
     CdcConfig, CdcType, IsolationClamp, MemoryStyle, PowerConfig, VendorIpConfig, VendorType,
 };
-use skalp_lir::MirToLirResult;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::mir::{Assertion, AssertionKind};
 use skalp_mir::type_width; // Use shared type width calculations
@@ -83,9 +82,8 @@ fn build_tuple_source_mapping(module: &Module) -> HashMap<SignalId, String> {
 
 /// Generate SystemVerilog from MIR
 ///
-/// Note: The LIR parameter is no longer needed as the SystemVerilog generator
-/// works entirely from MIR. This function is the primary entry point.
-pub fn generate_systemverilog_from_mir(mir: &Mir, _lir: &[MirToLirResult]) -> Result<String> {
+/// This function is the primary entry point for SystemVerilog generation.
+pub fn generate_systemverilog_from_mir(mir: &Mir) -> Result<String> {
     let mut sv = String::new();
 
     // Add header comment

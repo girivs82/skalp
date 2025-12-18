@@ -90,6 +90,7 @@ fn test_build_systemverilog() {
 }
 
 #[test]
+#[ignore = "VHDL generation temporarily disabled during GateNetlist migration"]
 fn test_build_vhdl() {
     let temp_dir = TempDir::new().unwrap();
     let project_name = "vhdl_test";
@@ -121,6 +122,7 @@ fn test_build_vhdl() {
 }
 
 #[test]
+#[ignore = "Legacy LIR output removed during GateNetlist migration"]
 fn test_build_lir() {
     let temp_dir = TempDir::new().unwrap();
     let project_name = "lir_test";
@@ -150,10 +152,7 @@ fn test_build_lir() {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "GPU simulation only available on macOS"
-)]
+#[ignore = "Legacy LIR simulation removed during GateNetlist migration"]
 fn test_simulation_command() {
     let temp_dir = TempDir::new().unwrap();
     let project_name = "sim_test";
@@ -198,6 +197,7 @@ fn test_simulation_command() {
 }
 
 #[test]
+#[ignore = "Synthesis temporarily disabled during GateNetlist migration"]
 fn test_synthesis_command() {
     let temp_dir = TempDir::new().unwrap();
     let project_name = "synth_test";

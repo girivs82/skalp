@@ -1,25 +1,27 @@
 //! LIR - Low-level Intermediate Representation
 //!
-//! Gate-level representation of hardware designs for simulation and fault analysis.
+//! This module provides the word-level intermediate representation for hardware designs,
+//! preserving multi-bit operations for smarter technology mapping.
 //!
-//! This module provides technology-independent primitive types (gates, flip-flops, muxes, etc.)
-//! for gate-level simulation and ISO 26262 safety analysis without requiring external synthesized netlists.
-//!
-//! The compilation flow is: HIR → MIR → LIR → SIR (for simulation)
+//! The compilation flow is: HIR → MIR → Lir → TechMapper → GateNetlist → SIR
 //!
 //! Key types:
-//! - `Lir` - The gate-level netlist (collection of primitives and nets)
-//! - `Primitive` - Individual gate/flip-flop/mux with hierarchical path for traceability
-//! - `PrimitiveType` - Type of primitive (AND, OR, DFF, MUX2, etc.)
-//! - `LirNet` - Wire connecting primitives
-//! - `NetId`, `PrimitiveId` - Numeric IDs for efficient lookup
+//! - `Lir` - Word-level IR preserving multi-bit operations
+//! - `LirOp` - Word-level operations (Add, Mux2, Reg, etc.)
+//! - `PrimitiveType` - Gate-level primitive types (AND, OR, DFF, etc.)
+//! - `PrimitiveId`, `NetId` - Numeric IDs for efficient lookup
+//!
+//! # Why Word-Level?
+//!
+//! - Technology libraries may have compound cells (ADDER8, MUX4, AOI22)
+//! - Eager decomposition loses information needed for optimal mapping
+//! - Decomposition decisions are technology-dependent
 
 use serde::{Deserialize, Serialize};
-use skalp_frontend::hir::DetectionConfig;
 use std::collections::HashMap;
 
 // ============================================================================
-// Extended Primitive Types for Fault Simulation
+// IDs
 // ============================================================================
 
 /// Primitive ID for unique identification within a design
@@ -29,6 +31,10 @@ pub struct PrimitiveId(pub u32);
 /// Net ID for unique identification within a design
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetId(pub u32);
+
+// ============================================================================
+// Primitive Types
+// ============================================================================
 
 /// Extended gate types for technology-independent synthesis and fault simulation.
 ///
@@ -113,15 +119,13 @@ pub enum PrimitiveType {
 
     // === Power Infrastructure ===
     /// Level shifter for voltage domain crossing
-    /// Translates signal from one voltage domain to another
     LevelShifter {
-        /// Source voltage domain (e.g., 1.0 for 1.0V)
-        from_voltage: u16, // Stored as mV for precision without float
-        /// Target voltage domain (e.g., 3300 for 3.3V)
+        /// Source voltage domain (stored as mV)
+        from_voltage: u16,
+        /// Target voltage domain (stored as mV)
         to_voltage: u16,
     },
     /// Isolation cell for power gating
-    /// Clamps output to a safe value when domain is powered down
     IsolationCell {
         /// Clamp value when isolated (0, 1, or 2 for hold-last-value)
         clamp_value: u8,
@@ -129,19 +133,16 @@ pub enum PrimitiveType {
         enable_active_high: bool,
     },
     /// Retention flip-flop for state preservation during power-down
-    /// Has save/restore signals for state backup/recovery
     RetentionDff {
         /// Has async reset
         has_reset: bool,
     },
     /// Power switch (header or footer cell)
-    /// Controls power supply to a domain
     PowerSwitch {
         /// True for PMOS header (VDD side), false for NMOS footer (VSS side)
         is_header: bool,
     },
     /// Always-on buffer for control signal routing
-    /// Routes signals through always-on power domain
     AlwaysOnBuf,
 }
 
@@ -188,60 +189,54 @@ impl PrimitiveType {
             PrimitiveType::Xnor => 2,
             PrimitiveType::Inv => 1,
             PrimitiveType::Buf => 1,
-            PrimitiveType::Tribuf { .. } => 2, // data, enable
-            PrimitiveType::Mux2 => 3,          // sel, d0, d1
-            PrimitiveType::Mux4 => 6,          // sel0, sel1, d0-d3
+            PrimitiveType::Tribuf { .. } => 2,
+            PrimitiveType::Mux2 => 3,
+            PrimitiveType::Mux4 => 6,
             PrimitiveType::MuxN { select_bits } => *select_bits + (1 << *select_bits),
-            PrimitiveType::DffP => 3,      // clk, d, rst
-            PrimitiveType::DffN => 3,      // clk, d, rst
-            PrimitiveType::DffNeg => 3,    // clk, d, rst
-            PrimitiveType::DffE => 4,      // clk, d, en, rst
-            PrimitiveType::DffAR => 3,     // clk, d, rst
-            PrimitiveType::DffAS => 3,     // clk, d, set
-            PrimitiveType::DffScan => 5,   // clk, d, scan_in, scan_en, rst
-            PrimitiveType::Dlatch => 2,    // en, d
-            PrimitiveType::SRlatch => 2,   // s, r
-            PrimitiveType::HalfAdder => 2, // a, b
-            PrimitiveType::FullAdder => 3, // a, b, cin
-            PrimitiveType::CompBit => 4,   // a, b, lt_in, eq_in
-            PrimitiveType::MemCell => 3,   // data_in, write_en, clk
-            PrimitiveType::RegCell => 3,   // data_in, write_en, clk
+            PrimitiveType::DffP => 3,
+            PrimitiveType::DffN => 3,
+            PrimitiveType::DffNeg => 3,
+            PrimitiveType::DffE => 4,
+            PrimitiveType::DffAR => 3,
+            PrimitiveType::DffAS => 3,
+            PrimitiveType::DffScan => 5,
+            PrimitiveType::Dlatch => 2,
+            PrimitiveType::SRlatch => 2,
+            PrimitiveType::HalfAdder => 2,
+            PrimitiveType::FullAdder => 3,
+            PrimitiveType::CompBit => 4,
+            PrimitiveType::MemCell => 3,
+            PrimitiveType::RegCell => 3,
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
-            // Power infrastructure
-            PrimitiveType::LevelShifter { .. } => 1, // data_in
-            PrimitiveType::IsolationCell { .. } => 2, // data_in, iso_en
+            PrimitiveType::LevelShifter { .. } => 1,
+            PrimitiveType::IsolationCell { .. } => 2,
             PrimitiveType::RetentionDff { has_reset } => {
                 if *has_reset {
                     5
                 } else {
                     4
-                } // clk, d, save, restore, [rst]
+                }
             }
-            PrimitiveType::PowerSwitch { .. } => 1, // enable
-            PrimitiveType::AlwaysOnBuf => 1,        // data_in
+            PrimitiveType::PowerSwitch { .. } => 1,
+            PrimitiveType::AlwaysOnBuf => 1,
         }
     }
 
     /// Returns the number of output pins for this primitive type
     pub fn output_count(&self) -> u8 {
         match self {
-            PrimitiveType::HalfAdder => 2,          // sum, carry
-            PrimitiveType::FullAdder => 2,          // sum, cout
-            PrimitiveType::CompBit => 2,            // lt_out, eq_out
-            PrimitiveType::PowerSwitch { .. } => 0, // Controls power rail, no logic output
-            _ => 1,                                 // All others have single output
+            PrimitiveType::HalfAdder => 2,
+            PrimitiveType::FullAdder => 2,
+            PrimitiveType::CompBit => 2,
+            PrimitiveType::PowerSwitch { .. } => 0,
+            _ => 1,
         }
     }
 
     /// Returns the technology-independent base FIT rate for this primitive.
-    ///
-    /// FIT = Failures In Time = failures per billion device hours
-    /// These are representative values from industry averages.
-    /// They can be overridden via FitOverrides for specific processes.
     pub fn base_fit(&self) -> f64 {
         match self {
-            // Combinational logic - low FIT, mainly SETs
             PrimitiveType::And { .. }
             | PrimitiveType::Or { .. }
             | PrimitiveType::Nand { .. }
@@ -252,8 +247,6 @@ impl PrimitiveType {
             PrimitiveType::Mux2 => 0.2,
             PrimitiveType::Mux4 => 0.4,
             PrimitiveType::MuxN { select_bits } => 0.2 * (1 << *select_bits) as f64,
-
-            // Sequential logic - higher FIT due to SEUs
             PrimitiveType::DffP
             | PrimitiveType::DffN
             | PrimitiveType::DffNeg
@@ -262,26 +255,18 @@ impl PrimitiveType {
             PrimitiveType::DffE => 1.2,
             PrimitiveType::DffScan => 1.5,
             PrimitiveType::Dlatch | PrimitiveType::SRlatch => 0.8,
-
-            // Arithmetic - moderate FIT
             PrimitiveType::HalfAdder => 0.2,
             PrimitiveType::FullAdder => 0.3,
             PrimitiveType::CompBit => 0.15,
-
-            // Memory - highest FIT per bit due to SEU susceptibility
             PrimitiveType::MemCell => 2.0,
             PrimitiveType::RegCell => 1.5,
-
-            // Special
             PrimitiveType::ClkBuf => 0.1,
-            PrimitiveType::Constant { .. } => 0.0, // No failures possible
-
-            // Power infrastructure - moderate to high FIT due to analog nature
-            PrimitiveType::LevelShifter { .. } => 0.3, // Analog circuitry
-            PrimitiveType::IsolationCell { .. } => 0.15, // Simple gate + control
-            PrimitiveType::RetentionDff { .. } => 1.5, // Higher due to balloon latch
-            PrimitiveType::PowerSwitch { .. } => 0.5,  // Large transistor, EM concerns
-            PrimitiveType::AlwaysOnBuf => 0.1,         // Same as regular buffer
+            PrimitiveType::Constant { .. } => 0.0,
+            PrimitiveType::LevelShifter { .. } => 0.3,
+            PrimitiveType::IsolationCell { .. } => 0.15,
+            PrimitiveType::RetentionDff { .. } => 1.5,
+            PrimitiveType::PowerSwitch { .. } => 0.5,
+            PrimitiveType::AlwaysOnBuf => 0.1,
         }
     }
 
@@ -321,7 +306,6 @@ impl PrimitiveType {
             PrimitiveType::RegCell => "REG",
             PrimitiveType::ClkBuf => "CLKBUF",
             PrimitiveType::Constant { .. } => "CONST",
-            // Power infrastructure
             PrimitiveType::LevelShifter { .. } => "LVLSHIFT",
             PrimitiveType::IsolationCell { .. } => "ISO",
             PrimitiveType::RetentionDff { .. } => "RETDFF",
@@ -380,43 +364,11 @@ impl std::fmt::Display for PrimitiveType {
     }
 }
 
-/// Primitive instance with hierarchical path for traceability.
-///
-/// Each primitive represents a single gate, flip-flop, or memory cell
-/// in the flattened gate-level netlist.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Primitive {
-    /// Unique ID within the design
-    pub id: PrimitiveId,
-    /// Primitive type
-    pub ptype: PrimitiveType,
-    /// Hierarchical path (e.g., "top.cpu.alu.adder_bit3")
-    /// Used for traceability back to RTL and error reporting
-    pub path: String,
-    /// Input net IDs (order depends on primitive type)
-    pub inputs: Vec<NetId>,
-    /// Output net IDs (order depends on primitive type)
-    pub outputs: Vec<NetId>,
-    /// Clock net (for sequential elements)
-    pub clock: Option<NetId>,
-    /// Reset net (for sequential elements)
-    pub reset: Option<NetId>,
-    /// Enable net (for gated elements)
-    pub enable: Option<NetId>,
-    /// Bit index within multi-bit signal (for traceability)
-    pub bit_index: Option<u32>,
-    /// Safety classification: If this primitive implements a safety mechanism
-    /// Contains (goal_name, mechanism_name, is_sm_of_sm) if safety-relevant
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub safety_info: Option<LirSafetyInfo>,
-    /// Power domain name for CCF (Common Cause Failure) analysis
-    /// All primitives in the same power domain share a common power supply
-    /// Used to model power-related failures as CCF
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub power_domain: Option<String>,
-}
+// ============================================================================
+// Safety Info
+// ============================================================================
 
-/// Safety information for LIR primitives
+/// Safety information for primitives/cells
 /// Used to propagate safety context from MIR to gate-level cells
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LirSafetyInfo {
@@ -429,266 +381,15 @@ pub struct LirSafetyInfo {
     /// Protected mechanism name (for SM-of-SM)
     pub protected_sm_name: Option<String>,
     /// True if this hardware is only active during boot/test mode
-    /// When true, faults in this hardware don't contribute to steady-state PMHF
-    /// (e.g., BIST hardware that only runs at power-on)
     #[serde(default)]
     pub is_boot_time_only: bool,
 }
 
-impl Primitive {
-    /// Create a new combinational primitive
-    pub fn new_comb(
-        id: PrimitiveId,
-        ptype: PrimitiveType,
-        path: String,
-        inputs: Vec<NetId>,
-        outputs: Vec<NetId>,
-    ) -> Self {
-        Self {
-            id,
-            ptype,
-            path,
-            inputs,
-            outputs,
-            clock: None,
-            reset: None,
-            enable: None,
-            bit_index: None,
-            safety_info: None,
-            power_domain: None,
-        }
-    }
-
-    /// Create a new sequential primitive (flip-flop)
-    pub fn new_seq(
-        id: PrimitiveId,
-        ptype: PrimitiveType,
-        path: String,
-        inputs: Vec<NetId>,
-        outputs: Vec<NetId>,
-        clock: NetId,
-        reset: Option<NetId>,
-    ) -> Self {
-        Self {
-            id,
-            ptype,
-            path,
-            inputs,
-            outputs,
-            clock: Some(clock),
-            reset,
-            enable: None,
-            bit_index: None,
-            safety_info: None,
-            power_domain: None,
-        }
-    }
-
-    /// Set safety information for this primitive
-    pub fn with_safety_info(mut self, info: LirSafetyInfo) -> Self {
-        self.safety_info = Some(info);
-        self
-    }
-
-    /// Set power domain for this primitive (for CCF analysis)
-    pub fn with_power_domain(mut self, domain: Option<String>) -> Self {
-        self.power_domain = domain;
-        self
-    }
-
-    /// Returns the FIT rate for this primitive
-    pub fn fit(&self) -> f64 {
-        self.ptype.base_fit()
-    }
-
-    // === Power Infrastructure Constructors ===
-
-    /// Create a new level shifter primitive
-    pub fn new_level_shifter(
-        id: PrimitiveId,
-        path: String,
-        from_voltage_mv: u16,
-        to_voltage_mv: u16,
-        input: NetId,
-        output: NetId,
-    ) -> Self {
-        Self {
-            id,
-            ptype: PrimitiveType::LevelShifter {
-                from_voltage: from_voltage_mv,
-                to_voltage: to_voltage_mv,
-            },
-            path,
-            inputs: vec![input],
-            outputs: vec![output],
-            clock: None,
-            reset: None,
-            enable: None,
-            bit_index: None,
-            safety_info: None,
-            power_domain: None,
-        }
-    }
-
-    /// Create a new isolation cell primitive
-    pub fn new_isolation_cell(
-        id: PrimitiveId,
-        path: String,
-        clamp_value: u8,
-        enable_active_high: bool,
-        data_in: NetId,
-        iso_enable: NetId,
-        output: NetId,
-    ) -> Self {
-        Self {
-            id,
-            ptype: PrimitiveType::IsolationCell {
-                clamp_value,
-                enable_active_high,
-            },
-            path,
-            inputs: vec![data_in, iso_enable],
-            outputs: vec![output],
-            clock: None,
-            reset: None,
-            enable: Some(iso_enable),
-            bit_index: None,
-            safety_info: None,
-            power_domain: None,
-        }
-    }
-
-    /// Create a new retention flip-flop primitive
-    pub fn new_retention_dff(
-        id: PrimitiveId,
-        path: String,
-        has_reset: bool,
-        inputs: Vec<NetId>,
-        output: NetId,
-        clock: NetId,
-        reset: Option<NetId>,
-    ) -> Self {
-        Self {
-            id,
-            ptype: PrimitiveType::RetentionDff { has_reset },
-            path,
-            inputs,
-            outputs: vec![output],
-            clock: Some(clock),
-            reset,
-            enable: None,
-            bit_index: None,
-            safety_info: None,
-            power_domain: None,
-        }
-    }
-
-    /// Create a new always-on buffer primitive
-    pub fn new_always_on_buf(id: PrimitiveId, path: String, input: NetId, output: NetId) -> Self {
-        Self {
-            id,
-            ptype: PrimitiveType::AlwaysOnBuf,
-            path,
-            inputs: vec![input],
-            outputs: vec![output],
-            clock: None,
-            reset: None,
-            enable: None,
-            bit_index: None,
-            safety_info: None,
-            power_domain: Some("always_on".to_string()),
-        }
-    }
-}
-
-/// Net in gate-level netlist.
-///
-/// Represents a wire connecting primitive outputs to inputs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LirNet {
-    /// Net ID
-    pub id: NetId,
-    /// Name (for debugging and traceability)
-    pub name: String,
-    /// Driver primitive and output pin (None for primary inputs)
-    pub driver: Option<(PrimitiveId, u8)>,
-    /// Load primitives and input pins
-    pub loads: Vec<(PrimitiveId, u8)>,
-    /// Is this a primary input?
-    pub is_primary_input: bool,
-    /// Is this a primary output?
-    pub is_primary_output: bool,
-    /// Is this driven by a state element (flip-flop output)?
-    pub is_state_output: bool,
-    /// Is this a detection signal (for safety analysis)?
-    /// Set via #[detection_signal] attribute on port or propagated from hierarchical instances
-    pub is_detection: bool,
-    /// Detection signal configuration (temporal mode for safety analysis)
-    /// Includes mode (continuous/boot/periodic) and optional interval
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detection_config: Option<DetectionConfig>,
-    /// Bit width (usually 1 for gate-level)
-    pub width: u8,
-}
-
-impl LirNet {
-    /// Create a new net
-    pub fn new(id: NetId, name: String) -> Self {
-        Self {
-            id,
-            name,
-            driver: None,
-            loads: Vec::new(),
-            is_primary_input: false,
-            is_primary_output: false,
-            is_state_output: false,
-            is_detection: false,
-            detection_config: None,
-            width: 1,
-        }
-    }
-
-    /// Create a primary input net
-    pub fn new_primary_input(id: NetId, name: String) -> Self {
-        Self {
-            id,
-            name,
-            driver: None,
-            loads: Vec::new(),
-            is_primary_input: true,
-            is_primary_output: false,
-            is_state_output: false,
-            is_detection: false,
-            detection_config: None,
-            width: 1,
-        }
-    }
-
-    /// Create a primary output net
-    pub fn new_primary_output(id: NetId, name: String, driver: (PrimitiveId, u8)) -> Self {
-        Self {
-            id,
-            name,
-            driver: Some(driver),
-            loads: Vec::new(),
-            is_primary_input: false,
-            is_primary_output: true,
-            is_state_output: false,
-            is_detection: false,
-            detection_config: None,
-            width: 1,
-        }
-    }
-
-    /// Returns the fanout (number of loads)
-    pub fn fanout(&self) -> usize {
-        self.loads.len()
-    }
-}
+// ============================================================================
+// Hierarchy
+// ============================================================================
 
 /// Hierarchy node for traceability back to RTL.
-///
-/// Maps primitive ID ranges to their source RTL module instances.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HierarchyNode {
     /// Instance path (e.g., "top.cpu.alu")
@@ -703,234 +404,11 @@ pub struct HierarchyNode {
     pub children: Vec<usize>,
 }
 
-/// Netlist statistics for reporting.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NetlistStats {
-    /// Total number of primitives
-    pub total_primitives: u64,
-    /// Number of combinational gates
-    pub comb_gates: u64,
-    /// Number of flip-flops
-    pub flip_flops: u64,
-    /// Number of latches
-    pub latches: u64,
-    /// Number of muxes
-    pub muxes: u64,
-    /// Number of memory cells
-    pub mem_cells: u64,
-    /// Total number of nets
-    pub total_nets: u64,
-    /// Maximum fanout
-    pub max_fanout: u32,
-    /// Combinational logic depth (longest path)
-    pub logic_depth: u32,
-    /// Total estimated FIT
-    pub total_fit: f64,
-    /// Breakdown by primitive type
-    pub primitive_counts: HashMap<String, u64>,
-    // Power infrastructure stats
-    /// Number of level shifters
-    pub level_shifters: u64,
-    /// Number of isolation cells
-    pub isolation_cells: u64,
-    /// Number of retention flip-flops
-    pub retention_flops: u64,
-    /// Number of power switches
-    pub power_switches: u64,
-    /// Number of always-on buffers
-    pub always_on_bufs: u64,
-}
-
-impl NetlistStats {
-    /// Calculate statistics from a netlist
-    pub fn from_netlist(netlist: &Lir) -> Self {
-        let mut stats = NetlistStats {
-            total_primitives: netlist.primitives.len() as u64,
-            total_nets: netlist.nets.len() as u64,
-            ..Default::default()
-        };
-
-        for prim in &netlist.primitives {
-            stats.total_fit += prim.fit();
-
-            let name = prim.ptype.short_name().to_string();
-            *stats.primitive_counts.entry(name).or_insert(0) += 1;
-
-            match &prim.ptype {
-                PrimitiveType::Mux2 | PrimitiveType::Mux4 | PrimitiveType::MuxN { .. } => {
-                    stats.muxes += 1;
-                }
-                PrimitiveType::DffP
-                | PrimitiveType::DffN
-                | PrimitiveType::DffNeg
-                | PrimitiveType::DffE
-                | PrimitiveType::DffAR
-                | PrimitiveType::DffAS
-                | PrimitiveType::DffScan => {
-                    stats.flip_flops += 1;
-                }
-                PrimitiveType::Dlatch | PrimitiveType::SRlatch => {
-                    stats.latches += 1;
-                }
-                PrimitiveType::MemCell | PrimitiveType::RegCell => {
-                    stats.mem_cells += 1;
-                }
-                // Power infrastructure
-                PrimitiveType::LevelShifter { .. } => {
-                    stats.level_shifters += 1;
-                }
-                PrimitiveType::IsolationCell { .. } => {
-                    stats.isolation_cells += 1;
-                }
-                PrimitiveType::RetentionDff { .. } => {
-                    stats.retention_flops += 1;
-                    stats.flip_flops += 1; // Also count as flip-flop
-                }
-                PrimitiveType::PowerSwitch { .. } => {
-                    stats.power_switches += 1;
-                }
-                PrimitiveType::AlwaysOnBuf => {
-                    stats.always_on_bufs += 1;
-                }
-                _ => {
-                    stats.comb_gates += 1;
-                }
-            }
-        }
-
-        for net in &netlist.nets {
-            if net.fanout() as u32 > stats.max_fanout {
-                stats.max_fanout = net.fanout() as u32;
-            }
-        }
-
-        stats
-    }
-
-    /// Returns total power infrastructure cell count
-    pub fn power_infrastructure_count(&self) -> u64 {
-        self.level_shifters
-            + self.isolation_cells
-            + self.retention_flops
-            + self.power_switches
-            + self.always_on_bufs
-    }
-}
-
-/// Technology-independent gate-level netlist.
-///
-/// This is the flattened, elaborated representation of a design
-/// used for gate-level simulation and fault injection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Lir {
-    /// Design name
-    pub name: String,
-    /// Original module hierarchy (for traceability)
-    pub hierarchy: Vec<HierarchyNode>,
-    /// All primitives in flattened design
-    pub primitives: Vec<Primitive>,
-    /// All nets in flattened design
-    pub nets: Vec<LirNet>,
-    /// Primary input net IDs
-    pub inputs: Vec<NetId>,
-    /// Primary output net IDs
-    pub outputs: Vec<NetId>,
-    /// Clock net IDs
-    pub clocks: Vec<NetId>,
-    /// Reset net IDs
-    pub resets: Vec<NetId>,
-    /// Statistics
-    pub stats: NetlistStats,
-}
-
-impl Lir {
-    /// Create a new empty gate netlist
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            hierarchy: Vec::new(),
-            primitives: Vec::new(),
-            nets: Vec::new(),
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            clocks: Vec::new(),
-            resets: Vec::new(),
-            stats: NetlistStats::default(),
-        }
-    }
-
-    /// Add a primitive to the netlist
-    pub fn add_primitive(&mut self, prim: Primitive) -> PrimitiveId {
-        let id = prim.id;
-        self.primitives.push(prim);
-        id
-    }
-
-    /// Add a net to the netlist
-    pub fn add_net(&mut self, net: LirNet) -> NetId {
-        let id = net.id;
-        self.nets.push(net);
-        id
-    }
-
-    /// Get a primitive by ID
-    pub fn get_primitive(&self, id: PrimitiveId) -> Option<&Primitive> {
-        self.primitives.iter().find(|p| p.id == id)
-    }
-
-    /// Get a net by ID
-    pub fn get_net(&self, id: NetId) -> Option<&LirNet> {
-        self.nets.iter().find(|n| n.id == id)
-    }
-
-    /// Get mutable primitive by ID
-    pub fn get_primitive_mut(&mut self, id: PrimitiveId) -> Option<&mut Primitive> {
-        self.primitives.iter_mut().find(|p| p.id == id)
-    }
-
-    /// Get mutable net by ID
-    pub fn get_net_mut(&mut self, id: NetId) -> Option<&mut LirNet> {
-        self.nets.iter_mut().find(|n| n.id == id)
-    }
-
-    /// Calculate and update statistics
-    pub fn update_stats(&mut self) {
-        self.stats = NetlistStats::from_netlist(self);
-    }
-
-    /// Get all sequential primitives (flip-flops, latches, memory)
-    pub fn sequential_primitives(&self) -> Vec<&Primitive> {
-        self.primitives
-            .iter()
-            .filter(|p| p.ptype.is_sequential())
-            .collect()
-    }
-
-    /// Get all combinational primitives
-    pub fn combinational_primitives(&self) -> Vec<&Primitive> {
-        self.primitives
-            .iter()
-            .filter(|p| !p.ptype.is_sequential())
-            .collect()
-    }
-
-    /// Get primitive path from hierarchy
-    pub fn get_rtl_path(&self, prim_id: PrimitiveId) -> Option<&str> {
-        self.get_primitive(prim_id).map(|p| p.path.as_str())
-    }
-
-    /// Get all primitives in a hierarchical instance
-    pub fn primitives_in_instance(&self, instance_path: &str) -> Vec<&Primitive> {
-        self.primitives
-            .iter()
-            .filter(|p| p.path.starts_with(instance_path))
-            .collect()
-    }
-}
+// ============================================================================
+// FIT Overrides
+// ============================================================================
 
 /// Configuration for FIT rate overrides.
-///
-/// Allows users to customize FIT rates for specific processes or conditions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FitOverrides {
     /// Override FIT for specific primitive types (e.g., "DFFP" => 0.8)
@@ -958,11 +436,7 @@ impl FitOverrides {
     pub fn effective_fit(&self, ptype: &PrimitiveType) -> f64 {
         let base = ptype.base_fit();
         let name = ptype.short_name();
-
-        // Check for type-specific override
         let type_fit = self.primitive_overrides.get(name).copied().unwrap_or(base);
-
-        // Apply global factors
         type_fit * self.global_scale * self.temperature_factor * self.voltage_factor
     }
 }
@@ -990,18 +464,14 @@ mod tests {
         assert_eq!(PrimitiveType::Inv.input_count(), 1);
         assert_eq!(PrimitiveType::Mux2.input_count(), 3);
         assert_eq!(PrimitiveType::DffP.input_count(), 3);
-
         assert_eq!(PrimitiveType::And { inputs: 4 }.output_count(), 1);
         assert_eq!(PrimitiveType::FullAdder.output_count(), 2);
     }
 
     #[test]
     fn test_primitive_type_fit() {
-        // Sequential elements have higher FIT
         assert!(PrimitiveType::DffP.base_fit() > PrimitiveType::And { inputs: 2 }.base_fit());
-        // Memory has highest FIT
         assert!(PrimitiveType::MemCell.base_fit() > PrimitiveType::DffP.base_fit());
-        // Constant has no failures
         assert_eq!(PrimitiveType::Constant { value: true }.base_fit(), 0.0);
     }
 
@@ -1016,35 +486,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lir_creation() {
-        let mut lir = Lir::new("test".to_string());
-
-        // Add some primitives
-        let prim = Primitive::new_comb(
-            PrimitiveId(0),
-            PrimitiveType::And { inputs: 2 },
-            "top.and_gate".to_string(),
-            vec![NetId(0), NetId(1)],
-            vec![NetId(2)],
-        );
-        lir.add_primitive(prim);
-
-        // Add some nets
-        let net_a = LirNet::new_primary_input(NetId(0), "a".to_string());
-        let net_b = LirNet::new_primary_input(NetId(1), "b".to_string());
-        let net_out = LirNet::new_primary_output(NetId(2), "out".to_string(), (PrimitiveId(0), 0));
-        lir.add_net(net_a);
-        lir.add_net(net_b);
-        lir.add_net(net_out);
-
-        lir.update_stats();
-
-        assert_eq!(lir.stats.total_primitives, 1);
-        assert_eq!(lir.stats.comb_gates, 1);
-        assert_eq!(lir.stats.total_nets, 3);
-    }
-
-    #[test]
     fn test_fit_overrides() {
         let mut overrides = FitOverrides::none();
         overrides
@@ -1053,75 +494,622 @@ mod tests {
         overrides.global_scale = 0.8;
 
         let dff_fit = overrides.effective_fit(&PrimitiveType::DffP);
-        assert_eq!(dff_fit, 0.5 * 0.8); // Override * scale
+        assert_eq!(dff_fit, 0.5 * 0.8);
 
         let and_fit = overrides.effective_fit(&PrimitiveType::And { inputs: 2 });
-        assert_eq!(and_fit, 0.1 * 0.8); // Base * scale
-    }
-
-    #[test]
-    fn test_lir_stats() {
-        let mut lir = Lir::new("test".to_string());
-
-        // Add mixed primitives
-        lir.add_primitive(Primitive::new_comb(
-            PrimitiveId(0),
-            PrimitiveType::And { inputs: 2 },
-            "top.and1".to_string(),
-            vec![],
-            vec![],
-        ));
-        lir.add_primitive(Primitive::new_seq(
-            PrimitiveId(1),
-            PrimitiveType::DffP,
-            "top.ff1".to_string(),
-            vec![],
-            vec![],
-            NetId(0),
-            None,
-        ));
-        lir.add_primitive(Primitive::new_comb(
-            PrimitiveId(2),
-            PrimitiveType::Mux2,
-            "top.mux1".to_string(),
-            vec![],
-            vec![],
-        ));
-
-        lir.update_stats();
-
-        assert_eq!(lir.stats.total_primitives, 3);
-        assert_eq!(lir.stats.comb_gates, 1); // AND only
-        assert_eq!(lir.stats.flip_flops, 1);
-        assert_eq!(lir.stats.muxes, 1);
-        assert!(lir.stats.total_fit > 0.0);
-    }
-
-    #[test]
-    fn test_sequential_combinational_separation() {
-        let mut lir = Lir::new("test".to_string());
-
-        lir.add_primitive(Primitive::new_comb(
-            PrimitiveId(0),
-            PrimitiveType::And { inputs: 2 },
-            "top.and1".to_string(),
-            vec![],
-            vec![],
-        ));
-        lir.add_primitive(Primitive::new_seq(
-            PrimitiveId(1),
-            PrimitiveType::DffP,
-            "top.ff1".to_string(),
-            vec![],
-            vec![],
-            NetId(0),
-            None,
-        ));
-
-        assert_eq!(lir.sequential_primitives().len(), 1);
-        assert_eq!(lir.combinational_primitives().len(), 1);
+        assert_eq!(and_fit, 0.1 * 0.8);
     }
 }
 
-// Old deprecated types have been removed.
-// Use the new types: Lir, LirNet, Primitive, PrimitiveType
+// ============================================================================
+// Word-Level LIR Types
+// ============================================================================
+
+/// Word-level operation types.
+///
+/// These represent multi-bit operations that will be decomposed
+/// during technology mapping based on available library cells.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LirOp {
+    // === Arithmetic ===
+    /// Addition: result = a + b (with optional carry-out)
+    Add { width: u32, has_carry: bool },
+    /// Subtraction: result = a - b (with optional borrow-out)
+    Sub { width: u32, has_borrow: bool },
+    /// Multiplication: result = a * b
+    Mul { width: u32, result_width: u32 },
+
+    // === Bitwise Logic ===
+    /// Bitwise AND
+    And { width: u32 },
+    /// Bitwise OR
+    Or { width: u32 },
+    /// Bitwise XOR
+    Xor { width: u32 },
+    /// Bitwise NOT (invert)
+    Not { width: u32 },
+    /// Bitwise NAND
+    Nand { width: u32 },
+    /// Bitwise NOR
+    Nor { width: u32 },
+
+    // === Comparison ===
+    /// Equality: result = (a == b)
+    Eq { width: u32 },
+    /// Not equal: result = (a != b)
+    Ne { width: u32 },
+    /// Less than (unsigned): result = (a < b)
+    Lt { width: u32 },
+    /// Less than or equal (unsigned): result = (a <= b)
+    Le { width: u32 },
+    /// Greater than (unsigned): result = (a > b)
+    Gt { width: u32 },
+    /// Greater than or equal (unsigned): result = (a >= b)
+    Ge { width: u32 },
+    /// Less than (signed)
+    Slt { width: u32 },
+
+    // === Multiplexing ===
+    /// 2:1 Multiplexer: result = sel ? b : a
+    Mux2 { width: u32 },
+    /// N:1 Multiplexer
+    MuxN { width: u32, ways: u32 },
+
+    // === Shift ===
+    /// Logical left shift
+    Shl { width: u32 },
+    /// Logical right shift
+    Shr { width: u32 },
+    /// Arithmetic right shift (sign-extend)
+    Sar { width: u32 },
+    /// Rotate left
+    Rol { width: u32 },
+    /// Rotate right
+    Ror { width: u32 },
+
+    // === Reduction ===
+    /// Reduction AND: result = &a (all bits ANDed)
+    RedAnd { width: u32 },
+    /// Reduction OR: result = |a (all bits ORed)
+    RedOr { width: u32 },
+    /// Reduction XOR: result = ^a (all bits XORed, parity)
+    RedXor { width: u32 },
+
+    // === Bit Manipulation ===
+    /// Concatenation: result = {a, b, ...}
+    Concat { widths: Vec<u32> },
+    /// Bit select: result = a[index]
+    BitSelect { width: u32 },
+    /// Range select: result = a[high:low]
+    RangeSelect { width: u32, high: u32, low: u32 },
+    /// Zero extend
+    ZeroExtend { from: u32, to: u32 },
+    /// Sign extend
+    SignExtend { from: u32, to: u32 },
+
+    // === Sequential ===
+    /// Register (D flip-flop array)
+    Reg {
+        width: u32,
+        has_enable: bool,
+        has_reset: bool,
+        reset_value: Option<u64>,
+    },
+    /// Latch array
+    Latch { width: u32 },
+
+    // === Memory ===
+    /// Memory read port
+    MemRead { data_width: u32, addr_width: u32 },
+    /// Memory write port
+    MemWrite { data_width: u32, addr_width: u32 },
+
+    // === Special ===
+    /// Constant value
+    Constant { width: u32, value: u64 },
+    /// Buffer (for fanout or pipeline)
+    Buffer { width: u32 },
+    /// Tristate buffer
+    Tristate { width: u32 },
+}
+
+impl LirOp {
+    /// Returns the output width of this operation
+    pub fn output_width(&self) -> u32 {
+        match self {
+            LirOp::Add { width, has_carry } => {
+                if *has_carry {
+                    width + 1
+                } else {
+                    *width
+                }
+            }
+            LirOp::Sub { width, has_borrow } => {
+                if *has_borrow {
+                    width + 1
+                } else {
+                    *width
+                }
+            }
+            LirOp::Mul { result_width, .. } => *result_width,
+            LirOp::And { width }
+            | LirOp::Or { width }
+            | LirOp::Xor { width }
+            | LirOp::Not { width }
+            | LirOp::Nand { width }
+            | LirOp::Nor { width } => *width,
+            LirOp::Eq { .. }
+            | LirOp::Ne { .. }
+            | LirOp::Lt { .. }
+            | LirOp::Le { .. }
+            | LirOp::Gt { .. }
+            | LirOp::Ge { .. }
+            | LirOp::Slt { .. } => 1, // Comparison results are 1-bit
+            LirOp::Mux2 { width } => *width,
+            LirOp::MuxN { width, .. } => *width,
+            LirOp::Shl { width }
+            | LirOp::Shr { width }
+            | LirOp::Sar { width }
+            | LirOp::Rol { width }
+            | LirOp::Ror { width } => *width,
+            LirOp::RedAnd { .. } | LirOp::RedOr { .. } | LirOp::RedXor { .. } => 1,
+            LirOp::Concat { widths } => widths.iter().sum(),
+            LirOp::BitSelect { .. } => 1,
+            LirOp::RangeSelect { high, low, .. } => high - low + 1,
+            LirOp::ZeroExtend { to, .. } | LirOp::SignExtend { to, .. } => *to,
+            LirOp::Reg { width, .. } | LirOp::Latch { width } => *width,
+            LirOp::MemRead { data_width, .. } => *data_width,
+            LirOp::MemWrite { .. } => 0, // Write has no data output
+            LirOp::Constant { width, .. } | LirOp::Buffer { width } | LirOp::Tristate { width } => {
+                *width
+            }
+        }
+    }
+
+    /// Returns the number of input operands
+    pub fn input_count(&self) -> usize {
+        match self {
+            LirOp::Not { .. }
+            | LirOp::RedAnd { .. }
+            | LirOp::RedOr { .. }
+            | LirOp::RedXor { .. } => 1,
+            LirOp::Add { .. }
+            | LirOp::Sub { .. }
+            | LirOp::Mul { .. }
+            | LirOp::And { .. }
+            | LirOp::Or { .. }
+            | LirOp::Xor { .. }
+            | LirOp::Nand { .. }
+            | LirOp::Nor { .. }
+            | LirOp::Eq { .. }
+            | LirOp::Ne { .. }
+            | LirOp::Lt { .. }
+            | LirOp::Le { .. }
+            | LirOp::Gt { .. }
+            | LirOp::Ge { .. }
+            | LirOp::Slt { .. }
+            | LirOp::Shl { .. }
+            | LirOp::Shr { .. }
+            | LirOp::Sar { .. }
+            | LirOp::Rol { .. }
+            | LirOp::Ror { .. } => 2,
+            LirOp::Mux2 { .. } => 3,                        // sel, a, b
+            LirOp::MuxN { ways, .. } => 1 + *ways as usize, // sel + inputs
+            LirOp::Concat { widths } => widths.len(),
+            LirOp::BitSelect { .. } => 2,   // data, index
+            LirOp::RangeSelect { .. } => 1, // data (range is fixed)
+            LirOp::ZeroExtend { .. } | LirOp::SignExtend { .. } => 1,
+            LirOp::Reg {
+                has_enable,
+                has_reset,
+                ..
+            } => {
+                1 + if *has_enable { 1 } else { 0 } + if *has_reset { 1 } else { 0 }
+                // d + optional en + optional rst
+            }
+            LirOp::Latch { .. } => 2,    // en, d
+            LirOp::MemRead { .. } => 1,  // addr
+            LirOp::MemWrite { .. } => 3, // addr, data, we
+            LirOp::Constant { .. } => 0,
+            LirOp::Buffer { .. } => 1,
+            LirOp::Tristate { .. } => 2, // data, enable
+        }
+    }
+
+    /// Returns true if this operation is sequential (state-holding)
+    pub fn is_sequential(&self) -> bool {
+        matches!(
+            self,
+            LirOp::Reg { .. }
+                | LirOp::Latch { .. }
+                | LirOp::MemRead { .. }
+                | LirOp::MemWrite { .. }
+        )
+    }
+}
+
+// ============================================================================
+// Word-Level Netlist
+// ============================================================================
+
+/// Unique identifier for a LIR node
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LirNodeId(pub u32);
+
+/// Unique identifier for a LIR signal
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LirSignalId(pub u32);
+
+/// A node in the LIR netlist (an operation instance)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirNode {
+    /// Unique ID
+    pub id: LirNodeId,
+    /// Operation type
+    pub op: LirOp,
+    /// Input signal IDs
+    pub inputs: Vec<LirSignalId>,
+    /// Output signal ID
+    pub output: LirSignalId,
+    /// Hierarchical path for traceability
+    pub path: String,
+    /// Clock signal (for sequential ops)
+    pub clock: Option<LirSignalId>,
+    /// Reset signal (for sequential ops)
+    pub reset: Option<LirSignalId>,
+}
+
+/// A signal in the LIR netlist
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirSignal {
+    /// Unique ID
+    pub id: LirSignalId,
+    /// Signal name
+    pub name: String,
+    /// Bit width
+    pub width: u32,
+    /// Driver node (None for primary inputs)
+    pub driver: Option<LirNodeId>,
+    /// Is this a primary input?
+    pub is_input: bool,
+    /// Is this a primary output?
+    pub is_output: bool,
+    /// Is this a detection signal (for safety analysis)?
+    /// Set via #[detection_signal] attribute on port
+    #[serde(default)]
+    pub is_detection: bool,
+}
+
+/// Low-level Intermediate Representation (word-level)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Lir {
+    /// Design name
+    pub name: String,
+    /// All nodes (operations)
+    pub nodes: Vec<LirNode>,
+    /// All signals
+    pub signals: Vec<LirSignal>,
+    /// Primary input signal IDs
+    pub inputs: Vec<LirSignalId>,
+    /// Primary output signal IDs
+    pub outputs: Vec<LirSignalId>,
+    /// Clock signals
+    pub clocks: Vec<LirSignalId>,
+    /// Reset signals
+    pub resets: Vec<LirSignalId>,
+    /// Detection signals (for safety analysis)
+    /// These are output signals marked with #[detection_signal]
+    #[serde(default)]
+    pub detection_signals: Vec<LirSignalId>,
+    /// Signal name to ID mapping
+    signal_map: HashMap<String, LirSignalId>,
+    /// Module-level safety information (from MIR SafetyContext)
+    /// Propagated to all cells during technology mapping
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_safety_info: Option<LirSafetyInfo>,
+}
+
+impl Lir {
+    /// Create a new empty LIR
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            nodes: Vec::new(),
+            signals: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            clocks: Vec::new(),
+            resets: Vec::new(),
+            detection_signals: Vec::new(),
+            signal_map: HashMap::new(),
+            module_safety_info: None,
+        }
+    }
+
+    /// Add a signal and return its ID
+    pub fn add_signal(&mut self, name: String, width: u32) -> LirSignalId {
+        let id = LirSignalId(self.signals.len() as u32);
+        self.signal_map.insert(name.clone(), id);
+        self.signals.push(LirSignal {
+            id,
+            name,
+            width,
+            driver: None,
+            is_input: false,
+            is_output: false,
+            is_detection: false,
+        });
+        id
+    }
+
+    /// Add a primary input signal
+    pub fn add_input(&mut self, name: String, width: u32) -> LirSignalId {
+        let id = self.add_signal(name, width);
+        self.signals[id.0 as usize].is_input = true;
+        self.inputs.push(id);
+        id
+    }
+
+    /// Add a primary output signal
+    pub fn add_output(&mut self, name: String, width: u32) -> LirSignalId {
+        let id = self.add_signal(name, width);
+        self.signals[id.0 as usize].is_output = true;
+        self.outputs.push(id);
+        id
+    }
+
+    /// Add a detection signal output (for safety analysis)
+    pub fn add_detection_output(&mut self, name: String, width: u32) -> LirSignalId {
+        let id = self.add_output(name, width);
+        self.signals[id.0 as usize].is_detection = true;
+        self.detection_signals.push(id);
+        id
+    }
+
+    /// Mark an existing signal as a detection signal
+    pub fn mark_as_detection(&mut self, id: LirSignalId) {
+        if let Some(signal) = self.signals.get_mut(id.0 as usize) {
+            signal.is_detection = true;
+            if !self.detection_signals.contains(&id) {
+                self.detection_signals.push(id);
+            }
+        }
+    }
+
+    /// Add a node (operation) and return its ID
+    pub fn add_node(
+        &mut self,
+        op: LirOp,
+        inputs: Vec<LirSignalId>,
+        output: LirSignalId,
+        path: String,
+    ) -> LirNodeId {
+        let id = LirNodeId(self.nodes.len() as u32);
+        self.signals[output.0 as usize].driver = Some(id);
+        self.nodes.push(LirNode {
+            id,
+            op,
+            inputs,
+            output,
+            path,
+            clock: None,
+            reset: None,
+        });
+        id
+    }
+
+    /// Add a sequential node with clock and reset
+    pub fn add_seq_node(
+        &mut self,
+        op: LirOp,
+        inputs: Vec<LirSignalId>,
+        output: LirSignalId,
+        path: String,
+        clock: LirSignalId,
+        reset: Option<LirSignalId>,
+    ) -> LirNodeId {
+        let id = LirNodeId(self.nodes.len() as u32);
+        self.signals[output.0 as usize].driver = Some(id);
+        self.nodes.push(LirNode {
+            id,
+            op,
+            inputs,
+            output,
+            path,
+            clock: Some(clock),
+            reset,
+        });
+        id
+    }
+
+    /// Get a signal by name
+    pub fn get_signal(&self, name: &str) -> Option<&LirSignal> {
+        self.signal_map
+            .get(name)
+            .map(|id| &self.signals[id.0 as usize])
+    }
+
+    /// Get total number of operations
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Get total number of signals
+    pub fn signal_count(&self) -> usize {
+        self.signals.len()
+    }
+
+    /// Calculate total bit-width of all signals (for statistics)
+    pub fn total_bits(&self) -> u32 {
+        self.signals.iter().map(|s| s.width).sum()
+    }
+}
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+/// Statistics for LIR
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LirStats {
+    /// Total nodes
+    pub total_nodes: usize,
+    /// Total signals
+    pub total_signals: usize,
+    /// Total bits
+    pub total_bits: u32,
+    /// Arithmetic ops
+    pub arithmetic_ops: usize,
+    /// Logic ops
+    pub logic_ops: usize,
+    /// Comparison ops
+    pub comparison_ops: usize,
+    /// Mux ops
+    pub mux_ops: usize,
+    /// Sequential ops
+    pub sequential_ops: usize,
+}
+
+impl LirStats {
+    /// Calculate statistics from a Lir
+    pub fn from_lir(lir: &Lir) -> Self {
+        let mut stats = Self {
+            total_nodes: lir.nodes.len(),
+            total_signals: lir.signals.len(),
+            total_bits: lir.total_bits(),
+            ..Default::default()
+        };
+
+        for node in &lir.nodes {
+            match &node.op {
+                LirOp::Add { .. } | LirOp::Sub { .. } | LirOp::Mul { .. } => {
+                    stats.arithmetic_ops += 1;
+                }
+                LirOp::And { .. }
+                | LirOp::Or { .. }
+                | LirOp::Xor { .. }
+                | LirOp::Not { .. }
+                | LirOp::Nand { .. }
+                | LirOp::Nor { .. } => {
+                    stats.logic_ops += 1;
+                }
+                LirOp::Eq { .. }
+                | LirOp::Ne { .. }
+                | LirOp::Lt { .. }
+                | LirOp::Le { .. }
+                | LirOp::Gt { .. }
+                | LirOp::Ge { .. }
+                | LirOp::Slt { .. } => {
+                    stats.comparison_ops += 1;
+                }
+                LirOp::Mux2 { .. } | LirOp::MuxN { .. } => {
+                    stats.mux_ops += 1;
+                }
+                LirOp::Reg { .. } | LirOp::Latch { .. } => {
+                    stats.sequential_ops += 1;
+                }
+                _ => {}
+            }
+        }
+
+        stats
+    }
+}
+
+// ============================================================================
+// Backward Compatibility Type Aliases
+// ============================================================================
+
+/// Type alias for backward compatibility
+pub type WordLir = Lir;
+/// Type alias for backward compatibility
+pub type WordOp = LirOp;
+/// Type alias for backward compatibility
+pub type WordNode = LirNode;
+/// Type alias for backward compatibility
+pub type WordSignal = LirSignal;
+/// Type alias for backward compatibility
+pub type WordNodeId = LirNodeId;
+/// Type alias for backward compatibility
+pub type WordSignalId = LirSignalId;
+/// Type alias for backward compatibility
+pub type WordLirStats = LirStats;
+
+// ============================================================================
+// LIR Tests
+// ============================================================================
+
+#[cfg(test)]
+mod lir_tests {
+    use super::*;
+
+    #[test]
+    fn test_lir_op_output_width() {
+        assert_eq!(
+            LirOp::Add {
+                width: 8,
+                has_carry: false
+            }
+            .output_width(),
+            8
+        );
+        assert_eq!(
+            LirOp::Add {
+                width: 8,
+                has_carry: true
+            }
+            .output_width(),
+            9
+        );
+        assert_eq!(LirOp::Eq { width: 32 }.output_width(), 1);
+        assert_eq!(LirOp::Mux2 { width: 16 }.output_width(), 16);
+    }
+
+    #[test]
+    fn test_lir_creation() {
+        let mut lir = Lir::new("test".to_string());
+
+        let a = lir.add_input("a".to_string(), 8);
+        let b = lir.add_input("b".to_string(), 8);
+        let sum = lir.add_signal("sum".to_string(), 8);
+        let out = lir.add_output("out".to_string(), 8);
+
+        lir.add_node(
+            LirOp::Add {
+                width: 8,
+                has_carry: false,
+            },
+            vec![a, b],
+            sum,
+            "add".to_string(),
+        );
+
+        lir.add_node(
+            LirOp::Buffer { width: 8 },
+            vec![sum],
+            out,
+            "out_buf".to_string(),
+        );
+
+        assert_eq!(lir.node_count(), 2);
+        assert_eq!(lir.signal_count(), 4);
+        assert_eq!(lir.inputs.len(), 2);
+        assert_eq!(lir.outputs.len(), 1);
+    }
+
+    #[test]
+    fn test_lir_op_is_sequential() {
+        assert!(LirOp::Reg {
+            width: 8,
+            has_enable: false,
+            has_reset: true,
+            reset_value: Some(0)
+        }
+        .is_sequential());
+        assert!(!LirOp::Add {
+            width: 8,
+            has_carry: false
+        }
+        .is_sequential());
+    }
+}

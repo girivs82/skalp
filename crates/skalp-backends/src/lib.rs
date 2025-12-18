@@ -3,6 +3,9 @@
 //!
 //! This crate provides hardware synthesis backends for SKALP designs,
 //! targeting both FPGA and ASIC platforms with comprehensive toolchain integration.
+//!
+//! NOTE: The Backend trait needs to be updated to use GateNetlist instead of the
+//! legacy Lir type. This is a work in progress.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -318,55 +321,7 @@ pub struct LogMessage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
-/// Main backend interface trait
-#[async_trait::async_trait]
-pub trait Backend {
-    /// Synthesize a design from LIR
-    async fn synthesize(
-        &self,
-        lir: &skalp_lir::Lir,
-        config: &SynthesisConfig,
-    ) -> BackendResult<SynthesisResults>;
-
-    /// Get supported target platforms
-    fn supported_targets(&self) -> Vec<TargetPlatform>;
-
-    /// Validate synthesis configuration
-    fn validate_config(&self, config: &SynthesisConfig) -> BackendResult<()>;
-
-    /// Get tool version information
-    fn tool_version(&self) -> BackendResult<String>;
-
-    /// Get backend name
-    fn name(&self) -> &str;
-
-    /// Get supported devices
-    fn supported_devices(&self) -> Vec<String>;
-
-    /// Validate design for backend
-    fn validate_design(&self, lir: &skalp_lir::Lir) -> BackendResult<()>;
-}
-
-/// Backend factory for creating appropriate backend instances
-pub struct BackendFactory;
-
-impl BackendFactory {
-    /// Create a backend for the specified target
-    pub fn create_backend(target: &TargetPlatform) -> BackendResult<Box<dyn Backend>> {
-        match target {
-            TargetPlatform::Fpga(fpga_target) => fpga::create_fpga_backend(fpga_target),
-            TargetPlatform::Asic(asic_target) => asic::create_asic_backend(asic_target),
-        }
-    }
-
-    /// List all available backends
-    pub fn available_backends() -> Vec<TargetPlatform> {
-        let mut backends = Vec::new();
-        backends.extend(fpga::available_fpga_targets());
-        backends.extend(asic::available_asic_targets());
-        backends
-    }
-}
+// NOTE: Backend trait removed - needs to be reimplemented for GateNetlist
 
 #[cfg(test)]
 mod tests {
@@ -408,11 +363,5 @@ mod tests {
 
         assert!(matches!(config.target, TargetPlatform::Fpga(_)));
         assert_eq!(config.optimization.primary, OptimizationTarget::Performance);
-    }
-
-    #[test]
-    fn test_backend_factory() {
-        let backends = BackendFactory::available_backends();
-        assert!(!backends.is_empty());
     }
 }

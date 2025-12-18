@@ -23,12 +23,8 @@ fn compile_to_verilog(source: &str) -> String {
     // Lower to MIR
     let mir = skalp_mir::lower_to_mir(&hir).expect("MIR lowering should succeed");
 
-    // Lower to LIR
-    let lir = skalp_lir::lower_to_lir(&mir).expect("LIR lowering should succeed");
-
-    // Generate SystemVerilog using correct generator
-    skalp_codegen::generate_systemverilog_from_mir(&mir, &lir)
-        .expect("Verilog generation should succeed")
+    // Generate SystemVerilog directly from MIR
+    skalp_codegen::generate_systemverilog_from_mir(&mir).expect("Verilog generation should succeed")
 }
 
 #[test]

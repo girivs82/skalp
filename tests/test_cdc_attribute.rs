@@ -580,7 +580,6 @@ impl CdcCodegenTest {
     // Use full compilation pipeline
     use skalp_codegen::generate_systemverilog_from_mir;
     use skalp_frontend::parse_and_build_hir;
-    use skalp_lir::lower_to_lir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
 
     let hir = parse_and_build_hir(source).expect("Failed to parse");
@@ -588,10 +587,9 @@ impl CdcCodegenTest {
     let mir = compiler
         .compile_to_mir(&hir)
         .expect("Failed to compile to MIR");
-    let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
     // Generate SystemVerilog
-    let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
+    let sv = generate_systemverilog_from_mir(&mir).expect("SV codegen should succeed");
 
     println!("Generated SystemVerilog:\n{}", sv);
 
@@ -629,7 +627,6 @@ impl CdcGrayTest {
     // Use full compilation pipeline
     use skalp_codegen::generate_systemverilog_from_mir;
     use skalp_frontend::parse_and_build_hir;
-    use skalp_lir::lower_to_lir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
 
     let hir = parse_and_build_hir(source).expect("Failed to parse");
@@ -637,10 +634,9 @@ impl CdcGrayTest {
     let mir = compiler
         .compile_to_mir(&hir)
         .expect("Failed to compile to MIR");
-    let lir = lower_to_lir(&mir).expect("Failed to lower to LIR");
 
     // Generate SystemVerilog
-    let sv = generate_systemverilog_from_mir(&mir, &lir).expect("SV codegen should succeed");
+    let sv = generate_systemverilog_from_mir(&mir).expect("SV codegen should succeed");
 
     println!("Generated SystemVerilog:\n{}", sv);
 

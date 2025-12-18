@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::gate_netlist::FaultType;
-use crate::word_lir::WordOp;
+use crate::lir::LirOp;
 
 // ============================================================================
 // Library Cell Types
@@ -897,8 +897,8 @@ impl TechLibrary {
         self.decomposition_rules.push(rule);
     }
 
-    /// Find a decomposition rule for a WordOp
-    pub fn find_decomposition(&self, op: &WordOp) -> Option<&DecompositionRule> {
+    /// Find a decomposition rule for a LirOp
+    pub fn find_decomposition(&self, op: &LirOp) -> Option<&DecompositionRule> {
         self.decomposition_rules.iter().find(|r| r.matches(op))
     }
 
@@ -1074,20 +1074,20 @@ pub struct DecompositionRule {
 }
 
 impl DecompositionRule {
-    /// Check if this rule matches a WordOp
-    pub fn matches(&self, op: &WordOp) -> bool {
+    /// Check if this rule matches a LirOp
+    pub fn matches(&self, op: &LirOp) -> bool {
         matches!(
             (&self.source, op),
-            (DecompSource::Xor, WordOp::Xor { .. })
-                | (DecompSource::And, WordOp::And { .. })
-                | (DecompSource::Or, WordOp::Or { .. })
-                | (DecompSource::Not, WordOp::Not { .. })
-                | (DecompSource::Mux2, WordOp::Mux2 { .. })
-                | (DecompSource::Add, WordOp::Add { .. })
-                | (DecompSource::Sub, WordOp::Sub { .. })
-                | (DecompSource::Eq, WordOp::Eq { .. })
-                | (DecompSource::Lt, WordOp::Lt { .. })
-                | (DecompSource::Reg, WordOp::Reg { .. })
+            (DecompSource::Xor, LirOp::Xor { .. })
+                | (DecompSource::And, LirOp::And { .. })
+                | (DecompSource::Or, LirOp::Or { .. })
+                | (DecompSource::Not, LirOp::Not { .. })
+                | (DecompSource::Mux2, LirOp::Mux2 { .. })
+                | (DecompSource::Add, LirOp::Add { .. })
+                | (DecompSource::Sub, LirOp::Sub { .. })
+                | (DecompSource::Eq, LirOp::Eq { .. })
+                | (DecompSource::Lt, LirOp::Lt { .. })
+                | (DecompSource::Reg, LirOp::Reg { .. })
         )
     }
 }
@@ -1218,8 +1218,8 @@ mod tests {
             fit_multiplier: 0.9,
         };
 
-        assert!(rule.matches(&WordOp::Xor { width: 1 }));
-        assert!(!rule.matches(&WordOp::And { width: 1 }));
+        assert!(rule.matches(&LirOp::Xor { width: 1 }));
+        assert!(!rule.matches(&LirOp::And { width: 1 }));
     }
 
     #[test]

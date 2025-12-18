@@ -17,8 +17,7 @@ fn compile_to_verilog(source: &str) -> Result<String, String> {
     let tree = parse(source);
     let hir = build_hir(&tree).map_err(|e| format!("HIR building failed: {:?}", e))?;
     let mir = skalp_mir::lower_to_mir(&hir).map_err(|e| format!("MIR lowering failed: {}", e))?;
-    let lir = skalp_lir::lower_to_lir(&mir).map_err(|e| format!("LIR lowering failed: {}", e))?;
-    skalp_codegen::generate_systemverilog_from_mir(&mir, &lir).map_err(|e| e.to_string())
+    skalp_codegen::generate_systemverilog_from_mir(&mir).map_err(|e| e.to_string())
 }
 
 // ============================================================================

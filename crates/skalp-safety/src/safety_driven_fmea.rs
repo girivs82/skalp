@@ -361,6 +361,19 @@ impl FaultEffectResult {
     }
 }
 
+/// PMHF breakdown components (ISO 26262-5 + ISO 26262-9)
+#[derive(Debug, Clone)]
+pub struct PmhfBreakdown {
+    /// λRF - Residual faults (undetected dangerous faults)
+    pub residual_fit: f64,
+    /// λSM - Safety mechanism failures (SM-of-SM)
+    pub sm_fit: f64,
+    /// λDPF_CCF - Common cause failures (e.g., power domain failures)
+    pub ccf_fit: f64,
+    /// Total PMHF = λRF + λSM + λDPF_CCF
+    pub total_pmhf: f64,
+}
+
 /// Complete FI-driven FMEA generation results
 #[derive(Debug, Clone)]
 pub struct FiDrivenFmeaResult {
@@ -392,70 +405,35 @@ pub struct FiDrivenFmeaResult {
     pub runtime_dc: Option<f64>,
     /// Boot DC (boot-time detection) - for LFM calculation
     pub boot_dc: Option<f64>,
-    /// CCF contribution to PMHF (λDPF_CCF) - from power domains and other CCF sources
+    /// CCF contribution to PMHF (λDPF_CCF from power domains, etc.)
     pub ccf_contribution: Option<f64>,
-    /// Safety mechanism failure contribution (λSM)
-    pub sm_contribution: Option<f64>,
 }
 
 impl FiDrivenFmeaResult {
-    /// Apply CCF contribution to PMHF calculation
-    ///
-    /// Per ISO 26262-5 + ISO 26262-9:
-    /// PMHF = λSPF + λRF + λSM + λDPF_CCF
-    ///
-    /// The FI-driven analysis gives us λRF (residual faults).
-    /// This method adds λDPF_CCF from CCF analysis (power domains, etc.)
+    /// Apply CCF (Common Cause Failure) contribution to PMHF
+    /// Per ISO 26262-9, CCF adds to PMHF as λDPF_CCF
     pub fn apply_ccf_contribution(&mut self, ccf_fit: f64) {
         self.ccf_contribution = Some(ccf_fit);
-        self.update_pmhf();
-    }
-
-    /// Apply safety mechanism failure contribution to PMHF
-    ///
-    /// λSM accounts for failures in the safety mechanisms themselves
-    pub fn apply_sm_contribution(&mut self, sm_fit: f64) {
-        self.sm_contribution = Some(sm_fit);
-        self.update_pmhf();
-    }
-
-    /// Recalculate PMHF with all contributions
-    ///
-    /// Full formula: PMHF = λRF + λSM + λDPF_CCF
-    /// Where λRF = base_pmhf from FI analysis (residual faults)
-    fn update_pmhf(&mut self) {
-        if let Some(base_pmhf) = self.measured_pmhf {
-            let ccf = self.ccf_contribution.unwrap_or(0.0);
-            let sm = self.sm_contribution.unwrap_or(0.0);
-            self.measured_pmhf = Some(base_pmhf + ccf + sm);
+        // Update measured_pmhf to include CCF contribution
+        if let Some(pmhf) = self.measured_pmhf {
+            self.measured_pmhf = Some(pmhf + ccf_fit);
         }
     }
 
-    /// Get PMHF breakdown for reporting
+    /// Get PMHF breakdown showing individual components
     pub fn pmhf_breakdown(&self) -> PmhfBreakdown {
-        let base = self.measured_pmhf.unwrap_or(0.0)
-            - self.ccf_contribution.unwrap_or(0.0)
-            - self.sm_contribution.unwrap_or(0.0);
+        let ccf_fit = self.ccf_contribution.unwrap_or(0.0);
+        let total_pmhf = self.measured_pmhf.unwrap_or(0.0);
+        // Residual FIT is total minus CCF
+        let residual_fit = total_pmhf - ccf_fit;
+
         PmhfBreakdown {
-            residual_fit: base,
-            ccf_fit: self.ccf_contribution.unwrap_or(0.0),
-            sm_fit: self.sm_contribution.unwrap_or(0.0),
-            total_pmhf: self.measured_pmhf.unwrap_or(0.0),
+            residual_fit,
+            sm_fit: 0.0, // SM-of-SM not currently tracked separately
+            ccf_fit,
+            total_pmhf,
         }
     }
-}
-
-/// PMHF breakdown for detailed reporting
-#[derive(Debug, Clone, Default)]
-pub struct PmhfBreakdown {
-    /// λRF - Residual faults (undetected dangerous faults)
-    pub residual_fit: f64,
-    /// λDPF_CCF - Common cause failure contribution
-    pub ccf_fit: f64,
-    /// λSM - Safety mechanism failure contribution
-    pub sm_fit: f64,
-    /// Total PMHF = λRF + λDPF_CCF + λSM
-    pub total_pmhf: f64,
 }
 
 // ============================================================================
@@ -660,8 +638,7 @@ impl SafetyDrivenFmeaGenerator {
             meets_asil,
             runtime_dc,
             boot_dc,
-            ccf_contribution: None, // Set via apply_ccf_contribution()
-            sm_contribution: None,  // Set via apply_sm_contribution()
+            ccf_contribution: None,
         }
     }
 

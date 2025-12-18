@@ -257,7 +257,6 @@ macro_rules! golden_test {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_golden_path_generation() {

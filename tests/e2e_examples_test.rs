@@ -33,11 +33,8 @@ fn compile_to_verilog(source: &str) -> Result<String, String> {
     // Lower to MIR
     let mir = skalp_mir::lower_to_mir(&hir).map_err(|e| format!("MIR lowering failed: {}", e))?;
 
-    // Lower to LIR
-    let lir = skalp_lir::lower_to_lir(&mir).map_err(|e| format!("LIR lowering failed: {}", e))?;
-
-    // Generate SystemVerilog
-    skalp_codegen::generate_systemverilog_from_mir(&mir, &lir).map_err(|e| e.to_string())
+    // Generate SystemVerilog directly from MIR
+    skalp_codegen::generate_systemverilog_from_mir(&mir).map_err(|e| e.to_string())
 }
 
 /// Assert that source compiles successfully to Verilog

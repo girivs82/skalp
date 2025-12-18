@@ -561,9 +561,8 @@ fn build_design(
     output_dir: &PathBuf,
     safety_options: Option<SafetyBuildOptions>,
 ) -> Result<()> {
-    use skalp_codegen::{generate_systemverilog_from_mir, generate_verilog, generate_vhdl};
+    use skalp_codegen::systemverilog::generate_systemverilog_from_mir;
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::lower_to_lir;
 
     info!("Building design from {:?} to {}", source, target);
 
@@ -585,10 +584,6 @@ fn build_design(
         .compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR with CDC analysis: {}", e))?;
 
-    // Lower to LIR
-    info!("Lowering to LIR...");
-    let lir = lower_to_lir(&mir).context("Failed to lower to LIR")?;
-
     // Create output directory
     fs::create_dir_all(output_dir)?;
 
@@ -596,37 +591,25 @@ fn build_design(
     let output_file = match target {
         "sv" | "systemverilog" => {
             info!("Generating SystemVerilog...");
-            // Use the new MIR-based generator for proper process generation
-            let sv_code = generate_systemverilog_from_mir(&mir, &lir)?;
+            // Use the MIR-based generator
+            let sv_code = generate_systemverilog_from_mir(&mir)?;
             let output_path = output_dir.join("design.sv");
             fs::write(&output_path, sv_code)?;
             output_path
         }
         "v" | "verilog" => {
-            info!("Generating Verilog...");
-            let v_code = generate_verilog(&lir)?;
-            let output_path = output_dir.join("design.v");
-            fs::write(&output_path, v_code)?;
-            output_path
+            // Verilog generation temporarily disabled (was using legacy LIR)
+            anyhow::bail!(
+                "Verilog generation is temporarily disabled. Use 'sv' for SystemVerilog."
+            );
         }
         "vhdl" => {
-            info!("Generating VHDL...");
-            let vhdl_code = generate_vhdl(&lir)?;
-            let output_path = output_dir.join("design.vhd");
-            fs::write(&output_path, vhdl_code)?;
-            output_path
+            // VHDL generation temporarily disabled (was using legacy LIR)
+            anyhow::bail!("VHDL generation is temporarily disabled. Use 'sv' for SystemVerilog.");
         }
         "lir" => {
-            info!("Saving LIR...");
-            let output_path = output_dir.join("design.lir");
-            // Get the first (top) module's LIR
-            let top_lir = lir
-                .first()
-                .map(|r| &r.lir)
-                .ok_or_else(|| anyhow::anyhow!("No modules produced in LIR lowering"))?;
-            let lir_json = serde_json::to_string_pretty(top_lir)?;
-            fs::write(&output_path, lir_json)?;
-            output_path
+            // LIR output temporarily disabled
+            anyhow::bail!("LIR output is temporarily disabled. Use 'mir' for MIR output.");
         }
         "mir" => {
             info!("Saving MIR...");
@@ -636,10 +619,7 @@ fn build_design(
             output_path
         }
         _ => {
-            anyhow::bail!(
-                "Unsupported target: {}. Use 'sv', 'v', 'vhdl', 'lir', or 'mir'",
-                target
-            );
+            anyhow::bail!("Unsupported target: {}. Use 'sv' or 'mir'", target);
         }
     };
 
@@ -699,8 +679,8 @@ fn simulate_design(
             }
 
             if gate_level {
-                // MIR → LIR → SIR
-                simulate_gate_level_from_mir(&mir, cycles, use_gpu)
+                // Gate-level simulation temporarily disabled during GateNetlist migration
+                anyhow::bail!("Gate-level simulation from MIR is temporarily disabled. Use behavioral simulation (--mode behavioral) instead.");
             } else {
                 // MIR → SIR
                 let sir = convert_mir_to_sir(&mir.modules[0]);
@@ -708,11 +688,8 @@ fn simulate_design(
             }
         }
         Some("lir") => {
-            // Pre-compiled LIR file - always gate-level
-            use skalp_lir::lir::Lir;
-            let design_str = fs::read_to_string(design_file)?;
-            let lir: Lir = serde_json::from_str(&design_str)?;
-            simulate_lir(&lir, cycles, use_gpu)
+            // Legacy LIR format has been removed
+            anyhow::bail!("Legacy LIR format is no longer supported. Use .sk files with behavioral or gate-level simulation.");
         }
         _ => {
             anyhow::bail!("Unsupported file format. Use .sk, .mir, or .lir files");
@@ -763,118 +740,27 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
     simulate_sir_behavioral(&sir, cycles, use_gpu)
 }
 
-/// Gate-level simulation: HIR → MIR → LIR → SIR
-fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
-    use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_mir::MirCompiler;
-
-    println!("🔬 Gate-Level Simulation (HIR → MIR → LIR → SIR)");
+/// Gate-level simulation: HIR → MIR → WordLir → GateNetlist → SIR
+/// NOTE: This path is being migrated to use GateNetlist instead of legacy LIR
+fn simulate_gate_level(source_file: &PathBuf, _cycles: u64, _use_gpu: bool) -> Result<()> {
+    println!("🔬 Gate-Level Simulation");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Source: {:?}", source_file);
-    println!("Cycles: {}", cycles);
-    println!("GPU: {}", use_gpu);
     println!();
-
-    // Parse and build HIR
-    info!("Parsing SKALP source...");
-    let hir =
-        parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
-
-    // Lower to MIR
-    info!("Compiling to MIR...");
-    let compiler = MirCompiler::new();
-    let mir = compiler
-        .compile_to_mir(&hir)
-        .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR: {}", e))?;
-
-    simulate_gate_level_from_mir(&mir, cycles, use_gpu)
+    println!("⚠️  Gate-level simulation is being migrated to use GateNetlist.");
+    println!("   Please use behavioral simulation (--mode behavioral) for now.");
+    println!("   The new flow: HIR → MIR → WordLir → TechMapper → GateNetlist → SIR");
+    anyhow::bail!("Gate-level simulation temporarily disabled during GateNetlist migration");
 }
 
-/// Gate-level simulation from MIR
-fn simulate_gate_level_from_mir(mir: &skalp_mir::Mir, cycles: u64, use_gpu: bool) -> Result<()> {
-    use skalp_lir::lower_to_lir;
-
-    // Lower to LIR (gate-level netlist)
-    info!("Converting to gate-level netlist (LIR)...");
-    let lir_results = lower_to_lir(mir)?;
-
-    if lir_results.is_empty() {
-        anyhow::bail!("No modules produced in LIR lowering");
-    }
-
-    let lir = &lir_results[0].lir;
-    let stats = &lir_results[0].stats;
-
-    println!("📊 Gate-Level Statistics:");
-    println!("   Module: {}", lir.name);
-    println!("   Ports: {}", stats.ports);
-    println!("   Primitives: {}", lir.primitives.len());
-    println!("   Nets: {}", lir.nets.len());
-
-    // Count by type
-    let seq_count = lir
-        .primitives
-        .iter()
-        .filter(|p| p.ptype.is_sequential())
-        .count();
-    let comb_count = lir.primitives.len() - seq_count;
-    println!("   Sequential (DFFs): {}", seq_count);
-    println!("   Combinational: {}", comb_count);
-
-    // FIT calculation
-    let total_fit: f64 = lir.primitives.iter().map(|p| p.ptype.base_fit()).sum();
-    println!("   Total FIT: {:.2}", total_fit);
-    println!();
-
-    simulate_lir(lir, cycles, use_gpu)
-}
-
-/// Simulate from LIR (gate-level netlist)
-fn simulate_lir(lir: &skalp_lir::lir::Lir, cycles: u64, use_gpu: bool) -> Result<()> {
-    use skalp_sim::lir_to_sir::convert_lir_to_sir;
-    use skalp_sim::GateLevelSimulator;
-
-    // Convert LIR to structural SIR
-    info!("Converting to structural SIR...");
-    let sir_result = convert_lir_to_sir(lir);
-
-    println!("🔧 Running gate-level simulation...");
-
-    // Create gate-level simulator
-    let mut sim = GateLevelSimulator::new(&sir_result.sir);
-
-    println!("   Primitive count: {}", sim.primitive_count());
-    println!("   Total FIT: {:.2}", sim.total_fit());
-
-    // Run simulation for specified cycles
-    for cycle in 0..cycles {
-        sim.step();
-
-        // Print progress every 100 cycles
-        if cycle > 0 && cycle % 100 == 0 {
-            print!("\r   Cycle: {}/{}", cycle, cycles);
-            use std::io::Write;
-            std::io::stdout().flush().ok();
-        }
-    }
-    println!("\r   Completed {} cycles", cycles);
-
-    // Dump final state
-    let signals = sim.dump_signals();
-    if !signals.is_empty() {
-        println!("\n📊 Final Signal Values (sample):");
-        for (name, bits) in signals.iter().take(10) {
-            let val: u64 = bits.iter().enumerate().map(|(i, &b)| (b as u64) << i).sum();
-            println!("   {} = {} (0x{:X})", name, val, val);
-        }
-        if signals.len() > 10 {
-            println!("   ... and {} more signals", signals.len() - 10);
-        }
-    }
-
-    println!("\n✅ Gate-level simulation complete!");
-
-    Ok(())
+/// Gate-level simulation from MIR (stub - pending GateNetlist migration)
+#[allow(dead_code)]
+fn simulate_gate_level_from_mir_stub(
+    _mir: &skalp_mir::Mir,
+    _cycles: u64,
+    _use_gpu: bool,
+) -> Result<()> {
+    anyhow::bail!("Gate-level simulation temporarily disabled during GateNetlist migration")
 }
 
 /// Run behavioral SIR simulation
@@ -925,181 +811,28 @@ fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: boo
 }
 
 /// Gate-level analysis and fault simulation
+/// NOTE: This function is being migrated to use GateNetlist instead of legacy LIR
 fn analyze_design(
     source: &PathBuf,
-    output_dir: &PathBuf,
-    fault_sim: bool,
-    cycles: u64,
-    use_gpu: bool,
-    max_faults: usize,
-    detailed: bool,
+    _output_dir: &PathBuf,
+    _fault_sim: bool,
+    _cycles: u64,
+    _use_gpu: bool,
+    _max_faults: usize,
+    _detailed: bool,
 ) -> Result<()> {
-    use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::lower_to_lir;
-    use skalp_sim::lir_to_sir::convert_lir_to_sir;
-    use std::collections::HashMap;
-
     println!("🔬 Gate-Level Analysis");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Source: {:?}", source);
-
-    // Parse and build HIR with module resolution
-    info!("Parsing SKALP source and building HIR with module resolution...");
-    let hir = parse_and_build_hir_from_file(source).context("Failed to parse and build HIR")?;
-
-    // Lower to MIR
-    info!("Lowering to MIR...");
-    let compiler =
-        skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
-    let mir = compiler
-        .compile_to_mir(&hir)
-        .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR: {}", e))?;
-
-    // Lower to Gate-Level Netlist
-    info!("Converting to gate-level netlist...");
-    let gate_results = lower_to_lir(&mir)?;
-
-    println!("\n📊 Gate-Level Analysis Results");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-    let mut total_primitives = 0;
-    let mut total_fit = 0.0;
-    let mut all_counts: HashMap<String, usize> = HashMap::new();
-
-    for result in &gate_results {
-        let lir = &result.lir;
-        let stats = &result.stats;
-
-        println!("\n📦 Module: {}", lir.name);
-        println!("   Ports: {}", stats.ports);
-        println!("   Primitives: {}", lir.primitives.len());
-        println!("   Nets: {}", lir.nets.len());
-
-        // Count primitives by type
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        let mut module_fit = 0.0;
-
-        for prim in &lir.primitives {
-            *counts
-                .entry(prim.ptype.short_name().to_string())
-                .or_insert(0) += 1;
-            *all_counts
-                .entry(prim.ptype.short_name().to_string())
-                .or_insert(0) += 1;
-            module_fit += prim.ptype.base_fit();
-        }
-
-        if detailed {
-            println!("\n   Primitive Breakdown:");
-            let mut sorted: Vec<_> = counts.into_iter().collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1));
-            for (ptype, count) in &sorted {
-                println!("     {:15} : {:5}", ptype, count);
-            }
-        }
-
-        println!("   Module FIT: {:.2}", module_fit);
-
-        total_primitives += lir.primitives.len();
-        total_fit += module_fit;
-    }
-
-    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("📈 Summary");
-    println!("   Total Modules: {}", gate_results.len());
-    println!("   Total Primitives: {}", total_primitives);
-    println!("   Total FIT: {:.2}", total_fit);
-
-    if detailed {
-        println!("\n   Overall Primitive Breakdown:");
-        let mut sorted: Vec<_> = all_counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
-        for (ptype, count) in &sorted {
-            println!("     {:15} : {:5}", ptype, count);
-        }
-    }
-
-    // Run fault simulation if requested
-    if fault_sim && !gate_results.is_empty() {
-        println!("\n🔥 Fault Simulation");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-        for result in &gate_results {
-            let lir = &result.lir;
-            println!("\n   Module: {}", lir.name);
-
-            // Convert to SIR for simulation
-            let sir_result = convert_lir_to_sir(lir);
-
-            #[cfg(target_os = "macos")]
-            {
-                use skalp_sim::sir::FaultType;
-                use skalp_sim::{GpuFaultCampaignConfig, GpuFaultSimulator};
-
-                if use_gpu {
-                    match GpuFaultSimulator::new(&sir_result.sir) {
-                        Ok(gpu_sim) => {
-                            println!("   Using GPU: {}", gpu_sim.device_info());
-
-                            let config = GpuFaultCampaignConfig {
-                                cycles_per_fault: cycles,
-                                fault_types: vec![FaultType::StuckAt0, FaultType::StuckAt1],
-                                max_faults,
-                                use_gpu: true,
-                                ..Default::default()
-                            };
-
-                            let results = gpu_sim.run_fault_campaign(&config);
-
-                            println!("   Faults Tested: {}", results.total_faults);
-                            println!("   Detected: {}", results.detected_faults);
-                            println!("   Corruption Faults: {}", results.corruption_faults);
-                            println!(
-                                "   Safe Faults: {} ({:.1}%)",
-                                results.safe_faults, results.safe_fault_percentage
-                            );
-                            println!(
-                                "   Diagnostic Coverage: {:.2}%",
-                                results.diagnostic_coverage
-                            );
-                        }
-                        Err(e) => {
-                            println!("   GPU initialization failed: {}. Using CPU fallback.", e);
-                            run_cpu_fault_sim(&sir_result.sir, cycles, max_faults);
-                        }
-                    }
-                } else {
-                    run_cpu_fault_sim(&sir_result.sir, cycles, max_faults);
-                }
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                run_cpu_fault_sim(&sir_result.sir, cycles, max_faults);
-            }
-        }
-    }
-
-    // Create output directory and save results
-    fs::create_dir_all(output_dir)?;
-
-    // Save analysis summary
-    let summary_path = output_dir.join("analysis_summary.txt");
-    let mut summary = String::new();
-    summary.push_str("Gate-Level Analysis Summary\n");
-    summary.push_str(&format!("Source: {:?}\n", source));
-    summary.push_str(&format!("Total Modules: {}\n", gate_results.len()));
-    summary.push_str(&format!("Total Primitives: {}\n", total_primitives));
-    summary.push_str(&format!("Total FIT: {:.2}\n", total_fit));
-    fs::write(&summary_path, summary)?;
-
-    println!("\n✅ Analysis complete!");
-    println!("📄 Results saved to: {:?}", output_dir);
-
-    Ok(())
+    println!();
+    println!("⚠️  Gate-level analysis is being migrated to use GateNetlist.");
+    println!("   Please use the 'safety' command for ISO 26262 FMEDA analysis.");
+    println!("   The new flow: HIR → MIR → WordLir → TechMapper → GateNetlist");
+    anyhow::bail!("Gate-level analysis temporarily disabled during GateNetlist migration");
 }
 
 /// Run CPU-based fault simulation
+#[allow(dead_code)]
 fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) {
     use skalp_sim::{FaultCampaignConfig, GateLevelSimulator};
 
@@ -1133,69 +866,15 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
 }
 
 /// Synthesize design for FPGA/ASIC
-fn synthesize_design(source: &PathBuf, device: &str, full_flow: bool) -> Result<()> {
-    use skalp_backends::TargetPlatform;
-
-    info!("Synthesizing for device: {}", device);
-
-    // First build to LIR
-    let temp_dir = tempfile::TempDir::new()?;
-    build_design(source, "lir", &temp_dir.path().to_path_buf(), None)?;
-
-    // Load the LIR
-    let lir_path = temp_dir.path().join("design.lir");
-    let lir_str = fs::read_to_string(&lir_path)?;
-    let _lir: skalp_lir::Lir = serde_json::from_str(&lir_str)?;
-
-    // Parse device target
-    let target = match device {
-        "ice40-hx1k" => TargetPlatform::Fpga(skalp_backends::FpgaTarget::Ice40 {
-            part: "iCE40HX1K".to_string(),
-            package: "TQ144".to_string(),
-        }),
-        "ice40-hx8k" => TargetPlatform::Fpga(skalp_backends::FpgaTarget::Ice40 {
-            part: "iCE40HX8K".to_string(),
-            package: "CT256".to_string(),
-        }),
-        "xc7a35t" => TargetPlatform::Fpga(skalp_backends::FpgaTarget::Xilinx7Series {
-            part: "xc7a35t".to_string(),
-            package: "cpg236".to_string(),
-        }),
-        "sky130" => TargetPlatform::Asic(skalp_backends::AsicTarget::Sky130),
-        "freepdk45" => TargetPlatform::Asic(skalp_backends::AsicTarget::FreePdk45),
-        _ => {
-            anyhow::bail!(
-                "Unknown device: {}. Supported: ice40-hx1k, ice40-hx8k, xc7a35t, sky130, freepdk45",
-                device
-            );
-        }
-    };
-
-    // Create synthesis config
-    let config = skalp_backends::SynthesisConfig {
-        target: target.clone(),
-        optimization: skalp_backends::OptimizationGoals {
-            primary: skalp_backends::OptimizationTarget::Area,
-            max_area_utilization: Some(0.8),
-            target_frequency: Some(100.0),
-            max_power: None,
-        },
-        timing_constraints: vec![],
-        power_constraints: None,
-        output_dir: "synth_output".to_string(),
-        tool_options: std::collections::HashMap::new(),
-    };
-
-    println!("🔧 Would run synthesis for target: {:?}", target);
-    println!("⚠️  Backend synthesis integration not yet complete in CLI");
-
-    if full_flow {
-        println!("\n🔄 Running full flow (place, route, bitstream)...");
-        // This would call place & route tools
-        println!("⚠️  Full flow not yet implemented");
-    }
-
-    Ok(())
+/// NOTE: This function is being migrated to use GateNetlist instead of legacy LIR
+fn synthesize_design(source: &PathBuf, device: &str, _full_flow: bool) -> Result<()> {
+    println!("🔧 Synthesizing design for device: {}", device);
+    println!("Source: {:?}", source);
+    println!();
+    println!("⚠️  Synthesis is being migrated to use GateNetlist.");
+    println!("   The new flow: HIR → MIR → WordLir → TechMapper → GateNetlist → Backend");
+    println!("   Supported devices: ice40-hx1k, ice40-hx8k, xc7a35t, sky130, freepdk45");
+    anyhow::bail!("FPGA/ASIC synthesis temporarily disabled during GateNetlist migration");
 }
 
 /// Program FPGA device
@@ -1262,16 +941,11 @@ fn format_files(files: &[PathBuf], check: bool) -> Result<()> {
 
 /// Run property-based tests
 fn run_tests(filter: Option<&str>) -> Result<()> {
-    use skalp_testing::TestConfig;
-
     println!("🧪 Running property-based tests...");
 
     if let Some(f) = filter {
         println!("   Filter: {}", f);
     }
-
-    // Load test configuration
-    let _config = TestConfig::default();
 
     // Find and load test files
     let test_files = fs::read_dir("tests")?
@@ -1970,6 +1644,8 @@ fn generate_hsi_report(hierarchy: &skalp_safety::hierarchy::SafetyHierarchy) -> 
 /// This implements the "double advantage" approach:
 /// 1. Failure effect identification from simulation
 /// 2. Measured diagnostic coverage from simulation
+///
+/// Flow: HIR → MIR → Lir → TechMapper → GateNetlist → SIR → FI Simulation
 #[allow(clippy::too_many_arguments)]
 fn run_fi_driven_safety(
     source: &PathBuf,
@@ -1986,15 +1662,883 @@ fn run_fi_driven_safety(
     dual_bist: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::lower_to_flattened_lir;
+    use skalp_lir::{
+        builtin_libraries::builtin_generic_asic, lower_mir_module_to_lir, tech_mapper::TechMapper,
+    };
     use skalp_safety::asil::AsilLevel;
-    use skalp_safety::fault_simulation::{EffectCondition, FailureEffectDef, SafetyGoalSimSpec};
+    use skalp_safety::fault_simulation::{
+        CompareOp, CompareValue, ConditionTerm, EffectCondition, FailureEffectDef,
+        SafetyGoalSimSpec,
+    };
     use skalp_safety::hierarchy::{DesignRef, Severity};
     use skalp_safety::safety_driven_fmea::{
         FaultEffectResult, FiDrivenConfig, SafetyDrivenFmeaGenerator,
     };
-    use skalp_sim::lir_to_sir::convert_lir_to_sir;
+    use skalp_sim::convert_gate_netlist_to_sir;
     use std::time::Instant;
+
+    let start = Instant::now();
+
+    println!("🛡️  ISO 26262 FI-Driven Safety Analysis");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Source: {:?}", source);
+    println!("Output: {:?}", output_dir);
+
+    // Parse ASIL level
+    let target_asil = match asil_str.to_uppercase().as_str() {
+        "A" => AsilLevel::A,
+        "B" => AsilLevel::B,
+        "C" => AsilLevel::C,
+        "D" => AsilLevel::D,
+        "QM" => AsilLevel::QM,
+        other => anyhow::bail!("Invalid ASIL level: {}. Use A, B, C, D, or QM", other),
+    };
+    println!("Target ASIL: {:?}", target_asil);
+    println!("Safety Goal: {}", goal_name);
+
+    // Create output directory
+    fs::create_dir_all(output_dir)?;
+
+    // Parse and build HIR
+    println!("\n📖 Parsing design...");
+    let hir = parse_and_build_hir_from_file(source).context("Failed to parse source")?;
+
+    // Lower to MIR
+    println!("🔧 Lowering to MIR...");
+    let compiler =
+        skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+    // Find the top module (last one, or one matching the file name)
+    let top_module = mir
+        .modules
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
+
+    // Lower to Lir and tech-map to GateNetlist
+    println!("🔩 Converting to gate-level netlist...");
+    let lir_result = lower_mir_module_to_lir(top_module);
+    let library = builtin_generic_asic();
+    let mut mapper = TechMapper::new(&library);
+    let tech_result = mapper.map(&lir_result.lir);
+    let netlist = &tech_result.netlist;
+
+    let total_cells = netlist.cells.len();
+    let total_fit = netlist.total_fit();
+
+    println!("\n📊 Design Statistics:");
+    println!("   Module: {}", netlist.name);
+    println!("   Gate cells: {}", total_cells);
+    println!("   Total FIT: {:.2}", total_fit);
+
+    // Create safety goal specification with default effect conditions
+    let mut spec = SafetyGoalSimSpec::new(goal_name, target_asil);
+
+    // Add default effect: any output corruption
+    spec.add_effect(FailureEffectDef {
+        name: "output_corruption".to_string(),
+        description: Some("Any output signal differs from golden reference".to_string()),
+        condition: EffectCondition::Term(ConditionTerm {
+            signal: DesignRef::parse("output"),
+            op: CompareOp::NotEqual,
+            value: CompareValue::Golden("golden_output".to_string()),
+        }),
+        severity: Severity::S3,
+        target_dc: match target_asil {
+            AsilLevel::D => 0.99,
+            AsilLevel::C => 0.97,
+            AsilLevel::B => 0.90,
+            _ => 0.60,
+        },
+    });
+
+    let config = FiDrivenConfig {
+        cycles_per_fault: cycles,
+        max_faults: if max_faults == 0 {
+            None
+        } else {
+            Some(max_faults)
+        },
+        ..FiDrivenConfig::default()
+    };
+
+    let generator = SafetyDrivenFmeaGenerator::new(spec.clone(), config);
+
+    // Build maps for cell path and safety mechanism detection
+    let cell_paths: std::collections::HashMap<u32, String> = netlist
+        .cells
+        .iter()
+        .map(|c| (c.id.0, c.path.clone()))
+        .collect();
+
+    let cell_fits: std::collections::HashMap<String, f64> = netlist
+        .cells
+        .iter()
+        .map(|c| (c.path.clone(), c.fit))
+        .collect();
+
+    // Identify safety mechanism cells (from annotations or naming conventions)
+    let sm_cells: std::collections::HashSet<u32> = netlist
+        .cells
+        .iter()
+        .filter(|c| {
+            let path_lower = c.path.to_lowercase();
+            path_lower.contains("_sm")
+                || path_lower.contains("_tmr")
+                || path_lower.contains("_voter")
+                || path_lower.contains("_crc")
+                || path_lower.contains("_ecc")
+                || path_lower.contains("_watchdog")
+        })
+        .map(|c| c.id.0)
+        .collect();
+
+    // Identify boot-time-only cells (BIST hardware)
+    let boot_time_only_cells: std::collections::HashSet<u32> = netlist
+        .cells
+        .iter()
+        .filter(|c| {
+            let path_lower = c.path.to_lowercase();
+            path_lower.contains("bist") || path_lower.contains("selftest")
+        })
+        .map(|c| c.id.0)
+        .collect();
+
+    // Convert GateNetlist to SIR for simulation
+    println!("🔄 Converting to SIR for simulation...");
+    let sir_result = convert_gate_netlist_to_sir(netlist);
+    println!("   SIR primitives: {}", sir_result.stats.primitives_created);
+
+    // Run fault injection campaign
+    let fault_results: Vec<FaultEffectResult> = if skip_fi {
+        println!("\n⏭️  Skipping fault injection (--skip-fi)");
+        vec![]
+    } else {
+        println!("\n🔥 Running Fault Injection Campaign...");
+        println!("   Cycles per fault: {}", cycles);
+        println!(
+            "   Max faults: {}",
+            if max_faults == 0 {
+                "all".to_string()
+            } else {
+                max_faults.to_string()
+            }
+        );
+
+        run_fi_campaign(
+            &sir_result.sir,
+            cycles,
+            max_faults,
+            use_gpu,
+            &cell_paths,
+            &cell_fits,
+            &sm_cells,
+            &boot_time_only_cells,
+        )?
+    };
+
+    // Generate FI-driven FMEA
+    println!("\n📋 Generating FI-Driven FMEA...");
+    let mut fi_result = generator.generate_from_campaign_results(
+        &fault_results,
+        total_cells,
+        &netlist.name,
+        total_fit,
+    );
+
+    // Apply power domain CCF contribution to PMHF
+    let power_domain_analysis =
+        skalp_safety::power_domains::extract_power_domains_from_gate_netlist(netlist);
+    let power_ccf_fit = power_domain_analysis.summary.total_ccf_fit;
+    if power_ccf_fit > 0.0 {
+        println!(
+            "   Adding power domain CCF: {:.2} FIT (λDPF_power)",
+            power_ccf_fit
+        );
+        fi_result.apply_ccf_contribution(power_ccf_fit);
+    }
+
+    // Print results summary
+    println!("\n📈 Results Summary:");
+    println!("   SPFM: {:.2}%", fi_result.measured_spfm * 100.0);
+    println!("   LFM: {:.2}%", fi_result.measured_lf * 100.0);
+    if let Some(pmhf) = fi_result.measured_pmhf {
+        println!("   PMHF: {:.2} FIT", pmhf);
+        if fi_result.ccf_contribution.is_some() {
+            let breakdown = fi_result.pmhf_breakdown();
+            println!("      ├─ λRF (residual): {:.2} FIT", breakdown.residual_fit);
+            println!(
+                "      └─ λDPF_CCF (power domains): {:.2} FIT",
+                breakdown.ccf_fit
+            );
+        }
+    }
+    println!(
+        "   Meets {:?}: {}",
+        target_asil,
+        if fi_result.meets_asil {
+            "✅ YES"
+        } else {
+            "❌ NO"
+        }
+    );
+
+    // Generate collaterals
+    println!("\n📁 Generating Safety Collaterals...");
+    let format_list: Vec<&str> = formats.split(',').map(|s| s.trim()).collect();
+
+    // Generate FMEDA report
+    if format_list.contains(&"md") || format_list.contains(&"all") {
+        let fmeda_path = output_dir.join("fmeda_report.md");
+        let fmeda_content =
+            generate_fi_driven_fmeda_md(&fi_result, &netlist.name, target_asil, netlist);
+        fs::write(&fmeda_path, fmeda_content)?;
+        println!("   ✅ {}", fmeda_path.display());
+    }
+
+    // Generate YAML summary
+    if format_list.contains(&"yaml") || format_list.contains(&"all") {
+        let yaml_path = output_dir.join("safety_analysis.yaml");
+        let yaml_content = generate_fi_driven_yaml(&fi_result, &netlist.name, target_asil);
+        fs::write(&yaml_path, yaml_content)?;
+        println!("   ✅ {}", yaml_path.display());
+    }
+
+    // Generate JSON summary
+    if format_list.contains(&"json") || format_list.contains(&"all") {
+        let json_path = output_dir.join("safety_analysis.json");
+        let json_content =
+            serde_json::to_string_pretty(&fi_result.auto_fmea).unwrap_or_else(|_| "{}".to_string());
+        fs::write(&json_path, json_content)?;
+        println!("   ✅ {}", json_path.display());
+    }
+
+    // Check for SEooC configuration
+    let top_entity = hir.entities.iter().find(|e| e.name == netlist.name);
+    if let Some(entity) = top_entity {
+        if let Some(seooc_config) = &entity.seooc_config {
+            run_seooc_analysis(
+                output_dir,
+                entity,
+                seooc_config,
+                &fault_results,
+                netlist,
+                &cell_fits,
+                power_ccf_fit,
+                &power_domain_analysis,
+            )?;
+        }
+    }
+
+    // Generate BIST if requested
+    if generate_bist && !fault_results.is_empty() {
+        run_bist_generation(
+            output_dir,
+            &netlist.name,
+            &fi_result,
+            &fault_results,
+            &cell_fits,
+            dual_bist,
+        )?;
+    }
+
+    let elapsed = start.elapsed();
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!(
+        "✅ FI-Driven Safety Analysis Complete ({:.2}s)",
+        elapsed.as_secs_f64()
+    );
+    println!("📁 Collaterals: {:?}", output_dir);
+
+    Ok(())
+}
+
+/// Run fault injection campaign on the SIR
+#[allow(clippy::too_many_arguments)]
+fn run_fi_campaign(
+    sir: &skalp_sim::sir::Sir,
+    cycles: u64,
+    max_faults: usize,
+    use_gpu: bool,
+    cell_paths: &std::collections::HashMap<u32, String>,
+    cell_fits: &std::collections::HashMap<String, f64>,
+    sm_cells: &std::collections::HashSet<u32>,
+    boot_time_only_cells: &std::collections::HashSet<u32>,
+) -> Result<Vec<skalp_safety::safety_driven_fmea::FaultEffectResult>> {
+    use skalp_frontend::hir::DetectionMode;
+    use skalp_safety::fault_simulation::FaultSite;
+    use skalp_safety::fault_simulation::FaultType;
+    use skalp_safety::hierarchy::DesignRef;
+    use skalp_safety::safety_driven_fmea::FaultEffectResult;
+    use skalp_sim::sir::{FaultType as SimFaultType, SirDetectionMode};
+
+    let mut results = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        use skalp_sim::{GpuFaultCampaignConfig, GpuFaultSimulator};
+
+        if use_gpu {
+            match GpuFaultSimulator::new(sir) {
+                Ok(gpu_sim) => {
+                    println!("   Using GPU: {}", gpu_sim.device_info());
+
+                    let campaign_config = GpuFaultCampaignConfig {
+                        cycles_per_fault: cycles,
+                        fault_types: vec![
+                            SimFaultType::StuckAt0,
+                            SimFaultType::StuckAt1,
+                            SimFaultType::BitFlip,
+                            SimFaultType::Transient,
+                        ],
+                        max_faults,
+                        use_gpu: true,
+                        ..Default::default()
+                    };
+
+                    let campaign = gpu_sim.run_fault_campaign(&campaign_config);
+
+                    println!("   Faults simulated: {}", campaign.total_faults);
+                    println!("   Detected: {}", campaign.detected_faults);
+                    println!(
+                        "   Safe faults: {} ({:.1}%)",
+                        campaign.safe_faults, campaign.safe_fault_percentage
+                    );
+                    println!("   DC (overall): {:.2}%", campaign.diagnostic_coverage);
+
+                    // Convert results
+                    for fault_result in &campaign.fault_results {
+                        let prim_id = fault_result.fault.target_primitive.0;
+                        let prim_path = cell_paths
+                            .get(&prim_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("cell_{}", prim_id));
+
+                        let triggered = if !fault_result.output_diffs.is_empty() {
+                            vec!["output_corruption".to_string()]
+                        } else {
+                            vec![]
+                        };
+
+                        let fault_type = match fault_result.fault.fault_type {
+                            SimFaultType::StuckAt0 => FaultType::StuckAt0,
+                            SimFaultType::StuckAt1 => FaultType::StuckAt1,
+                            SimFaultType::BitFlip | SimFaultType::Transient => FaultType::Transient,
+                            _ => FaultType::StuckAt0,
+                        };
+
+                        let detection_mode = fault_result.detection_mode.map(|m| match m {
+                            SirDetectionMode::Continuous => DetectionMode::Continuous,
+                            SirDetectionMode::Boot => DetectionMode::Boot,
+                            SirDetectionMode::Periodic => DetectionMode::Periodic,
+                            SirDetectionMode::OnDemand => DetectionMode::OnDemand,
+                        });
+
+                        results.push(FaultEffectResult {
+                            fault_site: FaultSite::new(DesignRef::parse(&prim_path), fault_type),
+                            primitive_path: prim_path.clone(),
+                            triggered_effects: triggered,
+                            detected: fault_result.detected,
+                            detected_by: if fault_result.detected {
+                                Some("safety_mechanism".to_string())
+                            } else {
+                                None
+                            },
+                            effect_cycle: None,
+                            detection_cycle: fault_result.detection_cycle,
+                            is_safety_mechanism: sm_cells.contains(&prim_id),
+                            detection_mode,
+                            is_boot_time_only: boot_time_only_cells.contains(&prim_id),
+                        });
+                    }
+
+                    return Ok(results);
+                }
+                Err(e) => {
+                    println!("   GPU init failed: {}. Falling back to CPU.", e);
+                }
+            }
+        }
+    }
+
+    // CPU-based simulation (fallback or non-macOS)
+    #[cfg(not(target_os = "macos"))]
+    let _ = use_gpu;
+
+    println!("   Using CPU simulation");
+
+    // Run CPU fault campaign
+    use skalp_sim::{FaultCampaignConfig, GateLevelSimulator};
+
+    let mut simulator = GateLevelSimulator::new(sir);
+
+    let config = FaultCampaignConfig {
+        cycles_per_fault: cycles,
+        clock_name: "clk".to_string(),
+        fault_types: vec![
+            SimFaultType::StuckAt0,
+            SimFaultType::StuckAt1,
+            SimFaultType::BitFlip,
+            SimFaultType::Transient,
+        ],
+        max_faults,
+        ..Default::default()
+    };
+
+    let campaign = simulator.run_fault_campaign_with_config(&config);
+
+    println!("   Faults simulated: {}", campaign.total_faults);
+    println!("   Detected: {}", campaign.detected_faults);
+    println!(
+        "   Safe faults: {} ({:.1}%)",
+        campaign.safe_faults, campaign.safe_fault_percentage
+    );
+    println!("   DC (overall): {:.2}%", campaign.diagnostic_coverage);
+
+    // Convert CPU results to FaultEffectResult
+    for fault_result in &campaign.fault_results {
+        let prim_id = fault_result.fault.target_primitive.0;
+        let prim_path = cell_paths
+            .get(&prim_id)
+            .cloned()
+            .unwrap_or_else(|| format!("cell_{}", prim_id));
+
+        let triggered = if !fault_result.output_diffs.is_empty() {
+            vec!["output_corruption".to_string()]
+        } else {
+            vec![]
+        };
+
+        let fault_type = match fault_result.fault.fault_type {
+            SimFaultType::StuckAt0 => FaultType::StuckAt0,
+            SimFaultType::StuckAt1 => FaultType::StuckAt1,
+            SimFaultType::BitFlip | SimFaultType::Transient => FaultType::Transient,
+            _ => FaultType::StuckAt0,
+        };
+
+        let detection_mode = fault_result.detection_mode.map(|m| match m {
+            SirDetectionMode::Continuous => DetectionMode::Continuous,
+            SirDetectionMode::Boot => DetectionMode::Boot,
+            SirDetectionMode::Periodic => DetectionMode::Periodic,
+            SirDetectionMode::OnDemand => DetectionMode::OnDemand,
+        });
+
+        results.push(FaultEffectResult {
+            fault_site: FaultSite::new(DesignRef::parse(&prim_path), fault_type),
+            primitive_path: prim_path.clone(),
+            triggered_effects: triggered,
+            detected: fault_result.detected,
+            detected_by: if fault_result.detected {
+                Some("safety_mechanism".to_string())
+            } else {
+                None
+            },
+            effect_cycle: None,
+            detection_cycle: fault_result.detection_cycle,
+            is_safety_mechanism: sm_cells.contains(&prim_id),
+            detection_mode,
+            is_boot_time_only: boot_time_only_cells.contains(&prim_id),
+        });
+    }
+
+    Ok(results)
+}
+
+/// Run SEooC analysis
+#[allow(clippy::too_many_arguments)]
+fn run_seooc_analysis(
+    output_dir: &std::path::Path,
+    entity: &skalp_frontend::hir::HirEntity,
+    seooc_config: &skalp_frontend::hir::SeoocConfig,
+    fault_results: &[skalp_safety::safety_driven_fmea::FaultEffectResult],
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    cell_fits: &std::collections::HashMap<String, f64>,
+    power_ccf_fit: f64,
+    power_domain_analysis: &skalp_safety::power_domains::PowerDomainAnalysis,
+) -> Result<()> {
+    println!("\n🛡️  SEooC Analysis (ISO 26262-10:9)...");
+
+    // Convert HIR config to analysis config
+    let seooc_analysis_config = skalp_safety::from_hir_seooc_config(&entity.name, seooc_config);
+
+    // Convert FI results to SEooC format
+    let mut undetected_faults_seooc = Vec::new();
+    for result in fault_results {
+        if !result.triggered_effects.is_empty() && !result.detected {
+            undetected_faults_seooc.push(skalp_safety::UndetectedFault {
+                site: result.primitive_path.clone(),
+                fault_type: format!("{:?}", result.fault_site.fault_type),
+                fit: cell_fits
+                    .get(&result.primitive_path)
+                    .copied()
+                    .unwrap_or(1.0),
+            });
+        }
+    }
+
+    let total_dangerous = fault_results
+        .iter()
+        .filter(|r| !r.triggered_effects.is_empty())
+        .count();
+    let internally_detected = fault_results
+        .iter()
+        .filter(|r| !r.triggered_effects.is_empty() && r.detected)
+        .count();
+
+    let fi_data = skalp_safety::FaultInjectionData {
+        total_dangerous,
+        internally_detected,
+        undetected_faults: undetected_faults_seooc,
+    };
+
+    // Prepare power domain CCF data
+    let power_ccf_data = if power_ccf_fit > 0.0 {
+        Some(skalp_safety::PowerDomainCcfData {
+            ccf_fit: power_ccf_fit,
+            domain_count: power_domain_analysis.domains.len(),
+            affects_pmhf: true,
+        })
+    } else {
+        None
+    };
+
+    // Run SEooC analysis
+    let seooc_result = skalp_safety::analyze_seooc_with_ccf(
+        &seooc_analysis_config,
+        &fi_data,
+        power_ccf_data.as_ref(),
+    );
+
+    // Print summary
+    println!("   Target ASIL: {:?}", seooc_result.target_asil);
+    println!("   Internal SPFM: {:.1}%", seooc_result.internal_spfm);
+    println!("   SPFM Gap: {:.1}%", seooc_result.spfm_gap);
+
+    if let Some(ref ccf_cov) = seooc_result.power_ccf_coverage {
+        println!("   ⚡ Power CCF Coverage by {}:", ccf_cov.mechanism_id);
+        println!(
+            "      Original λDPF_CCF: {:.2} FIT → Residual: {:.2} FIT",
+            ccf_cov.original_ccf_fit, ccf_cov.residual_ccf_fit
+        );
+    }
+
+    if seooc_result.target_achievable {
+        println!("   Status: ✅ Target achievable with external mechanisms");
+    } else {
+        println!("   Status: ⚠️  Gap remains - additional mechanisms needed");
+    }
+
+    // Generate SEooC report
+    let seooc_report = skalp_safety::format_seooc_report(&seooc_result);
+    let seooc_path = output_dir.join("seooc_derived_requirements.md");
+    fs::write(&seooc_path, &seooc_report)?;
+    println!("   ✅ {}", seooc_path.display());
+
+    // Generate YAML
+    let seooc_yaml = generate_seooc_yaml(&seooc_result);
+    let seooc_yaml_path = output_dir.join("seooc_derived_requirements.yaml");
+    fs::write(&seooc_yaml_path, &seooc_yaml)?;
+    println!("   ✅ {}", seooc_yaml_path.display());
+
+    Ok(())
+}
+
+/// Run BIST generation
+fn run_bist_generation(
+    output_dir: &std::path::Path,
+    design_name: &str,
+    fi_result: &skalp_safety::safety_driven_fmea::FiDrivenFmeaResult,
+    fault_results: &[skalp_safety::safety_driven_fmea::FaultEffectResult],
+    cell_fits: &std::collections::HashMap<String, f64>,
+    dual_bist: bool,
+) -> Result<()> {
+    use skalp_safety::bist_generation::{BistGenerationConfig, BistGenerator};
+    use skalp_safety::fault_diagnostics::{FaultClassification, UndetectedFaultInfo};
+
+    println!("\n🔧 Generating Safety-Driven BIST...");
+
+    // Identify undetected dangerous faults (coverage gaps)
+    let mut undetected_faults = Vec::new();
+    for result in fault_results {
+        if !result.triggered_effects.is_empty() && !result.detected {
+            if result.is_safety_mechanism {
+                continue; // SM faults need SM-of-SM, not BIST
+            }
+
+            undetected_faults.push(UndetectedFaultInfo {
+                fault_site: result.primitive_path.clone(),
+                fault_type: format!("{:?}", result.fault_site.fault_type),
+                component: result
+                    .primitive_path
+                    .split('.')
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                fit_contribution: cell_fits
+                    .get(&result.primitive_path)
+                    .copied()
+                    .unwrap_or(1.0),
+                classification: FaultClassification::CoverageGap,
+            });
+        }
+    }
+
+    println!("   Coverage gap faults: {}", undetected_faults.len());
+
+    if undetected_faults.is_empty() {
+        println!("   ℹ️  No coverage gaps found - BIST not needed");
+        return Ok(());
+    }
+
+    let bist_config = BistGenerationConfig {
+        entity_name: format!("{}Bist", design_name),
+        enable_dual_bist: dual_bist,
+        enable_signature: true,
+        enable_self_test: true,
+        max_patterns: 0,
+        ..Default::default()
+    };
+
+    let mut generator = BistGenerator::new(bist_config);
+    generator.identify_candidates(fi_result, fault_results, &undetected_faults);
+    let bist_result = generator.generate();
+
+    // Write BIST source
+    let bist_path = output_dir.join("generated_bist.sk");
+    fs::write(&bist_path, &bist_result.skalp_source)?;
+    println!(
+        "   ✅ {} ({} patterns)",
+        bist_path.display(),
+        bist_result.num_patterns
+    );
+
+    // Write BIST summary
+    let bist_summary_path = output_dir.join("bist_summary.md");
+    let bist_summary = format!(
+        r#"# Safety-Driven BIST Report
+
+## Overview
+
+- **Entity**: `{}`
+- **Test Patterns**: {}
+- **Faults Covered**: {}
+- **FIT Covered**: {:.2}
+- **Estimated Gates**: {}
+
+## SM-of-SM Features
+
+{}
+"#,
+        bist_result.entity_name,
+        bist_result.num_patterns,
+        bist_result.faults_covered,
+        bist_result.fit_covered,
+        bist_result.estimated_gates,
+        bist_result
+            .sm_of_sm_features
+            .iter()
+            .map(|f| format!("- {}", f))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    fs::write(&bist_summary_path, bist_summary)?;
+    println!("   ✅ {}", bist_summary_path.display());
+
+    if dual_bist {
+        println!("   🛡️  Dual BIST enabled (SM-of-SM protection)");
+    }
+
+    Ok(())
+}
+
+/// Generate FI-driven FMEDA report in Markdown
+fn generate_fi_driven_fmeda_md(
+    fi_result: &skalp_safety::safety_driven_fmea::FiDrivenFmeaResult,
+    design_name: &str,
+    target_asil: skalp_safety::asil::AsilLevel,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!("# FMEDA Report: {}\n\n", design_name));
+    output.push_str(&format!("**Target ASIL**: {:?}\n\n", target_asil));
+
+    output.push_str("## Design Statistics\n\n");
+    output.push_str(&format!("- **Gate Cells**: {}\n", netlist.cells.len()));
+    output.push_str(&format!("- **Total FIT**: {:.2}\n\n", netlist.total_fit()));
+
+    output.push_str("## Safety Metrics\n\n");
+    output.push_str("| Metric | Value | Target | Status |\n");
+    output.push_str("|--------|-------|--------|--------|\n");
+
+    let spfm_target = match target_asil {
+        skalp_safety::asil::AsilLevel::D => 99.0,
+        skalp_safety::asil::AsilLevel::C => 97.0,
+        skalp_safety::asil::AsilLevel::B => 90.0,
+        _ => 60.0,
+    };
+    let spfm_status = if fi_result.measured_spfm * 100.0 >= spfm_target {
+        "✅"
+    } else {
+        "❌"
+    };
+    output.push_str(&format!(
+        "| SPFM | {:.2}% | ≥{:.0}% | {} |\n",
+        fi_result.measured_spfm * 100.0,
+        spfm_target,
+        spfm_status
+    ));
+
+    let lfm_target = match target_asil {
+        skalp_safety::asil::AsilLevel::D => 90.0,
+        skalp_safety::asil::AsilLevel::C => 80.0,
+        skalp_safety::asil::AsilLevel::B => 60.0,
+        _ => 0.0,
+    };
+    let lfm_status = if fi_result.measured_lf * 100.0 >= lfm_target {
+        "✅"
+    } else {
+        "❌"
+    };
+    output.push_str(&format!(
+        "| LFM | {:.2}% | ≥{:.0}% | {} |\n",
+        fi_result.measured_lf * 100.0,
+        lfm_target,
+        lfm_status
+    ));
+
+    if let Some(pmhf) = fi_result.measured_pmhf {
+        output.push_str(&format!("| PMHF | {:.2} FIT | - | - |\n", pmhf));
+    }
+
+    output.push_str(&format!(
+        "\n**Overall Status**: {}\n",
+        if fi_result.meets_asil {
+            "✅ Meets ASIL requirements"
+        } else {
+            "❌ Does not meet ASIL requirements"
+        }
+    ));
+
+    output
+}
+
+/// Generate FI-driven results in YAML
+fn generate_fi_driven_yaml(
+    fi_result: &skalp_safety::safety_driven_fmea::FiDrivenFmeaResult,
+    design_name: &str,
+    target_asil: skalp_safety::asil::AsilLevel,
+) -> String {
+    // Calculate fault counts from results
+    let total_faults = fi_result.total_injections;
+    let detected_faults = fi_result
+        .fault_results
+        .iter()
+        .filter(|r| r.detected)
+        .count();
+    let safe_faults = fi_result
+        .fault_results
+        .iter()
+        .filter(|r| r.triggered_effects.is_empty())
+        .count();
+
+    format!(
+        r#"# FI-Driven Safety Analysis Results
+design: {}
+target_asil: {:?}
+metrics:
+  spfm: {:.4}
+  lfm: {:.4}
+  pmhf: {}
+  meets_asil: {}
+fault_counts:
+  total_injected: {}
+  detected: {}
+  safe: {}
+"#,
+        design_name,
+        target_asil,
+        fi_result.measured_spfm,
+        fi_result.measured_lf,
+        fi_result
+            .measured_pmhf
+            .map(|p| format!("{:.4}", p))
+            .unwrap_or_else(|| "null".to_string()),
+        fi_result.meets_asil,
+        total_faults,
+        detected_faults,
+        safe_faults,
+    )
+}
+
+/// Generate SEooC YAML
+fn generate_seooc_yaml(result: &skalp_safety::SeoocAnalysisResult) -> String {
+    format!(
+        r#"# SEooC Derived Requirements
+target_asil: {:?}
+internal_spfm: {:.2}
+spfm_gap: {:.2}
+target_achievable: {}
+derived_requirements:
+{}
+"#,
+        result.target_asil,
+        result.internal_spfm,
+        result.spfm_gap,
+        result.target_achievable,
+        result
+            .derived_requirements
+            .iter()
+            .map(|r| format!(
+                "  - id: {}\n    mechanism_type: {}\n    required_dc: {:.2}",
+                r.id, r.mechanism_type, r.required_dc
+            ))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+// - convert_lir_to_sir (legacy Lir → SIR)
+// - SafetyDrivenFmeaGenerator with fault_simulation types
+// The new implementation should use:
+// - lower_mir_module_to_word_lir (MIR → WordLir)
+// - TechMapper (WordLir → GateNetlist)
+// - gate_netlist_to_sir (GateNetlist → SIR)
+
+/// Generate FI-driven FMEDA report in Markdown (stub - pending GateNetlist migration)
+#[allow(dead_code)]
+fn generate_fi_driven_fmeda_md_stub(
+    _design_name: &str,
+    _target_asil: skalp_safety::asil::AsilLevel,
+) -> String {
+    "# FMEDA Report\n\n⚠️ FI-driven FMEDA generation temporarily disabled during GateNetlist migration.\n".to_string()
+}
+
+/// Generate FI-driven results in YAML (stub - pending GateNetlist migration)
+#[allow(dead_code)]
+fn generate_fi_driven_yaml_stub(
+    _design_name: &str,
+    _target_asil: skalp_safety::asil::AsilLevel,
+) -> String {
+    "# FI-driven results\nstatus: disabled_during_migration\n".to_string()
+}
+
+/// Run CPU-based fault injection campaign (stub - pending GateNetlist migration)
+#[allow(dead_code)]
+fn run_cpu_fi_campaign_stub(
+    _sir: &skalp_sim::sir::Sir,
+    _cycles: u64,
+    _max_faults: usize,
+) -> Result<()> {
+    anyhow::bail!("CPU FI campaign temporarily disabled during GateNetlist migration");
+}
+
+// === Begin orphaned code removal marker - delete everything until "End orphaned code" ===
+// The following code was left orphaned after function stubbing and needs to be deleted.
+
+fn _orphaned_code_marker_start() {}
+/*
 
     let start = Instant::now();
 
@@ -2640,16 +3184,29 @@ impl TopWithBist {{
 
     Ok(())
 }
+*/
+fn _orphaned_code_marker_end() {}
+// === End orphaned code removal marker ===
 
 /// Run CPU-based fault injection campaign
+/// NOTE: This function has been stubbed out - pending GateNetlist migration
+#[allow(dead_code)]
 fn run_cpu_fi_campaign(
-    sir: &skalp_sim::sir::Sir,
-    cycles: u64,
-    max_faults: usize,
-    primitive_paths: &std::collections::HashMap<u32, String>,
-    sm_primitives: &std::collections::HashSet<u32>,
-    boot_time_only_primitives: &std::collections::HashSet<u32>,
-) -> Result<Vec<skalp_safety::safety_driven_fmea::FaultEffectResult>> {
+    _sir: &skalp_sim::sir::Sir,
+    _cycles: u64,
+    _max_faults: usize,
+    _primitive_paths: &std::collections::HashMap<u32, String>,
+    _sm_primitives: &std::collections::HashSet<u32>,
+    _boot_time_only_primitives: &std::collections::HashSet<u32>,
+) -> Result<Vec<()>> {
+    // Legacy implementation removed - uses removed types:
+    // - skalp_safety::safety_driven_fmea::FaultEffectResult
+    // - skalp_safety::fault_simulation::FaultType
+    // - skalp_safety::fault_simulation::FaultSite
+    anyhow::bail!("CPU FI campaign temporarily disabled during GateNetlist migration");
+
+    /*
+    // Original implementation used:
     use skalp_frontend::hir::DetectionMode;
     use skalp_safety::fault_simulation::FaultType;
     use skalp_safety::hierarchy::DesignRef;
@@ -2771,482 +3328,5 @@ fn run_cpu_fi_campaign(
     }
 
     Ok(results)
+    */
 }
-
-/// Generate FI-driven FMEDA report in Markdown
-fn generate_fi_driven_fmeda_md(
-    result: &skalp_safety::safety_driven_fmea::FiDrivenFmeaResult,
-    design_name: &str,
-    target_asil: skalp_safety::asil::AsilLevel,
-    lir: &skalp_lir::Lir,
-) -> String {
-    let mut md = String::new();
-
-    md.push_str(&format!("# FMEDA Report: {}\n\n", design_name));
-    md.push_str("**Analysis Method**: Fault Injection Driven (Measured DC)\n\n");
-    md.push_str("> ✅ DC values are **measured** from fault injection simulation, not estimated from lookup tables.\n\n");
-
-    md.push_str(&format!("## Safety Goal: {}\n\n", result.goal_name));
-    md.push_str(&format!("- **Target ASIL**: {:?}\n", target_asil));
-    md.push_str(&format!(
-        "- **Total Primitives**: {}\n",
-        result.total_primitives
-    ));
-    md.push_str(&format!(
-        "- **Faults Injected**: {}\n",
-        result.total_injections
-    ));
-    md.push_str(&format!(
-        "- **Analysis Time**: {:.2}s\n\n",
-        result.wall_time.as_secs_f64()
-    ));
-
-    md.push_str("## Metrics Summary\n\n");
-    md.push_str("| Metric | Value | Target | Status |\n");
-    md.push_str("|--------|-------|--------|--------|\n");
-
-    let spfm_target = match target_asil {
-        skalp_safety::asil::AsilLevel::D => 99.0,
-        skalp_safety::asil::AsilLevel::C => 97.0,
-        skalp_safety::asil::AsilLevel::B => 90.0,
-        _ => 60.0,
-    };
-    let spfm_status = if result.measured_spfm * 100.0 >= spfm_target {
-        "✅ PASS"
-    } else {
-        "❌ FAIL"
-    };
-    md.push_str(&format!(
-        "| SPFM | {:.2}% | ≥{:.0}% | {} |\n",
-        result.measured_spfm * 100.0,
-        spfm_target,
-        spfm_status
-    ));
-
-    let lfm_target = match target_asil {
-        skalp_safety::asil::AsilLevel::D => 90.0,
-        skalp_safety::asil::AsilLevel::C => 80.0,
-        skalp_safety::asil::AsilLevel::B => 60.0,
-        _ => 0.0,
-    };
-    let lfm_status = if result.measured_lf * 100.0 >= lfm_target {
-        "✅ PASS"
-    } else {
-        "❌ FAIL"
-    };
-    md.push_str(&format!(
-        "| LFM | {:.2}% | ≥{:.0}% | {} |\n",
-        result.measured_lf * 100.0,
-        lfm_target,
-        lfm_status
-    ));
-
-    if let Some(pmhf) = result.measured_pmhf {
-        let pmhf_target = match target_asil {
-            skalp_safety::asil::AsilLevel::D => 10.0,
-            skalp_safety::asil::AsilLevel::C => 100.0,
-            skalp_safety::asil::AsilLevel::B => 100.0,
-            _ => 1000.0,
-        };
-        let pmhf_status = if pmhf <= pmhf_target {
-            "✅ PASS"
-        } else {
-            "❌ FAIL"
-        };
-        md.push_str(&format!(
-            "| PMHF | {:.2} FIT | ≤{:.0} FIT | {} |\n",
-            pmhf, pmhf_target, pmhf_status
-        ));
-    }
-
-    // PMHF breakdown (if CCF contribution applied)
-    if result.ccf_contribution.is_some() {
-        let breakdown = result.pmhf_breakdown();
-        md.push_str("\n### PMHF Breakdown (ISO 26262-5 + ISO 26262-9)\n\n");
-        md.push_str("```\n");
-        md.push_str("PMHF = λRF + λSM + λDPF_CCF\n");
-        md.push_str("```\n\n");
-        md.push_str("| Component | FIT | Description |\n");
-        md.push_str("|-----------|-----|-------------|\n");
-        md.push_str(&format!(
-            "| λRF (Residual Faults) | {:.2} | Undetected dangerous faults |\n",
-            breakdown.residual_fit
-        ));
-        if breakdown.sm_fit > 0.0 {
-            md.push_str(&format!(
-                "| λSM (SM Failures) | {:.2} | Safety mechanism failures |\n",
-                breakdown.sm_fit
-            ));
-        }
-        md.push_str(&format!(
-            "| λDPF_CCF (Power Domains) | {:.2} | Common cause failures from power |\n",
-            breakdown.ccf_fit
-        ));
-        md.push_str(&format!(
-            "| **Total PMHF** | **{:.2}** | |\n",
-            breakdown.total_pmhf
-        ));
-    }
-
-    // Detection mode breakdown (if available)
-    if result.runtime_dc.is_some() || result.boot_dc.is_some() {
-        md.push_str("\n### Detection Mode Breakdown\n\n");
-        md.push_str("| Mode | DC | Impact |\n");
-        md.push_str("|------|-----|--------|\n");
-        if let Some(runtime_dc) = result.runtime_dc {
-            md.push_str(&format!(
-                "| Runtime (Continuous) | {:.1}% | Contributes to SPFM |\n",
-                runtime_dc
-            ));
-        }
-        if let Some(boot_dc) = result.boot_dc {
-            md.push_str(&format!(
-                "| Boot-time (BIST) | {:.1}% | Contributes to LFM only |\n",
-                boot_dc
-            ));
-        }
-    }
-
-    md.push_str(&format!(
-        "\n**Overall Result**: {}\n\n",
-        if result.meets_asil {
-            "✅ MEETS REQUIREMENTS"
-        } else {
-            "❌ DOES NOT MEET REQUIREMENTS"
-        }
-    ));
-
-    // Effect analysis
-    md.push_str("## Effect-Based Analysis\n\n");
-    md.push_str("| Effect | Faults Causing | Detected | DC | Target | Status |\n");
-    md.push_str("|--------|----------------|----------|-----|--------|--------|\n");
-
-    for (name, analysis) in &result.effect_analyses {
-        if !name.starts_with('_') {
-            let status = if analysis.meets_target { "✅" } else { "❌" };
-            md.push_str(&format!(
-                "| {} | {} | {} | {:.1}% | ≥{:.0}% | {} |\n",
-                name,
-                analysis.total_faults_causing,
-                analysis.faults_detected,
-                analysis.measured_dc * 100.0,
-                analysis.target_dc * 100.0,
-                status
-            ));
-        }
-    }
-
-    // Build set of boot-time-only fault paths from fault_results
-    // These are faults in hardware that's only active during boot (e.g., BIST)
-    let boot_time_only_paths: std::collections::HashSet<String> = result
-        .fault_results
-        .iter()
-        .filter(|r| r.is_boot_time_only)
-        .map(|r| r.primitive_path.clone())
-        .collect();
-
-    // Add diagnostics section for undetected faults
-    let mut has_undetected = false;
-    for (name, analysis) in &result.effect_analyses {
-        if !name.starts_with('_') && !analysis.undetected_sites.is_empty() {
-            has_undetected = true;
-            break;
-        }
-    }
-
-    // Run CCF analysis (needed for both diagnostics and CCF report)
-    let ccf_analysis = skalp_safety::analyze_ccf(lir, &["ch_*", "channel_*"]);
-
-    // Extract power domains for CCF analysis
-    // Power supply failures cause all cells in a domain to fail simultaneously
-    let power_domain_analysis = skalp_safety::power_domains::extract_power_domains_from_lir(lir);
-
-    if has_undetected {
-        // Collect all undetected fault sites, separating runtime from boot-time-only
-        let mut runtime_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
-        let mut boot_time_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
-
-        for (name, analysis) in &result.effect_analyses {
-            if !name.starts_with('_') {
-                for site in &analysis.undetected_sites {
-                    let path = site.primitive_path.to_string();
-                    if boot_time_only_paths.contains(&path) {
-                        boot_time_undetected.push(site.clone());
-                    } else {
-                        runtime_undetected.push(site.clone());
-                    }
-                }
-            }
-        }
-
-        let total_runtime_undetected = runtime_undetected.len();
-        let total_boot_time_undetected = boot_time_undetected.len();
-
-        // Use enhanced fault diagnostics with CCF integration (runtime faults only)
-        let diagnostics = skalp_safety::FaultDiagnostics::new();
-        let (classified, summary) =
-            diagnostics.classify_with_ccf(&runtime_undetected, &ccf_analysis);
-
-        // Generate enhanced diagnostic report for runtime faults
-        md.push_str(&skalp_safety::generate_diagnostic_report(
-            &classified,
-            &summary,
-            total_runtime_undetected,
-        ));
-
-        // Detailed fault list separated by operational mode
-        md.push_str("\n## Detailed Fault List by Component\n\n");
-        md.push_str("> **Note**: Safety mechanism classification requires `#[implements(...)]` annotations on components.\n\n");
-
-        // Helper function to generate component breakdown
-        let generate_component_breakdown =
-            |sites: &[skalp_safety::fault_simulation::FaultSite], md: &mut String| {
-                let mut by_component: std::collections::HashMap<
-                    String,
-                    Vec<&skalp_safety::fault_simulation::FaultSite>,
-                > = std::collections::HashMap::new();
-
-                for site in sites {
-                    let path = site.primitive_path.to_string();
-                    let component = path
-                        .strip_prefix("top.")
-                        .unwrap_or(&path)
-                        .split('.')
-                        .next()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    by_component.entry(component).or_default().push(site);
-                }
-
-                let mut components: Vec<_> = by_component.iter().collect();
-                components.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-
-                for (component, faults) in components {
-                    md.push_str(&format!(
-                        "#### Component: `{}` ({} faults)\n\n",
-                        component,
-                        faults.len()
-                    ));
-
-                    md.push_str("| Fault Site | Type |\n");
-                    md.push_str("|------------|------|\n");
-                    for site in faults.iter().take(10) {
-                        md.push_str(&format!(
-                            "| `{}` | {} |\n",
-                            site.primitive_path,
-                            site.fault_type.name()
-                        ));
-                    }
-                    if faults.len() > 10 {
-                        md.push_str(&format!("| ... | ({} more) |\n", faults.len() - 10));
-                    }
-                    md.push('\n');
-                }
-            };
-
-        // Runtime faults - these affect SPFM
-        if !runtime_undetected.is_empty() {
-            md.push_str(&format!(
-                "### Runtime Faults ({} undetected) - Affects SPFM\n\n",
-                total_runtime_undetected
-            ));
-            md.push_str("> ⚠️ These faults occur in hardware active during normal operation and directly affect SPFM.\n\n");
-            generate_component_breakdown(&runtime_undetected, &mut md);
-        }
-
-        // Boot-time-only faults - excluded from SPFM per ISO 26262
-        if !boot_time_undetected.is_empty() {
-            md.push_str(&format!(
-                "### Boot-Time-Only Faults ({} total) - Excluded from SPFM\n\n",
-                total_boot_time_undetected
-            ));
-            md.push_str(
-                "> ℹ️ These faults occur in hardware only active during boot/test (e.g., BIST).\n",
-            );
-            md.push_str("> Per ISO 26262-5, they are **excluded from SPFM** calculation since the hardware is inactive during operation.\n");
-            md.push_str("> They are detected at boot time and do not contribute to operational failure probability.\n\n");
-            generate_component_breakdown(&boot_time_undetected, &mut md);
-        }
-    }
-
-    // Add SM Diversity Analysis (detects identical SM replication that defeats comparison)
-    let sm_diversity = skalp_safety::analyze_sm_diversity(lir);
-    md.push_str(&skalp_safety::generate_sm_diversity_report(&sm_diversity));
-
-    // Add CCF Analysis report (ccf_analysis was computed earlier for fault classification)
-    md.push_str(&skalp_safety::generate_ccf_report(&ccf_analysis));
-
-    // Add Power Domain Analysis report (power domains contribute to CCF)
-    md.push_str("\n---\n\n");
-    md.push_str("## Power Domain Analysis\n\n");
-    md.push_str("> Power supply failures cause Common Cause Failures (CCF) because all cells in a domain fail simultaneously.\n\n");
-    md.push_str(&skalp_safety::power_domains::format_power_domain_report(
-        &power_domain_analysis,
-    ));
-
-    // Add Safety-Power Domain Verification
-    // Checks: detection signals with requires_always_on, isolation cells, level shifters
-    let safety_power_result = skalp_safety::verify_safety_power_domains(lir);
-    md.push_str("\n---\n\n");
-    md.push_str(&skalp_safety::format_verification_report(
-        &safety_power_result,
-    ));
-
-    md
-}
-
-/// Generate FI-driven analysis YAML
-fn generate_fi_driven_yaml(
-    result: &skalp_safety::safety_driven_fmea::FiDrivenFmeaResult,
-    design_name: &str,
-    target_asil: skalp_safety::asil::AsilLevel,
-) -> String {
-    let mut yaml = String::new();
-
-    yaml.push_str("# FI-Driven Safety Analysis Results\n");
-    yaml.push_str(&format!("design: {}\n", design_name));
-    yaml.push_str(&format!("goal: {}\n", result.goal_name));
-    yaml.push_str(&format!("target_asil: {:?}\n", target_asil));
-    yaml.push_str("method: fault_injection_driven\n\n");
-
-    yaml.push_str("metrics:\n");
-    yaml.push_str(&format!("  spfm: {:.4}\n", result.measured_spfm));
-    yaml.push_str(&format!("  lfm: {:.4}\n", result.measured_lf));
-    if let Some(pmhf) = result.measured_pmhf {
-        yaml.push_str(&format!("  pmhf_fit: {:.2}\n", pmhf));
-    }
-    yaml.push_str(&format!("  meets_requirements: {}\n\n", result.meets_asil));
-
-    yaml.push_str("simulation:\n");
-    yaml.push_str(&format!("  primitives: {}\n", result.total_primitives));
-    yaml.push_str(&format!("  faults_injected: {}\n", result.total_injections));
-    yaml.push_str(&format!(
-        "  wall_time_seconds: {:.2}\n\n",
-        result.wall_time.as_secs_f64()
-    ));
-
-    yaml.push_str("effects:\n");
-    for (name, analysis) in &result.effect_analyses {
-        if !name.starts_with('_') {
-            yaml.push_str(&format!("  {}:\n", name));
-            yaml.push_str(&format!(
-                "    faults_causing: {}\n",
-                analysis.total_faults_causing
-            ));
-            yaml.push_str(&format!(
-                "    faults_detected: {}\n",
-                analysis.faults_detected
-            ));
-            yaml.push_str(&format!("    measured_dc: {:.4}\n", analysis.measured_dc));
-            yaml.push_str(&format!("    target_dc: {:.4}\n", analysis.target_dc));
-            yaml.push_str(&format!("    meets_target: {}\n", analysis.meets_target));
-        }
-    }
-
-    yaml
-}
-
-/// Generate SEooC derived requirements YAML for machine consumption
-fn generate_seooc_yaml(result: &skalp_safety::SeoocAnalysisResult) -> String {
-    let mut yaml = String::new();
-
-    yaml.push_str("# SEooC Derived Safety Requirements (ISO 26262-10:9)\n");
-    yaml.push_str(&format!("entity: {}\n", result.entity_name));
-    yaml.push_str(&format!("target_asil: {:?}\n\n", result.target_asil));
-
-    yaml.push_str("internal_metrics:\n");
-    yaml.push_str(&format!("  spfm: {:.4}\n", result.internal_spfm / 100.0));
-    yaml.push_str(&format!("  lfm: {:.4}\n", result.internal_lfm / 100.0));
-    yaml.push_str(&format!("  spfm_gap: {:.4}\n", result.spfm_gap / 100.0));
-    yaml.push_str(&format!("  lfm_gap: {:.4}\n", result.lfm_gap / 100.0));
-    yaml.push_str(&format!(
-        "  total_dangerous_faults: {}\n",
-        result.total_dangerous_faults
-    ));
-    yaml.push_str(&format!(
-        "  internally_detected_faults: {}\n\n",
-        result.internally_detected_faults
-    ));
-
-    yaml.push_str("undetected_by_category:\n");
-    yaml.push_str(&format!(
-        "  permanent: {}\n",
-        result.undetected_by_category.permanent
-    ));
-    yaml.push_str(&format!(
-        "  transient: {}\n",
-        result.undetected_by_category.transient
-    ));
-    yaml.push_str(&format!(
-        "  power: {}\n",
-        result.undetected_by_category.power
-    ));
-    yaml.push_str(&format!(
-        "  total: {}\n\n",
-        result.undetected_by_category.total
-    ));
-
-    if !result.derived_requirements.is_empty() {
-        yaml.push_str("derived_requirements:\n");
-        for req in &result.derived_requirements {
-            yaml.push_str(&format!("  - id: {}\n", req.id));
-            yaml.push_str(&format!("    mechanism_id: {}\n", req.assumed_mechanism_id));
-            yaml.push_str(&format!("    mechanism_type: {}\n", req.mechanism_type));
-            yaml.push_str(&format!(
-                "    covers: [{}]\n",
-                req.fault_types_covered.join(", ")
-            ));
-            yaml.push_str(&format!("    fault_count: {}\n", req.fault_count));
-            yaml.push_str(&format!(
-                "    required_dc: {:.4}\n",
-                req.required_dc / 100.0
-            ));
-            yaml.push_str(&format!("    dc_category: {}\n", req.dc_category));
-            yaml.push_str(&format!(
-                "    spfm_contribution: {:.4}\n",
-                req.spfm_contribution / 100.0
-            ));
-            yaml.push_str(&format!(
-                "    projected_cumulative_spfm: {:.4}\n\n",
-                req.projected_cumulative_spfm / 100.0
-            ));
-        }
-    }
-
-    // Power CCF coverage section (if applicable)
-    if let Some(ref ccf_cov) = result.power_ccf_coverage {
-        yaml.push_str("power_ccf_coverage:\n");
-        yaml.push_str(&format!("  mechanism_id: {}\n", ccf_cov.mechanism_id));
-        yaml.push_str(&format!(
-            "  original_ccf_fit: {:.2}\n",
-            ccf_cov.original_ccf_fit
-        ));
-        yaml.push_str(&format!(
-            "  assumed_dc: {:.4}\n",
-            ccf_cov.assumed_dc / 100.0
-        ));
-        yaml.push_str(&format!(
-            "  residual_ccf_fit: {:.2}\n",
-            ccf_cov.residual_ccf_fit
-        ));
-        yaml.push_str(&format!(
-            "  pmhf_improvement_fit: {:.2}\n\n",
-            ccf_cov.pmhf_improvement_fit
-        ));
-    }
-
-    yaml.push_str("summary:\n");
-    yaml.push_str(&format!(
-        "  projected_spfm: {:.4}\n",
-        result.projected_spfm / 100.0
-    ));
-    yaml.push_str(&format!(
-        "  target_achievable: {}\n",
-        result.target_achievable
-    ));
-
-    yaml
-}
-
-// Detection mode DC breakdown (runtime_dc, boot_dc) is now calculated from FI results
-// in the FMEA generator (calculate_mode_specific_dc), not from static LIR analysis.

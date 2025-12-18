@@ -928,7 +928,7 @@ fn test_eps_full_safety_analysis_flow() {
     // Assertions
     assert!(spfm >= 0.98, "SPFM should be >= 98%");
     assert!(lf >= 0.90, "LF should be >= 90%");
-    assert!(pmhf <= 15.0, "PMHF should be = 15 FIT");
+    assert!(pmhf <= 15.0, "PMHF should be <= 15 FIT");
     assert_eq!(fmea_data.len(), 6);
     assert_eq!(fmeda_data.len(), 6);
     // FTA analysis produces cut sets based on tree structure

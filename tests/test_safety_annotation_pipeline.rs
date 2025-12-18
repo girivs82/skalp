@@ -42,7 +42,7 @@ fn compile_to_gate_netlist(source: &str) -> Vec<skalp_lir::gate_netlist::GateNet
         .map(|module| {
             let word_lir_result = lower_mir_module_to_word_lir(module);
             let mut mapper = TechMapper::new(&library);
-            mapper.map(&word_lir_result.word_lir).netlist
+            mapper.map(&word_lir_result.lir).netlist
         })
         .collect()
 }
@@ -543,7 +543,7 @@ fn test_comprehensive_pipeline_flow() {
     // Step 3: Compile to WordLIR
     println!("\nStep 3: WordLIR Compilation");
     let word_lir_result = lower_mir_module_to_word_lir(mir_module);
-    let word_lir_safety = word_lir_result.word_lir.module_safety_info.as_ref();
+    let word_lir_safety = word_lir_result.lir.module_safety_info.as_ref();
     println!(
         "  WordLIR module_safety_info: {:?}",
         word_lir_safety.is_some()
@@ -557,7 +557,7 @@ fn test_comprehensive_pipeline_flow() {
     println!("\nStep 4: GateNetlist Technology Mapping");
     let library = builtin_generic_asic();
     let mut mapper = TechMapper::new(&library);
-    let gate_netlist = mapper.map(&word_lir_result.word_lir).netlist;
+    let gate_netlist = mapper.map(&word_lir_result.lir).netlist;
 
     println!("  GateNetlist: {} cells", gate_netlist.cells.len());
 

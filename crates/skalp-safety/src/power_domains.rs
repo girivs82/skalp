@@ -4,6 +4,7 @@
 //! Supports multiple power domains with controlled cross-domain communication.
 
 use crate::asil::AsilLevel;
+use crate::common_cause::{CcfCause, CcfGroup};
 use chrono::{DateTime, Utc};
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
@@ -1095,7 +1096,7 @@ impl Default for SignalConstraints {
 // CCF Integration for Power Domain Failures
 // ============================================================================
 
-use crate::common_cause::{CcfAnalysisResults, CcfCause, CcfGroup};
+use crate::common_cause::CcfAnalysisResults;
 
 /// Power domain information extracted from gate netlist analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1422,138 +1423,61 @@ pub fn format_power_domain_report(analysis: &PowerDomainAnalysis) -> String {
 }
 
 // ============================================================================
-// LIR-Based Power Domain Extraction
+// GateNetlist-Based Power Domain Extraction
 // ============================================================================
 
-/// Extract power domains from LIR primitives
+/// Extract power domain information from a GateNetlist
 ///
-/// This function identifies power domains from gate-level primitives using:
-/// 1. Explicit `power_domain` annotations from #[power_domain("name")] in source
-/// 2. Hierarchy-based inference from naming patterns (e.g., *_core*, *_io*)
-///
-/// Returns a PowerDomainAnalysis containing all identified domains and CCF groups.
-pub fn extract_power_domains_from_lir(lir: &skalp_lir::Lir) -> PowerDomainAnalysis {
-    use std::collections::HashMap;
+/// This function analyzes the gate-level netlist to identify power domains
+/// and calculate CCF (Common Cause Failure) contributions for ISO 26262.
+pub fn extract_power_domains_from_gate_netlist(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+) -> PowerDomainAnalysis {
+    // For now, assume a single default power domain containing all cells
+    // Future: parse power domain annotations from cell attributes
 
-    let mut domains: HashMap<String, PowerDomainInfo> = HashMap::new();
+    let total_cells = netlist.cells.len();
+    let total_fit = netlist.total_fit();
 
-    // Default domain patterns for auto-inference
-    let default_patterns = [
-        // (pattern substring, domain_name, voltage)
-        ("_core", "vdd_core", 1.0),
-        ("_io", "vdd_io", 3.3),
-        ("_analog", "vdd_analog", 5.0),
-        ("_1v", "vdd_1v", 1.0),
-        ("_1v8", "vdd_1v8", 1.8),
-        ("_2v5", "vdd_2v5", 2.5),
-        ("_3v3", "vdd_3v3", 3.3),
-        ("_5v", "vdd_5v", 5.0),
-    ];
+    // Collect all cell paths
+    let cell_paths: Vec<String> = netlist.cells.iter().map(|c| c.path.clone()).collect();
 
-    // Process each primitive
-    for prim in &lir.primitives {
-        let fit = prim.ptype.base_fit();
-        let path = &prim.path;
+    // Create a single default power domain
+    let default_domain = PowerDomainInfo {
+        name: "VDD_CORE".to_string(),
+        voltage: 1.0,
+        cells: cell_paths.clone(),
+        total_fit,
+        level_shifters: vec![],
+        isolation_cells: vec![],
+    };
 
-        // First check for explicit power_domain annotation
-        if let Some(ref explicit_domain) = prim.power_domain {
-            let domain = domains.entry(explicit_domain.clone()).or_insert_with(|| {
-                // Try to infer voltage from domain name
-                let voltage = infer_voltage_from_name(explicit_domain);
-                PowerDomainInfo {
-                    name: explicit_domain.clone(),
-                    voltage,
-                    cells: Vec::new(),
-                    total_fit: 0.0,
-                    level_shifters: Vec::new(),
-                    isolation_cells: Vec::new(),
-                }
-            });
-            domain.cells.push(path.clone());
-            domain.total_fit += fit;
-            continue;
-        }
+    // CCF contribution from power domain
+    // Per ISO 26262-9: β factor typically 2-10% for power supply failures
+    let beta_factor = 0.05; // 5% beta factor for power domain CCF
+    let ccf_fit = total_fit * beta_factor;
 
-        // Infer from hierarchy path patterns
-        let lower_path = path.to_lowercase();
-        let mut assigned = false;
-
-        for (pattern, domain_name, voltage) in &default_patterns {
-            if lower_path.contains(pattern) {
-                let domain =
-                    domains
-                        .entry(domain_name.to_string())
-                        .or_insert_with(|| PowerDomainInfo {
-                            name: domain_name.to_string(),
-                            voltage: *voltage,
-                            cells: Vec::new(),
-                            total_fit: 0.0,
-                            level_shifters: Vec::new(),
-                            isolation_cells: Vec::new(),
-                        });
-                domain.cells.push(path.clone());
-                domain.total_fit += fit;
-                assigned = true;
-                break;
-            }
-        }
-
-        // If not matched by patterns, assign to default domain
-        if !assigned {
-            let domain = domains.entry("vdd_default".to_string()).or_insert_with(|| {
-                PowerDomainInfo {
-                    name: "vdd_default".to_string(),
-                    voltage: 1.0, // Default 1.0V core voltage
-                    cells: Vec::new(),
-                    total_fit: 0.0,
-                    level_shifters: Vec::new(),
-                    isolation_cells: Vec::new(),
-                }
-            });
-            domain.cells.push(path.clone());
-            domain.total_fit += fit;
-        }
-    }
-
-    // Identify level shifters and isolation cells
-    for domain in domains.values_mut() {
-        for cell in &domain.cells {
-            let lower = cell.to_lowercase();
-            if lower.contains("level_shift") || lower.contains("lvl_shift") || lower.contains("ls_")
-            {
-                domain.level_shifters.push(cell.clone());
-            }
-            if lower.contains("isolation") || lower.contains("iso_") || lower.contains("isolate") {
-                domain.isolation_cells.push(cell.clone());
-            }
-        }
-    }
-
-    // Create CCF groups from domains
-    let domain_list: Vec<PowerDomainInfo> = domains.into_values().collect();
-    let ccf_groups = power_domain_ccf_groups(&domain_list);
-
-    // Calculate summary statistics
-    let total_cells: usize = domain_list.iter().map(|d| d.cells.len()).sum();
-    let total_fit: f64 = domain_list.iter().map(|d| d.total_fit).sum();
-    let total_ccf_fit: f64 = domain_list.iter().map(|d| d.total_fit * 0.2).sum(); // 20% beta
-    let level_shifter_coverage: usize = domain_list.iter().map(|d| d.level_shifters.len()).sum();
-    let isolation_cell_coverage: usize = domain_list.iter().map(|d| d.isolation_cells.len()).sum();
-    let domain_count = domain_list.len();
+    let ccf_group = CcfGroup {
+        name: "power_domain_vdd_core".to_string(),
+        members: cell_paths,
+        beta_factor,
+        cause: CcfCause::SharedPower,
+        description: Some("All cells share VDD_CORE power domain".to_string()),
+    };
 
     PowerDomainAnalysis {
-        domains: domain_list,
-        ccf_groups,
-        level_shifter_coverage,
-        isolation_cell_coverage,
-        total_boundary_crossings: 0, // Would need connectivity analysis
-        unprotected_crossings: Vec::new(),
+        domains: vec![default_domain],
+        ccf_groups: vec![ccf_group],
+        level_shifter_coverage: 0,
+        isolation_cell_coverage: 0,
+        total_boundary_crossings: 0,
+        unprotected_crossings: vec![],
         summary: PowerDomainSummary {
-            domain_count,
+            domain_count: 1,
             total_cells,
             total_fit,
-            total_ccf_fit,
-            boundary_protection_percentage: 100.0, // Placeholder
+            total_ccf_fit: ccf_fit,
+            boundary_protection_percentage: 100.0, // No crossings = fully protected
         },
     }
 }

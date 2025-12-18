@@ -1,20 +1,19 @@
-//! MIR to Word-Level LIR Transformation
+//! MIR to LIR Transformation
 //!
 //! Converts Mid-level IR (MIR) to word-level intermediate representation
-//! (`WordLir`) for technology mapping.
+//! (`Lir`) for technology mapping.
 //!
-//! Unlike `mir_to_gate_netlist`, this transformation preserves word-level
+//! Unlike gate-level transformation, this preserves word-level
 //! operations (Add, Mul, Mux, etc.) without decomposing them to gates.
 //! Decomposition is deferred to the technology mapping phase.
 //!
 //! # Flow
 //!
 //! ```text
-//! MIR → WordLir (word-level) → TechMapper → GateNetlist (gate-level)
+//! MIR → Lir (word-level) → TechMapper → GateNetlist (gate-level)
 //! ```
 
-use crate::lir::LirSafetyInfo;
-use crate::word_lir::{WordLir, WordLirStats, WordOp, WordSignalId};
+use crate::lir::{Lir, LirOp, LirSafetyInfo, LirSignalId, LirStats};
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
@@ -43,25 +42,28 @@ fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
     }
 }
 
-/// Result of MIR to WordLir transformation
+/// Result of MIR to LIR transformation
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct MirToWordLirResult {
+pub struct MirToLirResult {
     /// The generated word-level LIR
-    pub word_lir: WordLir,
+    pub lir: Lir,
     /// Transformation statistics
-    pub stats: WordLirStats,
+    pub stats: LirStats,
     /// Warnings generated during transformation
     pub warnings: Vec<String>,
 }
 
-/// MIR to WordLir transformer
-pub struct MirToWordLirTransform {
-    /// Output WordLir being built
-    lir: WordLir,
+/// Backward-compatible type alias
+pub type MirToWordLirResult = MirToLirResult;
+
+/// MIR to LIR transformer
+pub struct MirToLirTransform {
+    /// Output LIR being built
+    lir: Lir,
     /// Mapping from PortId to signal ID
-    port_to_signal: HashMap<PortId, WordSignalId>,
+    port_to_signal: HashMap<PortId, LirSignalId>,
     /// Mapping from SignalId to signal ID
-    signal_to_word_signal: HashMap<SignalId, WordSignalId>,
+    signal_to_lir_signal: HashMap<SignalId, LirSignalId>,
     /// Width of each port/signal
     port_widths: HashMap<PortId, u32>,
     signal_widths: HashMap<SignalId, u32>,
@@ -70,20 +72,20 @@ pub struct MirToWordLirTransform {
     /// Warnings
     warnings: Vec<String>,
     /// Clock signal IDs
-    clock_signals: Vec<WordSignalId>,
+    clock_signals: Vec<LirSignalId>,
     /// Reset signal IDs
-    reset_signals: Vec<WordSignalId>,
+    reset_signals: Vec<LirSignalId>,
     /// Counter for generating unique signal names
     temp_counter: u32,
 }
 
-impl MirToWordLirTransform {
+impl MirToLirTransform {
     /// Create a new transformer
     pub fn new(module_name: &str) -> Self {
         Self {
-            lir: WordLir::new(module_name.to_string()),
+            lir: Lir::new(module_name.to_string()),
             port_to_signal: HashMap::new(),
-            signal_to_word_signal: HashMap::new(),
+            signal_to_lir_signal: HashMap::new(),
             port_widths: HashMap::new(),
             signal_widths: HashMap::new(),
             hierarchy_path: "top".to_string(),
@@ -94,11 +96,11 @@ impl MirToWordLirTransform {
         }
     }
 
-    /// Transform a MIR module to WordLir
-    pub fn transform(&mut self, module: &Module) -> MirToWordLirResult {
+    /// Transform a MIR module to LIR
+    pub fn transform(&mut self, module: &Module) -> MirToLirResult {
         self.hierarchy_path = module.name.clone();
 
-        // Propagate module-level safety context to WordLir
+        // Propagate module-level safety context to LIR
         if let Some(ref ctx) = module.safety_context {
             if ctx.has_safety_annotation() {
                 self.lir.module_safety_info = Some(safety_context_to_lir_info(ctx));
@@ -129,10 +131,10 @@ impl MirToWordLirTransform {
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
         self.lir.resets = std::mem::take(&mut self.reset_signals);
 
-        let stats = WordLirStats::from_word_lir(&self.lir);
+        let stats = LirStats::from_lir(&self.lir);
 
-        MirToWordLirResult {
-            word_lir: self.lir.clone(),
+        MirToLirResult {
+            lir: self.lir.clone(),
             stats,
             warnings: std::mem::take(&mut self.warnings),
         }
@@ -185,7 +187,7 @@ impl MirToWordLirTransform {
         self.signal_widths.insert(signal.id, width);
 
         let signal_id = self.lir.add_signal(signal.name.clone(), width);
-        self.signal_to_word_signal.insert(signal.id, signal_id);
+        self.signal_to_lir_signal.insert(signal.id, signal_id);
 
         // Propagate detection signal flag from MIR internal signals
         // This is critical for hierarchical flattening where sub-module output ports
@@ -210,7 +212,7 @@ impl MirToWordLirTransform {
         // If they're different signals, create a buffer
         if expr_signal != target_signal {
             self.lir.add_node(
-                WordOp::Buffer {
+                LirOp::Buffer {
                     width: target_width,
                 },
                 vec![expr_signal],
@@ -242,8 +244,8 @@ impl MirToWordLirTransform {
     fn transform_sequential_block(
         &mut self,
         block: &Block,
-        clock_signal: Option<WordSignalId>,
-        reset_signal: Option<WordSignalId>,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
     ) {
         for stmt in &block.statements {
             self.transform_sequential_statement(stmt, clock_signal, reset_signal);
@@ -254,8 +256,8 @@ impl MirToWordLirTransform {
     fn transform_sequential_statement(
         &mut self,
         stmt: &Statement,
-        clock_signal: Option<WordSignalId>,
-        reset_signal: Option<WordSignalId>,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
     ) {
         match stmt {
             Statement::Assignment(assign) => {
@@ -265,7 +267,7 @@ impl MirToWordLirTransform {
                     let target_width = self.get_lvalue_width(&assign.lhs);
                     let d_signal = self.transform_expression(&assign.rhs, target_width);
 
-                    let reg_op = WordOp::Reg {
+                    let reg_op = LirOp::Reg {
                         width: target_width,
                         has_enable: false,
                         has_reset: reset_signal.is_some(),
@@ -343,7 +345,7 @@ impl MirToWordLirTransform {
                     // Create mux: sel, d0 (else), d1 (then)
                     let mux_out = self.alloc_temp_signal(target_width);
                     self.lir.add_node(
-                        WordOp::Mux2 {
+                        LirOp::Mux2 {
                             width: target_width,
                         },
                         vec![cond_signal, else_signal, then_signal],
@@ -352,7 +354,7 @@ impl MirToWordLirTransform {
                     );
 
                     // Create register
-                    let reg_op = WordOp::Reg {
+                    let reg_op = LirOp::Reg {
                         width: target_width,
                         has_enable: false,
                         has_reset: reset_signal.is_some(),
@@ -434,7 +436,7 @@ impl MirToWordLirTransform {
 
                 if expr_signal != target_signal {
                     self.lir.add_node(
-                        WordOp::Buffer {
+                        LirOp::Buffer {
                             width: target_width,
                         },
                         vec![expr_signal],
@@ -460,7 +462,7 @@ impl MirToWordLirTransform {
     }
 
     /// Transform an expression and return its output signal ID
-    fn transform_expression(&mut self, expr: &Expression, expected_width: u32) -> WordSignalId {
+    fn transform_expression(&mut self, expr: &Expression, expected_width: u32) -> LirSignalId {
         match &expr.kind {
             ExpressionKind::Literal(value) => self.create_constant(value, expected_width),
             ExpressionKind::Ref(lvalue) => self.get_lvalue_signal(lvalue),
@@ -481,7 +483,7 @@ impl MirToWordLirTransform {
                 let out = self.alloc_temp_signal(expected_width);
 
                 self.lir.add_node(
-                    WordOp::Mux2 {
+                    LirOp::Mux2 {
                         width: expected_width,
                     },
                     vec![cond_signal, else_signal, then_signal],
@@ -502,7 +504,7 @@ impl MirToWordLirTransform {
 
                 let out = self.alloc_temp_signal(widths.iter().sum());
                 self.lir.add_node(
-                    WordOp::Concat { widths },
+                    LirOp::Concat { widths },
                     signals,
                     out,
                     format!("{}.concat", self.hierarchy_path),
@@ -524,7 +526,7 @@ impl MirToWordLirTransform {
         left: &Expression,
         right: &Expression,
         expected_width: u32,
-    ) -> WordSignalId {
+    ) -> LirSignalId {
         let left_width = self.infer_expression_width(left);
         let right_width = self.infer_expression_width(right);
         let operand_width = left_width.max(right_width);
@@ -535,21 +537,21 @@ impl MirToWordLirTransform {
         let (word_op, result_width) = match op {
             // Arithmetic
             BinaryOp::Add => (
-                WordOp::Add {
+                LirOp::Add {
                     width: operand_width,
                     has_carry: expected_width > operand_width,
                 },
                 expected_width,
             ),
             BinaryOp::Sub => (
-                WordOp::Sub {
+                LirOp::Sub {
                     width: operand_width,
                     has_borrow: false,
                 },
                 operand_width,
             ),
             BinaryOp::Mul => (
-                WordOp::Mul {
+                LirOp::Mul {
                     width: operand_width,
                     result_width: expected_width,
                 },
@@ -558,19 +560,19 @@ impl MirToWordLirTransform {
 
             // Bitwise logic
             BinaryOp::And | BinaryOp::BitwiseAnd | BinaryOp::LogicalAnd => (
-                WordOp::And {
+                LirOp::And {
                     width: operand_width,
                 },
                 operand_width,
             ),
             BinaryOp::Or | BinaryOp::BitwiseOr | BinaryOp::LogicalOr => (
-                WordOp::Or {
+                LirOp::Or {
                     width: operand_width,
                 },
                 operand_width,
             ),
             BinaryOp::Xor | BinaryOp::BitwiseXor => (
-                WordOp::Xor {
+                LirOp::Xor {
                     width: operand_width,
                 },
                 operand_width,
@@ -578,37 +580,37 @@ impl MirToWordLirTransform {
 
             // Comparison (result is 1 bit)
             BinaryOp::Equal => (
-                WordOp::Eq {
+                LirOp::Eq {
                     width: operand_width,
                 },
                 1,
             ),
             BinaryOp::NotEqual => (
-                WordOp::Ne {
+                LirOp::Ne {
                     width: operand_width,
                 },
                 1,
             ),
             BinaryOp::Less => (
-                WordOp::Lt {
+                LirOp::Lt {
                     width: operand_width,
                 },
                 1,
             ),
             BinaryOp::LessEqual => (
-                WordOp::Le {
+                LirOp::Le {
                     width: operand_width,
                 },
                 1,
             ),
             BinaryOp::Greater => (
-                WordOp::Gt {
+                LirOp::Gt {
                     width: operand_width,
                 },
                 1,
             ),
             BinaryOp::GreaterEqual => (
-                WordOp::Ge {
+                LirOp::Ge {
                     width: operand_width,
                 },
                 1,
@@ -616,13 +618,13 @@ impl MirToWordLirTransform {
 
             // Shifts
             BinaryOp::LeftShift => (
-                WordOp::Shl {
+                LirOp::Shl {
                     width: operand_width,
                 },
                 operand_width,
             ),
             BinaryOp::RightShift => (
-                WordOp::Shr {
+                LirOp::Shr {
                     width: operand_width,
                 },
                 operand_width,
@@ -632,7 +634,7 @@ impl MirToWordLirTransform {
                 self.warnings
                     .push(format!("Unsupported binary op: {:?}", op));
                 (
-                    WordOp::Buffer {
+                    LirOp::Buffer {
                         width: operand_width,
                     },
                     operand_width,
@@ -656,13 +658,13 @@ impl MirToWordLirTransform {
         op: UnaryOp,
         operand: &Expression,
         expected_width: u32,
-    ) -> WordSignalId {
+    ) -> LirSignalId {
         let operand_width = self.infer_expression_width(operand);
         let operand_signal = self.transform_expression(operand, operand_width);
 
         let (word_op, result_width) = match op {
             UnaryOp::Not | UnaryOp::BitwiseNot => (
-                WordOp::Not {
+                LirOp::Not {
                     width: operand_width,
                 },
                 operand_width,
@@ -672,7 +674,7 @@ impl MirToWordLirTransform {
                 // First invert
                 let inv_out = self.alloc_temp_signal(operand_width);
                 self.lir.add_node(
-                    WordOp::Not {
+                    LirOp::Not {
                         width: operand_width,
                     },
                     vec![operand_signal],
@@ -684,7 +686,7 @@ impl MirToWordLirTransform {
                 let one = self.create_constant(&Value::Integer(1), operand_width);
                 let out = self.alloc_temp_signal(operand_width);
                 self.lir.add_node(
-                    WordOp::Add {
+                    LirOp::Add {
                         width: operand_width,
                         has_carry: false,
                     },
@@ -695,19 +697,19 @@ impl MirToWordLirTransform {
                 return out;
             }
             UnaryOp::Reduce(ReduceOp::And) => (
-                WordOp::RedAnd {
+                LirOp::RedAnd {
                     width: operand_width,
                 },
                 1,
             ),
             UnaryOp::Reduce(ReduceOp::Or) => (
-                WordOp::RedOr {
+                LirOp::RedOr {
                     width: operand_width,
                 },
                 1,
             ),
             UnaryOp::Reduce(ReduceOp::Xor) => (
-                WordOp::RedXor {
+                LirOp::RedXor {
                     width: operand_width,
                 },
                 1,
@@ -717,7 +719,7 @@ impl MirToWordLirTransform {
                 self.warnings
                     .push(format!("Unsupported reduction op: {:?}", op));
                 (
-                    WordOp::Buffer {
+                    LirOp::Buffer {
                         width: operand_width,
                     },
                     operand_width,
@@ -727,7 +729,7 @@ impl MirToWordLirTransform {
                 self.warnings
                     .push(format!("Unsupported unary op: {:?}", op));
                 (
-                    WordOp::Buffer {
+                    LirOp::Buffer {
                         width: operand_width,
                     },
                     operand_width,
@@ -746,7 +748,7 @@ impl MirToWordLirTransform {
     }
 
     /// Create a constant signal
-    fn create_constant(&mut self, value: &Value, width: u32) -> WordSignalId {
+    fn create_constant(&mut self, value: &Value, width: u32) -> LirSignalId {
         let (val, w) = match value {
             Value::Integer(i) => (*i as u64, width),
             Value::BitVector {
@@ -758,7 +760,7 @@ impl MirToWordLirTransform {
 
         let out = self.alloc_temp_signal(w);
         self.lir.add_node(
-            WordOp::Constant {
+            LirOp::Constant {
                 width: w,
                 value: val,
             },
@@ -770,7 +772,7 @@ impl MirToWordLirTransform {
     }
 
     /// Get signal ID for an LValue
-    fn get_lvalue_signal(&mut self, lvalue: &LValue) -> WordSignalId {
+    fn get_lvalue_signal(&mut self, lvalue: &LValue) -> LirSignalId {
         match lvalue {
             LValue::Port(port_id) => {
                 self.port_to_signal
@@ -782,7 +784,7 @@ impl MirToWordLirTransform {
                     })
             }
             LValue::Signal(signal_id) => self
-                .signal_to_word_signal
+                .signal_to_lir_signal
                 .get(signal_id)
                 .copied()
                 .unwrap_or_else(|| {
@@ -804,7 +806,7 @@ impl MirToWordLirTransform {
                 if let ExpressionKind::Literal(Value::Integer(i)) = &index.kind {
                     let out = self.alloc_temp_signal(1);
                     self.lir.add_node(
-                        WordOp::RangeSelect {
+                        LirOp::RangeSelect {
                             width: base_width,
                             high: *i as u32,
                             low: *i as u32,
@@ -819,7 +821,7 @@ impl MirToWordLirTransform {
                     let idx_signal = self.transform_expression(index, 32);
                     let out = self.alloc_temp_signal(1);
                     self.lir.add_node(
-                        WordOp::BitSelect { width: base_width },
+                        LirOp::BitSelect { width: base_width },
                         vec![base_signal, idx_signal],
                         out,
                         format!("{}.dyn_bit_sel", self.hierarchy_path),
@@ -839,7 +841,7 @@ impl MirToWordLirTransform {
                     let out_width = (*h - *l + 1) as u32;
                     let out = self.alloc_temp_signal(out_width);
                     self.lir.add_node(
-                        WordOp::RangeSelect {
+                        LirOp::RangeSelect {
                             width: base_width,
                             high: *h as u32,
                             low: *l as u32,
@@ -867,7 +869,7 @@ impl MirToWordLirTransform {
 
                 let out = self.alloc_temp_signal(widths.iter().sum());
                 self.lir.add_node(
-                    WordOp::Concat { widths },
+                    LirOp::Concat { widths },
                     signals,
                     out,
                     format!("{}.concat", self.hierarchy_path),
@@ -946,7 +948,7 @@ impl MirToWordLirTransform {
     }
 
     /// Get clock signal from sensitivity list
-    fn get_clock_from_sensitivity(&self, sens: &SensitivityList) -> Option<WordSignalId> {
+    fn get_clock_from_sensitivity(&self, sens: &SensitivityList) -> Option<LirSignalId> {
         if let SensitivityList::Edge(edges) = sens {
             for edge in edges {
                 if matches!(edge.edge, EdgeType::Rising | EdgeType::Falling) {
@@ -958,7 +960,7 @@ impl MirToWordLirTransform {
     }
 
     /// Get reset signal from sensitivity list
-    fn get_reset_from_sensitivity(&self, sens: &SensitivityList) -> Option<WordSignalId> {
+    fn get_reset_from_sensitivity(&self, sens: &SensitivityList) -> Option<LirSignalId> {
         if let SensitivityList::Edge(edges) = sens {
             for edge in edges {
                 if matches!(edge.edge, EdgeType::Active | EdgeType::Inactive) {
@@ -970,10 +972,10 @@ impl MirToWordLirTransform {
     }
 
     /// Get LValue signal without modifying state
-    fn get_lvalue_signal_readonly(&self, lvalue: &LValue) -> Option<WordSignalId> {
+    fn get_lvalue_signal_readonly(&self, lvalue: &LValue) -> Option<LirSignalId> {
         match lvalue {
             LValue::Port(port_id) => self.port_to_signal.get(port_id).copied(),
-            LValue::Signal(signal_id) => self.signal_to_word_signal.get(signal_id).copied(),
+            LValue::Signal(signal_id) => self.signal_to_lir_signal.get(signal_id).copied(),
             _ => None,
         }
     }
@@ -1007,17 +1009,22 @@ impl MirToWordLirTransform {
     }
 
     /// Allocate a temporary signal
-    fn alloc_temp_signal(&mut self, width: u32) -> WordSignalId {
+    fn alloc_temp_signal(&mut self, width: u32) -> LirSignalId {
         let name = format!("_t{}", self.temp_counter);
         self.temp_counter += 1;
         self.lir.add_signal(name, width)
     }
 }
 
-/// Transform a MIR module to WordLir
-pub fn lower_mir_module_to_word_lir(module: &Module) -> MirToWordLirResult {
-    let mut transformer = MirToWordLirTransform::new(&module.name);
+/// Transform a MIR module to LIR
+pub fn lower_mir_module_to_lir(module: &Module) -> MirToLirResult {
+    let mut transformer = MirToLirTransform::new(&module.name);
     transformer.transform(module)
+}
+
+/// Backward-compatible alias
+pub fn lower_mir_module_to_word_lir(module: &Module) -> MirToLirResult {
+    lower_mir_module_to_lir(module)
 }
 
 // ============================================================================
@@ -1099,23 +1106,23 @@ mod tests {
 
         // Should have a single Add node (not decomposed into full adders)
         let add_count = result
-            .word_lir
+            .lir
             .nodes
             .iter()
-            .filter(|n| matches!(n.op, WordOp::Add { .. }))
+            .filter(|n| matches!(n.op, LirOp::Add { .. }))
             .count();
 
         assert_eq!(add_count, 1, "Expected single Add node, got {}", add_count);
 
         // Check that the Add has width 8
         let add_node = result
-            .word_lir
+            .lir
             .nodes
             .iter()
-            .find(|n| matches!(n.op, WordOp::Add { .. }))
+            .find(|n| matches!(n.op, LirOp::Add { .. }))
             .unwrap();
 
-        if let WordOp::Add { width, .. } = &add_node.op {
+        if let LirOp::Add { width, .. } = &add_node.op {
             assert_eq!(*width, 8, "Expected Add width 8, got {}", width);
         }
     }
@@ -1126,8 +1133,8 @@ mod tests {
         let result = lower_mir_module_to_word_lir(&module);
 
         // Input signals should have width 8
-        for input_id in &result.word_lir.inputs {
-            let signal = &result.word_lir.signals[input_id.0 as usize];
+        for input_id in &result.lir.inputs {
+            let signal = &result.lir.signals[input_id.0 as usize];
             assert_eq!(signal.width, 8, "Input {} should have width 8", signal.name);
         }
     }
@@ -1199,28 +1206,28 @@ mod tests {
 
         // Should have a single Eq node
         let eq_count = result
-            .word_lir
+            .lir
             .nodes
             .iter()
-            .filter(|n| matches!(n.op, WordOp::Eq { .. }))
+            .filter(|n| matches!(n.op, LirOp::Eq { .. }))
             .count();
 
         assert_eq!(eq_count, 1, "Expected single Eq node");
 
         // Eq should have 8-bit operands but 1-bit output
         let eq_node = result
-            .word_lir
+            .lir
             .nodes
             .iter()
-            .find(|n| matches!(n.op, WordOp::Eq { .. }))
+            .find(|n| matches!(n.op, LirOp::Eq { .. }))
             .unwrap();
 
-        if let WordOp::Eq { width } = &eq_node.op {
+        if let LirOp::Eq { width } = &eq_node.op {
             assert_eq!(*width, 8, "Expected Eq operand width 8");
         }
 
         // Output should be 1-bit
-        let out_signal = &result.word_lir.signals[eq_node.output.0 as usize];
+        let out_signal = &result.lir.signals[eq_node.output.0 as usize];
         assert_eq!(out_signal.width, 1, "Expected 1-bit output");
     }
 
@@ -1302,10 +1309,10 @@ mod tests {
 
         // Should have a single Mux2 node with width 16
         let mux_count = result
-            .word_lir
+            .lir
             .nodes
             .iter()
-            .filter(|n| matches!(n.op, WordOp::Mux2 { width: 16 }))
+            .filter(|n| matches!(n.op, LirOp::Mux2 { width: 16 }))
             .count();
 
         assert_eq!(mux_count, 1, "Expected single 16-bit Mux2 node");

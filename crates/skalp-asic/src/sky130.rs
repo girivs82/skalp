@@ -2,10 +2,15 @@
 //!
 //! Complete implementation of SKY130 standard cells without external dependencies.
 //! Based on the open-source SKY130 PDK.
+//!
+//! NOTE: This module needs to be updated to use GateNetlist instead of the legacy Lir type.
 
+#![allow(unused_imports)]
 use crate::placement::{Net, Netlist, StandardCell};
 use crate::AsicError;
-use skalp_lir::{Lir, Primitive, PrimitiveType};
+use skalp_lir::PrimitiveType;
+// Legacy imports removed - Lir and Primitive no longer exist
+// The new flow should use GateNetlist instead
 use std::collections::HashMap;
 
 /// SKY130 Standard Cell Library
@@ -319,7 +324,16 @@ impl StandardCellLibrary {
         Self { cells }
     }
 
-    /// Map LIR design to SKY130 netlist
+    /// Map GateNetlist design to SKY130 netlist
+    /// NOTE: This function needs to be reimplemented to use GateNetlist instead of legacy Lir
+    pub fn map_design_stub(&self) -> Result<Netlist, AsicError> {
+        Err(AsicError::TechnologyError(
+            "SKY130 mapping temporarily disabled - pending GateNetlist migration".to_string(),
+        ))
+    }
+
+    // Legacy: Map LIR design to SKY130 netlist (commented out during migration)
+    /*
     pub fn map_design(&self, design: &Lir) -> Result<Netlist, AsicError> {
         let mut netlist_cells = Vec::new();
         let mut nets = Vec::new();
@@ -374,6 +388,7 @@ impl StandardCellLibrary {
             nets,
         })
     }
+    */
 
     /// Map primitive type to cell name
     fn map_primitive_type(&self, ptype: &PrimitiveType) -> Result<String, AsicError> {
@@ -405,7 +420,8 @@ impl StandardCellLibrary {
         })
     }
 
-    /// Create pins for a primitive based on cell definition
+    // Legacy: Create pins for a primitive based on cell definition (commented out during migration)
+    /*
     #[allow(dead_code)]
     fn create_pins_for_primitive(&self, prim: &Primitive, cell_def: &CellDefinition) -> Vec<Pin> {
         let mut pins = Vec::new();
@@ -443,6 +459,7 @@ impl StandardCellLibrary {
 
         pins
     }
+    */
 
     /// Create physical layout for inverter
     fn create_inverter_layout() -> CellLayout {

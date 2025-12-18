@@ -3,26 +3,24 @@
 //!
 //! ISO 26262 functional safety implementation for SKALP hardware synthesis.
 //! Provides ASIL-compliant safety requirements, FMEA generation, and safety mechanisms.
+//!
+//! NOTE: Several modules have been stubbed out pending migration to GateNetlist.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+// Core modules (working)
 pub mod analysis;
 pub mod asil;
-pub mod bist_generation;
 pub mod common_cause;
-pub mod coverage_verification;
 pub mod design_resolver;
 pub mod design_rules;
 pub mod diversity;
 pub mod do254;
-pub mod fault_diagnostics;
-pub mod fault_simulation;
 pub mod fmea;
 pub mod fmeda;
 pub mod fmeda_library;
 pub mod fta;
-pub mod gate_netlist_integration;
 pub mod hierarchy;
 pub mod hsi;
 pub mod iec61508;
@@ -30,11 +28,8 @@ pub mod mechanisms;
 pub mod metrics;
 pub mod pipeline;
 pub mod power_domains;
-pub mod power_infrastructure;
 pub mod requirements;
 pub mod safety_case;
-pub mod safety_driven_fmea;
-pub mod safety_power_verification;
 pub mod seooc;
 pub mod sm_failure_analysis;
 pub mod tool_qualification;
@@ -42,39 +37,15 @@ pub mod traits;
 pub mod uncertainty;
 pub mod workproducts;
 
-// Re-export fault simulation integration functions when sim-integration feature is enabled
-#[cfg(feature = "sim-integration")]
-pub use fault_simulation::{
-    build_primitive_path_map, fault_campaign_to_safety_results, fault_campaign_with_effects,
-};
-
-// Re-export domain fault injection types
-pub use fault_simulation::{
-    domain_fault_to_standard_faults, generate_domain_fault_sites, simulate_domain_brownout,
-    BrownoutAnalysis, DomainBrownoutResult, DomainFaultCampaignConfig, DomainFaultCampaignResults,
-    DomainFaultResult, DomainFaultSite, DomainFaultType,
-};
-
-// Re-export FI-driven FMEA types
-pub use safety_driven_fmea::{
-    EffectMonitor, FaultEffectResult, FiDrivenConfig, FiDrivenFmeaResult, PmhfBreakdown,
-    SafetyDrivenFmeaGenerator,
-};
-
-// Re-export fault diagnostics types
-pub use fault_diagnostics::{
-    analyze_ccf, analyze_sm_diversity, generate_ccf_report, generate_diagnostic_report,
-    generate_sm_diversity_report, CcfAnalysis, CcfSource, CcfSourceType, ClassifiedFault,
-    FaultClassification, FaultClassificationSummary, FaultDiagnostics, IdenticalSmPair,
-    MatchingPrimitivePair, SharedSignalInfo, SmDiversityAnalysis, SmDiversityWarning,
-    UndetectedFaultInfo, UndetectedReason, WarningSeverity,
-};
-
-// Re-export BIST generation types
-pub use bist_generation::{
-    generate_bist_from_analysis, BistCandidate, BistGenerationConfig, BistGenerator,
-    BistTestPattern, GeneratedBist,
-};
+// Modules pending migration to GateNetlist (stubbed)
+pub mod bist_generation;
+pub mod coverage_verification;
+pub mod fault_diagnostics;
+pub mod fault_simulation;
+pub mod gate_netlist_integration;
+pub mod power_infrastructure;
+pub mod safety_driven_fmea;
+pub mod safety_power_verification;
 
 // Re-export SEooC analysis types
 pub use seooc::{
@@ -82,16 +53,6 @@ pub use seooc::{
     AssumedMechanism, DcCategory, DerivedSafetyRequirement, FaultInjectionData, PowerCcfCoverage,
     PowerDomainCcfData, SeoocAnalysisConfig, SeoocAnalysisResult, UndetectedFault,
     UndetectedFaultCategories,
-};
-
-#[cfg(feature = "sim-integration")]
-pub use safety_driven_fmea::convert_campaign_to_effect_results;
-
-// Re-export safety-power verification types
-pub use safety_power_verification::{
-    format_verification_report, verify_safety_power_domains, PowerDomainRef, ResolvedPowerDomain,
-    SafetyPowerVerificationResult, SafetyPowerViolation, SafetyPowerWarning, VerificationStats,
-    ViolationType, WarningType,
 };
 
 /// Safety-related errors
@@ -107,48 +68,8 @@ pub enum SafetyError {
     PowerDomainError(String),
     #[error("Safety metrics calculation failed: {0}")]
     MetricsError(String),
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
-/// Configuration for safety analysis
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SafetyConfig {
-    /// Target ASIL level for the design
-    pub target_asil: asil::AsilLevel,
-    /// Enable FMEA generation
-    pub enable_fmea: bool,
-    /// Enable safety metrics calculation
-    pub enable_metrics: bool,
-    /// Enable power domain analysis
-    pub enable_power_domains: bool,
-    /// Safety mechanism requirements
-    pub mechanism_requirements: Vec<String>,
-}
-
-impl Default for SafetyConfig {
-    fn default() -> Self {
-        Self {
-            target_asil: asil::AsilLevel::A,
-            enable_fmea: true,
-            enable_metrics: true,
-            enable_power_domains: false,
-            mechanism_requirements: vec![],
-        }
-    }
-}
-
-/// Result type for safety operations
 pub type SafetyResult<T> = Result<T, SafetyError>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_safety_config_default() {
-        let config = SafetyConfig::default();
-        assert_eq!(config.target_asil, asil::AsilLevel::A);
-        assert!(config.enable_fmea);
-        assert!(config.enable_metrics);
-        assert!(!config.enable_power_domains);
-    }
-}

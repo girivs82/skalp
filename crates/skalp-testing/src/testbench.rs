@@ -25,12 +25,10 @@
 
 use crate::cache::{collect_dependencies, CompilationCache};
 use anyhow::Result;
-use skalp_frontend::{parse_and_build_hir, parse_and_build_hir_from_file};
-use skalp_mir::{MirCompiler, OptimizationLevel};
+use skalp_mir::MirCompiler;
 use skalp_sim::{SimulationConfig, Simulator};
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 
 /// High-level testbench builder for ergonomic verification
