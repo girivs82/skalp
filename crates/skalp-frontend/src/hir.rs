@@ -60,6 +60,43 @@ pub struct PowerDomainConfig {
     pub is_always_on: bool,
 }
 
+// ============================================================================
+// SEooC (Safety Element out of Context) Configuration
+// ============================================================================
+
+/// SEooC configuration for an entity
+/// Per ISO 26262-10:9, a SEooC is developed without full knowledge of the
+/// integrating system. It declares assumptions about external safety mechanisms
+/// that the integrator must provide.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SeoocConfig {
+    /// Target ASIL level for this SEooC
+    pub target_asil: String, // "A", "B", "C", "D", "QM"
+    /// Optional rationale for SEooC status
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// Assumed external mechanisms (entity-level, NOT port-level)
+    /// The response path (interrupt, reset, shutdown) is outside SEooC boundary
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumed_mechanisms: Vec<AssumedMechanismConfig>,
+}
+
+/// Assumed external mechanism - a requirement on the integrating system
+/// NOT tied to any specific port - the response path is outside this SEooC
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssumedMechanismConfig {
+    /// Unique identifier for this assumed mechanism (for traceability)
+    pub id: String,
+    /// Type of mechanism (voltage_monitor, watchdog, clock_monitor, etc.)
+    pub mechanism_type: String,
+    /// Fault types this external mechanism is assumed to detect
+    /// e.g., ["VoltageDropout", "GroundBounce"] or ["StuckAt0", "StuckAt1"]
+    pub covers: Vec<String>,
+    /// Human-readable description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// High-level Intermediate Representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hir {
@@ -132,6 +169,11 @@ pub struct HirEntity {
     /// When present, indicates this entity is a reusable safety mechanism.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_mechanism_config: Option<SafetyMechanismConfig>,
+    /// SEooC (Safety Element out of Context) configuration
+    /// When present, this entity is developed without full system knowledge.
+    /// Skalp will calculate required DC for external mechanisms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seooc_config: Option<SeoocConfig>,
 }
 
 /// Safety mechanism configuration for entities (from #[safety_mechanism(...)] attribute)

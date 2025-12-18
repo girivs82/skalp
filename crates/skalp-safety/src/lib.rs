@@ -34,6 +34,7 @@ pub mod power_infrastructure;
 pub mod requirements;
 pub mod safety_case;
 pub mod safety_driven_fmea;
+pub mod seooc;
 pub mod sm_failure_analysis;
 pub mod tool_qualification;
 pub mod traits;
@@ -71,6 +72,13 @@ pub use fault_diagnostics::{
 pub use bist_generation::{
     generate_bist_from_analysis, BistCandidate, BistGenerationConfig, BistGenerator,
     BistTestPattern, GeneratedBist,
+};
+
+// Re-export SEooC analysis types
+pub use seooc::{
+    analyze_seooc, format_seooc_report, from_hir_seooc_config, AssumedMechanism, DcCategory,
+    DerivedSafetyRequirement, FaultInjectionData, SeoocAnalysisConfig, SeoocAnalysisResult,
+    UndetectedFault, UndetectedFaultCategories,
 };
 
 #[cfg(feature = "sim-integration")]

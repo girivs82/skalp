@@ -167,6 +167,14 @@ pub struct HirBuilderContext {
     /// Used for Common Cause Failure (CCF) analysis
     pending_power_domain_config: Option<PowerDomainConfig>,
 
+    /// Pending SEooC config from most recent #[seooc(asil = "D")] attribute
+    /// Applied to next entity declaration
+    pending_seooc_config: Option<crate::hir::SeoocConfig>,
+
+    /// Pending assumed mechanisms from #[assumed_mechanism(...)] attributes
+    /// Collected and applied to next entity with SEooC config
+    pending_assumed_mechanisms: Vec<crate::hir::AssumedMechanismConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -283,6 +291,8 @@ impl HirBuilderContext {
             pending_safety_mechanism_config: None,
             pending_detection_config: None,
             pending_power_domain_config: None,
+            pending_seooc_config: None,
+            pending_assumed_mechanisms: Vec::new(),
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -849,6 +859,28 @@ impl HirBuilderContext {
             name, safety_mechanism_config
         );
 
+        // Consume pending SEooC config (from #[seooc(...)] attribute)
+        // and merge any pending assumed mechanisms (from #[assumed_mechanism(...)] attributes)
+        let seooc_config = {
+            let mut config = self.pending_seooc_config.take();
+            let assumed_mechanisms = std::mem::take(&mut self.pending_assumed_mechanisms);
+
+            if !assumed_mechanisms.is_empty() {
+                // If we have assumed mechanisms, ensure we have a seooc_config
+                let config = config.get_or_insert_with(Default::default);
+                config.assumed_mechanisms.extend(assumed_mechanisms);
+            }
+
+            if config.is_some() {
+                eprintln!(
+                    "🔍 [BUILD_ENTITY] Entity '{}' - seooc_config = {:?}",
+                    name, config
+                );
+            }
+
+            config
+        };
+
         // Use entity_power_domain_config captured at the top of this function
         // (before processing ports, which also can consume pending_power_domain_config)
 
@@ -867,6 +899,7 @@ impl HirBuilderContext {
             power_domains: Vec::new(), // Power domains will be populated later from declarations
             power_domain_config: entity_power_domain_config,
             safety_mechanism_config,
+            seooc_config,
         })
     }
 
@@ -7107,6 +7140,18 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Check for #[seooc(asil = "D")] attribute for SEooC analysis
+            if let Some(config) = self.extract_seooc_config_from_intent_value(&intent_value) {
+                self.pending_seooc_config = Some(config);
+                return;
+            }
+
+            // Check for #[assumed_mechanism(...)] attribute - collect multiple
+            if let Some(config) = self.extract_assumed_mechanism_from_intent_value(&intent_value) {
+                self.pending_assumed_mechanisms.push(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -8016,6 +8061,190 @@ impl HirBuilderContext {
             domain_name,
             voltage,
             is_always_on,
+        })
+    }
+
+    // ========================================================================
+    // SEooC (Safety Element out of Context) Extractors
+    // ========================================================================
+
+    /// Extract SEooC config from IntentValue
+    ///
+    /// Parses: `#[seooc(asil = "D")]` or `#[seooc(asil = "D", rationale = "...")]`
+    fn extract_seooc_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<crate::hir::SeoocConfig> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Check if this is a seooc attribute
+        let is_seooc = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "seooc");
+
+        if !is_seooc {
+            return None;
+        }
+
+        let mut target_asil = String::new();
+        let mut rationale: Option<String> = None;
+
+        let mut i = 0;
+        while i < tokens.len() {
+            // Look for asil parameter: asil = "D"
+            // Note: 'asil' is tokenized as AsilKw (keyword), not Ident
+            if (tokens[i].kind() == SyntaxKind::Ident || tokens[i].kind() == SyntaxKind::AsilKw)
+                && tokens[i].text() == "asil"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                target_asil = tokens[i + 2].text().trim_matches('"').to_string();
+            }
+
+            // Look for rationale parameter: rationale = "..."
+            if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "rationale"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                rationale = Some(tokens[i + 2].text().trim_matches('"').to_string());
+            }
+
+            i += 1;
+        }
+
+        // asil is required
+        if target_asil.is_empty() {
+            return None;
+        }
+
+        Some(crate::hir::SeoocConfig {
+            target_asil,
+            rationale,
+            assumed_mechanisms: Vec::new(), // Collected separately via #[assumed_mechanism]
+        })
+    }
+
+    /// Extract assumed mechanism config from IntentValue
+    ///
+    /// Parses: `#[assumed_mechanism(id = "EXT_VM", type = "voltage_monitor", covers = [VoltageDropout, GroundBounce])]`
+    fn extract_assumed_mechanism_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<crate::hir::AssumedMechanismConfig> {
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Check if this is an assumed_mechanism attribute
+        let is_assumed_mechanism = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "assumed_mechanism");
+
+        if !is_assumed_mechanism {
+            return None;
+        }
+
+        let mut id = String::new();
+        let mut mechanism_type = String::new();
+        let mut covers: Vec<String> = Vec::new();
+        let mut description: Option<String> = None;
+
+        let mut i = 0;
+        while i < tokens.len() {
+            // Look for id parameter: id = "EXT_VM"
+            if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "id"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                id = tokens[i + 2].text().trim_matches('"').to_string();
+            }
+
+            // Look for type parameter: mtype = "voltage_monitor" (using mtype to avoid keyword conflict)
+            if tokens[i].kind() == SyntaxKind::Ident
+                && (tokens[i].text() == "mtype" || tokens[i].text() == "mechanism_type")
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                mechanism_type = tokens[i + 2].text().trim_matches('"').to_string();
+            }
+
+            // Look for covers parameter: covers = [VoltageDropout, GroundBounce]
+            // OR covers = "VoltageDropout,GroundBounce" (comma-separated string)
+            // Note: 'covers' is tokenized as CoversKw (keyword), not Ident
+            if (tokens[i].kind() == SyntaxKind::Ident || tokens[i].kind() == SyntaxKind::CoversKw)
+                && tokens[i].text() == "covers"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                // Check if it's a string (comma-separated) or array
+                if tokens[i + 2].kind() == SyntaxKind::StringLiteral {
+                    // Parse comma-separated string: covers = "VoltageDropout,GroundBounce"
+                    let covers_str = tokens[i + 2].text().trim_matches('"');
+                    covers = covers_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                } else if tokens[i + 2].kind() == SyntaxKind::LBracket {
+                    // Parse array: covers = [VoltageDropout, GroundBounce]
+                    for token in tokens.iter().skip(i + 3) {
+                        if token.kind() == SyntaxKind::RBracket {
+                            break;
+                        } else if token.kind() == SyntaxKind::Ident {
+                            covers.push(token.text().to_string());
+                        }
+                    }
+                }
+            }
+
+            // Look for description parameter: description = "..."
+            if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "description"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                description = Some(tokens[i + 2].text().trim_matches('"').to_string());
+            }
+
+            i += 1;
+        }
+
+        // id and type are required
+        if id.is_empty() || mechanism_type.is_empty() {
+            return None;
+        }
+
+        Some(crate::hir::AssumedMechanismConfig {
+            id,
+            mechanism_type,
+            covers,
+            description,
         })
     }
 

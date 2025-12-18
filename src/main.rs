@@ -2359,6 +2359,75 @@ fn run_fi_driven_safety(
         println!("   ✅ {}", json_path.display());
     }
 
+    // Check for SEooC configuration and run derived requirements analysis
+    let top_entity = hir.entities.iter().find(|e| e.name == lir.name);
+    if let Some(entity) = top_entity {
+        if let Some(seooc_config) = &entity.seooc_config {
+            println!("\n🛡️  SEooC Analysis (ISO 26262-10:9)...");
+
+            // Convert HIR config to analysis config
+            let seooc_analysis_config =
+                skalp_safety::from_hir_seooc_config(&entity.name, seooc_config);
+
+            // Convert FI results to SEooC format
+            let mut undetected_faults_seooc = Vec::new();
+            for result in &fault_results {
+                if !result.triggered_effects.is_empty() && !result.detected {
+                    undetected_faults_seooc.push(skalp_safety::UndetectedFault {
+                        site: result.primitive_path.clone(),
+                        fault_type: format!("{:?}", result.fault_site.fault_type),
+                        fit: lir
+                            .primitives
+                            .iter()
+                            .find(|p| p.path == result.primitive_path)
+                            .map(|p| p.ptype.base_fit())
+                            .unwrap_or(1.0),
+                    });
+                }
+            }
+
+            let total_dangerous = fault_results
+                .iter()
+                .filter(|r| !r.triggered_effects.is_empty())
+                .count();
+            let internally_detected = fault_results
+                .iter()
+                .filter(|r| !r.triggered_effects.is_empty() && r.detected)
+                .count();
+
+            let fi_data = skalp_safety::FaultInjectionData {
+                total_dangerous,
+                internally_detected,
+                undetected_faults: undetected_faults_seooc,
+            };
+
+            // Run SEooC analysis
+            let seooc_result = skalp_safety::analyze_seooc(&seooc_analysis_config, &fi_data);
+
+            // Print summary
+            println!("   Target ASIL: {:?}", seooc_result.target_asil);
+            println!("   Internal SPFM: {:.1}%", seooc_result.internal_spfm);
+            println!("   SPFM Gap: {:.1}%", seooc_result.spfm_gap);
+            if seooc_result.target_achievable {
+                println!("   Status: ✅ Target achievable with external mechanisms");
+            } else {
+                println!("   Status: ⚠️  Gap remains - additional mechanisms needed");
+            }
+
+            // Generate SEooC report
+            let seooc_report = skalp_safety::format_seooc_report(&seooc_result);
+            let seooc_path = output_dir.join("seooc_derived_requirements.md");
+            fs::write(&seooc_path, &seooc_report)?;
+            println!("   ✅ {}", seooc_path.display());
+
+            // Also generate YAML for machine consumption
+            let seooc_yaml = generate_seooc_yaml(&seooc_result);
+            let seooc_yaml_path = output_dir.join("seooc_derived_requirements.yaml");
+            fs::write(&seooc_yaml_path, &seooc_yaml)?;
+            println!("   ✅ {}", seooc_yaml_path.display());
+        }
+    }
+
     // Generate BIST if requested and we have FI results
     if generate_bist && !fault_results.is_empty() {
         use skalp_safety::bist_generation::{BistGenerationConfig, BistGenerator};
@@ -2983,6 +3052,86 @@ fn generate_fi_driven_yaml(
             yaml.push_str(&format!("    meets_target: {}\n", analysis.meets_target));
         }
     }
+
+    yaml
+}
+
+/// Generate SEooC derived requirements YAML for machine consumption
+fn generate_seooc_yaml(result: &skalp_safety::SeoocAnalysisResult) -> String {
+    let mut yaml = String::new();
+
+    yaml.push_str("# SEooC Derived Safety Requirements (ISO 26262-10:9)\n");
+    yaml.push_str(&format!("entity: {}\n", result.entity_name));
+    yaml.push_str(&format!("target_asil: {:?}\n\n", result.target_asil));
+
+    yaml.push_str("internal_metrics:\n");
+    yaml.push_str(&format!("  spfm: {:.4}\n", result.internal_spfm / 100.0));
+    yaml.push_str(&format!("  lfm: {:.4}\n", result.internal_lfm / 100.0));
+    yaml.push_str(&format!("  spfm_gap: {:.4}\n", result.spfm_gap / 100.0));
+    yaml.push_str(&format!("  lfm_gap: {:.4}\n", result.lfm_gap / 100.0));
+    yaml.push_str(&format!(
+        "  total_dangerous_faults: {}\n",
+        result.total_dangerous_faults
+    ));
+    yaml.push_str(&format!(
+        "  internally_detected_faults: {}\n\n",
+        result.internally_detected_faults
+    ));
+
+    yaml.push_str("undetected_by_category:\n");
+    yaml.push_str(&format!(
+        "  permanent: {}\n",
+        result.undetected_by_category.permanent
+    ));
+    yaml.push_str(&format!(
+        "  transient: {}\n",
+        result.undetected_by_category.transient
+    ));
+    yaml.push_str(&format!(
+        "  power: {}\n",
+        result.undetected_by_category.power
+    ));
+    yaml.push_str(&format!(
+        "  total: {}\n\n",
+        result.undetected_by_category.total
+    ));
+
+    if !result.derived_requirements.is_empty() {
+        yaml.push_str("derived_requirements:\n");
+        for req in &result.derived_requirements {
+            yaml.push_str(&format!("  - id: {}\n", req.id));
+            yaml.push_str(&format!("    mechanism_id: {}\n", req.assumed_mechanism_id));
+            yaml.push_str(&format!("    mechanism_type: {}\n", req.mechanism_type));
+            yaml.push_str(&format!(
+                "    covers: [{}]\n",
+                req.fault_types_covered.join(", ")
+            ));
+            yaml.push_str(&format!("    fault_count: {}\n", req.fault_count));
+            yaml.push_str(&format!(
+                "    required_dc: {:.4}\n",
+                req.required_dc / 100.0
+            ));
+            yaml.push_str(&format!("    dc_category: {}\n", req.dc_category));
+            yaml.push_str(&format!(
+                "    spfm_contribution: {:.4}\n",
+                req.spfm_contribution / 100.0
+            ));
+            yaml.push_str(&format!(
+                "    projected_cumulative_spfm: {:.4}\n\n",
+                req.projected_cumulative_spfm / 100.0
+            ));
+        }
+    }
+
+    yaml.push_str("summary:\n");
+    yaml.push_str(&format!(
+        "  projected_spfm: {:.4}\n",
+        result.projected_spfm / 100.0
+    ));
+    yaml.push_str(&format!(
+        "  target_achievable: {}\n",
+        result.target_achievable
+    ));
 
     yaml
 }
