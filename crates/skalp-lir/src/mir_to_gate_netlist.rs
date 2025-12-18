@@ -103,6 +103,9 @@ pub struct MirToLirTransform {
     /// Signal-level power domains (from signal power_config.domain_name)
     /// Maps signal names to their power domains for fine-grained CCF analysis
     signal_power_domains: HashMap<String, String>,
+    /// Net-level power domains (from signal power domains)
+    /// Maps NetId to power domain for primitive power domain lookup
+    net_power_domains: HashMap<NetId, String>,
 }
 
 impl MirToLirTransform {
@@ -124,6 +127,7 @@ impl MirToLirTransform {
             module_safety_context: None,
             module_power_domain: None,
             signal_power_domains: HashMap::new(),
+            net_power_domains: HashMap::new(),
         }
     }
 
@@ -176,7 +180,16 @@ impl MirToLirTransform {
             })
             .unwrap_or("");
 
-        // Look up signal-level power domain
+        // Try to look up power domain from primitive's output nets
+        // This is more reliable than path-based lookup
+        for &output_net in &prim.outputs {
+            if let Some(domain) = self.net_power_domains.get(&output_net) {
+                prim.power_domain = Some(domain.clone());
+                return prim;
+            }
+        }
+
+        // Fall back to signal name from path (legacy behavior)
         if !path_signal.is_empty() {
             if let Some(domain) = self.signal_power_domains.get(path_signal) {
                 prim.power_domain = Some(domain.clone());
@@ -370,6 +383,11 @@ impl MirToLirTransform {
             self.lir.add_net(net);
             self.lvalue_to_net
                 .insert((1, signal.id.0, bit as u32), net_id);
+
+            // Store net's power domain for primitive lookup
+            if let Some(domain) = self.signal_power_domains.get(&signal.name) {
+                self.net_power_domains.insert(net_id, domain.to_string());
+            }
         }
 
         self.stats.total_bits += width;
