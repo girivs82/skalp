@@ -62,19 +62,19 @@ impl GeometryProcessor4 {
 
     on(clk.rise) {
         if rst {
-            state <= 0
-            count <= 0
+            state = 0
+            count = 0
         } else {
             if state == 0 && vertex_valid {
                 // Capture and transform vertex (passthrough for now)
-                out_pos_x <= vertex_x
-                out_pos_y <= vertex_y
-                out_pos_z <= vertex_z
-                out_pos_w <= 0x3F800000  // 1.0 in float32
-                state <= 1
-                count <= count + 1
+                out_pos_x = vertex_x
+                out_pos_y = vertex_y
+                out_pos_z = vertex_z
+                out_pos_w = 0x3F800000  // 1.0 in float32
+                state = 1
+                count = count + 1
             } else if state == 1 && output_ready {
-                state <= 0
+                state = 0
             }
         }
     }
@@ -644,10 +644,10 @@ impl SimpleCDC {
     
     on(wr_clk.rise) {
         if wr_rst {
-            data_reg <= 0
+            data_reg = 0
         } else {
             if wr_en {
-                data_reg <= wr_data
+                data_reg = wr_data
             }
         }
     }

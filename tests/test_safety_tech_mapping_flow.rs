@@ -169,43 +169,43 @@ impl MotorController {
     on(clk.rise) {
         if rst {
             // Reset all registers
-            position <= 0
-            velocity <= 0
-            id_current <= 0
-            iq_current <= 0
-            pwm_u_reg <= 0
-            pwm_v_reg <= 0
-            pwm_w_reg <= 0
-            fault_state <= false
-            encoder_mismatch <= false
-            overcurrent <= false
+            position = 0
+            velocity = 0
+            id_current = 0
+            iq_current = 0
+            pwm_u_reg = 0
+            pwm_v_reg = 0
+            pwm_w_reg = 0
+            fault_state = false
+            encoder_mismatch = false
+            overcurrent = false
         } else if enable && !fault_state {
             // Position estimation (use primary encoder)
-            position <= encoder_a
+            position = encoder_a
 
             // Encoder comparison for redundancy check
-            encoder_mismatch <= (encoder_a > encoder_b + 10) || (encoder_b > encoder_a + 10)
+            encoder_mismatch = (encoder_a > encoder_b + 10) || (encoder_b > encoder_a + 10)
 
             // Current limit check (overcurrent protection)
-            overcurrent <= (current_u > 3000) || (current_v > 3000) || (current_w > 3000)
+            overcurrent = (current_u > 3000) || (current_v > 3000) || (current_w > 3000)
 
             // Enter fault state if any safety violation
-            fault_state <= encoder_mismatch || overcurrent
+            fault_state = encoder_mismatch || overcurrent
 
             // Simplified FOC calculation (actual FOC is more complex)
             // Park transform approximation
-            id_current <= current_u
-            iq_current <= current_v
+            id_current = current_u
+            iq_current = current_v
 
             // PI controller output (simplified)
-            pwm_u_reg <= torque_cmd[9:0]
-            pwm_v_reg <= torque_cmd[9:0]
-            pwm_w_reg <= torque_cmd[9:0]
+            pwm_u_reg = torque_cmd[9:0]
+            pwm_v_reg = torque_cmd[9:0]
+            pwm_w_reg = torque_cmd[9:0]
         } else {
             // Safe state - disable outputs
-            pwm_u_reg <= 0
-            pwm_v_reg <= 0
-            pwm_w_reg <= 0
+            pwm_u_reg = 0
+            pwm_v_reg = 0
+            pwm_w_reg = 0
         }
     }
 
@@ -239,18 +239,18 @@ impl TmrVoter {
     on(clk.rise) {
         // 2-of-3 voting logic
         if a == b {
-            result <= a
-            error <= !(a == c)
+            result = a
+            error = !(a == c)
         } else if a == c {
-            result <= a
-            error <= true
+            result = a
+            error = true
         } else if b == c {
-            result <= b
-            error <= true
+            result = b
+            error = true
         } else {
             // All three disagree - use first input and flag error
-            result <= a
-            error <= true
+            result = a
+            error = true
         }
     }
 
@@ -278,15 +278,15 @@ impl Watchdog {
 
     on(clk.rise) {
         if rst {
-            counter <= 0
-            timed_out <= false
+            counter = 0
+            timed_out = false
         } else if kick {
-            counter <= 0
-            timed_out <= false
+            counter = 0
+            timed_out = false
         } else if counter >= timeout_val {
-            timed_out <= true
+            timed_out = true
         } else {
-            counter <= counter + 1
+            counter = counter + 1
         }
     }
 
@@ -509,7 +509,7 @@ fn test_asil_decomposition_analysis() {
         impl Channel {
             signal reg: nat[16] = 0
             on(clk.rise) {
-                reg <= input
+                reg = input
             }
             output = reg
         }

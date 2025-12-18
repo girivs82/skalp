@@ -23,13 +23,13 @@ mod sequential_debug_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    counter <= 0
+                    counter = 0
                 } else {
-                    counter <= counter + 1
+                    counter = counter + 1
                 }
 
                 // This assignment should be processed AFTER the if-statement
-                pipeline_valid <= pipeline_valid + 1
+                pipeline_valid = pipeline_valid + 1
             }
 
             result = counter

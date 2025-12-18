@@ -15,9 +15,9 @@ mod assertion_tests {
             signal counter: nat[8] = 0
 
             on(clk.rise) {
-                counter <= counter + 1
+                counter = counter + 1
                 assert(counter < 255, "Counter overflow")
-                valid <= 1
+                valid = 1
             }
         }
         "#;

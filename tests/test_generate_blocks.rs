@@ -18,9 +18,9 @@ mod generate_block_tests {
 
             on(clk.rise) {
                 generate for i in 0..8 {
-                    reversed[i] <= data_in[7 - i]
+                    reversed[i] = data_in[7 - i]
                 }
-                data_out <= reversed
+                data_out = reversed
             }
         }
         "#;
@@ -62,9 +62,9 @@ mod generate_block_tests {
             on(clk.rise) {
                 // Process every other bit (step of 2)
                 generate for i in 0..8 step 2 {
-                    result[i] <= data_in[i]
+                    result[i] = data_in[i]
                 }
-                data_out <= result
+                data_out = result
             }
         }
         "#;
@@ -98,9 +98,9 @@ mod generate_block_tests {
 
             on(clk.rise) {
                 generate if ENABLE_PIPELINE {
-                    stage1 <= data_in
-                    stage2 <= stage1
-                    data_out <= stage2
+                    stage1 = data_in
+                    stage2 = stage1
+                    data_out = stage2
                 }
             }
         }
@@ -135,9 +135,9 @@ mod generate_block_tests {
             on(clk.rise) {
                 generate if ENABLE_FEATURE {
                     // This should not be generated
-                    temp <= data_in + 1
+                    temp = data_in + 1
                 }
-                data_out <= data_in
+                data_out = data_in
             }
         }
         "#;
@@ -170,11 +170,11 @@ mod generate_block_tests {
 
             on(clk.rise) {
                 generate if USE_FAST_PATH {
-                    result <= data_in
+                    result = data_in
                 } else {
-                    result <= data_in + 1
+                    result = data_in + 1
                 }
-                data_out <= result
+                data_out = result
             }
         }
         "#;
@@ -208,16 +208,16 @@ mod generate_block_tests {
             on(clk.rise) {
                 generate match DATA_WIDTH {
                     8 => {
-                        result <= data_in & 0xFF
+                        result = data_in & 0xFF
                     }
                     16 => {
-                        result <= data_in & 0xFFFF
+                        result = data_in & 0xFFFF
                     }
                     32 => {
-                        result <= data_in
+                        result = data_in
                     }
                 }
-                data_out <= result
+                data_out = result
             }
         }
         "#;
@@ -252,10 +252,10 @@ mod generate_block_tests {
                 generate for row in 0..ROWS {
                     generate for col in 0..COLS {
                         // Each iteration creates initialization logic
-                        initialized <= true
+                        initialized = true
                     }
                 }
-                done <= initialized
+                done = initialized
             }
         }
         "#;
@@ -288,12 +288,12 @@ mod generate_block_tests {
             signal pipe_3: nat[8] = 0
 
             on(clk.rise) {
-                pipe_0 <= data_in
+                pipe_0 = data_in
                 generate for i in 0..3 {
-                    // This would create pipe_1 <= pipe_0, pipe_2 <= pipe_1, etc.
+                    // This would create pipe_1 = pipe_0, pipe_2 = pipe_1, etc.
                     // For now, just test the basic expansion
                 }
-                data_out <= pipe_3
+                data_out = pipe_3
             }
         }
         "#;
@@ -326,9 +326,9 @@ mod generate_block_tests {
             on(clk.rise) {
                 generate for i in 0..4 {
                     // Use loop variable in arithmetic
-                    result[i * 4] <= data_in[i]
+                    result[i * 4] = data_in[i]
                 }
-                data_out <= result
+                data_out = result
             }
         }
         "#;

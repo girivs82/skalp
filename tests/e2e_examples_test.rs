@@ -301,7 +301,7 @@ impl Register {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -552,7 +552,7 @@ impl FSM {
     signal state: bit[2] = 0
 
     on(clk.rise) {
-        state <= if rst {
+        state = if rst {
             0
         } else {
             match state {

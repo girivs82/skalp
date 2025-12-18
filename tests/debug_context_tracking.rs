@@ -24,11 +24,11 @@ mod context_debug_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    temp_value <= 0
-                    final_result <= 0
+                    temp_value = 0
+                    final_result = 0
                 } else {
-                    temp_value <= data_in + 5
-                    final_result <= temp_value + 10
+                    temp_value = data_in + 5
+                    final_result = temp_value + 10
                 }
             }
 

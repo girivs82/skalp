@@ -75,7 +75,7 @@ entity MemoryTest {
 
 impl MemoryTest {
     // Simple passthrough for now
-    read_data <= mem
+    read_data = mem
 }
 "#;
 
@@ -125,7 +125,7 @@ entity BramTest {
 }
 
 impl BramTest {
-    data <= bram
+    data = bram
 }
 "#;
 
@@ -158,7 +158,7 @@ entity MirMemTest {
 }
 
 impl MirMemTest {
-    data <= mem
+    data = mem
 }
 "#;
 
@@ -209,7 +209,7 @@ entity DistMemTest {
 }
 
 impl DistMemTest {
-    data <= lutram
+    data = lutram
 }
 "#;
 
@@ -264,7 +264,7 @@ entity WidthOverrideTest {
 }
 
 impl WidthOverrideTest {
-    data <= custom_mem
+    data = custom_mem
 }
 "#;
 
@@ -305,7 +305,7 @@ entity UltraMemTest {
 }
 
 impl UltraMemTest {
-    data <= ultraram
+    data = ultraram
 }
 "#;
 
@@ -346,7 +346,7 @@ entity RegMemTest {
 }
 
 impl RegMemTest {
-    data <= regfile
+    data = regfile
 }
 "#;
 

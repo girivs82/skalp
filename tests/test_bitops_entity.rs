@@ -20,9 +20,9 @@ mod bitops_entity_tests {
 
             on(clk.rise) {
                 generate for i in 0..8 {
-                    reversed[i] <= data_in[7 - i]
+                    reversed[i] = data_in[7 - i]
                 }
-                data_out <= reversed
+                data_out = reversed
             }
         }
         "#;
@@ -56,9 +56,9 @@ mod bitops_entity_tests {
 
             on(clk.rise) {
                 generate for i in 0..32 {
-                    reversed[i] <= data_in[31 - i]
+                    reversed[i] = data_in[31 - i]
                 }
-                data_out <= reversed
+                data_out = reversed
             }
         }
         "#;
@@ -89,14 +89,14 @@ mod bitops_entity_tests {
 
             on(clk.rise) {
                 // MSB stays the same
-                gray_code[7] <= binary[7]
+                gray_code[7] = binary[7]
 
                 // Each other bit is XOR of adjacent binary bits
                 generate for i in 0..7 {
-                    gray_code[i] <= binary[i] ^ binary[i + 1]
+                    gray_code[i] = binary[i] ^ binary[i + 1]
                 }
 
-                gray <= gray_code
+                gray = gray_code
             }
         }
         "#;
@@ -127,9 +127,9 @@ mod bitops_entity_tests {
 
             on(clk.rise) {
                 // XOR all bits together
-                p <= data_in[0] ^ data_in[1] ^ data_in[2] ^ data_in[3] ^
+                p = data_in[0] ^ data_in[1] ^ data_in[2] ^ data_in[3] ^
                      data_in[4] ^ data_in[5] ^ data_in[6] ^ data_in[7]
-                parity <= p
+                parity = p
             }
         }
         "#;
@@ -162,11 +162,11 @@ mod bitops_entity_tests {
 
             on(clk.rise) {
                 generate if USE_16BIT_MODE {
-                    result <= data_in & 0x0000FFFF
+                    result = data_in & 0x0000FFFF
                 } else {
-                    result <= data_in
+                    result = data_in
                 }
-                data_out <= result
+                data_out = result
             }
         }
         "#;
@@ -201,10 +201,10 @@ mod bitops_entity_tests {
             on(clk.rise) {
                 generate for row in 0..ROWS {
                     generate for col in 0..COLS {
-                        initialized <= 1
+                        initialized = 1
                     }
                 }
-                done <= initialized
+                done = initialized
             }
         }
         "#;
@@ -236,9 +236,9 @@ mod bitops_entity_tests {
             on(clk.rise) {
                 // Process every other bit (step of 2)
                 generate for i in 0..8 step 2 {
-                    result[i] <= data_in[i]
+                    result[i] = data_in[i]
                 }
-                data_out <= result
+                data_out = result
             }
         }
         "#;

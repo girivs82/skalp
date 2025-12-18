@@ -40,28 +40,28 @@ mod pipelined_processor_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    fetch_instruction <= 0
-                    decode_opcode <= 0
-                    decode_operand <= 0
-                    execute_result <= 0
-                    writeback_data <= 0
-                    pipeline_valid <= 0
+                    fetch_instruction = 0
+                    decode_opcode = 0
+                    decode_operand = 0
+                    execute_result = 0
+                    writeback_data = 0
+                    pipeline_valid = 0
                 } else {
                     // Stage 1: Fetch
-                    fetch_instruction <= instruction
+                    fetch_instruction = instruction
 
                     // Stage 2: Decode
-                    decode_opcode <= fetch_instruction[15:12]
-                    decode_operand <= fetch_instruction[7:0]
+                    decode_opcode = fetch_instruction[15:12]
+                    decode_operand = fetch_instruction[7:0]
 
                     // Stage 3: Execute (simplified)
-                    execute_result <= decode_operand + data_in
+                    execute_result = decode_operand + data_in
 
                     // Stage 4: Writeback
-                    writeback_data <= execute_result
+                    writeback_data = execute_result
 
                     // Valid pipeline - simplified approach
-                    pipeline_valid <= pipeline_valid + 1
+                    pipeline_valid = pipeline_valid + 1
                 }
             }
 
@@ -186,16 +186,16 @@ mod pipelined_processor_tests {
         }
 
         // Following the pipeline stages:
-        // Stage 1: Fetch (fetch_instruction <= instruction)
-        // Stage 2: Decode (decode_opcode <= fetch_instruction[15:12], decode_operand <= fetch_instruction[7:0])
-        // Stage 3: Execute (execute_result <= decode_operand + data_in)
-        // Stage 4: Writeback (writeback_data <= execute_result)
+        // Stage 1: Fetch (fetch_instruction = instruction)
+        // Stage 2: Decode (decode_opcode = fetch_instruction[15:12], decode_operand = fetch_instruction[7:0])
+        // Stage 3: Execute (execute_result = decode_operand + data_in)
+        // Stage 4: Writeback (writeback_data = execute_result)
 
         // Pipeline analysis: 4-stage pipeline with 2-cycle delay from fetch to execute
-        // Stage 1: Fetch    (fetch_instruction <= instruction)
-        // Stage 2: Decode   (decode_operand <= fetch_instruction[7:0], decode_opcode <= fetch_instruction[15:12])
-        // Stage 3: Execute  (execute_result <= decode_operand + data_in)
-        // Stage 4: Writeback (writeback_data <= execute_result)
+        // Stage 1: Fetch    (fetch_instruction = instruction)
+        // Stage 2: Decode   (decode_operand = fetch_instruction[7:0], decode_opcode = fetch_instruction[15:12])
+        // Stage 3: Execute  (execute_result = decode_operand + data_in)
+        // Stage 4: Writeback (writeback_data = execute_result)
 
         // Instructions reach execute stage 2 cycles after being fed
         // Results reach output (writeback_data) 1 cycle after execute

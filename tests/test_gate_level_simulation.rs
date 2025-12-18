@@ -742,8 +742,8 @@ fn test_gate_level_analysis_pipeline() {
             signal stage1_data: bit[16];
 
             on(clk.rise) {
-                stage1_valid <= valid_in;
-                stage1_data <= data_in;
+                stage1_valid = valid_in;
+                stage1_data = data_in;
             }
 
             // Stage 2: Processing (add 1, multiply by 2)
@@ -754,8 +754,8 @@ fn test_gate_level_analysis_pipeline() {
             processed = (stage1_data + 1) << 1;
 
             on(clk.rise) {
-                stage2_valid <= stage1_valid;
-                stage2_data <= processed;
+                stage2_valid = stage1_valid;
+                stage2_data = processed;
             }
 
             // Stage 3: Output register
@@ -763,8 +763,8 @@ fn test_gate_level_analysis_pipeline() {
             signal stage3_data: bit[16];
 
             on(clk.rise) {
-                stage3_valid <= stage2_valid;
-                stage3_data <= stage2_data;
+                stage3_valid = stage2_valid;
+                stage3_data = stage2_data;
             }
 
             valid_out = stage3_valid;

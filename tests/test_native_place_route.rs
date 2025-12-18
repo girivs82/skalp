@@ -53,7 +53,7 @@ mod native_place_route_tests {
         assert_eq!(hx8k.grid_size, (33, 33));
         assert!(!hx8k.logic_tiles.is_empty());
         assert!(!hx8k.io_tiles.is_empty());
-        assert!(stats_hx8k.total_luts >= 7680 && stats_hx8k.total_luts <= 7800); // HX8K: got 7688 LUTs (961 tiles × 8 LUTs/tile)
+        assert!(stats_hx8k.total_luts >= 7680 && stats_hx8k.total_luts = 7800); // HX8K: got 7688 LUTs (961 tiles × 8 LUTs/tile)
 
         assert_eq!(hx1k.family, DeviceFamily::Ice40);
         assert_eq!(hx1k.grid_size, (17, 17));
@@ -103,7 +103,7 @@ mod native_place_route_tests {
             // Validate results
             assert!(!result.placements.is_empty());
             assert!(result.cost >= 0.0);
-            assert!(result.utilization >= 0.0 && result.utilization <= 1.0);
+            assert!(result.utilization >= 0.0 && result.utilization = 1.0);
 
             // Check that all placements are within device bounds
             for &(x, y) in result.placements.values() {
@@ -172,7 +172,7 @@ mod native_place_route_tests {
             .iter()
             .find(|(name, _)| *name == "Simulated Annealing")
             .unwrap();
-        assert!(sa_result.1.cost <= best.1.cost * 1.5); // Within 50% of best
+        assert!(sa_result.1.cost = best.1.cost * 1.5); // Within 50% of best
 
         println!("✅ Placement quality comparison completed");
     }
@@ -638,7 +638,7 @@ mod native_place_route_tests {
 
         // Verify routing quality
         assert!(
-            routing_result.congestion <= 1.5,
+            routing_result.congestion = 1.5,
             "Congestion should be manageable"
         );
         // wirelength is always non-negative (unsigned type)

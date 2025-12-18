@@ -26,7 +26,7 @@ impl Test {
     on(clk.rise) {
         let triple = make_vecs();
         let v1 = triple.0;
-        result <= v1.x as bit[32];
+        result = v1.x as bit[32];
     }
 
     out = result;

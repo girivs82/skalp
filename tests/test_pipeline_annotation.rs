@@ -28,7 +28,7 @@ entity TestEntity {
 }
 
 impl TestEntity {
-    result <= pipelined_add(x, y)
+    result = pipelined_add(x, y)
 }
 "#;
 
@@ -86,7 +86,7 @@ entity MacTest {
 }
 
 impl MacTest {
-    result <= pipelined_mac(a, b, c)
+    result = pipelined_mac(a, b, c)
 }
 "#;
 
@@ -209,7 +209,7 @@ entity FreqTest {
 }
 
 impl FreqTest {
-    result <= high_freq_mul(a, b)
+    result = high_freq_mul(a, b)
 }
 "#;
 

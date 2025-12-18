@@ -414,11 +414,11 @@ mod gpu_simulation_tests {
 
             on(clk.rise) {
                 if rst {
-                    result_broken_reg <= 0
-                    result_working_reg <= 0
+                    result_broken_reg = 0
+                    result_working_reg = 0
                 } else {
-                    result_broken_reg <= broken
-                    result_working_reg <= working
+                    result_broken_reg = broken
+                    result_working_reg = working
                 }
             }
         }

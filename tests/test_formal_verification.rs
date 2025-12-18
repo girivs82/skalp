@@ -18,9 +18,9 @@ mod formal_verification_tests {
 
             on(clk.rise) {
                 if reset {
-                    counter_reg <= 0;
+                    counter_reg = 0;
                 } else if req && !ack {
-                    counter_reg <= counter_reg + 1;
+                    counter_reg = counter_reg + 1;
                 }
             }
 
@@ -84,14 +84,14 @@ mod formal_verification_tests {
 
             on(clk.rise) {
                 if reset {
-                    state <= 0;
-                    buffer <= 0;
+                    state = 0;
+                    buffer = 0;
                 } else {
                     match state {
-                        0 => if valid { state <= 1; buffer <= data; }
-                        1 => if ready { state <= 2; }
-                        2 => { state <= 0; }
-                        _ => { state <= 0; }
+                        0 => if valid { state = 1; buffer = data; }
+                        1 => if ready { state = 2; }
+                        2 => { state = 0; }
+                        _ => { state = 0; }
                     }
                 }
             }
@@ -102,7 +102,7 @@ mod formal_verification_tests {
             formal advanced_properties {
                 // Complex safety properties
                 safety no_data_loss: (state == 1) |-> (buffer == data);
-                safety valid_state_machine: state <= 2;
+                safety valid_state_machine: state = 2;
                 safety reset_behavior: reset |-> ##1 (state == 0 && buffer == 0);
 
                 // Advanced liveness properties
@@ -177,9 +177,9 @@ mod formal_verification_tests {
 
             on(clk.rise) {
                 if start && !stop {
-                    active_reg <= true;
+                    active_reg = true;
                 } else if stop {
-                    active_reg <= false;
+                    active_reg = false;
                 }
             }
 
@@ -258,21 +258,21 @@ mod formal_verification_tests {
             // Basic functionality
             on(clk.rise) {
                 if reset {
-                    state <= 0;
-                    cmd_buffer <= 0;
-                    resp_buffer <= 0;
+                    state = 0;
+                    cmd_buffer = 0;
+                    resp_buffer = 0;
                 } else {
                     match state {
                         0 => if cmd_valid && cmd_ready {
-                            state <= 1;
-                            cmd_buffer <= cmd_data;
+                            state = 1;
+                            cmd_buffer = cmd_data;
                         }
                         1 => {
-                            resp_buffer <= cmd_buffer + 1;
-                            state <= 2;
+                            resp_buffer = cmd_buffer + 1;
+                            state = 2;
                         }
-                        2 => { state <= 0; }
-                        _ => { state <= 0; }
+                        2 => { state = 0; }
+                        _ => { state = 0; }
                     }
                 }
             }
@@ -283,7 +283,7 @@ mod formal_verification_tests {
             // Immediate assertions (Milestone 1)
             on(clk.rise) {
                 assert(!reset || state == 0, "Reset should clear state");
-                assert(state <= 2, "State should be valid");
+                assert(state = 2, "State should be valid");
             }
 
             // Concurrent assertions (Milestone 2)
@@ -314,7 +314,7 @@ mod formal_verification_tests {
                     resp_valid |-> (resp_data == cmd_buffer + 1);
 
                 safety state_machine_bounds:
-                    always (state <= 2);
+                    always (state = 2);
 
                 // Liveness properties
                 liveness command_completion:
@@ -351,7 +351,7 @@ mod formal_verification_tests {
             }
 
             // Additional verification checks
-            invariant global_state_validity: state <= 2;
+            invariant global_state_validity: state = 2;
             safety no_data_corruption: cmd_valid |-> eventually (resp_data != 0);
             liveness eventual_idle: always eventually (state == 0);
 
@@ -465,7 +465,7 @@ mod sva_generation_tests {
             signal counter: nat[8] = 0
 
             on(clk.rise) {
-                counter <= counter + 1;
+                counter = counter + 1;
                 assert!(counter < 255, "Counter must not overflow");
             }
 
@@ -511,7 +511,7 @@ mod sva_generation_tests {
             on(clk.rise) {
                 assume!(valid, "Valid signal assumed true");
                 if valid {
-                    stored <= data;
+                    stored = data;
                 }
             }
 
@@ -595,13 +595,13 @@ mod sva_generation_tests {
             signal counter: nat[8] = 0
 
             on(clk.rise) {
-                // Assumptions about inputs - use < instead of <= to avoid parser ambiguity
+                // Assumptions about inputs - use < instead of = to avoid parser ambiguity
                 assume!(data < 100, "Data assumed in range");
 
                 if reset {
-                    counter <= 0;
+                    counter = 0;
                 } else {
-                    counter <= counter + data;
+                    counter = counter + data;
                 }
 
                 // Assertions about internal state - use < instead of <=

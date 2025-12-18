@@ -233,9 +233,9 @@ impl TestIf {
 
     on(clk.rise) {
         if (cond == 1) {
-            val <= 1
+            val = 1
         } else {
-            val <= 0
+            val = 0
         }
     }
 
@@ -289,7 +289,7 @@ impl<T> Register<T> {
     signal reg: T
 
     on(clk.rise) {
-        reg <= data
+        reg = data
     }
 
     q = reg
@@ -313,7 +313,7 @@ impl<const WIDTH: nat> Counter<WIDTH> {
     signal counter: nat[WIDTH] = 0
 
     on(clk.rise) {
-        counter <= counter + 1
+        counter = counter + 1
     }
 
     count = counter
@@ -363,7 +363,7 @@ impl TestComparison {
     eq = (a == b) as bit
     ne = (a != b) as bit
     lt = (a < b) as bit
-    le = (a <= b) as bit
+    le = (a = b) as bit
     gt = (a > b) as bit
     ge = (a >= b) as bit
 }
@@ -440,7 +440,7 @@ impl TestClockDomain {
     signal reg: nat[8] = 0
 
     on(clk.rise) {
-        reg <= data
+        reg = data
     }
 
     q = reg
@@ -463,9 +463,9 @@ impl TestReset {
 
     on(clk.rise) {
         if (rst) {
-            counter <= 0
+            counter = 0
         } else {
-            counter <= counter + 1
+            counter = counter + 1
         }
     }
 

@@ -169,7 +169,7 @@ fn test_sequential_dff_flow() {
             signal reg: bool = false
 
             on(clk.rise) {
-                reg <= d
+                reg = d
             }
 
             q = reg
@@ -342,9 +342,9 @@ fn test_counter_design() {
 
             on(clk.rise) {
                 if rst {
-                    counter <= 0
+                    counter = 0
                 } else if enable {
-                    counter <= counter + 1
+                    counter = counter + 1
                 }
             }
 

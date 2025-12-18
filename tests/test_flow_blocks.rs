@@ -204,11 +204,11 @@ mod flow_block_tests {
             on(clk.rise) {
                 flow {
                     data |> {
-                        stage1 <= data + 1
+                        stage1 = data + 1
                     } |> {
-                        stage2 <= stage1 * 2
+                        stage2 = stage1 * 2
                     } |> {
-                        processed <= stage2 - 5
+                        processed = stage2 - 5
                     }
                 }
             }
@@ -245,7 +245,7 @@ mod flow_block_tests {
             on(clk.rise) {
                 flow {
                     input_val |> temp |> {
-                        output_val <= temp + 10
+                        output_val = temp + 10
                     }
                 }
             }

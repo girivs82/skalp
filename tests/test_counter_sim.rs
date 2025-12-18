@@ -27,9 +27,9 @@ mod counter_sim_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    counter <= 0
+                    counter = 0
                 } else {
-                    counter <= counter + 1
+                    counter = counter + 1
                 }
             }
 

@@ -48,7 +48,7 @@ mod test_trait_bounds {
         signal state: bit[32] = 0
 
         on(clk.rise) {
-            state <= fp_add::<fp32>(data1, data2);
+            state = fp_add::<fp32>(data1, data2);
             result = state;
         }
     }

@@ -20,18 +20,18 @@ mod match_expression_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    current_state <= 0
+                    current_state = 0
                 } else {
-                    current_state <= next_state
+                    current_state = next_state
                 }
 
                 // Use match expression with guards and literal patterns inside event block
                 match current_state {
-                    0 => next_state <= 1,
-                    1 if ready => next_state <= 2,
-                    1 => next_state <= 1,
-                    2 => next_state <= 0,
-                    _ => next_state <= 0,
+                    0 => next_state = 1,
+                    1 if ready => next_state = 2,
+                    1 => next_state = 1,
+                    2 => next_state = 0,
+                    _ => next_state = 0,
                 }
             }
 
@@ -106,10 +106,10 @@ mod match_expression_tests {
         impl SimpleMatch {
             on(clk.rise) {
                 match input_val {
-                    0 => result <= 10,
-                    1 => result <= 20,
-                    2 => result <= 30,
-                    _ => result <= 0,
+                    0 => result = 10,
+                    1 => result = 20,
+                    2 => result = 30,
+                    _ => result = 0,
                 }
             }
         }
@@ -158,11 +158,11 @@ mod match_expression_tests {
         impl GuardedMatch {
             on(clk.rise) {
                 match state_val {
-                    0 if enable => output <= 5,
-                    0 => output <= 1,
-                    1 if enable => output <= 6,
-                    1 => output <= 2,
-                    _ => output <= 0,
+                    0 if enable => output = 5,
+                    0 => output = 1,
+                    1 if enable => output = 6,
+                    1 => output = 2,
+                    _ => output = 0,
                 }
             }
         }

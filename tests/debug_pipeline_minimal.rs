@@ -27,9 +27,9 @@ mod minimal_pipeline_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    pipeline_valid <= 0
+                    pipeline_valid = 0
                 } else {
-                    pipeline_valid <= pipeline_valid + 1
+                    pipeline_valid = pipeline_valid + 1
                 }
             }
 

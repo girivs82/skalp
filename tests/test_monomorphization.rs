@@ -240,7 +240,7 @@ fn test_nested_generic_instantiation() {
             signal data: bit[WIDTH] = 0
 
             on(clk.rise) {
-                data <= d
+                data = d
             }
 
             q = data
@@ -423,7 +423,7 @@ fn test_mixed_generic_and_non_generic() {
         impl SimpleReg {
             signal data: bit[8] = 0
             on(clk.rise) {
-                data <= d
+                data = d
             }
             q = data
         }

@@ -175,9 +175,9 @@ impl<const WIDTH: nat> Counter<WIDTH> {
 
     @(posedge clk) {
         if reset {
-            count <= 0;
+            count = 0;
         } else {
-            count <= count + 1;
+            count = count + 1;
         }
     }
 }
@@ -589,7 +589,7 @@ impl<const WIDTH: nat> Counter<WIDTH> {
     signal count: nat[WIDTH];
 
     @(posedge clk) {
-        count <= count + 1;
+        count = count + 1;
     }
 }
 
@@ -767,7 +767,7 @@ impl NestedFieldTest {
     signal out_vertex: Vertex
 
     @(posedge clk) {
-        out_vertex.position.x <= input_x;  // Nested field assignment
+        out_vertex.position.x = input_x;  // Nested field assignment
     }
 
     output_x = out_vertex.position.x;
@@ -893,7 +893,7 @@ impl SyncStage {
     signal data_sync: nat[8];
 
     @(posedge clk) {
-        data_sync <= data_in;
+        data_sync = data_in;
     }
 
     data_out = data_sync;
@@ -935,11 +935,11 @@ impl DualClock {
     signal rd_data: nat[8];
 
     @(posedge wr_clk) {
-        wr_data <= write_data;
+        wr_data = write_data;
     }
 
     @(posedge rd_clk) {
-        rd_data <= wr_data;
+        rd_data = wr_data;
     }
 
     read_data = rd_data;

@@ -63,7 +63,7 @@ mod technology_mapping_tests {
                 mapping_result.resource_usage.luts
             );
             assert!(
-                mapping_result.resource_usage.luts <= 10,
+                mapping_result.resource_usage.luts = 10,
                 "Should not use excessive LUTs"
             );
             assert!(
@@ -144,9 +144,9 @@ mod technology_mapping_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    reg_q <= false
+                    reg_q = false
                 } else {
-                    reg_q <= data
+                    reg_q = data
                 }
             }
 
@@ -259,13 +259,13 @@ mod technology_mapping_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    counter <= 0
-                    valid_reg <= false
+                    counter = 0
+                    valid_reg = false
                 } else if (enable) {
-                    counter <= counter + 1
-                    valid_reg <= true
+                    counter = counter + 1
+                    valid_reg = true
                 } else {
-                    valid_reg <= false
+                    valid_reg = false
                 }
             }
 

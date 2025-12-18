@@ -48,11 +48,11 @@ mod test_karythra_generics {
 
         on(clk.rise) {
             // Call with 32-bit width (should generate exec_generic_c32)
-            state32 <= exec_generic::<32>(opcode, data1, data2);
+            state32 = exec_generic::<32>(opcode, data1, data2);
             result32 = state32;
 
             // Call with 64-bit width (should generate exec_generic_c64)
-            state64 <= exec_generic::<64>(opcode, data1, data2);
+            state64 = exec_generic::<64>(opcode, data1, data2);
             result64 = state64;
         }
     }

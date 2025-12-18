@@ -74,7 +74,7 @@ mod trait_tests {
         impl Clocked for Counter {
             fn on_rising_edge(&self) {
                 if (!rst) {
-                    count <= count + 1;
+                    count = count + 1;
                 }
             }
 
@@ -150,9 +150,9 @@ mod trait_tests {
 
         impl BusInterface for MemoryController {
             fn transfer(&self, addr: nat[32], data: nat[32]) {
-                address <= addr;
-                data <= data;
-                valid <= 1;
+                address = addr;
+                data = data;
+                valid = 1;
             }
 
             fn is_ready(&self) -> logic {

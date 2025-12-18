@@ -26,7 +26,7 @@ entity TestEntity {
 
 impl TestEntity {
     // Call with named generic argument: W: 32
-    result <= generic_add::<W: 32>(x, y)
+    result = generic_add::<W: 32>(x, y)
 }
 "#;
 
@@ -103,7 +103,7 @@ entity MixedTest {
 
 impl MixedTest {
     // Call with positional followed by named generic
-    result <= generic_op::<32, M: 16>(x, y)
+    result = generic_op::<32, M: 16>(x, y)
 }
 "#;
 
@@ -167,7 +167,7 @@ entity WidthTest {
 }
 
 impl WidthTest {
-    result <= width_add::<W: 64>(x, y)
+    result = width_add::<W: 64>(x, y)
 }
 "#;
 

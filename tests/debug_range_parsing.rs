@@ -16,9 +16,9 @@ mod range_debug_tests {
             signal pipeline_valid: nat[1] = 0
 
             on(clk.rise) {
-                decode_opcode <= fetch_instruction[15:12]
-                fetch_instruction <= (fetch_instruction << 1) | 1
-                pipeline_valid <= (pipeline_valid << 1) | 1
+                decode_opcode = fetch_instruction[15:12]
+                fetch_instruction = (fetch_instruction << 1) | 1
+                pipeline_valid = (pipeline_valid << 1) | 1
             }
 
             result = decode_opcode

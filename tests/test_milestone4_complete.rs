@@ -14,7 +14,7 @@ mod milestone4_tests {
 
         impl<T, const SIZE: nat[16]> Buffer<T, SIZE> {
             on(clk.rise) {
-                data_out <= data_in;
+                data_out = data_in;
             }
         }
 
@@ -80,17 +80,17 @@ mod milestone4_tests {
 
             on(clk.rise) {
                 if (rst) {
-                    current_state <= 0;
+                    current_state = 0;
                 } else {
-                    current_state <= next_state;
+                    current_state = next_state;
                 }
 
                 match current_state {
-                    0 => next_state <= 1,
-                    1 if ready => next_state <= 2,
-                    1 => next_state <= 1,
-                    2 => next_state <= 0,
-                    _ => next_state <= 0,
+                    0 => next_state = 1,
+                    1 if ready => next_state = 2,
+                    1 => next_state = 1,
+                    2 => next_state = 0,
+                    _ => next_state = 0,
                 }
             }
 

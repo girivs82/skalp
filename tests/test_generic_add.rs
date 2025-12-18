@@ -32,7 +32,7 @@ mod test_generics {
 
         on(clk.rise) {
             // Call generic function with width 32
-            state <= add::<32>(a, b);
+            state = add::<32>(a, b);
             result = state;
         }
     }
