@@ -188,7 +188,12 @@ fn test_simulation_command() {
     }
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Starting GPU-accelerated simulation"));
+    // Check for gate-level simulation output (may or may not use GPU acceleration)
+    assert!(
+        stdout.contains("gate-level simulation") || stdout.contains("GPU-accelerated simulation"),
+        "Expected simulation output, got: {}",
+        stdout
+    );
     assert!(stdout.contains("100 cycles"));
 }
 

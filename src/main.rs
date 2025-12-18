@@ -619,7 +619,12 @@ fn build_design(
         "lir" => {
             info!("Saving LIR...");
             let output_path = output_dir.join("design.lir");
-            let lir_json = serde_json::to_string_pretty(&lir)?;
+            // Get the first (top) module's LIR
+            let top_lir = lir
+                .first()
+                .map(|r| &r.lir)
+                .ok_or_else(|| anyhow::anyhow!("No modules produced in LIR lowering"))?;
+            let lir_json = serde_json::to_string_pretty(top_lir)?;
             fs::write(&output_path, lir_json)?;
             output_path
         }
