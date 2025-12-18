@@ -46,6 +46,13 @@ pub use fault_simulation::{
     build_primitive_path_map, fault_campaign_to_safety_results, fault_campaign_with_effects,
 };
 
+// Re-export domain fault injection types
+pub use fault_simulation::{
+    domain_fault_to_standard_faults, generate_domain_fault_sites, simulate_domain_brownout,
+    BrownoutAnalysis, DomainBrownoutResult, DomainFaultCampaignConfig, DomainFaultCampaignResults,
+    DomainFaultResult, DomainFaultSite, DomainFaultType,
+};
+
 // Re-export FI-driven FMEA types
 pub use safety_driven_fmea::{
     EffectMonitor, FaultEffectResult, FiDrivenConfig, FiDrivenFmeaResult, SafetyDrivenFmeaGenerator,

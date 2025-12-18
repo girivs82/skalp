@@ -337,6 +337,13 @@ fn make_cell(
         output_capacitance_ff: None,
         input_capacitance_ff: None,
         max_fanout: None,
+        // Voltage margins for 1.0V nominal process
+        // Combinational cells are relatively robust
+        min_voltage_mv: Some(700),             // Fails below 0.7V
+        nominal_voltage_mv: Some(1000),        // 1.0V nominal
+        timing_margin_voltage_mv: Some(850),   // Timing degrades below 0.85V
+        voltage_delay_coefficient: Some(0.12), // 12% delay increase per 100mV drop
+        voltage_sensitivity: Some(6),          // Mid-range sensitivity
         failure_modes: vec![
             LibraryFailureMode::new("stuck_at_0", fit * 0.30, FaultType::StuckAt0)
                 .with_mechanism("oxide_breakdown"),
@@ -388,6 +395,13 @@ fn make_seq_cell(
         output_capacitance_ff: None,
         input_capacitance_ff: None,
         max_fanout: None,
+        // Voltage margins for 1.0V nominal process
+        // Sequential cells are MORE SENSITIVE due to timing margins
+        min_voltage_mv: Some(750), // Fails below 0.75V (higher than comb)
+        nominal_voltage_mv: Some(1000), // 1.0V nominal
+        timing_margin_voltage_mv: Some(900), // Timing degrades below 0.9V (tighter)
+        voltage_delay_coefficient: Some(0.18), // 18% delay increase per 100mV (worse)
+        voltage_sensitivity: Some(3), // HIGH sensitivity - fails early in brownout
         failure_modes: vec![
             LibraryFailureMode::new("stuck_at_0", fit * 0.20, FaultType::StuckAt0)
                 .with_mechanism("oxide_breakdown"),
@@ -437,6 +451,12 @@ fn make_fpga_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCell {
         output_capacitance_ff: None,
         input_capacitance_ff: None,
         max_fanout: None,
+        // FPGA typically runs at higher voltage (e.g., 1.2V core)
+        min_voltage_mv: Some(1050),            // Fails below 1.05V
+        nominal_voltage_mv: Some(1200),        // 1.2V nominal
+        timing_margin_voltage_mv: Some(1100),  // Timing degrades below 1.1V
+        voltage_delay_coefficient: Some(0.10), // 10% delay increase per 100mV
+        voltage_sensitivity: Some(5),          // Medium sensitivity
         failure_modes: vec![
             LibraryFailureMode::new("config_upset", fit * 0.50, FaultType::DataRetention)
                 .with_mechanism("sram_soft_error")
@@ -481,6 +501,12 @@ fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCe
         output_capacitance_ff: None,
         input_capacitance_ff: None,
         max_fanout: None,
+        // FPGA sequential cells - more sensitive than LUTs
+        min_voltage_mv: Some(1080),            // Higher minimum for FFs
+        nominal_voltage_mv: Some(1200),        // 1.2V nominal
+        timing_margin_voltage_mv: Some(1120),  // Tighter timing margin
+        voltage_delay_coefficient: Some(0.15), // More delay sensitivity
+        voltage_sensitivity: Some(3),          // High sensitivity - fails early
         failure_modes: vec![
             LibraryFailureMode::new("config_upset", fit * 0.35, FaultType::DataRetention)
                 .with_mechanism("sram_soft_error")
@@ -562,6 +588,13 @@ fn make_level_shifter_cell(
         output_capacitance_ff: Some(10 * drive_strength as u32),
         input_capacitance_ff: Some(15),
         max_fanout: Some(4 * drive_strength as u32),
+        // Level shifters operate between two voltage domains
+        // They need BOTH domains to be within spec to function
+        min_voltage_mv: Some(650),           // Very robust - analog design
+        nominal_voltage_mv: Some(1000),      // Input domain nominal
+        timing_margin_voltage_mv: Some(800), // Wide operating range
+        voltage_delay_coefficient: Some(0.20), // Higher delay sensitivity
+        voltage_sensitivity: Some(4),        // Medium-high sensitivity
     }
 }
 
@@ -615,6 +648,12 @@ fn make_isolation_cell(
         output_capacitance_ff: Some(8 * drive_strength as u32),
         input_capacitance_ff: Some(10),
         max_fanout: Some(5 * drive_strength as u32),
+        // Isolation cells must remain functional to protect against undefined states
+        min_voltage_mv: Some(600), // Very low - must work during power transitions
+        nominal_voltage_mv: Some(1000), // 1.0V nominal
+        timing_margin_voltage_mv: Some(750), // Wide margin for reliability
+        voltage_delay_coefficient: Some(0.08), // Low delay sensitivity
+        voltage_sensitivity: Some(8), // LOW sensitivity - must be robust
     }
 }
 
@@ -666,6 +705,12 @@ fn make_isolation_latch_cell(
         output_capacitance_ff: Some(10 * drive_strength as u32),
         input_capacitance_ff: Some(12),
         max_fanout: Some(4 * drive_strength as u32),
+        // Isolation latch - more sensitive due to state storage
+        min_voltage_mv: Some(650),           // Must work during transitions
+        nominal_voltage_mv: Some(1000),      // 1.0V nominal
+        timing_margin_voltage_mv: Some(800), // Tighter margin for latch
+        voltage_delay_coefficient: Some(0.12), // Moderate delay sensitivity
+        voltage_sensitivity: Some(6),        // Medium sensitivity
     }
 }
 
@@ -719,6 +764,12 @@ fn make_power_switch_cell(
         output_capacitance_ff: Some(100 * drive_strength as u32),
         input_capacitance_ff: Some(50),
         max_fanout: Some(1), // Power switches don't have traditional fanout
+        // Power switches - must be MOST robust, operates at gate drive voltage
+        min_voltage_mv: Some(500),             // Can operate very low
+        nominal_voltage_mv: Some(1000),        // 1.0V nominal gate drive
+        timing_margin_voltage_mv: Some(600),   // Very wide operating range
+        voltage_delay_coefficient: Some(0.25), // Switching speed affected by voltage
+        voltage_sensitivity: Some(10),         // LOWEST sensitivity - last to fail
     }
 }
 
@@ -767,6 +818,12 @@ fn make_aon_buffer_cell(
         output_capacitance_ff: Some(6 * drive_strength as u32),
         input_capacitance_ff: Some(8),
         max_fanout: Some(6 * drive_strength as u32),
+        // AON buffers - always powered, must be highly robust
+        min_voltage_mv: Some(550),             // Very robust
+        nominal_voltage_mv: Some(1000),        // 1.0V nominal
+        timing_margin_voltage_mv: Some(700),   // Wide margin
+        voltage_delay_coefficient: Some(0.10), // Low delay sensitivity
+        voltage_sensitivity: Some(9),          // Very low sensitivity - almost never fails
     }
 }
 
@@ -945,6 +1002,12 @@ fn make_power_cell_with_drive(
         output_capacitance_ff: Some(10 * drive_strength as u32),
         input_capacitance_ff: Some(10),
         max_fanout: Some(4 * drive_strength as u32), // 4 loads per X1
+        // Default voltage margins for generic power cells
+        min_voltage_mv: Some(700),
+        nominal_voltage_mv: Some(1000),
+        timing_margin_voltage_mv: Some(850),
+        voltage_delay_coefficient: Some(0.15),
+        voltage_sensitivity: Some(5), // Mid-range - specialized functions override
     }
 }
 
@@ -978,6 +1041,12 @@ fn make_retention_cell(name: &str, function: CellFunction, fit: f64) -> LibraryC
         output_capacitance_ff: Some(12),
         input_capacitance_ff: Some(8),
         max_fanout: Some(3), // Sequential outputs typically have lower fanout
+        // Voltage margins - retention cells need stable power for state preservation
+        min_voltage_mv: Some(800), // Higher minimum for retention integrity
+        nominal_voltage_mv: Some(1000), // 1.0V nominal
+        timing_margin_voltage_mv: Some(920), // Tight timing margin
+        voltage_delay_coefficient: Some(0.20), // 20% delay increase per 100mV
+        voltage_sensitivity: Some(2), // VERY HIGH sensitivity - balloon latch sensitive
     }
 }
 

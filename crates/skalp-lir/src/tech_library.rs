@@ -71,6 +71,27 @@ pub struct LibraryCell {
     /// Maximum fanout (number of standard loads)
     #[serde(default)]
     pub max_fanout: Option<u32>,
+
+    // === Voltage Margin Characteristics (for power domain simulation) ===
+    /// Minimum operating voltage in millivolts (mV)
+    /// Below this voltage, the cell will fail (output stuck-at-0)
+    #[serde(default)]
+    pub min_voltage_mv: Option<u16>,
+    /// Nominal operating voltage in millivolts (mV)
+    #[serde(default)]
+    pub nominal_voltage_mv: Option<u16>,
+    /// Voltage at which timing starts degrading (mV)
+    /// Between min_voltage and timing_margin_voltage, delay increases
+    #[serde(default)]
+    pub timing_margin_voltage_mv: Option<u16>,
+    /// Delay increase coefficient (% delay increase per 100mV drop below timing margin)
+    /// e.g., 0.15 means 15% delay increase per 100mV drop
+    #[serde(default)]
+    pub voltage_delay_coefficient: Option<f64>,
+    /// Cell voltage sensitivity ranking (1 = most sensitive, fails first in brownout)
+    /// Used for progressive brownout simulation ordering
+    #[serde(default)]
+    pub voltage_sensitivity: Option<u8>,
 }
 
 fn default_drive_strength() -> u8 {
@@ -95,6 +116,11 @@ impl LibraryCell {
             output_capacitance_ff: None,
             input_capacitance_ff: None,
             max_fanout: None,
+            min_voltage_mv: None,
+            nominal_voltage_mv: None,
+            timing_margin_voltage_mv: None,
+            voltage_delay_coefficient: None,
+            voltage_sensitivity: None,
         }
     }
 
@@ -124,6 +150,64 @@ impl LibraryCell {
         self.output_capacitance_ff = Some(output_cap_ff);
         self.max_fanout = Some(max_fanout);
         self
+    }
+
+    /// Set voltage margin characteristics for power domain simulation
+    ///
+    /// # Arguments
+    /// * `nominal_mv` - Nominal operating voltage (e.g., 1000 for 1.0V)
+    /// * `min_mv` - Minimum operating voltage (cell fails below this)
+    /// * `timing_margin_mv` - Voltage below which timing degrades
+    /// * `delay_coeff` - Delay increase per 100mV drop (e.g., 0.15 = 15%)
+    /// * `sensitivity` - Brownout sensitivity (1 = fails first, 10 = most robust)
+    pub fn with_voltage_margins(
+        mut self,
+        nominal_mv: u16,
+        min_mv: u16,
+        timing_margin_mv: u16,
+        delay_coeff: f64,
+        sensitivity: u8,
+    ) -> Self {
+        self.nominal_voltage_mv = Some(nominal_mv);
+        self.min_voltage_mv = Some(min_mv);
+        self.timing_margin_voltage_mv = Some(timing_margin_mv);
+        self.voltage_delay_coefficient = Some(delay_coeff);
+        self.voltage_sensitivity = Some(sensitivity);
+        self
+    }
+
+    /// Check if the cell will fail at a given voltage
+    pub fn will_fail_at_voltage(&self, voltage_mv: u16) -> bool {
+        if let Some(min) = self.min_voltage_mv {
+            voltage_mv < min
+        } else {
+            // Default: assume cell needs at least 70% of nominal
+            let nominal = self.nominal_voltage_mv.unwrap_or(1000);
+            voltage_mv < (nominal * 70 / 100)
+        }
+    }
+
+    /// Calculate delay multiplier at a given voltage
+    /// Returns 1.0 at nominal voltage, increases as voltage drops
+    pub fn delay_multiplier_at_voltage(&self, voltage_mv: u16) -> f64 {
+        let nominal = self.nominal_voltage_mv.unwrap_or(1000);
+        let timing_margin = self.timing_margin_voltage_mv.unwrap_or(nominal * 90 / 100);
+        let coeff = self.voltage_delay_coefficient.unwrap_or(0.15);
+
+        if voltage_mv >= timing_margin {
+            1.0 // No delay increase above timing margin
+        } else if voltage_mv < self.min_voltage_mv.unwrap_or(nominal * 70 / 100) {
+            f64::INFINITY // Cell fails - infinite delay
+        } else {
+            // Linear delay increase between timing margin and min voltage
+            let drop_mv = (timing_margin - voltage_mv) as f64;
+            1.0 + (drop_mv / 100.0) * coeff
+        }
+    }
+
+    /// Get voltage sensitivity for brownout ordering (lower = more sensitive)
+    pub fn get_voltage_sensitivity(&self) -> u8 {
+        self.voltage_sensitivity.unwrap_or(5) // Default mid-range sensitivity
     }
 
     /// Calculate maximum fanout based on load capacitance

@@ -1759,6 +1759,602 @@ pub fn build_primitive_path_map(
 }
 
 // ============================================================================
+// Power Domain Fault Injection
+// ============================================================================
+
+/// Types of domain-wide power faults
+///
+/// These fault types affect entire power domains simultaneously, modeling
+/// realistic power supply failures for ISO 26262 Common Cause Failure analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DomainFaultType {
+    /// Complete power failure - all cells in domain stuck-at-0
+    /// Cause: Power regulator failure, short circuit, fuse blow
+    /// Effect: All outputs in domain go to 0
+    PowerFailure,
+
+    /// Voltage dropout - cells fail based on voltage sensitivity
+    /// Cause: Load transient, IR drop, regulator droop
+    /// Effect: Sensitive cells fail first, robust cells survive longer
+    VoltageDropout {
+        /// Target voltage in millivolts (nominal is typically 1000mV)
+        target_voltage_mv: u16,
+    },
+
+    /// Progressive brownout - cells fail in sensitivity order
+    /// Cause: Gradual power supply degradation, battery discharge
+    /// Effect: Cells fail one by one in order of voltage sensitivity
+    Brownout {
+        /// Starting voltage in millivolts
+        start_voltage_mv: u16,
+        /// Ending voltage in millivolts
+        end_voltage_mv: u16,
+        /// Rate of voltage drop in mV per cycle
+        droop_rate_mv_per_cycle: u16,
+    },
+
+    /// Ground bounce - transient glitches on all outputs
+    /// Cause: Simultaneous switching noise (SSN)
+    /// Effect: Brief glitches, proportional to cell current draw
+    GroundBounce {
+        /// Magnitude of bounce in millivolts
+        magnitude_mv: u16,
+        /// Duration in cycles
+        duration_cycles: u32,
+    },
+
+    /// Power-on reset failure - cells come up in random state
+    /// Cause: POR circuit failure, slow voltage ramp
+    /// Effect: State elements have undefined initial values
+    PowerOnResetFailure,
+}
+
+impl DomainFaultType {
+    /// Get name for reporting
+    pub fn name(&self) -> &'static str {
+        match self {
+            DomainFaultType::PowerFailure => "power_failure",
+            DomainFaultType::VoltageDropout { .. } => "voltage_dropout",
+            DomainFaultType::Brownout { .. } => "brownout",
+            DomainFaultType::GroundBounce { .. } => "ground_bounce",
+            DomainFaultType::PowerOnResetFailure => "por_failure",
+        }
+    }
+
+    /// Get human-readable description
+    pub fn description(&self) -> String {
+        match self {
+            DomainFaultType::PowerFailure => {
+                "Complete power failure - all cells stuck at 0".to_string()
+            }
+            DomainFaultType::VoltageDropout { target_voltage_mv } => {
+                format!(
+                    "Voltage dropout to {}mV - cells fail based on sensitivity",
+                    target_voltage_mv
+                )
+            }
+            DomainFaultType::Brownout {
+                start_voltage_mv,
+                end_voltage_mv,
+                droop_rate_mv_per_cycle,
+            } => {
+                format!(
+                    "Progressive brownout {}mV→{}mV at {}mV/cycle",
+                    start_voltage_mv, end_voltage_mv, droop_rate_mv_per_cycle
+                )
+            }
+            DomainFaultType::GroundBounce {
+                magnitude_mv,
+                duration_cycles,
+            } => {
+                format!(
+                    "Ground bounce {}mV for {} cycles",
+                    magnitude_mv, duration_cycles
+                )
+            }
+            DomainFaultType::PowerOnResetFailure => {
+                "POR failure - undefined initial states".to_string()
+            }
+        }
+    }
+
+    /// Get standard domain fault set for ASIL-D analysis
+    pub fn asil_d_set() -> Vec<DomainFaultType> {
+        vec![
+            DomainFaultType::PowerFailure,
+            DomainFaultType::VoltageDropout {
+                target_voltage_mv: 700,
+            },
+            DomainFaultType::VoltageDropout {
+                target_voltage_mv: 800,
+            },
+            DomainFaultType::Brownout {
+                start_voltage_mv: 1000,
+                end_voltage_mv: 600,
+                droop_rate_mv_per_cycle: 10,
+            },
+            DomainFaultType::GroundBounce {
+                magnitude_mv: 200,
+                duration_cycles: 5,
+            },
+            DomainFaultType::PowerOnResetFailure,
+        ]
+    }
+}
+
+/// A domain-wide fault injection site
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainFaultSite {
+    /// Power domain name
+    pub domain_name: String,
+    /// Domain voltage (nominal, in mV)
+    pub domain_voltage_mv: u16,
+    /// Type of domain fault to inject
+    pub fault_type: DomainFaultType,
+    /// Primitive paths affected by this domain
+    pub affected_primitives: Vec<String>,
+    /// Per-primitive voltage sensitivity (1=most sensitive, 10=most robust)
+    pub primitive_sensitivities: HashMap<String, u8>,
+}
+
+impl DomainFaultSite {
+    /// Create a new domain fault site
+    pub fn new(domain_name: &str, domain_voltage_mv: u16, fault_type: DomainFaultType) -> Self {
+        Self {
+            domain_name: domain_name.to_string(),
+            domain_voltage_mv,
+            fault_type,
+            affected_primitives: Vec::new(),
+            primitive_sensitivities: HashMap::new(),
+        }
+    }
+
+    /// Add a primitive to this domain with its voltage sensitivity
+    pub fn with_primitive(mut self, path: &str, sensitivity: u8) -> Self {
+        self.affected_primitives.push(path.to_string());
+        self.primitive_sensitivities
+            .insert(path.to_string(), sensitivity);
+        self
+    }
+
+    /// Add multiple primitives
+    pub fn with_primitives(mut self, paths: &[(String, u8)]) -> Self {
+        for (path, sensitivity) in paths {
+            self.affected_primitives.push(path.clone());
+            self.primitive_sensitivities
+                .insert(path.clone(), *sensitivity);
+        }
+        self
+    }
+
+    /// Generate unique identifier for this domain fault
+    pub fn id(&self) -> String {
+        format!("domain:{}@{}", self.domain_name, self.fault_type.name())
+    }
+
+    /// Get primitives sorted by voltage sensitivity (most sensitive first)
+    pub fn primitives_by_sensitivity(&self) -> Vec<&String> {
+        let mut paths: Vec<_> = self.affected_primitives.iter().collect();
+        paths.sort_by_key(|p| self.primitive_sensitivities.get(*p).copied().unwrap_or(5));
+        paths
+    }
+
+    /// Determine which primitives would fail at a given voltage
+    ///
+    /// Uses voltage sensitivity to determine failure order:
+    /// - Sensitivity 1-2: Fail at 900mV (most sensitive - e.g., retention cells)
+    /// - Sensitivity 3-4: Fail at 800mV (high sensitivity - e.g., sequential)
+    /// - Sensitivity 5-6: Fail at 750mV (medium - e.g., combinational)
+    /// - Sensitivity 7-8: Fail at 700mV (low - e.g., isolation cells)
+    /// - Sensitivity 9-10: Fail at 650mV (very robust - e.g., power switches)
+    pub fn primitives_failing_at_voltage(&self, voltage_mv: u16) -> Vec<&String> {
+        self.affected_primitives
+            .iter()
+            .filter(|p| {
+                let sensitivity = self.primitive_sensitivities.get(*p).copied().unwrap_or(5);
+                let fail_voltage = match sensitivity {
+                    1..=2 => 900,  // Most sensitive
+                    3..=4 => 800,  // High sensitivity
+                    5..=6 => 750,  // Medium
+                    7..=8 => 700,  // Low
+                    9..=10 => 650, // Very robust
+                    _ => 750,      // Default to medium
+                };
+                voltage_mv <= fail_voltage
+            })
+            .collect()
+    }
+}
+
+/// Result of domain-wide fault injection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainFaultResult {
+    /// The domain fault that was injected
+    pub domain_fault: DomainFaultSite,
+    /// Number of primitives affected
+    pub primitives_affected: usize,
+    /// Primitives that failed (for progressive faults like brownout)
+    pub failed_primitives: Vec<String>,
+    /// Digital fault effects applied to each primitive
+    pub primitive_faults: HashMap<String, FaultType>,
+    /// Whether any detection signal triggered
+    pub detected: bool,
+    /// Which detection signals triggered
+    pub detecting_signals: Vec<String>,
+    /// Cycles until first detection (if detected)
+    pub detection_latency_cycles: Option<u64>,
+}
+
+impl DomainFaultResult {
+    /// Create result for complete power failure
+    pub fn power_failure(domain_fault: DomainFaultSite) -> Self {
+        let primitives_affected = domain_fault.affected_primitives.len();
+        let primitive_faults: HashMap<String, FaultType> = domain_fault
+            .affected_primitives
+            .iter()
+            .map(|p| (p.clone(), FaultType::StuckAt0))
+            .collect();
+
+        Self {
+            failed_primitives: domain_fault.affected_primitives.clone(),
+            domain_fault,
+            primitives_affected,
+            primitive_faults,
+            detected: false,
+            detecting_signals: Vec::new(),
+            detection_latency_cycles: None,
+        }
+    }
+
+    /// Create result for voltage dropout
+    pub fn voltage_dropout(domain_fault: DomainFaultSite, voltage_mv: u16) -> Self {
+        let failed = domain_fault.primitives_failing_at_voltage(voltage_mv);
+        let primitives_affected = failed.len();
+        let failed_primitives: Vec<String> = failed.iter().map(|s| (*s).clone()).collect();
+
+        // Sensitive cells get stuck-at-0, others get timing violations
+        let primitive_faults: HashMap<String, FaultType> = domain_fault
+            .affected_primitives
+            .iter()
+            .map(|p| {
+                let sensitivity = domain_fault
+                    .primitive_sensitivities
+                    .get(p)
+                    .copied()
+                    .unwrap_or(5);
+                let fault = if failed_primitives.contains(p) {
+                    FaultType::StuckAt0 // Hard failure
+                } else if sensitivity <= 6 {
+                    FaultType::SetupViolation // Timing degradation
+                } else {
+                    FaultType::Transient // Minor glitch
+                };
+                (p.clone(), fault)
+            })
+            .collect();
+
+        Self {
+            domain_fault,
+            primitives_affected,
+            failed_primitives,
+            primitive_faults,
+            detected: false,
+            detecting_signals: Vec::new(),
+            detection_latency_cycles: None,
+        }
+    }
+}
+
+/// Configuration for domain fault injection campaigns
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainFaultCampaignConfig {
+    /// Domain fault types to inject
+    pub fault_types: Vec<DomainFaultType>,
+    /// Whether to include progressive brownout simulation
+    pub include_brownout: bool,
+    /// Brownout voltage steps (if include_brownout is true)
+    pub brownout_steps_mv: Vec<u16>,
+    /// Cycles to simulate after fault injection
+    pub cycles_per_fault: u64,
+    /// Whether to track individual primitive failures
+    pub track_primitive_failures: bool,
+}
+
+impl Default for DomainFaultCampaignConfig {
+    fn default() -> Self {
+        Self {
+            fault_types: vec![
+                DomainFaultType::PowerFailure,
+                DomainFaultType::VoltageDropout {
+                    target_voltage_mv: 800,
+                },
+            ],
+            include_brownout: true,
+            brownout_steps_mv: vec![950, 900, 850, 800, 750, 700, 650],
+            cycles_per_fault: 1000,
+            track_primitive_failures: true,
+        }
+    }
+}
+
+/// Results from a domain fault injection campaign
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainFaultCampaignResults {
+    /// Configuration used
+    pub config: DomainFaultCampaignConfig,
+    /// Results per domain
+    pub domain_results: HashMap<String, Vec<DomainFaultResult>>,
+    /// Total domain faults injected
+    pub total_domain_faults: usize,
+    /// Domains with detection capability
+    pub domains_with_detection: usize,
+    /// Average detection latency across all detected faults
+    pub avg_detection_latency_cycles: f64,
+    /// Brownout analysis results (if enabled)
+    pub brownout_analysis: Option<BrownoutAnalysis>,
+}
+
+/// Analysis of progressive brownout simulation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrownoutAnalysis {
+    /// Per-domain brownout results
+    pub domain_brownout: HashMap<String, DomainBrownoutResult>,
+    /// Voltage at which first detection occurs (per domain)
+    pub first_detection_voltage_mv: HashMap<String, u16>,
+    /// Voltage at which safety goal is violated (per domain)
+    pub safety_violation_voltage_mv: HashMap<String, u16>,
+}
+
+/// Brownout results for a single domain
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainBrownoutResult {
+    /// Domain name
+    pub domain_name: String,
+    /// Voltage steps simulated
+    pub voltage_steps: Vec<u16>,
+    /// Primitives failing at each voltage step
+    pub failures_at_voltage: HashMap<u16, Vec<String>>,
+    /// Cumulative failure count at each step
+    pub cumulative_failures: Vec<(u16, usize)>,
+    /// Detection status at each voltage step
+    pub detection_at_voltage: HashMap<u16, bool>,
+}
+
+impl DomainBrownoutResult {
+    /// Create new brownout result for a domain
+    pub fn new(domain_name: &str) -> Self {
+        Self {
+            domain_name: domain_name.to_string(),
+            voltage_steps: Vec::new(),
+            failures_at_voltage: HashMap::new(),
+            cumulative_failures: Vec::new(),
+            detection_at_voltage: HashMap::new(),
+        }
+    }
+
+    /// Add a voltage step result
+    pub fn add_step(&mut self, voltage_mv: u16, failures: Vec<String>, detected: bool) {
+        self.voltage_steps.push(voltage_mv);
+        let cumulative = self
+            .cumulative_failures
+            .last()
+            .map(|(_, c)| *c)
+            .unwrap_or(0)
+            + failures.len();
+        self.failures_at_voltage.insert(voltage_mv, failures);
+        self.cumulative_failures.push((voltage_mv, cumulative));
+        self.detection_at_voltage.insert(voltage_mv, detected);
+    }
+
+    /// Get the voltage at which detection first occurs
+    pub fn first_detection_voltage(&self) -> Option<u16> {
+        self.voltage_steps
+            .iter()
+            .rev() // Start from lowest voltage (last step)
+            .find(|v| self.detection_at_voltage.get(*v).copied().unwrap_or(false))
+            .copied()
+    }
+
+    /// Get primitives that fail at or above a given voltage
+    pub fn primitives_failing_above(&self, threshold_mv: u16) -> Vec<String> {
+        self.failures_at_voltage
+            .iter()
+            .filter(|(v, _)| **v >= threshold_mv)
+            .flat_map(|(_, prims)| prims.iter().cloned())
+            .collect()
+    }
+}
+
+/// Generate domain fault injection sites from LIR
+///
+/// This function analyzes the LIR to identify power domains and creates
+/// domain fault sites for each domain with appropriate voltage sensitivities.
+pub fn generate_domain_fault_sites(
+    lir: &skalp_lir::Lir,
+    _tech_library: Option<&crate::fmeda_library::TechLibrary>,
+) -> Vec<DomainFaultSite> {
+    let mut sites = Vec::new();
+    let mut domain_primitives: HashMap<String, Vec<(String, u8)>> = HashMap::new();
+    let mut domain_voltages: HashMap<String, u16> = HashMap::new();
+
+    // Collect primitives by power domain
+    for prim in &lir.primitives {
+        let domain_name = prim
+            .power_domain
+            .clone()
+            .unwrap_or_else(|| "vdd_default".to_string());
+
+        // Determine voltage sensitivity based on primitive type
+        let sensitivity = match &prim.ptype {
+            // Sequential cells - more sensitive
+            skalp_lir::lir::PrimitiveType::DffP
+            | skalp_lir::lir::PrimitiveType::DffN
+            | skalp_lir::lir::PrimitiveType::DffNeg
+            | skalp_lir::lir::PrimitiveType::DffE
+            | skalp_lir::lir::PrimitiveType::DffAR
+            | skalp_lir::lir::PrimitiveType::DffAS
+            | skalp_lir::lir::PrimitiveType::DffScan
+            | skalp_lir::lir::PrimitiveType::Dlatch
+            | skalp_lir::lir::PrimitiveType::SRlatch
+            | skalp_lir::lir::PrimitiveType::MemCell
+            | skalp_lir::lir::PrimitiveType::RegCell => 3, // Sequential - sensitive
+
+            // Power infrastructure - most robust
+            skalp_lir::lir::PrimitiveType::PowerSwitch { .. } => 9, // Very robust
+            skalp_lir::lir::PrimitiveType::AlwaysOnBuf => 9,        // Very robust
+
+            // Isolation cells - designed to be robust
+            skalp_lir::lir::PrimitiveType::IsolationCell { .. } => 8, // Robust
+
+            // Level shifters - moderately sensitive
+            skalp_lir::lir::PrimitiveType::LevelShifter { .. } => 4, // Sensitive
+
+            // Retention cells - very sensitive due to balloon latch
+            skalp_lir::lir::PrimitiveType::RetentionDff { .. } => 2, // Very sensitive
+
+            // Combinational - medium sensitivity
+            _ => 6,
+        };
+
+        // Infer domain voltage from name
+        let voltage_mv = infer_domain_voltage(&domain_name);
+        domain_voltages.insert(domain_name.clone(), voltage_mv);
+
+        domain_primitives
+            .entry(domain_name)
+            .or_default()
+            .push((prim.path.clone(), sensitivity));
+    }
+
+    // Create fault sites for each domain with all fault types
+    for (domain_name, primitives) in domain_primitives {
+        let voltage_mv = domain_voltages.get(&domain_name).copied().unwrap_or(1000);
+
+        // Power failure
+        let mut site =
+            DomainFaultSite::new(&domain_name, voltage_mv, DomainFaultType::PowerFailure);
+        site = site.with_primitives(&primitives);
+        sites.push(site);
+
+        // Voltage dropout at various levels
+        for target_mv in [900u16, 800, 750, 700].iter() {
+            if *target_mv < voltage_mv {
+                let mut site = DomainFaultSite::new(
+                    &domain_name,
+                    voltage_mv,
+                    DomainFaultType::VoltageDropout {
+                        target_voltage_mv: *target_mv,
+                    },
+                );
+                site = site.with_primitives(&primitives);
+                sites.push(site);
+            }
+        }
+
+        // Progressive brownout
+        let mut site = DomainFaultSite::new(
+            &domain_name,
+            voltage_mv,
+            DomainFaultType::Brownout {
+                start_voltage_mv: voltage_mv,
+                end_voltage_mv: 600,
+                droop_rate_mv_per_cycle: 10,
+            },
+        );
+        site = site.with_primitives(&primitives);
+        sites.push(site);
+
+        // Ground bounce
+        let mut site = DomainFaultSite::new(
+            &domain_name,
+            voltage_mv,
+            DomainFaultType::GroundBounce {
+                magnitude_mv: 200,
+                duration_cycles: 5,
+            },
+        );
+        site = site.with_primitives(&primitives);
+        sites.push(site);
+    }
+
+    sites
+}
+
+/// Infer domain voltage from domain name patterns
+fn infer_domain_voltage(domain_name: &str) -> u16 {
+    let name_lower = domain_name.to_lowercase();
+
+    // Check for explicit voltage in name
+    if name_lower.contains("3v3") || name_lower.contains("3.3v") {
+        return 3300;
+    }
+    if name_lower.contains("1v8") || name_lower.contains("1.8v") {
+        return 1800;
+    }
+    if name_lower.contains("1v2") || name_lower.contains("1.2v") {
+        return 1200;
+    }
+    if name_lower.contains("1v0") || name_lower.contains("1.0v") || name_lower.contains("1v") {
+        return 1000;
+    }
+    if name_lower.contains("0v9") || name_lower.contains("0.9v") {
+        return 900;
+    }
+    if name_lower.contains("5v") {
+        return 5000;
+    }
+
+    // Infer from domain type
+    if name_lower.contains("io") || name_lower.contains("pad") {
+        return 3300; // I/O typically 3.3V
+    }
+    if name_lower.contains("core") || name_lower.contains("logic") {
+        return 1000; // Core typically 1.0V
+    }
+    if name_lower.contains("analog") {
+        return 1800; // Analog often 1.8V
+    }
+    if name_lower.contains("mem") || name_lower.contains("sram") {
+        return 1000; // Memory typically same as core
+    }
+
+    // Default to 1.0V core voltage
+    1000
+}
+
+/// Convert domain fault results to standard fault simulation results
+///
+/// This allows domain faults to be analyzed using the existing FMEA framework.
+pub fn domain_fault_to_standard_faults(domain_result: &DomainFaultResult) -> Vec<FaultSite> {
+    domain_result
+        .primitive_faults
+        .iter()
+        .map(|(path, fault_type)| FaultSite::new(DesignRef::parse(path), *fault_type))
+        .collect()
+}
+
+/// Simulate brownout for a domain and return analysis results
+pub fn simulate_domain_brownout(
+    domain_fault: &DomainFaultSite,
+    voltage_steps: &[u16],
+) -> DomainBrownoutResult {
+    let mut result = DomainBrownoutResult::new(&domain_fault.domain_name);
+
+    for &voltage_mv in voltage_steps {
+        let failing = domain_fault.primitives_failing_at_voltage(voltage_mv);
+        let failures: Vec<String> = failing.iter().map(|s| (*s).clone()).collect();
+
+        // In real implementation, this would run simulation to check detection
+        // For now, assume detection if > 50% of cells fail
+        let detected = failures.len() > domain_fault.affected_primitives.len() / 2;
+
+        result.add_step(voltage_mv, failures, detected);
+    }
+
+    result
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2355,5 +2951,230 @@ mod tests {
         }
 
         assert_eq!(FaultType::ClockGlitch.category(), FaultCategory::Clock);
+    }
+
+    // ========================================================================
+    // Domain Fault Injection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_domain_fault_type_names() {
+        assert_eq!(DomainFaultType::PowerFailure.name(), "power_failure");
+        assert_eq!(
+            DomainFaultType::VoltageDropout {
+                target_voltage_mv: 800
+            }
+            .name(),
+            "voltage_dropout"
+        );
+        assert_eq!(
+            DomainFaultType::Brownout {
+                start_voltage_mv: 1000,
+                end_voltage_mv: 600,
+                droop_rate_mv_per_cycle: 10
+            }
+            .name(),
+            "brownout"
+        );
+        assert_eq!(
+            DomainFaultType::GroundBounce {
+                magnitude_mv: 200,
+                duration_cycles: 5
+            }
+            .name(),
+            "ground_bounce"
+        );
+        assert_eq!(DomainFaultType::PowerOnResetFailure.name(), "por_failure");
+    }
+
+    #[test]
+    fn test_domain_fault_type_descriptions() {
+        let desc = DomainFaultType::PowerFailure.description();
+        assert!(desc.contains("power failure"));
+
+        let desc = DomainFaultType::VoltageDropout {
+            target_voltage_mv: 800,
+        }
+        .description();
+        assert!(desc.contains("800mV"));
+
+        let desc = DomainFaultType::Brownout {
+            start_voltage_mv: 1000,
+            end_voltage_mv: 600,
+            droop_rate_mv_per_cycle: 10,
+        }
+        .description();
+        assert!(desc.contains("1000mV"));
+        assert!(desc.contains("600mV"));
+    }
+
+    #[test]
+    fn test_domain_fault_asil_d_set() {
+        let set = DomainFaultType::asil_d_set();
+        assert!(set.len() >= 5); // At least power failure, dropouts, brownout, ground bounce, POR
+        assert!(set.contains(&DomainFaultType::PowerFailure));
+        assert!(set.contains(&DomainFaultType::PowerOnResetFailure));
+    }
+
+    #[test]
+    fn test_domain_fault_site_creation() {
+        let site = DomainFaultSite::new("vdd_core", 1000, DomainFaultType::PowerFailure)
+            .with_primitive("top.core.cpu.alu", 6)
+            .with_primitive("top.core.cpu.reg_file", 3);
+
+        assert_eq!(site.domain_name, "vdd_core");
+        assert_eq!(site.domain_voltage_mv, 1000);
+        assert_eq!(site.affected_primitives.len(), 2);
+        assert_eq!(
+            site.primitive_sensitivities.get("top.core.cpu.alu"),
+            Some(&6)
+        );
+        assert_eq!(
+            site.primitive_sensitivities.get("top.core.cpu.reg_file"),
+            Some(&3)
+        );
+    }
+
+    #[test]
+    fn test_domain_fault_site_id() {
+        let site = DomainFaultSite::new(
+            "vdd_io",
+            3300,
+            DomainFaultType::VoltageDropout {
+                target_voltage_mv: 2800,
+            },
+        );
+        assert_eq!(site.id(), "domain:vdd_io@voltage_dropout");
+    }
+
+    #[test]
+    fn test_primitives_by_sensitivity() {
+        let site = DomainFaultSite::new("vdd_core", 1000, DomainFaultType::PowerFailure)
+            .with_primitive("robust_cell", 9) // Most robust
+            .with_primitive("sensitive_cell", 2) // Most sensitive
+            .with_primitive("medium_cell", 5); // Medium
+
+        let sorted = site.primitives_by_sensitivity();
+        assert_eq!(sorted[0], "sensitive_cell"); // Sensitivity 2 first
+        assert_eq!(sorted[1], "medium_cell"); // Sensitivity 5 second
+        assert_eq!(sorted[2], "robust_cell"); // Sensitivity 9 last
+    }
+
+    #[test]
+    fn test_primitives_failing_at_voltage() {
+        let site = DomainFaultSite::new("vdd_core", 1000, DomainFaultType::PowerFailure)
+            .with_primitive("retention_ff", 2) // Sens 1-2: Fails at <= 900mV
+            .with_primitive("dff", 3) // Sens 3-4: Fails at <= 800mV
+            .with_primitive("combo", 6) // Sens 5-6: Fails at <= 750mV
+            .with_primitive("isolation", 8) // Sens 7-8: Fails at <= 700mV
+            .with_primitive("power_switch", 10); // Sens 9-10: Fails at <= 650mV
+
+        // At 900mV - only most sensitive cells fail (sens 1-2)
+        let failing_900 = site.primitives_failing_at_voltage(900);
+        assert_eq!(failing_900.len(), 1); // Only retention_ff
+        assert!(failing_900.iter().any(|p| *p == "retention_ff"));
+
+        // At 800mV - sens 1-4 cells fail
+        let failing_800 = site.primitives_failing_at_voltage(800);
+        assert_eq!(failing_800.len(), 2); // retention_ff and dff
+
+        // At 700mV - sens 1-8 cells fail
+        let failing_700 = site.primitives_failing_at_voltage(700);
+        assert_eq!(failing_700.len(), 4); // All except power_switch
+
+        // At 650mV - all cells fail
+        let failing_650 = site.primitives_failing_at_voltage(650);
+        assert_eq!(failing_650.len(), 5); // All cells
+    }
+
+    #[test]
+    fn test_domain_fault_result_power_failure() {
+        let site = DomainFaultSite::new("vdd_core", 1000, DomainFaultType::PowerFailure)
+            .with_primitive("cell1", 5)
+            .with_primitive("cell2", 5);
+
+        let result = DomainFaultResult::power_failure(site);
+        assert_eq!(result.primitives_affected, 2);
+        assert_eq!(result.failed_primitives.len(), 2);
+        assert_eq!(result.primitive_faults.len(), 2);
+        assert_eq!(
+            result.primitive_faults.get("cell1"),
+            Some(&FaultType::StuckAt0)
+        );
+        assert_eq!(
+            result.primitive_faults.get("cell2"),
+            Some(&FaultType::StuckAt0)
+        );
+    }
+
+    #[test]
+    fn test_domain_fault_result_voltage_dropout() {
+        let site = DomainFaultSite::new("vdd_core", 1000, DomainFaultType::PowerFailure)
+            .with_primitive("sensitive", 2) // Will fail at 900mV
+            .with_primitive("robust", 9); // Won't fail at 850mV
+
+        let result = DomainFaultResult::voltage_dropout(site, 850);
+        assert_eq!(result.failed_primitives.len(), 1);
+        assert!(result.failed_primitives.contains(&"sensitive".to_string()));
+        assert_eq!(
+            result.primitive_faults.get("sensitive"),
+            Some(&FaultType::StuckAt0)
+        );
+    }
+
+    #[test]
+    fn test_infer_domain_voltage() {
+        assert_eq!(infer_domain_voltage("vdd_core_1v0"), 1000);
+        assert_eq!(infer_domain_voltage("vdd_io_3v3"), 3300);
+        assert_eq!(infer_domain_voltage("vdd_io"), 3300);
+        assert_eq!(infer_domain_voltage("vdd_core"), 1000);
+        assert_eq!(infer_domain_voltage("vdd_analog_1v8"), 1800);
+        assert_eq!(infer_domain_voltage("vdd_default"), 1000);
+    }
+
+    #[test]
+    fn test_domain_brownout_result() {
+        let mut result = DomainBrownoutResult::new("vdd_core");
+
+        result.add_step(950, vec![], false);
+        result.add_step(900, vec!["cell1".to_string()], false);
+        result.add_step(850, vec!["cell2".to_string()], true);
+        result.add_step(800, vec!["cell3".to_string()], true);
+
+        assert_eq!(result.voltage_steps.len(), 4);
+        assert_eq!(result.cumulative_failures.last(), Some(&(800, 3)));
+
+        // Detection first occurs at 850mV (iterating from low to high)
+        let first_detect = result.first_detection_voltage();
+        assert_eq!(first_detect, Some(800)); // Lowest voltage where detected
+    }
+
+    #[test]
+    fn test_simulate_domain_brownout() {
+        let site = DomainFaultSite::new("vdd_core", 1000, DomainFaultType::PowerFailure)
+            .with_primitive("sensitive", 2)
+            .with_primitive("medium", 5)
+            .with_primitive("robust", 9);
+
+        let result = simulate_domain_brownout(&site, &[950, 900, 850, 800, 750, 700, 650]);
+
+        assert_eq!(result.voltage_steps.len(), 7);
+        // At 900mV, only sensitive (sens=2) fails
+        assert_eq!(
+            result.failures_at_voltage.get(&900).map(|v| v.len()),
+            Some(1)
+        );
+        // At 650mV, all cells should fail
+        let failures_650 = result.failures_at_voltage.get(&650).unwrap();
+        assert_eq!(failures_650.len(), 3);
+    }
+
+    #[test]
+    fn test_domain_fault_campaign_config_default() {
+        let config = DomainFaultCampaignConfig::default();
+        assert!(config.include_brownout);
+        assert!(!config.brownout_steps_mv.is_empty());
+        assert!(config.track_primitive_failures);
+        assert!(config.cycles_per_fault > 0);
     }
 }
