@@ -709,11 +709,20 @@ kernel void fault_sim_kernel(
         let num_detection_signals = detection_signal_ids.len() as u32;
 
         // Create detection signals buffer
-        let detection_buffer = self.device.new_buffer_with_data(
-            detection_signal_ids.as_ptr() as _,
-            (detection_signal_ids.len().max(1) * std::mem::size_of::<u32>()) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        // Handle empty detection signals by using a placeholder to avoid copying from invalid ptr
+        let detection_buffer = if detection_signal_ids.is_empty() {
+            // Create an empty buffer with minimum size when no detection signals
+            self.device.new_buffer(
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            )
+        } else {
+            self.device.new_buffer_with_data(
+                detection_signal_ids.as_ptr() as _,
+                (detection_signal_ids.len() * std::mem::size_of::<u32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            )
+        };
 
         // Execute kernel
         let pipeline = self.fault_sim_pipeline.as_ref().unwrap();
