@@ -7614,7 +7614,7 @@ impl<'hir> HirToMir<'hir> {
     /// which is common in algorithms like clz32, ctz32, popcount32, etc.
     ///
     /// For complex cases like clz32 with multiple mutable variables:
-    /// ```
+    /// ```ignore
     /// let mut count = 0;
     /// let mut temp = value;
     /// if (temp & 0xFFFF0000) == 0 { count = count + 16; temp = temp << 16; }
@@ -7925,7 +7925,7 @@ impl<'hir> HirToMir<'hir> {
     /// BUG #86 FIX: Try to transform block expression with mutable variable pattern
     ///
     /// This handles block expressions like:
-    /// ```
+    /// ```ignore
     /// {
     ///     let mut count = 0;
     ///     let mut temp = value;

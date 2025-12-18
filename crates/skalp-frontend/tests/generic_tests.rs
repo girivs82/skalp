@@ -125,8 +125,8 @@ fn test_const_generic_parameters() {
 
             on(push.rise) {
                 if (!full) {
-                    memory[write_ptr] <= push_data
-                    write_ptr <= (write_ptr + 1) % DEPTH
+                    memory[write_ptr] = push_data
+                    write_ptr = (write_ptr + 1) % DEPTH
                 }
             }
         }

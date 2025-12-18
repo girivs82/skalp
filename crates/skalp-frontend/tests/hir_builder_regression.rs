@@ -158,7 +158,7 @@ impl FlipFlop {
     signal q_reg: bit = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -186,7 +186,7 @@ impl Counter {
     signal count_reg: bit[8] = 0
 
     on(clk.rise) {
-        count_reg <= if rst { 0 } else { count_reg + 1 }
+        count_reg = if rst { 0 } else { count_reg + 1 }
     }
 
     count = count_reg
@@ -308,7 +308,7 @@ impl DFF {
     signal q_reg: bit = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -338,7 +338,7 @@ impl Test {
     signal q_reg: bit = 0
 
     on(clk.fall) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -368,11 +368,11 @@ impl DualEdge {
     signal q_reg: bit = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     on(clk.fall) {
-        q_reg <= ~d
+        q_reg = ~d
     }
 
     q = q_reg

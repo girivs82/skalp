@@ -112,7 +112,7 @@ fn test_event_block_parsing() {
             signal q_reg: bit = 0
 
             on(clk.rise) {
-                q_reg <= d
+                q_reg = d
             }
 
             q = q_reg

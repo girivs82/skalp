@@ -147,7 +147,7 @@ impl Register {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -205,7 +205,7 @@ impl DFF {
     signal q_reg: bit = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -234,7 +234,7 @@ impl Counter {
     signal count_reg: bit[8] = 0
 
     on(clk.rise) {
-        count_reg <= if rst { 0 } else { count_reg + 1 }
+        count_reg = if rst { 0 } else { count_reg + 1 }
     }
 
     count = count_reg
@@ -261,7 +261,7 @@ impl FSM {
     signal state: bit[2] = 0
 
     on(clk.rise) {
-        state <= if rst {
+        state = if rst {
             0
         } else {
             match state {
@@ -318,7 +318,7 @@ impl Register {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -354,7 +354,7 @@ impl Test {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -380,7 +380,7 @@ impl Test {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= if rst { 0 } else { d }
+        q_reg = if rst { 0 } else { d }
     }
 
     q = q_reg
@@ -450,8 +450,8 @@ impl PipelinedALU {
     }
 
     on(clk.rise) {
-        stage1 <= temp
-        stage2 <= stage1
+        stage1 = temp
+        stage2 = stage1
     }
 
     result = stage2
@@ -477,7 +477,7 @@ impl StateMachine {
     signal state: bit[2] = 0
 
     on(clk.rise) {
-        state <= if rst {
+        state = if rst {
             0
         } else {
             match state {
@@ -513,7 +513,7 @@ impl Counter {
     signal count_reg: bit[8] = 0
 
     on(clk.rise) {
-        count_reg <= if rst {
+        count_reg = if rst {
             0
         } else if enable {
             count_reg + 1
@@ -573,8 +573,8 @@ impl MultiState {
     signal reg2: bit[8] = 0
 
     on(clk.rise) {
-        reg1 <= d1
-        reg2 <= d2
+        reg1 = d1
+        reg2 = d2
     }
 
     q1 = reg1
@@ -605,7 +605,7 @@ impl Mixed {
     temp = a + b
 
     on(clk.rise) {
-        reg <= temp
+        reg = temp
     }
 
     result = reg

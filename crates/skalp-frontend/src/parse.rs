@@ -5234,6 +5234,8 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::ImplementsKw)
                 | Some(SyntaxKind::AsilKw)
                 | Some(SyntaxKind::CoversKw)
+                // Vendor IP keywords that can be used as attribute parameter names
+                | Some(SyntaxKind::LibraryKw)
         )
     }
 

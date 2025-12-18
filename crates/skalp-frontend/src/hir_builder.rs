@@ -7715,7 +7715,12 @@ impl HirBuilderContext {
         let mut current_key: Option<&str> = None;
 
         for token in tokens.iter() {
-            if token.kind() == SyntaxKind::Ident {
+            // Handle both Ident tokens and keyword tokens that can be used as identifiers
+            let is_ident_like = token.kind() == SyntaxKind::Ident
+                || token.kind() == SyntaxKind::LibraryKw
+                || token.kind() == SyntaxKind::TypeKw;
+
+            if is_ident_like {
                 let text = token.text();
                 match text {
                     // Key names

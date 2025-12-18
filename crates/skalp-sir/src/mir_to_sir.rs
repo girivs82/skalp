@@ -344,11 +344,6 @@ impl<'a> MirToSirConverter<'a> {
             let sir_type = self.convert_type(&signal.signal_type);
             let width = sir_type.width();
 
-            eprintln!(
-                "📏 Signal '{}': MIR type={:?}, SIR type={:?}, width={}",
-                signal.name, signal.signal_type, sir_type, width
-            );
-
             // Determine if this is a register by checking if it's assigned in sequential blocks
             let is_register = self.is_signal_sequential(signal.id);
 
@@ -754,7 +749,10 @@ impl<'a> MirToSirConverter<'a> {
                             // Static bit select - treat as normal assignment
                             let target = self.lvalue_to_string(&assign.lhs);
                             println!("   📝 ASSIGNMENT: {} <= expression", target);
-                            let value = self.create_expression_node(&assign.rhs);
+                            // BUG FIX: Pass target signal width to expression creation
+                            let target_width = self.get_signal_width(&target);
+                            let value = self
+                                .create_expression_node_with_width(&assign.rhs, Some(target_width));
                             let ff_node =
                                 self.create_flipflop_with_input(value, clock, edge.clone());
                             self.connect_node_to_signal(ff_node, &target);
@@ -767,7 +765,12 @@ impl<'a> MirToSirConverter<'a> {
                         // CRITICAL: For sequential blocks (non-blocking assignments), all RHS
                         // values are sampled at the beginning of the clock cycle.
                         // We should NOT use a local context that tracks intermediate values.
-                        let value = self.create_expression_node(&assign.rhs);
+
+                        // BUG FIX: Pass target signal width to expression creation
+                        // This ensures integer literals get the correct width instead of defaulting to 32
+                        let target_width = self.get_signal_width(&target);
+                        let value =
+                            self.create_expression_node_with_width(&assign.rhs, Some(target_width));
 
                         // Create flip-flop
                         let ff_node = self.create_flipflop_with_input(value, clock, edge.clone());
@@ -2555,12 +2558,13 @@ impl<'a> MirToSirConverter<'a> {
                         }
                     }
                 }
-                let left_node = self.create_expression_node(left);
-                let right_node = self.create_expression_node(right);
+                // BUG FIX: Propagate target width to operands so integer literals get correct width
+                let left_node = self.create_expression_node_with_width(left, target_width);
+                let right_node = self.create_expression_node_with_width(right, target_width);
                 self.create_binary_op_node(op, left_node, right_node)
             }
             ExpressionKind::Unary { op, operand } => {
-                let operand_node = self.create_expression_node(operand);
+                let operand_node = self.create_expression_node_with_width(operand, target_width);
                 self.create_unary_op_node(op, operand_node)
             }
             ExpressionKind::Conditional {

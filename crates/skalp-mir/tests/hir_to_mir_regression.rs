@@ -100,7 +100,7 @@ impl Register {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -449,7 +449,7 @@ impl Test {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -479,7 +479,7 @@ impl Test {
     signal temp: bit[8] = 0
 
     on(clk.rise) {
-        temp <= a
+        temp = a
     }
 
     b = temp + 1
@@ -531,7 +531,7 @@ impl Test {
     signal q_reg: bit[8] = 0
 
     on(clk.rise) {
-        q_reg <= d
+        q_reg = d
     }
 
     q = q_reg
@@ -611,7 +611,7 @@ impl FSM {
     signal state: bit[2] = 0
 
     on(clk.rise) {
-        state <= if rst {
+        state = if rst {
             0
         } else {
             match state {
@@ -646,7 +646,7 @@ impl Counter {
     signal count_reg: bit[8] = 0
 
     on(clk.rise) {
-        count_reg <= if rst { 0 } else { count_reg + 1 }
+        count_reg = if rst { 0 } else { count_reg + 1 }
     }
 
     count = count_reg
