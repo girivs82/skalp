@@ -98,6 +98,7 @@ fn create_simple_entity() -> Hir {
             breakpoint_config: None,
             power_config: None,
             safety_config: None,
+            power_domain: None,
         }],
         variables: vec![],
         constants: vec![],

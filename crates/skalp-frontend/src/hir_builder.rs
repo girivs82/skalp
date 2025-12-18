@@ -176,6 +176,10 @@ pub struct HirBuilderContext {
     /// Collected and applied to next entity with SEooC config
     pending_assumed_mechanisms: Vec<crate::hir::AssumedMechanismConfig>,
 
+    /// Current entity's default power domain (set during impl block processing)
+    /// Used for signal power domain inheritance when signal doesn't specify one
+    current_default_power_domain: Option<String>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -296,6 +300,7 @@ impl HirBuilderContext {
             pending_power_domain_config: None,
             pending_seooc_config: None,
             pending_assumed_mechanisms: Vec::new(),
+            current_default_power_domain: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -808,6 +813,7 @@ impl HirBuilderContext {
                                     breakpoint_config: None,
                                     power_config: None,
                                     safety_config: None,
+                                    power_domain: self.current_default_power_domain.clone(),
                                 };
                                 signals.push(signal);
 
@@ -1023,9 +1029,16 @@ impl HirBuilderContext {
         self.symbols.enter_scope();
 
         // Get the built entity and add its ports and generic parameters to the current scope
+        // Also extract default power domain for signal inheritance
         let (ports, generics) = if let Some(built_entity) = self.built_entities.get(&entity_name) {
+            // Set current entity's default power domain for signal inheritance
+            self.current_default_power_domain = built_entity
+                .power_domain_config
+                .as_ref()
+                .map(|c| c.domain_name.clone());
             (built_entity.ports.clone(), built_entity.generics.clone())
         } else {
+            self.current_default_power_domain = None;
             (Vec::new(), Vec::new())
         };
 
@@ -1198,6 +1211,9 @@ impl HirBuilderContext {
 
         // Infer clock domains for signals based on event block assignments
         self.infer_clock_domains(&mut implementation);
+
+        // Clear the current entity's default power domain (leaving impl scope)
+        self.current_default_power_domain = None;
 
         Some(implementation)
     }
@@ -1422,12 +1438,19 @@ impl HirBuilderContext {
         // Consume any pending breakpoint config from preceding #[breakpoint] attribute
         let breakpoint_config = self.pending_breakpoint_config.take();
 
+        // Determine final power domain:
+        // 1. Signal's explicit lifetime: signal data<'core>: type
+        // 2. Fall back to entity's default power domain
+        let final_power_domain = signal_power_domain
+            .clone()
+            .or_else(|| self.current_default_power_domain.clone());
+
         // Consume any pending power config from preceding #[retention], #[isolation], #[pdc], #[level_shift] attributes
         // Merge with signal_power_domain from lifetime parameter
         let mut power_config = self.pending_power_config.take();
-        if let Some(domain_name) = signal_power_domain {
+        if let Some(ref domain_name) = final_power_domain {
             let config = power_config.get_or_insert_with(Default::default);
-            config.domain_name = Some(domain_name);
+            config.domain_name = Some(domain_name.clone());
         }
 
         // Consume any pending safety config from preceding #[implements(...)] attribute
@@ -1446,6 +1469,7 @@ impl HirBuilderContext {
             breakpoint_config,
             power_config,
             safety_config,
+            power_domain: final_power_domain,
         })
     }
 

@@ -535,6 +535,11 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
                 generate_power_attributes(&mut sv, &signal.name, power_config);
             }
 
+            // Generate power domain annotation if present
+            if let Some(ref power_domain) = signal.power_domain {
+                sv.push_str(&format!("    (* power_domain = \"{}\" *)\n", power_domain));
+            }
+
             // Format: wire [element_width] name [array_dim];
             sv.push_str(&format!(
                 "    {} {}{}{}",

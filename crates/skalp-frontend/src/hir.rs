@@ -386,6 +386,10 @@ pub struct HirSignal {
     /// When present, indicates this signal implements a safety mechanism from a safety_goal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_config: Option<SafetyConfig>,
+    /// Power domain assignment (from signal<'domain> lifetime syntax)
+    /// When present, indicates which power domain this signal belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_domain: Option<String>,
 }
 
 /// Variable in HIR

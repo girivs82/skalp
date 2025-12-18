@@ -459,6 +459,10 @@ impl<'hir> HirToMir<'hir> {
                     if hir_signal.power_config.is_some() {
                         signal.power_config = hir_signal.power_config.clone();
                     }
+                    // Propagate power domain from HIR signal to MIR signal
+                    if hir_signal.power_domain.is_some() {
+                        signal.power_domain = hir_signal.power_domain.clone();
+                    }
                     // Propagate safety config from HIR signal to MIR signal
                     if let Some(ref safety_config) = hir_signal.safety_config {
                         signal.safety_context = Some(convert_safety_config(safety_config));
@@ -632,6 +636,10 @@ impl<'hir> HirToMir<'hir> {
                             // Propagate power config from HIR signal to MIR signal
                             if hir_signal.power_config.is_some() {
                                 signal.power_config = hir_signal.power_config.clone();
+                            }
+                            // Propagate power domain from HIR signal to MIR signal
+                            if hir_signal.power_domain.is_some() {
+                                signal.power_domain = hir_signal.power_domain.clone();
                             }
                             // Propagate safety config from HIR signal to MIR signal
                             if let Some(ref safety_config) = hir_signal.safety_config {
