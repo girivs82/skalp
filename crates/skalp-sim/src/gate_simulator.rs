@@ -917,6 +917,7 @@ mod tests {
             enable: None,
             bit_index: None,
             safety_info: None,
+            power_domain: None,
         });
 
         lir

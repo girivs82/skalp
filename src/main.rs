@@ -2111,10 +2111,7 @@ fn run_fi_driven_safety(
             .iter()
             .filter(|p| {
                 // Check safety_info flag
-                let from_annotation = p
-                    .safety_info
-                    .as_ref()
-                    .is_some_and(|s| s.is_boot_time_only);
+                let from_annotation = p.safety_info.as_ref().is_some_and(|s| s.is_boot_time_only);
 
                 // Check path for BIST-related keywords (case-insensitive)
                 let path_lower = p.path.to_lowercase();
@@ -2700,6 +2697,10 @@ fn generate_fi_driven_fmeda_md(
     // Run CCF analysis (needed for both diagnostics and CCF report)
     let ccf_analysis = skalp_safety::analyze_ccf(lir, &["ch_*", "channel_*"]);
 
+    // Extract power domains for CCF analysis
+    // Power supply failures cause all cells in a domain to fail simultaneously
+    let power_domain_analysis = skalp_safety::power_domains::extract_power_domains_from_lir(lir);
+
     if has_undetected {
         // Collect all undetected fault sites, separating runtime from boot-time-only
         let mut runtime_undetected: Vec<skalp_safety::fault_simulation::FaultSite> = Vec::new();
@@ -2723,7 +2724,8 @@ fn generate_fi_driven_fmeda_md(
 
         // Use enhanced fault diagnostics with CCF integration (runtime faults only)
         let diagnostics = skalp_safety::FaultDiagnostics::new();
-        let (classified, summary) = diagnostics.classify_with_ccf(&runtime_undetected, &ccf_analysis);
+        let (classified, summary) =
+            diagnostics.classify_with_ccf(&runtime_undetected, &ccf_analysis);
 
         // Generate enhanced diagnostic report for runtime faults
         md.push_str(&skalp_safety::generate_diagnostic_report(
@@ -2737,49 +2739,50 @@ fn generate_fi_driven_fmeda_md(
         md.push_str("> **Note**: Safety mechanism classification requires `#[implements(...)]` annotations on components.\n\n");
 
         // Helper function to generate component breakdown
-        let generate_component_breakdown = |sites: &[skalp_safety::fault_simulation::FaultSite], md: &mut String| {
-            let mut by_component: std::collections::HashMap<
-                String,
-                Vec<&skalp_safety::fault_simulation::FaultSite>,
-            > = std::collections::HashMap::new();
+        let generate_component_breakdown =
+            |sites: &[skalp_safety::fault_simulation::FaultSite], md: &mut String| {
+                let mut by_component: std::collections::HashMap<
+                    String,
+                    Vec<&skalp_safety::fault_simulation::FaultSite>,
+                > = std::collections::HashMap::new();
 
-            for site in sites {
-                let path = site.primitive_path.to_string();
-                let component = path
-                    .strip_prefix("top.")
-                    .unwrap_or(&path)
-                    .split('.')
-                    .next()
-                    .unwrap_or("unknown")
-                    .to_string();
-                by_component.entry(component).or_default().push(site);
-            }
+                for site in sites {
+                    let path = site.primitive_path.to_string();
+                    let component = path
+                        .strip_prefix("top.")
+                        .unwrap_or(&path)
+                        .split('.')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    by_component.entry(component).or_default().push(site);
+                }
 
-            let mut components: Vec<_> = by_component.iter().collect();
-            components.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+                let mut components: Vec<_> = by_component.iter().collect();
+                components.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
-            for (component, faults) in components {
-                md.push_str(&format!(
-                    "#### Component: `{}` ({} faults)\n\n",
-                    component,
-                    faults.len()
-                ));
-
-                md.push_str("| Fault Site | Type |\n");
-                md.push_str("|------------|------|\n");
-                for site in faults.iter().take(10) {
+                for (component, faults) in components {
                     md.push_str(&format!(
-                        "| `{}` | {} |\n",
-                        site.primitive_path,
-                        site.fault_type.name()
+                        "#### Component: `{}` ({} faults)\n\n",
+                        component,
+                        faults.len()
                     ));
+
+                    md.push_str("| Fault Site | Type |\n");
+                    md.push_str("|------------|------|\n");
+                    for site in faults.iter().take(10) {
+                        md.push_str(&format!(
+                            "| `{}` | {} |\n",
+                            site.primitive_path,
+                            site.fault_type.name()
+                        ));
+                    }
+                    if faults.len() > 10 {
+                        md.push_str(&format!("| ... | ({} more) |\n", faults.len() - 10));
+                    }
+                    md.push('\n');
                 }
-                if faults.len() > 10 {
-                    md.push_str(&format!("| ... | ({} more) |\n", faults.len() - 10));
-                }
-                md.push('\n');
-            }
-        };
+            };
 
         // Runtime faults - these affect SPFM
         if !runtime_undetected.is_empty() {
@@ -2797,7 +2800,9 @@ fn generate_fi_driven_fmeda_md(
                 "### Boot-Time-Only Faults ({} total) - Excluded from SPFM\n\n",
                 total_boot_time_undetected
             ));
-            md.push_str("> ℹ️ These faults occur in hardware only active during boot/test (e.g., BIST).\n");
+            md.push_str(
+                "> ℹ️ These faults occur in hardware only active during boot/test (e.g., BIST).\n",
+            );
             md.push_str("> Per ISO 26262-5, they are **excluded from SPFM** calculation since the hardware is inactive during operation.\n");
             md.push_str("> They are detected at boot time and do not contribute to operational failure probability.\n\n");
             generate_component_breakdown(&boot_time_undetected, &mut md);
@@ -2810,6 +2815,14 @@ fn generate_fi_driven_fmeda_md(
 
     // Add CCF Analysis report (ccf_analysis was computed earlier for fault classification)
     md.push_str(&skalp_safety::generate_ccf_report(&ccf_analysis));
+
+    // Add Power Domain Analysis report (power domains contribute to CCF)
+    md.push_str("\n---\n\n");
+    md.push_str("## Power Domain Analysis\n\n");
+    md.push_str("> Power supply failures cause Common Cause Failures (CCF) because all cells in a domain fail simultaneously.\n\n");
+    md.push_str(&skalp_safety::power_domains::format_power_domain_report(
+        &power_domain_analysis,
+    ));
 
     md
 }

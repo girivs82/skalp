@@ -1025,6 +1025,7 @@ mod tests {
             enable: None,
             bit_index: None,
             safety_info: None,
+            power_domain: None,
         });
 
         let sir_result = convert_lir_to_sir(&lir);
@@ -1093,6 +1094,7 @@ mod tests {
             enable: None,
             bit_index: None,
             safety_info: None,
+            power_domain: None,
         });
 
         let sir_result = convert_lir_to_sir(&lir);

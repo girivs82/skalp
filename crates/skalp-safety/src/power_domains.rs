@@ -1422,6 +1422,177 @@ pub fn format_power_domain_report(analysis: &PowerDomainAnalysis) -> String {
 }
 
 // ============================================================================
+// LIR-Based Power Domain Extraction
+// ============================================================================
+
+/// Extract power domains from LIR primitives
+///
+/// This function identifies power domains from gate-level primitives using:
+/// 1. Explicit `power_domain` annotations from #[power_domain("name")] in source
+/// 2. Hierarchy-based inference from naming patterns (e.g., *_core*, *_io*)
+///
+/// Returns a PowerDomainAnalysis containing all identified domains and CCF groups.
+pub fn extract_power_domains_from_lir(lir: &skalp_lir::Lir) -> PowerDomainAnalysis {
+    use std::collections::HashMap;
+
+    let mut domains: HashMap<String, PowerDomainInfo> = HashMap::new();
+
+    // Default domain patterns for auto-inference
+    let default_patterns = [
+        // (pattern substring, domain_name, voltage)
+        ("_core", "vdd_core", 1.0),
+        ("_io", "vdd_io", 3.3),
+        ("_analog", "vdd_analog", 5.0),
+        ("_1v", "vdd_1v", 1.0),
+        ("_1v8", "vdd_1v8", 1.8),
+        ("_2v5", "vdd_2v5", 2.5),
+        ("_3v3", "vdd_3v3", 3.3),
+        ("_5v", "vdd_5v", 5.0),
+    ];
+
+    // Process each primitive
+    for prim in &lir.primitives {
+        let fit = prim.ptype.base_fit();
+        let path = &prim.path;
+
+        // First check for explicit power_domain annotation
+        if let Some(ref explicit_domain) = prim.power_domain {
+            let domain = domains.entry(explicit_domain.clone()).or_insert_with(|| {
+                // Try to infer voltage from domain name
+                let voltage = infer_voltage_from_name(explicit_domain);
+                PowerDomainInfo {
+                    name: explicit_domain.clone(),
+                    voltage,
+                    cells: Vec::new(),
+                    total_fit: 0.0,
+                    level_shifters: Vec::new(),
+                    isolation_cells: Vec::new(),
+                }
+            });
+            domain.cells.push(path.clone());
+            domain.total_fit += fit;
+            continue;
+        }
+
+        // Infer from hierarchy path patterns
+        let lower_path = path.to_lowercase();
+        let mut assigned = false;
+
+        for (pattern, domain_name, voltage) in &default_patterns {
+            if lower_path.contains(pattern) {
+                let domain =
+                    domains
+                        .entry(domain_name.to_string())
+                        .or_insert_with(|| PowerDomainInfo {
+                            name: domain_name.to_string(),
+                            voltage: *voltage,
+                            cells: Vec::new(),
+                            total_fit: 0.0,
+                            level_shifters: Vec::new(),
+                            isolation_cells: Vec::new(),
+                        });
+                domain.cells.push(path.clone());
+                domain.total_fit += fit;
+                assigned = true;
+                break;
+            }
+        }
+
+        // If not matched by patterns, assign to default domain
+        if !assigned {
+            let domain = domains.entry("vdd_default".to_string()).or_insert_with(|| {
+                PowerDomainInfo {
+                    name: "vdd_default".to_string(),
+                    voltage: 1.0, // Default 1.0V core voltage
+                    cells: Vec::new(),
+                    total_fit: 0.0,
+                    level_shifters: Vec::new(),
+                    isolation_cells: Vec::new(),
+                }
+            });
+            domain.cells.push(path.clone());
+            domain.total_fit += fit;
+        }
+    }
+
+    // Identify level shifters and isolation cells
+    for domain in domains.values_mut() {
+        for cell in &domain.cells {
+            let lower = cell.to_lowercase();
+            if lower.contains("level_shift") || lower.contains("lvl_shift") || lower.contains("ls_")
+            {
+                domain.level_shifters.push(cell.clone());
+            }
+            if lower.contains("isolation") || lower.contains("iso_") || lower.contains("isolate") {
+                domain.isolation_cells.push(cell.clone());
+            }
+        }
+    }
+
+    // Create CCF groups from domains
+    let domain_list: Vec<PowerDomainInfo> = domains.into_values().collect();
+    let ccf_groups = power_domain_ccf_groups(&domain_list);
+
+    // Calculate summary statistics
+    let total_cells: usize = domain_list.iter().map(|d| d.cells.len()).sum();
+    let total_fit: f64 = domain_list.iter().map(|d| d.total_fit).sum();
+    let total_ccf_fit: f64 = domain_list.iter().map(|d| d.total_fit * 0.2).sum(); // 20% beta
+    let level_shifter_coverage: usize = domain_list.iter().map(|d| d.level_shifters.len()).sum();
+    let isolation_cell_coverage: usize = domain_list.iter().map(|d| d.isolation_cells.len()).sum();
+    let domain_count = domain_list.len();
+
+    PowerDomainAnalysis {
+        domains: domain_list,
+        ccf_groups,
+        level_shifter_coverage,
+        isolation_cell_coverage,
+        total_boundary_crossings: 0, // Would need connectivity analysis
+        unprotected_crossings: Vec::new(),
+        summary: PowerDomainSummary {
+            domain_count,
+            total_cells,
+            total_fit,
+            total_ccf_fit,
+            boundary_protection_percentage: 100.0, // Placeholder
+        },
+    }
+}
+
+/// Infer voltage from power domain name
+fn infer_voltage_from_name(name: &str) -> f64 {
+    let lower = name.to_lowercase();
+
+    // Check for explicit voltage indicators
+    if lower.contains("5v") || lower.contains("5_0v") {
+        return 5.0;
+    }
+    if lower.contains("3v3") || lower.contains("3_3v") {
+        return 3.3;
+    }
+    if lower.contains("2v5") || lower.contains("2_5v") {
+        return 2.5;
+    }
+    if lower.contains("1v8") || lower.contains("1_8v") {
+        return 1.8;
+    }
+    if lower.contains("1v2") || lower.contains("1_2v") {
+        return 1.2;
+    }
+    if lower.contains("1v") || lower.contains("1_0v") || lower.contains("core") {
+        return 1.0;
+    }
+    if lower.contains("io") || lower.contains("pad") {
+        return 3.3; // Typical I/O voltage
+    }
+    if lower.contains("analog") {
+        return 5.0; // Typical analog supply
+    }
+
+    // Default to core voltage
+    1.0
+}
+
+// ============================================================================
 // Power Domain Isolation Verification (ISO 26262 Compliance)
 // ============================================================================
 

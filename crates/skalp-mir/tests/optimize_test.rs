@@ -43,6 +43,7 @@ fn create_module_with_unused() -> Mir {
         power_config: None,
         safety_context: None,
         detection_config: None,
+        power_domain: None,
     });
     module.signals.push(Signal {
         id: SignalId(1),
@@ -58,6 +59,7 @@ fn create_module_with_unused() -> Mir {
         power_config: None,
         safety_context: None,
         detection_config: None,
+        power_domain: None,
     });
 
     // Add variables - some used, some unused
@@ -147,6 +149,7 @@ fn create_module_with_constants() -> Mir {
         power_config: None,
         safety_context: None,
         detection_config: None,
+        power_domain: None,
     });
 
     // Create process with constant expressions
@@ -269,6 +272,7 @@ fn test_constant_folding_arithmetic() {
         power_config: None,
         safety_context: None,
         detection_config: None,
+        power_domain: None,
     });
 
     // Test various arithmetic operations
@@ -384,6 +388,7 @@ fn test_constant_folding_conditional() {
         power_config: None,
         safety_context: None,
         detection_config: None,
+        power_domain: None,
     });
 
     // Test conditional expression with constant condition

@@ -162,6 +162,11 @@ pub struct HirBuilderContext {
     /// before a port declaration
     pending_detection_config: Option<DetectionConfig>,
 
+    /// Pending power domain config from most recent attribute
+    /// Set when we see `#[power_domain("name")]` before a port/entity declaration
+    /// Used for Common Cause Failure (CCF) analysis
+    pending_power_domain_config: Option<PowerDomainConfig>,
+
     /// Line index for converting byte offsets to line:column positions
     line_index: Option<LineIndex>,
 
@@ -277,6 +282,7 @@ impl HirBuilderContext {
             pending_safety_config: None,
             pending_safety_mechanism_config: None,
             pending_detection_config: None,
+            pending_power_domain_config: None,
             intent_impl_styles: HashMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
@@ -901,6 +907,9 @@ impl HirBuilderContext {
             name, direction, is_detection, mode_str
         );
 
+        // Consume pending power_domain_config from #[power_domain("name")] attribute
+        let power_domain_config = self.pending_power_domain_config.take();
+
         Some(HirPort {
             id,
             name,
@@ -908,6 +917,7 @@ impl HirBuilderContext {
             port_type,
             physical_constraints,
             detection_config,
+            power_domain_config,
         })
     }
 
@@ -7080,6 +7090,13 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Check for #[power_domain("name")] attribute for CCF analysis
+            if let Some(config) = self.extract_power_domain_config_from_intent_value(&intent_value)
+            {
+                self.pending_power_domain_config = Some(config);
+                return;
+            }
+
             // Otherwise, look up the intent by name (e.g., #[parallel] or #[pipelined])
             let tokens: Vec<String> = intent_value
                 .children_with_tokens()
@@ -7909,6 +7926,85 @@ impl HirBuilderContext {
         }
 
         Some(config)
+    }
+
+    /// Extract power domain config for CCF (Common Cause Failure) analysis
+    ///
+    /// Parses: `#[power_domain("vdd_core")]` or `#[power_domain("vdd_io", voltage = 3.3, always_on = true)]`
+    fn extract_power_domain_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<PowerDomainConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Check if this is a power_domain attribute
+        let is_power_domain = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "power_domain");
+
+        if !is_power_domain {
+            return None;
+        }
+
+        // Extract the domain name from the first string literal
+        let mut domain_name = String::new();
+        let mut voltage: Option<f64> = None;
+        let mut is_always_on = false;
+
+        let mut i = 0;
+        while i < tokens.len() {
+            // Look for string literals (domain name)
+            if tokens[i].kind() == SyntaxKind::StringLiteral && domain_name.is_empty() {
+                domain_name = tokens[i].text().trim_matches('"').to_string();
+            }
+
+            // Look for voltage parameter: voltage = 3.3
+            if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "voltage"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                if let Ok(v) = tokens[i + 2].text().parse::<f64>() {
+                    voltage = Some(v);
+                }
+            }
+
+            // Look for always_on parameter: always_on = true
+            if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "always_on"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                is_always_on = tokens[i + 2].text() == "true";
+            }
+
+            i += 1;
+        }
+
+        // Domain name is required
+        if domain_name.is_empty() {
+            return None;
+        }
+
+        Some(PowerDomainConfig {
+            domain_name,
+            voltage,
+            is_always_on,
+        })
     }
 
     // ========================================================================

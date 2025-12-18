@@ -41,6 +41,25 @@ pub struct DetectionConfig {
     pub interval_ms: Option<u32>,
 }
 
+// ============================================================================
+// Power Domain Configuration (ISO 26262 CCF Analysis)
+// ============================================================================
+
+/// Configuration for power domain assignment
+/// Used for Common Cause Failure (CCF) analysis - power supply failures
+/// affect all cells in a domain simultaneously
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PowerDomainConfig {
+    /// Power domain name (e.g., "vdd_core", "vdd_io", "vdd_analog")
+    pub domain_name: String,
+    /// Optional nominal voltage specification (V)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voltage: Option<f64>,
+    /// True if this is an always-on domain (cannot be power-gated)
+    #[serde(default)]
+    pub is_always_on: bool,
+}
+
 /// High-level Intermediate Representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hir {
@@ -238,6 +257,11 @@ pub struct HirPort {
     /// None = not a detection signal, Some = detection signal with config
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detection_config: Option<DetectionConfig>,
+    /// Power domain configuration (for CCF analysis)
+    /// Set via #[power_domain("name")] attribute
+    /// None = default domain, Some = explicit domain assignment
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_domain_config: Option<PowerDomainConfig>,
 }
 
 impl HirPort {

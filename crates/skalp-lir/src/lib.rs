@@ -437,6 +437,7 @@ impl<'a> LirFlattener<'a> {
                             enable: None,
                             bit_index: None,
                             safety_info: None,
+                            power_domain: None,
                         };
 
                         self.flattened.add_primitive(buffer);

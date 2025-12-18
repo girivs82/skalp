@@ -683,10 +683,7 @@ impl SafetyDrivenFmeaGenerator {
 
         // Count boot-time-only faults - these are excluded from SPFM calculation
         // because the hardware is inactive during runtime operation
-        let boot_time_only_faults = results
-            .iter()
-            .filter(|r| r.is_boot_time_only)
-            .count() as u64;
+        let boot_time_only_faults = results.iter().filter(|r| r.is_boot_time_only).count() as u64;
 
         // For SPFM: exclude boot-time-only hardware entirely (not relevant to runtime)
         let runtime_total = total.saturating_sub(boot_time_only_faults);
@@ -758,10 +755,7 @@ impl SafetyDrivenFmeaGenerator {
         // IMPORTANT: Exclude boot-time-only hardware (e.g., BIST) from steady-state PMHF
         // Boot-time hardware is inactive during normal operation, so its faults don't
         // contribute to the probability of failure during operation.
-        let boot_time_only_faults = results
-            .iter()
-            .filter(|r| r.is_boot_time_only)
-            .count() as u64;
+        let boot_time_only_faults = results.iter().filter(|r| r.is_boot_time_only).count() as u64;
 
         // Estimate FIT for boot-time-only hardware (proportional to fault count)
         // This assumes uniform FIT distribution across primitives
@@ -786,10 +780,7 @@ impl SafetyDrivenFmeaGenerator {
                 !r.triggered_effects.is_empty()
                     && r.detected
                     && !r.is_boot_time_only
-                    && matches!(
-                        r.detection_mode,
-                        Some(DetectionMode::Continuous) | None
-                    )
+                    && matches!(r.detection_mode, Some(DetectionMode::Continuous) | None)
             })
             .count() as u64;
 
@@ -1000,6 +991,7 @@ pub fn convert_campaign_to_effect_results(
             detection_cycle: fault_result.detection_cycle,
             is_safety_mechanism: false, // Set by caller from annotations
             detection_mode,
+            is_boot_time_only: false, // Set by caller from annotations
         });
     }
 

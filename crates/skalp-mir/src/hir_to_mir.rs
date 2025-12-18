@@ -805,6 +805,10 @@ impl<'hir> HirToMir<'hir> {
                                         power_config: None,
                                         safety_context: None,
                                         detection_config: port.detection_config.clone(),
+                                        power_domain: port
+                                            .power_domain_config
+                                            .as_ref()
+                                            .map(|c| c.domain_name.clone()),
                                     };
                                     module.signals.push(signal);
 
@@ -16427,6 +16431,7 @@ impl<'hir> HirToMir<'hir> {
                 power_config: None,
                 safety_context: None,
                 detection_config: None,
+                power_domain: None,
             };
             module.signals.push(signal);
 
@@ -16668,6 +16673,7 @@ impl<'hir> HirToMir<'hir> {
                                 power_config: None,
                                 safety_context: None,
                                 detection_config: None,
+                                power_domain: None,
                             };
                             module.signals.push(signal);
 
@@ -16987,6 +16993,7 @@ impl<'hir> HirToMir<'hir> {
                         power_config: None,
                         safety_context: None,
                         detection_config: None,
+                        power_domain: None,
                     };
                     module.signals.push(signal);
                     println!(
@@ -17029,6 +17036,7 @@ impl<'hir> HirToMir<'hir> {
                     power_config: None,
                     safety_context: None,
                     detection_config: None,
+                    power_domain: None,
                 };
                 module.signals.push(signal);
                 eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
@@ -17118,6 +17126,7 @@ impl<'hir> HirToMir<'hir> {
                     power_config: None,
                     safety_context: None,
                     detection_config: detection_cfg.clone(),
+                    power_domain: None, // TODO: propagate from port
                 };
                 eprintln!(
                     "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output (detection={})",

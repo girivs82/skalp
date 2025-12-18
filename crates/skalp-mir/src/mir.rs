@@ -212,6 +212,11 @@ pub struct Signal {
     /// Propagated from sub-module output ports marked with #[detection_signal]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detection_config: Option<DetectionConfig>,
+    /// Power domain name for CCF (Common Cause Failure) analysis
+    /// Set via #[power_domain("name")] attribute
+    /// Used to identify cells sharing a common power supply
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_domain: Option<String>,
 }
 
 impl Signal {

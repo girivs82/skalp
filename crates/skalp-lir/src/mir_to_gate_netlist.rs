@@ -1997,6 +1997,7 @@ mod tests {
                 power_config: None,
                 safety_context: None,
                 detection_config: None,
+                power_domain: None,
             }],
             variables: Vec::new(),
             processes: Vec::new(),

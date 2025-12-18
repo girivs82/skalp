@@ -663,6 +663,7 @@ impl TypeFlattener {
             power_config: None,
             safety_context: None,
             detection_config: None,
+            power_domain: None,
         };
         signals.push(signal);
 

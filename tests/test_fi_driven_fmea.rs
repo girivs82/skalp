@@ -211,6 +211,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(5),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             // Fault 2: Stuck-at-1 on TMR voter - DETECTED by TMR
             FaultEffectResult {
@@ -226,6 +227,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(4),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             // Fault 3: Watchdog counter fault - DETECTED by watchdog
             FaultEffectResult {
@@ -241,6 +243,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(1000),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             // Fault 4: Safe state controller - NOT DETECTED (dangerous!)
             FaultEffectResult {
@@ -256,6 +259,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: None,
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             // Fault 5: Motor driver - DETECTED by comparator
             FaultEffectResult {
@@ -271,6 +275,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(5),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             // Fault 6: Safe fault - no effect triggered
             FaultEffectResult {
@@ -286,6 +291,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: None,
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
         ];
 
@@ -404,6 +410,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(30),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             // Fault causes brake_asymmetry
             FaultEffectResult {
@@ -419,6 +426,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(80),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             // Fault causes BOTH effects (severe!)
             FaultEffectResult {
@@ -434,6 +442,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: None,
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
         ];
 
@@ -526,6 +535,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(1),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_1"), FaultType::StuckAt0),
@@ -537,6 +547,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(1),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_2"), FaultType::StuckAt0),
@@ -548,6 +559,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: Some(1),
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
             FaultEffectResult {
                 fault_site: FaultSite::new(DesignRef::parse("cell_3"), FaultType::StuckAt0),
@@ -559,6 +571,7 @@ mod fi_driven_fmea_tests {
                 detection_cycle: None,
                 is_safety_mechanism: false,
                 detection_mode: None,
+                is_boot_time_only: false,
             },
         ];
 

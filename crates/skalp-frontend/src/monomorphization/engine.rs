@@ -287,6 +287,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     port_type: self.substitute_type(&port.port_type, instantiation),
                     physical_constraints: port.physical_constraints.clone(),
                     detection_config: port.detection_config.clone(),
+                    power_domain_config: port.power_domain_config.clone(),
                 }
             })
             .collect();

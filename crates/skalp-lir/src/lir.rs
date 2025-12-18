@@ -309,6 +309,11 @@ pub struct Primitive {
     /// Contains (goal_name, mechanism_name, is_sm_of_sm) if safety-relevant
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_info: Option<LirSafetyInfo>,
+    /// Power domain name for CCF (Common Cause Failure) analysis
+    /// All primitives in the same power domain share a common power supply
+    /// Used to model power-related failures as CCF
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_domain: Option<String>,
 }
 
 /// Safety information for LIR primitives
@@ -350,6 +355,7 @@ impl Primitive {
             enable: None,
             bit_index: None,
             safety_info: None,
+            power_domain: None,
         }
     }
 
@@ -374,12 +380,19 @@ impl Primitive {
             enable: None,
             bit_index: None,
             safety_info: None,
+            power_domain: None,
         }
     }
 
     /// Set safety information for this primitive
     pub fn with_safety_info(mut self, info: LirSafetyInfo) -> Self {
         self.safety_info = Some(info);
+        self
+    }
+
+    /// Set power domain for this primitive (for CCF analysis)
+    pub fn with_power_domain(mut self, domain: Option<String>) -> Self {
+        self.power_domain = domain;
         self
     }
 
