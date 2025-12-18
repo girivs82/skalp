@@ -968,42 +968,60 @@ impl GateLevelSimulator {
                     _ => continue,
                 };
 
-                // Determine fault category
-                let category = match fault_type {
-                    FaultType::StuckAt0 | FaultType::StuckAt1 => "permanent",
-                    FaultType::BitFlip | FaultType::Transient => "transient",
-                    FaultType::VoltageDropout | FaultType::GroundBounce => "power",
-                    _ => "permanent", // default
-                };
+                // Determine fault category per ISO 26262:
+                // - Permanent: SA0, SA1, VoltageDropout (power rail failure)
+                // - Transient: BitFlip, SEU, GroundBounce (temporary events)
+                // - Power: Cross-cutting view of VoltageDropout + GroundBounce
+                let is_permanent = matches!(
+                    fault_type,
+                    FaultType::StuckAt0 | FaultType::StuckAt1 | FaultType::VoltageDropout
+                );
+                let is_transient = matches!(
+                    fault_type,
+                    FaultType::BitFlip | FaultType::Transient | FaultType::GroundBounce
+                );
+                let is_power = matches!(
+                    fault_type,
+                    FaultType::VoltageDropout | FaultType::GroundBounce
+                );
 
                 let result = self.run_fault_sim(fault, config.cycles_per_fault, &config.clock_name);
                 total_faults += 1;
 
-                // Track by category
-                match category {
-                    "permanent" => perm_total += 1,
-                    "transient" => trans_total += 1,
-                    "power" => power_total += 1,
-                    _ => {}
+                // Track by category (power faults also count in permanent/transient)
+                if is_permanent {
+                    perm_total += 1;
+                }
+                if is_transient {
+                    trans_total += 1;
+                }
+                if is_power {
+                    power_total += 1;
                 }
 
                 let caused_corruption = !result.output_diffs.is_empty();
                 if caused_corruption {
                     corruption_faults += 1;
-                    match category {
-                        "permanent" => perm_corruption += 1,
-                        "transient" => trans_corruption += 1,
-                        "power" => power_corruption += 1,
-                        _ => {}
+                    if is_permanent {
+                        perm_corruption += 1;
+                    }
+                    if is_transient {
+                        trans_corruption += 1;
+                    }
+                    if is_power {
+                        power_corruption += 1;
                     }
                     // DC counts detected faults among corruption faults only
                     if result.detected {
                         detected_faults += 1;
-                        match category {
-                            "permanent" => perm_detected += 1,
-                            "transient" => trans_detected += 1,
-                            "power" => power_detected += 1,
-                            _ => {}
+                        if is_permanent {
+                            perm_detected += 1;
+                        }
+                        if is_transient {
+                            trans_detected += 1;
+                        }
+                        if is_power {
+                            power_detected += 1;
                         }
                     }
                 }
@@ -1071,11 +1089,16 @@ impl GateLevelSimulator {
         };
 
         // Calculate FIT contributions based on library/foundry rates
-        let perm_base_fit = config.fit_rates.permanent_fit_per_gate * num_primitives as f64;
-        let trans_base_fit = config.fit_rates.effective_transient_fit() * num_primitives as f64;
         // Power FIT is per-domain, estimate ~5 domains for typical design
         let estimated_power_domains = 5.0;
         let power_base_fit = config.fit_rates.power_fit_per_domain * estimated_power_domains;
+
+        // Per ISO 26262: VoltageDropout is permanent, GroundBounce is transient
+        // Include power FIT in appropriate category (split evenly as approximation)
+        let perm_base_fit =
+            config.fit_rates.permanent_fit_per_gate * num_primitives as f64 + power_base_fit * 0.5; // VoltageDropout portion
+        let trans_base_fit = config.fit_rates.effective_transient_fit() * num_primitives as f64
+            + power_base_fit * 0.5; // GroundBounce portion
 
         // Corruption rate = fraction of faults that cause output corruption
         let perm_corruption_rate = if perm_total > 0 {
