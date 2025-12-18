@@ -17,7 +17,7 @@ module ALU (
 
     assign result_comb = ((op == 3'b000) ? (a + b) : ((op == 3'b001) ? (a - b) : ((op == 3'b010) ? (a & b) : ((op == 3'b011) ? (a | b) : ((op == 3'b100) ? (a ^ b) : ((op == 3'b101) ? (a << b[4:0]) : ((op == 3'b110) ? (a >> b[4:0]) : ((op == 3'b111) ? ((a < b) ? 1 : 0) : 0))))))));
     assign zero_comb = ((result_comb == 0) ? 1 : 0);
-    assign overflow_comb = ((op == 3'b000) ? ((((~a[31] & ~b[31]) & result_comb) & result_comb[31]) | (((a[31] & b[31]) & ~result_comb[31]) & ~result_comb[31])) : ((op == 3'b001) ? ((((~a[31] & b[31]) & result_comb) & result_comb[31]) | (((a[31] & ~b[31]) & ~result_comb[31]) & ~result_comb[31])) : 0));
+    assign overflow_comb = ((op == 3'b000) ? (((~a[31] & ~b[31]) & result_comb) | ((a[31] & b[31]) & ~result_comb[31])) : ((op == 3'b001) ? (((~a[31] & b[31]) & result_comb) | ((a[31] & ~b[31]) & ~result_comb[31])) : 0));
 
     always_ff @(posedge clk) begin
         result <= result_comb;
