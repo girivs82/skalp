@@ -665,9 +665,20 @@ impl HirBuilderContext {
             }
 
             // Second pass: build entity body items (signals, assignments, let bindings)
+            // Clear any pending attribute state from first pass before processing signals
+            self.pending_cdc_config = None;
+            self.pending_trace_config = None;
+            self.pending_detection_config = None;
+            self.pending_safety_mechanism_config = None;
+            self.pending_assumed_mechanisms.clear();
+
             for child in port_list.children() {
                 match child.kind() {
-                    SyntaxKind::Attribute | SyntaxKind::PortDecl => {
+                    SyntaxKind::Attribute => {
+                        // Process attributes for signals in the second pass
+                        self.process_attribute(&child);
+                    }
+                    SyntaxKind::PortDecl => {
                         // Already processed in first pass
                     }
                     SyntaxKind::SignalDecl => {
