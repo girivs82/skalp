@@ -39,6 +39,12 @@ pub struct DetectionConfig {
     /// Used for PMHF calculation with time-dependent coverage
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u32>,
+    /// If true, this detection signal MUST be in an always-on power domain
+    /// Use for watchdogs, voltage monitors, and other mechanisms that must
+    /// survive power domain failures. Verification will warn if the signal
+    /// is placed in a switchable domain.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_always_on: bool,
 }
 
 // ============================================================================

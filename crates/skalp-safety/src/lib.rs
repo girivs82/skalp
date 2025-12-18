@@ -34,6 +34,7 @@ pub mod power_infrastructure;
 pub mod requirements;
 pub mod safety_case;
 pub mod safety_driven_fmea;
+pub mod safety_power_verification;
 pub mod seooc;
 pub mod sm_failure_analysis;
 pub mod tool_qualification;
@@ -83,6 +84,13 @@ pub use seooc::{
 
 #[cfg(feature = "sim-integration")]
 pub use safety_driven_fmea::convert_campaign_to_effect_results;
+
+// Re-export safety-power verification types
+pub use safety_power_verification::{
+    format_verification_report, verify_safety_power_domains, PowerDomainRef, ResolvedPowerDomain,
+    SafetyPowerVerificationResult, SafetyPowerViolation, SafetyPowerWarning, VerificationStats,
+    ViolationType, WarningType,
+};
 
 /// Safety-related errors
 #[derive(Error, Debug)]

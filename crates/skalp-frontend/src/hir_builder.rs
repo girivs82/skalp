@@ -7993,6 +7993,16 @@ impl HirBuilderContext {
                 }
             }
 
+            // Look for requires_always_on parameter
+            // #[detection_signal(requires_always_on = true)]
+            if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "requires_always_on"
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::Assign
+            {
+                config.requires_always_on = tokens[i + 2].text() == "true";
+            }
+
             i += 1;
         }
 
