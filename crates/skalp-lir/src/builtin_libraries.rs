@@ -500,18 +500,288 @@ fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCe
     }
 }
 
+// =============================================================================
+// Power Infrastructure Cell Creation Functions
+// Each cell type has specific failure modes based on its physical characteristics
+// =============================================================================
+
+/// Create a level shifter cell with voltage-domain-crossing-specific failure modes
+///
+/// Level shifters are analog circuits that translate signals between voltage domains.
+/// Failure mode distribution:
+/// - Level translation failure: 25% - output stuck at wrong voltage level
+/// - Cross-domain coupling: 15% - noise injection from one domain to another
+/// - Stuck-at-0: 15% - output driver failure (low)
+/// - Stuck-at-1: 15% - output driver failure (high)
+/// - Asymmetric delay: 20% - rise/fall time mismatch (common in level shifters)
+/// - Open circuit: 10% - internal connection failure
+fn make_level_shifter_cell(
+    name: &str,
+    function: CellFunction,
+    fit: f64,
+    drive_strength: u8,
+    is_low_to_high: bool,
+) -> LibraryCell {
+    let (inputs, outputs) = function.default_pins();
+    let mechanism = if is_low_to_high {
+        "cross_coupled_latch_failure"
+    } else {
+        "current_mirror_failure"
+    };
+
+    LibraryCell {
+        name: name.to_string(),
+        function,
+        fit,
+        area: Some(4.0 * drive_strength as f64), // Level shifters are larger than buffers
+        transistor_count: Some(16 * drive_strength as u32),
+        inputs,
+        outputs,
+        failure_modes: vec![
+            // Level translation failure - output stuck at input domain voltage
+            LibraryFailureMode::new("level_xlat_fail", fit * 0.25, FaultType::StuckAt0)
+                .with_mechanism(mechanism),
+            // Cross-domain noise coupling
+            LibraryFailureMode::new("cross_domain_noise", fit * 0.15, FaultType::Transient)
+                .with_mechanism("substrate_coupling")
+                .with_recovery_time_ns(0.5),
+            // Standard stuck-at faults
+            LibraryFailureMode::new("stuck_at_0", fit * 0.15, FaultType::StuckAt0)
+                .with_mechanism("output_nmos_failure"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.15, FaultType::StuckAt1)
+                .with_mechanism("output_pmos_failure"),
+            // Asymmetric delay - very common in level shifters
+            LibraryFailureMode::new("asymmetric_delay", fit * 0.20, FaultType::Delay)
+                .with_mechanism("rise_fall_mismatch"),
+            // Open circuit
+            LibraryFailureMode::new("open", fit * 0.10, FaultType::Open)
+                .with_mechanism("via_failure"),
+        ],
+        drive_strength,
+        max_output_current_ua: Some(2000 * drive_strength as u32),
+        output_capacitance_ff: Some(10 * drive_strength as u32),
+        input_capacitance_ff: Some(15),
+        max_fanout: Some(4 * drive_strength as u32),
+    }
+}
+
+/// Create an isolation cell with isolation-specific failure modes
+///
+/// Isolation cells prevent undefined signals from propagating when a domain is powered down.
+/// Failure mode distribution:
+/// - Isolation failure: 30% - doesn't clamp when enable asserted (CRITICAL for safety)
+/// - Enable path failure: 20% - isolation enable signal doesn't propagate
+/// - Stuck-at-0: 15% - output stuck low
+/// - Stuck-at-1: 15% - output stuck high
+/// - Leakage: 10% - partial isolation, signal bleeds through
+/// - Delay: 10% - slow isolation response
+fn make_isolation_cell(
+    name: &str,
+    function: CellFunction,
+    fit: f64,
+    drive_strength: u8,
+) -> LibraryCell {
+    let (inputs, outputs) = function.default_pins();
+
+    LibraryCell {
+        name: name.to_string(),
+        function,
+        fit,
+        area: Some(2.5 * drive_strength as f64),
+        transistor_count: Some(10 * drive_strength as u32),
+        inputs,
+        outputs,
+        failure_modes: vec![
+            // Isolation failure - CRITICAL: doesn't clamp when it should
+            LibraryFailureMode::new("isolation_fail", fit * 0.30, FaultType::StuckAt1)
+                .with_mechanism("clamp_transistor_failure"),
+            // Enable path failure
+            LibraryFailureMode::new("enable_path_fail", fit * 0.20, FaultType::Open)
+                .with_mechanism("enable_buffer_failure"),
+            // Standard stuck-at faults
+            LibraryFailureMode::new("stuck_at_0", fit * 0.15, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.15, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            // Leakage - partial isolation
+            LibraryFailureMode::new("leakage", fit * 0.10, FaultType::Bridge)
+                .with_mechanism("subthreshold_leakage"),
+            // Delay
+            LibraryFailureMode::new("delay", fit * 0.10, FaultType::Delay)
+                .with_mechanism("process_variation"),
+        ],
+        drive_strength,
+        max_output_current_ua: Some(1500 * drive_strength as u32),
+        output_capacitance_ff: Some(8 * drive_strength as u32),
+        input_capacitance_ff: Some(10),
+        max_fanout: Some(5 * drive_strength as u32),
+    }
+}
+
+/// Create an isolation latch cell (holds last value during isolation)
+///
+/// More complex than clamp-type isolation - has state retention.
+/// Failure mode distribution similar to isolation cell but with latch-specific modes.
+fn make_isolation_latch_cell(
+    name: &str,
+    function: CellFunction,
+    fit: f64,
+    drive_strength: u8,
+) -> LibraryCell {
+    let (inputs, outputs) = function.default_pins();
+
+    LibraryCell {
+        name: name.to_string(),
+        function,
+        fit,
+        area: Some(4.0 * drive_strength as f64), // Larger due to latch
+        transistor_count: Some(16 * drive_strength as u32),
+        inputs,
+        outputs,
+        failure_modes: vec![
+            // Isolation failure
+            LibraryFailureMode::new("isolation_fail", fit * 0.25, FaultType::StuckAt1)
+                .with_mechanism("clamp_transistor_failure"),
+            // Latch retention failure
+            LibraryFailureMode::new("latch_retention", fit * 0.20, FaultType::DataRetention)
+                .with_mechanism("latch_node_discharge")
+                .with_soft_error_cross_section(1.0e-15),
+            // Enable path failure
+            LibraryFailureMode::new("enable_path_fail", fit * 0.15, FaultType::Open)
+                .with_mechanism("enable_buffer_failure"),
+            // Standard stuck-at faults
+            LibraryFailureMode::new("stuck_at_0", fit * 0.12, FaultType::StuckAt0)
+                .with_mechanism("oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.12, FaultType::StuckAt1)
+                .with_mechanism("electromigration"),
+            // Timing
+            LibraryFailureMode::new("setup_hold", fit * 0.08, FaultType::Timing)
+                .with_mechanism("latch_timing_margin"),
+            // Leakage
+            LibraryFailureMode::new("leakage", fit * 0.08, FaultType::Bridge)
+                .with_mechanism("subthreshold_leakage"),
+        ],
+        drive_strength,
+        max_output_current_ua: Some(1500 * drive_strength as u32),
+        output_capacitance_ff: Some(10 * drive_strength as u32),
+        input_capacitance_ff: Some(12),
+        max_fanout: Some(4 * drive_strength as u32),
+    }
+}
+
+/// Create a power switch cell with high-current-specific failure modes
+///
+/// Power switches are large transistors that control power to domains.
+/// CRITICAL for safety - stuck-open means domain is unpowered!
+/// Failure mode distribution:
+/// - Stuck open: 25% - domain cannot power on (CRITICAL safety impact)
+/// - Stuck closed: 20% - domain cannot power off (power impact, less safety critical)
+/// - High resistance: 25% - IR drop causes brownout/timing issues
+/// - Slow switching: 15% - inrush current issues during power-up
+/// - Electromigration: 15% - high current causes metal degradation
+fn make_power_switch_cell(
+    name: &str,
+    function: CellFunction,
+    fit: f64,
+    drive_strength: u8,
+    is_header: bool,
+) -> LibraryCell {
+    let (inputs, outputs) = function.default_pins();
+    let transistor_type = if is_header { "pmos" } else { "nmos" };
+
+    LibraryCell {
+        name: name.to_string(),
+        function,
+        fit,
+        area: Some(10.0 * drive_strength as f64), // Power switches are large
+        transistor_count: Some(4 * drive_strength as u32), // Few but large transistors
+        inputs,
+        outputs,
+        failure_modes: vec![
+            // Stuck open - CRITICAL: domain stays off
+            LibraryFailureMode::new("stuck_open", fit * 0.25, FaultType::Open)
+                .with_mechanism(&format!("{}_gate_oxide_fail", transistor_type)),
+            // Stuck closed - domain stays on
+            LibraryFailureMode::new("stuck_closed", fit * 0.20, FaultType::Bridge)
+                .with_mechanism(&format!("{}_gate_short", transistor_type)),
+            // High resistance - IR drop
+            LibraryFailureMode::new("high_resistance", fit * 0.25, FaultType::Delay)
+                .with_mechanism("contact_degradation"),
+            // Slow switching
+            LibraryFailureMode::new("slow_switch", fit * 0.15, FaultType::Timing)
+                .with_mechanism("gate_capacitance_increase"),
+            // Electromigration - common in high-current paths
+            LibraryFailureMode::new("electromigration", fit * 0.15, FaultType::Open)
+                .with_mechanism("metal_voiding"),
+        ],
+        drive_strength,
+        max_output_current_ua: Some(50000 * drive_strength as u32), // 50mA per X1 - high current!
+        output_capacitance_ff: Some(100 * drive_strength as u32),
+        input_capacitance_ff: Some(50),
+        max_fanout: Some(1), // Power switches don't have traditional fanout
+    }
+}
+
+/// Create an always-on buffer cell
+///
+/// AON buffers are in the always-on domain, used for critical signals.
+/// Standard buffer failure modes but with higher reliability requirements.
+/// Failure mode distribution:
+/// - Stuck-at-0: 25%
+/// - Stuck-at-1: 25%
+/// - Delay: 20%
+/// - Open: 15%
+/// - Transient: 15% (slightly higher due to AON domain noise sensitivity)
+fn make_aon_buffer_cell(
+    name: &str,
+    function: CellFunction,
+    fit: f64,
+    drive_strength: u8,
+) -> LibraryCell {
+    let (inputs, outputs) = function.default_pins();
+
+    LibraryCell {
+        name: name.to_string(),
+        function,
+        fit,
+        area: Some(2.0 * drive_strength as f64),
+        transistor_count: Some(4 * drive_strength as u32),
+        inputs,
+        outputs,
+        failure_modes: vec![
+            LibraryFailureMode::new("stuck_at_0", fit * 0.25, FaultType::StuckAt0)
+                .with_mechanism("nmos_oxide_breakdown"),
+            LibraryFailureMode::new("stuck_at_1", fit * 0.25, FaultType::StuckAt1)
+                .with_mechanism("pmos_electromigration"),
+            LibraryFailureMode::new("delay", fit * 0.20, FaultType::Delay)
+                .with_mechanism("process_variation"),
+            LibraryFailureMode::new("open", fit * 0.15, FaultType::Open)
+                .with_mechanism("via_failure"),
+            // AON domain can have more noise due to power switching nearby
+            LibraryFailureMode::new("transient", fit * 0.15, FaultType::Transient)
+                .with_mechanism("power_domain_noise")
+                .with_recovery_time_ns(0.5),
+        ],
+        drive_strength,
+        max_output_current_ua: Some(2000 * drive_strength as u32),
+        output_capacitance_ff: Some(6 * drive_strength as u32),
+        input_capacitance_ff: Some(8),
+        max_fanout: Some(6 * drive_strength as u32),
+    }
+}
+
 /// Add power infrastructure cells to a library
 fn add_power_cells(lib: &mut TechLibrary) {
-    // Level shifters - analog circuitry, moderate FIT
+    // Level shifters - analog circuitry with specific failure modes
     // Add X1, X2, X4 drive strength variants
     for (suffix, strength, fit_mult) in [("X1", 1u8, 1.0), ("X2", 2, 1.3), ("X4", 4, 1.8)] {
         lib.add_cell(
-            make_power_cell_with_drive(
+            make_level_shifter_cell(
                 &format!("LVLSHIFT_LH_{}", suffix),
                 CellFunction::LevelShifterLH,
                 0.30 * fit_mult,
-                "Low-to-High voltage level shifter",
                 strength,
+                true, // low-to-high
             )
             .with_electrical(
                 2000 * strength as u32, // 2mA base, scales with strength
@@ -521,12 +791,12 @@ fn add_power_cells(lib: &mut TechLibrary) {
             ),
         );
         lib.add_cell(
-            make_power_cell_with_drive(
+            make_level_shifter_cell(
                 &format!("LVLSHIFT_HL_{}", suffix),
                 CellFunction::LevelShifterHL,
                 0.30 * fit_mult,
-                "High-to-Low voltage level shifter",
                 strength,
+                false, // high-to-low
             )
             .with_electrical(
                 2000 * strength as u32,
@@ -537,14 +807,13 @@ fn add_power_cells(lib: &mut TechLibrary) {
         );
     }
 
-    // Isolation cells - add X1, X2, X4 variants
+    // Isolation cells - add X1, X2, X4 variants with isolation-specific failure modes
     for (suffix, strength, fit_mult) in [("X1", 1u8, 1.0), ("X2", 2, 1.2), ("X4", 4, 1.5)] {
         lib.add_cell(
-            make_power_cell_with_drive(
+            make_isolation_cell(
                 &format!("ISO_AND_{}", suffix),
                 CellFunction::IsolationAnd,
                 0.15 * fit_mult,
-                "Isolation cell (clamps to 0)",
                 strength,
             )
             .with_electrical(
@@ -555,11 +824,10 @@ fn add_power_cells(lib: &mut TechLibrary) {
             ),
         );
         lib.add_cell(
-            make_power_cell_with_drive(
+            make_isolation_cell(
                 &format!("ISO_OR_{}", suffix),
                 CellFunction::IsolationOr,
                 0.15 * fit_mult,
-                "Isolation cell (clamps to 1)",
                 strength,
             )
             .with_electrical(
@@ -570,11 +838,10 @@ fn add_power_cells(lib: &mut TechLibrary) {
             ),
         );
         lib.add_cell(
-            make_power_cell_with_drive(
+            make_isolation_latch_cell(
                 &format!("ISO_LATCH_{}", suffix),
                 CellFunction::IsolationLatch,
                 0.25 * fit_mult,
-                "Isolation cell (holds last value)",
                 strength,
             )
             .with_electrical(
@@ -601,19 +868,19 @@ fn add_power_cells(lib: &mut TechLibrary) {
     // Power switches - large transistors, electromigration concerns
     // Multiple sizes for different current requirements
     for (suffix, strength, fit_mult) in [("X1", 1u8, 1.0), ("X4", 4, 1.5), ("X8", 8, 2.0)] {
-        lib.add_cell(make_power_cell_with_drive(
+        lib.add_cell(make_power_switch_cell(
             &format!("PWRSW_HDR_{}", suffix),
             CellFunction::PowerSwitchHeader,
             0.5 * fit_mult,
-            "PMOS header power switch",
             strength,
+            true, // is_header (PMOS)
         ));
-        lib.add_cell(make_power_cell_with_drive(
+        lib.add_cell(make_power_switch_cell(
             &format!("PWRSW_FTR_{}", suffix),
             CellFunction::PowerSwitchFooter,
             0.5 * fit_mult,
-            "NMOS footer power switch",
             strength,
+            false, // is_footer (NMOS)
         ));
     }
 
@@ -625,11 +892,10 @@ fn add_power_cells(lib: &mut TechLibrary) {
         ("X8", 8, 2.0),
     ] {
         lib.add_cell(
-            make_power_cell_with_drive(
+            make_aon_buffer_cell(
                 &format!("AONBUF_{}", suffix),
                 CellFunction::AlwaysOnBuf,
                 0.10 * fit_mult,
-                "Always-on domain buffer",
                 strength,
             )
             .with_electrical(
