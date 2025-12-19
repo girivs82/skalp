@@ -63,8 +63,9 @@ pub use mapping::{
 };
 pub use npn::{are_npn_equivalent, npn_canonicalize, NpnCanonical, NpnDatabase};
 pub use passes::{
-    analyze_fanout, Balance, BufferConfig, BufferInsertion, BufferStats, ConstProp, Dce,
-    FanoutAnalysis, Pass, PassResult, Refactor, Rewrite, Strash,
+    analyze_fanout, run_fraig, run_fraig_with_config, Balance, BufferConfig, BufferInsertion,
+    BufferStats, ConstProp, Dce, FanoutAnalysis, Fraig, FraigConfig, FraigStats, Pass, PassResult,
+    Refactor, Rewrite, Strash,
 };
 pub use sta::{Sta, StaResult, TimingOptHints, TimingPath};
 pub use timing::{
