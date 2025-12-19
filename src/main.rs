@@ -689,10 +689,14 @@ fn build_design(
                     gate_netlist
                 };
 
+            // Generate Verilog from gate netlist
+            let verilog = optimized_netlist.to_verilog();
+            let verilog_path = output_dir.join("design_gates.v");
+            fs::write(&verilog_path, &verilog)?;
+
             // Save gate netlist as JSON
             let netlist_json = serde_json::to_string_pretty(&optimized_netlist)?;
-            let output_path = output_dir.join("design_gates.json");
-            fs::write(&output_path, &netlist_json)?;
+            fs::write(output_dir.join("design_gates.json"), &netlist_json)?;
 
             // Print stats
             let stats = skalp_lir::GateNetlistStats::from_netlist(&optimized_netlist);
@@ -704,7 +708,7 @@ fn build_design(
                 stats.cell_types.keys().collect::<Vec<_>>()
             );
 
-            output_path
+            verilog_path
         }
         _ => {
             anyhow::bail!(
