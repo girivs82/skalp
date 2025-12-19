@@ -57,8 +57,9 @@ pub use datapath::{
 pub use engine::{SynthConfig, SynthEngine, SynthPreset, SynthResult};
 pub use liberty::{create_basic_library, LibertyLibrary};
 pub use mapping::{
-    CellMatcher, CutMapper, CutMatch, DelayMapper, DelayMappingConfig, MappedNode,
-    MappingObjective, MappingResult, MappingStats,
+    size_cells, size_cells_for_area, size_cells_for_timing, CellMatcher, CellSizer,
+    CellSizingConfig, CellSizingStats, CutMapper, CutMatch, DelayMapper, DelayMappingConfig,
+    DriveStrength, MappedNode, MappingObjective, MappingResult, MappingStats,
 };
 pub use npn::{are_npn_equivalent, npn_canonicalize, NpnCanonical, NpnDatabase};
 pub use passes::{

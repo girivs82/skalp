@@ -15,9 +15,14 @@
 //! - Cong, J., & Ding, Y. (1994). FlowMap: An optimal technology mapping algorithm.
 //! - Mishchenko, A., et al. (2007). Combinational and sequential mapping with priority cuts.
 
+mod cell_sizer;
 mod cut_mapper;
 mod delay_mapper;
 
+pub use cell_sizer::{
+    size_cells, size_cells_for_area, size_cells_for_timing, CellSizer, CellSizingConfig,
+    CellSizingStats, DriveStrength,
+};
 pub use cut_mapper::{CutMapper, MappingResult};
 pub use delay_mapper::{DelayMapper, DelayMappingConfig};
 
