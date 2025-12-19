@@ -1,0 +1,29 @@
+[package]
+name = "skalp-ml"
+version = "0.1.0"
+edition = "2021"
+description = "ML-guided synthesis optimization for SKALP"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+# Enable ONNX Runtime for inference (requires onnxruntime installed)
+onnx = ["dep:ort", "dep:ndarray"]
+# Enable training support
+training = []
+
+[dependencies]
+# Core dependencies
+skalp-lir = { path = "../skalp-lir" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Random number generation
+rand = "0.8"
+
+# Optional: ONNX Runtime for inference
+ort = { version = "2.0.0-rc.10", optional = true }
+ndarray = { version = "0.16", optional = true }
+
+[dev-dependencies]

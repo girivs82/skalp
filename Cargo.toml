@@ -123,4 +123,5 @@ members = [
     "crates/skalp-testing",
     "crates/skalp-parallel",
     "crates/skalp-incremental", "crates/skalp-asic", "crates/skalp-resolve", "crates/skalp-manifest", "crates/skalp-package",
+    "crates/skalp-ml",
 ]

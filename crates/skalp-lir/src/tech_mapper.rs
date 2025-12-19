@@ -1042,6 +1042,36 @@ pub fn map_lir_to_gates(lir: &Lir, library: &TechLibrary) -> TechMapResult {
     mapper.map(lir)
 }
 
+/// Map a Lir to GateNetlist and run gate-level optimizations
+pub fn map_lir_to_gates_optimized(lir: &Lir, library: &TechLibrary) -> TechMapResult {
+    use crate::gate_optimizer::GateOptimizer;
+
+    let mut mapper = TechMapper::new(library);
+    let mut result = mapper.map(lir);
+
+    // Run gate-level optimizations
+    let mut optimizer = GateOptimizer::new();
+    let opt_stats = optimizer.optimize(&mut result.netlist);
+
+    // Update stats with optimization info
+    result.stats.cells_created = result.netlist.cells.len();
+    result.stats.nets_created = result.netlist.nets.len();
+
+    // Add optimization summary to warnings (as info)
+    if opt_stats.cells_removed > 0 {
+        result.warnings.push(format!(
+            "Optimization: removed {} cells ({} → {}), FIT {} → {}",
+            opt_stats.cells_removed,
+            opt_stats.cells_before,
+            opt_stats.cells_after,
+            opt_stats.fit_before,
+            opt_stats.fit_after
+        ));
+    }
+
+    result
+}
+
 /// Backward-compatible alias
 pub fn map_word_lir_to_gates(word_lir: &Lir, library: &TechLibrary) -> TechMapResult {
     map_lir_to_gates(word_lir, library)
