@@ -1,0 +1,612 @@
+//! Synthesis Engine
+//!
+//! This module provides the main API for running logic synthesis optimization
+//! on gate-level netlists. It orchestrates the various optimization passes
+//! and provides presets for common use cases.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use skalp_lir::synth::{SynthEngine, SynthPreset};
+//!
+//! let mut engine = SynthEngine::with_preset(SynthPreset::Balanced);
+//! let optimized = engine.optimize(&gate_netlist, &tech_library);
+//! ```
+
+use super::liberty::LibertyLibrary;
+use super::mapping::{CutMapper, DelayMapper, DelayMappingConfig, MappingObjective, MappingResult};
+use super::passes::{Balance, ConstProp, Dce, Pass, PassResult, Refactor, Rewrite, Strash};
+use super::sta::{Sta, StaResult};
+use super::timing::{TimePs, TimingConstraints};
+use super::{Aig, AigBuilder, AigWriter};
+use crate::gate_netlist::GateNetlist;
+use crate::tech_library::TechLibrary;
+use std::time::Instant;
+
+/// Synthesis preset configurations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SynthPreset {
+    /// Quick optimization - minimal passes for fast turnaround
+    Quick,
+    /// Balanced optimization - good trade-off between quality and runtime
+    #[default]
+    Balanced,
+    /// Full optimization - maximum effort for best QoR
+    Full,
+    /// Timing-focused - prioritize meeting timing constraints
+    Timing,
+    /// Area-focused - prioritize minimizing gate count
+    Area,
+}
+
+/// Synthesis configuration
+#[derive(Debug, Clone)]
+pub struct SynthConfig {
+    /// Optimization preset
+    pub preset: SynthPreset,
+    /// Target clock period (ps) - for timing-driven optimization
+    pub target_period: Option<TimePs>,
+    /// Maximum number of optimization iterations
+    pub max_iterations: usize,
+    /// Enable verbose logging
+    pub verbose: bool,
+    /// Run timing analysis after optimization
+    pub run_timing_analysis: bool,
+    /// Custom pass sequence (if None, uses preset)
+    pub custom_passes: Option<Vec<String>>,
+}
+
+impl Default for SynthConfig {
+    fn default() -> Self {
+        Self {
+            preset: SynthPreset::default(),
+            target_period: None,
+            max_iterations: 3,
+            verbose: false,
+            run_timing_analysis: false,
+            custom_passes: None,
+        }
+    }
+}
+
+impl SynthConfig {
+    /// Create config for quick optimization
+    pub fn quick() -> Self {
+        Self {
+            preset: SynthPreset::Quick,
+            max_iterations: 1,
+            ..Default::default()
+        }
+    }
+
+    /// Create config for full optimization
+    pub fn full() -> Self {
+        Self {
+            preset: SynthPreset::Full,
+            max_iterations: 5,
+            run_timing_analysis: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create config for timing-driven optimization
+    pub fn timing() -> Self {
+        Self {
+            preset: SynthPreset::Timing,
+            target_period: Some(10000.0), // 10ns default
+            max_iterations: 5,
+            run_timing_analysis: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create config for timing-driven optimization with specific period
+    pub fn timing_with_period(target_period: TimePs) -> Self {
+        Self {
+            preset: SynthPreset::Timing,
+            target_period: Some(target_period),
+            max_iterations: 5,
+            run_timing_analysis: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create config for area-focused optimization
+    pub fn area() -> Self {
+        Self {
+            preset: SynthPreset::Area,
+            max_iterations: 3,
+            run_timing_analysis: false,
+            ..Default::default()
+        }
+    }
+}
+
+/// Synthesis engine for logic optimization
+#[derive(Debug)]
+pub struct SynthEngine {
+    /// Configuration
+    config: SynthConfig,
+    /// Timing constraints
+    constraints: Option<TimingConstraints>,
+    /// Pass results from last run
+    pass_results: Vec<PassResult>,
+    /// Timing analysis result
+    timing_result: Option<StaResult>,
+    /// Mapping result
+    mapping_result: Option<MappingResult>,
+    /// Total optimization time
+    total_time_ms: u64,
+}
+
+impl Default for SynthEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SynthEngine {
+    /// Create a new synthesis engine with default configuration
+    pub fn new() -> Self {
+        Self {
+            config: SynthConfig::default(),
+            constraints: None,
+            pass_results: Vec::new(),
+            timing_result: None,
+            mapping_result: None,
+            total_time_ms: 0,
+        }
+    }
+
+    /// Create an engine with specific preset
+    pub fn with_preset(preset: SynthPreset) -> Self {
+        let config = match preset {
+            SynthPreset::Quick => SynthConfig::quick(),
+            SynthPreset::Balanced => SynthConfig::default(),
+            SynthPreset::Full => SynthConfig::full(),
+            SynthPreset::Timing => SynthConfig {
+                preset: SynthPreset::Timing,
+                run_timing_analysis: true,
+                max_iterations: 4,
+                ..Default::default()
+            },
+            SynthPreset::Area => SynthConfig {
+                preset: SynthPreset::Area,
+                max_iterations: 4,
+                ..Default::default()
+            },
+        };
+
+        Self {
+            config,
+            ..Self::new()
+        }
+    }
+
+    /// Create an engine with specific configuration
+    pub fn with_config(config: SynthConfig) -> Self {
+        Self {
+            config,
+            ..Self::new()
+        }
+    }
+
+    /// Set timing constraints
+    pub fn set_constraints(&mut self, constraints: TimingConstraints) {
+        self.constraints = Some(constraints);
+    }
+
+    /// Set target clock period
+    pub fn set_target_period(&mut self, period: TimePs) {
+        self.config.target_period = Some(period);
+        self.config.run_timing_analysis = true;
+    }
+
+    /// Enable verbose logging
+    pub fn set_verbose(&mut self, verbose: bool) {
+        self.config.verbose = verbose;
+    }
+
+    /// Optimize a GateNetlist
+    pub fn optimize(&mut self, netlist: &GateNetlist, library: &TechLibrary) -> SynthResult {
+        let start = Instant::now();
+        self.pass_results.clear();
+
+        // Phase 1: Build AIG
+        if self.config.verbose {
+            eprintln!("Building AIG from GateNetlist...");
+        }
+        let builder = AigBuilder::new(netlist);
+        let mut aig = builder.build();
+
+        let initial_stats = aig.compute_stats();
+        if self.config.verbose {
+            eprintln!(
+                "Initial: {} ANDs, {} levels",
+                initial_stats.and_count, initial_stats.max_level
+            );
+        }
+
+        // Phase 2: Run optimization passes
+        self.run_optimization_passes(&mut aig);
+
+        let final_stats = aig.compute_stats();
+        if self.config.verbose {
+            eprintln!(
+                "After optimization: {} ANDs, {} levels",
+                final_stats.and_count, final_stats.max_level
+            );
+        }
+
+        // Phase 3: Run timing analysis if requested
+        if self.config.run_timing_analysis {
+            self.run_timing_analysis(&aig);
+        }
+
+        // Phase 4: Map to library cells
+        self.run_technology_mapping(&aig);
+
+        // Phase 5: Convert back to GateNetlist
+        if self.config.verbose {
+            eprintln!("Converting AIG back to GateNetlist...");
+        }
+        let writer = AigWriter::new(library);
+        let optimized = writer.write(&aig);
+
+        self.total_time_ms = start.elapsed().as_millis() as u64;
+
+        SynthResult {
+            netlist: optimized,
+            initial_and_count: initial_stats.and_count,
+            final_and_count: final_stats.and_count,
+            initial_levels: initial_stats.max_level as usize,
+            final_levels: final_stats.max_level as usize,
+            pass_results: self.pass_results.clone(),
+            timing_result: self.timing_result.clone(),
+            mapping_result: self.mapping_result.clone(),
+            total_time_ms: self.total_time_ms,
+        }
+    }
+
+    /// Optimize an AIG directly
+    pub fn optimize_aig(&mut self, aig: &mut Aig) -> Vec<PassResult> {
+        self.pass_results.clear();
+        self.run_optimization_passes(aig);
+
+        if self.config.run_timing_analysis {
+            self.run_timing_analysis(aig);
+        }
+
+        self.run_technology_mapping(aig);
+
+        self.pass_results.clone()
+    }
+
+    /// Run the optimization pass sequence
+    fn run_optimization_passes(&mut self, aig: &mut Aig) {
+        let passes = self.get_pass_sequence();
+
+        for iteration in 0..self.config.max_iterations {
+            if self.config.verbose {
+                eprintln!("=== Iteration {} ===", iteration + 1);
+            }
+
+            let before = aig.compute_stats();
+
+            for pass_name in &passes {
+                if let Some(result) = self.run_pass(aig, pass_name) {
+                    if self.config.verbose {
+                        eprintln!(
+                            "  {} : {} -> {} ANDs",
+                            result.pass_name, result.ands_before, result.ands_after
+                        );
+                    }
+                    self.pass_results.push(result);
+                }
+            }
+
+            let after = aig.compute_stats();
+
+            // Check for convergence
+            if before.and_count == after.and_count && before.max_level == after.max_level {
+                if self.config.verbose {
+                    eprintln!("Converged after {} iterations", iteration + 1);
+                }
+                break;
+            }
+        }
+    }
+
+    /// Get the pass sequence for the current preset
+    fn get_pass_sequence(&self) -> Vec<String> {
+        if let Some(ref custom) = self.config.custom_passes {
+            return custom.clone();
+        }
+
+        match self.config.preset {
+            SynthPreset::Quick => vec!["strash".to_string(), "dce".to_string()],
+            SynthPreset::Balanced => vec![
+                "strash".to_string(),
+                "const_prop".to_string(),
+                "balance".to_string(),
+                "rewrite".to_string(),
+                "dce".to_string(),
+            ],
+            SynthPreset::Full => vec![
+                "strash".to_string(),
+                "const_prop".to_string(),
+                "balance".to_string(),
+                "rewrite".to_string(),
+                "refactor".to_string(),
+                "balance".to_string(),
+                "rewrite".to_string(),
+                "dce".to_string(),
+            ],
+            SynthPreset::Timing => vec![
+                "strash".to_string(),
+                "balance".to_string(),
+                "rewrite".to_string(),
+                "balance".to_string(),
+                "dce".to_string(),
+            ],
+            SynthPreset::Area => vec![
+                "strash".to_string(),
+                "const_prop".to_string(),
+                "rewrite".to_string(),
+                "refactor".to_string(),
+                "rewrite".to_string(),
+                "dce".to_string(),
+            ],
+        }
+    }
+
+    /// Run a single pass by name
+    fn run_pass(&mut self, aig: &mut Aig, pass_name: &str) -> Option<PassResult> {
+        match pass_name {
+            "strash" => {
+                let mut pass = Strash::new();
+                Some(pass.run(aig))
+            }
+            "const_prop" | "constprop" => {
+                let mut pass = ConstProp::new();
+                Some(pass.run(aig))
+            }
+            "balance" => {
+                let mut pass = Balance::new();
+                Some(pass.run(aig))
+            }
+            "rewrite" => {
+                let mut pass = Rewrite::new();
+                Some(pass.run(aig))
+            }
+            "refactor" => {
+                let mut pass = Refactor::new();
+                Some(pass.run(aig))
+            }
+            "dce" => {
+                let mut pass = Dce::new();
+                Some(pass.run(aig))
+            }
+            _ => {
+                if self.config.verbose {
+                    eprintln!("Unknown pass: {}", pass_name);
+                }
+                None
+            }
+        }
+    }
+
+    /// Run timing analysis
+    fn run_timing_analysis(&mut self, aig: &Aig) {
+        let mut sta = Sta::new();
+
+        if let Some(ref constraints) = self.constraints {
+            sta.set_constraints(constraints.clone());
+        } else if let Some(period) = self.config.target_period {
+            let mut constraints = TimingConstraints::new();
+            constraints.add_clock("clk", period);
+            sta.set_constraints(constraints);
+        }
+
+        self.timing_result = Some(sta.analyze(aig));
+
+        if self.config.verbose {
+            if let Some(ref result) = self.timing_result {
+                eprintln!("Timing: {}", result.summary());
+            }
+        }
+    }
+
+    /// Run technology mapping
+    fn run_technology_mapping(&mut self, aig: &Aig) {
+        let result = match self.config.preset {
+            SynthPreset::Timing => {
+                let config = DelayMappingConfig {
+                    target_period: self.config.target_period.unwrap_or(10000.0),
+                    area_recovery: true,
+                    ..Default::default()
+                };
+                let mapper = DelayMapper::with_config(config);
+                let delay_result = mapper.map(aig);
+                MappingResult {
+                    mapped_nodes: delay_result.mapped_nodes,
+                    stats: delay_result.stats,
+                }
+            }
+            SynthPreset::Area => {
+                let mapper = CutMapper::with_objective(MappingObjective::Area);
+                mapper.map(aig)
+            }
+            _ => {
+                let mapper = CutMapper::with_objective(MappingObjective::Balanced);
+                mapper.map(aig)
+            }
+        };
+
+        if self.config.verbose {
+            eprintln!("Mapping: {}", result.stats.summary());
+        }
+
+        self.mapping_result = Some(result);
+    }
+
+    /// Get the pass results from the last run
+    pub fn pass_results(&self) -> &[PassResult] {
+        &self.pass_results
+    }
+
+    /// Get the timing result from the last run
+    pub fn timing_result(&self) -> Option<&StaResult> {
+        self.timing_result.as_ref()
+    }
+
+    /// Get the mapping result from the last run
+    pub fn mapping_result(&self) -> Option<&MappingResult> {
+        self.mapping_result.as_ref()
+    }
+
+    /// Get total optimization time in milliseconds
+    pub fn total_time_ms(&self) -> u64 {
+        self.total_time_ms
+    }
+}
+
+/// Result of synthesis optimization
+#[derive(Debug, Clone)]
+pub struct SynthResult {
+    /// Optimized netlist
+    pub netlist: GateNetlist,
+    /// Initial AND gate count
+    pub initial_and_count: usize,
+    /// Final AND gate count
+    pub final_and_count: usize,
+    /// Initial logic levels
+    pub initial_levels: usize,
+    /// Final logic levels
+    pub final_levels: usize,
+    /// Results from each pass
+    pub pass_results: Vec<PassResult>,
+    /// Timing analysis result
+    pub timing_result: Option<StaResult>,
+    /// Technology mapping result
+    pub mapping_result: Option<MappingResult>,
+    /// Total time in milliseconds
+    pub total_time_ms: u64,
+}
+
+impl SynthResult {
+    /// Get the gate reduction ratio
+    pub fn gate_reduction(&self) -> f64 {
+        if self.initial_and_count == 0 {
+            0.0
+        } else {
+            1.0 - (self.final_and_count as f64 / self.initial_and_count as f64)
+        }
+    }
+
+    /// Get the level reduction ratio
+    pub fn level_reduction(&self) -> f64 {
+        if self.initial_levels == 0 {
+            0.0
+        } else {
+            1.0 - (self.final_levels as f64 / self.initial_levels as f64)
+        }
+    }
+
+    /// Check if timing was met
+    pub fn timing_met(&self) -> bool {
+        self.timing_result
+            .as_ref()
+            .map(|r| r.is_timing_met())
+            .unwrap_or(true)
+    }
+
+    /// Get a summary string
+    pub fn summary(&self) -> String {
+        format!(
+            "Gates: {} -> {} ({:.1}% reduction), Levels: {} -> {} ({:.1}% reduction), Time: {}ms",
+            self.initial_and_count,
+            self.final_and_count,
+            self.gate_reduction() * 100.0,
+            self.initial_levels,
+            self.final_levels,
+            self.level_reduction() * 100.0,
+            self.total_time_ms
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_synth_engine_creation() {
+        let engine = SynthEngine::new();
+        assert_eq!(engine.config.preset, SynthPreset::Balanced);
+    }
+
+    #[test]
+    fn test_synth_preset() {
+        let quick = SynthEngine::with_preset(SynthPreset::Quick);
+        assert_eq!(quick.config.max_iterations, 1);
+
+        let full = SynthEngine::with_preset(SynthPreset::Full);
+        assert_eq!(full.config.max_iterations, 5);
+    }
+
+    #[test]
+    fn test_synth_config() {
+        let config = SynthConfig::timing_with_period(5000.0);
+        assert_eq!(config.target_period, Some(5000.0));
+        assert!(config.run_timing_analysis);
+
+        let config_default = SynthConfig::timing();
+        assert_eq!(config_default.target_period, Some(10000.0)); // default 10ns
+        assert!(config_default.run_timing_analysis);
+    }
+
+    #[test]
+    fn test_get_pass_sequence() {
+        let engine = SynthEngine::with_preset(SynthPreset::Quick);
+        let passes = engine.get_pass_sequence();
+        assert!(passes.contains(&"strash".to_string()));
+        assert!(passes.contains(&"dce".to_string()));
+    }
+
+    #[test]
+    fn test_optimize_aig_simple() {
+        use crate::synth::{Aig, AigLit};
+
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        aig.add_output("y".to_string(), ab);
+
+        let mut engine = SynthEngine::with_preset(SynthPreset::Quick);
+        let results = engine.optimize_aig(&mut aig);
+
+        // Should have run some passes
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_synth_result_metrics() {
+        let result = SynthResult {
+            netlist: GateNetlist::new("test".to_string(), "default".to_string()),
+            initial_and_count: 100,
+            final_and_count: 60,
+            initial_levels: 10,
+            final_levels: 7,
+            pass_results: Vec::new(),
+            timing_result: None,
+            mapping_result: None,
+            total_time_ms: 50,
+        };
+
+        assert!((result.gate_reduction() - 0.4).abs() < 0.001);
+        assert!((result.level_reduction() - 0.3).abs() < 0.001);
+        assert!(result.timing_met()); // No timing constraint
+    }
+}

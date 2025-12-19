@@ -21,6 +21,15 @@ pub struct SafetyBuildOptions {
     pub formats: String,
 }
 
+/// Logic synthesis optimization options
+#[derive(Debug, Clone, Default)]
+pub struct OptimizationOptions {
+    /// Optimization preset (quick, balanced, full, timing, area)
+    pub preset: Option<String>,
+    /// Custom pass sequence (comma-separated)
+    pub passes: Option<String>,
+}
+
 /// SKALP - Intent-driven hardware synthesis
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -80,6 +89,15 @@ enum Commands {
         /// Work product output format (comma-separated: md,html,pdf,csv,reqif)
         #[arg(long, value_name = "FORMATS", default_value = "md,html")]
         workproduct_formats: String,
+
+        // === Logic Synthesis Optimization Options ===
+        /// Optimization preset (quick, balanced, full, timing, area)
+        #[arg(long, value_name = "PRESET")]
+        optimize: Option<String>,
+
+        /// Custom pass sequence (comma-separated: strash,rewrite,balance,refactor,map)
+        #[arg(long, value_name = "PASSES")]
+        passes: Option<String>,
     },
 
     /// Simulate the design
@@ -336,6 +354,8 @@ fn main() -> Result<()> {
             safety_check_only,
             workproducts,
             workproduct_formats,
+            optimize,
+            passes,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -352,7 +372,19 @@ fn main() -> Result<()> {
                 None
             };
 
-            build_design(&source_file, &target, &output, safety_options)?;
+            // Build optimization options
+            let optimization_options = OptimizationOptions {
+                preset: optimize,
+                passes,
+            };
+
+            build_design(
+                &source_file,
+                &target,
+                &output,
+                safety_options,
+                optimization_options,
+            )?;
         }
 
         Commands::Sim {
@@ -560,6 +592,7 @@ fn build_design(
     target: &str,
     output_dir: &PathBuf,
     safety_options: Option<SafetyBuildOptions>,
+    optimization_options: OptimizationOptions,
 ) -> Result<()> {
     use skalp_codegen::systemverilog::generate_systemverilog_from_mir;
     use skalp_frontend::parse_and_build_hir_from_file;
@@ -573,6 +606,14 @@ fn build_design(
     // Run safety analysis if enabled
     if let Some(ref safety_opts) = safety_options {
         run_safety_analysis(&hir, safety_opts, output_dir)?;
+    }
+
+    // Log optimization settings
+    if let Some(ref preset) = optimization_options.preset {
+        info!("Using optimization preset: {}", preset);
+    }
+    if let Some(ref passes) = optimization_options.passes {
+        info!("Using custom passes: {}", passes);
     }
 
     // Lower to MIR with CDC analysis
@@ -618,8 +659,58 @@ fn build_design(
             fs::write(&output_path, mir_json)?;
             output_path
         }
+        "gates" => {
+            use skalp_lir::{builtin_libraries::builtin_generic_asic, lower_mir_module_to_lir};
+
+            info!("Generating optimized gate-level netlist...");
+
+            // Get the top module from MIR
+            let top_module = mir
+                .modules
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No modules found in MIR"))?;
+
+            // Lower MIR module to LIR
+            let lir_result = lower_mir_module_to_lir(top_module);
+
+            // Get ASIC library
+            let library = builtin_generic_asic();
+
+            // Map to gate netlist with optimizations
+            let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
+            let gate_netlist = tech_result.netlist;
+
+            // Apply synthesis optimization if requested
+            let optimized_netlist =
+                if optimization_options.preset.is_some() || optimization_options.passes.is_some() {
+                    info!("Running synthesis optimization...");
+                    apply_synthesis_optimization(&gate_netlist, &library, &optimization_options)?
+                } else {
+                    gate_netlist
+                };
+
+            // Save gate netlist as JSON
+            let netlist_json = serde_json::to_string_pretty(&optimized_netlist)?;
+            let output_path = output_dir.join("design_gates.json");
+            fs::write(&output_path, &netlist_json)?;
+
+            // Print stats
+            let stats = skalp_lir::GateNetlistStats::from_netlist(&optimized_netlist);
+            println!("📊 Gate netlist stats:");
+            println!("   Cells: {}", stats.total_cells);
+            println!("   Nets: {}", stats.total_nets);
+            println!(
+                "   Cell types: {:?}",
+                stats.cell_types.keys().collect::<Vec<_>>()
+            );
+
+            output_path
+        }
         _ => {
-            anyhow::bail!("Unsupported target: {}. Use 'sv' or 'mir'", target);
+            anyhow::bail!(
+                "Unsupported target: {}. Use 'sv', 'mir', or 'gates'",
+                target
+            );
         }
     };
 
@@ -627,6 +718,66 @@ fn build_design(
     println!("📄 Output: {:?}", output_file);
 
     Ok(())
+}
+
+/// Apply synthesis optimization to a gate netlist
+fn apply_synthesis_optimization(
+    netlist: &skalp_lir::GateNetlist,
+    library: &skalp_lir::TechLibrary,
+    options: &OptimizationOptions,
+) -> Result<skalp_lir::GateNetlist> {
+    use skalp_lir::synth::{SynthConfig, SynthEngine};
+
+    // Create config based on preset
+    let config = match options.preset.as_deref() {
+        Some("quick") => {
+            info!("Using quick optimization preset");
+            SynthConfig::quick()
+        }
+        Some("balanced") | None => {
+            info!("Using balanced optimization preset");
+            SynthConfig::default()
+        }
+        Some("full") => {
+            info!("Using full optimization preset");
+            SynthConfig::full()
+        }
+        Some("timing") => {
+            info!("Using timing-focused optimization preset");
+            SynthConfig::timing()
+        }
+        Some("area") => {
+            info!("Using area-focused optimization preset");
+            SynthConfig::area()
+        }
+        Some(other) => {
+            anyhow::bail!(
+                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area",
+                other
+            );
+        }
+    };
+
+    // Create engine
+    let mut engine = SynthEngine::with_config(config);
+
+    // Run optimization
+    let result = engine.optimize(netlist, library);
+
+    info!(
+        "Optimization complete: {} AND gates -> {} AND gates",
+        result.initial_and_count, result.final_and_count
+    );
+    info!(
+        "Logic levels: {} -> {}",
+        result.initial_levels, result.final_levels
+    );
+
+    for pass_result in &result.pass_results {
+        info!("  {}", pass_result);
+    }
+
+    Ok(result.netlist)
 }
 
 /// Simulate design
@@ -1662,9 +1813,7 @@ fn run_fi_driven_safety(
     dual_bist: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::{
-        builtin_libraries::builtin_generic_asic, lower_mir_module_to_lir, tech_mapper::TechMapper,
-    };
+    use skalp_lir::{builtin_libraries::builtin_generic_asic, lower_mir_module_to_lir};
     use skalp_safety::asil::AsilLevel;
     use skalp_safety::fault_simulation::{
         CompareOp, CompareValue, ConditionTerm, EffectCondition, FailureEffectDef,
@@ -1721,9 +1870,17 @@ fn run_fi_driven_safety(
     println!("🔩 Converting to gate-level netlist...");
     let lir_result = lower_mir_module_to_lir(top_module);
     let library = builtin_generic_asic();
-    let mut mapper = TechMapper::new(&library);
-    let tech_result = mapper.map(&lir_result.lir);
+
+    // Use optimized tech mapper (constant folding, DCE, boolean simp, buffer removal)
+    let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
     let netlist = &tech_result.netlist;
+
+    // Report optimization results if any
+    for warning in &tech_result.warnings {
+        if warning.starts_with("Optimization:") {
+            println!("   ⚡ {}", warning);
+        }
+    }
 
     let total_cells = netlist.cells.len();
     let total_fit = netlist.total_fit();

@@ -27,11 +27,13 @@
 
 pub mod builtin_libraries;
 pub mod gate_netlist;
+pub mod gate_optimizer;
 pub mod lir;
 pub mod mir_to_lir;
 pub mod netlist;
 pub mod pattern_detector;
 pub mod primitives;
+pub mod synth;
 pub mod tech_library;
 pub mod tech_mapper;
 pub mod technology;
@@ -67,7 +69,8 @@ pub use tech_library::{
 
 // Technology mapper
 pub use tech_mapper::{
-    map_lir_to_gates, map_word_lir_to_gates, TechMapResult, TechMapStats, TechMapper,
+    map_lir_to_gates, map_lir_to_gates_optimized, map_word_lir_to_gates, TechMapResult,
+    TechMapStats, TechMapper,
 };
 
 // Built-in technology libraries
@@ -81,6 +84,12 @@ pub use pattern_detector::{
     DetectedPatterns, DmrPattern, PatternDetector, TmrPattern, VoterPattern, VoterType,
     WatchdogPattern,
 };
+
+// Gate optimizer
+pub use gate_optimizer::{GateOptimizer, OptimizationStats, PassStats};
+
+// Synthesis engine (AIG-based optimization)
+pub use synth::{Aig, AigBuilder, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats, AigWriter};
 
 // Other exports
 pub use netlist::Netlist;
