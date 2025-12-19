@@ -639,8 +639,8 @@ impl Pass for Rewrite {
                 self.total_gain += candidate.gain;
             }
 
-            // Limit the number of rewrites per pass
-            if self.rewritten_count >= 100 {
+            // Limit the number of rewrites per pass (500 allows more aggressive optimization)
+            if self.rewritten_count >= 500 {
                 break;
             }
         }

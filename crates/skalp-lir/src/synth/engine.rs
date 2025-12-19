@@ -344,11 +344,20 @@ impl SynthEngine {
 
         match self.config.preset {
             SynthPreset::Quick => vec!["strash".to_string(), "dce".to_string()],
+            // Balanced: Use Resyn2-style sequence for better optimization
             SynthPreset::Balanced => vec![
                 "strash".to_string(),
                 "const_prop".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
+                "refactor".to_string(),
+                "balance".to_string(),
+                "rewrite".to_string(),
+                "rewrite_z".to_string(),
+                "balance".to_string(),
+                "refactor_z".to_string(),
+                "rewrite_z".to_string(),
+                "balance".to_string(),
                 "dce".to_string(),
             ],
             SynthPreset::Full => vec![
