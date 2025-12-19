@@ -6,7 +6,7 @@
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use crate::tech_library::CellFunction;
 
-use super::aig::{Aig, AigLit, AigNodeId, AigSafetyInfo};
+use super::aig::{Aig, AigLit, AigNodeId, AigSafetyInfo, BarrierType};
 
 /// Builder for converting GateNetlist to AIG
 pub struct AigBuilder<'a> {
@@ -405,41 +405,166 @@ impl<'a> AigBuilder<'a> {
                 self.aig.add_and(en, a)
             }
 
-            // Power infrastructure cells (model as buffers/pass-throughs)
-            CellFunction::LevelShifterLH
-            | CellFunction::LevelShifterHL
-            | CellFunction::AlwaysOnBuf => inputs.first().copied().unwrap_or(AigLit::false_lit()),
+            // Power infrastructure cells - create BARRIER nodes to prevent cross-domain optimization
+            CellFunction::LevelShifterLH => {
+                let data = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::LevelShifterLH,
+                    data,
+                    None,
+                    None,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
+            }
+
+            CellFunction::LevelShifterHL => {
+                let data = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::LevelShifterHL,
+                    data,
+                    None,
+                    None,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
+            }
+
+            CellFunction::AlwaysOnBuf => {
+                let data = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::AlwaysOnBuf,
+                    data,
+                    None,
+                    None,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
+            }
 
             CellFunction::IsolationAnd => {
-                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
-                let iso = inputs.get(1).copied().unwrap_or(AigLit::true_lit());
-                self.aig.add_and(a, iso)
+                let data = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let enable = inputs.get(1).copied();
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::IsolationAnd,
+                    data,
+                    enable,
+                    None,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
             }
 
             CellFunction::IsolationOr => {
-                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
-                let iso = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
-                self.aig.add_or(a, iso)
+                let data = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let enable = inputs.get(1).copied();
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::IsolationOr,
+                    data,
+                    enable,
+                    None,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
             }
 
-            CellFunction::IsolationLatch
-            | CellFunction::RetentionDff
-            | CellFunction::RetentionDffR => {
+            CellFunction::IsolationLatch => {
                 let d = inputs.first().copied().unwrap_or(AigLit::false_lit());
                 let clock = cell
                     .clock
                     .and_then(|c| self.net_map[c.0 as usize])
                     .map(|l| l.node);
 
-                let latch_id = self
-                    .aig
-                    .add_latch_with_safety(d, None, clock, None, safety.clone());
-                AigLit::new(latch_id)
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::IsolationLatch,
+                    d,
+                    None,
+                    clock,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
             }
 
-            CellFunction::PowerSwitchHeader | CellFunction::PowerSwitchFooter => {
-                // Power switches just pass through the enable
-                inputs.first().copied().unwrap_or(AigLit::true_lit())
+            CellFunction::RetentionDff => {
+                let d = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let clock = cell
+                    .clock
+                    .and_then(|c| self.net_map[c.0 as usize])
+                    .map(|l| l.node);
+
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::RetentionDff,
+                    d,
+                    None,
+                    clock,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
+            }
+
+            CellFunction::RetentionDffR => {
+                let d = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let clock = cell
+                    .clock
+                    .and_then(|c| self.net_map[c.0 as usize])
+                    .map(|l| l.node);
+                let reset = cell
+                    .reset
+                    .and_then(|r| self.net_map[r.0 as usize])
+                    .map(|l| l.node);
+
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::RetentionDffR,
+                    d,
+                    None,
+                    clock,
+                    reset,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
+            }
+
+            CellFunction::PowerSwitchHeader => {
+                let data = inputs.first().copied().unwrap_or(AigLit::true_lit());
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::PowerSwitchHeader,
+                    data,
+                    None,
+                    None,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
+            }
+
+            CellFunction::PowerSwitchFooter => {
+                let data = inputs.first().copied().unwrap_or(AigLit::true_lit());
+                let barrier_id = self.aig.add_barrier_with_safety(
+                    BarrierType::PowerSwitchFooter,
+                    data,
+                    None,
+                    None,
+                    None,
+                    None,
+                    safety.clone(),
+                );
+                AigLit::new(barrier_id)
             }
 
             // N-bit adders and MUX4 - complex cells decomposed elsewhere
@@ -502,6 +627,41 @@ impl<'a> AigBuilder<'a> {
 
     /// Parse cell function from cell type name
     fn parse_cell_function(&self, cell_type: &str) -> CellFunction {
+        // First check for power domain cells (which have multi-part names like LVLSHIFT_LH_X1)
+        let upper = cell_type.to_uppercase();
+
+        // Check power domain cells first (need to check before stripping suffix)
+        if upper.starts_with("LVLSHIFT_LH") || upper.starts_with("LVLSHIFTLH") {
+            return CellFunction::LevelShifterLH;
+        }
+        if upper.starts_with("LVLSHIFT_HL") || upper.starts_with("LVLSHIFTHL") {
+            return CellFunction::LevelShifterHL;
+        }
+        if upper.starts_with("ISO_AND") || upper.starts_with("ISOAND") {
+            return CellFunction::IsolationAnd;
+        }
+        if upper.starts_with("ISO_OR") || upper.starts_with("ISOOR") {
+            return CellFunction::IsolationOr;
+        }
+        if upper.starts_with("ISO_LATCH") || upper.starts_with("ISOLATCH") {
+            return CellFunction::IsolationLatch;
+        }
+        if upper.starts_with("AON_BUF") || upper.starts_with("AONBUF") {
+            return CellFunction::AlwaysOnBuf;
+        }
+        if upper.starts_with("RET_DFF_R") || upper.starts_with("RETDFFR") {
+            return CellFunction::RetentionDffR;
+        }
+        if upper.starts_with("RET_DFF") || upper.starts_with("RETDFF") {
+            return CellFunction::RetentionDff;
+        }
+        if upper.starts_with("PSW_HDR") || upper.starts_with("PSWHDR") {
+            return CellFunction::PowerSwitchHeader;
+        }
+        if upper.starts_with("PSW_FTR") || upper.starts_with("PSWFTR") {
+            return CellFunction::PowerSwitchFooter;
+        }
+
         // Normalize name (remove drive strength suffix like _X1, _X2)
         let base_name = cell_type
             .split('_')

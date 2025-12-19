@@ -240,6 +240,20 @@ impl Retiming {
                         },
                     );
                 }
+                AigNode::Barrier { data, .. } => {
+                    // Barriers are power domain boundaries - add fixed delay
+                    let data_timing = timing.get(&data.node).cloned().unwrap_or_default();
+                    let barrier_delay = 30.0; // Level shifter/isolation cell delay
+
+                    timing.insert(
+                        id,
+                        NodeTiming {
+                            arrival: data_timing.arrival + barrier_delay,
+                            level: data_timing.level + 1,
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
 

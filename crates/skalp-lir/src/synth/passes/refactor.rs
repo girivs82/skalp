@@ -100,7 +100,9 @@ impl Refactor {
                         let fanouts = fanout_counts.get(&node).copied().unwrap_or(0);
                         fanouts > 1
                     }
-                    Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. }) => true,
+                    Some(AigNode::Input { .. })
+                    | Some(AigNode::Latch { .. })
+                    | Some(AigNode::Barrier { .. }) => true, // Barriers are optimization boundaries
                     Some(AigNode::Const) => true,
                     None => true,
                 }

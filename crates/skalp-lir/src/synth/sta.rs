@@ -266,6 +266,35 @@ impl Sta {
                     timing.slew_fall = timing.slew_rise;
                     timing.load = load;
                 }
+
+                AigNode::Barrier { data, .. } => {
+                    // Barriers are power domain boundary cells (level shifters, etc.)
+                    // They have a fixed delay similar to buffers
+                    let barrier_delay = 30.0; // Level shifter/isolation cell delay in ps
+
+                    if let Some(data_timing) = self.node_timing.get(&data.node) {
+                        let data_arr_rise = if data.inverted {
+                            data_timing.arrival_fall
+                        } else {
+                            data_timing.arrival_rise
+                        };
+                        let data_arr_fall = if data.inverted {
+                            data_timing.arrival_rise
+                        } else {
+                            data_timing.arrival_fall
+                        };
+
+                        // Wire delay based on fanout
+                        let fanout = fanout_counts.get(&node_id).copied().unwrap_or(1) as f64;
+                        let wire_delay = self.wire_delay_per_fanout * fanout;
+
+                        timing.arrival_rise = data_arr_rise + barrier_delay + wire_delay;
+                        timing.arrival_fall = data_arr_fall + barrier_delay + wire_delay;
+                        timing.slew_rise = data_timing.slew_rise;
+                        timing.slew_fall = data_timing.slew_fall;
+                        timing.load = self.wire_cap_per_fanout * fanout;
+                    }
+                }
             }
 
             self.node_timing.insert(node_id, timing);

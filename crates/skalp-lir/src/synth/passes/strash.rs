@@ -7,7 +7,7 @@
 //! inputs, only one copy exists in the AIG.
 
 use super::{Pass, PassResult};
-use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
+use crate::synth::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
 use std::collections::HashMap;
 
 /// Structural hashing pass
@@ -95,6 +95,37 @@ impl Pass for Strash {
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig
                         .add_latch_with_safety(new_data, *init, new_clock, new_reset, safety);
+                    node_map.insert(id, AigLit::new(new_id));
+                }
+                AigNode::Barrier {
+                    barrier_type,
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    init,
+                } => {
+                    let new_data = resolve_lit(&node_map, *data);
+                    let new_enable = enable.map(|e| resolve_lit(&node_map, e));
+                    let new_clock = clock.map(|c| {
+                        let lit = node_map.get(&c).copied().unwrap_or(AigLit::new(c));
+                        lit.node
+                    });
+                    let new_reset = reset.map(|r| {
+                        let lit = node_map.get(&r).copied().unwrap_or(AigLit::new(r));
+                        lit.node
+                    });
+
+                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                    let new_id = new_aig.add_barrier_with_safety(
+                        barrier_type.clone(),
+                        new_data,
+                        new_enable,
+                        new_clock,
+                        new_reset,
+                        *init,
+                        safety,
+                    );
                     node_map.insert(id, AigLit::new(new_id));
                 }
             }

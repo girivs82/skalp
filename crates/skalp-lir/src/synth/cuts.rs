@@ -208,6 +208,11 @@ impl CutEnumeration {
                     // Latches are treated like inputs for combinational cuts
                     CutSet::trivial(id)
                 }
+                AigNode::Barrier { .. } => {
+                    // Barriers are power domain boundaries - treated like inputs
+                    // to prevent cross-domain optimization
+                    CutSet::trivial(id)
+                }
                 AigNode::And { left, right } => {
                     // Compute cuts by merging fanin cuts
                     let left_cuts = node_cuts.get(&left.node).cloned().unwrap_or_default();
@@ -339,8 +344,8 @@ fn evaluate_lit(
         if let Some(node) = aig.get_node(lit.node) {
             match node {
                 AigNode::Const => false,
-                AigNode::Input { .. } | AigNode::Latch { .. } => {
-                    // Should have been a leaf
+                AigNode::Input { .. } | AigNode::Latch { .. } | AigNode::Barrier { .. } => {
+                    // Should have been a leaf (barriers are optimization boundaries)
                     false
                 }
                 AigNode::And { left, right } => evaluate_node(

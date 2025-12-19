@@ -8,7 +8,7 @@ use crate::gate_netlist::{
 };
 use crate::tech_library::{CellFunction, TechLibrary};
 
-use super::aig::{Aig, AigLit, AigNode, AigNodeId};
+use super::aig::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
 
 use std::collections::HashMap;
 
@@ -110,8 +110,8 @@ impl AigWriterState<'_> {
         let order = self.topological_order(aig);
 
         for id in order {
-            let node = aig.get_node(id).unwrap();
-            match node {
+            let node = aig.get_node(id).unwrap().clone();
+            match &node {
                 AigNode::Const | AigNode::Input { .. } => {
                     // Already handled
                 }
@@ -125,6 +125,25 @@ impl AigWriterState<'_> {
                     reset,
                 } => {
                     self.process_latch_node(aig, id, *data, *init, *clock, *reset);
+                }
+                AigNode::Barrier {
+                    barrier_type,
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    init,
+                } => {
+                    self.process_barrier_node(
+                        aig,
+                        id,
+                        barrier_type.clone(),
+                        *data,
+                        *enable,
+                        *clock,
+                        *reset,
+                        *init,
+                    );
                 }
             }
         }
@@ -405,6 +424,242 @@ impl AigWriterState<'_> {
             return (cell.name.clone(), cell.fit);
         }
         ("DFFR_X1".to_string(), 0.25)
+    }
+
+    /// Process a barrier node (power domain boundary)
+    #[allow(clippy::too_many_arguments)]
+    fn process_barrier_node(
+        &mut self,
+        aig: &Aig,
+        id: AigNodeId,
+        barrier_type: BarrierType,
+        data: AigLit,
+        enable: Option<AigLit>,
+        clock: Option<AigNodeId>,
+        reset: Option<AigNodeId>,
+        _init: Option<bool>,
+    ) {
+        // Get input nets
+        let data_net = self.get_or_create_lit_net(aig, data);
+
+        // Create output net
+        let output_net = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), format!("barrier{}", id.0)));
+
+        // Get safety info
+        let safety = aig
+            .get_safety_info(id)
+            .map(|s| {
+                s.classification
+                    .clone()
+                    .unwrap_or(CellSafetyClassification::Functional)
+            })
+            .unwrap_or(CellSafetyClassification::Functional);
+
+        // Find appropriate cell and create it
+        let (cell_type, cell_fit, inputs, is_seq) = match barrier_type {
+            BarrierType::LevelShifterLH => {
+                let (name, fit) = self.find_level_shifter_lh_cell();
+                (name, fit, vec![data_net], false)
+            }
+            BarrierType::LevelShifterHL => {
+                let (name, fit) = self.find_level_shifter_hl_cell();
+                (name, fit, vec![data_net], false)
+            }
+            BarrierType::AlwaysOnBuf => {
+                let (name, fit) = self.find_always_on_buf_cell();
+                (name, fit, vec![data_net], false)
+            }
+            BarrierType::IsolationAnd => {
+                let enable_net = enable
+                    .map(|e| self.get_or_create_lit_net(aig, e))
+                    .unwrap_or_else(|| {
+                        // Create a constant 1 net if no enable
+                        self.netlist
+                            .add_net(GateNet::new(GateNetId(0), "const_1".to_string()))
+                    });
+                let (name, fit) = self.find_isolation_and_cell();
+                (name, fit, vec![data_net, enable_net], false)
+            }
+            BarrierType::IsolationOr => {
+                let enable_net = enable
+                    .map(|e| self.get_or_create_lit_net(aig, e))
+                    .unwrap_or_else(|| {
+                        // Create a constant 0 net if no enable
+                        *self.node_to_net.get(&AigNodeId::FALSE).unwrap()
+                    });
+                let (name, fit) = self.find_isolation_or_cell();
+                (name, fit, vec![data_net, enable_net], false)
+            }
+            BarrierType::IsolationLatch => {
+                let (name, fit) = self.find_isolation_latch_cell();
+                (name, fit, vec![data_net], true)
+            }
+            BarrierType::RetentionDff => {
+                let (name, fit) = self.find_retention_dff_cell();
+                (name, fit, vec![data_net], true)
+            }
+            BarrierType::RetentionDffR => {
+                let (name, fit) = self.find_retention_dffr_cell();
+                (name, fit, vec![data_net], true)
+            }
+            BarrierType::PowerSwitchHeader => {
+                let (name, fit) = self.find_power_switch_header_cell();
+                (name, fit, vec![data_net], false)
+            }
+            BarrierType::PowerSwitchFooter => {
+                let (name, fit) = self.find_power_switch_footer_cell();
+                (name, fit, vec![data_net], false)
+            }
+        };
+
+        // Create the cell
+        let cell = if is_seq {
+            let clock_net = clock.and_then(|c| self.node_to_net.get(&c).copied());
+            let reset_net = reset.and_then(|r| self.node_to_net.get(&r).copied());
+
+            Cell::new_seq(
+                CellId(self.next_cell_id),
+                cell_type,
+                self.library.name.clone(),
+                cell_fit,
+                format!("aig.barrier{}", id.0),
+                inputs,
+                vec![output_net],
+                clock_net.unwrap_or(GateNetId(0)),
+                reset_net,
+            )
+            .with_safety_classification(safety)
+        } else {
+            Cell::new_comb(
+                CellId(self.next_cell_id),
+                cell_type,
+                self.library.name.clone(),
+                cell_fit,
+                format!("aig.barrier{}", id.0),
+                inputs,
+                vec![output_net],
+            )
+            .with_safety_classification(safety)
+        };
+
+        self.next_cell_id += 1;
+        self.netlist.add_cell(cell);
+
+        // Store mapping
+        self.node_to_net.insert(id, output_net);
+        self.lit_to_net.insert((id, false), output_net);
+    }
+
+    /// Find a level shifter LH cell in the library
+    fn find_level_shifter_lh_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::LevelShifterLH);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("LVLSHIFT_LH_X1".to_string(), 0.15)
+    }
+
+    /// Find a level shifter HL cell in the library
+    fn find_level_shifter_hl_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::LevelShifterHL);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("LVLSHIFT_HL_X1".to_string(), 0.15)
+    }
+
+    /// Find an always-on buffer cell in the library
+    fn find_always_on_buf_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::AlwaysOnBuf);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("AON_BUF_X1".to_string(), 0.1)
+    }
+
+    /// Find an isolation AND cell in the library
+    fn find_isolation_and_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::IsolationAnd);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("ISO_AND_X1".to_string(), 0.12)
+    }
+
+    /// Find an isolation OR cell in the library
+    fn find_isolation_or_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::IsolationOr);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("ISO_OR_X1".to_string(), 0.12)
+    }
+
+    /// Find an isolation latch cell in the library
+    fn find_isolation_latch_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::IsolationLatch);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("ISO_LATCH_X1".to_string(), 0.2)
+    }
+
+    /// Find a retention DFF cell in the library
+    fn find_retention_dff_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::RetentionDff);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("RTNDFF_X1".to_string(), 0.25)
+    }
+
+    /// Find a retention DFFR cell in the library
+    fn find_retention_dffr_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::RetentionDffR);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("RTNDFFR_X1".to_string(), 0.28)
+    }
+
+    /// Find a power switch header cell in the library
+    fn find_power_switch_header_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::PowerSwitchHeader);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("PSW_HEADER_X1".to_string(), 0.1)
+    }
+
+    /// Find a power switch footer cell in the library
+    fn find_power_switch_footer_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::PowerSwitchFooter);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        ("PSW_FOOTER_X1".to_string(), 0.1)
     }
 }
 

@@ -7,6 +7,34 @@
 use crate::gate_netlist::{CellId, CellSafetyClassification, GateNetId};
 use std::collections::HashMap;
 
+/// Type of optimization barrier (power domain boundary cells)
+///
+/// These cells represent boundaries between power domains and should NOT
+/// be optimized through to prevent cross-domain logic optimization.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BarrierType {
+    /// Level shifter from low voltage to high voltage domain
+    LevelShifterLH,
+    /// Level shifter from high voltage to low voltage domain
+    LevelShifterHL,
+    /// Always-on buffer (power domain safe buffer)
+    AlwaysOnBuf,
+    /// Isolation cell (AND type) - output = input & enable
+    IsolationAnd,
+    /// Isolation cell (OR type) - output = input | enable
+    IsolationOr,
+    /// Isolation latch
+    IsolationLatch,
+    /// Retention flip-flop
+    RetentionDff,
+    /// Retention flip-flop with reset
+    RetentionDffR,
+    /// Power switch (header type)
+    PowerSwitchHeader,
+    /// Power switch (footer type)
+    PowerSwitchFooter,
+}
+
 /// Unique identifier for an AIG node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AigNodeId(pub u32);
@@ -117,6 +145,26 @@ pub enum AigNode {
         /// Reset input node
         reset: Option<AigNodeId>,
     },
+
+    /// Power domain barrier (optimization boundary)
+    ///
+    /// These nodes represent power domain boundary cells like level shifters,
+    /// isolation cells, and retention elements. They are NOT optimized through
+    /// to prevent unsafe cross-domain logic optimization.
+    Barrier {
+        /// Barrier type
+        barrier_type: BarrierType,
+        /// Data input (main signal)
+        data: AigLit,
+        /// Enable/control input (for isolation cells, power switches)
+        enable: Option<AigLit>,
+        /// Clock input (for sequential barriers like retention DFFs)
+        clock: Option<AigNodeId>,
+        /// Reset input (for sequential barriers)
+        reset: Option<AigNodeId>,
+        /// Initial value (for sequential barriers)
+        init: Option<bool>,
+    },
 }
 
 impl AigNode {
@@ -140,12 +188,24 @@ impl AigNode {
         matches!(self, AigNode::Const)
     }
 
+    /// Check if this is a barrier (power domain boundary)
+    pub fn is_barrier(&self) -> bool {
+        matches!(self, AigNode::Barrier { .. })
+    }
+
     /// Get the fanin literals for this node
     pub fn fanins(&self) -> Vec<AigLit> {
         match self {
             AigNode::Const | AigNode::Input { .. } => vec![],
             AigNode::And { left, right } => vec![*left, *right],
             AigNode::Latch { data, .. } => vec![*data],
+            AigNode::Barrier { data, enable, .. } => {
+                let mut result = vec![*data];
+                if let Some(en) = enable {
+                    result.push(*en);
+                }
+                result
+            }
         }
     }
 }
@@ -269,6 +329,11 @@ impl Aig {
     /// Get the number of latch nodes
     pub fn latch_count(&self) -> usize {
         self.nodes.iter().filter(|n| n.is_latch()).count()
+    }
+
+    /// Get the number of barrier nodes (power domain boundaries)
+    pub fn barrier_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.is_barrier()).count()
     }
 
     /// Get the number of outputs
@@ -455,6 +520,65 @@ impl Aig {
         id
     }
 
+    /// Add a power domain barrier (optimization boundary)
+    ///
+    /// Barriers represent cells that cross power domain boundaries and should
+    /// NOT be optimized through. This prevents unsafe cross-domain optimization.
+    pub fn add_barrier(
+        &mut self,
+        barrier_type: BarrierType,
+        data: AigLit,
+        enable: Option<AigLit>,
+        clock: Option<AigNodeId>,
+        reset: Option<AigNodeId>,
+        init: Option<bool>,
+    ) -> AigNodeId {
+        let id = AigNodeId(self.nodes.len() as u32);
+        self.nodes.push(AigNode::Barrier {
+            barrier_type,
+            data,
+            enable,
+            clock,
+            reset,
+            init,
+        });
+
+        // Copy safety info from data input (barriers preserve safety characteristics)
+        let data_safety = self
+            .safety_info
+            .get(data.node.0 as usize)
+            .cloned()
+            .unwrap_or_default();
+        self.safety_info.push(data_safety);
+
+        id
+    }
+
+    /// Add a power domain barrier with explicit safety info
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_barrier_with_safety(
+        &mut self,
+        barrier_type: BarrierType,
+        data: AigLit,
+        enable: Option<AigLit>,
+        clock: Option<AigNodeId>,
+        reset: Option<AigNodeId>,
+        init: Option<bool>,
+        safety: AigSafetyInfo,
+    ) -> AigNodeId {
+        let id = AigNodeId(self.nodes.len() as u32);
+        self.nodes.push(AigNode::Barrier {
+            barrier_type,
+            data,
+            enable,
+            clock,
+            reset,
+            init,
+        });
+        self.safety_info.push(safety);
+        id
+    }
+
     /// Add a primary output
     pub fn add_output(&mut self, name: String, lit: AigLit) {
         self.outputs.push((name, lit));
@@ -606,7 +730,7 @@ impl Aig {
             }
         };
 
-        // Update all AND and Latch nodes
+        // Update all AND, Latch, and Barrier nodes
         for node in &mut self.nodes {
             match node {
                 AigNode::And { left, right } => {
@@ -615,6 +739,12 @@ impl Aig {
                 }
                 AigNode::Latch { data, .. } => {
                     *data = resolve(*data);
+                }
+                AigNode::Barrier { data, enable, .. } => {
+                    *data = resolve(*data);
+                    if let Some(en) = enable {
+                        *en = resolve(*en);
+                    }
                 }
                 _ => {}
             }

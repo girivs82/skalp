@@ -111,6 +111,28 @@ impl CutMapper {
                     best_match.insert(node_id, None);
                 }
 
+                AigNode::Barrier { data, .. } => {
+                    // Barriers are power domain boundaries - treat as optimization barriers
+                    // with a fixed mapping (they'll be preserved in the final netlist)
+                    let barrier_delay = 30.0; // Level shifter/isolation cell delay
+                    let barrier_area = 2.0;
+
+                    node_delay.insert(node_id, barrier_delay);
+                    node_area.insert(node_id, barrier_area);
+
+                    result.stats.record_cell("BARRIER_X1", barrier_area);
+                    result.mapped_nodes.insert(
+                        node_id,
+                        MappedNode {
+                            cell_type: "BARRIER_X1".to_string(),
+                            inputs: vec![(data.node, data.inverted)],
+                            area: barrier_area,
+                            delay: barrier_delay,
+                        },
+                    );
+                    best_match.insert(node_id, None);
+                }
+
                 AigNode::And { left, right } => {
                     // Find best cut and cell match
                     let best = self.find_best_match(aig, node_id, &cuts, &node_delay, &node_area);

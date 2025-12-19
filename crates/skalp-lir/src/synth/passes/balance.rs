@@ -10,7 +10,7 @@
 //! O(n) to O(log n) for chains of ANDs.
 
 use super::{Pass, PassResult};
-use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo};
+use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, BarrierType};
 use std::collections::{HashMap, HashSet};
 
 /// Tree balancing pass
@@ -222,6 +222,34 @@ impl Pass for Balance {
                         *init,
                         resolved_clock,
                         resolved_reset,
+                        safety,
+                    );
+                    node_map.insert(id, AigLit::new(new_id));
+                }
+                AigNode::Barrier {
+                    barrier_type,
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    init,
+                } => {
+                    // Barriers are power domain boundaries - copy as-is
+                    let resolved_data = resolve_lit(&node_map, *data);
+                    let resolved_enable = enable.map(|e| resolve_lit(&node_map, e));
+                    let resolved_clock =
+                        clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
+                    let resolved_reset =
+                        reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
+
+                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                    let new_id = new_aig.add_barrier_with_safety(
+                        barrier_type.clone(),
+                        resolved_data,
+                        resolved_enable,
+                        resolved_clock,
+                        resolved_reset,
+                        *init,
                         safety,
                     );
                     node_map.insert(id, AigLit::new(new_id));

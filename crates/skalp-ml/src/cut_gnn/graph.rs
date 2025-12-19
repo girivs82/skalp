@@ -168,6 +168,7 @@ impl AigGraph {
                 AigNode::And { .. } => 1.0,
                 AigNode::Latch { .. } => 2.0,
                 AigNode::Const => 3.0,
+                AigNode::Barrier { .. } => 4.0, // Power domain boundary
             };
 
             // Normalize fanout
@@ -301,6 +302,7 @@ fn compute_levels(aig: &Aig) -> HashMap<AigNodeId, usize> {
                 left_level.max(right_level) + 1
             }
             AigNode::Latch { data, .. } => levels.get(&data.node).copied().unwrap_or(0) + 1,
+            AigNode::Barrier { data, .. } => levels.get(&data.node).copied().unwrap_or(0) + 1,
         };
         levels.insert(id, level);
     }

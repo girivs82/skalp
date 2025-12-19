@@ -17,7 +17,7 @@
 //! reduction, SAT solving would be needed.
 
 use super::{Pass, PassResult};
-use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
+use crate::synth::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
 use std::collections::HashMap;
 
 /// FRAIG configuration
@@ -128,6 +128,11 @@ impl Fraig {
                 AigNode::Latch { data, .. } => {
                     // For latches, use the data input signature
                     // (In a proper sequential simulation, we'd need state)
+                    let data_sig = self.get_lit_signature(&signatures, *data);
+                    signatures.insert(id, data_sig);
+                }
+                AigNode::Barrier { data, .. } => {
+                    // Barriers are power domain boundaries - use the data input signature
                     let data_sig = self.get_lit_signature(&signatures, *data);
                     signatures.insert(id, data_sig);
                 }
@@ -286,6 +291,28 @@ impl Fraig {
                     let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
                     let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
                     let new_id = new_aig.add_latch(new_data, *init, new_clock, new_reset);
+                    old_to_new.insert(old_id, AigLit::new(new_id));
+                }
+                AigNode::Barrier {
+                    barrier_type,
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    init,
+                } => {
+                    let new_data = self.translate_lit(&old_to_new, *data);
+                    let new_enable = enable.map(|e| self.translate_lit(&old_to_new, e));
+                    let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
+                    let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
+                    let new_id = new_aig.add_barrier(
+                        barrier_type.clone(),
+                        new_data,
+                        new_enable,
+                        new_clock,
+                        new_reset,
+                        *init,
+                    );
                     old_to_new.insert(old_id, AigLit::new(new_id));
                 }
             }

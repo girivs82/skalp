@@ -11,7 +11,7 @@
 //! - `a & !a = 0`
 
 use super::{Pass, PassResult};
-use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo};
+use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, BarrierType};
 use std::collections::HashMap;
 
 /// Constant propagation pass
@@ -142,6 +142,32 @@ impl Pass for ConstProp {
                         *init,
                         resolved_clock,
                         resolved_reset,
+                        safety,
+                    );
+                    self.replacements.insert(id, AigLit::new(new_id));
+                }
+                AigNode::Barrier {
+                    barrier_type,
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    init,
+                } => {
+                    // Barriers are power domain boundaries - copy with resolved inputs
+                    let resolved_data = self.resolve(*data);
+                    let resolved_enable = enable.map(|e| self.resolve(e));
+                    let resolved_clock = clock.map(|c| self.resolve(AigLit::new(c)).node);
+                    let resolved_reset = reset.map(|r| self.resolve(AigLit::new(r)).node);
+
+                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                    let new_id = new_aig.add_barrier_with_safety(
+                        barrier_type.clone(),
+                        resolved_data,
+                        resolved_enable,
+                        resolved_clock,
+                        resolved_reset,
+                        *init,
                         safety,
                     );
                     self.replacements.insert(id, AigLit::new(new_id));

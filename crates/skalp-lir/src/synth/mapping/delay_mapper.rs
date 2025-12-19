@@ -144,6 +144,24 @@ impl DelayMapper {
                     best_cut.insert(node_id, None);
                 }
 
+                AigNode::Barrier { data, .. } => {
+                    // Barriers are power domain boundaries - fixed delay
+                    let barrier_delay = 30.0;
+                    let data_arrival = arrival.get(&data.node).copied().unwrap_or(0.0);
+                    arrival.insert(node_id, data_arrival + barrier_delay);
+
+                    mapping.insert(
+                        node_id,
+                        MappedNode {
+                            cell_type: "BARRIER_X1".to_string(),
+                            inputs: vec![(data.node, data.inverted)],
+                            area: 2.0,
+                            delay: barrier_delay,
+                        },
+                    );
+                    best_cut.insert(node_id, None);
+                }
+
                 AigNode::And { left, right } => {
                     // Find minimum delay cut
                     let (min_delay, best, cell_match) =

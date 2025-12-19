@@ -46,7 +46,7 @@ pub mod passes;
 pub mod sta;
 pub mod timing;
 
-pub use aig::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats};
+pub use aig::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats, BarrierType};
 pub use aig_builder::AigBuilder;
 pub use aig_writer::AigWriter;
 pub use cuts::{Cut, CutEnumeration, CutParams, CutSet};
