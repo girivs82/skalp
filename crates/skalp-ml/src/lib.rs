@@ -47,10 +47,14 @@
 //! engine.optimize(&mut aig);
 //! ```
 
+pub mod arch_select;
+pub mod cut_gnn;
 pub mod features;
 pub mod pass_advisor;
 pub mod policy;
 
+pub use arch_select::{ArchAdvisor, ArchAdvisorConfig, DatapathArchitecture};
+pub use cut_gnn::{CutScorer, CutScorerConfig, GnnCutSelector};
 pub use features::{extract_features, AigFeatures, FeatureExtractor};
 pub use pass_advisor::{MlPassAdvisor, PassAction, PassAdvisorConfig};
 pub use policy::{PolicyNetwork, SimplePolicy};
