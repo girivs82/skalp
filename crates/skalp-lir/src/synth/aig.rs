@@ -501,6 +501,25 @@ impl Aig {
         let mut levels = vec![0u32; self.nodes.len()];
         for (id, node) in self.iter_nodes() {
             if let AigNode::And { left, right } = node {
+                // Validate node references before accessing
+                if left.node.0 as usize >= self.nodes.len() {
+                    eprintln!(
+                        "[AIG ERROR] Node {} references left={} but only {} nodes exist",
+                        id.0,
+                        left.node.0,
+                        self.nodes.len()
+                    );
+                    continue;
+                }
+                if right.node.0 as usize >= self.nodes.len() {
+                    eprintln!(
+                        "[AIG ERROR] Node {} references right={} but only {} nodes exist",
+                        id.0,
+                        right.node.0,
+                        self.nodes.len()
+                    );
+                    continue;
+                }
                 let left_level = levels[left.node.0 as usize];
                 let right_level = levels[right.node.0 as usize];
                 levels[id.0 as usize] = left_level.max(right_level) + 1;
@@ -508,15 +527,19 @@ impl Aig {
         }
         let max_level = *levels.iter().max().unwrap_or(&0);
 
-        // Compute fanout
+        // Compute fanout (with validation)
         let mut fanout = vec![0u32; self.nodes.len()];
         for node in &self.nodes {
             for lit in node.fanins() {
-                fanout[lit.node.0 as usize] += 1;
+                if let Some(f) = fanout.get_mut(lit.node.0 as usize) {
+                    *f += 1;
+                }
             }
         }
         for (_, lit) in &self.outputs {
-            fanout[lit.node.0 as usize] += 1;
+            if let Some(f) = fanout.get_mut(lit.node.0 as usize) {
+                *f += 1;
+            }
         }
         let max_fanout = *fanout.iter().max().unwrap_or(&0);
         let avg_fanout = if self.nodes.len() > 1 {

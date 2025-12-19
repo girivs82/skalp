@@ -102,11 +102,14 @@ impl Rewrite {
         // Count current nodes in the cone
         let current_nodes = count_cone_nodes(aig, node, &cut.leaves, fanout_counts);
 
-        // Calculate gain
+        // Calculate gain (positive means improvement)
+        // Note: current_nodes only counts nodes with single fanout that can be removed
+        // impl_.and_count is the number of new gates we'll add
         let gain = current_nodes as i32 - impl_.and_count as i32;
 
-        // In zero-cost mode, accept gain >= 0 (allows depth optimization without area increase)
-        // In normal mode, only accept gain > 0 (strict area reduction)
+        // IMPORTANT: Only accept if we're actually reducing gates
+        // The gain must be > 0 (strictly positive) to guarantee improvement
+        // Zero-cost mode accepts gain >= 0 for depth optimization without area increase
         let accept = if self.zero_cost { gain >= 0 } else { gain > 0 };
 
         if accept {
@@ -297,6 +300,182 @@ fn count_cone_nodes(
     count
 }
 
+/// Rebuild AIG in topological order, discarding unreachable nodes
+///
+/// This is necessary after applying substitutions because nodes may reference
+/// other nodes that come later in the nodes vector. Processing in topological
+/// order ensures all references are resolved before they're needed.
+fn rebuild_aig_topological(aig: &mut Aig) {
+    use std::collections::{HashSet, VecDeque};
+
+    // Find all reachable nodes starting from outputs using DFS
+    let mut reachable: HashSet<AigNodeId> = HashSet::new();
+    let mut stack: Vec<AigNodeId> = Vec::new();
+
+    // Start from outputs
+    for (_, lit) in aig.outputs() {
+        stack.push(lit.node);
+    }
+
+    // Add constant
+    reachable.insert(AigNodeId::FALSE);
+
+    // DFS to find all reachable nodes
+    while let Some(id) = stack.pop() {
+        if reachable.contains(&id) {
+            continue;
+        }
+        reachable.insert(id);
+
+        if let Some(node) = aig.get_node(id) {
+            for fanin in node.fanins() {
+                if !reachable.contains(&fanin.node) {
+                    stack.push(fanin.node);
+                }
+            }
+            // Handle latch clock/reset
+            if let AigNode::Latch { clock, reset, .. } = node {
+                if let Some(c) = clock {
+                    if !reachable.contains(c) {
+                        stack.push(*c);
+                    }
+                }
+                if let Some(r) = reset {
+                    if !reachable.contains(r) {
+                        stack.push(*r);
+                    }
+                }
+            }
+        }
+    }
+
+    // Build new AIG with reachable nodes using Kahn's algorithm (O(V+E))
+    let mut new_aig = Aig::new(aig.name.clone());
+    let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
+    node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
+
+    // Compute in-degrees for reachable nodes (only count reachable fanins)
+    let mut in_degree: HashMap<AigNodeId, usize> = HashMap::new();
+    for &id in &reachable {
+        in_degree.insert(id, 0);
+    }
+    for &id in &reachable {
+        if let Some(node) = aig.get_node(id) {
+            for fanin in node.fanins() {
+                if reachable.contains(&fanin.node) && fanin.node != AigNodeId::FALSE {
+                    *in_degree.entry(id).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Initialize queue with nodes that have no dependencies (in_degree == 0)
+    let mut queue: VecDeque<AigNodeId> = VecDeque::new();
+    for (&id, &deg) in &in_degree {
+        if deg == 0 && id != AigNodeId::FALSE {
+            queue.push_back(id);
+        }
+    }
+
+    // Build fanout lists for efficient updates
+    let mut fanouts: HashMap<AigNodeId, Vec<AigNodeId>> = HashMap::new();
+    for &id in &reachable {
+        if let Some(node) = aig.get_node(id) {
+            for fanin in node.fanins() {
+                if reachable.contains(&fanin.node) {
+                    fanouts.entry(fanin.node).or_default().push(id);
+                }
+            }
+        }
+    }
+
+    // Process nodes in topological order
+    while let Some(id) = queue.pop_front() {
+        if node_map.contains_key(&id) {
+            continue;
+        }
+
+        let node = match aig.get_node(id) {
+            Some(n) => n.clone(),
+            None => continue,
+        };
+
+        // Process this node
+        match node {
+            AigNode::Const => {
+                // Already handled
+            }
+            AigNode::Input {
+                ref name,
+                source_net,
+            } => {
+                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                let new_id = new_aig.add_input_with_safety(name.clone(), source_net, safety);
+                node_map.insert(id, AigLit::new(new_id));
+            }
+            AigNode::And { left, right } => {
+                let new_left = resolve_lit(&node_map, left);
+                let new_right = resolve_lit(&node_map, right);
+                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                let new_lit = new_aig.add_and_with_safety(new_left, new_right, safety);
+                node_map.insert(id, new_lit);
+            }
+            AigNode::Latch {
+                data,
+                init,
+                clock,
+                reset,
+            } => {
+                let new_data = resolve_lit(&node_map, data);
+                let new_clock =
+                    clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
+                let new_reset =
+                    reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
+                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                let new_id =
+                    new_aig.add_latch_with_safety(new_data, init, new_clock, new_reset, safety);
+                node_map.insert(id, AigLit::new(new_id));
+            }
+        }
+
+        // Decrease in-degree of fanouts and add to queue if ready
+        if let Some(fouts) = fanouts.get(&id) {
+            for &fanout_id in fouts {
+                if let Some(deg) = in_degree.get_mut(&fanout_id) {
+                    if *deg > 0 {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(fanout_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Copy outputs with resolved literals
+    for (name, lit) in aig.outputs() {
+        let new_lit = resolve_lit(&node_map, *lit);
+        new_aig.add_output(name.clone(), new_lit);
+    }
+
+    // Replace the AIG
+    *aig = new_aig;
+}
+
+/// Resolve a literal through the node mapping
+fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+    if let Some(&mapped) = map.get(&lit.node) {
+        if lit.inverted {
+            mapped.invert()
+        } else {
+            mapped
+        }
+    } else {
+        lit
+    }
+}
+
 /// Compute fanout counts for all nodes
 fn compute_fanout_counts(aig: &Aig) -> HashMap<AigNodeId, usize> {
     let mut counts: HashMap<AigNodeId, usize> = HashMap::new();
@@ -382,7 +561,18 @@ impl Pass for Rewrite {
             }
 
             // Apply the rewrite by building a new implementation
+            let gates_before = aig.and_count();
             if let Some(new_lit) = self.apply_rewrite(aig, candidate) {
+                let gates_added = aig.and_count() - gates_before;
+                // Sanity check: we should add at most impl_.and_count gates
+                // (could be fewer due to structural hashing)
+                if gates_added > candidate.implementation.and_count {
+                    eprintln!(
+                        "    [rewrite warning] Expected to add {} gates, actually added {}",
+                        candidate.implementation.and_count, gates_added
+                    );
+                }
+
                 // Register the substitution
                 subst_map.insert(candidate.node, new_lit);
 
@@ -402,6 +592,8 @@ impl Pass for Rewrite {
         // Apply all substitutions to update the AIG
         if !subst_map.is_empty() {
             aig.apply_substitutions(&subst_map);
+            // Rebuild AIG to compact and ensure topological order
+            rebuild_aig_topological(aig);
         }
 
         result.record_after(aig);
