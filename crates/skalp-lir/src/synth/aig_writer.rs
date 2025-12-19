@@ -9,6 +9,7 @@ use crate::gate_netlist::{
 use crate::tech_library::{CellFunction, TechLibrary};
 
 use super::aig::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
+use super::mapping::{MappedNode, MappingResult};
 
 use std::collections::HashMap;
 
@@ -16,18 +17,35 @@ use std::collections::HashMap;
 pub struct AigWriter<'a> {
     /// Target technology library
     library: &'a TechLibrary,
+    /// Optional mapping result for technology-mapped output
+    mapping_result: Option<&'a MappingResult>,
 }
 
 impl<'a> AigWriter<'a> {
     /// Create a new writer
     pub fn new(library: &'a TechLibrary) -> Self {
-        Self { library }
+        Self {
+            library,
+            mapping_result: None,
+        }
+    }
+
+    /// Create a writer with technology mapping results
+    ///
+    /// When mapping results are provided, the writer will use the mapped
+    /// cell types (NAND2, NOR2, XOR2, MUX2, etc.) instead of just AND2/INV.
+    pub fn with_mapping(library: &'a TechLibrary, mapping: &'a MappingResult) -> Self {
+        Self {
+            library,
+            mapping_result: Some(mapping),
+        }
     }
 
     /// Write AIG to gate netlist
     pub fn write(&self, aig: &Aig) -> GateNetlist {
         let mut state = AigWriterState {
             library: self.library,
+            mapping_result: self.mapping_result,
             netlist: GateNetlist::new(aig.name.clone(), self.library.name.clone()),
             node_to_net: HashMap::new(),
             lit_to_net: HashMap::new(),
@@ -55,6 +73,9 @@ impl<'a> AigWriter<'a> {
 struct AigWriterState<'a> {
     /// Target technology library
     library: &'a TechLibrary,
+
+    /// Optional mapping result for technology-mapped output
+    mapping_result: Option<&'a MappingResult>,
 
     /// The netlist being built
     netlist: GateNetlist,
@@ -178,6 +199,15 @@ impl AigWriterState<'_> {
 
     /// Process an AND node
     fn process_and_node(&mut self, aig: &Aig, id: AigNodeId, left: AigLit, right: AigLit) {
+        // Check if we have a technology-mapped cell for this node
+        if let Some(mapping) = self.mapping_result {
+            if let Some(mapped) = mapping.mapped_nodes.get(&id) {
+                self.emit_mapped_cell(aig, id, mapped);
+                return;
+            }
+        }
+
+        // Fall back to basic AND2 mapping
         // Get input nets
         let left_net = self.get_or_create_lit_net(aig, left);
         let right_net = self.get_or_create_lit_net(aig, right);
@@ -208,6 +238,57 @@ impl AigWriterState<'_> {
             cell_fit,
             format!("aig.n{}", id.0),
             vec![left_net, right_net],
+            vec![output_net],
+        )
+        .with_safety_classification(safety);
+
+        self.next_cell_id += 1;
+        self.netlist.add_cell(cell);
+
+        // Store mapping
+        self.node_to_net.insert(id, output_net);
+        self.lit_to_net.insert((id, false), output_net);
+    }
+
+    /// Emit a technology-mapped cell (NAND2, XOR2, MUX2, etc.)
+    fn emit_mapped_cell(&mut self, aig: &Aig, id: AigNodeId, mapped: &MappedNode) {
+        // Create output net
+        let output_net = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));
+
+        // Get input nets from the mapped cell's inputs
+        // Each input is (AigNodeId, inverted) - we need to get or create the net
+        let input_nets: Vec<GateNetId> = mapped
+            .inputs
+            .iter()
+            .map(|(node, inverted)| {
+                let lit = AigLit {
+                    node: *node,
+                    inverted: *inverted,
+                };
+                self.get_or_create_lit_net(aig, lit)
+            })
+            .collect();
+
+        // Get safety info
+        let safety = aig
+            .get_safety_info(id)
+            .map(|s| {
+                s.classification
+                    .clone()
+                    .unwrap_or(CellSafetyClassification::Functional)
+            })
+            .unwrap_or(CellSafetyClassification::Functional);
+
+        // Create cell with the mapped cell type
+        let cell = Cell::new_comb(
+            CellId(self.next_cell_id),
+            mapped.cell_type.clone(),
+            self.library.name.clone(),
+            mapped.area, // Use mapped area (which includes FIT estimate)
+            format!("aig.n{}", id.0),
+            input_nets,
             vec![output_net],
         )
         .with_safety_classification(safety);

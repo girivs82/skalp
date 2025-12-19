@@ -261,11 +261,15 @@ impl SynthEngine {
         // Phase 4: Map to library cells
         self.run_technology_mapping(&aig);
 
-        // Phase 5: Convert back to GateNetlist
+        // Phase 5: Convert back to GateNetlist using technology mapping results
         if self.config.verbose {
             eprintln!("Converting AIG back to GateNetlist...");
         }
-        let writer = AigWriter::new(library);
+        let writer = if let Some(ref mapping) = self.mapping_result {
+            AigWriter::with_mapping(library, mapping)
+        } else {
+            AigWriter::new(library)
+        };
         let optimized = writer.write(&aig);
 
         self.total_time_ms = start.elapsed().as_millis() as u64;
