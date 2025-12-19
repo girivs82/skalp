@@ -11,7 +11,7 @@ This report summarizes the synthesis quality of SKALP's native Rust logic synthe
 | Design | Quick | Balanced | Full | Reduction |
 |--------|------:|----------|------|-----------|
 | Counter (8-bit) | 67 | 67 | 67 | 0% |
-| ALU (32-bit) | 2,071 | 1,177 | 711 | **65.7%** |
+| ALU (32-bit) | 2,071 | 1,177 | 525 | **74.6%** |
 | SPI Master | 19 | 19 | 19 | 0% |
 | FIFO (sync) | 11 | 11 | 11 | 0% |
 | CDC Synchronizer | 8 | 8 | 8 | 0% |
@@ -51,10 +51,10 @@ This report summarizes the synthesis quality of SKALP's native Rust logic synthe
 
 ### 1. ALU Optimization
 The 32-bit ALU shows significant optimization potential:
-- **65.7% cell reduction** from Quick to Full preset
-- 2,071 cells (Quick) -> 1,177 cells (Balanced) -> 711 cells (Full)
+- **74.6% cell reduction** from Quick to Full preset
+- 2,071 cells (Quick) -> 1,177 cells (Balanced) -> 525 cells (Full)
 - Demonstrates effectiveness of:
-  - AIG rewriting passes
+  - AIG rewriting passes with deterministic node ordering
   - FRAIG (SAT-based equivalence checking)
   - Area recovery during technology mapping
 

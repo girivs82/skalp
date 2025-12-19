@@ -306,7 +306,7 @@ fn count_cone_nodes(
 /// other nodes that come later in the nodes vector. Processing in topological
 /// order ensures all references are resolved before they're needed.
 fn rebuild_aig_topological(aig: &mut Aig) {
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::HashSet;
 
     // Find all reachable nodes starting from outputs AND latches using DFS
     // Latches must be included because they form feedback loops in sequential circuits
@@ -378,20 +378,32 @@ fn rebuild_aig_topological(aig: &mut Aig) {
     }
 
     // Initialize queue with nodes that have no dependencies (in_degree == 0)
-    // Sort by node ID to ensure deterministic processing order
-    let mut queue: VecDeque<AigNodeId> = VecDeque::new();
+    // Sort by node name for inputs (deterministic semantic ordering)
+    use std::collections::VecDeque;
     let mut zero_degree: Vec<AigNodeId> = in_degree
         .iter()
         .filter(|(&id, &deg)| deg == 0 && id != AigNodeId::FALSE)
         .map(|(&id, _)| id)
         .collect();
-    zero_degree.sort_by_key(|id| id.0);
-    for id in zero_degree {
-        queue.push_back(id);
-    }
 
-    // Build fanout lists for efficient updates
-    // Sort each fanout list by node ID for deterministic processing
+    // Sort zero-degree nodes: inputs by name, others by node type then ID
+    zero_degree.sort_by(|&a, &b| {
+        let node_a = aig.get_node(a);
+        let node_b = aig.get_node(b);
+        match (node_a, node_b) {
+            (
+                Some(AigNode::Input { name: name_a, .. }),
+                Some(AigNode::Input { name: name_b, .. }),
+            ) => name_a.cmp(name_b),
+            (Some(AigNode::Input { .. }), _) => std::cmp::Ordering::Less,
+            (_, Some(AigNode::Input { .. })) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(&b.0),
+        }
+    });
+
+    let mut queue: VecDeque<AigNodeId> = zero_degree.into_iter().collect();
+
+    // Build fanout lists for efficient updates (sort for determinism)
     let mut fanouts: HashMap<AigNodeId, Vec<AigNodeId>> = HashMap::new();
     for &id in &reachable {
         if let Some(node) = aig.get_node(id) {
@@ -402,9 +414,9 @@ fn rebuild_aig_topological(aig: &mut Aig) {
             }
         }
     }
-    // Sort fanout lists for deterministic order
-    for fanout_list in fanouts.values_mut() {
-        fanout_list.sort_by_key(|id| id.0);
+    // Sort fanout lists by node ID for determinism
+    for list in fanouts.values_mut() {
+        list.sort_by_key(|id| id.0);
     }
 
     // Process nodes in topological order
@@ -418,7 +430,7 @@ fn rebuild_aig_topological(aig: &mut Aig) {
             None => continue,
         };
 
-        // Process this node
+        // Add node to new AIG
         match node {
             AigNode::Const => {
                 // Already handled
