@@ -290,6 +290,15 @@ pub struct Aig {
 
     /// Structural hash for AND nodes: (left, right) -> node_id
     strash_map: HashMap<(AigLit, AigLit), AigNodeId>,
+
+    /// Choice nodes: representative node -> list of equivalent alternatives
+    ///
+    /// When FRAIG or other equivalence-detecting passes find that multiple nodes
+    /// compute the same function, they can be recorded as choices. The technology
+    /// mapper can then explore all alternatives to find the best implementation.
+    ///
+    /// Each alternative is stored as an AigLit to handle potential inversions.
+    choices: HashMap<AigNodeId, Vec<AigLit>>,
 }
 
 impl Aig {
@@ -302,6 +311,7 @@ impl Aig {
             safety_info: Vec::new(),
             net_to_lit: HashMap::new(),
             strash_map: HashMap::new(),
+            choices: HashMap::new(),
         };
 
         // Node 0 is always constant false
@@ -614,6 +624,134 @@ impl Aig {
         self.add_or(sel_then, not_sel_else)
     }
 
+    // ==================== Choice Node Management ====================
+
+    /// Add a choice (equivalent alternative) for a node
+    ///
+    /// Records that `alternative` computes the same function as `representative`.
+    /// The `inverted` flag indicates if the alternative is the inverse of the representative.
+    /// During technology mapping, the mapper can explore both implementations and
+    /// choose the one that results in better area/delay.
+    ///
+    /// # Arguments
+    /// * `representative` - The main node ID that represents this equivalence class
+    /// * `alternative` - An equivalent node (stored as AigLit to handle inversions)
+    ///
+    /// # Returns
+    /// `true` if the choice was added, `false` if it was a duplicate
+    pub fn add_choice(&mut self, representative: AigNodeId, alternative: AigLit) -> bool {
+        // Don't add self-references
+        if alternative.node == representative && !alternative.inverted {
+            return false;
+        }
+
+        // Don't add constant nodes as choices
+        if alternative.node == AigNodeId::FALSE {
+            return false;
+        }
+
+        let choices = self.choices.entry(representative).or_default();
+
+        // Check for duplicates
+        if choices.contains(&alternative) {
+            return false;
+        }
+
+        choices.push(alternative);
+        true
+    }
+
+    /// Get all choices (equivalent alternatives) for a node
+    ///
+    /// Returns a slice of AigLit representing equivalent implementations.
+    /// An empty slice means no choices have been recorded.
+    pub fn get_choices(&self, node: AigNodeId) -> &[AigLit] {
+        self.choices.get(&node).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Check if a node has any choices
+    pub fn has_choices(&self, node: AigNodeId) -> bool {
+        self.choices
+            .get(&node)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Get the total number of choice nodes (nodes with at least one alternative)
+    pub fn choice_node_count(&self) -> usize {
+        self.choices.iter().filter(|(_, v)| !v.is_empty()).count()
+    }
+
+    /// Get the total number of choices across all nodes
+    pub fn total_choice_count(&self) -> usize {
+        self.choices.values().map(|v| v.len()).sum()
+    }
+
+    /// Iterate over all nodes that have choices
+    pub fn iter_choice_nodes(&self) -> impl Iterator<Item = (AigNodeId, &[AigLit])> + '_ {
+        self.choices
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(id, choices)| (*id, choices.as_slice()))
+    }
+
+    /// Clear all choices
+    pub fn clear_choices(&mut self) {
+        self.choices.clear();
+    }
+
+    /// Get the representative node for a choice class
+    ///
+    /// Given any node in a choice class, returns the representative node.
+    /// This is useful for normalizing node references.
+    pub fn get_representative(&self, node: AigNodeId) -> AigNodeId {
+        // Check if this node is an alternative in some choice class
+        for (&rep, choices) in &self.choices {
+            for choice in choices {
+                if choice.node == node {
+                    return rep;
+                }
+            }
+        }
+        // Not found as an alternative - it's either a representative or has no choices
+        node
+    }
+
+    /// Merge two choice classes
+    ///
+    /// When two nodes are proven equivalent, merge their choice classes.
+    /// The node with the smaller ID becomes the representative.
+    pub fn merge_choice_classes(&mut self, node1: AigNodeId, node2: AigNodeId, inverted: bool) {
+        if node1 == node2 {
+            return;
+        }
+
+        // Smaller ID becomes representative
+        let (rep, other) = if node1.0 < node2.0 {
+            (node1, node2)
+        } else {
+            (node2, node1)
+        };
+
+        // Add the other node as a choice
+        let other_lit = if inverted {
+            AigLit::not(other)
+        } else {
+            AigLit::new(other)
+        };
+        self.add_choice(rep, other_lit);
+
+        // Move choices from other to rep
+        if let Some(other_choices) = self.choices.remove(&other) {
+            for choice in other_choices {
+                let adjusted = if inverted { choice.invert() } else { choice };
+                self.add_choice(rep, adjusted);
+            }
+        }
+    }
+
+    // ==================== End Choice Node Management ====================
+
     /// Compute AIG statistics
     pub fn compute_stats(&self) -> AigStats {
         let and_count = self.and_count();
@@ -675,6 +813,10 @@ impl Aig {
         // Total FIT
         let total_fit: f64 = self.safety_info.iter().map(|s| s.fit).sum();
 
+        // Choice statistics
+        let choice_node_count = self.choice_node_count();
+        let total_choice_count = self.total_choice_count();
+
         AigStats {
             node_count: self.nodes.len(),
             and_count,
@@ -685,6 +827,8 @@ impl Aig {
             max_fanout,
             avg_fanout,
             total_fit,
+            choice_node_count,
+            total_choice_count,
         }
     }
 
@@ -781,6 +925,10 @@ pub struct AigStats {
     pub avg_fanout: f64,
     /// Total FIT rate
     pub total_fit: f64,
+    /// Number of nodes with choices (equivalent alternatives)
+    pub choice_node_count: usize,
+    /// Total number of choices across all nodes
+    pub total_choice_count: usize,
 }
 
 impl std::fmt::Display for AigStats {
@@ -793,6 +941,13 @@ impl std::fmt::Display for AigStats {
         writeln!(f, "  Levels: {}", self.max_level)?;
         writeln!(f, "  Max fanout: {}", self.max_fanout)?;
         writeln!(f, "  Avg fanout: {:.2}", self.avg_fanout)?;
+        if self.choice_node_count > 0 {
+            writeln!(
+                f,
+                "  Choices: {} nodes with {} alternatives",
+                self.choice_node_count, self.total_choice_count
+            )?;
+        }
         writeln!(f, "  Total FIT: {:.4}", self.total_fit)
     }
 }
@@ -980,5 +1135,146 @@ mod tests {
             .is_safety_mechanism());
         // All sources included
         assert_eq!(merged.source_cells.len(), 2);
+    }
+
+    #[test]
+    fn test_choice_basic() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+
+        // Create two equivalent implementations: (a & b) and (b & a)
+        // In practice, strash would merge these, but for testing we manually add choice
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let bc = aig.add_and(AigLit::new(b), AigLit::new(c));
+
+        // No choices initially
+        assert!(!aig.has_choices(ab.node));
+        assert_eq!(aig.choice_node_count(), 0);
+        assert_eq!(aig.total_choice_count(), 0);
+
+        // Add bc as a choice for ab
+        assert!(aig.add_choice(ab.node, AigLit::new(bc.node)));
+
+        assert!(aig.has_choices(ab.node));
+        assert_eq!(aig.choice_node_count(), 1);
+        assert_eq!(aig.total_choice_count(), 1);
+
+        let choices = aig.get_choices(ab.node);
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].node, bc.node);
+        assert!(!choices[0].inverted);
+    }
+
+    #[test]
+    fn test_choice_inverted() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let nab = aig.add_and(AigLit::not(a), AigLit::not(b)); // !(a | b) = !a & !b by De Morgan
+
+        // Add inverted choice
+        assert!(aig.add_choice(ab.node, AigLit::not(nab.node)));
+
+        let choices = aig.get_choices(ab.node);
+        assert_eq!(choices.len(), 1);
+        assert!(choices[0].inverted);
+    }
+
+    #[test]
+    fn test_choice_no_duplicates() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+
+        // Create genuinely different nodes (not merged by strash)
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let bc = aig.add_and(AigLit::new(b), AigLit::new(c)); // Different from ab
+
+        // Add the same choice twice
+        assert!(aig.add_choice(ab.node, AigLit::new(bc.node)));
+        assert!(!aig.add_choice(ab.node, AigLit::new(bc.node))); // Duplicate
+
+        assert_eq!(aig.total_choice_count(), 1);
+    }
+
+    #[test]
+    fn test_choice_no_self_reference() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+
+        // Can't add self as choice
+        assert!(!aig.add_choice(ab.node, AigLit::new(ab.node)));
+        assert_eq!(aig.total_choice_count(), 0);
+    }
+
+    #[test]
+    fn test_choice_merge_classes() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let bc = aig.add_and(AigLit::new(b), AigLit::new(c));
+        let ac = aig.add_and(AigLit::new(a), AigLit::new(c));
+
+        // ab has bc as choice
+        aig.add_choice(ab.node, AigLit::new(bc.node));
+        // ac also is a choice
+        aig.add_choice(ac.node, AigLit::new(bc.node));
+
+        // Merge: ab and ac are equivalent
+        aig.merge_choice_classes(ab.node, ac.node, false);
+
+        // The smaller ID (ab) should be the representative
+        // and should have both bc and ac as choices
+        let choices = aig.get_choices(ab.node);
+        assert!(choices.len() >= 2); // ac and bc
+    }
+
+    #[test]
+    fn test_choice_stats() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let bc = aig.add_and(AigLit::new(b), AigLit::new(c));
+        let ac = aig.add_and(AigLit::new(a), AigLit::new(c));
+
+        aig.add_choice(ab.node, AigLit::new(bc.node));
+        aig.add_choice(ab.node, AigLit::new(ac.node));
+
+        let stats = aig.compute_stats();
+        assert_eq!(stats.choice_node_count, 1);
+        assert_eq!(stats.total_choice_count, 2);
+    }
+
+    #[test]
+    fn test_choice_clear() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+
+        // Create genuinely different nodes
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let bc = aig.add_and(AigLit::new(b), AigLit::new(c));
+
+        aig.add_choice(ab.node, AigLit::new(bc.node));
+        assert_eq!(aig.choice_node_count(), 1);
+
+        aig.clear_choices();
+        assert_eq!(aig.choice_node_count(), 0);
+        assert_eq!(aig.total_choice_count(), 0);
     }
 }

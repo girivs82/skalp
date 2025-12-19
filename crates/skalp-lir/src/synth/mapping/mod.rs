@@ -23,7 +23,7 @@ pub use cell_sizer::{
     size_cells, size_cells_for_area, size_cells_for_timing, CellSizer, CellSizingConfig,
     CellSizingStats, DriveStrength,
 };
-pub use cut_mapper::{CutMapper, MappingResult};
+pub use cut_mapper::{CutMapper, CutMapperConfig, MappingResult};
 pub use delay_mapper::{DelayMapper, DelayMappingConfig};
 
 use super::timing::CellTiming;
@@ -242,6 +242,10 @@ impl CellMatcher {
                         cut: Cut {
                             leaves: Vec::new(), // Will be filled by caller
                             truth_table: tt,
+                            area_cost: cell.area as f32,
+                            arrival_time: cell.delay as f32,
+                            area_flow: cell.area as f32,
+                            edge_count: num_inputs as u32,
                         },
                         cell_type: cell.cell_type.clone(),
                         area: cell.area,
@@ -263,6 +267,10 @@ impl CellMatcher {
                         cut: Cut {
                             leaves: Vec::new(),
                             truth_table: tt,
+                            area_cost: (cell.area + 1.0) as f32, // Include inverter cost
+                            arrival_time: (cell.delay + 15.0) as f32,
+                            area_flow: (cell.area + 1.0) as f32,
+                            edge_count: num_inputs as u32,
                         },
                         cell_type: cell.cell_type.clone(),
                         area: cell.area + 1.0, // Add inverter cost

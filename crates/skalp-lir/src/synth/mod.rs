@@ -43,13 +43,14 @@ pub mod liberty;
 pub mod mapping;
 pub mod npn;
 pub mod passes;
+pub mod sat;
 pub mod sta;
 pub mod timing;
 
 pub use aig::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats, BarrierType};
 pub use aig_builder::AigBuilder;
 pub use aig_writer::AigWriter;
-pub use cuts::{Cut, CutEnumeration, CutParams, CutSet};
+pub use cuts::{Cut, CutEnumeration, CutParams, CutPriority, CutSet};
 pub use datapath::{
     generate_carry_lookahead, generate_kogge_stone, generate_ripple_carry, AdderArchitecture,
     AdderConfig, AdderOptimizer, AdderStats, DatapathConfig, DatapathOp, DatapathStats,
@@ -58,8 +59,8 @@ pub use engine::{SynthConfig, SynthEngine, SynthPreset, SynthResult};
 pub use liberty::{create_basic_library, LibertyLibrary};
 pub use mapping::{
     size_cells, size_cells_for_area, size_cells_for_timing, CellMatcher, CellSizer,
-    CellSizingConfig, CellSizingStats, CutMapper, CutMatch, DelayMapper, DelayMappingConfig,
-    DriveStrength, MappedNode, MappingObjective, MappingResult, MappingStats,
+    CellSizingConfig, CellSizingStats, CutMapper, CutMapperConfig, CutMatch, DelayMapper,
+    DelayMappingConfig, DriveStrength, MappedNode, MappingObjective, MappingResult, MappingStats,
 };
 pub use npn::{are_npn_equivalent, npn_canonicalize, NpnCanonical, NpnDatabase};
 pub use passes::{
@@ -68,6 +69,7 @@ pub use passes::{
     FraigConfig, FraigStats, Pass, PassResult, Refactor, Retiming, RetimingConfig, RetimingStats,
     Rewrite, Strash,
 };
+pub use sat::{Lit, SatResult, Solver, SolverStats};
 pub use sta::{Sta, StaResult, TimingOptHints, TimingPath};
 pub use timing::{
     CellTiming, ClockDefinition, NetTiming, NldmTable, OperatingConditions, PinTiming, TimePs,

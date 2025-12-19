@@ -2,11 +2,73 @@
 //!
 //! This module implements the core cut-based mapping algorithm that
 //! maps an AIG to technology library cells.
+//!
+//! # Features
+//!
+//! - Priority-based cut selection (area, delay, balanced)
+//! - Two-phase mapping: delay-optimal + area recovery
+//! - Choice-aware mapping for exploring equivalent implementations
 
 use super::{CellMatcher, CutMatch, MappedNode, MappingObjective, MappingStats};
-use crate::synth::cuts::{CutEnumeration, CutParams};
+use crate::synth::cuts::{CutEnumeration, CutParams, CutPriority};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, Cut};
 use std::collections::{HashMap, HashSet};
+
+/// Configuration for the cut-based mapper
+#[derive(Debug, Clone)]
+pub struct CutMapperConfig {
+    /// Maximum cut size (K)
+    pub cut_size: usize,
+    /// Maximum cuts per node
+    pub max_cuts: usize,
+    /// Whether to use priority-based cut enumeration
+    pub use_priority_cuts: bool,
+    /// Whether to enable area recovery phase
+    pub area_recovery: bool,
+    /// Area recovery iterations
+    pub recovery_iterations: usize,
+    /// Whether to use choice nodes for exploration
+    pub use_choices: bool,
+}
+
+impl Default for CutMapperConfig {
+    fn default() -> Self {
+        Self {
+            cut_size: 4,
+            max_cuts: 8,
+            use_priority_cuts: true,
+            area_recovery: true,
+            recovery_iterations: 2,
+            use_choices: false,
+        }
+    }
+}
+
+impl CutMapperConfig {
+    /// Configuration for fast mapping (minimal optimization)
+    pub fn fast() -> Self {
+        Self {
+            cut_size: 4,
+            max_cuts: 4,
+            use_priority_cuts: false,
+            area_recovery: false,
+            recovery_iterations: 0,
+            use_choices: false,
+        }
+    }
+
+    /// Configuration for best quality mapping
+    pub fn quality() -> Self {
+        Self {
+            cut_size: 6,
+            max_cuts: 12,
+            use_priority_cuts: true,
+            area_recovery: true,
+            recovery_iterations: 3,
+            use_choices: true,
+        }
+    }
+}
 
 /// Cut-based technology mapper
 pub struct CutMapper {
@@ -20,6 +82,8 @@ pub struct CutMapper {
     area_weight: f64,
     /// Delay weight (for balanced objective)
     delay_weight: f64,
+    /// Mapper configuration
+    config: CutMapperConfig,
 }
 
 impl Default for CutMapper {
@@ -37,6 +101,7 @@ impl CutMapper {
             objective: MappingObjective::Balanced,
             area_weight: 1.0,
             delay_weight: 1.0,
+            config: CutMapperConfig::default(),
         }
     }
 
@@ -48,6 +113,26 @@ impl CutMapper {
             objective,
             area_weight: 1.0,
             delay_weight: 1.0,
+            config: CutMapperConfig::default(),
+        }
+    }
+
+    /// Create mapper with specific configuration
+    pub fn with_config(config: CutMapperConfig) -> Self {
+        let cut_params = CutParams {
+            k: config.cut_size,
+            max_cuts: config.max_cuts,
+            use_choices: config.use_choices,
+            ..Default::default()
+        };
+
+        Self {
+            matcher: CellMatcher::new(),
+            cut_params,
+            objective: MappingObjective::Balanced,
+            area_weight: 1.0,
+            delay_weight: 1.0,
+            config,
         }
     }
 
@@ -62,12 +147,96 @@ impl CutMapper {
         self.delay_weight = delay_weight;
     }
 
+    /// Set configuration
+    pub fn set_config(&mut self, config: CutMapperConfig) {
+        self.config = config.clone();
+        self.cut_params.k = config.cut_size;
+        self.cut_params.max_cuts = config.max_cuts;
+        self.cut_params.use_choices = config.use_choices;
+    }
+
     /// Map an AIG to a technology netlist
     pub fn map(&self, aig: &Aig) -> MappingResult {
-        let mut result = MappingResult::new();
+        if self.config.use_priority_cuts && self.config.area_recovery {
+            self.map_with_recovery(aig)
+        } else if self.config.use_priority_cuts {
+            self.map_with_priority(aig)
+        } else {
+            self.map_basic(aig)
+        }
+    }
 
-        // Step 1: Enumerate cuts
+    /// Two-phase mapping: delay-optimal followed by area recovery
+    fn map_with_recovery(&self, aig: &Aig) -> MappingResult {
+        // Phase 1: Delay-optimal mapping
+        let mut params = self.cut_params.clone();
+        params.priority = CutPriority::Delay;
+
+        let has_any_choices = aig.choice_node_count() > 0;
+        let cuts = if self.config.use_choices && has_any_choices {
+            CutEnumeration::enumerate_with_choices(aig, params.clone())
+        } else {
+            CutEnumeration::enumerate_with_priority(aig, params.clone())
+        };
+
+        let mut result = self.map_internal(aig, &cuts);
+        let initial_delay = result.stats.critical_delay;
+
+        // Phase 2: Area recovery with delay bound
+        if self.config.area_recovery && self.config.recovery_iterations > 0 {
+            let delay_bound = initial_delay * 1.05; // Allow 5% slack
+
+            for _ in 0..self.config.recovery_iterations {
+                params.priority = CutPriority::AreaWithDelayBound;
+                params.delay_bound = delay_bound as f32;
+
+                let recovery_cuts = if self.config.use_choices {
+                    CutEnumeration::enumerate_with_choices(aig, params.clone())
+                } else {
+                    CutEnumeration::enumerate_with_priority(aig, params.clone())
+                };
+
+                let recovery_result = self.map_internal(aig, &recovery_cuts);
+
+                // Accept if area improved without violating delay
+                if recovery_result.stats.total_area < result.stats.total_area
+                    && recovery_result.stats.critical_delay <= delay_bound
+                {
+                    result = recovery_result;
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Priority-based mapping (single phase)
+    fn map_with_priority(&self, aig: &Aig) -> MappingResult {
+        let mut params = self.cut_params.clone();
+        params.priority = match self.objective {
+            MappingObjective::Area => CutPriority::Area,
+            MappingObjective::Delay => CutPriority::Delay,
+            MappingObjective::Balanced => CutPriority::AreaDelay,
+        };
+
+        let cuts = if self.config.use_choices {
+            CutEnumeration::enumerate_with_choices(aig, params)
+        } else {
+            CutEnumeration::enumerate_with_priority(aig, params)
+        };
+
+        self.map_internal(aig, &cuts)
+    }
+
+    /// Basic mapping without priority cuts
+    fn map_basic(&self, aig: &Aig) -> MappingResult {
         let cuts = CutEnumeration::enumerate(aig, self.cut_params.clone());
+        self.map_internal(aig, &cuts)
+    }
+
+    /// Internal mapping implementation
+    fn map_internal(&self, aig: &Aig, cuts: &CutEnumeration) -> MappingResult {
+        let mut result = MappingResult::new();
 
         // Step 2: Compute best match for each node
         let mut best_match: HashMap<AigNodeId, Option<CutMatch>> = HashMap::new();
@@ -135,7 +304,7 @@ impl CutMapper {
 
                 AigNode::And { left, right } => {
                     // Find best cut and cell match
-                    let best = self.find_best_match(aig, node_id, &cuts, &node_delay, &node_area);
+                    let best = self.find_best_match(aig, node_id, cuts, &node_delay, &node_area);
 
                     if let Some(match_) = &best {
                         let arrival = self.compute_arrival(&match_.cut, &node_delay);
@@ -423,5 +592,127 @@ mod tests {
         let result = MappingResult::new();
         assert!(!result.is_success());
         assert!(result.get_node(AigNodeId(0)).is_none());
+    }
+
+    #[test]
+    fn test_cut_mapper_config_default() {
+        let config = CutMapperConfig::default();
+        assert_eq!(config.cut_size, 4);
+        assert_eq!(config.max_cuts, 8);
+        assert!(config.use_priority_cuts);
+        assert!(config.area_recovery);
+        assert_eq!(config.recovery_iterations, 2);
+        assert!(!config.use_choices);
+    }
+
+    #[test]
+    fn test_cut_mapper_config_fast() {
+        let config = CutMapperConfig::fast();
+        assert!(!config.use_priority_cuts);
+        assert!(!config.area_recovery);
+        assert_eq!(config.max_cuts, 4);
+    }
+
+    #[test]
+    fn test_cut_mapper_config_quality() {
+        let config = CutMapperConfig::quality();
+        assert!(config.use_priority_cuts);
+        assert!(config.area_recovery);
+        assert_eq!(config.cut_size, 6);
+        assert_eq!(config.max_cuts, 12);
+        assert!(config.use_choices);
+    }
+
+    #[test]
+    fn test_cut_mapper_with_config() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let abc = aig.add_and(ab, AigLit::new(c));
+        aig.add_output("y".to_string(), abc);
+
+        // Test with fast config
+        let mapper_fast = CutMapper::with_config(CutMapperConfig::fast());
+        let result_fast = mapper_fast.map(&aig);
+        assert!(result_fast.is_success());
+
+        // Test with quality config
+        let mapper_quality = CutMapper::with_config(CutMapperConfig::quality());
+        let result_quality = mapper_quality.map(&aig);
+        assert!(result_quality.is_success());
+    }
+
+    #[test]
+    fn test_cut_mapper_priority_mapping() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+        let d = aig.add_input("d".to_string(), None);
+
+        // Create a more complex circuit for priority mapping to show difference
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let cd = aig.add_and(AigLit::new(c), AigLit::new(d));
+        let abcd = aig.add_and(ab, cd);
+        aig.add_output("y".to_string(), abcd);
+
+        // Priority mapping should work
+        let config = CutMapperConfig {
+            use_priority_cuts: true,
+            area_recovery: false,
+            ..Default::default()
+        };
+
+        let mapper = CutMapper::with_config(config);
+        let result = mapper.map(&aig);
+
+        assert!(result.is_success());
+        assert!(result.stats.cell_count >= 1);
+    }
+
+    #[test]
+    fn test_cut_mapper_area_recovery() {
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let abc = aig.add_and(ab, AigLit::new(c));
+        aig.add_output("y".to_string(), abc);
+
+        // Enable area recovery
+        let config = CutMapperConfig {
+            area_recovery: true,
+            recovery_iterations: 2,
+            ..Default::default()
+        };
+
+        let mapper = CutMapper::with_config(config);
+        let result = mapper.map(&aig);
+
+        assert!(result.is_success());
+        // Area recovery should complete without error
+        assert!(result.stats.critical_delay > 0.0);
+    }
+
+    #[test]
+    fn test_cut_mapper_set_config() {
+        let mut mapper = CutMapper::new();
+
+        let config = CutMapperConfig::quality();
+        mapper.set_config(config);
+
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        aig.add_output("y".to_string(), ab);
+
+        let result = mapper.map(&aig);
+        assert!(result.is_success());
     }
 }

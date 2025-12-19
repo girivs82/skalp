@@ -308,13 +308,21 @@ fn count_cone_nodes(
 fn rebuild_aig_topological(aig: &mut Aig) {
     use std::collections::{HashSet, VecDeque};
 
-    // Find all reachable nodes starting from outputs using DFS
+    // Find all reachable nodes starting from outputs AND latches using DFS
+    // Latches must be included because they form feedback loops in sequential circuits
     let mut reachable: HashSet<AigNodeId> = HashSet::new();
     let mut stack: Vec<AigNodeId> = Vec::new();
 
     // Start from outputs
     for (_, lit) in aig.outputs() {
         stack.push(lit.node);
+    }
+
+    // Also start from all latches and barriers (sequential elements with feedback)
+    for (id, node) in aig.iter_nodes() {
+        if node.is_latch() || matches!(node, AigNode::Barrier { .. }) {
+            stack.push(id);
+        }
     }
 
     // Add constant
@@ -370,14 +378,20 @@ fn rebuild_aig_topological(aig: &mut Aig) {
     }
 
     // Initialize queue with nodes that have no dependencies (in_degree == 0)
+    // Sort by node ID to ensure deterministic processing order
     let mut queue: VecDeque<AigNodeId> = VecDeque::new();
-    for (&id, &deg) in &in_degree {
-        if deg == 0 && id != AigNodeId::FALSE {
-            queue.push_back(id);
-        }
+    let mut zero_degree: Vec<AigNodeId> = in_degree
+        .iter()
+        .filter(|(&id, &deg)| deg == 0 && id != AigNodeId::FALSE)
+        .map(|(&id, _)| id)
+        .collect();
+    zero_degree.sort_by_key(|id| id.0);
+    for id in zero_degree {
+        queue.push_back(id);
     }
 
     // Build fanout lists for efficient updates
+    // Sort each fanout list by node ID for deterministic processing
     let mut fanouts: HashMap<AigNodeId, Vec<AigNodeId>> = HashMap::new();
     for &id in &reachable {
         if let Some(node) = aig.get_node(id) {
@@ -387,6 +401,10 @@ fn rebuild_aig_topological(aig: &mut Aig) {
                 }
             }
         }
+    }
+    // Sort fanout lists for deterministic order
+    for fanout_list in fanouts.values_mut() {
+        fanout_list.sort_by_key(|id| id.0);
     }
 
     // Process nodes in topological order

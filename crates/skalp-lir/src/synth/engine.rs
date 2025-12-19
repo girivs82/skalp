@@ -14,8 +14,13 @@
 //! ```
 
 use super::liberty::LibertyLibrary;
-use super::mapping::{CutMapper, DelayMapper, DelayMappingConfig, MappingObjective, MappingResult};
-use super::passes::{Balance, ConstProp, Dce, Pass, PassResult, Refactor, Rewrite, Strash};
+use super::mapping::{
+    CutMapper, CutMapperConfig, DelayMapper, DelayMappingConfig, MappingObjective, MappingResult,
+};
+use super::passes::{
+    Balance, BufferConfig, BufferInsertion, ConstProp, Dce, Fraig, FraigConfig, Pass, PassResult,
+    Refactor, Retiming, RetimingConfig, Rewrite, Strash,
+};
 use super::sta::{Sta, StaResult};
 use super::timing::{TimePs, TimingConstraints};
 use super::{Aig, AigBuilder, AigWriter};
@@ -350,6 +355,7 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
+                "fraig".to_string(), // SAT-based equivalence checking
                 "dce".to_string(),
             ],
             SynthPreset::Timing => vec![
@@ -357,6 +363,8 @@ impl SynthEngine {
                 "balance".to_string(),
                 "rewrite".to_string(),
                 "balance".to_string(),
+                "retiming".to_string(), // Register retiming for timing optimization
+                "buffer".to_string(),   // Buffer insertion for fanout management
                 "dce".to_string(),
             ],
             SynthPreset::Area => vec![
@@ -421,6 +429,48 @@ impl SynthEngine {
                 let mut pass = Dce::new();
                 Some(pass.run(aig))
             }
+            "fraig" => {
+                // FRAIG: SAT-based functional equivalence checking
+                let config = FraigConfig::default();
+                let mut pass = Fraig::with_config(config);
+                Some(pass.run(aig))
+            }
+            "fraig_choices" => {
+                // FRAIG with choice recording for mapper exploration
+                let config = FraigConfig {
+                    record_choices: true,
+                    ..Default::default()
+                };
+                let mut pass = Fraig::with_config(config);
+                Some(pass.run(aig))
+            }
+            "buffer" | "buffer_insert" => {
+                // Buffer insertion for fanout management
+                let config = BufferConfig::default();
+                let mut pass = BufferInsertion::with_config(config);
+                Some(pass.run(aig))
+            }
+            "buffer_perf" => {
+                // High-performance buffer insertion (more aggressive)
+                let config = BufferConfig::high_performance();
+                let mut pass = BufferInsertion::with_config(config);
+                Some(pass.run(aig))
+            }
+            "retiming" | "retime" => {
+                // Register retiming for timing optimization
+                let mut config = RetimingConfig::default();
+                if let Some(period) = self.config.target_period {
+                    config.target_period = period;
+                }
+                let mut pass = Retiming::with_config(config);
+                Some(pass.run(aig))
+            }
+            "retiming_hf" => {
+                // High-frequency retiming (aggressive)
+                let config = RetimingConfig::high_frequency();
+                let mut pass = Retiming::with_config(config);
+                Some(pass.run(aig))
+            }
             _ => {
                 if self.config.verbose {
                     eprintln!("Unknown pass: {}", pass_name);
@@ -467,12 +517,34 @@ impl SynthEngine {
                     stats: delay_result.stats,
                 }
             }
-            SynthPreset::Area => {
-                let mapper = CutMapper::with_objective(MappingObjective::Area);
+            SynthPreset::Quick => {
+                // Fast mapping with minimal optimization
+                let mapper = CutMapper::with_config(CutMapperConfig::fast());
                 mapper.map(aig)
             }
-            _ => {
-                let mapper = CutMapper::with_objective(MappingObjective::Balanced);
+            SynthPreset::Full | SynthPreset::Resyn2 => {
+                // Quality mapping with priority cuts and area recovery
+                let mut config = CutMapperConfig::quality();
+                // Enable choice-aware mapping if AIG has choice nodes
+                config.use_choices = aig.choice_node_count() > 0;
+                let mapper = CutMapper::with_config(config);
+                mapper.map(aig)
+            }
+            SynthPreset::Area => {
+                // Area-focused mapping with aggressive area recovery
+                let config = CutMapperConfig {
+                    use_priority_cuts: true,
+                    area_recovery: true,
+                    recovery_iterations: 3,
+                    ..Default::default()
+                };
+                let mut mapper = CutMapper::with_config(config);
+                mapper.set_objective(MappingObjective::Area);
+                mapper.map(aig)
+            }
+            SynthPreset::Balanced => {
+                // Default balanced mapping with area recovery
+                let mapper = CutMapper::with_config(CutMapperConfig::default());
                 mapper.map(aig)
             }
         };
