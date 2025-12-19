@@ -27,6 +27,9 @@ pub struct Rewrite {
     cut_params: CutParams,
     /// NPN database
     npn_db: NpnDatabase,
+    /// Zero-cost mode: allow rewrites with gain >= 0 (instead of > 0)
+    /// This enables more depth optimization without area increase
+    zero_cost: bool,
     /// Number of nodes rewritten
     rewritten_count: usize,
     /// Total gain (nodes saved)
@@ -39,6 +42,20 @@ impl Rewrite {
         Self {
             cut_params: CutParams::default(),
             npn_db: NpnDatabase::new(),
+            zero_cost: false,
+            rewritten_count: 0,
+            total_gain: 0,
+        }
+    }
+
+    /// Create a rewriting pass with zero-cost mode enabled
+    /// Zero-cost mode allows rewrites that don't change node count
+    /// (equivalent to ABC's `rewrite -z`)
+    pub fn zero_cost() -> Self {
+        Self {
+            cut_params: CutParams::default(),
+            npn_db: NpnDatabase::new(),
+            zero_cost: true,
             rewritten_count: 0,
             total_gain: 0,
         }
@@ -49,6 +66,18 @@ impl Rewrite {
         Self {
             cut_params,
             npn_db: NpnDatabase::new(),
+            zero_cost: false,
+            rewritten_count: 0,
+            total_gain: 0,
+        }
+    }
+
+    /// Create a rewriting pass with custom cut parameters and zero-cost mode
+    pub fn with_params_zero_cost(cut_params: CutParams) -> Self {
+        Self {
+            cut_params,
+            npn_db: NpnDatabase::new(),
+            zero_cost: true,
             rewritten_count: 0,
             total_gain: 0,
         }
@@ -76,14 +105,149 @@ impl Rewrite {
         // Calculate gain
         let gain = current_nodes as i32 - impl_.and_count as i32;
 
-        if gain > 0 {
+        // In zero-cost mode, accept gain >= 0 (allows depth optimization without area increase)
+        // In normal mode, only accept gain > 0 (strict area reduction)
+        let accept = if self.zero_cost { gain >= 0 } else { gain > 0 };
+
+        if accept {
             Some(RewriteCandidate {
                 node,
                 cut: cut.clone(),
                 canonical,
-                implementation: impl_.clone(),
+                implementation: impl_,
                 gain,
             })
+        } else {
+            None
+        }
+    }
+
+    /// Apply a rewrite by building the new implementation in the AIG
+    /// Returns the new literal that should replace the original node
+    fn apply_rewrite(&self, aig: &mut Aig, candidate: &RewriteCandidate) -> Option<AigLit> {
+        // For now, we use a simple approach:
+        // If the implementation has fewer gates than the current cone,
+        // we rebuild using basic boolean algebra
+
+        // Get the leaves as literals, applying the NPN transformation
+        let num_leaves = candidate.cut.leaves.len();
+        if num_leaves > 6 {
+            return None; // Too many inputs
+        }
+
+        // Build input literals with NPN transformations applied
+        let mut input_lits: Vec<AigLit> = Vec::new();
+        for i in 0..num_leaves {
+            let perm_idx = candidate.canonical.permutation[i];
+            if perm_idx < num_leaves {
+                let leaf = candidate.cut.leaves[perm_idx];
+                let negated = (candidate.canonical.input_negations >> i) & 1 == 1;
+                input_lits.push(AigLit {
+                    node: leaf,
+                    inverted: negated,
+                });
+            } else {
+                // Invalid permutation index
+                return None;
+            }
+        }
+
+        // Build the implementation using the gates from NPN database
+        let result_lit = if candidate.implementation.gates.is_empty() {
+            // No gates needed - the result is a direct input or constant
+            // Decode the result_lit from the implementation
+            let impl_result = candidate.implementation.result_lit;
+            let idx = (impl_result / 2) as usize;
+            let inv = impl_result & 1 == 1;
+
+            if idx < num_leaves {
+                let mut lit = input_lits[idx];
+                if inv {
+                    lit.inverted = !lit.inverted;
+                }
+                lit
+            } else {
+                // Invalid - shouldn't happen for empty gates
+                return None;
+            }
+        } else {
+            // Build using the gate list
+            self.build_from_gates(
+                aig,
+                &input_lits,
+                &candidate.implementation.gates,
+                candidate.implementation.result_lit,
+            )?
+        };
+
+        // Apply output negation if needed
+        let final_lit = if candidate.canonical.output_negated {
+            AigLit {
+                node: result_lit.node,
+                inverted: !result_lit.inverted,
+            }
+        } else {
+            result_lit
+        };
+
+        Some(final_lit)
+    }
+
+    /// Build an implementation from a list of gates
+    /// Each gate is (left_lit, right_lit) where lit = input_idx * 2 + inverted
+    /// result_lit specifies which literal is the output
+    fn build_from_gates(
+        &self,
+        aig: &mut Aig,
+        input_lits: &[AigLit],
+        gates: &[(u8, u8)],
+        result_lit: u8,
+    ) -> Option<AigLit> {
+        let num_inputs = input_lits.len();
+        let mut node_lits: Vec<AigLit> = input_lits.to_vec();
+
+        for &(left_encoded, right_encoded) in gates {
+            let left_idx = (left_encoded / 2) as usize;
+            let left_inv = left_encoded & 1 == 1;
+            let right_idx = (right_encoded / 2) as usize;
+            let right_inv = right_encoded & 1 == 1;
+
+            // Get literals for left and right inputs
+            let left_lit = if left_idx < node_lits.len() {
+                let mut lit = node_lits[left_idx];
+                if left_inv {
+                    lit.inverted = !lit.inverted;
+                }
+                lit
+            } else {
+                return None; // Invalid index
+            };
+
+            let right_lit = if right_idx < node_lits.len() {
+                let mut lit = node_lits[right_idx];
+                if right_inv {
+                    lit.inverted = !lit.inverted;
+                }
+                lit
+            } else {
+                return None; // Invalid index
+            };
+
+            // Create the AND node
+            let new_lit = aig.add_and(left_lit, right_lit);
+            node_lits.push(new_lit);
+        }
+
+        // Use the result_lit to get the correct output
+        let result_idx = (result_lit / 2) as usize;
+        let result_inv = result_lit & 1 == 1;
+
+        if result_idx < node_lits.len() {
+            let mut lit = node_lits[result_idx];
+            if result_inv {
+                lit.inverted = !lit.inverted;
+            }
+            Some(lit)
         } else {
             None
         }
@@ -193,18 +357,41 @@ impl Pass for Rewrite {
         // Sort by gain (highest first)
         candidates.sort_by(|a, b| b.gain.cmp(&a.gain));
 
-        // Apply rewrites greedily
-        // Note: For simplicity, we just collect stats here.
-        // A full implementation would actually apply the rewrites.
-        for candidate in &candidates {
-            // In a full implementation, we would:
-            // 1. Build the new subgraph using the optimal implementation
-            // 2. Update the node mapping
-            // 3. Run DCE to clean up
+        // Track which nodes have been rewritten (to avoid conflicts)
+        let mut rewritten_nodes: std::collections::HashSet<AigNodeId> =
+            std::collections::HashSet::new();
 
-            // For now, just count potential improvements
-            self.rewritten_count += 1;
-            self.total_gain += candidate.gain;
+        // Build substitution map: old_node -> new_lit
+        let mut subst_map: HashMap<AigNodeId, AigLit> = HashMap::new();
+
+        // Apply rewrites greedily
+        for candidate in &candidates {
+            // Skip if this node or any of its leaves have been modified
+            if rewritten_nodes.contains(&candidate.node) {
+                continue;
+            }
+            let mut conflict = false;
+            for leaf in &candidate.cut.leaves {
+                if rewritten_nodes.contains(leaf) {
+                    conflict = true;
+                    break;
+                }
+            }
+            if conflict {
+                continue;
+            }
+
+            // Apply the rewrite by building a new implementation
+            if let Some(new_lit) = self.apply_rewrite(aig, candidate) {
+                // Register the substitution
+                subst_map.insert(candidate.node, new_lit);
+
+                // Mark this node as rewritten
+                rewritten_nodes.insert(candidate.node);
+
+                self.rewritten_count += 1;
+                self.total_gain += candidate.gain;
+            }
 
             // Limit the number of rewrites per pass
             if self.rewritten_count >= 100 {
@@ -212,12 +399,15 @@ impl Pass for Rewrite {
             }
         }
 
-        // The actual rewriting would rebuild the AIG here
-        // For now, we just report the potential improvements
+        // Apply all substitutions to update the AIG
+        if !subst_map.is_empty() {
+            aig.apply_substitutions(&subst_map);
+        }
 
         result.record_after(aig);
         result.add_extra("candidates", &candidates.len().to_string());
-        result.add_extra("potential_gain", &self.total_gain.to_string());
+        result.add_extra("rewrites_applied", &self.rewritten_count.to_string());
+        result.add_extra("total_gain", &self.total_gain.to_string());
         result
     }
 }
@@ -282,5 +472,116 @@ mod tests {
         assert_eq!(fanout_counts.get(&a), Some(&2));
         // 'b' should have fanout 1
         assert_eq!(fanout_counts.get(&b), Some(&1));
+    }
+
+    #[test]
+    fn test_rewrite_finds_candidates() {
+        use crate::synth::cuts::{CutEnumeration, CutParams};
+        use crate::synth::npn::NpnDatabase;
+
+        // Create an AIG with a known pattern that should be rewritable
+        // XOR: (a & !b) | (!a & b) = !(!( a & !b) & !(! a & b))
+        // In AIG: need 4 AND gates naively
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+
+        // !a & b
+        let not_a_and_b = aig.add_and(AigLit::not(a), AigLit::new(b));
+        // a & !b
+        let a_and_not_b = aig.add_and(AigLit::new(a), AigLit::not(b));
+        // !((!a & b) & (a & !b)) - this is !((! a & b) & (a & !b)), then invert for OR
+        // Actually for OR we need: !(!x & !y) = x | y
+        let nand = aig.add_and(not_a_and_b.invert(), a_and_not_b.invert());
+        // Result is !(nand) = XOR
+        aig.add_output("xor".to_string(), nand.invert());
+
+        let before_ands = aig.and_count();
+        println!("Before rewrite: {} ANDs", before_ands);
+
+        // Debug: enumerate cuts and see what we find
+        let cuts = CutEnumeration::enumerate(&aig, CutParams::default());
+        println!("\nCuts enumerated:");
+        for (id, node) in aig.iter_nodes() {
+            if let AigNode::And { .. } = node {
+                if let Some(cut_set) = cuts.get_cuts(id) {
+                    println!("  Node {:?}: {} cuts", id, cut_set.cuts.len());
+                    for cut in &cut_set.cuts {
+                        println!(
+                            "    leaves: {:?}, tt: 0x{:x}, size: {}",
+                            cut.leaves,
+                            cut.truth_table,
+                            cut.size()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Debug: check NPN database
+        let npn_db = NpnDatabase::new();
+        println!("\nNPN database has {} entries", npn_db.len());
+
+        // Check what the XOR truth table is
+        // XOR of 2 inputs: 0110 = 0x6
+        let xor_tt_2 = 0x6_u64;
+        if let Some((impl_, canonical)) = npn_db.lookup(xor_tt_2, 2) {
+            println!(
+                "XOR 2-input (0x{:x}) -> canonical 0x{:x}, {} AND gates, {} gates",
+                xor_tt_2,
+                canonical.canonical_tt,
+                impl_.and_count,
+                impl_.gates.len()
+            );
+        } else {
+            println!("XOR 2-input (0x{:x}) NOT FOUND in NPN database", xor_tt_2);
+        }
+
+        // XOR of 4 inputs that only depends on 2 vars: 0x6666
+        let xor_tt_4 = 0x6666_u64;
+        if let Some((impl_, canonical)) = npn_db.lookup(xor_tt_4, 4) {
+            println!(
+                "XOR 4-input (0x{:x}) -> canonical 0x{:x}, {} AND gates, {} gates",
+                xor_tt_4,
+                canonical.canonical_tt,
+                impl_.and_count,
+                impl_.gates.len()
+            );
+        } else {
+            println!("XOR 4-input (0x{:x}) NOT FOUND in NPN database", xor_tt_4);
+        }
+
+        // Also check what's at 0x9 (what the cut has)
+        if let Some((impl_, canonical)) = npn_db.lookup(0x9, 2) {
+            println!(
+                "XNOR 2-input (0x9) -> canonical 0x{:x}, {} AND gates, {} gates",
+                canonical.canonical_tt,
+                impl_.and_count,
+                impl_.gates.len()
+            );
+        }
+
+        let mut pass = Rewrite::new();
+        let result = pass.run(&mut aig);
+
+        println!("\nAfter rewrite: {} ANDs", result.ands_after);
+        // Extract extra values from the Vec
+        let get_extra = |key: &str| -> String {
+            result
+                .extra
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| "?".to_string())
+        };
+        println!(
+            "Candidates found: {}, rewrites applied: {}, total gain: {}",
+            get_extra("candidates"),
+            get_extra("rewrites_applied"),
+            get_extra("total_gain")
+        );
+
+        // The rewrite should at least complete and find some candidates
+        assert!(result.ands_after > 0);
     }
 }

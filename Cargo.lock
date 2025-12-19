@@ -2888,6 +2888,7 @@ dependencies = [
  "skalp-lir",
  "skalp-manifest",
  "skalp-mir",
+ "skalp-ml",
  "skalp-package",
  "skalp-place-route",
  "skalp-resolve",

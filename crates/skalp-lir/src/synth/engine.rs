@@ -37,6 +37,9 @@ pub enum SynthPreset {
     Timing,
     /// Area-focused - prioritize minimizing gate count
     Area,
+    /// Resyn2 - ABC's proven pass sequence for high-quality optimization
+    /// balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance
+    Resyn2,
 }
 
 /// Synthesis configuration
@@ -173,6 +176,13 @@ impl SynthEngine {
             SynthPreset::Area => SynthConfig {
                 preset: SynthPreset::Area,
                 max_iterations: 4,
+                ..Default::default()
+            },
+            // Resyn2 runs the full sequence once (no iterations - the sequence itself has repetition)
+            SynthPreset::Resyn2 => SynthConfig {
+                preset: SynthPreset::Resyn2,
+                max_iterations: 3, // Run the resyn2 sequence 3 times for convergence
+                run_timing_analysis: true,
                 ..Default::default()
             },
         };
@@ -357,6 +367,20 @@ impl SynthEngine {
                 "rewrite".to_string(),
                 "dce".to_string(),
             ],
+            // ABC's resyn2: balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance
+            SynthPreset::Resyn2 => vec![
+                "balance".to_string(),
+                "rewrite".to_string(),
+                "refactor".to_string(),
+                "balance".to_string(),
+                "rewrite".to_string(),
+                "rewrite_z".to_string(), // zero-cost rewrite
+                "balance".to_string(),
+                "refactor_z".to_string(), // zero-cost refactor
+                "rewrite_z".to_string(),  // zero-cost rewrite
+                "balance".to_string(),
+                "dce".to_string(),
+            ],
         }
     }
 
@@ -379,8 +403,18 @@ impl SynthEngine {
                 let mut pass = Rewrite::new();
                 Some(pass.run(aig))
             }
+            // Zero-cost rewrite (equivalent to ABC's `rewrite -z`)
+            "rewrite_z" | "rewrite-z" => {
+                let mut pass = Rewrite::zero_cost();
+                Some(pass.run(aig))
+            }
             "refactor" => {
                 let mut pass = Refactor::new();
+                Some(pass.run(aig))
+            }
+            // Zero-cost refactor (equivalent to ABC's `refactor -z`)
+            "refactor_z" | "refactor-z" => {
+                let mut pass = Refactor::zero_cost();
                 Some(pass.run(aig))
             }
             "dce" => {

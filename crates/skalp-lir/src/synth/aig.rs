@@ -560,6 +560,51 @@ impl Aig {
             }
         }
     }
+
+    /// Apply substitutions to all nodes and outputs
+    ///
+    /// For each entry (old_node, new_lit) in the map, replaces all references
+    /// to old_node with new_lit (applying the correct inversion).
+    pub fn apply_substitutions(&mut self, subst_map: &HashMap<AigNodeId, AigLit>) {
+        if subst_map.is_empty() {
+            return;
+        }
+
+        // Helper to resolve a literal through the substitution map
+        let resolve = |lit: AigLit| -> AigLit {
+            if let Some(&new_lit) = subst_map.get(&lit.node) {
+                if lit.inverted {
+                    new_lit.invert()
+                } else {
+                    new_lit
+                }
+            } else {
+                lit
+            }
+        };
+
+        // Update all AND and Latch nodes
+        for node in &mut self.nodes {
+            match node {
+                AigNode::And { left, right } => {
+                    *left = resolve(*left);
+                    *right = resolve(*right);
+                }
+                AigNode::Latch { data, .. } => {
+                    *data = resolve(*data);
+                }
+                _ => {}
+            }
+        }
+
+        // Update all outputs
+        for (_, lit) in &mut self.outputs {
+            *lit = resolve(*lit);
+        }
+
+        // Invalidate structural hash (needs rebuilding)
+        self.strash_map.clear();
+    }
 }
 
 /// Statistics for an AIG

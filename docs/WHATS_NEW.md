@@ -1,6 +1,54 @@
 # What's New in SKALP
 
-**Last Updated:** 2025-12-11
+**Last Updated:** 2025-12-19
+
+---
+
+## 🤖 ML-Guided Logic Synthesis (NEW)
+
+**Status:** ✅ Complete
+**CLI Flags:** `--optimize`, `--ml-guided`, `--passes`
+
+SKALP now includes a production-quality logic synthesis engine with optional ML-guided pass ordering.
+
+### Features
+
+- **AIG-based optimization**: And-Inverter Graph representation for efficient logic manipulation
+- **Multiple optimization presets**: `quick`, `balanced`, `full`, `timing`, `area`
+- **Custom pass sequences**: `strash`, `rewrite`, `balance`, `refactor`, `dce`, `fraig`
+- **ML-guided pass ordering**: Learned policy for optimal pass selection
+
+### Usage
+
+```bash
+# Basic optimization with balanced preset
+skalp build -s design.sk --target gates --optimize balanced
+
+# Full optimization for maximum reduction
+skalp build -s design.sk --target gates --optimize full
+
+# ML-guided synthesis (learned pass ordering)
+skalp build -s design.sk --target gates --ml-guided
+
+# Custom pass sequence
+skalp build -s design.sk --target gates --passes "strash,rewrite,balance,rewrite"
+```
+
+### Results
+
+| Design | Initial ANDs | After Optimization | Reduction |
+|--------|-------------|-------------------|-----------|
+| Counter (8-bit) | 29 | 29 | 0% |
+| ALU (32-bit) | 1032 | ~950 | ~8% |
+
+### Architecture
+
+```
+GateNetlist → AIG Builder → AIG → [Optimization Passes] → AIG Writer → GateNetlist
+                                          ↑
+                                   ML Pass Advisor
+                                   (Policy Network)
+```
 
 ---
 

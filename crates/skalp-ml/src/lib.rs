@@ -59,7 +59,8 @@ pub use features::{extract_features, AigFeatures, FeatureExtractor};
 pub use pass_advisor::{MlPassAdvisor, PassAction, PassAdvisorConfig};
 pub use policy::{PolicyNetwork, SimplePolicy};
 
-use skalp_lir::synth::{Aig, PassResult};
+use skalp_lir::synth::{Aig, AigBuilder, AigWriter, PassResult};
+use skalp_lir::{GateNetlist, TechLibrary};
 use thiserror::Error;
 
 /// Errors that can occur in ML operations
@@ -132,6 +133,29 @@ impl MlConfig {
             ..Default::default()
         }
     }
+}
+
+/// Result of ML-guided netlist optimization
+#[derive(Debug, Clone)]
+pub struct MlOptimizeResult {
+    /// The optimized netlist
+    pub netlist: GateNetlist,
+    /// Initial AND gate count
+    pub initial_and_count: usize,
+    /// Final AND gate count
+    pub final_and_count: usize,
+    /// Initial logic levels
+    pub initial_levels: u32,
+    /// Final logic levels
+    pub final_levels: u32,
+    /// Number of passes executed
+    pub passes_executed: usize,
+    /// Sequence of passes applied
+    pub pass_sequence: Vec<String>,
+    /// ML decisions made
+    pub ml_decisions: usize,
+    /// Improvement achieved (0.0-1.0)
+    pub improvement: f64,
 }
 
 /// ML-guided synthesis engine
@@ -222,6 +246,43 @@ impl MlSynthEngine {
         };
 
         Ok(results)
+    }
+
+    /// Optimize a GateNetlist using ML-guided pass selection
+    ///
+    /// This is the high-level API that takes a gate netlist, converts to AIG,
+    /// runs ML-guided optimization, and converts back to a gate netlist.
+    pub fn optimize_netlist(
+        &mut self,
+        netlist: &GateNetlist,
+        library: &TechLibrary,
+    ) -> MlResult<MlOptimizeResult> {
+        // Phase 1: Build AIG from netlist
+        let builder = AigBuilder::new(netlist);
+        let mut aig = builder.build();
+
+        let initial_stats = aig.compute_stats();
+
+        // Phase 2: Run ML-guided optimization
+        let pass_results = self.optimize(&mut aig)?;
+
+        let final_stats = aig.compute_stats();
+
+        // Phase 3: Write back to netlist
+        let writer = AigWriter::new(library);
+        let optimized_netlist = writer.write(&aig);
+
+        Ok(MlOptimizeResult {
+            netlist: optimized_netlist,
+            initial_and_count: initial_stats.and_count,
+            final_and_count: final_stats.and_count,
+            initial_levels: initial_stats.max_level,
+            final_levels: final_stats.max_level,
+            passes_executed: pass_results.len(),
+            pass_sequence: self.stats.pass_sequence.clone(),
+            ml_decisions: self.stats.ml_decisions,
+            improvement: self.stats.improvement,
+        })
     }
 
     /// Execute a pass action

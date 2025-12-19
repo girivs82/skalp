@@ -24,10 +24,12 @@ pub struct SafetyBuildOptions {
 /// Logic synthesis optimization options
 #[derive(Debug, Clone, Default)]
 pub struct OptimizationOptions {
-    /// Optimization preset (quick, balanced, full, timing, area)
+    /// Optimization preset (quick, balanced, full, timing, area, resyn2)
     pub preset: Option<String>,
     /// Custom pass sequence (comma-separated)
     pub passes: Option<String>,
+    /// Use ML-guided pass ordering
+    pub ml_guided: bool,
 }
 
 /// SKALP - Intent-driven hardware synthesis
@@ -91,13 +93,17 @@ enum Commands {
         workproduct_formats: String,
 
         // === Logic Synthesis Optimization Options ===
-        /// Optimization preset (quick, balanced, full, timing, area)
+        /// Optimization preset (quick, balanced, full, timing, area, resyn2)
         #[arg(long, value_name = "PRESET")]
         optimize: Option<String>,
 
         /// Custom pass sequence (comma-separated: strash,rewrite,balance,refactor,map)
         #[arg(long, value_name = "PASSES")]
         passes: Option<String>,
+
+        /// Use ML-guided pass ordering for optimization
+        #[arg(long)]
+        ml_guided: bool,
     },
 
     /// Simulate the design
@@ -356,6 +362,7 @@ fn main() -> Result<()> {
             workproduct_formats,
             optimize,
             passes,
+            ml_guided,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -376,6 +383,7 @@ fn main() -> Result<()> {
             let optimization_options = OptimizationOptions {
                 preset: optimize,
                 passes,
+                ml_guided,
             };
 
             build_design(
@@ -681,13 +689,15 @@ fn build_design(
             let gate_netlist = tech_result.netlist;
 
             // Apply synthesis optimization if requested
-            let optimized_netlist =
-                if optimization_options.preset.is_some() || optimization_options.passes.is_some() {
-                    info!("Running synthesis optimization...");
-                    apply_synthesis_optimization(&gate_netlist, &library, &optimization_options)?
-                } else {
-                    gate_netlist
-                };
+            let optimized_netlist = if optimization_options.preset.is_some()
+                || optimization_options.passes.is_some()
+                || optimization_options.ml_guided
+            {
+                info!("Running synthesis optimization...");
+                apply_synthesis_optimization(&gate_netlist, &library, &optimization_options)?
+            } else {
+                gate_netlist
+            };
 
             // Generate Verilog from gate netlist
             let verilog = optimized_netlist.to_verilog();
@@ -730,7 +740,12 @@ fn apply_synthesis_optimization(
     library: &skalp_lir::TechLibrary,
     options: &OptimizationOptions,
 ) -> Result<skalp_lir::GateNetlist> {
-    use skalp_lir::synth::{SynthConfig, SynthEngine};
+    // Use ML-guided optimization if requested
+    if options.ml_guided {
+        return apply_ml_synthesis_optimization(netlist, library, options);
+    }
+
+    use skalp_lir::synth::{SynthConfig, SynthEngine, SynthPreset};
 
     // Create config based on preset
     let config = match options.preset.as_deref() {
@@ -754,9 +769,18 @@ fn apply_synthesis_optimization(
             info!("Using area-focused optimization preset");
             SynthConfig::area()
         }
+        Some("resyn2") => {
+            info!("Using resyn2 optimization preset (ABC-equivalent)");
+            SynthConfig {
+                preset: SynthPreset::Resyn2,
+                max_iterations: 3,
+                run_timing_analysis: true,
+                ..Default::default()
+            }
+        }
         Some(other) => {
             anyhow::bail!(
-                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area",
+                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area, resyn2",
                 other
             );
         }
@@ -780,6 +804,43 @@ fn apply_synthesis_optimization(
     for pass_result in &result.pass_results {
         info!("  {}", pass_result);
     }
+
+    Ok(result.netlist)
+}
+
+/// Apply ML-guided synthesis optimization
+fn apply_ml_synthesis_optimization(
+    netlist: &skalp_lir::GateNetlist,
+    library: &skalp_lir::TechLibrary,
+    _options: &OptimizationOptions,
+) -> Result<skalp_lir::GateNetlist> {
+    use skalp_ml::{MlConfig, MlSynthEngine};
+
+    info!("Using ML-guided synthesis optimization");
+
+    // Create ML config
+    let config = MlConfig::default();
+    let mut engine = MlSynthEngine::new(config);
+
+    // Run ML-guided optimization
+    let result = engine
+        .optimize_netlist(netlist, library)
+        .map_err(|e| anyhow::anyhow!("ML optimization failed: {}", e))?;
+
+    info!(
+        "ML optimization complete: {} AND gates -> {} AND gates",
+        result.initial_and_count, result.final_and_count
+    );
+    info!(
+        "Logic levels: {} -> {}",
+        result.initial_levels, result.final_levels
+    );
+    info!(
+        "ML decisions: {}, passes: {}",
+        result.ml_decisions, result.passes_executed
+    );
+    info!("Pass sequence: {:?}", result.pass_sequence);
+    info!("Improvement: {:.1}%", result.improvement * 100.0);
 
     Ok(result.netlist)
 }
@@ -968,8 +1029,8 @@ fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: boo
 /// Gate-level analysis and fault simulation
 /// NOTE: This function is being migrated to use GateNetlist instead of legacy LIR
 fn analyze_design(
-    source: &PathBuf,
-    _output_dir: &PathBuf,
+    source: &Path,
+    _output_dir: &Path,
     _fault_sim: bool,
     _cycles: u64,
     _use_gpu: bool,

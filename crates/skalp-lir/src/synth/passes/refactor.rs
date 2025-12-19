@@ -32,6 +32,8 @@ pub struct Refactor {
     max_depth: usize,
     /// Maximum cone leaves
     max_leaves: usize,
+    /// Zero-cost mode: allow refactoring with savings >= 0
+    zero_cost: bool,
     /// Number of cones refactored
     refactored_count: usize,
 }
@@ -42,6 +44,18 @@ impl Refactor {
         Self {
             max_depth: MAX_CONE_DEPTH,
             max_leaves: MAX_CONE_LEAVES,
+            zero_cost: false,
+            refactored_count: 0,
+        }
+    }
+
+    /// Create a refactoring pass with zero-cost mode enabled
+    /// (equivalent to ABC's `refactor -z`)
+    pub fn zero_cost() -> Self {
+        Self {
+            max_depth: MAX_CONE_DEPTH,
+            max_leaves: MAX_CONE_LEAVES,
+            zero_cost: true,
             refactored_count: 0,
         }
     }
@@ -51,6 +65,7 @@ impl Refactor {
         Self {
             max_depth,
             max_leaves,
+            zero_cost: false,
             refactored_count: 0,
         }
     }
@@ -138,7 +153,15 @@ impl Refactor {
             0
         };
 
-        if estimated_savings > 0 {
+        // In zero-cost mode, accept savings >= 0
+        // In normal mode, only accept savings > 0
+        let accept = if self.zero_cost {
+            estimated_savings >= 0
+        } else {
+            estimated_savings > 0
+        };
+
+        if accept {
             Some(RefactorResult {
                 cone: cone.clone(),
                 estimated_savings,

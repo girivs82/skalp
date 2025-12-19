@@ -76,38 +76,48 @@ impl<'a> AigBuilder<'a> {
 
     /// Process all cells and convert to AIG nodes
     fn process_cells(&mut self) {
+        // Build a lookup map from CellId to Cell reference
+        // since CellIds may not be contiguous indices
+        let cells_by_id: std::collections::HashMap<CellId, &Cell> =
+            self.netlist.cells.iter().map(|c| (c.id, c)).collect();
+
         // Topological sort cells by dependency
         let cell_order = self.topological_order();
 
         for cell_id in cell_order {
-            let cell = &self.netlist.cells[cell_id.0 as usize];
-            self.process_cell(cell);
+            if let Some(cell) = cells_by_id.get(&cell_id) {
+                self.process_cell(cell);
+            }
         }
     }
 
     /// Get cells in topological order
     fn topological_order(&self) -> Vec<CellId> {
-        use std::collections::{HashSet, VecDeque};
+        use std::collections::{HashMap, HashSet, VecDeque};
 
         let mut result = Vec::with_capacity(self.netlist.cells.len());
         let mut ready: VecDeque<CellId> = VecDeque::new();
         let mut processed: HashSet<CellId> = HashSet::new();
 
         // Build dependency map: cell -> cells it depends on
-        let mut deps: Vec<HashSet<CellId>> = vec![HashSet::new(); self.netlist.cells.len()];
+        // Use HashMap since CellIds may not be contiguous
+        let mut deps: HashMap<CellId, HashSet<CellId>> = HashMap::new();
 
         for cell in &self.netlist.cells {
+            let cell_deps = deps.entry(cell.id).or_default();
             for &input_net in &cell.inputs {
-                let net = &self.netlist.nets[input_net.0 as usize];
-                if let Some(driver_id) = net.driver {
-                    deps[cell.id.0 as usize].insert(driver_id);
+                if (input_net.0 as usize) < self.netlist.nets.len() {
+                    let net = &self.netlist.nets[input_net.0 as usize];
+                    if let Some(driver_id) = net.driver {
+                        cell_deps.insert(driver_id);
+                    }
                 }
             }
         }
 
         // Find cells with no dependencies (or only primary inputs)
         for cell in &self.netlist.cells {
-            if deps[cell.id.0 as usize].is_empty() {
+            if deps.get(&cell.id).map(|d| d.is_empty()).unwrap_or(true) {
                 ready.push_back(cell.id);
             }
         }
@@ -124,13 +134,11 @@ impl<'a> AigBuilder<'a> {
             // Find cells that depend on this one and may now be ready
             for cell in &self.netlist.cells {
                 if !processed.contains(&cell.id) {
-                    deps[cell.id.0 as usize].remove(&cell_id);
-                    if deps[cell.id.0 as usize].is_empty()
-                        || deps[cell.id.0 as usize]
-                            .iter()
-                            .all(|d| processed.contains(d))
-                    {
-                        ready.push_back(cell.id);
+                    if let Some(cell_deps) = deps.get_mut(&cell.id) {
+                        cell_deps.remove(&cell_id);
+                        if cell_deps.is_empty() || cell_deps.iter().all(|d| processed.contains(d)) {
+                            ready.push_back(cell.id);
+                        }
                     }
                 }
             }
