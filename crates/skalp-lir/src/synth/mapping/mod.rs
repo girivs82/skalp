@@ -176,10 +176,14 @@ impl CellMatcher {
         // ANDNOT: f = a & ~b, tt = 0010 = 0x2
         // (output when: a=0,b=0->0, a=0,b=1->0, a=1,b=0->1, a=1,b=1->0)
         self.add_cell_match(0x2, "ANDNOT_X1", 1.5, 20.0, vec!["A", "B"]);
+        // ANDNOT permuted: f = ~a & b, tt = 0100 = 0x4 (swap inputs)
+        self.add_cell_match(0x4, "ANDNOT_X1", 1.5, 20.0, vec!["B", "A"]);
 
         // ORNOT: f = a | ~b, tt = 1011 = 0xB
         // (output when: a=0,b=0->1, a=0,b=1->0, a=1,b=0->1, a=1,b=1->1)
         self.add_cell_match(0xB, "ORNOT_X1", 1.5, 20.0, vec!["A", "B"]);
+        // ORNOT permuted: f = ~a | b, tt = 1101 = 0xD (swap inputs)
+        self.add_cell_match(0xD, "ORNOT_X1", 1.5, 20.0, vec!["B", "A"]);
 
         // Single input gates
         // Inverter: f = !a, tt = 01 = 0x1 for 1 input
