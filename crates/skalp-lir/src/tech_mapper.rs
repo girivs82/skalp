@@ -401,6 +401,28 @@ impl<'a> TechMapper<'a> {
                 );
             }
 
+            // Shift operations
+            LirOp::Shl { width } => {
+                self.map_shift(*width, &input_nets, &output_nets, &node.path, true);
+            }
+            LirOp::Shr { width } => {
+                self.map_shift(*width, &input_nets, &output_nets, &node.path, false);
+            }
+            LirOp::Sar { width } => {
+                // Arithmetic right shift - same as logical for now, but should sign-extend
+                self.map_shift(*width, &input_nets, &output_nets, &node.path, false);
+            }
+
+            // Range select: extract bits [high:low] from input
+            LirOp::RangeSelect { high, low, .. } => {
+                self.map_range_select(*high, *low, &input_nets, &output_nets, &node.path);
+            }
+
+            // Bit select: extract single bit from input
+            LirOp::BitSelect { .. } => {
+                self.map_bit_select(&input_nets, &output_nets, &node.path);
+            }
+
             _ => {
                 self.warnings
                     .push(format!("Unsupported operation: {:?}", node.op));
@@ -707,6 +729,279 @@ impl<'a> TechMapper<'a> {
         }
 
         self.stats.direct_mappings += 1;
+    }
+
+    /// Map a barrel shifter (left or right shift)
+    ///
+    /// Uses cascaded MUX layers for logarithmic shift implementation.
+    /// For an N-bit data with log2(N) shift bits:
+    /// - Layer 0: shift by 0 or 1 (controlled by shift_amt[0])
+    /// - Layer 1: shift by 0 or 2 (controlled by shift_amt[1])
+    /// - Layer 2: shift by 0 or 4 (controlled by shift_amt[2])
+    /// - etc.
+    fn map_shift(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+        left: bool,
+    ) {
+        if inputs.len() < 2 {
+            self.warnings.push(format!(
+                "Shift needs 2 inputs (data, amount), got {}",
+                inputs.len()
+            ));
+            return;
+        }
+
+        let data = &inputs[0];
+        let shift_amt = &inputs[1];
+
+        if data.is_empty() || shift_amt.is_empty() {
+            self.warnings.push("Shift: empty input vectors".to_string());
+            return;
+        }
+
+        let mux_info = self.get_cell_info(&CellFunction::Mux2, 0.15);
+
+        // Calculate number of shift stages (log2 of width)
+        let shift_bits = (32 - (width - 1).leading_zeros()) as usize;
+        let shift_bits = shift_bits.min(shift_amt.len()); // Limit to available shift bits
+
+        // Create a constant 0 net for filling in shifted bits
+        let const_0 = self.alloc_net_id();
+        self.netlist
+            .add_net(GateNet::new(const_0, format!("{}.const_0", path)));
+        self.stats.nets_created += 1;
+
+        // Current stage values (start with input data)
+        let mut current: Vec<GateNetId> = (0..width as usize)
+            .map(|i| data.get(i).copied().unwrap_or(data[0]))
+            .collect();
+
+        // Build barrel shifter with cascaded MUX layers
+        for stage in 0..shift_bits {
+            let shift_amount = 1usize << stage;
+            let sel = shift_amt.get(stage).copied().unwrap_or(shift_amt[0]);
+
+            let mut next_stage: Vec<GateNetId> = Vec::with_capacity(width as usize);
+
+            for bit in 0..width as usize {
+                // Allocate output net for this MUX
+                let mux_out = if stage == shift_bits - 1 {
+                    // Last stage - use final output nets
+                    outputs.get(bit).copied().unwrap_or(outputs[0])
+                } else {
+                    // Intermediate stage - create new net
+                    let net = self.alloc_net_id();
+                    self.netlist.add_net(GateNet::new(
+                        net,
+                        format!("{}.stage{}_bit{}", path, stage, bit),
+                    ));
+                    self.stats.nets_created += 1;
+                    net
+                };
+
+                // Calculate source bit for shifted value
+                let (d0, d1) = if left {
+                    // Left shift: when sel=1, bit[i] gets bit[i-shift_amount] (or 0)
+                    let unshifted = current[bit];
+                    let shifted = if bit >= shift_amount {
+                        current[bit - shift_amount]
+                    } else {
+                        const_0
+                    };
+                    (unshifted, shifted)
+                } else {
+                    // Right shift: when sel=1, bit[i] gets bit[i+shift_amount] (or 0)
+                    let unshifted = current[bit];
+                    let shifted = if bit + shift_amount < width as usize {
+                        current[bit + shift_amount]
+                    } else {
+                        const_0
+                    };
+                    (unshifted, shifted)
+                };
+
+                // Create MUX: sel=0 -> d0 (unshifted), sel=1 -> d1 (shifted)
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    mux_info.name.clone(),
+                    self.library.name.clone(),
+                    mux_info.fit,
+                    format!("{}.mux_s{}_b{}", path, stage, bit),
+                    vec![sel, d0, d1],
+                    vec![mux_out],
+                );
+                cell.source_op = Some(if left { "Shl" } else { "Shr" }.to_string());
+                cell.failure_modes = mux_info.failure_modes.clone();
+                self.add_cell(cell);
+
+                next_stage.push(mux_out);
+            }
+
+            current = next_stage;
+        }
+
+        // If no shift stages were needed (width=1), just connect input to output
+        if shift_bits == 0 {
+            for bit in 0..width as usize {
+                let src = current.get(bit).copied().unwrap_or(current[0]);
+                let dst = outputs.get(bit).copied().unwrap_or(outputs[0]);
+
+                // Use buffer to connect
+                let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    buf_info.name.clone(),
+                    self.library.name.clone(),
+                    buf_info.fit,
+                    format!("{}.buf_bit{}", path, bit),
+                    vec![src],
+                    vec![dst],
+                );
+                cell.source_op = Some("Buffer".to_string());
+                cell.failure_modes = buf_info.failure_modes.clone();
+                self.add_cell(cell);
+            }
+        }
+
+        self.stats.decomposed_mappings += 1;
+    }
+
+    /// Map range select (bit extraction): output = input[high:low]
+    ///
+    /// This is pure wiring - we just connect the specified bits from input to output.
+    /// Uses buffers to make the connections explicit in the netlist.
+    fn map_range_select(
+        &mut self,
+        high: u32,
+        low: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.is_empty() || inputs[0].is_empty() {
+            self.warnings.push("RangeSelect: empty input".to_string());
+            return;
+        }
+
+        let data = &inputs[0];
+        let out_width = (high - low + 1) as usize;
+
+        // Get buffer cell info for explicit wiring
+        let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+
+        for bit in 0..out_width {
+            let src_bit = low as usize + bit;
+            let src = data.get(src_bit).copied().unwrap_or_else(|| {
+                // If the source bit doesn't exist, warn but continue
+                self.warnings.push(format!(
+                    "RangeSelect: bit {} out of range for input width {}",
+                    src_bit,
+                    data.len()
+                ));
+                data.first().copied().unwrap_or(GateNetId(0))
+            });
+            let dst = outputs.get(bit).copied().unwrap_or(outputs[0]);
+
+            // Use buffer for explicit connection
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                buf_info.name.clone(),
+                self.library.name.clone(),
+                buf_info.fit,
+                format!("{}.sel_bit{}", path, bit),
+                vec![src],
+                vec![dst],
+            );
+            cell.source_op = Some("RangeSelect".to_string());
+            cell.failure_modes = buf_info.failure_modes.clone();
+            self.add_cell(cell);
+        }
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Map bit select (single bit extraction): output = input[index]
+    ///
+    /// Index is the second input signal (dynamic bit select).
+    /// For simplicity, we implement this as a MUX tree.
+    fn map_bit_select(&mut self, inputs: &[Vec<GateNetId>], outputs: &[GateNetId], path: &str) {
+        if inputs.len() < 2 {
+            self.warnings
+                .push("BitSelect needs 2 inputs (data, index)".to_string());
+            return;
+        }
+
+        let data = &inputs[0];
+        let index = &inputs[1];
+        let output = outputs.first().copied().unwrap_or(GateNetId(0));
+
+        if data.is_empty() || index.is_empty() {
+            self.warnings
+                .push("BitSelect: empty input vectors".to_string());
+            return;
+        }
+
+        // Build a MUX tree to select one bit based on index
+        // For small inputs, we can use a cascade of MUXes
+        let mux_info = self.get_cell_info(&CellFunction::Mux2, 0.15);
+
+        // Number of MUX stages = ceil(log2(data.len()))
+        let num_bits = data.len();
+        let index_bits = (32 - (num_bits.saturating_sub(1) as u32).leading_zeros()) as usize;
+        let index_bits = index_bits.max(1).min(index.len());
+
+        // Start with all data bits padded to power of 2
+        let padded_size = 1usize << index_bits;
+        let mut current: Vec<GateNetId> = (0..padded_size)
+            .map(|i| data.get(i).copied().unwrap_or(data[0]))
+            .collect();
+
+        // Build MUX tree from leaves to root
+        for stage in 0..index_bits {
+            let sel = index.get(stage).copied().unwrap_or(index[0]);
+            let stage_size = current.len() / 2;
+            let mut next_stage = Vec::with_capacity(stage_size);
+
+            for i in 0..stage_size {
+                let d0 = current[i * 2];
+                let d1 = current[i * 2 + 1];
+
+                let mux_out = if stage == index_bits - 1 && i == 0 {
+                    output
+                } else {
+                    let net = self.alloc_net_id();
+                    self.netlist.add_net(GateNet::new(
+                        net,
+                        format!("{}.bitsel_s{}_i{}", path, stage, i),
+                    ));
+                    self.stats.nets_created += 1;
+                    net
+                };
+
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    mux_info.name.clone(),
+                    self.library.name.clone(),
+                    mux_info.fit,
+                    format!("{}.bitsel_mux_s{}_i{}", path, stage, i),
+                    vec![sel, d0, d1],
+                    vec![mux_out],
+                );
+                cell.source_op = Some("BitSelect".to_string());
+                cell.failure_modes = mux_info.failure_modes.clone();
+                self.add_cell(cell);
+
+                next_stage.push(mux_out);
+            }
+
+            current = next_stage;
+        }
+
+        self.stats.decomposed_mappings += 1;
     }
 
     /// Map equality comparator
