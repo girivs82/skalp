@@ -30,6 +30,8 @@ pub struct OptimizationOptions {
     pub passes: Option<String>,
     /// Use ML-guided pass ordering
     pub ml_guided: bool,
+    /// Directory to collect training data
+    pub training_data_dir: Option<PathBuf>,
 }
 
 /// SKALP - Intent-driven hardware synthesis
@@ -104,6 +106,10 @@ enum Commands {
         /// Use ML-guided pass ordering for optimization
         #[arg(long)]
         ml_guided: bool,
+
+        /// Collect training data during synthesis for ML model training
+        #[arg(long, value_name = "DIR")]
+        collect_training_data: Option<PathBuf>,
     },
 
     /// Simulate the design
@@ -363,6 +369,7 @@ fn main() -> Result<()> {
             optimize,
             passes,
             ml_guided,
+            collect_training_data,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -384,6 +391,7 @@ fn main() -> Result<()> {
                 preset: optimize,
                 passes,
                 ml_guided,
+                training_data_dir: collect_training_data,
             };
 
             build_design(
@@ -812,37 +820,79 @@ fn apply_synthesis_optimization(
 fn apply_ml_synthesis_optimization(
     netlist: &skalp_lir::GateNetlist,
     library: &skalp_lir::TechLibrary,
-    _options: &OptimizationOptions,
+    options: &OptimizationOptions,
 ) -> Result<skalp_lir::GateNetlist> {
+    use skalp_lir::synth::{AigBuilder, AigWriter};
     use skalp_ml::{MlConfig, MlSynthEngine};
 
     info!("Using ML-guided synthesis optimization");
 
-    // Create ML config
-    let config = MlConfig::default();
-    let mut engine = MlSynthEngine::new(config);
+    // Create ML config with training mode if requested
+    let config = if options.training_data_dir.is_some() {
+        MlConfig::training()
+    } else {
+        MlConfig::default()
+    };
 
-    // Run ML-guided optimization
-    let result = engine
-        .optimize_netlist(netlist, library)
+    // Create engine - with or without training data collection
+    let mut engine = if let Some(ref dir) = options.training_data_dir {
+        let run_id = format!("run_{}", chrono::Utc::now().timestamp());
+        info!("Training data collection enabled: {}", dir.display());
+        MlSynthEngine::with_training(config, &run_id)
+    } else {
+        MlSynthEngine::new(config)
+    };
+
+    // Build AIG from netlist
+    let builder = AigBuilder::new(netlist);
+    let mut aig = builder.build();
+
+    let initial_stats = aig.compute_stats();
+
+    // Run ML-guided optimization with design name for training
+    let design_name = &netlist.name;
+    let library_name = "7nm"; // TODO: Get from library
+
+    let _pass_results = engine
+        .optimize_with_design_name(&mut aig, design_name, library_name)
         .map_err(|e| anyhow::anyhow!("ML optimization failed: {}", e))?;
+
+    let final_stats = aig.compute_stats();
 
     info!(
         "ML optimization complete: {} AND gates -> {} AND gates",
-        result.initial_and_count, result.final_and_count
+        initial_stats.and_count, final_stats.and_count
     );
     info!(
         "Logic levels: {} -> {}",
-        result.initial_levels, result.final_levels
+        initial_stats.max_level, final_stats.max_level
     );
     info!(
         "ML decisions: {}, passes: {}",
-        result.ml_decisions, result.passes_executed
+        engine.stats().ml_decisions,
+        engine.stats().passes_executed
     );
-    info!("Pass sequence: {:?}", result.pass_sequence);
-    info!("Improvement: {:.1}%", result.improvement * 100.0);
+    info!("Pass sequence: {:?}", engine.stats().pass_sequence);
+    info!("Improvement: {:.1}%", engine.stats().improvement * 100.0);
 
-    Ok(result.netlist)
+    // Export training data if requested
+    if let Some(ref dir) = options.training_data_dir {
+        engine
+            .export_training_data(dir.to_str().unwrap_or("training_data"))
+            .map_err(|e| anyhow::anyhow!("Failed to export training data: {}", e))?;
+
+        if let Some(collector) = engine.collector() {
+            info!(
+                "Training data collected: {} episodes, {} pass decisions",
+                collector.episode_count(),
+                collector.stats().total_pass_decisions
+            );
+        }
+    }
+
+    // Write back to netlist
+    let writer = AigWriter::new(library);
+    Ok(writer.write(&aig))
 }
 
 /// Simulate design

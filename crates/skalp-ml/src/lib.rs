@@ -52,12 +52,16 @@ pub mod cut_gnn;
 pub mod features;
 pub mod pass_advisor;
 pub mod policy;
+pub mod training_data;
 
 pub use arch_select::{ArchAdvisor, ArchAdvisorConfig, DatapathArchitecture};
 pub use cut_gnn::{CutScorer, CutScorerConfig, GnnCutSelector};
 pub use features::{extract_features, AigFeatures, FeatureExtractor};
 pub use pass_advisor::{MlPassAdvisor, PassAction, PassAdvisorConfig};
 pub use policy::{PolicyNetwork, SimplePolicy};
+pub use training_data::{
+    CollectorConfig, QualityOfResult, SynthesisEpisode, TrainingDataCollector, TrainingDataset,
+};
 
 use skalp_lir::synth::{Aig, AigBuilder, AigWriter, PassResult};
 use skalp_lir::{GateNetlist, TechLibrary};
@@ -167,6 +171,8 @@ pub struct MlSynthEngine {
     feature_extractor: FeatureExtractor,
     /// Statistics from ML decisions
     stats: MlSynthStats,
+    /// Optional training data collector for recording decisions
+    collector: Option<TrainingDataCollector>,
 }
 
 /// Statistics from ML-guided synthesis
@@ -192,6 +198,42 @@ impl MlSynthEngine {
             feature_extractor: FeatureExtractor::new(),
             config,
             stats: MlSynthStats::default(),
+            collector: None,
+        }
+    }
+
+    /// Create an engine with training data collection enabled
+    pub fn with_training(config: MlConfig, run_id: &str) -> Self {
+        Self {
+            pass_advisor: MlPassAdvisor::new(PassAdvisorConfig::default()),
+            feature_extractor: FeatureExtractor::new(),
+            config,
+            stats: MlSynthStats::default(),
+            collector: Some(TrainingDataCollector::new(run_id)),
+        }
+    }
+
+    /// Enable training data collection
+    pub fn enable_training(&mut self, run_id: &str) {
+        self.collector = Some(TrainingDataCollector::new(run_id));
+    }
+
+    /// Get the training data collector (for exporting data)
+    pub fn collector(&self) -> Option<&TrainingDataCollector> {
+        self.collector.as_ref()
+    }
+
+    /// Get mutable access to the training data collector
+    pub fn collector_mut(&mut self) -> Option<&mut TrainingDataCollector> {
+        self.collector.as_mut()
+    }
+
+    /// Export training data to a directory
+    pub fn export_training_data(&self, output_dir: &str) -> std::io::Result<()> {
+        if let Some(ref collector) = self.collector {
+            collector.export(output_dir)
+        } else {
+            Ok(())
         }
     }
 
@@ -202,6 +244,16 @@ impl MlSynthEngine {
 
     /// Optimize an AIG using ML-guided pass selection
     pub fn optimize(&mut self, aig: &mut Aig) -> MlResult<Vec<PassResult>> {
+        self.optimize_with_design_name(aig, "unknown", "default")
+    }
+
+    /// Optimize an AIG with design name for training data collection
+    pub fn optimize_with_design_name(
+        &mut self,
+        aig: &mut Aig,
+        design_name: &str,
+        library_name: &str,
+    ) -> MlResult<Vec<PassResult>> {
         self.stats = MlSynthStats::default();
         let mut results = Vec::new();
 
@@ -209,15 +261,20 @@ impl MlSynthEngine {
         let initial_features = self.feature_extractor.extract(aig);
         let initial_cost = initial_features.estimated_cost();
 
+        // Start training episode if collector is enabled
+        if let Some(ref mut collector) = self.collector {
+            collector.start_episode(design_name, library_name, &initial_features);
+        }
+
         // Run optimization loop
         for _iter in 0..self.config.max_passes {
             // Extract current features
-            let features = self.feature_extractor.extract(aig);
+            let features_before = self.feature_extractor.extract(aig);
 
             // Get next action from policy
             let action = if self.config.use_pass_advisor {
                 self.stats.ml_decisions += 1;
-                self.pass_advisor.suggest_action(&features)
+                self.pass_advisor.suggest_action(&features_before)
             } else {
                 self.stats.fallback_decisions += 1;
                 PassAction::default_sequence()
@@ -230,6 +287,20 @@ impl MlSynthEngine {
 
             // Execute the suggested pass
             if let Some(result) = self.execute_action(aig, &action) {
+                // Extract features after the pass
+                let features_after = self.feature_extractor.extract(aig);
+
+                // Record decision for training
+                if let Some(ref mut collector) = self.collector {
+                    collector.record_pass_decision(
+                        &features_before,
+                        action,
+                        None, // action_probs not available from simple advisor
+                        &result,
+                        &features_after,
+                    );
+                }
+
                 self.stats.pass_sequence.push(result.pass_name.clone());
                 self.stats.passes_executed += 1;
                 results.push(result);
@@ -244,6 +315,21 @@ impl MlSynthEngine {
         } else {
             0.0
         };
+
+        // End training episode with QoR
+        if let Some(ref mut collector) = self.collector {
+            let qor = QualityOfResult {
+                cell_count: final_features.node_count,
+                and_equivalent: final_features.and_count,
+                critical_delay: final_features.max_level as f64 * 10.0, // Rough estimate
+                total_area: final_features.estimated_cost(),
+                inverter_count: 0,
+                buffer_count: 0,
+                cell_distribution: std::collections::HashMap::new(),
+                improvement: self.stats.improvement,
+            };
+            collector.end_episode(&final_features, qor);
+        }
 
         Ok(results)
     }
@@ -370,5 +456,67 @@ mod tests {
         let results = engine.optimize(&mut aig).unwrap();
         // Empty AIG should terminate quickly
         assert!(results.len() <= 20);
+    }
+
+    #[test]
+    fn test_training_data_collection() {
+        use skalp_lir::synth::AigLit;
+
+        // Create an engine with training enabled
+        let mut engine = MlSynthEngine::with_training(MlConfig::default(), "test_run");
+
+        // Create a simple AIG with some logic
+        let mut aig = Aig::new("counter".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let and_node = aig.add_and(AigLit::new(a), AigLit::new(b));
+        aig.add_output("out".to_string(), and_node);
+
+        // Run optimization
+        let _results = engine
+            .optimize_with_design_name(&mut aig, "counter", "7nm")
+            .unwrap();
+
+        // Verify training data was collected
+        let collector = engine.collector().expect("Collector should exist");
+        assert_eq!(collector.episode_count(), 1);
+
+        // Check stats
+        let stats = collector.stats();
+        // Pass decisions may be 0 if no passes were beneficial (usize always >= 0)
+        assert_eq!(stats.total_episodes, 1);
+    }
+
+    #[test]
+    fn test_training_data_export() {
+        use skalp_lir::synth::AigLit;
+
+        // Create an engine with training enabled
+        let mut engine = MlSynthEngine::with_training(MlConfig::default(), "export_test");
+
+        // Create a simple AIG
+        let mut aig = Aig::new("simple".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let and_node = aig.add_and(AigLit::new(a), AigLit::new(b));
+        aig.add_output("out".to_string(), and_node);
+
+        // Run optimization
+        let _results = engine
+            .optimize_with_design_name(&mut aig, "simple", "default")
+            .unwrap();
+
+        // Export to temp directory
+        let temp_dir = std::env::temp_dir().join("skalp_ml_test");
+        engine
+            .export_training_data(temp_dir.to_str().unwrap())
+            .unwrap();
+
+        // Verify files were created
+        assert!(temp_dir.join("dataset.json").exists());
+        assert!(temp_dir.join("stats.json").exists());
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

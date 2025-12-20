@@ -3074,6 +3074,7 @@ dependencies = [
 name = "skalp-ml"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ndarray",
  "ort",
  "rand 0.8.5",
