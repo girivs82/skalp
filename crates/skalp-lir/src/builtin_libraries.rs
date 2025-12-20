@@ -80,6 +80,8 @@ pub fn builtin_generic_asic() -> TechLibrary {
     // XOR gates
     lib.add_cell(make_cell("XOR2_X1", CellFunction::Xor2, 0.15, 8, 1.6));
     lib.add_cell(make_cell("XNOR2_X1", CellFunction::Xnor2, 0.15, 8, 1.6));
+    lib.add_cell(make_cell("ANDNOT_X1", CellFunction::AndNot, 0.10, 4, 0.8));
+    lib.add_cell(make_cell("ORNOT_X1", CellFunction::OrNot, 0.10, 4, 0.8));
 
     // === Complex Gates ===
 
@@ -153,6 +155,8 @@ pub fn builtin_asic_7nm() -> TechLibrary {
     lib.add_cell(make_cell("OR2_X1", CellFunction::Or2, 0.10, 6, 0.4));
     lib.add_cell(make_cell("XOR2_X1", CellFunction::Xor2, 0.12, 8, 0.6));
     lib.add_cell(make_cell("XNOR2_X1", CellFunction::Xnor2, 0.12, 8, 0.6));
+    lib.add_cell(make_cell("ANDNOT_X1", CellFunction::AndNot, 0.08, 4, 0.3));
+    lib.add_cell(make_cell("ORNOT_X1", CellFunction::OrNot, 0.08, 4, 0.3));
 
     // Multiplexers
     lib.add_cell(make_cell("MUX2_X1", CellFunction::Mux2, 0.15, 12, 0.8));
@@ -196,6 +200,8 @@ pub fn builtin_asic_28nm() -> TechLibrary {
     lib.add_cell(make_cell("OR2_X1", CellFunction::Or2, 0.12, 6, 1.0));
     lib.add_cell(make_cell("XOR2_X1", CellFunction::Xor2, 0.15, 8, 1.6));
     lib.add_cell(make_cell("XNOR2_X1", CellFunction::Xnor2, 0.15, 8, 1.6));
+    lib.add_cell(make_cell("ANDNOT_X1", CellFunction::AndNot, 0.10, 4, 0.8));
+    lib.add_cell(make_cell("ORNOT_X1", CellFunction::OrNot, 0.10, 4, 0.8));
 
     lib.add_cell(make_cell("MUX2_X1", CellFunction::Mux2, 0.18, 12, 2.0));
 

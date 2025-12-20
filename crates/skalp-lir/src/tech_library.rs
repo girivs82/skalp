@@ -302,6 +302,8 @@ pub enum CellFunction {
     Xor2,
     Xnor2,
     Buf,
+    AndNot, // a & ~b
+    OrNot,  // a | ~b
 
     // Complex gates
     Aoi21, // AND-OR-Invert: ~((a & b) | c)
@@ -371,7 +373,9 @@ impl CellFunction {
             | CellFunction::And2
             | CellFunction::Or2
             | CellFunction::Xor2
-            | CellFunction::Xnor2 => (vec!["a".into(), "b".into()], vec!["y".into()]),
+            | CellFunction::Xnor2
+            | CellFunction::AndNot
+            | CellFunction::OrNot => (vec!["a".into(), "b".into()], vec!["y".into()]),
             CellFunction::Nand3 | CellFunction::Nor3 | CellFunction::And3 | CellFunction::Or3 => {
                 (vec!["a".into(), "b".into(), "c".into()], vec!["y".into()])
             }

@@ -323,18 +323,61 @@ impl AigWriterState<'_> {
             }
         }
 
-        // Fall back to basic AND2 mapping
-        // Get input nets
-        let left_net = self.get_or_create_lit_net(aig, left);
-        let right_net = self.get_or_create_lit_net(aig, right);
+        // Select cell type based on input inversions to avoid extra inverters:
+        // - AND(a, b) → AND2
+        // - AND(~a, b) → ANDNOT with inputs (b, a) where second input is inverted
+        // - AND(a, ~b) → ANDNOT with inputs (a, b) where second input is inverted
+        // - AND(~a, ~b) → NOR2 with inputs (a, b) by DeMorgan: ~a & ~b = ~(a | b)
+        let (cell_type, cell_fit, input_a, input_b): (String, f64, AigLit, AigLit) =
+            match (left.inverted, right.inverted) {
+                (false, false) => {
+                    // AND(a, b) → AND2
+                    let (ct, cf) = self.find_and2_cell();
+                    (ct, cf, left, right)
+                }
+                (true, false) => {
+                    // AND(~a, b) → ANDNOT(b, a) where second input is inverted
+                    let (ct, cf) = self.find_andnot_cell();
+                    // ANDNOT: A & ~B, so we need (B=non-inverted, A=to-be-inverted)
+                    // left is ~a, right is b, we want b & ~a = ANDNOT(b, a)
+                    let uninverted_left = AigLit {
+                        node: left.node,
+                        inverted: false,
+                    };
+                    (ct, cf, right, uninverted_left) // inputs: (b, a) → ANDNOT computes b & ~a
+                }
+                (false, true) => {
+                    // AND(a, ~b) → ANDNOT(a, b) where second input is inverted
+                    let (ct, cf) = self.find_andnot_cell();
+                    let uninverted_right = AigLit {
+                        node: right.node,
+                        inverted: false,
+                    };
+                    (ct, cf, left, uninverted_right) // inputs: (a, b) → ANDNOT computes a & ~b
+                }
+                (true, true) => {
+                    // AND(~a, ~b) → NOR2(a, b) by DeMorgan: ~a & ~b = ~(a | b)
+                    let (ct, cf) = self.find_nor2_cell();
+                    let uninverted_left = AigLit {
+                        node: left.node,
+                        inverted: false,
+                    };
+                    let uninverted_right = AigLit {
+                        node: right.node,
+                        inverted: false,
+                    };
+                    (ct, cf, uninverted_left, uninverted_right)
+                }
+            };
+
+        // Get input nets (now using the adjusted inputs without redundant inversions)
+        let left_net = self.get_or_create_lit_net(aig, input_a);
+        let right_net = self.get_or_create_lit_net(aig, input_b);
 
         // Create output net
         let output_net = self
             .netlist
             .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));
-
-        // Find appropriate cell from library
-        let (cell_type, cell_fit) = self.find_and2_cell();
 
         // Get safety info
         let safety = aig
@@ -634,6 +677,26 @@ impl AigWriterState<'_> {
 
         // Default
         ("AND2_X1".to_string(), 0.1)
+    }
+
+    /// Find an ANDNOT cell in the library (computes A & ~B)
+    fn find_andnot_cell(&self) -> (String, f64) {
+        let andnot_cells = self.library.find_cells_by_function(&CellFunction::AndNot);
+        if let Some(cell) = andnot_cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        // Default
+        ("ANDNOT_X1".to_string(), 0.08)
+    }
+
+    /// Find a NOR2 cell in the library
+    fn find_nor2_cell(&self) -> (String, f64) {
+        let nor2_cells = self.library.find_cells_by_function(&CellFunction::Nor2);
+        if let Some(cell) = nor2_cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        // Default
+        ("NOR2_X1".to_string(), 0.08)
     }
 
     /// Find an inverter cell in the library

@@ -340,6 +340,23 @@ impl<'a> AigBuilder<'a> {
                 self.aig
                     .add_and_with_safety(a.invert(), b.invert(), safety.clone())
             }
+
+            // ANDNOT: a & ~b
+            CellFunction::AndNot => {
+                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
+                self.aig.add_and_with_safety(a, b.invert(), safety.clone())
+            }
+
+            // ORNOT: a | ~b = ~(~a & b)
+            CellFunction::OrNot => {
+                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
+                self.aig
+                    .add_and_with_safety(a.invert(), b, safety.clone())
+                    .invert()
+            }
+
             CellFunction::Nor3 => {
                 let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
                 let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
