@@ -26,6 +26,7 @@
 mod balance;
 mod buffer_opt;
 mod const_prop;
+mod dc2;
 mod dce;
 mod fraig;
 mod refactor;
@@ -37,6 +38,7 @@ mod strash;
 pub use balance::Balance;
 pub use buffer_opt::{analyze_fanout, BufferConfig, BufferInsertion, BufferStats, FanoutAnalysis};
 pub use const_prop::ConstProp;
+pub use dc2::Dc2;
 pub use dce::Dce;
 pub use fraig::{run_fraig, run_fraig_with_config, Fraig, FraigConfig, FraigStats};
 pub use refactor::Refactor;
