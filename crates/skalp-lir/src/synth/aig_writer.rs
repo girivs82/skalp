@@ -306,11 +306,11 @@ impl AigWriterState<'_> {
             }
             // Still need to create a net for this node in case it's referenced elsewhere
             // (shouldn't happen for properly detected patterns, but be safe)
-            if !self.node_to_net.contains_key(&id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.node_to_net.entry(id) {
                 let output_net = self
                     .netlist
                     .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));
-                self.node_to_net.insert(id, output_net);
+                e.insert(output_net);
             }
             return;
         }

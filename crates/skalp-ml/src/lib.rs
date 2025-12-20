@@ -123,7 +123,8 @@ impl MlConfig {
     /// Create config for training mode
     pub fn training() -> Self {
         Self {
-            exploration_rate: 0.1, // 10% random exploration
+            exploration_rate: 0.3, // 30% random exploration for diverse data
+            max_passes: 30,        // Run more passes to gather more decisions
             ..Default::default()
         }
     }
@@ -193,8 +194,13 @@ pub struct MlSynthStats {
 impl MlSynthEngine {
     /// Create a new ML-guided synthesis engine
     pub fn new(config: MlConfig) -> Self {
+        let advisor_config = PassAdvisorConfig {
+            exploration_rate: config.exploration_rate,
+            max_no_improvement: 5, // Allow more passes before giving up
+            ..Default::default()
+        };
         Self {
-            pass_advisor: MlPassAdvisor::new(PassAdvisorConfig::default()),
+            pass_advisor: MlPassAdvisor::new(advisor_config),
             feature_extractor: FeatureExtractor::new(),
             config,
             stats: MlSynthStats::default(),
@@ -204,8 +210,13 @@ impl MlSynthEngine {
 
     /// Create an engine with training data collection enabled
     pub fn with_training(config: MlConfig, run_id: &str) -> Self {
+        let advisor_config = PassAdvisorConfig {
+            exploration_rate: config.exploration_rate,
+            max_no_improvement: 10, // More lenient for training
+            ..Default::default()
+        };
         Self {
-            pass_advisor: MlPassAdvisor::new(PassAdvisorConfig::default()),
+            pass_advisor: MlPassAdvisor::new(advisor_config),
             feature_extractor: FeatureExtractor::new(),
             config,
             stats: MlSynthStats::default(),
