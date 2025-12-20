@@ -365,6 +365,10 @@ fn make_cell(
             LibraryFailureMode::new("delay", fit * 0.07, FaultType::Delay)
                 .with_mechanism("process_variation"),
         ],
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -428,6 +432,10 @@ fn make_seq_cell(
             LibraryFailureMode::new("reset_path", fit * 0.07, FaultType::ResetPath)
                 .with_mechanism("reset_buffer_failure"),
         ],
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -481,6 +489,10 @@ fn make_fpga_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCell {
             LibraryFailureMode::new("delay", fit * 0.05, FaultType::Delay)
                 .with_mechanism("process_variation"),
         ],
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -529,6 +541,10 @@ fn make_fpga_seq_cell(name: &str, function: CellFunction, fit: f64) -> LibraryCe
             LibraryFailureMode::new("clock_path", fit * 0.10, FaultType::ClockPath)
                 .with_mechanism("clock_routing_failure"),
         ],
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -601,6 +617,10 @@ fn make_level_shifter_cell(
         timing_margin_voltage_mv: Some(800), // Wide operating range
         voltage_delay_coefficient: Some(0.20), // Higher delay sensitivity
         voltage_sensitivity: Some(4),        // Medium-high sensitivity
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -660,6 +680,10 @@ fn make_isolation_cell(
         timing_margin_voltage_mv: Some(750), // Wide margin for reliability
         voltage_delay_coefficient: Some(0.08), // Low delay sensitivity
         voltage_sensitivity: Some(8), // LOW sensitivity - must be robust
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -717,6 +741,10 @@ fn make_isolation_latch_cell(
         timing_margin_voltage_mv: Some(800), // Tighter margin for latch
         voltage_delay_coefficient: Some(0.12), // Moderate delay sensitivity
         voltage_sensitivity: Some(6),        // Medium sensitivity
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -776,6 +804,10 @@ fn make_power_switch_cell(
         timing_margin_voltage_mv: Some(600),   // Very wide operating range
         voltage_delay_coefficient: Some(0.25), // Switching speed affected by voltage
         voltage_sensitivity: Some(10),         // LOWEST sensitivity - last to fail
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -830,6 +862,10 @@ fn make_aon_buffer_cell(
         timing_margin_voltage_mv: Some(700),   // Wide margin
         voltage_delay_coefficient: Some(0.10), // Low delay sensitivity
         voltage_sensitivity: Some(9),          // Very low sensitivity - almost never fails
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -1014,6 +1050,10 @@ fn make_power_cell_with_drive(
         timing_margin_voltage_mv: Some(850),
         voltage_delay_coefficient: Some(0.15),
         voltage_sensitivity: Some(5), // Mid-range - specialized functions override
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 
@@ -1053,6 +1093,10 @@ fn make_retention_cell(name: &str, function: CellFunction, fit: f64) -> LibraryC
         timing_margin_voltage_mv: Some(920), // Tight timing margin
         voltage_delay_coefficient: Some(0.20), // 20% delay increase per 100mV
         voltage_sensitivity: Some(2), // VERY HIGH sensitivity - balloon latch sensitive
+        timing: None,
+        setup_ps: None,
+        hold_ps: None,
+        clk_to_q_ps: None,
     }
 }
 

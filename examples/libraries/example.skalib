@@ -1,0 +1,187 @@
+# Example SKALP Technology Library (.skalib)
+# This file demonstrates the native library format with safety-first design.
+#
+# Key features:
+# - FIT rates and failure modes are first-class citizens
+# - Linear timing model: delay = base + (slope * load_capacitance)
+# - TOML format for human readability and easy parsing
+# - Translatable to/from Liberty format for foundry compatibility
+
+[library]
+name = "example_7nm"
+version = "1.0.0"
+process_node_nm = 7
+reference_temperature_c = 25.0
+reference_voltage_v = 1.0
+
+# Basic Inverter - smallest cell
+[[cells]]
+name = "INV_X1"
+function = "inv"
+fit = 0.05
+area_um2 = 0.5
+transistor_count = 2
+drive_strength = 1
+input_capacitance_ff = 2
+output_capacitance_ff = 1
+max_fanout = 4
+nominal_voltage_mv = 1000
+min_voltage_mv = 700
+
+[cells.timing]
+arcs = [
+    { arc = "a->y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.5, fall_base_ps = 12, fall_slope_ps_per_ff = 0.4 }
+]
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.025
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.025
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# 2-input NAND Gate
+[[cells]]
+name = "NAND2_X1"
+function = "nand2"
+fit = 0.10
+area_um2 = 1.0
+transistor_count = 4
+drive_strength = 1
+input_capacitance_ff = 3
+output_capacitance_ff = 2
+max_fanout = 4
+nominal_voltage_mv = 1000
+min_voltage_mv = 700
+
+[cells.timing]
+arcs = [
+    { arc = "a->y", rise_base_ps = 20, rise_slope_ps_per_ff = 0.6, fall_base_ps = 18, fall_slope_ps_per_ff = 0.5 },
+    { arc = "b->y", rise_base_ps = 22, rise_slope_ps_per_ff = 0.6, fall_base_ps = 19, fall_slope_ps_per_ff = 0.5 }
+]
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.04
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.04
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.02
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+# 2-input XOR Gate
+[[cells]]
+name = "XOR2_X1"
+function = "xor2"
+fit = 0.15
+area_um2 = 2.0
+transistor_count = 8
+drive_strength = 1
+input_capacitance_ff = 4
+output_capacitance_ff = 2
+max_fanout = 4
+
+[cells.timing]
+arcs = [
+    { arc = "a->y", rise_base_ps = 35, rise_slope_ps_per_ff = 0.8, fall_base_ps = 32, fall_slope_ps_per_ff = 0.7 },
+    { arc = "b->y", rise_base_ps = 35, rise_slope_ps_per_ff = 0.8, fall_base_ps = 32, fall_slope_ps_per_ff = 0.7 }
+]
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.06
+fault_type = "stuck_at_0"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.06
+fault_type = "stuck_at_1"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.03
+fault_type = "delay"
+mechanism = "process_variation"
+
+# D Flip-Flop with Enable
+[[cells]]
+name = "DFFE_X1"
+function = "dffe"
+fit = 0.25
+area_um2 = 5.0
+transistor_count = 24
+drive_strength = 1
+input_capacitance_ff = 5
+output_capacitance_ff = 3
+max_fanout = 3
+# Sequential timing
+setup_ps = 50
+hold_ps = 20
+clk_to_q_ps = 80
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.05
+fault_type = "stuck_at_0"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.05
+fault_type = "stuck_at_1"
+
+[[cells.failure_modes]]
+name = "setup_violation"
+fit = 0.05
+fault_type = "timing"
+mechanism = "setup_slack_violation"
+
+[[cells.failure_modes]]
+name = "hold_violation"
+fit = 0.05
+fault_type = "timing"
+mechanism = "hold_slack_violation"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.05
+fault_type = "data_retention"
+mechanism = "latch_node_discharge"
+detection_method = "scan_test"
+
+# AND-NOT Gate (common in optimized designs)
+[[cells]]
+name = "ANDNOT_X1"
+function = "andnot"
+fit = 0.08
+area_um2 = 1.2
+transistor_count = 4
+
+[cells.timing]
+arcs = [
+    { arc = "a->y", rise_base_ps = 18, rise_slope_ps_per_ff = 0.5, fall_base_ps = 16, fall_slope_ps_per_ff = 0.4 },
+    { arc = "b->y", rise_base_ps = 20, rise_slope_ps_per_ff = 0.6, fall_base_ps = 17, fall_slope_ps_per_ff = 0.5 }
+]
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.04
+fault_type = "stuck_at_0"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.04
+fault_type = "stuck_at_1"

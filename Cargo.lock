@@ -3027,9 +3027,11 @@ dependencies = [
  "indexmap",
  "petgraph",
  "serde",
+ "serde_json",
  "skalp-frontend",
  "skalp-mir",
  "thiserror 1.0.69",
+ "toml",
 ]
 
 [[package]]

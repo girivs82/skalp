@@ -28,6 +28,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 use crate::gate_netlist::FaultType;
 use crate::lir::LirOp;
@@ -92,6 +94,70 @@ pub struct LibraryCell {
     /// Used for progressive brownout simulation ordering
     #[serde(default)]
     pub voltage_sensitivity: Option<u8>,
+
+    // === Timing Characteristics ===
+    /// Timing arcs for combinational cells (input -> output delays)
+    #[serde(default)]
+    pub timing: Option<CellTiming>,
+
+    /// Setup time in picoseconds (for sequential cells)
+    #[serde(default)]
+    pub setup_ps: Option<u32>,
+
+    /// Hold time in picoseconds (for sequential cells)
+    #[serde(default)]
+    pub hold_ps: Option<u32>,
+
+    /// Clock-to-Q delay in picoseconds (for sequential cells)
+    #[serde(default)]
+    pub clk_to_q_ps: Option<u32>,
+}
+
+/// Timing characteristics for a cell
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CellTiming {
+    /// Timing arcs: maps "input_pin->output_pin" to timing arc
+    #[serde(default)]
+    pub arcs: HashMap<String, TimingArc>,
+}
+
+/// A timing arc from input to output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimingArc {
+    /// Rise delay: base_ps + (slope_ps_per_ff * load_capacitance_ff)
+    pub rise_base_ps: u32,
+    pub rise_slope_ps_per_ff: f64,
+
+    /// Fall delay: base_ps + (slope_ps_per_ff * load_capacitance_ff)
+    pub fall_base_ps: u32,
+    pub fall_slope_ps_per_ff: f64,
+}
+
+impl TimingArc {
+    /// Create a symmetric timing arc (same rise/fall)
+    pub fn symmetric(base_ps: u32, slope_ps_per_ff: f64) -> Self {
+        Self {
+            rise_base_ps: base_ps,
+            rise_slope_ps_per_ff: slope_ps_per_ff,
+            fall_base_ps: base_ps,
+            fall_slope_ps_per_ff: slope_ps_per_ff,
+        }
+    }
+
+    /// Calculate rise delay for a given load capacitance
+    pub fn rise_delay_ps(&self, load_ff: f64) -> f64 {
+        self.rise_base_ps as f64 + self.rise_slope_ps_per_ff * load_ff
+    }
+
+    /// Calculate fall delay for a given load capacitance
+    pub fn fall_delay_ps(&self, load_ff: f64) -> f64 {
+        self.fall_base_ps as f64 + self.fall_slope_ps_per_ff * load_ff
+    }
+
+    /// Calculate average delay for a given load capacitance
+    pub fn avg_delay_ps(&self, load_ff: f64) -> f64 {
+        (self.rise_delay_ps(load_ff) + self.fall_delay_ps(load_ff)) / 2.0
+    }
 }
 
 fn default_drive_strength() -> u8 {
@@ -121,6 +187,10 @@ impl LibraryCell {
             timing_margin_voltage_mv: None,
             voltage_delay_coefficient: None,
             voltage_sensitivity: None,
+            timing: None,
+            setup_ps: None,
+            hold_ps: None,
+            clk_to_q_ps: None,
         }
     }
 
@@ -985,6 +1055,496 @@ impl TechLibrary {
             cell_count: self.cells.len(),
         }
     }
+
+    // ====== File I/O Methods ======
+
+    /// Load a technology library from a .skalib TOML file
+    ///
+    /// # Example
+    /// ```no_run
+    /// use skalp_lir::tech_library::TechLibrary;
+    /// let lib = TechLibrary::load_from_file("my_library.skalib").unwrap();
+    /// ```
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, LibraryLoadError> {
+        let content = fs::read_to_string(path.as_ref())
+            .map_err(|e| LibraryLoadError::IoError(e.to_string()))?;
+
+        Self::from_toml(&content)
+    }
+
+    /// Parse a technology library from a TOML string
+    pub fn from_toml(content: &str) -> Result<Self, LibraryLoadError> {
+        let toml_lib: TomlLibrary =
+            toml::from_str(content).map_err(|e| LibraryLoadError::ParseError(e.to_string()))?;
+
+        toml_lib.into_tech_library()
+    }
+
+    /// Save the library to a .skalib TOML file
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), LibraryLoadError> {
+        let toml_lib = TomlLibrary::from_tech_library(self);
+        let content = toml::to_string_pretty(&toml_lib)
+            .map_err(|e| LibraryLoadError::SerializeError(e.to_string()))?;
+
+        fs::write(path, content).map_err(|e| LibraryLoadError::IoError(e.to_string()))
+    }
+
+    /// Serialize the library to a TOML string
+    pub fn to_toml(&self) -> Result<String, LibraryLoadError> {
+        let toml_lib = TomlLibrary::from_tech_library(self);
+        toml::to_string_pretty(&toml_lib)
+            .map_err(|e| LibraryLoadError::SerializeError(e.to_string()))
+    }
+}
+
+// ============================================================================
+// TOML Schema for .skalib files
+// ============================================================================
+
+/// Error type for library loading/saving operations
+#[derive(Debug, Clone)]
+pub enum LibraryLoadError {
+    IoError(String),
+    ParseError(String),
+    SerializeError(String),
+    ValidationError(String),
+}
+
+impl std::fmt::Display for LibraryLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LibraryLoadError::IoError(s) => write!(f, "I/O error: {}", s),
+            LibraryLoadError::ParseError(s) => write!(f, "Parse error: {}", s),
+            LibraryLoadError::SerializeError(s) => write!(f, "Serialization error: {}", s),
+            LibraryLoadError::ValidationError(s) => write!(f, "Validation error: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for LibraryLoadError {}
+
+/// TOML representation of a technology library
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlLibrary {
+    /// Library metadata
+    library: TomlLibraryMeta,
+    /// Library cells
+    #[serde(default)]
+    cells: Vec<TomlCell>,
+}
+
+/// Library metadata in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlLibraryMeta {
+    name: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    process_node_nm: Option<u32>,
+    #[serde(default)]
+    reference_temperature_c: Option<f64>,
+    #[serde(default)]
+    reference_voltage_v: Option<f64>,
+}
+
+/// Cell definition in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlCell {
+    name: String,
+    function: String,
+    #[serde(default)]
+    fit: f64,
+    #[serde(default)]
+    area_um2: Option<f64>,
+    #[serde(default)]
+    transistor_count: Option<u32>,
+    #[serde(default)]
+    inputs: Vec<String>,
+    #[serde(default)]
+    outputs: Vec<String>,
+    #[serde(default)]
+    drive_strength: Option<u8>,
+    #[serde(default)]
+    input_capacitance_ff: Option<u32>,
+    #[serde(default)]
+    output_capacitance_ff: Option<u32>,
+    #[serde(default)]
+    max_fanout: Option<u32>,
+    // Voltage margins
+    #[serde(default)]
+    nominal_voltage_mv: Option<u16>,
+    #[serde(default)]
+    min_voltage_mv: Option<u16>,
+    // Timing (combinational)
+    #[serde(default)]
+    timing: Option<TomlCellTiming>,
+    // Timing (sequential)
+    #[serde(default)]
+    setup_ps: Option<u32>,
+    #[serde(default)]
+    hold_ps: Option<u32>,
+    #[serde(default)]
+    clk_to_q_ps: Option<u32>,
+    // Failure modes
+    #[serde(default)]
+    failure_modes: Vec<TomlFailureMode>,
+}
+
+/// Timing information in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlCellTiming {
+    #[serde(default)]
+    arcs: Vec<TomlTimingArc>,
+}
+
+/// Timing arc in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlTimingArc {
+    /// Arc name: "a->y" format
+    arc: String,
+    /// Rise delay base in picoseconds
+    rise_base_ps: u32,
+    /// Rise delay slope in ps/fF
+    #[serde(default)]
+    rise_slope_ps_per_ff: f64,
+    /// Fall delay base in picoseconds
+    fall_base_ps: u32,
+    /// Fall delay slope in ps/fF
+    #[serde(default)]
+    fall_slope_ps_per_ff: f64,
+}
+
+/// Failure mode in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlFailureMode {
+    name: String,
+    fit: f64,
+    #[serde(default = "default_fault_type")]
+    fault_type: String,
+    #[serde(default)]
+    mechanism: Option<String>,
+    #[serde(default)]
+    detection_method: Option<String>,
+}
+
+fn default_fault_type() -> String {
+    "stuck_at_0".to_string()
+}
+
+impl TomlLibrary {
+    /// Convert TOML representation to TechLibrary
+    fn into_tech_library(self) -> Result<TechLibrary, LibraryLoadError> {
+        let mut lib = TechLibrary::new(&self.library.name);
+        lib.process_node = self.library.process_node_nm;
+        lib.version = self.library.version;
+        lib.reference_temperature = self.library.reference_temperature_c;
+        lib.reference_voltage = self.library.reference_voltage_v;
+
+        for cell in self.cells {
+            let library_cell = cell.into_library_cell()?;
+            lib.add_cell(library_cell);
+        }
+
+        Ok(lib)
+    }
+
+    /// Create TOML representation from TechLibrary
+    fn from_tech_library(lib: &TechLibrary) -> Self {
+        let cells: Vec<TomlCell> = lib
+            .cells
+            .values()
+            .map(TomlCell::from_library_cell)
+            .collect();
+
+        TomlLibrary {
+            library: TomlLibraryMeta {
+                name: lib.name.clone(),
+                version: lib.version.clone(),
+                process_node_nm: lib.process_node,
+                reference_temperature_c: lib.reference_temperature,
+                reference_voltage_v: lib.reference_voltage,
+            },
+            cells,
+        }
+    }
+}
+
+impl TomlCell {
+    /// Convert TOML cell to LibraryCell
+    fn into_library_cell(self) -> Result<LibraryCell, LibraryLoadError> {
+        let function = parse_cell_function(&self.function)?;
+
+        // Use provided pins or default
+        let (default_inputs, default_outputs) = function.default_pins();
+        let inputs = if self.inputs.is_empty() {
+            default_inputs
+        } else {
+            self.inputs
+        };
+        let outputs = if self.outputs.is_empty() {
+            default_outputs
+        } else {
+            self.outputs
+        };
+
+        // Parse timing arcs
+        let timing = self.timing.map(|t| {
+            let mut arcs = HashMap::new();
+            for arc in t.arcs {
+                arcs.insert(
+                    arc.arc,
+                    TimingArc {
+                        rise_base_ps: arc.rise_base_ps,
+                        rise_slope_ps_per_ff: arc.rise_slope_ps_per_ff,
+                        fall_base_ps: arc.fall_base_ps,
+                        fall_slope_ps_per_ff: arc.fall_slope_ps_per_ff,
+                    },
+                );
+            }
+            CellTiming { arcs }
+        });
+
+        // Parse failure modes
+        let failure_modes: Vec<LibraryFailureMode> = self
+            .failure_modes
+            .into_iter()
+            .map(|fm| {
+                let fault_type = parse_fault_type(&fm.fault_type);
+                let mut mode = LibraryFailureMode::new(&fm.name, fm.fit, fault_type);
+                if let Some(m) = fm.mechanism {
+                    mode = mode.with_mechanism(&m);
+                }
+                if let Some(d) = fm.detection_method {
+                    mode = mode.with_detection_method(&d);
+                }
+                mode
+            })
+            .collect();
+
+        Ok(LibraryCell {
+            name: self.name,
+            function,
+            fit: self.fit,
+            area: self.area_um2,
+            transistor_count: self.transistor_count,
+            inputs,
+            outputs,
+            failure_modes,
+            drive_strength: self.drive_strength.unwrap_or(1),
+            max_output_current_ua: None,
+            output_capacitance_ff: self.output_capacitance_ff,
+            input_capacitance_ff: self.input_capacitance_ff,
+            max_fanout: self.max_fanout,
+            min_voltage_mv: self.min_voltage_mv,
+            nominal_voltage_mv: self.nominal_voltage_mv,
+            timing_margin_voltage_mv: None,
+            voltage_delay_coefficient: None,
+            voltage_sensitivity: None,
+            timing,
+            setup_ps: self.setup_ps,
+            hold_ps: self.hold_ps,
+            clk_to_q_ps: self.clk_to_q_ps,
+        })
+    }
+
+    /// Create TOML cell from LibraryCell
+    fn from_library_cell(cell: &LibraryCell) -> Self {
+        let timing = cell.timing.as_ref().map(|t| TomlCellTiming {
+            arcs: t
+                .arcs
+                .iter()
+                .map(|(arc, ta)| TomlTimingArc {
+                    arc: arc.clone(),
+                    rise_base_ps: ta.rise_base_ps,
+                    rise_slope_ps_per_ff: ta.rise_slope_ps_per_ff,
+                    fall_base_ps: ta.fall_base_ps,
+                    fall_slope_ps_per_ff: ta.fall_slope_ps_per_ff,
+                })
+                .collect(),
+        });
+
+        let failure_modes: Vec<TomlFailureMode> = cell
+            .failure_modes
+            .iter()
+            .map(|fm| TomlFailureMode {
+                name: fm.name.clone(),
+                fit: fm.fit,
+                fault_type: format_fault_type(&fm.fault_type),
+                mechanism: fm.mechanism.clone(),
+                detection_method: fm.detection_method.clone(),
+            })
+            .collect();
+
+        TomlCell {
+            name: cell.name.clone(),
+            function: format_cell_function(&cell.function),
+            fit: cell.fit,
+            area_um2: cell.area,
+            transistor_count: cell.transistor_count,
+            inputs: cell.inputs.clone(),
+            outputs: cell.outputs.clone(),
+            drive_strength: Some(cell.drive_strength),
+            input_capacitance_ff: cell.input_capacitance_ff,
+            output_capacitance_ff: cell.output_capacitance_ff,
+            max_fanout: cell.max_fanout,
+            nominal_voltage_mv: cell.nominal_voltage_mv,
+            min_voltage_mv: cell.min_voltage_mv,
+            timing,
+            setup_ps: cell.setup_ps,
+            hold_ps: cell.hold_ps,
+            clk_to_q_ps: cell.clk_to_q_ps,
+            failure_modes,
+        }
+    }
+}
+
+/// Parse a function name string to CellFunction
+fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
+    let lower = s.to_lowercase();
+    match lower.as_str() {
+        "inv" | "not" => Ok(CellFunction::Inv),
+        "buf" | "buffer" => Ok(CellFunction::Buf),
+        "nand2" => Ok(CellFunction::Nand2),
+        "nand3" => Ok(CellFunction::Nand3),
+        "nand4" => Ok(CellFunction::Nand4),
+        "nor2" => Ok(CellFunction::Nor2),
+        "nor3" => Ok(CellFunction::Nor3),
+        "nor4" => Ok(CellFunction::Nor4),
+        "and2" => Ok(CellFunction::And2),
+        "and3" => Ok(CellFunction::And3),
+        "and4" => Ok(CellFunction::And4),
+        "or2" => Ok(CellFunction::Or2),
+        "or3" => Ok(CellFunction::Or3),
+        "or4" => Ok(CellFunction::Or4),
+        "xor2" => Ok(CellFunction::Xor2),
+        "xnor2" => Ok(CellFunction::Xnor2),
+        "andnot" | "and_not" => Ok(CellFunction::AndNot),
+        "ornot" | "or_not" => Ok(CellFunction::OrNot),
+        "aoi21" => Ok(CellFunction::Aoi21),
+        "aoi22" => Ok(CellFunction::Aoi22),
+        "oai21" => Ok(CellFunction::Oai21),
+        "oai22" => Ok(CellFunction::Oai22),
+        "mux2" => Ok(CellFunction::Mux2),
+        "mux4" => Ok(CellFunction::Mux4),
+        "ha" | "half_adder" | "halfadder" => Ok(CellFunction::HalfAdder),
+        "fa" | "full_adder" | "fulladder" => Ok(CellFunction::FullAdder),
+        "dff" => Ok(CellFunction::Dff),
+        "dffr" | "dff_r" => Ok(CellFunction::DffR),
+        "dffe" | "dff_e" => Ok(CellFunction::DffE),
+        "dffre" | "dff_re" => Ok(CellFunction::DffRE),
+        "latch" => Ok(CellFunction::Latch),
+        "tristate" | "tri" => Ok(CellFunction::Tristate),
+        // Power infrastructure
+        "level_shifter_lh" | "lslh" => Ok(CellFunction::LevelShifterLH),
+        "level_shifter_hl" | "lshl" => Ok(CellFunction::LevelShifterHL),
+        "isolation_and" | "iso_and" => Ok(CellFunction::IsolationAnd),
+        "isolation_or" | "iso_or" => Ok(CellFunction::IsolationOr),
+        "isolation_latch" | "iso_latch" => Ok(CellFunction::IsolationLatch),
+        "retention_dff" | "ret_dff" => Ok(CellFunction::RetentionDff),
+        "retention_dffr" | "ret_dffr" => Ok(CellFunction::RetentionDffR),
+        "power_switch_header" | "psh" => Ok(CellFunction::PowerSwitchHeader),
+        "power_switch_footer" | "psf" => Ok(CellFunction::PowerSwitchFooter),
+        "always_on_buf" | "aob" => Ok(CellFunction::AlwaysOnBuf),
+        "tie_high" | "tieh" => Ok(CellFunction::TieHigh),
+        "tie_low" | "tiel" => Ok(CellFunction::TieLow),
+        _ => {
+            // Check for adder with width
+            if lower.starts_with("adder") {
+                if let Some(width_str) = lower.strip_prefix("adder") {
+                    if let Ok(width) = width_str.parse::<u32>() {
+                        return Ok(CellFunction::Adder(width));
+                    }
+                }
+            }
+            // Default to custom
+            Ok(CellFunction::Custom(s.to_string()))
+        }
+    }
+}
+
+/// Format CellFunction to string for TOML
+fn format_cell_function(f: &CellFunction) -> String {
+    match f {
+        CellFunction::Inv => "inv".to_string(),
+        CellFunction::Buf => "buf".to_string(),
+        CellFunction::Nand2 => "nand2".to_string(),
+        CellFunction::Nand3 => "nand3".to_string(),
+        CellFunction::Nand4 => "nand4".to_string(),
+        CellFunction::Nor2 => "nor2".to_string(),
+        CellFunction::Nor3 => "nor3".to_string(),
+        CellFunction::Nor4 => "nor4".to_string(),
+        CellFunction::And2 => "and2".to_string(),
+        CellFunction::And3 => "and3".to_string(),
+        CellFunction::And4 => "and4".to_string(),
+        CellFunction::Or2 => "or2".to_string(),
+        CellFunction::Or3 => "or3".to_string(),
+        CellFunction::Or4 => "or4".to_string(),
+        CellFunction::Xor2 => "xor2".to_string(),
+        CellFunction::Xnor2 => "xnor2".to_string(),
+        CellFunction::AndNot => "andnot".to_string(),
+        CellFunction::OrNot => "ornot".to_string(),
+        CellFunction::Aoi21 => "aoi21".to_string(),
+        CellFunction::Aoi22 => "aoi22".to_string(),
+        CellFunction::Oai21 => "oai21".to_string(),
+        CellFunction::Oai22 => "oai22".to_string(),
+        CellFunction::Mux2 => "mux2".to_string(),
+        CellFunction::Mux4 => "mux4".to_string(),
+        CellFunction::HalfAdder => "half_adder".to_string(),
+        CellFunction::FullAdder => "full_adder".to_string(),
+        CellFunction::Adder(n) => format!("adder{}", n),
+        CellFunction::Dff => "dff".to_string(),
+        CellFunction::DffR => "dffr".to_string(),
+        CellFunction::DffE => "dffe".to_string(),
+        CellFunction::DffRE => "dffre".to_string(),
+        CellFunction::Latch => "latch".to_string(),
+        CellFunction::Tristate => "tristate".to_string(),
+        CellFunction::LevelShifterLH => "level_shifter_lh".to_string(),
+        CellFunction::LevelShifterHL => "level_shifter_hl".to_string(),
+        CellFunction::IsolationAnd => "isolation_and".to_string(),
+        CellFunction::IsolationOr => "isolation_or".to_string(),
+        CellFunction::IsolationLatch => "isolation_latch".to_string(),
+        CellFunction::RetentionDff => "retention_dff".to_string(),
+        CellFunction::RetentionDffR => "retention_dffr".to_string(),
+        CellFunction::PowerSwitchHeader => "power_switch_header".to_string(),
+        CellFunction::PowerSwitchFooter => "power_switch_footer".to_string(),
+        CellFunction::AlwaysOnBuf => "always_on_buf".to_string(),
+        CellFunction::TieHigh => "tie_high".to_string(),
+        CellFunction::TieLow => "tie_low".to_string(),
+        CellFunction::Custom(s) => s.clone(),
+    }
+}
+
+/// Parse fault type string
+fn parse_fault_type(s: &str) -> FaultType {
+    match s.to_lowercase().as_str() {
+        "stuck_at_0" | "sa0" => FaultType::StuckAt0,
+        "stuck_at_1" | "sa1" => FaultType::StuckAt1,
+        "transient" | "seu" => FaultType::Transient,
+        "delay" => FaultType::Delay,
+        "bridge" => FaultType::Bridge,
+        "timing" | "setup_hold" => FaultType::Timing,
+        "open" | "open_circuit" => FaultType::Open,
+        "data_retention" | "retention" => FaultType::DataRetention,
+        "clock_path" | "clock" => FaultType::ClockPath,
+        "reset_path" | "reset" => FaultType::ResetPath,
+        _ => FaultType::StuckAt0, // Default
+    }
+}
+
+/// Format fault type to string
+fn format_fault_type(f: &FaultType) -> String {
+    match f {
+        FaultType::StuckAt0 => "stuck_at_0".to_string(),
+        FaultType::StuckAt1 => "stuck_at_1".to_string(),
+        FaultType::Transient => "transient".to_string(),
+        FaultType::Delay => "delay".to_string(),
+        FaultType::Bridge => "bridge".to_string(),
+        FaultType::Timing => "timing".to_string(),
+        FaultType::Open => "open".to_string(),
+        FaultType::DataRetention => "data_retention".to_string(),
+        FaultType::ClockPath => "clock_path".to_string(),
+        FaultType::ResetPath => "reset_path".to_string(),
+    }
 }
 
 /// Summary of derating calculations for a library
@@ -1431,5 +1991,149 @@ mod tests {
         for (base, derated) in cell.failure_modes.iter().zip(derated_modes.iter()) {
             assert!(derated.fit > base.fit);
         }
+    }
+
+    // ======================================================================
+    // TOML Parsing Tests
+    // ======================================================================
+
+    #[test]
+    fn test_toml_parse_simple_library() {
+        let toml_content = r#"
+            [library]
+            name = "test_lib"
+            version = "1.0"
+            process_node_nm = 7
+            reference_temperature_c = 25.0
+            reference_voltage_v = 1.0
+
+            [[cells]]
+            name = "INV_X1"
+            function = "inv"
+            fit = 0.05
+        "#;
+
+        let lib = TechLibrary::from_toml(toml_content).expect("Failed to parse TOML");
+
+        assert_eq!(lib.name, "test_lib");
+        assert_eq!(lib.process_node, Some(7));
+        assert_eq!(lib.cell_count(), 1);
+
+        let inv = lib.get_cell("INV_X1").expect("INV_X1 not found");
+        assert_eq!(inv.function, CellFunction::Inv);
+        assert!((inv.fit - 0.05).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_toml_parse_with_timing() {
+        let toml_content = r#"
+            [library]
+            name = "timing_test"
+
+            [[cells]]
+            name = "NAND2_X1"
+            function = "nand2"
+            fit = 0.10
+
+            [cells.timing]
+            arcs = [
+                { arc = "a->y", rise_base_ps = 20, rise_slope_ps_per_ff = 0.5, fall_base_ps = 18, fall_slope_ps_per_ff = 0.4 },
+                { arc = "b->y", rise_base_ps = 22, rise_slope_ps_per_ff = 0.6, fall_base_ps = 19, fall_slope_ps_per_ff = 0.5 }
+            ]
+        "#;
+
+        let lib = TechLibrary::from_toml(toml_content).expect("Failed to parse TOML");
+        let cell = lib.get_cell("NAND2_X1").expect("NAND2_X1 not found");
+
+        let timing = cell.timing.as_ref().expect("No timing data");
+        assert_eq!(timing.arcs.len(), 2);
+
+        let arc_a = timing.arcs.get("a->y").expect("arc a->y not found");
+        assert_eq!(arc_a.rise_base_ps, 20);
+        assert!((arc_a.rise_slope_ps_per_ff - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_toml_parse_with_failure_modes() {
+        let toml_content = r#"
+            [library]
+            name = "failure_test"
+
+            [[cells]]
+            name = "DFFE_X1"
+            function = "dffe"
+            fit = 0.25
+            setup_ps = 50
+            hold_ps = 20
+            clk_to_q_ps = 80
+
+            [[cells.failure_modes]]
+            name = "stuck_at_0"
+            fit = 0.05
+            fault_type = "stuck_at_0"
+
+            [[cells.failure_modes]]
+            name = "setup_violation"
+            fit = 0.05
+            fault_type = "timing"
+            mechanism = "setup_slack_violation"
+        "#;
+
+        let lib = TechLibrary::from_toml(toml_content).expect("Failed to parse TOML");
+        let cell = lib.get_cell("DFFE_X1").expect("DFFE_X1 not found");
+
+        assert_eq!(cell.setup_ps, Some(50));
+        assert_eq!(cell.hold_ps, Some(20));
+        assert_eq!(cell.clk_to_q_ps, Some(80));
+
+        assert_eq!(cell.failure_modes.len(), 2);
+        assert_eq!(cell.failure_modes[0].name, "stuck_at_0");
+        assert_eq!(cell.failure_modes[1].fault_type, FaultType::Timing);
+    }
+
+    #[test]
+    fn test_toml_roundtrip() {
+        // Create a library programmatically
+        let mut lib = TechLibrary::new("roundtrip_test");
+        lib.version = Some("1.0".to_string());
+        lib.process_node = Some(7);
+        lib.reference_temperature = Some(25.0);
+        lib.reference_voltage = Some(1.0);
+
+        lib.add_cell(
+            LibraryCell::new_comb("NAND2_X1", CellFunction::Nand2, 0.1)
+                .with_default_failure_modes(),
+        );
+
+        // Convert to TOML and back
+        let toml_str = lib.to_toml().expect("Failed to serialize");
+        let lib2 = TechLibrary::from_toml(&toml_str).expect("Failed to parse");
+
+        assert_eq!(lib2.name, "roundtrip_test");
+        assert_eq!(lib2.cell_count(), 1);
+
+        let cell = lib2.get_cell("NAND2_X1").expect("NAND2_X1 not found");
+        assert!((cell.fit - 0.1).abs() < 0.001);
+        assert_eq!(cell.failure_modes.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_cell_function() {
+        // Test various function name formats
+        assert_eq!(parse_cell_function("inv").unwrap(), CellFunction::Inv);
+        assert_eq!(parse_cell_function("NOT").unwrap(), CellFunction::Inv);
+        assert_eq!(parse_cell_function("nand2").unwrap(), CellFunction::Nand2);
+        assert_eq!(parse_cell_function("NAND2").unwrap(), CellFunction::Nand2);
+        assert_eq!(parse_cell_function("xor2").unwrap(), CellFunction::Xor2);
+        assert_eq!(parse_cell_function("dff").unwrap(), CellFunction::Dff);
+        assert_eq!(parse_cell_function("dffe").unwrap(), CellFunction::DffE);
+        assert_eq!(
+            parse_cell_function("level_shifter_lh").unwrap(),
+            CellFunction::LevelShifterLH
+        );
+        assert_eq!(
+            parse_cell_function("iso_and").unwrap(),
+            CellFunction::IsolationAnd
+        );
     }
 }
