@@ -43,13 +43,64 @@ impl<'a> AigBuilder<'a> {
         // Phase 1: Create input nodes for primary inputs
         self.build_inputs();
 
-        // Phase 2: Process cells in topological order
+        // Phase 2: Pre-create latch nodes for sequential feedback
+        // This handles cycles where combinational cells depend on latch outputs
+        self.pre_create_latches();
+
+        // Phase 3: Process cells in topological order
         self.process_cells();
 
-        // Phase 3: Create outputs
+        // Phase 4: Create outputs
         self.build_outputs();
 
         self.aig
+    }
+
+    /// Pre-create latch nodes for all DFF cells to handle feedback loops
+    /// This ensures latch output nets are mapped before combinational cells try to read them
+    fn pre_create_latches(&mut self) {
+        let mut latch_count = 0;
+        for cell in &self.netlist.cells {
+            let cell_type = cell.cell_type.to_uppercase();
+            let base = cell_type.split('_').next().unwrap_or(&cell_type);
+
+            // Check if this is a DFF/latch cell
+            if matches!(
+                base,
+                "DFF" | "DFFR" | "DFFE" | "DFFRE" | "DFFRQ" | "DFFQ" | "LATCH"
+            ) {
+                // Pre-create latch node with placeholder input
+                // The real input will be connected when the cell is processed
+                let clock = cell
+                    .clock
+                    .and_then(|c| self.net_map[c.0 as usize])
+                    .map(|l| l.node);
+                let reset = cell
+                    .reset
+                    .and_then(|r| self.net_map[r.0 as usize])
+                    .map(|l| l.node);
+
+                eprintln!("[AIG_BUILDER] Pre-creating latch for cell {} (type={}), clock={:?}, reset={:?}",
+                    cell.id.0, cell.cell_type, clock, reset);
+
+                // Create latch with false_lit as placeholder - will be updated later
+                let latch_id = self.aig.add_latch(AigLit::false_lit(), None, clock, reset);
+                let latch_lit = AigLit::new(latch_id);
+
+                // Map all output nets to this latch
+                for &output_net in &cell.outputs {
+                    let net_name = &self.netlist.nets[output_net.0 as usize].name;
+                    eprintln!(
+                        "[AIG_BUILDER]   Mapping output net {} ({}) to latch {:?}",
+                        output_net.0, net_name, latch_id
+                    );
+                    self.net_map[output_net.0 as usize] = Some(latch_lit);
+                    self.aig.register_net(output_net, latch_lit);
+                }
+                latch_count += 1;
+            }
+        }
+        eprintln!("[AIG_BUILDER] Pre-created {} latches", latch_count);
     }
 
     /// Create AIG inputs for primary inputs
@@ -166,6 +217,23 @@ impl<'a> AigBuilder<'a> {
         // Parse cell function from name or type
         let function = self.parse_cell_function(&cell.cell_type);
 
+        // Get net names for debugging
+        let input_net_names: Vec<_> = cell
+            .inputs
+            .iter()
+            .map(|&net_id| {
+                let net_name = &self.netlist.nets[net_id.0 as usize].name;
+                format!("{}({})", net_id.0, net_name)
+            })
+            .collect();
+        eprintln!(
+            "[AIG_BUILDER] Processing cell {} (type={}, fn={:?})",
+            cell.id.0, cell.cell_type, function
+        );
+        eprintln!("              input_nets={:?}", input_net_names);
+        eprintln!("              input_lits={:?}", inputs);
+        eprintln!("              outputs={:?}", cell.outputs);
+
         // Build AIG for this cell
         let safety =
             AigSafetyInfo::from_cell(cell.id, cell.fit, cell.safety_classification.clone());
@@ -179,6 +247,10 @@ impl<'a> AigBuilder<'a> {
 
             // Buffer
             CellFunction::Buf => inputs.first().copied().unwrap_or(AigLit::false_lit()),
+
+            // Tie cells (constant outputs)
+            CellFunction::TieHigh => AigLit::true_lit(),
+            CellFunction::TieLow => AigLit::false_lit(),
 
             // AND gates
             CellFunction::And2 => {
@@ -349,26 +421,83 @@ impl<'a> AigBuilder<'a> {
             }
 
             // Half adder: sum = a ^ b, cout = a & b
+            // This is a multi-output cell - handle specially
             CellFunction::HalfAdder => {
                 let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
                 let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
-                // We only return sum; carry is handled separately if needed
-                // For now, treat as XOR for the primary output
-                self.aig.add_xor(a, b)
+
+                // Compute both outputs
+                let sum_lit = self.aig.add_xor(a, b);
+                let carry_lit = self.aig.add_and(a, b);
+
+                // Map outputs: first is sum, second is carry
+                if let Some(&sum_net) = cell.outputs.first() {
+                    self.net_map[sum_net.0 as usize] = Some(sum_lit);
+                    self.aig.register_net(sum_net, sum_lit);
+                }
+                if let Some(&carry_net) = cell.outputs.get(1) {
+                    self.net_map[carry_net.0 as usize] = Some(carry_lit);
+                    self.aig.register_net(carry_net, carry_lit);
+                }
+
+                // Return early - we've already mapped outputs
+                return;
             }
 
             // Full adder: sum = a ^ b ^ cin, cout = (a & b) | (cin & (a ^ b))
+            // This is a multi-output cell - handle specially
             CellFunction::FullAdder => {
                 let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
                 let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
                 let cin = inputs.get(2).copied().unwrap_or(AigLit::false_lit());
+
+                // Compute both outputs
                 let ab_xor = self.aig.add_xor(a, b);
-                self.aig.add_xor(ab_xor, cin)
+                let sum_lit = self.aig.add_xor(ab_xor, cin);
+
+                // Carry = (a & b) | (cin & (a ^ b)) = majority function
+                let ab_and = self.aig.add_and(a, b);
+                let cin_ab_xor = self.aig.add_and(cin, ab_xor);
+                let carry_lit = self.aig.add_or(ab_and, cin_ab_xor);
+
+                // Map outputs: first is sum, second is carry
+                if let Some(&sum_net) = cell.outputs.first() {
+                    self.net_map[sum_net.0 as usize] = Some(sum_lit);
+                    self.aig.register_net(sum_net, sum_lit);
+                }
+                if let Some(&cout_net) = cell.outputs.get(1) {
+                    self.net_map[cout_net.0 as usize] = Some(carry_lit);
+                    self.aig.register_net(cout_net, carry_lit);
+                }
+
+                // Return early - we've already mapped outputs
+                return;
             }
 
             // Sequential elements
+            // Note: Latches are pre-created in pre_create_latches() to handle feedback loops
+            // Here we just update their data input with the computed value
             CellFunction::Dff | CellFunction::DffR | CellFunction::DffE | CellFunction::DffRE => {
                 let d = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                eprintln!(
+                    "[AIG_BUILDER] Processing DFF cell {}, d input = {:?}",
+                    cell.id.0, d
+                );
+
+                // Find the pre-created latch for this cell's output
+                if let Some(&output_net) = cell.outputs.first() {
+                    if let Some(existing_lit) = self.net_map[output_net.0 as usize] {
+                        // Update the latch with the real data input
+                        eprintln!(
+                            "[AIG_BUILDER]   Updating pre-created latch {:?} with d={:?}",
+                            existing_lit.node, d
+                        );
+                        self.aig.update_latch_data(existing_lit.node, d);
+                        return; // Already mapped, don't create new one
+                    }
+                }
+
+                // Fallback: create new latch if not pre-created
                 let clock = cell
                     .clock
                     .and_then(|c| self.net_map[c.0 as usize])
@@ -386,6 +515,17 @@ impl<'a> AigBuilder<'a> {
 
             CellFunction::Latch => {
                 let d = inputs.first().copied().unwrap_or(AigLit::false_lit());
+
+                // Find the pre-created latch for this cell's output
+                if let Some(&output_net) = cell.outputs.first() {
+                    if let Some(existing_lit) = self.net_map[output_net.0 as usize] {
+                        // Update the latch with the real data input
+                        self.aig.update_latch_data(existing_lit.node, d);
+                        return; // Already mapped, don't create new one
+                    }
+                }
+
+                // Fallback: create new latch if not pre-created
                 let clock = cell
                     .clock
                     .and_then(|c| self.net_map[c.0 as usize])
@@ -662,6 +802,18 @@ impl<'a> AigBuilder<'a> {
             return CellFunction::PowerSwitchFooter;
         }
 
+        // Check tie cells (TIE_HIGH, TIE_LOW have underscore in name)
+        if upper.starts_with("TIE_HIGH")
+            || upper.starts_with("TIEHIGH")
+            || upper.starts_with("TIEHI")
+        {
+            return CellFunction::TieHigh;
+        }
+        if upper.starts_with("TIE_LOW") || upper.starts_with("TIELOW") || upper.starts_with("TIELO")
+        {
+            return CellFunction::TieLow;
+        }
+
         // Normalize name (remove drive strength suffix like _X1, _X2)
         let base_name = cell_type
             .split('_')
@@ -700,6 +852,9 @@ impl<'a> AigBuilder<'a> {
             "DFFRE" | "DFFREQ" => CellFunction::DffRE,
             "LATCH" | "LAT" => CellFunction::Latch,
             "TRI" | "TRISTATE" | "TRIBUF" => CellFunction::Tristate,
+            // Tie cells for constant outputs
+            "TIE_HIGH" | "TIEHIGH" | "TIEHI" | "VDD" => CellFunction::TieHigh,
+            "TIE_LOW" | "TIELOW" | "TIELO" | "VSS" | "GND" => CellFunction::TieLow,
             _ => CellFunction::Custom(cell_type.to_string()),
         }
     }
@@ -842,5 +997,155 @@ mod tests {
 
         assert_eq!(aig.latch_count(), 1);
         assert_eq!(aig.input_count(), 2); // clk and d
+    }
+
+    #[test]
+    fn test_half_adder_both_outputs() {
+        // HalfAdder has 2 outputs: sum = a ^ b, carry = a & b
+        // This test verifies that both outputs are computed correctly
+        // and are DIFFERENT (the bug was that all outputs got the same value)
+        let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
+
+        let a = netlist.add_input("a".to_string());
+        let b = netlist.add_input("b".to_string());
+        let sum = netlist.add_output("sum".to_string());
+        let carry = netlist.add_output("carry".to_string());
+
+        let ha_cell = Cell::new_comb(
+            CellId(0),
+            "HA_X1".to_string(),
+            "generic".to_string(),
+            0.2,
+            "top.ha".to_string(),
+            vec![a, b],
+            vec![sum, carry],
+        );
+        netlist.add_cell(ha_cell);
+
+        let builder = AigBuilder::new(&netlist);
+        let aig = builder.build();
+
+        // Get the output literals
+        let outputs = aig.outputs();
+        assert_eq!(outputs.len(), 2, "HalfAdder should have 2 outputs");
+
+        let (sum_name, sum_lit) = &outputs[0];
+        let (carry_name, carry_lit) = &outputs[1];
+
+        // Verify output names
+        assert_eq!(sum_name, "sum");
+        assert_eq!(carry_name, "carry");
+
+        // CRITICAL: sum and carry must be DIFFERENT
+        // sum = a ^ b (XOR), carry = a & b (AND)
+        // These are different functions, so their AIG literals must differ
+        assert_ne!(
+            sum_lit, carry_lit,
+            "BUG: HalfAdder sum and carry must be different! sum={:?}, carry={:?}",
+            sum_lit, carry_lit
+        );
+    }
+
+    #[test]
+    fn test_full_adder_both_outputs() {
+        // FullAdder has 2 outputs: sum = a ^ b ^ cin, carry = (a & b) | (cin & (a ^ b))
+        let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
+
+        let a = netlist.add_input("a".to_string());
+        let b = netlist.add_input("b".to_string());
+        let cin = netlist.add_input("cin".to_string());
+        let sum = netlist.add_output("sum".to_string());
+        let cout = netlist.add_output("cout".to_string());
+
+        let fa_cell = Cell::new_comb(
+            CellId(0),
+            "FA_X1".to_string(),
+            "generic".to_string(),
+            0.3,
+            "top.fa".to_string(),
+            vec![a, b, cin],
+            vec![sum, cout],
+        );
+        netlist.add_cell(fa_cell);
+
+        let builder = AigBuilder::new(&netlist);
+        let aig = builder.build();
+
+        let outputs = aig.outputs();
+        assert_eq!(outputs.len(), 2, "FullAdder should have 2 outputs");
+
+        let (sum_name, sum_lit) = &outputs[0];
+        let (cout_name, cout_lit) = &outputs[1];
+
+        assert_eq!(sum_name, "sum");
+        assert_eq!(cout_name, "cout");
+
+        // CRITICAL: sum and cout must be DIFFERENT
+        assert_ne!(
+            sum_lit, cout_lit,
+            "BUG: FullAdder sum and cout must be different! sum={:?}, cout={:?}",
+            sum_lit, cout_lit
+        );
+    }
+
+    #[test]
+    fn test_adder_chain_functional() {
+        // Test a chain of half adder + full adder (2-bit adder)
+        // This simulates what happens when adding counter + 1
+        let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
+
+        // Inputs: a[0], a[1], b[0], b[1]
+        let a0 = netlist.add_input("a0".to_string());
+        let a1 = netlist.add_input("a1".to_string());
+        let b0 = netlist.add_input("b0".to_string());
+        let b1 = netlist.add_input("b1".to_string());
+
+        // Intermediate carry
+        let c0 = netlist.add_net(GateNet::new(GateNetId(0), "c0".to_string()));
+
+        // Outputs
+        let s0 = netlist.add_output("s0".to_string());
+        let s1 = netlist.add_output("s1".to_string());
+        let cout = netlist.add_output("cout".to_string());
+
+        // Half adder for bit 0
+        let ha_cell = Cell::new_comb(
+            CellId(0),
+            "HA_X1".to_string(),
+            "generic".to_string(),
+            0.2,
+            "add.ha0".to_string(),
+            vec![a0, b0],
+            vec![s0, c0],
+        );
+        netlist.add_cell(ha_cell);
+
+        // Full adder for bit 1
+        let fa_cell = Cell::new_comb(
+            CellId(1),
+            "FA_X1".to_string(),
+            "generic".to_string(),
+            0.3,
+            "add.fa1".to_string(),
+            vec![a1, b1, c0],
+            vec![s1, cout],
+        );
+        netlist.add_cell(fa_cell);
+
+        let builder = AigBuilder::new(&netlist);
+        let aig = builder.build();
+
+        let outputs = aig.outputs();
+        assert_eq!(
+            outputs.len(),
+            3,
+            "2-bit adder should have 3 outputs (s0, s1, cout)"
+        );
+
+        // All outputs should be different
+        let lits: Vec<_> = outputs.iter().map(|(_, lit)| lit).collect();
+        assert_ne!(lits[0], lits[1], "s0 and s1 must be different");
+        assert_ne!(lits[0], lits[2], "s0 and cout must be different");
+        assert_ne!(lits[1], lits[2], "s1 and cout must be different");
     }
 }

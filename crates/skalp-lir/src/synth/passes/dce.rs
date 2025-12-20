@@ -46,6 +46,7 @@ impl Pass for Dce {
         "dce"
     }
 
+    #[allow(clippy::type_complexity)]
     fn run(&mut self, aig: &mut Aig) -> PassResult {
         let mut result = PassResult::new(self.name());
         result.record_before(aig);
@@ -60,13 +61,45 @@ impl Pass for Dce {
             mark_live(aig, lit.node, &mut live);
         }
 
-        // Also mark latches as live (their outputs might feed back)
+        // Also mark latches/barriers as live (their outputs might feed back)
+        // and mark their clock/reset inputs as live (not included in fanins())
         for (id, node) in aig.iter_nodes() {
-            if node.is_latch() {
-                live.insert(id);
-                for fanin in node.fanins() {
-                    mark_live(aig, fanin.node, &mut live);
+            match node {
+                AigNode::Latch {
+                    data: _,
+                    clock,
+                    reset,
+                    ..
+                } => {
+                    live.insert(id);
+                    for fanin in node.fanins() {
+                        mark_live(aig, fanin.node, &mut live);
+                    }
+                    // Clock and reset are not AigLit, they're AigNodeId, so mark them directly
+                    if let Some(clk) = clock {
+                        live.insert(*clk);
+                        mark_live(aig, *clk, &mut live);
+                    }
+                    if let Some(rst) = reset {
+                        live.insert(*rst);
+                        mark_live(aig, *rst, &mut live);
+                    }
                 }
+                AigNode::Barrier { clock, reset, .. } => {
+                    live.insert(id);
+                    for fanin in node.fanins() {
+                        mark_live(aig, fanin.node, &mut live);
+                    }
+                    if let Some(clk) = clock {
+                        live.insert(*clk);
+                        mark_live(aig, *clk, &mut live);
+                    }
+                    if let Some(rst) = reset {
+                        live.insert(*rst);
+                        mark_live(aig, *rst, &mut live);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -81,14 +114,34 @@ impl Pass for Dce {
             return result;
         }
 
-        // Build new AIG with only live nodes
+        // Build new AIG with only live nodes using two-phase approach for sequential circuits:
+        // Phase 1: Process inputs, pre-create latches/barriers, then process AND nodes
+        // Phase 2: Update latch/barrier data with resolved values
         let mut new_aig = Aig::new(aig.name.clone());
         let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
 
         // Map constant
         node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
 
-        // Process nodes in order, copying only live ones
+        // Collect latches and barriers for two-phase processing
+        let mut latch_ids: Vec<(
+            AigNodeId,
+            AigLit,
+            Option<bool>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+        )> = Vec::new();
+        let mut barrier_ids: Vec<(
+            AigNodeId,
+            BarrierType,
+            AigLit,
+            Option<AigLit>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+            Option<bool>,
+        )> = Vec::new();
+
+        // Phase 1a: Process inputs and pre-create latches/barriers (only live ones)
         for (id, node) in aig.iter_nodes() {
             if !live.contains(&id) {
                 continue;
@@ -103,30 +156,25 @@ impl Pass for Dce {
                     let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
                     node_map.insert(id, AigLit::new(new_id));
                 }
-                AigNode::And { left, right } => {
-                    let new_left = resolve_lit(&node_map, *left);
-                    let new_right = resolve_lit(&node_map, *right);
-
-                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                    let new_lit = new_aig.add_and_with_safety(new_left, new_right, safety);
-                    node_map.insert(id, new_lit);
-                }
                 AigNode::Latch {
                     data,
                     init,
                     clock,
                     reset,
                 } => {
-                    let new_data = resolve_lit(&node_map, *data);
-                    let new_clock =
-                        clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
-                    let new_reset =
-                        reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
-
+                    // Pre-create latch with placeholder data
+                    let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                    let new_id = new_aig
-                        .add_latch_with_safety(new_data, *init, new_clock, new_reset, safety);
+                    let new_id = new_aig.add_latch_with_safety(
+                        AigLit::false_lit(),
+                        *init,
+                        new_clock,
+                        new_reset,
+                        safety,
+                    );
                     node_map.insert(id, AigLit::new(new_id));
+                    latch_ids.push((id, *data, *init, *clock, *reset));
                 }
                 AigNode::Barrier {
                     barrier_type,
@@ -136,26 +184,64 @@ impl Pass for Dce {
                     reset,
                     init,
                 } => {
-                    let new_data = resolve_lit(&node_map, *data);
-                    let new_enable = enable.map(|e| resolve_lit(&node_map, e));
-                    let new_clock =
-                        clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
-                    let new_reset =
-                        reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
-
+                    // Pre-create barrier with placeholder data
+                    let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_barrier_with_safety(
                         barrier_type.clone(),
-                        new_data,
-                        new_enable,
+                        AigLit::false_lit(),
+                        None,
                         new_clock,
                         new_reset,
                         *init,
                         safety,
                     );
                     node_map.insert(id, AigLit::new(new_id));
+                    barrier_ids.push((
+                        id,
+                        barrier_type.clone(),
+                        *data,
+                        *enable,
+                        *clock,
+                        *reset,
+                        *init,
+                    ));
+                }
+                AigNode::And { .. } => {
+                    // Will process in phase 1b
                 }
             }
+        }
+
+        // Phase 1b: Process AND nodes (now latch outputs are in node_map)
+        for (id, node) in aig.iter_nodes() {
+            if !live.contains(&id) {
+                continue;
+            }
+
+            if let AigNode::And { left, right } = node {
+                let new_left = resolve_lit(&node_map, *left);
+                let new_right = resolve_lit(&node_map, *right);
+
+                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                let new_lit = new_aig.add_and_with_safety(new_left, new_right, safety);
+                node_map.insert(id, new_lit);
+            }
+        }
+
+        // Phase 2: Update latch/barrier data with resolved values
+        for (id, data, _init, _clock, _reset) in latch_ids {
+            let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
+            let new_data = resolve_lit(&node_map, data);
+            new_aig.update_latch_data(new_node_id, new_data);
+        }
+
+        for (id, _barrier_type, data, enable, _clock, _reset, _init) in barrier_ids {
+            let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
+            let new_data = resolve_lit(&node_map, data);
+            let new_enable = enable.map(|e| resolve_lit(&node_map, e));
+            new_aig.update_barrier_data(new_node_id, new_data, new_enable);
         }
 
         // Copy outputs with resolved literals
@@ -175,6 +261,9 @@ impl Pass for Dce {
 
 /// Resolve a literal through the node mapping
 fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+    if lit.node == AigNodeId::FALSE {
+        return lit;
+    }
     if let Some(&mapped) = map.get(&lit.node) {
         if lit.inverted {
             mapped.invert()
@@ -182,7 +271,12 @@ fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
             mapped
         }
     } else {
-        lit
+        // Node not found in map - return FALSE as safe default
+        eprintln!(
+            "[DCE WARNING] Node {:?} not found in map, returning FALSE",
+            lit.node
+        );
+        AigLit::false_lit()
     }
 }
 

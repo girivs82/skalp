@@ -865,10 +865,9 @@ impl<'a> TechMapper<'a> {
             let d = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
             let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
-            let mut dff_inputs = vec![d];
-            if let Some(rst) = reset {
-                dff_inputs.push(rst);
-            }
+            // D input only - reset is passed separately to Cell::new_seq
+            // and rendered as .RST in Verilog output
+            let dff_inputs = vec![d];
 
             let mut cell = Cell::new_seq(
                 CellId(0),

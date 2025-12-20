@@ -34,6 +34,7 @@ impl Pass for Strash {
         "strash"
     }
 
+    #[allow(clippy::type_complexity)]
     fn run(&mut self, aig: &mut Aig) -> PassResult {
         let mut result = PassResult::new(self.name());
         result.record_before(aig);
@@ -41,13 +42,34 @@ impl Pass for Strash {
         self.merged_count = 0;
 
         // Build new AIG with fresh structural hash
+        // Use two-phase approach for sequential circuits:
+        // Phase 1: Process inputs, pre-create latches, then process AND nodes
+        // Phase 2: Update latch data with resolved values
         let mut new_aig = Aig::new(aig.name.clone());
         let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
 
         // Map constant
         node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
 
-        // Process nodes in order
+        // Collect latches and barriers for two-phase processing
+        let mut latch_ids: Vec<(
+            AigNodeId,
+            AigLit,
+            Option<bool>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+        )> = Vec::new();
+        let mut barrier_ids: Vec<(
+            AigNodeId,
+            BarrierType,
+            AigLit,
+            Option<AigLit>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+            Option<bool>,
+        )> = Vec::new();
+
+        // Phase 1a: Process inputs and pre-create latches/barriers
         for (id, node) in aig.iter_nodes() {
             match node {
                 AigNode::Const => {
@@ -58,44 +80,25 @@ impl Pass for Strash {
                     let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
                     node_map.insert(id, AigLit::new(new_id));
                 }
-                AigNode::And { left, right } => {
-                    // Resolve inputs through the mapping
-                    let new_left = resolve_lit(&node_map, *left);
-                    let new_right = resolve_lit(&node_map, *right);
-
-                    // The add_and method will perform structural hashing
-                    let old_and_count = new_aig.and_count();
-                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                    let new_lit = new_aig.add_and_with_safety(new_left, new_right, safety);
-                    let new_and_count = new_aig.and_count();
-
-                    // Check if the node was merged (reused existing)
-                    if new_and_count == old_and_count {
-                        self.merged_count += 1;
-                    }
-
-                    node_map.insert(id, new_lit);
-                }
                 AigNode::Latch {
                     data,
                     init,
                     clock,
                     reset,
                 } => {
-                    let new_data = resolve_lit(&node_map, *data);
-                    let new_clock = clock.map(|c| {
-                        let lit = node_map.get(&c).copied().unwrap_or(AigLit::new(c));
-                        lit.node
-                    });
-                    let new_reset = reset.map(|r| {
-                        let lit = node_map.get(&r).copied().unwrap_or(AigLit::new(r));
-                        lit.node
-                    });
-
+                    // Pre-create latch with placeholder data, record for phase 2
+                    let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                    let new_id = new_aig
-                        .add_latch_with_safety(new_data, *init, new_clock, new_reset, safety);
+                    let new_id = new_aig.add_latch_with_safety(
+                        AigLit::false_lit(),
+                        *init,
+                        new_clock,
+                        new_reset,
+                        safety,
+                    );
                     node_map.insert(id, AigLit::new(new_id));
+                    latch_ids.push((id, *data, *init, *clock, *reset));
                 }
                 AigNode::Barrier {
                     barrier_type,
@@ -105,30 +108,70 @@ impl Pass for Strash {
                     reset,
                     init,
                 } => {
-                    let new_data = resolve_lit(&node_map, *data);
-                    let new_enable = enable.map(|e| resolve_lit(&node_map, e));
-                    let new_clock = clock.map(|c| {
-                        let lit = node_map.get(&c).copied().unwrap_or(AigLit::new(c));
-                        lit.node
-                    });
-                    let new_reset = reset.map(|r| {
-                        let lit = node_map.get(&r).copied().unwrap_or(AigLit::new(r));
-                        lit.node
-                    });
-
+                    // Pre-create barrier with placeholder data
+                    let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_barrier_with_safety(
                         barrier_type.clone(),
-                        new_data,
-                        new_enable,
+                        AigLit::false_lit(),
+                        None,
                         new_clock,
                         new_reset,
                         *init,
                         safety,
                     );
                     node_map.insert(id, AigLit::new(new_id));
+                    barrier_ids.push((
+                        id,
+                        barrier_type.clone(),
+                        *data,
+                        *enable,
+                        *clock,
+                        *reset,
+                        *init,
+                    ));
+                }
+                AigNode::And { .. } => {
+                    // Will process in phase 1b
                 }
             }
+        }
+
+        // Phase 1b: Process AND nodes (now latch outputs are in node_map)
+        for (id, node) in aig.iter_nodes() {
+            if let AigNode::And { left, right } = node {
+                // Resolve inputs through the mapping
+                let new_left = resolve_lit(&node_map, *left);
+                let new_right = resolve_lit(&node_map, *right);
+
+                // The add_and method will perform structural hashing
+                let old_and_count = new_aig.and_count();
+                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                let new_lit = new_aig.add_and_with_safety(new_left, new_right, safety);
+                let new_and_count = new_aig.and_count();
+
+                // Check if the node was merged (reused existing)
+                if new_and_count == old_and_count {
+                    self.merged_count += 1;
+                }
+
+                node_map.insert(id, new_lit);
+            }
+        }
+
+        // Phase 2: Update latch/barrier data with resolved values
+        for (id, data, _init, _clock, _reset) in latch_ids {
+            let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
+            let new_data = resolve_lit(&node_map, data);
+            new_aig.update_latch_data(new_node_id, new_data);
+        }
+
+        for (id, _barrier_type, data, enable, _clock, _reset, _init) in barrier_ids {
+            let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
+            let new_data = resolve_lit(&node_map, data);
+            let new_enable = enable.map(|e| resolve_lit(&node_map, e));
+            new_aig.update_barrier_data(new_node_id, new_data, new_enable);
         }
 
         // Copy outputs with resolved literals
@@ -148,6 +191,9 @@ impl Pass for Strash {
 
 /// Resolve a literal through the node mapping
 fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+    if lit.node == AigNodeId::FALSE {
+        return lit;
+    }
     if let Some(&mapped) = map.get(&lit.node) {
         if lit.inverted {
             mapped.invert()
@@ -155,7 +201,12 @@ fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
             mapped
         }
     } else {
-        lit
+        // Node not found in map - return FALSE as safe default
+        eprintln!(
+            "[STRASH WARNING] Node {:?} not found in map, returning FALSE",
+            lit.node
+        );
+        AigLit::false_lit()
     }
 }
 

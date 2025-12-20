@@ -130,6 +130,24 @@ impl AigWriterState<'_> {
         // Get nodes in topological order
         let order = self.topological_order(aig);
 
+        eprintln!(
+            "[AIG_WRITER] Processing {} nodes in topological order",
+            order.len()
+        );
+        let mut and_count = 0;
+        let mut latch_count = 0;
+        for (id, node) in aig.iter_nodes() {
+            match node {
+                AigNode::And { .. } => and_count += 1,
+                AigNode::Latch { .. } => latch_count += 1,
+                _ => {}
+            }
+        }
+        eprintln!(
+            "[AIG_WRITER] AIG has {} AND nodes, {} latches",
+            and_count, latch_count
+        );
+
         for id in order {
             let node = aig.get_node(id).unwrap().clone();
             match &node {

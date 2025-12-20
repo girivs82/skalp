@@ -138,6 +138,7 @@ impl Pass for Balance {
         "balance"
     }
 
+    #[allow(clippy::type_complexity)]
     fn run(&mut self, aig: &mut Aig) -> PassResult {
         let mut result = PassResult::new(self.name());
         result.record_before(aig);
@@ -147,14 +148,34 @@ impl Pass for Balance {
         // Compute fanout counts
         let fanout_counts = self.compute_fanout_counts(aig);
 
-        // Build new AIG with balanced trees
+        // Build new AIG with balanced trees using two-phase approach for sequential circuits:
+        // Phase 1: Process inputs, pre-create latches/barriers, then process AND nodes
+        // Phase 2: Update latch/barrier data with resolved values
         let mut new_aig = Aig::new(aig.name.clone());
         let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
 
         // Map constant
         node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
 
-        // First pass: copy inputs and latches, mark AND nodes for later
+        // Collect latches and barriers for two-phase processing
+        let mut latch_ids: Vec<(
+            AigNodeId,
+            AigLit,
+            Option<bool>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+        )> = Vec::new();
+        let mut barrier_ids: Vec<(
+            AigNodeId,
+            BarrierType,
+            AigLit,
+            Option<AigLit>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+            Option<bool>,
+        )> = Vec::new();
+
+        // Phase 1a: Process inputs and pre-create latches/barriers
         for (id, node) in aig.iter_nodes() {
             match node {
                 AigNode::Const => {
@@ -165,66 +186,25 @@ impl Pass for Balance {
                     let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
                     node_map.insert(id, AigLit::new(new_id));
                 }
-                AigNode::And { left, right } => {
-                    // Process AND nodes
-                    let resolved_left = resolve_lit(&node_map, *left);
-                    let resolved_right = resolve_lit(&node_map, *right);
-
-                    // Check if this is a root of an AND cone (multiple fanouts or output)
-                    let fanouts = fanout_counts.get(&id).copied().unwrap_or(0);
-                    let is_root = fanouts > 1 || fanouts == 0;
-
-                    if is_root {
-                        // Collect leaves and rebuild balanced
-                        let mut leaves = Vec::new();
-                        let mut visited = HashSet::new();
-                        visited.insert(id);
-
-                        collect_leaves(aig, *left, &fanout_counts, &mut leaves, &mut visited);
-                        collect_leaves(aig, *right, &fanout_counts, &mut leaves, &mut visited);
-
-                        // Resolve leaves through node_map
-                        let resolved_leaves: Vec<AigLit> = leaves
-                            .into_iter()
-                            .map(|l| resolve_lit(&node_map, l))
-                            .collect();
-
-                        if resolved_leaves.len() > 2 {
-                            self.rebalanced_count += 1;
-                        }
-
-                        let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                        let balanced = build_balanced_tree(&mut new_aig, resolved_leaves, safety);
-                        node_map.insert(id, balanced);
-                    } else {
-                        // Single fanout - just copy the node
-                        let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                        let new_lit =
-                            new_aig.add_and_with_safety(resolved_left, resolved_right, safety);
-                        node_map.insert(id, new_lit);
-                    }
-                }
                 AigNode::Latch {
                     data,
                     init,
                     clock,
                     reset,
                 } => {
-                    let resolved_data = resolve_lit(&node_map, *data);
-                    let resolved_clock =
-                        clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
-                    let resolved_reset =
-                        reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
-
+                    // Pre-create latch with placeholder data
+                    let resolved_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let resolved_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_latch_with_safety(
-                        resolved_data,
+                        AigLit::false_lit(),
                         *init,
                         resolved_clock,
                         resolved_reset,
                         safety,
                     );
                     node_map.insert(id, AigLit::new(new_id));
+                    latch_ids.push((id, *data, *init, *clock, *reset));
                 }
                 AigNode::Barrier {
                     barrier_type,
@@ -234,27 +214,91 @@ impl Pass for Balance {
                     reset,
                     init,
                 } => {
-                    // Barriers are power domain boundaries - copy as-is
-                    let resolved_data = resolve_lit(&node_map, *data);
-                    let resolved_enable = enable.map(|e| resolve_lit(&node_map, e));
-                    let resolved_clock =
-                        clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
-                    let resolved_reset =
-                        reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
-
+                    // Pre-create barrier with placeholder data
+                    let resolved_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let resolved_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_barrier_with_safety(
                         barrier_type.clone(),
-                        resolved_data,
-                        resolved_enable,
+                        AigLit::false_lit(),
+                        None,
                         resolved_clock,
                         resolved_reset,
                         *init,
                         safety,
                     );
                     node_map.insert(id, AigLit::new(new_id));
+                    barrier_ids.push((
+                        id,
+                        barrier_type.clone(),
+                        *data,
+                        *enable,
+                        *clock,
+                        *reset,
+                        *init,
+                    ));
+                }
+                AigNode::And { .. } => {
+                    // Will process in phase 1b
                 }
             }
+        }
+
+        // Phase 1b: Process AND nodes (now latch outputs are in node_map)
+        for (id, node) in aig.iter_nodes() {
+            if let AigNode::And { left, right } = node {
+                // Process AND nodes
+                let resolved_left = resolve_lit(&node_map, *left);
+                let resolved_right = resolve_lit(&node_map, *right);
+
+                // Check if this is a root of an AND cone (multiple fanouts or output)
+                let fanouts = fanout_counts.get(&id).copied().unwrap_or(0);
+                let is_root = fanouts > 1 || fanouts == 0;
+
+                if is_root {
+                    // Collect leaves and rebuild balanced
+                    let mut leaves = Vec::new();
+                    let mut visited = HashSet::new();
+                    visited.insert(id);
+
+                    collect_leaves(aig, *left, &fanout_counts, &mut leaves, &mut visited);
+                    collect_leaves(aig, *right, &fanout_counts, &mut leaves, &mut visited);
+
+                    // Resolve leaves through node_map
+                    let resolved_leaves: Vec<AigLit> = leaves
+                        .into_iter()
+                        .map(|l| resolve_lit(&node_map, l))
+                        .collect();
+
+                    if resolved_leaves.len() > 2 {
+                        self.rebalanced_count += 1;
+                    }
+
+                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                    let balanced = build_balanced_tree(&mut new_aig, resolved_leaves, safety);
+                    node_map.insert(id, balanced);
+                } else {
+                    // Single fanout - just copy the node
+                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                    let new_lit =
+                        new_aig.add_and_with_safety(resolved_left, resolved_right, safety);
+                    node_map.insert(id, new_lit);
+                }
+            }
+        }
+
+        // Phase 2: Update latch/barrier data with resolved values
+        for (id, data, _init, _clock, _reset) in latch_ids {
+            let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
+            let resolved_data = resolve_lit(&node_map, data);
+            new_aig.update_latch_data(new_node_id, resolved_data);
+        }
+
+        for (id, _barrier_type, data, enable, _clock, _reset, _init) in barrier_ids {
+            let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
+            let resolved_data = resolve_lit(&node_map, data);
+            let resolved_enable = enable.map(|e| resolve_lit(&node_map, e));
+            new_aig.update_barrier_data(new_node_id, resolved_data, resolved_enable);
         }
 
         // Copy outputs with resolved literals
@@ -274,6 +318,10 @@ impl Pass for Balance {
 
 /// Resolve a literal through the node mapping
 fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+    if lit.node == AigNodeId::FALSE {
+        // Constant false is always valid
+        return lit;
+    }
     if let Some(&mapped) = map.get(&lit.node) {
         if lit.inverted {
             mapped.invert()
@@ -281,7 +329,12 @@ fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
             mapped
         }
     } else {
-        lit
+        // Node not found in map - return FALSE as safe default
+        eprintln!(
+            "[BALANCE WARNING] Node {:?} not found in map, returning FALSE",
+            lit.node
+        );
+        AigLit::false_lit()
     }
 }
 

@@ -695,6 +695,21 @@ impl GateOptimizer {
             }
         }
 
+        // Apply net replacements to output port list
+        // This handles the case where a buffer driving an output is removed
+        for output in &mut netlist.outputs {
+            let original = *output;
+            while let Some(&replacement) = self.net_replacements.get(output) {
+                *output = replacement;
+            }
+            // If replaced, mark the new net as output
+            if *output != original {
+                if let Some(net) = netlist.nets.get_mut(output.0 as usize) {
+                    net.is_output = true;
+                }
+            }
+        }
+
         // Update net fanout information
         for net in &mut netlist.nets {
             net.fanout

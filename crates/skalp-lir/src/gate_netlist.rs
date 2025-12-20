@@ -688,10 +688,12 @@ fn get_input_pin_name(cell_type: &str, index: usize) -> String {
             2 => "C".to_string(),
             _ => "D".to_string(),
         },
+        // MUX2: Y = (S ? B : A), inputs are [sel, d0, d1]
+        // so index 0 is sel -> S, index 1 is d0 -> A, index 2 is d1 -> B
         "MUX2" => match index {
-            0 => "A".to_string(),
-            1 => "B".to_string(),
-            _ => "S".to_string(),
+            0 => "S".to_string(),
+            1 => "A".to_string(),
+            _ => "B".to_string(),
         },
         "DFF" | "DFFR" | "DFFS" => "D".to_string(),
         "AOI21" | "OAI21" => match index {

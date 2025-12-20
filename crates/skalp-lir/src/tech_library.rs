@@ -350,6 +350,12 @@ pub enum CellFunction {
     /// Always-on buffer
     AlwaysOnBuf,
 
+    // Tie cells (constant outputs)
+    /// Tie-high cell: outputs constant 1
+    TieHigh,
+    /// Tie-low cell: outputs constant 0
+    TieLow,
+
     // Custom/vendor-specific
     Custom(String),
 }
@@ -458,6 +464,8 @@ impl CellFunction {
                 (vec!["en".into()], Vec::new()) // Controls power rail, no logic output
             }
             CellFunction::AlwaysOnBuf => (vec!["a".into()], vec!["y".into()]),
+            // Tie cells have no inputs, just output
+            CellFunction::TieHigh | CellFunction::TieLow => (Vec::new(), vec!["y".into()]),
             CellFunction::Custom(_) => (Vec::new(), Vec::new()),
         }
     }

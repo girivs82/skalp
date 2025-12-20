@@ -530,6 +530,33 @@ impl Aig {
         id
     }
 
+    /// Update the data input of an existing latch node
+    /// This is used for handling feedback loops where latch outputs are needed
+    /// before their data inputs can be computed
+    pub fn update_latch_data(&mut self, latch_id: AigNodeId, new_data: AigLit) {
+        if let Some(AigNode::Latch { data, .. }) = self.nodes.get_mut(latch_id.0 as usize) {
+            *data = new_data;
+        }
+    }
+
+    /// Update a barrier node's data and enable inputs after creation
+    ///
+    /// Used by optimization passes that need to pre-create barriers before
+    /// their inputs are available (for handling sequential feedback loops).
+    pub fn update_barrier_data(
+        &mut self,
+        barrier_id: AigNodeId,
+        new_data: AigLit,
+        new_enable: Option<AigLit>,
+    ) {
+        if let Some(AigNode::Barrier { data, enable, .. }) =
+            self.nodes.get_mut(barrier_id.0 as usize)
+        {
+            *data = new_data;
+            *enable = new_enable;
+        }
+    }
+
     /// Add a power domain barrier (optimization boundary)
     ///
     /// Barriers represent cells that cross power domain boundaries and should

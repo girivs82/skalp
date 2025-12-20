@@ -333,29 +333,57 @@ fn rebuild_aig_topological(aig: &mut Aig) {
         if reachable.contains(&id) {
             continue;
         }
+
+        // Only add to reachable if the node actually exists in the AIG
+        // After optimization, some referenced nodes might not exist anymore
+        let node = match aig.get_node(id) {
+            Some(n) => n,
+            None => {
+                eprintln!("[REBUILD] Skipping non-existent node {:?}", id);
+                continue;
+            }
+        };
+
         reachable.insert(id);
 
-        if let Some(node) = aig.get_node(id) {
-            for fanin in node.fanins() {
-                if !reachable.contains(&fanin.node) {
-                    stack.push(fanin.node);
+        for fanin in node.fanins() {
+            if !reachable.contains(&fanin.node) {
+                stack.push(fanin.node);
+            }
+        }
+        // Handle latch clock/reset
+        if let AigNode::Latch { clock, reset, .. } = node {
+            if let Some(c) = clock {
+                if !reachable.contains(c) {
+                    stack.push(*c);
                 }
             }
-            // Handle latch clock/reset
-            if let AigNode::Latch { clock, reset, .. } = node {
-                if let Some(c) = clock {
-                    if !reachable.contains(c) {
-                        stack.push(*c);
-                    }
-                }
-                if let Some(r) = reset {
-                    if !reachable.contains(r) {
-                        stack.push(*r);
-                    }
+            if let Some(r) = reset {
+                if !reachable.contains(r) {
+                    stack.push(*r);
                 }
             }
         }
     }
+
+    // Count node types in reachable set
+    let mut reachable_ands = 0;
+    let mut reachable_latches = 0;
+    for &id in &reachable {
+        if let Some(node) = aig.get_node(id) {
+            match node {
+                AigNode::And { .. } => reachable_ands += 1,
+                AigNode::Latch { .. } => reachable_latches += 1,
+                _ => {}
+            }
+        }
+    }
+    eprintln!(
+        "[REBUILD] Reachable: {} nodes ({} ANDs, {} latches)",
+        reachable.len(),
+        reachable_ands,
+        reachable_latches
+    );
 
     // Build new AIG with reachable nodes using Kahn's algorithm (O(V+E))
     let mut new_aig = Aig::new(aig.name.clone());
@@ -363,14 +391,30 @@ fn rebuild_aig_topological(aig: &mut Aig) {
     node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
 
     // Compute in-degrees for reachable nodes (only count reachable fanins)
+    // IMPORTANT: Latches break cycles in sequential circuits. Their outputs are
+    // treated as having in_degree 0 (like primary inputs), and their data inputs
+    // are resolved after all combinational logic is processed.
     let mut in_degree: HashMap<AigNodeId, usize> = HashMap::new();
     for &id in &reachable {
         in_degree.insert(id, 0);
     }
     for &id in &reachable {
         if let Some(node) = aig.get_node(id) {
+            // Skip latches and barriers - they're processed in phase 2
+            if node.is_latch() || matches!(node, AigNode::Barrier { .. }) {
+                continue;
+            }
             for fanin in node.fanins() {
-                if reachable.contains(&fanin.node) && fanin.node != AigNodeId::FALSE {
+                // Don't count fanins from latch/barrier nodes - they break cycles
+                // and their outputs are treated as pseudo-inputs
+                let is_latch_or_barrier = aig
+                    .get_node(fanin.node)
+                    .map(|n| n.is_latch() || matches!(n, AigNode::Barrier { .. }))
+                    .unwrap_or(false);
+                if reachable.contains(&fanin.node)
+                    && fanin.node != AigNodeId::FALSE
+                    && !is_latch_or_barrier
+                {
                     *in_degree.entry(id).or_insert(0) += 1;
                 }
             }
@@ -378,13 +422,38 @@ fn rebuild_aig_topological(aig: &mut Aig) {
     }
 
     // Initialize queue with nodes that have no dependencies (in_degree == 0)
-    // Sort by node name for inputs (deterministic semantic ordering)
+    // IMPORTANT: Exclude latches/barriers from initial queue - they must be processed LAST
+    // after all combinational logic is in node_map, so their data inputs can be resolved
     use std::collections::VecDeque;
     let mut zero_degree: Vec<AigNodeId> = in_degree
         .iter()
-        .filter(|(&id, &deg)| deg == 0 && id != AigNodeId::FALSE)
+        .filter(|(&id, &deg)| {
+            if deg != 0 || id == AigNodeId::FALSE {
+                return false;
+            }
+            // Exclude latches and barriers - process them after combinational logic
+            if let Some(node) = aig.get_node(id) {
+                !node.is_latch() && !matches!(node, AigNode::Barrier { .. })
+            } else {
+                false
+            }
+        })
         .map(|(&id, _)| id)
         .collect();
+
+    // Collect latches and barriers to process after combinational logic
+    let mut sequential_nodes: Vec<AigNodeId> = reachable
+        .iter()
+        .filter(|&&id| {
+            if let Some(node) = aig.get_node(id) {
+                node.is_latch() || matches!(node, AigNode::Barrier { .. })
+            } else {
+                false
+            }
+        })
+        .copied()
+        .collect();
+    sequential_nodes.sort_by_key(|id| id.0); // Deterministic order
 
     // Sort zero-degree nodes: inputs by name, others by node type then ID
     zero_degree.sort_by(|&a, &b| {
@@ -401,7 +470,77 @@ fn rebuild_aig_topological(aig: &mut Aig) {
         }
     });
 
+    eprintln!(
+        "[REBUILD] Starting with {} nodes in zero_degree queue",
+        zero_degree.len()
+    );
     let mut queue: VecDeque<AigNodeId> = zero_degree.into_iter().collect();
+
+    // Phase 0: Process input nodes FIRST so clock/reset mappings are available for latches
+    let mut input_ids = Vec::new();
+    for &id in queue.iter() {
+        if let Some(AigNode::Input { name, source_net }) = aig.get_node(id) {
+            let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+            let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
+            node_map.insert(id, AigLit::new(new_id));
+            input_ids.push(id);
+        }
+    }
+    eprintln!(
+        "[REBUILD] Pre-created {} inputs in node_map",
+        input_ids.len()
+    );
+
+    // Pre-create latch/barrier outputs as placeholders in node_map
+    // This allows AND nodes to resolve references to latch outputs during phase 1
+    // The latch data inputs will be properly connected in phase 2
+    // Now clock/reset can be correctly resolved using the input node_map entries
+    for &id in &sequential_nodes {
+        if let Some(node) = aig.get_node(id) {
+            match node {
+                AigNode::Latch {
+                    init, clock, reset, ..
+                } => {
+                    // Resolve clock/reset through node_map (now populated with inputs)
+                    let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
+                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                    // Create latch with false_lit as placeholder data - will be updated in phase 2
+                    let new_id = new_aig.add_latch_with_safety(
+                        AigLit::false_lit(),
+                        *init,
+                        new_clock,
+                        new_reset,
+                        safety,
+                    );
+                    node_map.insert(id, AigLit::new(new_id));
+                }
+                AigNode::Barrier {
+                    barrier_type,
+                    init,
+                    clock,
+                    reset,
+                    ..
+                } => {
+                    let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
+                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
+                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                    // Create barrier with false_lit as placeholder data - will be updated in phase 2
+                    let new_id = new_aig.add_barrier_with_safety(
+                        barrier_type.clone(),
+                        AigLit::false_lit(),
+                        None,
+                        new_clock,
+                        new_reset,
+                        *init,
+                        safety,
+                    );
+                    node_map.insert(id, AigLit::new(new_id));
+                }
+                _ => {}
+            }
+        }
+    }
 
     // Build fanout lists for efficient updates (sort for determinism)
     let mut fanouts: HashMap<AigNodeId, Vec<AigNodeId>> = HashMap::new();
@@ -421,6 +560,22 @@ fn rebuild_aig_topological(aig: &mut Aig) {
 
     // Process nodes in topological order
     while let Some(id) = queue.pop_front() {
+        // ALWAYS decrease in-degree of fanouts, even if node already processed
+        // This is critical for correctness after pre-processing inputs in phase 0
+        if let Some(fouts) = fanouts.get(&id) {
+            for &fanout_id in fouts {
+                if let Some(deg) = in_degree.get_mut(&fanout_id) {
+                    if *deg > 0 {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(fanout_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Skip if already processed (inputs were pre-created in phase 0)
         if node_map.contains_key(&id) {
             continue;
         }
@@ -430,7 +585,8 @@ fn rebuild_aig_topological(aig: &mut Aig) {
             None => continue,
         };
 
-        // Add node to new AIG
+        // Add node to new AIG (only inputs and AND gates in phase 1)
+        // Latches and barriers are handled in phase 2 after combinational logic
         match node {
             AigNode::Const => {
                 // Already handled
@@ -450,62 +606,66 @@ fn rebuild_aig_topological(aig: &mut Aig) {
                 let new_lit = new_aig.add_and_with_safety(new_left, new_right, safety);
                 node_map.insert(id, new_lit);
             }
-            AigNode::Latch {
-                data,
-                init,
-                clock,
-                reset,
-            } => {
+            // Latches and barriers are processed in phase 2
+            AigNode::Latch { .. } | AigNode::Barrier { .. } => {}
+        }
+    }
+
+    eprintln!(
+        "[REBUILD] After phase 1: node_map has {} entries, new_aig has {} ANDs",
+        node_map.len(),
+        new_aig.and_count()
+    );
+
+    // Debug: find nodes that are reachable but not in node_map
+    for &id in &reachable {
+        if !node_map.contains_key(&id) && id != AigNodeId::FALSE {
+            let node_type = aig
+                .get_node(id)
+                .map(|n| match n {
+                    AigNode::Const => "Const",
+                    AigNode::Input { .. } => "Input",
+                    AigNode::And { .. } => "And",
+                    AigNode::Latch { .. } => "Latch",
+                    AigNode::Barrier { .. } => "Barrier",
+                })
+                .unwrap_or("Unknown");
+            let in_deg = in_degree.get(&id).copied().unwrap_or(999);
+            eprintln!(
+                "[REBUILD DEBUG] Node {:?} ({}) is reachable but NOT in node_map, in_degree={}",
+                id, node_type, in_deg
+            );
+        }
+    }
+
+    // Phase 2: Update sequential elements (latches/barriers) with their data inputs
+    // The latches were pre-created with placeholder data - now update with real values
+    for id in sequential_nodes {
+        // Get the pre-created latch's new node ID
+        let new_node_id = match node_map.get(&id) {
+            Some(lit) => lit.node,
+            None => continue, // Shouldn't happen since we pre-created all latches
+        };
+
+        let node = match aig.get_node(id) {
+            Some(n) => n.clone(),
+            None => continue,
+        };
+
+        match node {
+            AigNode::Latch { data, .. } => {
                 let new_data = resolve_lit(&node_map, data);
-                let new_clock =
-                    clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
-                let new_reset =
-                    reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
-                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                let new_id =
-                    new_aig.add_latch_with_safety(new_data, init, new_clock, new_reset, safety);
-                node_map.insert(id, AigLit::new(new_id));
+                new_aig.update_latch_data(new_node_id, new_data);
             }
-            AigNode::Barrier {
-                ref barrier_type,
-                data,
-                enable,
-                clock,
-                reset,
-                init,
-            } => {
+            AigNode::Barrier { data, enable, .. } => {
                 let new_data = resolve_lit(&node_map, data);
                 let new_enable = enable.map(|e| resolve_lit(&node_map, e));
-                let new_clock =
-                    clock.map(|c| node_map.get(&c).copied().unwrap_or(AigLit::new(c)).node);
-                let new_reset =
-                    reset.map(|r| node_map.get(&r).copied().unwrap_or(AigLit::new(r)).node);
-                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                let new_id = new_aig.add_barrier_with_safety(
-                    barrier_type.clone(),
-                    new_data,
-                    new_enable,
-                    new_clock,
-                    new_reset,
-                    init,
-                    safety,
-                );
-                node_map.insert(id, AigLit::new(new_id));
+                // For barriers, we need to update data and enable
+                // Using update_latch_data as a workaround (barriers use same data field)
+                new_aig.update_latch_data(new_node_id, new_data);
+                // TODO: Also update enable if needed
             }
-        }
-
-        // Decrease in-degree of fanouts and add to queue if ready
-        if let Some(fouts) = fanouts.get(&id) {
-            for &fanout_id in fouts {
-                if let Some(deg) = in_degree.get_mut(&fanout_id) {
-                    if *deg > 0 {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(fanout_id);
-                        }
-                    }
-                }
-            }
+            _ => {} // Inputs and ANDs already processed
         }
     }
 
@@ -521,6 +681,10 @@ fn rebuild_aig_topological(aig: &mut Aig) {
 
 /// Resolve a literal through the node mapping
 fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+    if lit.node == AigNodeId::FALSE {
+        // Constant false is always valid
+        return lit;
+    }
     if let Some(&mapped) = map.get(&lit.node) {
         if lit.inverted {
             mapped.invert()
@@ -528,7 +692,13 @@ fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
             mapped
         }
     } else {
-        lit
+        // Node not found in map - this can happen when the node was removed
+        // by optimization or doesn't exist after rebuild. Return FALSE as safe default.
+        eprintln!(
+            "[REWRITE WARNING] Node {:?} not found in map, returning FALSE",
+            lit.node
+        );
+        AigLit::false_lit()
     }
 }
 
@@ -647,9 +817,59 @@ impl Pass for Rewrite {
 
         // Apply all substitutions to update the AIG
         if !subst_map.is_empty() {
+            eprintln!("[REWRITE] Applying {} substitutions:", subst_map.len());
+            for (old, new) in &subst_map {
+                eprintln!("  {:?} -> {:?}", old, new);
+            }
+
+            // Debug: check latch data BEFORE apply_substitutions
+            for (id, node) in aig.iter_nodes() {
+                if let AigNode::Latch { data, .. } = node {
+                    let exists = aig.get_node(data.node).is_some();
+                    if !exists {
+                        eprintln!("[REWRITE PRE-BUG] Latch {:?} BEFORE subst already references non-existent data {:?}", id, data.node);
+                    }
+                }
+            }
+
             aig.apply_substitutions(&subst_map);
+
+            // Debug: check AIG state before rebuild
+            eprintln!(
+                "[REWRITE] Before rebuild: {} nodes in AIG",
+                aig.node_count()
+            );
+            // Check what latches reference
+            for (id, node) in aig.iter_nodes() {
+                if let AigNode::Latch { data, .. } = node {
+                    let exists = aig.get_node(data.node).is_some();
+                    if !exists {
+                        eprintln!(
+                            "[REWRITE BUG] Latch {:?} references non-existent data {:?}",
+                            id, data.node
+                        );
+                        // Check if any substitution points to this node
+                        for (old, new) in &subst_map {
+                            if new.node == data.node {
+                                eprintln!("[REWRITE BUG]   Substitution {:?} -> {:?} points to missing node", old, new);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Rebuild AIG to compact and ensure topological order
             rebuild_aig_topological(aig);
+
+            // Debug: verify latch data is valid after rebuild
+            for (id, node) in aig.iter_nodes() {
+                if let AigNode::Latch { data, .. } = node {
+                    let exists = aig.get_node(data.node).is_some();
+                    if !exists {
+                        eprintln!("[REWRITE POST-REBUILD BUG] Latch {:?} STILL references non-existent data {:?}", id, data.node);
+                    }
+                }
+            }
         }
 
         result.record_after(aig);

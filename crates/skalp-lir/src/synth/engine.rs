@@ -235,6 +235,14 @@ impl SynthEngine {
         let mut aig = builder.build();
 
         let initial_stats = aig.compute_stats();
+        eprintln!(
+            "[ENGINE] Initial AIG: {} ANDs, {} levels, {} latches, {} inputs, {} outputs",
+            initial_stats.and_count,
+            initial_stats.max_level,
+            initial_stats.latch_count,
+            initial_stats.input_count,
+            initial_stats.output_count
+        );
         if self.config.verbose {
             eprintln!(
                 "Initial: {} ANDs, {} levels",
@@ -246,6 +254,10 @@ impl SynthEngine {
         self.run_optimization_passes(&mut aig);
 
         let final_stats = aig.compute_stats();
+        eprintln!(
+            "[ENGINE] After optimization: {} ANDs, {} levels, {} latches",
+            final_stats.and_count, final_stats.max_level, final_stats.latch_count
+        );
         if self.config.verbose {
             eprintln!(
                 "After optimization: {} ANDs, {} levels",
@@ -314,12 +326,16 @@ impl SynthEngine {
 
             for pass_name in &passes {
                 if let Some(result) = self.run_pass(aig, pass_name) {
-                    if self.config.verbose {
-                        eprintln!(
-                            "  {} : {} -> {} ANDs",
-                            result.pass_name, result.ands_before, result.ands_after
-                        );
-                    }
+                    let stats = aig.compute_stats();
+                    eprintln!(
+                        "[PASS] {}: {} -> {} ANDs, {} latches, {} inputs, {} outputs",
+                        result.pass_name,
+                        result.ands_before,
+                        result.ands_after,
+                        stats.latch_count,
+                        stats.input_count,
+                        stats.output_count
+                    );
                     self.pass_results.push(result);
                 }
             }
