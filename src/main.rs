@@ -24,7 +24,7 @@ pub struct SafetyBuildOptions {
 /// Logic synthesis optimization options
 #[derive(Debug, Clone, Default)]
 pub struct OptimizationOptions {
-    /// Optimization preset (quick, balanced, full, timing, area, resyn2)
+    /// Optimization preset (quick, balanced, full, timing, area, resyn2, compress2)
     pub preset: Option<String>,
     /// Custom pass sequence (comma-separated)
     pub passes: Option<String>,
@@ -97,7 +97,7 @@ enum Commands {
         workproduct_formats: String,
 
         // === Logic Synthesis Optimization Options ===
-        /// Optimization preset (quick, balanced, full, timing, area, resyn2)
+        /// Optimization preset (quick, balanced, full, timing, area, resyn2, compress2)
         #[arg(long, value_name = "PRESET")]
         optimize: Option<String>,
 
@@ -847,9 +847,17 @@ fn apply_synthesis_optimization(
                 ..Default::default()
             }
         }
+        Some("compress2") => {
+            info!("Using compress2 optimization preset (aggressive area)");
+            SynthConfig {
+                preset: SynthPreset::Compress2,
+                max_iterations: 3,
+                ..Default::default()
+            }
+        }
         Some(other) => {
             anyhow::bail!(
-                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area, resyn2",
+                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area, resyn2, compress2",
                 other
             );
         }

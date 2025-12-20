@@ -45,6 +45,9 @@ pub enum SynthPreset {
     /// Resyn2 - ABC's proven pass sequence for high-quality optimization
     /// balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance
     Resyn2,
+    /// Compress2 - ABC's area-focused script with resubstitution
+    /// balance; resub; rewrite; resub; refactor; resub; balance; ...
+    Compress2,
 }
 
 /// Synthesis configuration
@@ -188,6 +191,12 @@ impl SynthEngine {
                 preset: SynthPreset::Resyn2,
                 max_iterations: 3, // Run the resyn2 sequence 3 times for convergence
                 run_timing_analysis: true,
+                ..Default::default()
+            },
+            // Compress2 - aggressive area optimization with resubstitution
+            SynthPreset::Compress2 => SynthConfig {
+                preset: SynthPreset::Compress2,
+                max_iterations: 3,
                 ..Default::default()
             },
         };
@@ -433,6 +442,23 @@ impl SynthEngine {
                 "balance".to_string(),
                 "dce".to_string(),
             ],
+            // ABC's compress2-style: aggressive area optimization with resubstitution
+            SynthPreset::Compress2 => vec![
+                "balance".to_string(),
+                "resub".to_string(),
+                "rewrite".to_string(),
+                "resub".to_string(),
+                "refactor".to_string(),
+                "resub".to_string(),
+                "balance".to_string(),
+                "resub_z".to_string(),
+                "rewrite_z".to_string(),
+                "resub_z".to_string(),
+                "refactor_z".to_string(),
+                "balance".to_string(),
+                "fraig".to_string(),
+                "dce".to_string(),
+            ],
         }
     }
 
@@ -599,7 +625,7 @@ impl SynthEngine {
                 let mapper = CutMapper::from_library_with_config(library, config);
                 mapper.map(aig)
             }
-            SynthPreset::Area => {
+            SynthPreset::Area | SynthPreset::Compress2 => {
                 // Area-focused mapping with aggressive area recovery
                 let config = CutMapperConfig {
                     use_priority_cuts: true,
