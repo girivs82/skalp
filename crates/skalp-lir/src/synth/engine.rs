@@ -19,7 +19,7 @@ use super::mapping::{
 };
 use super::passes::{
     Balance, BufferConfig, BufferInsertion, ConstProp, Dc2, Dce, Fraig, FraigConfig, Pass,
-    PassResult, Refactor, Resub, Retiming, RetimingConfig, Rewrite, Strash,
+    PassResult, Refactor, Resub, Retiming, RetimingConfig, Rewrite, Scorr, Strash,
 };
 use super::sta::{Sta, StaResult};
 use super::timing::{TimePs, TimingConstraints};
@@ -528,6 +528,11 @@ impl SynthEngine {
             "dc2" => {
                 // DC2: Don't care based optimization
                 let mut pass = Dc2::new();
+                Some(pass.run(aig))
+            }
+            "scorr" => {
+                // Sequential SAT sweeping - find equivalent signals
+                let mut pass = Scorr::new();
                 Some(pass.run(aig))
             }
             _ => {

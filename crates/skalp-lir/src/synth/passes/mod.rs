@@ -33,6 +33,7 @@ mod refactor;
 mod resub;
 mod retiming;
 mod rewrite;
+mod scorr;
 mod strash;
 
 pub use balance::Balance;
@@ -47,6 +48,7 @@ pub use retiming::{
     run_retiming, run_retiming_with_config, Retiming, RetimingConfig, RetimingStats,
 };
 pub use rewrite::Rewrite;
+pub use scorr::Scorr;
 pub use strash::Strash;
 
 use super::{Aig, AigStats};
