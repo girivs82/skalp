@@ -360,7 +360,7 @@ impl SynthEngine {
 
         match self.config.preset {
             SynthPreset::Quick => vec!["strash".to_string(), "dce".to_string()],
-            // Balanced: Use Resyn2-style sequence for better optimization
+            // Balanced: Use Full-style sequence which preserves SDFFE patterns better
             SynthPreset::Balanced => vec![
                 "strash".to_string(),
                 "const_prop".to_string(),
@@ -369,11 +369,7 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
-                "rewrite_z".to_string(),
-                "balance".to_string(),
-                "refactor_z".to_string(),
-                "rewrite_z".to_string(),
-                "balance".to_string(),
+                "fraig".to_string(), // SAT-based equivalence - don't add more passes after
                 "dce".to_string(),
             ],
             SynthPreset::Full => vec![
