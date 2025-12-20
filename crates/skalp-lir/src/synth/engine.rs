@@ -572,8 +572,9 @@ impl SynthEngine {
                 mapper.map(aig)
             }
             SynthPreset::Balanced => {
-                // Default balanced mapping with area recovery
-                let mapper = CutMapper::with_config(CutMapperConfig::default());
+                // Quality mapping with larger cuts for better area optimization
+                let config = CutMapperConfig::quality();
+                let mapper = CutMapper::with_config(config);
                 mapper.map(aig)
             }
         };

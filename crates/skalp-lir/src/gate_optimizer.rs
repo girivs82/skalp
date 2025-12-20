@@ -699,13 +699,23 @@ impl GateOptimizer {
         // This handles the case where a buffer driving an output is removed
         for output in &mut netlist.outputs {
             let original = *output;
+            // Get the original output port name before replacement
+            let original_name = netlist
+                .nets
+                .get(original.0 as usize)
+                .map(|n| n.name.clone());
+
             while let Some(&replacement) = self.net_replacements.get(output) {
                 *output = replacement;
             }
-            // If replaced, mark the new net as output
+            // If replaced, mark the new net as output and preserve the output port name
             if *output != original {
                 if let Some(net) = netlist.nets.get_mut(output.0 as usize) {
                     net.is_output = true;
+                    // Preserve the output port name - this is critical for correct port mapping
+                    if let Some(name) = original_name {
+                        net.name = name;
+                    }
                 }
             }
         }

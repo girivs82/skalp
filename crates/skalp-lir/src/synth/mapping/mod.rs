@@ -53,6 +53,10 @@ pub struct MappedNode {
     pub area: f64,
     /// Cell delay (worst-case)
     pub delay: f64,
+    /// Whether the cell's output needs to be inverted
+    /// When true, the actual function is !cell_function
+    /// This can be absorbed if consumers use the inverted output
+    pub output_inverted: bool,
 }
 
 /// Mapping statistics
@@ -246,7 +250,35 @@ impl CellMatcher {
         let mask = (1u64 << (1 << num_inputs)) - 1;
         let tt = truth_table & mask;
 
-        // Direct match
+        // Try with output inversion FIRST
+        // Rationale: In sequential circuits, many nodes are used inverted (e.g., latch data inputs
+        // for toggle logic). By preferring output_inverted cells, we can absorb the inversion
+        // into the cell mapping and avoid creating separate inverter cells.
+        let inverted_tt = !tt & mask;
+        if let Some(cells) = self.tt_to_cell.get(&inverted_tt) {
+            for cell in cells {
+                if cell.input_pins.len() == num_inputs {
+                    matches.push(CutMatch {
+                        cut: Cut {
+                            leaves: Vec::new(),
+                            truth_table: tt,
+                            area_cost: cell.area as f32,
+                            arrival_time: cell.delay as f32,
+                            area_flow: cell.area as f32,
+                            edge_count: num_inputs as u32,
+                        },
+                        cell_type: cell.cell_type.clone(),
+                        area: cell.area,
+                        delay: cell.delay,
+                        pin_mapping: cell.input_pins.clone(),
+                        input_inversions: vec![false; num_inputs],
+                        output_inverted: true,
+                    });
+                }
+            }
+        }
+
+        // Direct match (non-inverted)
         if let Some(cells) = self.tt_to_cell.get(&tt) {
             for cell in cells {
                 if cell.input_pins.len() == num_inputs {
@@ -265,31 +297,6 @@ impl CellMatcher {
                         pin_mapping: cell.input_pins.clone(),
                         input_inversions: vec![false; num_inputs],
                         output_inverted: false,
-                    });
-                }
-            }
-        }
-
-        // Try with output inversion
-        let inverted_tt = !tt & mask;
-        if let Some(cells) = self.tt_to_cell.get(&inverted_tt) {
-            for cell in cells {
-                if cell.input_pins.len() == num_inputs {
-                    matches.push(CutMatch {
-                        cut: Cut {
-                            leaves: Vec::new(),
-                            truth_table: tt,
-                            area_cost: (cell.area + 1.0) as f32, // Include inverter cost
-                            arrival_time: (cell.delay + 15.0) as f32,
-                            area_flow: (cell.area + 1.0) as f32,
-                            edge_count: num_inputs as u32,
-                        },
-                        cell_type: cell.cell_type.clone(),
-                        area: cell.area + 1.0, // Add inverter cost
-                        delay: cell.delay + 15.0,
-                        pin_mapping: cell.input_pins.clone(),
-                        input_inversions: vec![false; num_inputs],
-                        output_inverted: true,
                     });
                 }
             }

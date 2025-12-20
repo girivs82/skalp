@@ -139,6 +139,7 @@ impl DelayMapper {
                             inputs: vec![(data.node, data.inverted)],
                             area: 4.0,
                             delay: clk_to_q,
+                            output_inverted: false,
                         },
                     );
                     best_cut.insert(node_id, None);
@@ -157,6 +158,7 @@ impl DelayMapper {
                             inputs: vec![(data.node, data.inverted)],
                             area: 2.0,
                             delay: barrier_delay,
+                            output_inverted: false,
                         },
                     );
                     best_cut.insert(node_id, None);
@@ -185,6 +187,7 @@ impl DelayMapper {
                                 inputs,
                                 area: match_.area,
                                 delay: match_.delay,
+                                output_inverted: match_.output_inverted,
                             },
                         );
                     } else {
@@ -202,6 +205,7 @@ impl DelayMapper {
                                 ],
                                 area: 2.0,
                                 delay: 25.0,
+                                output_inverted: false,
                             },
                         );
                     }
@@ -341,6 +345,7 @@ impl DelayMapper {
                                     inputs,
                                     area: match_.area,
                                     delay: match_.delay,
+                                    output_inverted: match_.output_inverted,
                                 },
                             );
                             break;
@@ -501,13 +506,13 @@ mod tests {
 
         // Very tight timing
         let config = DelayMappingConfig {
-            target_period: 50.0, // 50ps - very tight
+            target_period: 20.0, // 20ps - very tight, less than a single gate
             ..Default::default()
         };
         let mapper = DelayMapper::with_config(config);
         let result = mapper.map(&aig);
 
-        // With 50ps target and ~5 gates at 25ps each, should violate
+        // With 20ps target and chain of gates, should violate
         assert!(!result.timing_met);
     }
 

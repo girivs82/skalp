@@ -541,6 +541,83 @@ impl GateNetlist {
         self.cells.get(id.0 as usize)
     }
 
+    /// Remove dead cells whose outputs have no fanout and aren't primary outputs
+    ///
+    /// This is useful for cleaning up redundant cells that were created during
+    /// technology mapping but whose outputs are never used.
+    pub fn remove_dead_cells(&mut self) -> usize {
+        use std::collections::HashSet;
+
+        // Identify output nets that must be preserved
+        let output_nets: HashSet<GateNetId> = self.outputs.iter().copied().collect();
+
+        // Identify cells that are dead (all outputs have no fanout and aren't primary outputs)
+        let dead_cells: HashSet<CellId> = self
+            .cells
+            .iter()
+            .filter(|cell| {
+                // A cell is dead if all its outputs have no fanout and aren't primary outputs
+                // Sequential cells (latches) are never considered dead
+                if cell.clock.is_some() {
+                    return false;
+                }
+
+                cell.outputs.iter().all(|&out_net| {
+                    // Check if this output net is a primary output
+                    if output_nets.contains(&out_net) {
+                        return false;
+                    }
+                    // Check if this output net has any fanout
+                    if let Some(net) = self.nets.get(out_net.0 as usize) {
+                        net.fanout.is_empty()
+                    } else {
+                        true // Net doesn't exist, treat as dead
+                    }
+                })
+            })
+            .map(|cell| cell.id)
+            .collect();
+
+        if dead_cells.is_empty() {
+            return 0;
+        }
+
+        let removed_count = dead_cells.len();
+
+        // Remove dead cells by filtering
+        self.cells.retain(|cell| !dead_cells.contains(&cell.id));
+
+        // Re-assign cell IDs and update net references
+        let mut old_to_new: HashMap<CellId, CellId> = HashMap::new();
+        for (new_idx, cell) in self.cells.iter_mut().enumerate() {
+            old_to_new.insert(cell.id, CellId(new_idx as u32));
+            cell.id = CellId(new_idx as u32);
+        }
+
+        // Update net driver references
+        for net in &mut self.nets {
+            if let Some(old_driver) = net.driver {
+                if let Some(&new_driver) = old_to_new.get(&old_driver) {
+                    net.driver = Some(new_driver);
+                } else {
+                    // Driver was removed
+                    net.driver = None;
+                    net.driver_pin = None;
+                }
+            }
+            // Update fanout references
+            net.fanout
+                .retain(|(cell_id, _)| old_to_new.contains_key(cell_id));
+            for (cell_id, _) in &mut net.fanout {
+                if let Some(&new_id) = old_to_new.get(cell_id) {
+                    *cell_id = new_id;
+                }
+            }
+        }
+
+        removed_count
+    }
+
     /// Update statistics
     pub fn update_stats(&mut self) {
         self.stats = GateNetlistStats::from_netlist(self);

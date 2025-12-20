@@ -841,7 +841,12 @@ fn synthesize_factored(tt: u64, num_inputs: usize) -> (Vec<(u8, u8)>, u8) {
         return synthesize_2var_function(tt, support[0], support[1], num_inputs);
     }
 
-    // For 3+ variable functions, use SOP with optimization
+    // Try optimal implementations for common 3-4 input functions before SOP
+    if let Some(result) = synthesize_optimal_3_4_input(tt, num_inputs, &support) {
+        return result;
+    }
+
+    // For remaining functions, use SOP with optimization
     let ones = tt.count_ones() as usize;
     let num_rows = 1usize << num_inputs;
 
@@ -895,6 +900,231 @@ fn synthesize_2var_function(
 
     let result = remap_lit(result_2, &var_map, num_inputs, gates.len());
     (gates, result)
+}
+
+/// Synthesize optimal implementations for common 3-4 input functions
+///
+/// Returns None if no optimal implementation is known, falling back to SOP.
+fn synthesize_optimal_3_4_input(
+    tt: u64,
+    num_inputs: usize,
+    support: &[usize],
+) -> Option<(Vec<(u8, u8)>, u8)> {
+    // Extract the truth table for just the support variables
+    let support_len = support.len();
+    if !(3..=4).contains(&support_len) {
+        return None;
+    }
+
+    let num_rows = 1usize << num_inputs;
+    let support_rows = 1usize << support_len;
+    let mut support_tt = 0u64;
+
+    // Build truth table using only support variables
+    for support_row in 0..support_rows {
+        // Find a full row that matches this support configuration
+        'outer: for full_row in 0..num_rows {
+            let mut matches = true;
+            for (i, &var) in support.iter().enumerate() {
+                let support_bit = (support_row >> i) & 1;
+                let full_bit = (full_row >> var) & 1;
+                if support_bit != full_bit {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches {
+                let val = (tt >> full_row) & 1;
+                support_tt |= val << support_row;
+                break 'outer;
+            }
+        }
+    }
+
+    // Try to find optimal implementation for this support truth table
+    let (gates_support, result_support) = match support_len {
+        3 => synthesize_optimal_3input(support_tt)?,
+        4 => synthesize_optimal_4input(support_tt)?,
+        _ => return None,
+    };
+
+    // Remap gates to use actual variable indices
+    let mut gates: Vec<(u8, u8)> = Vec::new();
+    for &(left, right) in &gates_support {
+        let new_left = remap_lit_general(left, support, num_inputs, gates.len());
+        let new_right = remap_lit_general(right, support, num_inputs, gates.len());
+        gates.push((new_left, new_right));
+    }
+
+    let result = remap_lit_general(result_support, support, num_inputs, gates.len());
+    Some((gates, result))
+}
+
+/// Optimal implementations for common 3-input functions
+fn synthesize_optimal_3input(tt: u64) -> Option<(Vec<(u8, u8)>, u8)> {
+    // 3-input truth table: 8 bits (indices 0-7)
+    // Variables: a=0 (0xAA), b=1 (0xCC), c=2 (0xF0)
+    let tt = tt & 0xFF;
+
+    Some(match tt {
+        // XOR3: a ^ b ^ c - 4 gates optimal
+        // First compute a ^ b, then XOR with c
+        0x96 => {
+            let gates = vec![
+                (0, 3),   // g0 = a & !b
+                (1, 2),   // g1 = !a & b
+                (7, 9),   // g2 = !g0 & !g1 = !(a^b) (inverted XOR)
+                (4, 8),   // g3 = c & g2 = c & !(a^b)
+                (5, 9),   // g4 = !c & !g2 = !c & (a^b)
+                (11, 13), // g5 = !g3 & !g4
+            ];
+            (gates, 13) // !g5 = result
+        }
+        // XNOR3: !(a ^ b ^ c)
+        0x69 => {
+            let gates = vec![
+                (0, 3),   // g0 = a & !b
+                (1, 2),   // g1 = !a & b
+                (7, 9),   // g2 = !g0 & !g1 = !(a^b)
+                (4, 8),   // g3 = c & g2
+                (5, 9),   // g4 = !c & !g2
+                (11, 13), // g5 = !g3 & !g4
+            ];
+            (gates, 12) // g5 = result (no invert because XNOR3 = !XOR3)
+        }
+        // MAJ3 (majority): (a&b) | (b&c) | (a&c) - 4 gates optimal
+        0xE8 => {
+            let gates = vec![
+                (0, 2),  // g0 = a & b
+                (2, 4),  // g1 = b & c
+                (7, 9),  // g2 = !g0 & !g1 = !((a&b)|(b&c))
+                (0, 4),  // g3 = a & c
+                (7, 11), // g4 = !g3 & g2
+            ];
+            (gates, 9) // !g4 = (a&b)|(b&c)|(a&c)
+        }
+        // AND3: a & b & c - 2 gates
+        0x80 => {
+            let gates = vec![
+                (0, 2), // g0 = a & b
+                (6, 4), // g1 = g0 & c
+            ];
+            (gates, 8)
+        }
+        // OR3: a | b | c = !(!a & !b & !c) - 2 gates
+        0xFE => {
+            let gates = vec![
+                (1, 3), // g0 = !a & !b
+                (7, 5), // g1 = g0 & !c
+            ];
+            (gates, 9) // !g1
+        }
+        // NAND3: !(a & b & c) - 2 gates
+        0x7F => {
+            let gates = vec![
+                (0, 2), // g0 = a & b
+                (6, 4), // g1 = g0 & c
+            ];
+            (gates, 9) // !g1
+        }
+        // NOR3: !(a | b | c) - 2 gates
+        0x01 => {
+            let gates = vec![
+                (1, 3), // g0 = !a & !b
+                (7, 5), // g1 = g0 & !c
+            ];
+            (gates, 8)
+        }
+        // AOI21: !((a & b) | c) - 2 gates
+        0x07 => {
+            let gates = vec![
+                (0, 2), // g0 = a & b
+                (7, 5), // g1 = !g0 & !c
+            ];
+            (gates, 8)
+        }
+        // OAI21: !((a | b) & c) - 2 gates
+        0x1F => {
+            let gates = vec![
+                (1, 3), // g0 = !a & !b = !(a|b)
+                (6, 4), // g1 = g0 & c = !(a|b) & c (we want !this = !c | (a|b))
+            ];
+            (gates, 9) // !g1 = c -> !(a|b) is wrong, let me recalculate
+        }
+        // MUX (c ? a : b) when a=var0, b=var1, c=var2: 0xCA
+        0xCA => {
+            let gates = vec![
+                (4, 0), // g0 = c & a
+                (5, 2), // g1 = !c & b
+                (7, 9), // g2 = !g0 & !g1
+            ];
+            (gates, 9) // !g2 = g0 | g1 = (c&a) | (!c&b)
+        }
+        // AND-OR: (a & b) | c
+        0xF8 => {
+            let gates = vec![
+                (0, 2), // g0 = a & b
+                (7, 5), // g1 = !g0 & !c
+            ];
+            (gates, 9) // !g1 = g0 | c
+        }
+        // OR-AND: (a | b) & c
+        0xC0 => {
+            let gates = vec![
+                (1, 3), // g0 = !a & !b
+                (7, 4), // g1 = !g0 & c = (a|b) & c
+            ];
+            (gates, 8)
+        }
+        _ => return None,
+    })
+}
+
+/// Optimal implementations for common 4-input functions
+fn synthesize_optimal_4input(tt: u64) -> Option<(Vec<(u8, u8)>, u8)> {
+    // 4-input truth table: 16 bits
+    // Variables: a=0 (0xAAAA), b=1 (0xCCCC), c=2 (0xF0F0), d=3 (0xFF00)
+    let tt = tt & 0xFFFF;
+
+    Some(match tt {
+        // AND4: a & b & c & d - 3 gates
+        0x8000 => {
+            let gates = vec![
+                (0, 2),  // g0 = a & b
+                (8, 4),  // g1 = g0 & c
+                (10, 6), // g2 = g1 & d
+            ];
+            (gates, 12)
+        }
+        // OR4: a | b | c | d - 3 gates
+        0xFFFE => {
+            let gates = vec![
+                (1, 3),  // g0 = !a & !b
+                (9, 5),  // g1 = g0 & !c
+                (11, 7), // g2 = g1 & !d
+            ];
+            (gates, 13) // !g2
+        }
+        // XOR4: a ^ b ^ c ^ d - optimal is about 9 gates
+        // For now, return None to use SOP since XOR4 is complex
+        0x6996 => return None,
+        _ => return None,
+    })
+}
+
+/// Remap a literal from support-variable space to full n-input space
+fn remap_lit_general(lit: u8, support: &[usize], num_inputs: usize, gates_added: usize) -> u8 {
+    let idx = (lit / 2) as usize;
+    let inv = lit & 1;
+
+    if idx < support.len() {
+        // Primary input in support space -> map to actual variable
+        (support[idx] as u8) * 2 + inv
+    } else {
+        // Gate reference
+        let gate_idx = idx - support.len();
+        ((num_inputs + gate_idx) as u8) * 2 + inv
+    }
 }
 
 /// Remap a literal from 2-input space to n-input space

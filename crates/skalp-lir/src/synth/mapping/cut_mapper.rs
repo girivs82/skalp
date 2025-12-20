@@ -275,6 +275,7 @@ impl CutMapper {
                             inputs: vec![(data.node, data.inverted)],
                             area: dff_area,
                             delay: dff_delay,
+                            output_inverted: false,
                         },
                     );
                     best_match.insert(node_id, None);
@@ -297,6 +298,7 @@ impl CutMapper {
                             inputs: vec![(data.node, data.inverted)],
                             area: barrier_area,
                             delay: barrier_delay,
+                            output_inverted: false,
                         },
                     );
                     best_match.insert(node_id, None);
@@ -332,6 +334,7 @@ impl CutMapper {
                                 inputs,
                                 area: match_.area,
                                 delay: match_.delay,
+                                output_inverted: match_.output_inverted,
                             },
                         );
                     } else {
@@ -357,6 +360,7 @@ impl CutMapper {
                                 ],
                                 area: and_area,
                                 delay: and_delay,
+                                output_inverted: false,
                             },
                         );
                     }
@@ -433,11 +437,21 @@ impl CutMapper {
             .fold(0.0, f64::max)
     }
 
-    /// Compute area for a cut (sum of leaf areas that are not shared)
+    /// Compute area for a cut using area flow
+    /// Area flow divides the cost of each leaf by its fanout count,
+    /// giving a more accurate estimate of the marginal cost of using this cut
     fn compute_cut_area(&self, cut: &Cut, node_area: &HashMap<AigNodeId, f64>) -> f64 {
-        // For simplicity, we don't account for sharing here
-        // A more sophisticated mapper would track fanout
-        0.0
+        // Use the cut's pre-computed area_flow if available
+        if cut.area_flow > 0.0 {
+            return cut.area_flow as f64;
+        }
+
+        // Otherwise, sum the areas of the cut leaves
+        // This gives an upper bound on the area contribution
+        cut.leaves
+            .iter()
+            .filter_map(|&leaf| node_area.get(&leaf).copied())
+            .sum()
     }
 
     /// Add inverters for inverted outputs

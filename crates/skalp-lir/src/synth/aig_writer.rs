@@ -58,11 +58,20 @@ impl<'a> AigWriter<'a> {
         // Phase 2: Create constant nets
         state.create_const_nets(aig);
 
-        // Phase 3: Process nodes in topological order
+        // Phase 3: Pre-create latch output nets (needed for sequential circuits with feedback)
+        state.pre_create_latch_nets(aig);
+
+        // Phase 4: Process nodes in topological order
         state.process_nodes(aig);
 
-        // Phase 4: Create outputs
+        // Phase 5: Create outputs
         state.create_outputs(aig);
+
+        // Phase 6: Remove dead cells (cells whose outputs have no fanout)
+        let removed = state.netlist.remove_dead_cells();
+        if removed > 0 {
+            eprintln!("[AIG_WRITER] Removed {} dead cells", removed);
+        }
 
         state.netlist.update_stats();
         state.netlist
@@ -123,6 +132,23 @@ impl AigWriterState<'_> {
         self.lit_to_net.insert((AigNodeId::FALSE, false), const0);
 
         // We'll create constant 1 (inverted const 0) lazily when needed
+    }
+
+    /// Pre-create latch output nets before processing nodes
+    ///
+    /// This is needed for sequential circuits with feedback loops where
+    /// AND nodes may reference latch outputs before the latches are processed.
+    fn pre_create_latch_nets(&mut self, aig: &Aig) {
+        for (id, node) in aig.iter_nodes() {
+            if let AigNode::Latch { .. } = node {
+                // Create output net for this latch
+                let output_net = self
+                    .netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("q{}", id.0)));
+                self.node_to_net.insert(id, output_net);
+                self.lit_to_net.insert((id, false), output_net);
+            }
+        }
     }
 
     /// Process all nodes
@@ -314,9 +340,20 @@ impl AigWriterState<'_> {
         self.next_cell_id += 1;
         self.netlist.add_cell(cell);
 
-        // Store mapping
-        self.node_to_net.insert(id, output_net);
-        self.lit_to_net.insert((id, false), output_net);
+        // Store mapping based on output polarity
+        // If output_inverted is true, the cell computes the inverse of the AIG function,
+        // so the cell's output represents the inverted literal
+        if mapped.output_inverted {
+            // Cell output is inverted relative to the AIG node
+            // (id, true) -> output_net means requesting inverted output gets the cell directly
+            self.node_to_net.insert(id, output_net);
+            self.lit_to_net.insert((id, true), output_net);
+            // Note: (id, false) will create an inverter if needed
+        } else {
+            // Normal case: cell output matches AIG node
+            self.node_to_net.insert(id, output_net);
+            self.lit_to_net.insert((id, false), output_net);
+        }
     }
 
     /// Process a latch node
@@ -332,10 +369,12 @@ impl AigWriterState<'_> {
         // Get input net
         let data_net = self.get_or_create_lit_net(aig, data);
 
-        // Create output net
-        let output_net = self
-            .netlist
-            .add_net(GateNet::new(GateNetId(0), format!("q{}", id.0)));
+        // Get pre-created output net (created in pre_create_latch_nets phase)
+        let output_net = self.node_to_net.get(&id).copied().unwrap_or_else(|| {
+            // Fallback: create if not pre-created (shouldn't happen normally)
+            self.netlist
+                .add_net(GateNet::new(GateNetId(0), format!("q{}", id.0)))
+        });
 
         // Get clock and reset nets
         let clock_net = clock.and_then(|c| self.node_to_net.get(&c).copied());
@@ -375,9 +414,7 @@ impl AigWriterState<'_> {
         self.next_cell_id += 1;
         self.netlist.add_cell(cell);
 
-        // Store mapping
-        self.node_to_net.insert(id, output_net);
-        self.lit_to_net.insert((id, false), output_net);
+        // Note: node_to_net and lit_to_net are already set in pre_create_latch_nets
     }
 
     /// Get or create a net for a literal (handling inversion)

@@ -297,8 +297,9 @@ impl MirToLirTransform {
                 }
             }
             Statement::If(if_stmt) => {
-                // For sequential if, create mux + register
-                let cond_signal = self.transform_expression(&if_stmt.condition, 1);
+                // Check for SDFF pattern: if (reset) { reg = const } else { reg = value }
+                // When detected, skip the mux and use integrated synchronous reset
+                let is_reset_condition = self.is_reset_signal_reference(&if_stmt.condition);
 
                 // Collect assignments from each branch
                 let then_assigns = Self::collect_assignments(&if_stmt.then_block);
@@ -329,54 +330,131 @@ impl MirToLirTransform {
                     let then_expr = Self::find_assignment_expr(&then_assigns, target);
                     let else_expr = Self::find_assignment_expr(&else_assigns, target);
 
-                    // Transform values
-                    let then_signal = if let Some(expr) = then_expr {
-                        self.transform_expression(expr, target_width)
+                    // Check if else branch has nested ifs for this target
+                    // If so, skip this target at this level - the nested ifs will handle it
+                    let else_has_nested_ifs = if let Some(ref else_block) = if_stmt.else_block {
+                        Self::block_has_nested_if_for_target(else_block, target)
                     } else {
-                        target_signal // Feedback: keep current value
+                        false
                     };
 
-                    let else_signal = if let Some(expr) = else_expr {
-                        self.transform_expression(expr, target_width)
+                    // Skip targets that are handled by nested ifs to avoid duplicate registers
+                    if else_has_nested_ifs {
+                        continue;
+                    }
+
+                    // Check for SDFF pattern:
+                    // - Condition is reset signal
+                    // - Then branch (reset case) is a constant
+                    // - There's an else branch with the actual next value
+                    let sdff_pattern = if is_reset_condition && else_expr.is_some() {
+                        then_expr.and_then(Self::try_extract_constant)
                     } else {
-                        target_signal // Feedback: keep current value
+                        None
                     };
 
-                    // Create mux: sel, d0 (else), d1 (then)
-                    let mux_out = self.alloc_temp_signal(target_width);
-                    self.lir.add_node(
-                        LirOp::Mux2 {
+                    if let Some(reset_value) = sdff_pattern {
+                        // SDFF pattern detected: skip mux, use integrated sync reset
+                        // The register's internal reset will handle the reset behavior
+                        let else_signal = if let Some(expr) = else_expr {
+                            self.transform_expression(expr, target_width)
+                        } else {
+                            target_signal // Feedback: keep current value
+                        };
+
+                        // Create register with sync reset (no mux needed)
+                        let reg_op = LirOp::Reg {
                             width: target_width,
-                        },
-                        vec![cond_signal, else_signal, then_signal],
-                        mux_out,
-                        format!("{}.mux", self.hierarchy_path),
-                    );
+                            has_enable: false,
+                            has_reset: true,
+                            reset_value: Some(reset_value),
+                        };
 
-                    // Create register
-                    let reg_op = LirOp::Reg {
-                        width: target_width,
-                        has_enable: false,
-                        has_reset: reset_signal.is_some(),
-                        reset_value: Some(0),
-                    };
-
-                    if let Some(clk) = clock_signal {
-                        self.lir.add_seq_node(
-                            reg_op,
-                            vec![mux_out],
-                            target_signal,
-                            format!("{}.reg", self.hierarchy_path),
-                            clk,
-                            reset_signal,
-                        );
+                        if let Some(clk) = clock_signal {
+                            self.lir.add_seq_node(
+                                reg_op,
+                                vec![else_signal], // Direct value, no mux
+                                target_signal,
+                                format!("{}.reg", self.hierarchy_path),
+                                clk,
+                                reset_signal,
+                            );
+                        } else {
+                            self.lir.add_node(
+                                reg_op,
+                                vec![else_signal],
+                                target_signal,
+                                format!("{}.reg", self.hierarchy_path),
+                            );
+                        }
                     } else {
+                        // Standard pattern: create mux + register
+                        let cond_signal = self.transform_expression(&if_stmt.condition, 1);
+
+                        // Transform values
+                        let then_signal = if let Some(expr) = then_expr {
+                            self.transform_expression(expr, target_width)
+                        } else {
+                            target_signal // Feedback: keep current value
+                        };
+
+                        let else_signal = if let Some(expr) = else_expr {
+                            self.transform_expression(expr, target_width)
+                        } else {
+                            target_signal // Feedback: keep current value
+                        };
+
+                        // Create mux: sel, d0 (else), d1 (then)
+                        let mux_out = self.alloc_temp_signal(target_width);
                         self.lir.add_node(
-                            reg_op,
-                            vec![mux_out],
-                            target_signal,
-                            format!("{}.reg", self.hierarchy_path),
+                            LirOp::Mux2 {
+                                width: target_width,
+                            },
+                            vec![cond_signal, else_signal, then_signal],
+                            mux_out,
+                            format!("{}.mux", self.hierarchy_path),
                         );
+
+                        // Create register
+                        let reg_op = LirOp::Reg {
+                            width: target_width,
+                            has_enable: false,
+                            has_reset: reset_signal.is_some(),
+                            reset_value: Some(0),
+                        };
+
+                        if let Some(clk) = clock_signal {
+                            self.lir.add_seq_node(
+                                reg_op,
+                                vec![mux_out],
+                                target_signal,
+                                format!("{}.reg", self.hierarchy_path),
+                                clk,
+                                reset_signal,
+                            );
+                        } else {
+                            self.lir.add_node(
+                                reg_op,
+                                vec![mux_out],
+                                target_signal,
+                                format!("{}.reg", self.hierarchy_path),
+                            );
+                        }
+                    }
+                }
+
+                // Recursively process nested if statements in then and else blocks
+                // This handles targets that are assigned inside nested conditionals
+                for stmt in &if_stmt.then_block.statements {
+                    if let Statement::If(_) = stmt {
+                        self.transform_sequential_statement(stmt, clock_signal, reset_signal);
+                    }
+                }
+                if let Some(ref else_block) = if_stmt.else_block {
+                    for stmt in &else_block.statements {
+                        if let Statement::If(_) = stmt {
+                            self.transform_sequential_statement(stmt, clock_signal, reset_signal);
+                        }
                     }
                 }
             }
@@ -401,6 +479,60 @@ impl MirToLirTransform {
                 }
                 Statement::Block(inner_block) => {
                     assigns.extend(Self::collect_assignments(inner_block));
+                }
+                _ => {}
+            }
+        }
+        assigns
+    }
+
+    /// Check if a block contains nested if statements that assign to a target
+    /// This is used to determine if SDFF pattern can be safely applied
+    fn block_has_nested_if_for_target(block: &Block, target: &LValue) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::If(if_stmt) => {
+                    // Check if this if statement or its children assign to target
+                    let then_assigns = Self::collect_all_assignments_recursive(&if_stmt.then_block);
+                    if then_assigns.iter().any(|(lv, _)| lv == target) {
+                        return true;
+                    }
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        let else_assigns = Self::collect_all_assignments_recursive(else_block);
+                        if else_assigns.iter().any(|(lv, _)| lv == target) {
+                            return true;
+                        }
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    if Self::block_has_nested_if_for_target(inner_block, target) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Recursively collect all assignments from a block, including those in nested ifs
+    fn collect_all_assignments_recursive(block: &Block) -> Vec<(LValue, Expression)> {
+        let mut assigns = Vec::new();
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) =>
+                {
+                    assigns.push((assign.lhs.clone(), assign.rhs.clone()));
+                }
+                Statement::Block(inner_block) => {
+                    assigns.extend(Self::collect_all_assignments_recursive(inner_block));
+                }
+                Statement::If(if_stmt) => {
+                    assigns.extend(Self::collect_all_assignments_recursive(&if_stmt.then_block));
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        assigns.extend(Self::collect_all_assignments_recursive(else_block));
+                    }
                 }
                 _ => {}
             }
@@ -976,6 +1108,41 @@ impl MirToLirTransform {
         match lvalue {
             LValue::Port(port_id) => self.port_to_signal.get(port_id).copied(),
             LValue::Signal(signal_id) => self.signal_to_lir_signal.get(signal_id).copied(),
+            _ => None,
+        }
+    }
+
+    /// Check if an expression is a reference to the reset signal
+    /// Returns true if the expression directly references a tracked reset signal
+    fn is_reset_signal_reference(&self, expr: &Expression) -> bool {
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => match lvalue {
+                LValue::Port(port_id) => {
+                    if let Some(&sig_id) = self.port_to_signal.get(port_id) {
+                        self.reset_signals.contains(&sig_id)
+                    } else {
+                        false
+                    }
+                }
+                LValue::Signal(signal_id) => {
+                    if let Some(&sig_id) = self.signal_to_lir_signal.get(signal_id) {
+                        self.reset_signals.contains(&sig_id)
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Try to extract a constant integer value from an expression
+    /// Returns Some(value) if the expression is a literal integer, None otherwise
+    fn try_extract_constant(expr: &Expression) -> Option<u64> {
+        match &expr.kind {
+            ExpressionKind::Literal(Value::Integer(i)) => Some(*i as u64),
+            ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
             _ => None,
         }
     }
