@@ -60,7 +60,7 @@ pub use cut_gnn::{CutScorer, CutScorerConfig, GnnCutSelector};
 pub use features::{extract_features, AigFeatures, FeatureExtractor};
 pub use pass_advisor::{MlPassAdvisor, PassAction, PassAdvisorConfig};
 pub use policy::{PolicyNetwork, SimplePolicy};
-pub use trainer::{PolicyTrainer, TrainerConfig, TrainingStats};
+pub use trainer::{PolicyTrainer, TrainerConfig, TrainingMode, TrainingStats};
 pub use training_data::{
     CollectorConfig, QualityOfResult, SynthesisEpisode, TrainingDataCollector, TrainingDataset,
 };
@@ -125,8 +125,8 @@ impl MlConfig {
     /// Create config for training mode
     pub fn training() -> Self {
         Self {
-            exploration_rate: 0.3, // 30% random exploration for diverse data
-            max_passes: 30,        // Run more passes to gather more decisions
+            exploration_rate: 0.2, // 20% random exploration - mostly on-policy data
+            max_passes: 40,        // Run more passes to gather more decisions
             ..Default::default()
         }
     }
@@ -298,6 +298,11 @@ impl MlSynthEngine {
                 break;
             }
 
+            // Skip if ML selected DCE (we'll run it automatically anyway)
+            if matches!(action, PassAction::Dce) {
+                continue;
+            }
+
             // Execute the suggested pass
             if let Some(result) = self.execute_action(aig, &action) {
                 // Extract features after the pass
@@ -317,6 +322,13 @@ impl MlSynthEngine {
                 self.stats.pass_sequence.push(result.pass_name.clone());
                 self.stats.passes_executed += 1;
                 results.push(result);
+
+                // Auto-run DCE after every pass (guaranteed cleanup)
+                if let Some(dce_result) = self.execute_action(aig, &PassAction::Dce) {
+                    self.stats.pass_sequence.push(dce_result.pass_name.clone());
+                    self.stats.passes_executed += 1;
+                    results.push(dce_result);
+                }
             }
         }
 
@@ -421,10 +433,15 @@ impl MlSynthEngine {
         }
     }
 
-    /// Load a policy model from file
+    /// Load a policy model from file (ONNX format)
     #[cfg(feature = "onnx")]
     pub fn load_policy(&mut self, path: &str) -> MlResult<()> {
         self.pass_advisor.load_model(path)
+    }
+
+    /// Load a trained policy from a JSON file
+    pub fn load_json_policy(&mut self, path: &str) -> std::io::Result<()> {
+        self.pass_advisor.load_policy_from_file(path)
     }
 
     /// Save training data for offline learning

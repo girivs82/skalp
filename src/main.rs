@@ -30,6 +30,8 @@ pub struct OptimizationOptions {
     pub passes: Option<String>,
     /// Use ML-guided pass ordering
     pub ml_guided: bool,
+    /// Path to trained ML policy model (JSON format)
+    pub ml_policy_path: Option<PathBuf>,
     /// Directory to collect training data
     pub training_data_dir: Option<PathBuf>,
 }
@@ -107,9 +109,19 @@ enum Commands {
         #[arg(long)]
         ml_guided: bool,
 
+        /// Path to trained ML policy model (JSON format, use with --ml-guided)
+        #[arg(long, value_name = "PATH")]
+        ml_policy: Option<PathBuf>,
+
         /// Collect training data during synthesis for ML model training
         #[arg(long, value_name = "DIR")]
         collect_training_data: Option<PathBuf>,
+
+        // === Technology Library Options ===
+        /// Path to technology library file (.skalib format)
+        /// If not specified, uses the built-in generic ASIC library
+        #[arg(long, value_name = "PATH")]
+        library: Option<PathBuf>,
     },
 
     /// Simulate the design
@@ -337,6 +349,10 @@ enum Commands {
         /// Batch size
         #[arg(long, default_value = "32")]
         batch_size: usize,
+
+        /// Training mode: standard, positive-only, episode-weighted, best-episodes
+        #[arg(long, default_value = "standard")]
+        mode: String,
     },
 }
 
@@ -392,7 +408,9 @@ fn main() -> Result<()> {
             optimize,
             passes,
             ml_guided,
+            ml_policy,
             collect_training_data,
+            library,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -414,6 +432,7 @@ fn main() -> Result<()> {
                 preset: optimize,
                 passes,
                 ml_guided,
+                ml_policy_path: ml_policy,
                 training_data_dir: collect_training_data,
             };
 
@@ -423,6 +442,7 @@ fn main() -> Result<()> {
                 &output,
                 safety_options,
                 optimization_options,
+                library.as_ref(),
             )?;
         }
 
@@ -538,8 +558,9 @@ fn main() -> Result<()> {
             epochs,
             learning_rate,
             batch_size,
+            mode,
         } => {
-            train_ml_model(&data, &output, epochs, learning_rate, batch_size)?;
+            train_ml_model(&data, &output, epochs, learning_rate, batch_size, &mode)?;
         }
     }
 
@@ -642,6 +663,7 @@ fn build_design(
     output_dir: &PathBuf,
     safety_options: Option<SafetyBuildOptions>,
     optimization_options: OptimizationOptions,
+    library_path: Option<&PathBuf>,
 ) -> Result<()> {
     use skalp_codegen::systemverilog::generate_systemverilog_from_mir;
     use skalp_frontend::parse_and_build_hir_from_file;
@@ -722,8 +744,14 @@ fn build_design(
             // Lower MIR module to LIR
             let lir_result = lower_mir_module_to_lir(top_module);
 
-            // Get ASIC library
-            let library = builtin_generic_asic();
+            // Get technology library
+            let library = if let Some(path) = library_path {
+                info!("Loading technology library from {:?}", path);
+                skalp_lir::TechLibrary::load_from_file(path)
+                    .context("Failed to load technology library")?
+            } else {
+                builtin_generic_asic()
+            };
 
             // Map to gate netlist with optimizations
             let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
@@ -876,6 +904,14 @@ fn apply_ml_synthesis_optimization(
         MlSynthEngine::new(config)
     };
 
+    // Load trained policy if specified
+    if let Some(ref policy_path) = options.ml_policy_path {
+        info!("Loading trained policy from: {}", policy_path.display());
+        engine
+            .load_json_policy(policy_path.to_str().unwrap_or(""))
+            .map_err(|e| anyhow::anyhow!("Failed to load policy: {}", e))?;
+    }
+
     // Build AIG from netlist
     let builder = AigBuilder::new(netlist);
     let mut aig = builder.build();
@@ -935,8 +971,23 @@ fn train_ml_model(
     epochs: usize,
     learning_rate: f64,
     batch_size: usize,
+    mode: &str,
 ) -> Result<()> {
-    use skalp_ml::{PolicyTrainer, TrainerConfig};
+    use skalp_ml::{PolicyTrainer, TrainerConfig, TrainingMode};
+
+    // Parse training mode
+    let training_mode = match mode.to_lowercase().as_str() {
+        "standard" => TrainingMode::Standard,
+        "positive-only" | "positive_only" => TrainingMode::PositiveOnly,
+        "episode-weighted" | "episode_weighted" => TrainingMode::EpisodeWeighted,
+        "best-episodes" | "best_episodes" => TrainingMode::BestEpisodes,
+        _ => {
+            anyhow::bail!(
+                "Unknown training mode: '{}'. Valid modes: standard, positive-only, episode-weighted, best-episodes",
+                mode
+            );
+        }
+    };
 
     println!("🧠 Training ML pass ordering model");
     println!("   Data directory: {}", data_dir.display());
@@ -944,6 +995,7 @@ fn train_ml_model(
     println!("   Epochs: {}", epochs);
     println!("   Learning rate: {}", learning_rate);
     println!("   Batch size: {}", batch_size);
+    println!("   Mode: {:?}", training_mode);
     println!();
 
     // Load training data
@@ -971,9 +1023,9 @@ fn train_ml_model(
 
     let mut trainer = PolicyTrainer::new(config);
 
-    // Train the model
+    // Train the model with specified mode
     println!("\n📈 Training...\n");
-    let stats = trainer.train(&dataset);
+    let stats = trainer.train_with_mode(&dataset, training_mode);
 
     // Ensure output directory exists
     if let Some(parent) = output_path.parent() {

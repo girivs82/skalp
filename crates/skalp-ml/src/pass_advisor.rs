@@ -92,6 +92,18 @@ impl PassAction {
         ]
     }
 
+    /// Get ML-selectable passes (excludes DCE which is run automatically)
+    pub fn ml_selectable_passes() -> Vec<Self> {
+        vec![
+            PassAction::Rewrite,
+            PassAction::Refactor,
+            PassAction::Balance,
+            PassAction::Strash,
+            PassAction::Fraig,
+            PassAction::ConstProp,
+        ]
+    }
+
     /// Default optimization sequence (heuristic)
     pub fn default_sequence() -> Self {
         // Start with structural cleanup
@@ -161,6 +173,17 @@ impl MlPassAdvisor {
         }
     }
 
+    /// Load a trained policy from a JSON file
+    pub fn load_policy_from_file(&mut self, path: &str) -> std::io::Result<()> {
+        self.policy = SimplePolicy::load_from_file(path)?;
+        Ok(())
+    }
+
+    /// Set a custom policy
+    pub fn set_policy(&mut self, policy: SimplePolicy) {
+        self.policy = policy;
+    }
+
     /// Suggest the next action based on current features
     pub fn suggest_action(&mut self, features: &AigFeatures) -> PassAction {
         let current_cost = features.estimated_cost();
@@ -192,7 +215,13 @@ impl MlPassAdvisor {
 
         // Get action from policy
         if self.config.use_learned_policy {
-            self.policy.predict(features)
+            let action = self.policy.predict(features);
+            // Debug: print action probabilities
+            if std::env::var("SKALP_DEBUG_ML").is_ok() {
+                let probs = self.policy.action_probs(features);
+                eprintln!("ML policy selected {:?} with probs: {:?}", action, probs);
+            }
+            action
         } else {
             self.heuristic_action(features)
         }
@@ -200,7 +229,8 @@ impl MlPassAdvisor {
 
     /// Random action for exploration
     fn random_action(&self) -> PassAction {
-        let actions = PassAction::all_passes();
+        // Use ML-selectable passes (DCE is run automatically after each pass)
+        let actions = PassAction::ml_selectable_passes();
         let idx = rand::random::<usize>() % actions.len();
         actions[idx]
     }

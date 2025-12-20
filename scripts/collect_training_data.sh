@@ -12,7 +12,7 @@ set -e
 SKALP_BIN="${SKALP_BIN:-./target/release/skalp}"
 STDLIB_PATH="${SKALP_STDLIB_PATH:-./crates/skalp-stdlib}"
 OUTPUT_DIR="${1:-./training_data}"
-EPISODES_PER_DESIGN="${2:-5}"  # Run multiple episodes per design
+EPISODES_PER_DESIGN="${2:-15}"  # Run multiple episodes per design for more diversity
 TEMP_DIR="/tmp/skalp_training_$$"
 
 # Colors for output
@@ -109,6 +109,15 @@ DESIGNS=(
     # Pipeline tests
     "pipeline_annot:tests/fixtures/test_pipeline_annotation.sk"
     "struct_outputs:tests/fixtures/test_struct_outputs.sk"
+
+    # ML Training designs - varied complexity for training
+    "barrel_shifter:examples/training/barrel_shifter.sk"
+    "mac_unit:examples/training/mac_unit.sk"
+    "priority_encoder:examples/training/priority_encoder.sk"
+    "popcount:examples/training/popcount.sk"
+    "crc16:examples/training/crc16.sk"
+    "comparator_tree:examples/training/comparator_tree.sk"
+    "gray_counter:examples/training/gray_counter.sk"
 )
 
 NUM_DESIGNS=${#DESIGNS[@]}

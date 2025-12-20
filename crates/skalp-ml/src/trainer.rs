@@ -29,6 +29,8 @@ pub struct TrainerConfig {
     pub weight_decay: f64,
     /// Validation split ratio
     pub validation_split: f64,
+    /// Early stopping patience (epochs without improvement)
+    pub early_stopping_patience: usize,
 }
 
 impl Default for TrainerConfig {
@@ -42,6 +44,7 @@ impl Default for TrainerConfig {
             grad_clip: 1.0,
             weight_decay: 0.0001,
             validation_split: 0.1,
+            early_stopping_patience: 10, // Stop if no improvement for 10 epochs
         }
     }
 }
@@ -88,10 +91,24 @@ impl From<&PassDecision> for Experience {
     }
 }
 
+/// Training mode for different data preprocessing strategies
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrainingMode {
+    /// Use discounted returns (standard policy gradient)
+    Standard,
+    /// Only use decisions with positive immediate rewards
+    PositiveOnly,
+    /// Use episode-level reward for all decisions
+    EpisodeWeighted,
+    /// Only train on best episodes (top 20%)
+    BestEpisodes,
+}
+
 /// Policy gradient trainer
 pub struct PolicyTrainer {
     config: TrainerConfig,
     policy: SimplePolicy,
+    best_policy: Option<SimplePolicy>,
     stats: TrainingStats,
 }
 
@@ -101,6 +118,7 @@ impl PolicyTrainer {
         Self {
             config,
             policy: SimplePolicy::new(),
+            best_policy: None,
             stats: TrainingStats::default(),
         }
     }
@@ -110,6 +128,7 @@ impl PolicyTrainer {
         Self {
             config,
             policy,
+            best_policy: None,
             stats: TrainingStats::default(),
         }
     }
@@ -148,6 +167,97 @@ impl PolicyTrainer {
         experiences
     }
 
+    /// Convert dataset to experiences, filtering for positive rewards only
+    fn dataset_to_positive_experiences(dataset: &TrainingDataset) -> Vec<Experience> {
+        let mut experiences = Vec::new();
+
+        for episode in &dataset.episodes {
+            for decision in &episode.pass_decisions {
+                // Only include decisions that led to improvement
+                if decision.reward > 0.0 {
+                    let exp = Experience::from(decision);
+                    experiences.push(exp);
+                }
+            }
+        }
+
+        // If we have very few positive examples, include neutral ones too
+        if experiences.len() < 100 {
+            for episode in &dataset.episodes {
+                for decision in &episode.pass_decisions {
+                    if decision.reward >= 0.0 {
+                        let exp = Experience::from(decision);
+                        experiences.push(exp);
+                    }
+                }
+            }
+        }
+
+        experiences
+    }
+
+    /// Convert dataset using episode-level reward assignment
+    /// All decisions in an episode share the episode's total reward
+    /// This gives credit to passes that set up later successful passes
+    fn dataset_to_episode_weighted_experiences(dataset: &TrainingDataset) -> Vec<Experience> {
+        let mut experiences = Vec::new();
+
+        for episode in &dataset.episodes {
+            if episode.pass_decisions.is_empty() {
+                continue;
+            }
+
+            // Compute episode total reward
+            let episode_reward: f64 = episode.pass_decisions.iter().map(|d| d.reward).sum();
+
+            // Assign episode reward to all decisions
+            for decision in &episode.pass_decisions {
+                let mut exp = Experience::from(decision);
+                exp.return_value = episode_reward;
+                experiences.push(exp);
+            }
+        }
+
+        experiences
+    }
+
+    /// Convert dataset using best-episode supervised learning
+    /// Only include decisions from episodes with top N% episode rewards
+    fn dataset_to_best_episode_experiences(
+        dataset: &TrainingDataset,
+        top_percentile: f64,
+    ) -> Vec<Experience> {
+        // Compute episode rewards
+        let mut episode_rewards: Vec<(usize, f64)> = dataset
+            .episodes
+            .iter()
+            .enumerate()
+            .map(|(i, ep)| {
+                let reward: f64 = ep.pass_decisions.iter().map(|d| d.reward).sum();
+                (i, reward)
+            })
+            .collect();
+
+        // Sort by reward descending
+        episode_rewards.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        // Take top percentile
+        let take_count = ((dataset.episodes.len() as f64) * top_percentile).ceil() as usize;
+        let take_count = take_count.max(1);
+
+        let mut experiences = Vec::new();
+        for (idx, reward) in episode_rewards.into_iter().take(take_count) {
+            let episode = &dataset.episodes[idx];
+            for decision in &episode.pass_decisions {
+                let mut exp = Experience::from(decision);
+                exp.return_value = reward; // Use episode-level reward
+                experiences.push(exp);
+            }
+        }
+
+        experiences
+    }
+
     /// Compute baseline (average return) for advantage estimation
     fn compute_baseline(experiences: &[Experience]) -> f64 {
         if experiences.is_empty() {
@@ -165,19 +275,59 @@ impl PolicyTrainer {
 
     /// Train the policy on the given dataset
     pub fn train(&mut self, dataset: &TrainingDataset) -> TrainingStats {
+        self.train_with_mode(dataset, TrainingMode::Standard)
+    }
+
+    /// Train the policy only on positive reward examples
+    pub fn train_positive_only(&mut self, dataset: &TrainingDataset) -> TrainingStats {
+        self.train_with_mode(dataset, TrainingMode::PositiveOnly)
+    }
+
+    /// Train the policy using episode-level rewards
+    pub fn train_episode_weighted(&mut self, dataset: &TrainingDataset) -> TrainingStats {
+        self.train_with_mode(dataset, TrainingMode::EpisodeWeighted)
+    }
+
+    /// Train the policy only on best episodes
+    pub fn train_best_episodes(&mut self, dataset: &TrainingDataset) -> TrainingStats {
+        self.train_with_mode(dataset, TrainingMode::BestEpisodes)
+    }
+
+    /// Train the policy with the specified mode
+    pub fn train_with_mode(
+        &mut self,
+        dataset: &TrainingDataset,
+        mode: TrainingMode,
+    ) -> TrainingStats {
         let start_time = std::time::Instant::now();
 
-        // Convert to experiences
-        let mut experiences = Self::dataset_to_experiences(dataset);
+        // Convert to experiences based on mode
+        let (mut experiences, mode_desc) = match mode {
+            TrainingMode::Standard => (Self::dataset_to_experiences(dataset), ""),
+            TrainingMode::PositiveOnly => (
+                Self::dataset_to_positive_experiences(dataset),
+                " (positive rewards only)",
+            ),
+            TrainingMode::EpisodeWeighted => (
+                Self::dataset_to_episode_weighted_experiences(dataset),
+                " (episode-weighted)",
+            ),
+            TrainingMode::BestEpisodes => (
+                Self::dataset_to_best_episode_experiences(dataset, 0.20),
+                " (top 20% episodes)",
+            ),
+        };
+
         if experiences.is_empty() {
             eprintln!("Warning: No training experiences found");
             return self.stats.clone();
         }
 
         println!(
-            "Training on {} experiences from {} episodes",
+            "Training on {} experiences from {} episodes{}",
             experiences.len(),
-            dataset.episodes.len()
+            dataset.episodes.len(),
+            mode_desc
         );
 
         // Compute baseline and advantages
@@ -201,7 +351,9 @@ impl PolicyTrainer {
             val_exp.len()
         );
 
-        // Training loop
+        // Training loop with early stopping
+        let mut epochs_without_improvement = 0;
+
         for epoch in 0..self.config.epochs {
             let loss = self.train_epoch(train_exp);
             self.stats.losses.push(loss);
@@ -213,17 +365,46 @@ impl PolicyTrainer {
             if val_accuracy > self.stats.best_val_accuracy {
                 self.stats.best_val_accuracy = val_accuracy;
                 self.stats.best_epoch = epoch;
+                // Save best policy
+                self.best_policy = Some(self.policy.clone());
+                epochs_without_improvement = 0;
+            } else {
+                epochs_without_improvement += 1;
             }
 
             if epoch % 10 == 0 || epoch == self.config.epochs - 1 {
                 println!(
-                    "Epoch {}/{}: loss={:.4}, val_acc={:.2}%",
+                    "Epoch {}/{}: loss={:.4}, val_acc={:.2}%{}",
                     epoch + 1,
                     self.config.epochs,
                     loss,
-                    val_accuracy * 100.0
+                    val_accuracy * 100.0,
+                    if epochs_without_improvement > 0 {
+                        format!(" (no improvement for {})", epochs_without_improvement)
+                    } else {
+                        " *best*".to_string()
+                    }
                 );
             }
+
+            // Early stopping check
+            if epochs_without_improvement >= self.config.early_stopping_patience {
+                println!(
+                    "\nEarly stopping at epoch {} (no improvement for {} epochs)",
+                    epoch + 1,
+                    self.config.early_stopping_patience
+                );
+                break;
+            }
+        }
+
+        // Restore best policy
+        if let Some(best) = self.best_policy.take() {
+            self.policy = best;
+            println!(
+                "Restored best model from epoch {}",
+                self.stats.best_epoch + 1
+            );
         }
 
         self.stats.training_time_secs = start_time.elapsed().as_secs_f64();
