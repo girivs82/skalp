@@ -223,6 +223,41 @@ impl CellMatcher {
         self.add_cell_match(0xFFFE, "OR4_X1", 3.0, 32.0, vec!["A", "B", "C", "D"]);
         self.add_cell_match(0x7FFF, "NAND4_X1", 2.5, 25.0, vec!["A", "B", "C", "D"]);
         self.add_cell_match(0x0001, "NOR4_X1", 2.5, 28.0, vec!["A", "B", "C", "D"]);
+
+        // AOI4: !(a&b | c&d) - 4-input AND-OR-Invert with 2+2 structure
+        // For 4 inputs (a=bit0, b=bit1, c=bit2, d=bit3):
+        // Output is 1 when: !(a&b) AND !(c&d)
+        // = rows where NOT (a=1 AND b=1) AND NOT (c=1 AND d=1)
+        // = all rows except: 3 (a=1,b=1,c=0,d=0), 7 (a=1,b=1,c=1,d=0), 11 (a=1,b=1,c=0,d=1),
+        //                    12 (a=0,b=0,c=1,d=1), 13 (a=1,b=0,c=1,d=1), 14 (a=0,b=1,c=1,d=1),
+        //                    15 (a=1,b=1,c=1,d=1)
+        // = bits 0,1,2,4,5,6,8,9,10 = 0x0777
+        self.add_cell_match(0x0777, "AOI4_X1", 2.0, 22.0, vec!["A", "B", "C", "D"]);
+        // AOI4 with swapped pairs: !(c&d | a&b) - same function, different wiring
+        self.add_cell_match(0x1777, "AOI4_X1", 2.0, 22.0, vec!["C", "D", "A", "B"]);
+
+        // OAI4: !((a|b) & (c|d)) - 4-input OR-AND-Invert with 2+2 structure
+        // Output is 1 when: !(a|b) OR !(c|d)
+        // = rows where (a=0 AND b=0) OR (c=0 AND d=0)
+        // = rows 0-3 (c=0,d=0) UNION rows 0,4,8,12 (a=0,b=0)
+        // = 0,1,2,3,4,8,12 = bits 0,1,2,3,4,8,12 = 0x111F
+        self.add_cell_match(0x111F, "OAI4_X1", 2.0, 22.0, vec!["A", "B", "C", "D"]);
+        // OAI4 with swapped pairs
+        self.add_cell_match(0x1F11, "OAI4_X1", 2.0, 22.0, vec!["C", "D", "A", "B"]);
+
+        // Additional AOI21/OAI21 permutations for better matching
+        // Standard AOI21: !(a&b | c) with c as the single input
+        // 0x15 is !(a | b&c), so we need to add !(a&b | c) = 0x07
+        self.add_cell_match(0x07, "AOI21_X1", 2.0, 20.0, vec!["A", "B", "C"]); // !(a&b | c)
+                                                                               // Other permutations
+        self.add_cell_match(0x23, "AOI21_X1", 2.0, 20.0, vec!["A", "C", "B"]); // !(a&c | b)
+        self.add_cell_match(0x45, "AOI21_X1", 2.0, 20.0, vec!["B", "C", "A"]); // !(b&c | a)
+
+        // Standard OAI21: !((a|b) & c) with c as the single input
+        // 0x57 is !((a|b) & c), let's add permutations
+        self.add_cell_match(0x1F, "OAI21_X1", 2.0, 20.0, vec!["A", "B", "C"]); // !((a|b) & c)
+        self.add_cell_match(0x2F, "OAI21_X1", 2.0, 20.0, vec!["A", "C", "B"]); // !((a|c) & b)
+        self.add_cell_match(0x4F, "OAI21_X1", 2.0, 20.0, vec!["B", "C", "A"]); // !((b|c) & a)
     }
 
     fn add_cell_match(

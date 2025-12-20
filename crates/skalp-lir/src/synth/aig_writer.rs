@@ -366,9 +366,6 @@ impl AigWriterState<'_> {
         clock: Option<AigNodeId>,
         reset: Option<AigNodeId>,
     ) {
-        // Get input net
-        let data_net = self.get_or_create_lit_net(aig, data);
-
         // Get pre-created output net (created in pre_create_latch_nets phase)
         let output_net = self.node_to_net.get(&id).copied().unwrap_or_else(|| {
             // Fallback: create if not pre-created (shouldn't happen normally)
@@ -380,13 +377,6 @@ impl AigWriterState<'_> {
         let clock_net = clock.and_then(|c| self.node_to_net.get(&c).copied());
         let reset_net = reset.and_then(|r| self.node_to_net.get(&r).copied());
 
-        // Find appropriate cell from library
-        let (cell_type, cell_fit) = if reset_net.is_some() {
-            self.find_dffr_cell()
-        } else {
-            self.find_dff_cell()
-        };
-
         // Get safety info
         let safety = aig
             .get_safety_info(id)
@@ -397,22 +387,61 @@ impl AigWriterState<'_> {
             })
             .unwrap_or(CellSafetyClassification::Functional);
 
-        // Create cell
-        let cell = Cell::new_seq(
-            CellId(self.next_cell_id),
-            cell_type,
-            self.library.name.clone(),
-            cell_fit,
-            format!("aig.latch{}", id.0),
-            vec![data_net],
-            vec![output_net],
-            clock_net.unwrap_or(GateNetId(0)),
-            reset_net,
-        )
-        .with_safety_classification(safety);
+        // Try to detect enable pattern: D = (enable & new_value) | (~enable & Q)
+        // If found, use SDFFE instead of DFFR to save combinational logic
+        if let Some((enable_lit, new_data_lit)) = self.detect_enable_pattern(aig, data, id) {
+            let enable_net = self.get_or_create_lit_net(aig, enable_lit);
+            let new_data_net = self.get_or_create_lit_net(aig, new_data_lit);
 
-        self.next_cell_id += 1;
-        self.netlist.add_cell(cell);
+            // Find SDFFE cell (with enable and reset)
+            let (cell_type, cell_fit) = self.find_sdffe_cell();
+
+            // Create SDFFE cell with enable input
+            // Inputs: [D, E] where D is the new data and E is the enable
+            let cell = Cell::new_seq_with_enable(
+                CellId(self.next_cell_id),
+                cell_type,
+                self.library.name.clone(),
+                cell_fit,
+                format!("aig.latch{}", id.0),
+                new_data_net,
+                enable_net,
+                output_net,
+                clock_net.unwrap_or(GateNetId(0)),
+                reset_net,
+            )
+            .with_safety_classification(safety);
+
+            self.next_cell_id += 1;
+            self.netlist.add_cell(cell);
+        } else {
+            // No enable pattern found, use regular DFFR
+            let data_net = self.get_or_create_lit_net(aig, data);
+
+            // Find appropriate cell from library
+            let (cell_type, cell_fit) = if reset_net.is_some() {
+                self.find_dffr_cell()
+            } else {
+                self.find_dff_cell()
+            };
+
+            // Create cell
+            let cell = Cell::new_seq(
+                CellId(self.next_cell_id),
+                cell_type,
+                self.library.name.clone(),
+                cell_fit,
+                format!("aig.latch{}", id.0),
+                vec![data_net],
+                vec![output_net],
+                clock_net.unwrap_or(GateNetId(0)),
+                reset_net,
+            )
+            .with_safety_classification(safety);
+
+            self.next_cell_id += 1;
+            self.netlist.add_cell(cell);
+        }
 
         // Note: node_to_net and lit_to_net are already set in pre_create_latch_nets
     }
@@ -560,6 +589,114 @@ impl AigWriterState<'_> {
             return (cell.name.clone(), cell.fit);
         }
         ("DFFR_X1".to_string(), 0.25)
+    }
+
+    /// Find a SDFFE cell (DFF with synchronous enable and reset) in the library
+    fn find_sdffe_cell(&self) -> (String, f64) {
+        // Try to find SDFFE in library (DFF with synchronous enable and reset)
+        let sdffe_cells = self.library.find_cells_by_function(&CellFunction::DffE);
+        if let Some(cell) = sdffe_cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        // Fallback: use SDFFE_PP0P name format (positive edge, positive enable, reset to 0)
+        ("SDFFE_PP0P_X1".to_string(), 0.28)
+    }
+
+    /// Detect MUX-style enable pattern in latch data input
+    ///
+    /// Pattern: D = (enable & new_value) | (~enable & Q)
+    /// In AIG: D = NOT(AND(NOT(AND(enable, new_value)), NOT(AND(NOT(enable), Q))))
+    ///
+    /// Returns Some((enable_lit, data_lit)) if pattern is detected
+    fn detect_enable_pattern(
+        &self,
+        aig: &Aig,
+        data: AigLit,
+        latch_id: AigNodeId,
+    ) -> Option<(AigLit, AigLit)> {
+        // Pattern: D = NOT(AND(X, Y)) where D.inverted = true
+        if !data.inverted {
+            return None;
+        }
+
+        // Get the AND node for the inverted MUX output
+        let mux_and = match aig.get_node(data.node) {
+            Some(AigNode::And { left, right }) => (*left, *right),
+            _ => return None,
+        };
+
+        // Both inputs should be inverted (they are the NORed halves of the MUX)
+        // X = NOT(AND(enable, new_value))
+        // Y = NOT(AND(NOT(enable), Q))
+        if !mux_and.0.inverted || !mux_and.1.inverted {
+            return None;
+        }
+
+        // Try both orderings
+        for (x, y) in [(mux_and.0, mux_and.1), (mux_and.1, mux_and.0)] {
+            if let Some(result) = self.try_extract_enable_pattern(aig, x, y, latch_id) {
+                return Some(result);
+            }
+        }
+
+        None
+    }
+
+    /// Try to extract enable pattern from two AND nodes
+    /// x = NOT(AND(enable, new_value))
+    /// y = NOT(AND(NOT(enable), Q))
+    fn try_extract_enable_pattern(
+        &self,
+        aig: &Aig,
+        x: AigLit,
+        y: AigLit,
+        latch_id: AigNodeId,
+    ) -> Option<(AigLit, AigLit)> {
+        // x.node should be AND(enable, new_value)
+        let (x_left, x_right) = match aig.get_node(x.node) {
+            Some(AigNode::And { left, right }) => (*left, *right),
+            _ => return None,
+        };
+
+        // y.node should be AND(NOT(enable), Q)
+        let (y_left, y_right) = match aig.get_node(y.node) {
+            Some(AigNode::And { left, right }) => (*left, *right),
+            _ => return None,
+        };
+
+        // One of y's inputs should be the latch output (Q)
+        // The other should be the inverted enable
+        let (enable_inv, q_input) = if y_left.node == latch_id {
+            (y_right, y_left)
+        } else if y_right.node == latch_id {
+            (y_left, y_right)
+        } else {
+            return None;
+        };
+
+        // Q should not be inverted in the feedback path
+        if q_input.inverted {
+            return None;
+        }
+
+        // enable_inv should be inverted (it's ~enable in the pattern)
+        if !enable_inv.inverted {
+            return None;
+        }
+
+        let enable_node = enable_inv.node;
+
+        // Check if one of x's inputs matches the enable
+        let (potential_enable, new_value) = if x_left.node == enable_node && !x_left.inverted {
+            (x_left, x_right)
+        } else if x_right.node == enable_node && !x_right.inverted {
+            (x_right, x_left)
+        } else {
+            return None;
+        };
+
+        // Found the pattern!
+        Some((potential_enable, new_value))
     }
 
     /// Process a barrier node (power domain boundary)

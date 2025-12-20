@@ -117,6 +117,38 @@ impl Cell {
         }
     }
 
+    /// Create a new sequential cell with enable input (e.g., SDFFE)
+    ///
+    /// The inputs are ordered as [data, enable] to match standard cell conventions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_seq_with_enable(
+        id: CellId,
+        cell_type: String,
+        library: String,
+        fit: f64,
+        path: String,
+        data: GateNetId,
+        enable: GateNetId,
+        output: GateNetId,
+        clock: GateNetId,
+        reset: Option<GateNetId>,
+    ) -> Self {
+        Self {
+            id,
+            cell_type,
+            library,
+            fit,
+            failure_modes: Vec::new(),
+            inputs: vec![data, enable], // [D, E] ordering
+            outputs: vec![output],
+            path,
+            clock: Some(clock),
+            reset,
+            source_op: None,
+            safety_classification: CellSafetyClassification::default(),
+        }
+    }
+
     /// Set the safety classification for this cell
     pub fn with_safety_classification(mut self, classification: CellSafetyClassification) -> Self {
         self.safety_classification = classification;
