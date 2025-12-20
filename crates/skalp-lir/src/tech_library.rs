@@ -914,6 +914,11 @@ impl TechLibrary {
         self.decomposition_rules.iter().find(|r| r.matches(op))
     }
 
+    /// Iterate over all cells in the library
+    pub fn iter_cells(&self) -> impl Iterator<Item = (&String, &LibraryCell)> {
+        self.cells.iter()
+    }
+
     /// Get all cell names
     pub fn cell_names(&self) -> Vec<&str> {
         self.cells.keys().map(|s| s.as_str()).collect()

@@ -12,6 +12,7 @@
 use super::{CellMatcher, CutMatch, MappedNode, MappingObjective, MappingStats};
 use crate::synth::cuts::{CutEnumeration, CutParams, CutPriority};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, Cut};
+use crate::tech_library::TechLibrary;
 use std::collections::{HashMap, HashSet};
 
 /// Configuration for the cut-based mapper
@@ -102,6 +103,40 @@ impl CutMapper {
             area_weight: 1.0,
             delay_weight: 1.0,
             config: CutMapperConfig::default(),
+        }
+    }
+
+    /// Create a mapper that uses cells from a technology library
+    ///
+    /// This is the preferred constructor as it uses the actual cells
+    /// available in the library with their real costs and timing.
+    pub fn from_library(library: &TechLibrary) -> Self {
+        Self {
+            matcher: CellMatcher::from_library(library),
+            cut_params: CutParams::default(),
+            objective: MappingObjective::Balanced,
+            area_weight: 1.0,
+            delay_weight: 1.0,
+            config: CutMapperConfig::default(),
+        }
+    }
+
+    /// Create mapper from library with specific configuration
+    pub fn from_library_with_config(library: &TechLibrary, config: CutMapperConfig) -> Self {
+        let cut_params = CutParams {
+            k: config.cut_size,
+            max_cuts: config.max_cuts,
+            use_choices: config.use_choices,
+            ..Default::default()
+        };
+
+        Self {
+            matcher: CellMatcher::from_library(library),
+            cut_params,
+            objective: MappingObjective::Balanced,
+            area_weight: 1.0,
+            delay_weight: 1.0,
+            config,
         }
     }
 

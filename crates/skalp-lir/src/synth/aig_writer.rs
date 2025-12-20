@@ -323,52 +323,11 @@ impl AigWriterState<'_> {
             }
         }
 
-        // Select cell type based on input inversions to avoid extra inverters:
-        // - AND(a, b) → AND2
-        // - AND(~a, b) → ANDNOT with inputs (b, a) where second input is inverted
-        // - AND(a, ~b) → ANDNOT with inputs (a, b) where second input is inverted
-        // - AND(~a, ~b) → NOR2 with inputs (a, b) by DeMorgan: ~a & ~b = ~(a | b)
+        // Select the best cell based on input inversions and library availability.
+        // Strategy: Try specialized cells first (ANDNOT, NOR2), fall back to AND2+INV.
+        // This is library-agnostic - we query what cells are available.
         let (cell_type, cell_fit, input_a, input_b): (String, f64, AigLit, AigLit) =
-            match (left.inverted, right.inverted) {
-                (false, false) => {
-                    // AND(a, b) → AND2
-                    let (ct, cf) = self.find_and2_cell();
-                    (ct, cf, left, right)
-                }
-                (true, false) => {
-                    // AND(~a, b) → ANDNOT(b, a) where second input is inverted
-                    let (ct, cf) = self.find_andnot_cell();
-                    // ANDNOT: A & ~B, so we need (B=non-inverted, A=to-be-inverted)
-                    // left is ~a, right is b, we want b & ~a = ANDNOT(b, a)
-                    let uninverted_left = AigLit {
-                        node: left.node,
-                        inverted: false,
-                    };
-                    (ct, cf, right, uninverted_left) // inputs: (b, a) → ANDNOT computes b & ~a
-                }
-                (false, true) => {
-                    // AND(a, ~b) → ANDNOT(a, b) where second input is inverted
-                    let (ct, cf) = self.find_andnot_cell();
-                    let uninverted_right = AigLit {
-                        node: right.node,
-                        inverted: false,
-                    };
-                    (ct, cf, left, uninverted_right) // inputs: (a, b) → ANDNOT computes a & ~b
-                }
-                (true, true) => {
-                    // AND(~a, ~b) → NOR2(a, b) by DeMorgan: ~a & ~b = ~(a | b)
-                    let (ct, cf) = self.find_nor2_cell();
-                    let uninverted_left = AigLit {
-                        node: left.node,
-                        inverted: false,
-                    };
-                    let uninverted_right = AigLit {
-                        node: right.node,
-                        inverted: false,
-                    };
-                    (ct, cf, uninverted_left, uninverted_right)
-                }
-            };
+            self.select_best_and_cell(left, right);
 
         // Get input nets (now using the adjusted inputs without redundant inversions)
         let left_net = self.get_or_create_lit_net(aig, input_a);
@@ -679,24 +638,111 @@ impl AigWriterState<'_> {
         ("AND2_X1".to_string(), 0.1)
     }
 
-    /// Find an ANDNOT cell in the library (computes A & ~B)
-    fn find_andnot_cell(&self) -> (String, f64) {
-        let andnot_cells = self.library.find_cells_by_function(&CellFunction::AndNot);
-        if let Some(cell) = andnot_cells.first() {
-            return (cell.name.clone(), cell.fit);
-        }
-        // Default
-        ("ANDNOT_X1".to_string(), 0.08)
+    /// Try to find an ANDNOT cell in the library (computes A & ~B)
+    /// Returns None if the library doesn't have this cell type
+    fn try_find_andnot_cell(&self) -> Option<(String, f64)> {
+        self.library
+            .find_best_cell(&CellFunction::AndNot)
+            .map(|cell| (cell.name.clone(), cell.fit))
     }
 
-    /// Find a NOR2 cell in the library
-    fn find_nor2_cell(&self) -> (String, f64) {
-        let nor2_cells = self.library.find_cells_by_function(&CellFunction::Nor2);
-        if let Some(cell) = nor2_cells.first() {
-            return (cell.name.clone(), cell.fit);
+    /// Try to find a NOR2 cell in the library
+    /// Returns None if the library doesn't have this cell type
+    fn try_find_nor2_cell(&self) -> Option<(String, f64)> {
+        self.library
+            .find_best_cell(&CellFunction::Nor2)
+            .map(|cell| (cell.name.clone(), cell.fit))
+    }
+
+    /// Try to find an ORNOT cell in the library (computes A | ~B)
+    /// Returns None if the library doesn't have this cell type
+    fn try_find_ornot_cell(&self) -> Option<(String, f64)> {
+        self.library
+            .find_best_cell(&CellFunction::OrNot)
+            .map(|cell| (cell.name.clone(), cell.fit))
+    }
+
+    /// Try to find a NAND2 cell in the library
+    /// Returns None if the library doesn't have this cell type
+    fn try_find_nand2_cell(&self) -> Option<(String, f64)> {
+        self.library
+            .find_best_cell(&CellFunction::Nand2)
+            .map(|cell| (cell.name.clone(), cell.fit))
+    }
+
+    /// Select the best cell for an AND operation based on input inversions
+    /// and what cells are available in the technology library.
+    ///
+    /// This is the core library-agnostic optimization: we query what primitives
+    /// are available and pick the best option for each pattern.
+    fn select_best_and_cell(&self, left: AigLit, right: AigLit) -> (String, f64, AigLit, AigLit) {
+        let (and2_name, and2_fit) = self.find_and2_cell();
+        let (inv_name, inv_fit) = self.find_inv_cell();
+        let _ = inv_name; // Will be used for cost calculation
+
+        match (left.inverted, right.inverted) {
+            (false, false) => {
+                // AND(a, b) → AND2 (no alternatives needed)
+                (and2_name, and2_fit, left, right)
+            }
+
+            (true, false) | (false, true) => {
+                // AND(~a, b) or AND(a, ~b) → Try ANDNOT, else AND2 + INV
+                let (inverted_input, non_inverted_input) = if left.inverted {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+
+                // Option 1: Use ANDNOT if available
+                // ANDNOT computes A & ~B, so A=non_inverted, B=inverted.node
+                if let Some((andnot_name, andnot_fit)) = self.try_find_andnot_cell() {
+                    let uninverted = AigLit {
+                        node: inverted_input.node,
+                        inverted: false,
+                    };
+                    // Cost comparison: ANDNOT vs AND2 + INV
+                    if andnot_fit <= and2_fit + inv_fit {
+                        return (andnot_name, andnot_fit, non_inverted_input, uninverted);
+                    }
+                }
+
+                // Option 2: Use NAND + output_inversion pattern
+                // ~(a & b) with inverted output = a & b
+                // For AND(~x, y): we could use ~NAND(x, ~y) but that's more complex
+
+                // Fallback: Use AND2 with inverted input (inverter will be created)
+                (and2_name, and2_fit, left, right)
+            }
+
+            (true, true) => {
+                // AND(~a, ~b) = ~(a | b) = NOR2(a, b) by DeMorgan
+                let uninverted_left = AigLit {
+                    node: left.node,
+                    inverted: false,
+                };
+                let uninverted_right = AigLit {
+                    node: right.node,
+                    inverted: false,
+                };
+
+                // Option 1: Use NOR2 if available (best option, single cell)
+                if let Some((nor2_name, nor2_fit)) = self.try_find_nor2_cell() {
+                    // Cost: NOR2 vs AND2 + 2*INV
+                    if nor2_fit <= and2_fit + 2.0 * inv_fit {
+                        return (nor2_name, nor2_fit, uninverted_left, uninverted_right);
+                    }
+                }
+
+                // Option 2: Use NAND with inverted output
+                // AND(~a, ~b) = ~NAND(~a, ~b) - but NAND(~a,~b) = ~(~a & ~b) = a | b
+                // So ~NAND(~a,~b) = ~(a | b) = NOR - same as NOR2
+                // This doesn't help unless we can share the output inversion
+
+                // Fallback: Use AND2 with both inputs inverted
+                (and2_name, and2_fit, left, right)
+            }
         }
-        // Default
-        ("NOR2_X1".to_string(), 0.08)
     }
 
     /// Find an inverter cell in the library

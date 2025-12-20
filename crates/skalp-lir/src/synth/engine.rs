@@ -270,8 +270,8 @@ impl SynthEngine {
             self.run_timing_analysis(&aig);
         }
 
-        // Phase 4: Map to library cells
-        self.run_technology_mapping(&aig);
+        // Phase 4: Map to library cells using available primitives
+        self.run_technology_mapping(&aig, library);
 
         // Phase 5: Convert back to GateNetlist using technology mapping results
         if self.config.verbose {
@@ -299,8 +299,15 @@ impl SynthEngine {
         }
     }
 
-    /// Optimize an AIG directly
-    pub fn optimize_aig(&mut self, aig: &mut Aig) -> Vec<PassResult> {
+    /// Optimize an AIG directly with optional library-aware mapping
+    ///
+    /// If a library is provided, technology mapping will use the library's
+    /// cells. Otherwise, default cell definitions are used.
+    pub fn optimize_aig(
+        &mut self,
+        aig: &mut Aig,
+        library: Option<&TechLibrary>,
+    ) -> Vec<PassResult> {
         self.pass_results.clear();
         self.run_optimization_passes(aig);
 
@@ -308,7 +315,17 @@ impl SynthEngine {
             self.run_timing_analysis(aig);
         }
 
-        self.run_technology_mapping(aig);
+        // Use library-aware mapping if library is provided
+        if let Some(lib) = library {
+            self.run_technology_mapping(aig, lib);
+        } else {
+            // Use default mapping (without library)
+            let result = CutMapper::with_config(CutMapperConfig::quality()).map(aig);
+            if self.config.verbose {
+                eprintln!("Mapping: {}", result.stats.summary());
+            }
+            self.mapping_result = Some(result);
+        }
 
         self.pass_results.clone()
     }
@@ -526,8 +543,8 @@ impl SynthEngine {
         }
     }
 
-    /// Run technology mapping
-    fn run_technology_mapping(&mut self, aig: &Aig) {
+    /// Run technology mapping using cells from the library
+    fn run_technology_mapping(&mut self, aig: &Aig, library: &TechLibrary) {
         let result = match self.config.preset {
             SynthPreset::Timing => {
                 let config = DelayMappingConfig {
@@ -543,8 +560,8 @@ impl SynthEngine {
                 }
             }
             SynthPreset::Quick => {
-                // Fast mapping with minimal optimization
-                let mapper = CutMapper::with_config(CutMapperConfig::fast());
+                // Fast mapping with minimal optimization, using library cells
+                let mapper = CutMapper::from_library_with_config(library, CutMapperConfig::fast());
                 mapper.map(aig)
             }
             SynthPreset::Full | SynthPreset::Resyn2 => {
@@ -552,7 +569,7 @@ impl SynthEngine {
                 let mut config = CutMapperConfig::quality();
                 // Enable choice-aware mapping if AIG has choice nodes
                 config.use_choices = aig.choice_node_count() > 0;
-                let mapper = CutMapper::with_config(config);
+                let mapper = CutMapper::from_library_with_config(library, config);
                 mapper.map(aig)
             }
             SynthPreset::Area => {
@@ -563,14 +580,14 @@ impl SynthEngine {
                     recovery_iterations: 3,
                     ..Default::default()
                 };
-                let mut mapper = CutMapper::with_config(config);
+                let mut mapper = CutMapper::from_library_with_config(library, config);
                 mapper.set_objective(MappingObjective::Area);
                 mapper.map(aig)
             }
             SynthPreset::Balanced => {
-                // Quality mapping with larger cuts for better area optimization
+                // Quality mapping using library cells
                 let config = CutMapperConfig::quality();
-                let mapper = CutMapper::with_config(config);
+                let mapper = CutMapper::from_library_with_config(library, config);
                 mapper.map(aig)
             }
         };
@@ -717,7 +734,7 @@ mod tests {
         aig.add_output("y".to_string(), ab);
 
         let mut engine = SynthEngine::with_preset(SynthPreset::Quick);
-        let results = engine.optimize_aig(&mut aig);
+        let results = engine.optimize_aig(&mut aig, None);
 
         // Should have run some passes
         assert!(!results.is_empty());
