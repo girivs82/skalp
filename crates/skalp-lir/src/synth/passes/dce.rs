@@ -3,6 +3,11 @@
 //! This pass removes nodes that do not contribute to any output.
 //! It performs a backward traversal from outputs and removes any
 //! nodes that are not reachable.
+//!
+//! # References
+//!
+//! - Standard compiler optimization technique.
+//! - ABC User Guide: Dead node removal is part of `cleanup` and implicit in synthesis.
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, BarrierType};

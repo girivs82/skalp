@@ -100,6 +100,7 @@ impl Dc2 {
         mffc
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_mffc_rec(
         &self,
         aig: &Aig,
@@ -113,18 +114,16 @@ impl Dc2 {
         }
         visited.insert(node);
 
-        if let Some(n) = aig.get_node(node) {
-            if let AigNode::And { left, right, .. } = n {
-                // Only include if this is the only fanout
-                let left_fo = fanouts.get(&left.node).copied().unwrap_or(1);
-                let right_fo = fanouts.get(&right.node).copied().unwrap_or(1);
+        if let Some(AigNode::And { left, right, .. }) = aig.get_node(node) {
+            // Only include if this is the only fanout
+            let left_fo = fanouts.get(&left.node).copied().unwrap_or(1);
+            let right_fo = fanouts.get(&right.node).copied().unwrap_or(1);
 
-                if left_fo == 1 {
-                    self.collect_mffc_rec(aig, left.node, fanouts, mffc, visited);
-                }
-                if right_fo == 1 {
-                    self.collect_mffc_rec(aig, right.node, fanouts, mffc, visited);
-                }
+            if left_fo == 1 {
+                self.collect_mffc_rec(aig, left.node, fanouts, mffc, visited);
+            }
+            if right_fo == 1 {
+                self.collect_mffc_rec(aig, right.node, fanouts, mffc, visited);
             }
         }
 
@@ -132,12 +131,7 @@ impl Dc2 {
     }
 
     /// Collect cut leaves for a node
-    fn collect_cut_leaves(
-        &self,
-        aig: &Aig,
-        root: AigNodeId,
-        max_size: usize,
-    ) -> Vec<AigNodeId> {
+    fn collect_cut_leaves(&self, aig: &Aig, root: AigNodeId, max_size: usize) -> Vec<AigNodeId> {
         let mut leaves = Vec::new();
         let mut internal = HashSet::new();
         let mut frontier = vec![root];
@@ -150,7 +144,7 @@ impl Dc2 {
                         // Try to expand fanins
                         for lit in [left, right] {
                             if !internal.contains(&lit.node) {
-                                if leaves.len() + 1 <= max_size {
+                                if leaves.len() < max_size {
                                     // Can still add leaves
                                     if let Some(AigNode::And { .. }) = aig.get_node(lit.node) {
                                         // Expand this AND node
@@ -182,21 +176,13 @@ impl Dc2 {
     }
 
     /// Compute truth table for a node over given leaves
-    fn compute_tt(
-        &self,
-        aig: &Aig,
-        node: AigNodeId,
-        leaves: &[AigNodeId],
-    ) -> Option<u64> {
+    fn compute_tt(&self, aig: &Aig, node: AigNodeId, leaves: &[AigNodeId]) -> Option<u64> {
         if leaves.len() > 6 {
             return None;
         }
 
-        let leaf_map: HashMap<AigNodeId, usize> = leaves
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| (n, i))
-            .collect();
+        let leaf_map: HashMap<AigNodeId, usize> =
+            leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let num_rows = 1usize << leaves.len();
         let mut tt = 0u64;
@@ -441,8 +427,8 @@ impl Dc2 {
                 let b = AigLit::new(leaves[*j]);
                 let a_and_nb = aig.add_and(a, b.invert());
                 let na_and_b = aig.add_and(a.invert(), b);
-                let nand = aig.add_and(a_and_nb.invert(), na_and_b.invert());
-                nand // XNOR = !XOR
+                // XNOR = !XOR = !(a XOR b) = NAND(a&!b, !a&b)
+                aig.add_and(a_and_nb.invert(), na_and_b.invert())
             }
             SimplifiedForm::Mux(s, a, inv_a, b, inv_b) => {
                 // MUX(s,a,b) = (s & a) | (!s & b)

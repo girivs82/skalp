@@ -123,11 +123,7 @@ impl Resub {
     }
 
     /// Collect leaves (primary inputs and latches) for truth table computation
-    fn collect_leaves(
-        &self,
-        aig: &Aig,
-        nodes: &[AigNodeId],
-    ) -> Vec<AigNodeId> {
+    fn collect_leaves(&self, aig: &Aig, nodes: &[AigNodeId]) -> Vec<AigNodeId> {
         let mut leaves = Vec::new();
         let mut visited = HashSet::new();
         let mut stack: Vec<AigNodeId> = nodes.to_vec();
@@ -160,22 +156,14 @@ impl Resub {
     }
 
     /// Compute truth table for a node given leaf assignments
-    fn compute_truth_table(
-        &self,
-        aig: &Aig,
-        node: AigNodeId,
-        leaves: &[AigNodeId],
-    ) -> Option<u64> {
+    fn compute_truth_table(&self, aig: &Aig, node: AigNodeId, leaves: &[AigNodeId]) -> Option<u64> {
         if leaves.len() > self.max_inputs {
             return None;
         }
 
         let num_rows = 1usize << leaves.len();
-        let leaf_to_idx: HashMap<AigNodeId, usize> = leaves
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| (n, i))
-            .collect();
+        let leaf_to_idx: HashMap<AigNodeId, usize> =
+            leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let mut tt = 0u64;
         let mut cache = HashMap::new();
@@ -234,7 +222,11 @@ impl Resub {
         cache: &mut HashMap<AigNodeId, bool>,
     ) -> bool {
         let val = self.evaluate_node(aig, lit.node, assignment, leaf_to_idx, cache);
-        if lit.inverted { !val } else { val }
+        if lit.inverted {
+            !val
+        } else {
+            val
+        }
     }
 
     /// Try to find a resubstitution for a node using divisors

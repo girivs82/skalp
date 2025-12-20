@@ -105,9 +105,7 @@ impl Scorr {
                 for (node_id, node) in aig.iter_nodes() {
                     let sig = match node {
                         AigNode::Const => 0u64,
-                        AigNode::Input { .. } => {
-                            *input_values.get(&node_id).unwrap_or(&0)
-                        }
+                        AigNode::Input { .. } => *input_values.get(&node_id).unwrap_or(&0),
                         AigNode::Latch { .. } => {
                             // Use previous value (already in signatures)
                             // Next state computed after all nodes evaluated
@@ -118,9 +116,7 @@ impl Scorr {
                             let right_sig = self.get_lit_signature(*right, &signatures);
                             left_sig & right_sig
                         }
-                        AigNode::Barrier { data, .. } => {
-                            self.get_lit_signature(*data, &signatures)
-                        }
+                        AigNode::Barrier { data, .. } => self.get_lit_signature(*data, &signatures),
                     };
                     signatures.insert(node_id, sig);
                 }
@@ -274,11 +270,8 @@ impl Scorr {
             return None;
         }
 
-        let leaf_map: HashMap<AigNodeId, usize> = leaves
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| (n, i))
-            .collect();
+        let leaf_map: HashMap<AigNodeId, usize> =
+            leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let num_rows = 1usize << leaves.len();
         let mut tt = 0u64;
@@ -392,10 +385,7 @@ impl Pass for Scorr {
         // Step 4: Apply substitutions
         if !substitutions.is_empty() {
             if self.verbose {
-                eprintln!(
-                    "[SCORR] Merging {} equivalent signals",
-                    substitutions.len()
-                );
+                eprintln!("[SCORR] Merging {} equivalent signals", substitutions.len());
             }
 
             aig.apply_substitutions(&substitutions);

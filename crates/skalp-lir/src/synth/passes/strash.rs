@@ -5,6 +5,12 @@
 //!
 //! Structural hashing ensures that for any two AND nodes with the same
 //! inputs, only one copy exists in the AIG.
+//!
+//! # References
+//!
+//! - Mishchenko, A., Chatterjee, S., & Brayton, R. (2006).
+//!   DAG-aware AIG rewriting: a fresh look at combinational logic synthesis.
+//! - ABC User Guide: `strash` command for structural hashing.
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, BarrierType};

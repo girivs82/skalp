@@ -8,6 +8,11 @@
 //! For each node, we collect all leaves of its AND cone, then rebuild
 //! using a balanced binary tree structure. This reduces depth from
 //! O(n) to O(log n) for chains of ANDs.
+//!
+//! # References
+//!
+//! - Cortadella, J. (2003). Timing-driven logic bi-decomposition.
+//! - ABC User Guide: `balance` command for AIG tree balancing.
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, BarrierType};

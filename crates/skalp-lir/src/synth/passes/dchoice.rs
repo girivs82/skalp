@@ -190,11 +190,8 @@ impl Dchoice {
             return None;
         }
 
-        let leaf_map: HashMap<AigNodeId, usize> = leaves
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| (n, i))
-            .collect();
+        let leaf_map: HashMap<AigNodeId, usize> =
+            leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let num_rows = 1usize << leaves.len();
         let mut tt = 0u64;
