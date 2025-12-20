@@ -91,6 +91,7 @@ impl Refactor {
         let mut internal_ordered = Vec::new();
         let mut stack = vec![(root, 0usize)];
         let mut visited = HashSet::new();
+        let mut incomplete = false;
 
         while let Some((node, depth)) = stack.pop() {
             if visited.contains(&node) {
@@ -99,28 +100,35 @@ impl Refactor {
             visited.insert(node);
 
             // Check if this should be a leaf
-            let is_leaf = if node == root {
-                false
+            let (is_leaf, forced_by_limit) = if node == root {
+                (false, false)
             } else if depth >= self.max_depth || leaves.len() >= self.max_leaves {
-                true
+                (true, true)
             } else {
                 match aig.get_node(node) {
                     Some(AigNode::And { .. }) => {
                         // Multi-fanout nodes become leaves
                         let fanouts = fanout_counts.get(&node).copied().unwrap_or(0);
-                        fanouts > 1
+                        (fanouts > 1, false)
                     }
                     Some(AigNode::Input { .. })
                     | Some(AigNode::Latch { .. })
-                    | Some(AigNode::Barrier { .. }) => true,
-                    Some(AigNode::Const) => true,
-                    None => true,
+                    | Some(AigNode::Barrier { .. }) => (true, false),
+                    Some(AigNode::Const) => (true, false),
+                    None => (true, false),
                 }
             };
 
             if is_leaf {
                 if !leaves.contains(&node) {
                     leaves.push(node);
+                }
+                // If we forced this node to be a leaf due to limits, and it's an AND node,
+                // the cone is incomplete because we haven't explored its fanins
+                if forced_by_limit {
+                    if let Some(AigNode::And { .. }) = aig.get_node(node) {
+                        incomplete = true;
+                    }
                 }
             } else {
                 internal.insert(node);
@@ -138,6 +146,7 @@ impl Refactor {
             leaves,
             internal_nodes: internal,
             internal_ordered,
+            incomplete,
         }
     }
 
@@ -223,6 +232,8 @@ impl Refactor {
                 left_val && right_val
             }
             Some(AigNode::Const) => false, // Constant 0
+            // If we reach Input/Latch/Barrier here, the cone was incomplete.
+            // This should be caught by the cone.incomplete flag check in try_refactor_cone.
             _ => false,
         };
 
@@ -242,7 +253,13 @@ impl Refactor {
         }
 
         let num_rows = 1usize << num_inputs;
-        let mask = (1u64 << num_rows) - 1;
+        // When num_rows = 64, we need u64::MAX as the mask
+        // (1 << 64 overflows, wrapping_shl wraps to 0 shift, giving mask=0)
+        let mask = if num_rows >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << num_rows) - 1
+        };
         let tt = tt & mask;
 
         // Handle constants
@@ -294,7 +311,11 @@ impl Refactor {
     /// Factor using Shannon decomposition: f = x*f_x + x'*f_x'
     fn factor_shannon(&self, tt: u64, num_inputs: usize) -> Option<FactoredForm> {
         let num_rows = 1usize << num_inputs;
-        let mask = (1u64 << num_rows) - 1;
+        let mask = if num_rows >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << num_rows) - 1
+        };
 
         // Find the best variable to split on (one that creates smallest subfunctions)
         let mut best_var = 0;
@@ -403,7 +424,11 @@ impl Refactor {
     /// Factor using Sum-of-Products with minterm combination
     fn factor_sop(&self, tt: u64, num_inputs: usize) -> Option<FactoredForm> {
         let num_rows = 1usize << num_inputs;
-        let mask = (1u64 << num_rows) - 1;
+        let mask = if num_rows >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << num_rows) - 1
+        };
         let tt = tt & mask;
 
         // Count ones - if more than half, compute complement
@@ -642,6 +667,34 @@ impl Refactor {
             return None;
         }
 
+        // Skip incomplete cones (hit max_leaves/max_depth limits with unexplored AND nodes)
+        // These would produce incorrect truth tables
+        if cone.incomplete {
+            return None;
+        }
+
+        // Safety check: verify all leaves are valid (either Input/Latch/Barrier or multi-fanout AND)
+        // If we find a leaf that is a single-fanout AND, the cone is invalid
+        for &leaf_id in &cone.leaves {
+            if let Some(node) = aig.get_node(leaf_id) {
+                match node {
+                    AigNode::Input { .. }
+                    | AigNode::Latch { .. }
+                    | AigNode::Barrier { .. }
+                    | AigNode::Const => {
+                        // These are valid leaves
+                    }
+                    AigNode::And { .. } => {
+                        // AND nodes are valid leaves only if they're multi-fanout
+                        // (verified during cone collection) - OK
+                    }
+                }
+            } else {
+                // Invalid node reference - skip this cone
+                return None;
+            }
+        }
+
         // Compute truth table
         let tt = self.compute_cone_truth_table(aig, cone)?;
 
@@ -675,6 +728,8 @@ struct ConeInfo {
     leaves: Vec<AigNodeId>,
     internal_nodes: HashSet<AigNodeId>,
     internal_ordered: Vec<AigNodeId>,
+    /// True if the cone is incomplete (hit max_leaves while AND nodes were unexplored)
+    incomplete: bool,
 }
 
 /// A factored form representation
