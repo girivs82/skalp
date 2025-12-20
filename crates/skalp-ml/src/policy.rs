@@ -185,6 +185,35 @@ impl SimplePolicy {
         let policy: Self = serde_json::from_str(&json)?;
         Ok(policy)
     }
+
+    /// Get reference to weights
+    pub fn weights(&self) -> &Vec<Vec<f64>> {
+        &self.weights
+    }
+
+    /// Get reference to biases
+    pub fn biases(&self) -> &Vec<f64> {
+        &self.bias
+    }
+
+    /// Set a single weight value
+    pub fn set_weight(&mut self, feature_idx: usize, action_idx: usize, value: f64) {
+        if feature_idx < self.weights.len() && action_idx < self.weights[feature_idx].len() {
+            self.weights[feature_idx][action_idx] = value;
+        }
+    }
+
+    /// Set a single bias value
+    pub fn set_bias(&mut self, action_idx: usize, value: f64) {
+        if action_idx < self.bias.len() {
+            self.bias[action_idx] = value;
+        }
+    }
+
+    /// Set learning rate
+    pub fn set_learning_rate(&mut self, lr: f64) {
+        self.learning_rate = lr;
+    }
 }
 
 impl PolicyNetwork for SimplePolicy {

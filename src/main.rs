@@ -315,6 +315,29 @@ enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
+
+    /// Train ML pass ordering model
+    Train {
+        /// Directory containing collected training data (from --collect-training-data)
+        #[arg(short, long)]
+        data: PathBuf,
+
+        /// Output path for trained model (default: models/pass_policy.json)
+        #[arg(short, long, default_value = "models/pass_policy.json")]
+        output: PathBuf,
+
+        /// Number of training epochs
+        #[arg(long, default_value = "100")]
+        epochs: usize,
+
+        /// Learning rate
+        #[arg(long, default_value = "0.001")]
+        learning_rate: f64,
+
+        /// Batch size
+        #[arg(long, default_value = "32")]
+        batch_size: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -508,6 +531,16 @@ fn main() -> Result<()> {
             CacheCommands::Clear => clear_cache()?,
             CacheCommands::Remove { package, version } => remove_from_cache(&package, &version)?,
         },
+
+        Commands::Train {
+            data,
+            output,
+            epochs,
+            learning_rate,
+            batch_size,
+        } => {
+            train_ml_model(&data, &output, epochs, learning_rate, batch_size)?;
+        }
     }
 
     Ok(())
@@ -893,6 +926,81 @@ fn apply_ml_synthesis_optimization(
     // Write back to netlist
     let writer = AigWriter::new(library);
     Ok(writer.write(&aig))
+}
+
+/// Train the ML pass ordering policy using collected training data
+fn train_ml_model(
+    data_dir: &Path,
+    output_path: &Path,
+    epochs: usize,
+    learning_rate: f64,
+    batch_size: usize,
+) -> Result<()> {
+    use skalp_ml::{PolicyTrainer, TrainerConfig};
+
+    println!("🧠 Training ML pass ordering model");
+    println!("   Data directory: {}", data_dir.display());
+    println!("   Output: {}", output_path.display());
+    println!("   Epochs: {}", epochs);
+    println!("   Learning rate: {}", learning_rate);
+    println!("   Batch size: {}", batch_size);
+    println!();
+
+    // Load training data
+    println!("📂 Loading training data...");
+    let dataset = PolicyTrainer::load_data(data_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to load training data: {}", e))?;
+
+    println!(
+        "   Loaded {} episodes with {} pass decisions",
+        dataset.episodes.len(),
+        dataset.stats.total_pass_decisions
+    );
+
+    if dataset.episodes.is_empty() {
+        anyhow::bail!("No training episodes found in {}", data_dir.display());
+    }
+
+    // Create trainer with config
+    let config = TrainerConfig {
+        epochs,
+        learning_rate,
+        batch_size,
+        ..Default::default()
+    };
+
+    let mut trainer = PolicyTrainer::new(config);
+
+    // Train the model
+    println!("\n📈 Training...\n");
+    let stats = trainer.train(&dataset);
+
+    // Ensure output directory exists
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Save the trained policy
+    trainer
+        .save_policy(output_path.to_str().unwrap_or("pass_policy.json"))
+        .map_err(|e| anyhow::anyhow!("Failed to save policy: {}", e))?;
+
+    // Save training stats
+    let stats_path = output_path.with_extension("stats.json");
+    trainer
+        .save_stats(stats_path.to_str().unwrap())
+        .map_err(|e| anyhow::anyhow!("Failed to save training stats: {}", e))?;
+
+    println!("\n✅ Training complete!");
+    println!("   Policy saved to: {}", output_path.display());
+    println!("   Stats saved to: {}", stats_path.display());
+    println!(
+        "   Best validation accuracy: {:.2}% (epoch {})",
+        stats.best_val_accuracy * 100.0,
+        stats.best_epoch + 1
+    );
+
+    Ok(())
 }
 
 /// Simulate design
