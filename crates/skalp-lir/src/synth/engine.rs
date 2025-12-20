@@ -19,7 +19,7 @@ use super::mapping::{
 };
 use super::passes::{
     Balance, BufferConfig, BufferInsertion, ConstProp, Dce, Fraig, FraigConfig, Pass, PassResult,
-    Refactor, Retiming, RetimingConfig, Rewrite, Strash,
+    Refactor, Resub, Retiming, RetimingConfig, Rewrite, Strash,
 };
 use super::sta::{Sta, StaResult};
 use super::timing::{TimePs, TimingConstraints};
@@ -413,8 +413,10 @@ impl SynthEngine {
                 "strash".to_string(),
                 "const_prop".to_string(),
                 "rewrite".to_string(),
+                "resub".to_string(),
                 "refactor".to_string(),
                 "rewrite".to_string(),
+                "resub".to_string(),
                 "dce".to_string(),
             ],
             // ABC's resyn2: balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance
@@ -511,6 +513,16 @@ impl SynthEngine {
                 // High-frequency retiming (aggressive)
                 let config = RetimingConfig::high_frequency();
                 let mut pass = Retiming::with_config(config);
+                Some(pass.run(aig))
+            }
+            "resub" => {
+                // Resubstitution: re-express nodes using existing divisors
+                let mut pass = Resub::new();
+                Some(pass.run(aig))
+            }
+            "resub_z" | "resub-z" => {
+                // Zero-cost resubstitution
+                let mut pass = Resub::zero_cost();
                 Some(pass.run(aig))
             }
             _ => {

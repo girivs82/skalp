@@ -29,6 +29,7 @@ mod const_prop;
 mod dce;
 mod fraig;
 mod refactor;
+mod resub;
 mod retiming;
 mod rewrite;
 mod strash;
@@ -39,6 +40,7 @@ pub use const_prop::ConstProp;
 pub use dce::Dce;
 pub use fraig::{run_fraig, run_fraig_with_config, Fraig, FraigConfig, FraigStats};
 pub use refactor::Refactor;
+pub use resub::Resub;
 pub use retiming::{
     run_retiming, run_retiming_with_config, Retiming, RetimingConfig, RetimingStats,
 };
