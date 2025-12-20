@@ -805,6 +805,12 @@ fn get_input_pin_name(cell_type: &str, index: usize) -> String {
             _ => "B".to_string(),
         },
         "DFF" | "DFFR" | "DFFS" => "D".to_string(),
+        // SDFFE and DFFE have two inputs: D (data) and E (enable)
+        // Also handle Yosys-style names like SDFFE_PP0P
+        s if s.starts_with("SDFFE") || s.starts_with("DFFE") => match index {
+            0 => "D".to_string(),
+            _ => "E".to_string(),
+        },
         "AOI21" | "OAI21" => match index {
             0 => "A1".to_string(),
             1 => "A2".to_string(),
