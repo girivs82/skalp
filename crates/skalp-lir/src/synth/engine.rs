@@ -443,6 +443,7 @@ impl SynthEngine {
                 "dce".to_string(),
             ],
             // ABC's compress2-style: aggressive area optimization with resubstitution
+            // Key: run refactor AFTER balance to find better factorizations
             SynthPreset::Compress2 => vec![
                 "balance".to_string(),
                 "resub".to_string(),
@@ -451,11 +452,12 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "resub".to_string(),
                 "balance".to_string(),
+                "refactor_z".to_string(), // Refactor after balance finds better structure
                 "resub_z".to_string(),
                 "rewrite_z".to_string(),
-                "resub_z".to_string(),
-                "refactor_z".to_string(),
                 "balance".to_string(),
+                "refactor_z".to_string(), // Another refactor after balance
+                "resub_z".to_string(),
                 "fraig".to_string(),
                 "dce".to_string(),
             ],
