@@ -18,7 +18,7 @@ use super::mapping::{
     CutMapper, CutMapperConfig, DelayMapper, DelayMappingConfig, MappingObjective, MappingResult,
 };
 use super::passes::{
-    Balance, BufferConfig, BufferInsertion, ConstProp, Dc2, Dce, Fraig, FraigConfig, Pass,
+    Balance, BufferConfig, BufferInsertion, ConstProp, Dc2, Dchoice, Dce, Fraig, FraigConfig, Pass,
     PassResult, Refactor, Resub, Retiming, RetimingConfig, Rewrite, Scorr, Strash,
 };
 use super::sta::{Sta, StaResult};
@@ -533,6 +533,11 @@ impl SynthEngine {
             "scorr" => {
                 // Sequential SAT sweeping - find equivalent signals
                 let mut pass = Scorr::new();
+                Some(pass.run(aig))
+            }
+            "dchoice" | "choice" => {
+                // Choice-based synthesis - record equivalent implementations
+                let mut pass = Dchoice::new();
                 Some(pass.run(aig))
             }
             _ => {
