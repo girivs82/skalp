@@ -14,6 +14,7 @@ toml = "0.8"
 skalp-mir = { path = "../skalp-mir" }
 skalp-frontend = { path = "../skalp-frontend" }
 anyhow = "1.0.100"
+rayon = "1.10"
 
 [dev-dependencies]
 skalp-frontend = { path = "../skalp-frontend" }

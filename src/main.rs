@@ -855,9 +855,17 @@ fn apply_synthesis_optimization(
                 ..Default::default()
             }
         }
+        Some("auto") => {
+            info!("Using auto optimization (parallel preset selection)");
+            SynthConfig {
+                preset: SynthPreset::Auto,
+                max_iterations: 3,
+                ..Default::default()
+            }
+        }
         Some(other) => {
             anyhow::bail!(
-                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area, resyn2, compress2",
+                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area, resyn2, compress2, auto",
                 other
             );
         }

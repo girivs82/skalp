@@ -26,6 +26,7 @@ use super::timing::{TimePs, TimingConstraints};
 use super::{Aig, AigBuilder, AigWriter};
 use crate::gate_netlist::GateNetlist;
 use crate::tech_library::TechLibrary;
+use rayon::prelude::*;
 use std::time::Instant;
 
 /// Synthesis preset configurations
@@ -48,6 +49,8 @@ pub enum SynthPreset {
     /// Compress2 - ABC's area-focused script with resubstitution
     /// balance; resub; rewrite; resub; refactor; resub; balance; ...
     Compress2,
+    /// Auto - run multiple presets in parallel and pick the best result
+    Auto,
 }
 
 /// Synthesis configuration
@@ -199,6 +202,12 @@ impl SynthEngine {
                 max_iterations: 3,
                 ..Default::default()
             },
+            // Auto - will run multiple presets in parallel
+            SynthPreset::Auto => SynthConfig {
+                preset: SynthPreset::Auto,
+                max_iterations: 3,
+                ..Default::default()
+            },
         };
 
         Self {
@@ -233,6 +242,11 @@ impl SynthEngine {
 
     /// Optimize a GateNetlist
     pub fn optimize(&mut self, netlist: &GateNetlist, library: &TechLibrary) -> SynthResult {
+        // Handle Auto preset - run multiple presets in parallel and pick best
+        if self.config.preset == SynthPreset::Auto {
+            return self.optimize_auto(netlist, library);
+        }
+
         let start = Instant::now();
         self.pass_results.clear();
 
@@ -306,6 +320,57 @@ impl SynthEngine {
             mapping_result: self.mapping_result.clone(),
             total_time_ms: self.total_time_ms,
         }
+    }
+
+    /// Run multiple optimization presets in parallel and return the best result
+    fn optimize_auto(&mut self, netlist: &GateNetlist, library: &TechLibrary) -> SynthResult {
+        let start = Instant::now();
+
+        eprintln!("[AUTO] Running multiple optimization strategies in parallel...");
+
+        // Presets to try in parallel
+        let presets = [SynthPreset::Resyn2, SynthPreset::Compress2];
+
+        // Clone netlist and library for parallel use
+        let netlist_clone = netlist.clone();
+        let library_clone = library.clone();
+
+        // Run presets in parallel
+        let results: Vec<(SynthPreset, SynthResult)> = presets
+            .par_iter()
+            .map(|&preset| {
+                let mut engine = SynthEngine::with_preset(preset);
+                let result = engine.optimize(&netlist_clone, &library_clone);
+                (preset, result)
+            })
+            .collect();
+
+        // Find the best result (fewest gates in final netlist)
+        let (best_preset, mut best_result) = results
+            .into_iter()
+            .min_by_key(|(_, result)| result.netlist.cell_count())
+            .expect("At least one preset should run");
+
+        let total_time = start.elapsed().as_millis() as u64;
+
+        eprintln!(
+            "[AUTO] Best result: {:?} with {} cells (tested {} presets in {}ms)",
+            best_preset,
+            best_result.netlist.cell_count(),
+            presets.len(),
+            total_time
+        );
+
+        // Update timing to reflect total parallel time
+        best_result.total_time_ms = total_time;
+
+        // Copy results to self for consistency
+        self.pass_results = best_result.pass_results.clone();
+        self.timing_result = best_result.timing_result.clone();
+        self.mapping_result = best_result.mapping_result.clone();
+        self.total_time_ms = total_time;
+
+        best_result
     }
 
     /// Optimize an AIG directly with optional library-aware mapping
@@ -461,6 +526,8 @@ impl SynthEngine {
                 "fraig".to_string(),
                 "dce".to_string(),
             ],
+            // Auto is handled at optimize() level, shouldn't reach here
+            SynthPreset::Auto => unreachable!("Auto preset handled in optimize_auto()"),
         }
     }
 
@@ -645,6 +712,8 @@ impl SynthEngine {
                 let mapper = CutMapper::from_library_with_config(library, config);
                 mapper.map(aig)
             }
+            // Auto is handled at optimize() level, shouldn't reach here
+            SynthPreset::Auto => unreachable!("Auto preset handled in optimize_auto()"),
         };
 
         if self.config.verbose {

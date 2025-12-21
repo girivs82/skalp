@@ -3026,6 +3026,7 @@ dependencies = [
  "bitvec",
  "indexmap",
  "petgraph",
+ "rayon",
  "serde",
  "serde_json",
  "skalp-frontend",
