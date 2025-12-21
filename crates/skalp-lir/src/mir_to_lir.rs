@@ -1243,11 +1243,7 @@ pub enum PortConnectionInfo {
 /// based on its context (constant inputs, unused outputs).
 pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     // Build module lookup by ID
-    let module_map: HashMap<ModuleId, &Module> = mir
-        .modules
-        .iter()
-        .map(|m| (m.id, m))
-        .collect();
+    let module_map: HashMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
 
     // Find modules that are instantiated (have parents)
     let mut instantiated_modules: HashSet<ModuleId> = HashSet::new();
@@ -1258,7 +1254,8 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     }
 
     // Find top module (not instantiated by any other)
-    let top_module = mir.modules
+    let top_module = mir
+        .modules
         .iter()
         .find(|m| !instantiated_modules.contains(&m.id))
         .unwrap_or_else(|| &mir.modules[0]);
@@ -1316,7 +1313,9 @@ fn elaborate_instance(
     }
 
     // Record hierarchy
-    result.hierarchy.insert(instance_path.to_string(), children.clone());
+    result
+        .hierarchy
+        .insert(instance_path.to_string(), children.clone());
 
     // Store this instance's result
     result.instances.insert(
@@ -1378,12 +1377,18 @@ fn lvalue_to_name(lvalue: &LValue) -> String {
         LValue::BitSelect { base, index: _ } => {
             format!("{}[...]", lvalue_to_name(base))
         }
-        LValue::RangeSelect { base, high: _, low: _ } => {
+        LValue::RangeSelect {
+            base,
+            high: _,
+            low: _,
+        } => {
             format!("{}[...]", lvalue_to_name(base))
         }
-        LValue::Concat(parts) => {
-            parts.iter().map(lvalue_to_name).collect::<Vec<_>>().join("_")
-        }
+        LValue::Concat(parts) => parts
+            .iter()
+            .map(lvalue_to_name)
+            .collect::<Vec<_>>()
+            .join("_"),
     }
 }
 

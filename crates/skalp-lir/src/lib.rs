@@ -54,6 +54,11 @@ pub use mir_to_lir::{lower_mir_module_to_lir, MirToLirResult};
 // Backward-compatible aliases for MIR to LIR
 pub use mir_to_lir::{lower_mir_module_to_word_lir, MirToWordLirResult};
 
+// Hierarchical MIR to LIR transformation
+pub use mir_to_lir::{
+    lower_mir_hierarchical, HierarchicalMirToLirResult, InstanceLirResult, PortConnectionInfo,
+};
+
 // Gate-level netlist (output of technology mapping)
 pub use gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, FaultType, GateNet, GateNetId,
@@ -70,8 +75,8 @@ pub use tech_library::{
 
 // Technology mapper
 pub use tech_mapper::{
-    map_lir_to_gates, map_lir_to_gates_optimized, map_word_lir_to_gates, TechMapResult,
-    TechMapStats, TechMapper,
+    map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized, map_word_lir_to_gates,
+    TechMapResult, TechMapStats, TechMapper,
 };
 
 // Built-in technology libraries

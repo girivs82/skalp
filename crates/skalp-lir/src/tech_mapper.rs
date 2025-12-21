@@ -1371,6 +1371,53 @@ pub fn map_word_lir_to_gates(word_lir: &Lir, library: &TechLibrary) -> TechMapRe
     map_lir_to_gates(word_lir, library)
 }
 
+/// Map hierarchical MIR result to HierarchicalNetlist
+///
+/// Takes the result of `lower_mir_hierarchical` and maps each instance's LIR
+/// to a GateNetlist, preserving hierarchy and connection context.
+pub fn map_hierarchical_to_gates(
+    hier_lir: &crate::mir_to_lir::HierarchicalMirToLirResult,
+    library: &TechLibrary,
+) -> crate::hierarchical_netlist::HierarchicalNetlist {
+    use crate::hierarchical_netlist::{HierarchicalNetlist, InstanceNetlist, PortConnection};
+    use crate::mir_to_lir::PortConnectionInfo;
+
+    let mut result = HierarchicalNetlist::new(hier_lir.top_module.clone(), library.name.clone());
+
+    // Map each instance's LIR to a GateNetlist
+    for (path, inst_lir) in &hier_lir.instances {
+        let tech_result = map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library);
+        let mut inst_netlist =
+            InstanceNetlist::new(inst_lir.module_name.clone(), tech_result.netlist);
+
+        // Record connection context
+        for (port_name, conn_info) in &inst_lir.port_connections {
+            let port_conn = match conn_info {
+                PortConnectionInfo::Signal(signal_name) => {
+                    PortConnection::ParentNet(signal_name.clone())
+                }
+                PortConnectionInfo::Constant(value) => {
+                    inst_netlist.record_constant_input(port_name, *value);
+                    PortConnection::Constant(*value)
+                }
+                PortConnectionInfo::InstancePort(inst_path, inst_port) => {
+                    PortConnection::ChildPort(inst_path.clone(), inst_port.clone())
+                }
+            };
+            inst_netlist.add_port_connection(port_name.clone(), port_conn);
+        }
+
+        // Add child instance references
+        for child in &inst_lir.children {
+            inst_netlist.add_child(child.clone());
+        }
+
+        result.add_instance(path.clone(), inst_netlist);
+    }
+
+    result
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

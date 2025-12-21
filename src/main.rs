@@ -735,15 +735,6 @@ fn build_design(
 
             info!("Generating optimized gate-level netlist...");
 
-            // Get the top module from MIR
-            let top_module = mir
-                .modules
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("No modules found in MIR"))?;
-
-            // Lower MIR module to LIR
-            let lir_result = lower_mir_module_to_lir(top_module);
-
             // Get technology library
             let library = if let Some(path) = library_path {
                 info!("Loading technology library from {:?}", path);
@@ -753,19 +744,87 @@ fn build_design(
                 builtin_generic_asic()
             };
 
-            // Map to gate netlist with optimizations
-            let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
-            let gate_netlist = tech_result.netlist;
+            // Check if design has multiple modules/instances for hierarchical synthesis
+            let has_hierarchy =
+                mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
 
-            // Apply synthesis optimization if requested
-            let optimized_netlist = if optimization_options.preset.is_some()
-                || optimization_options.passes.is_some()
-                || optimization_options.ml_guided
-            {
-                info!("Running synthesis optimization...");
-                apply_synthesis_optimization(&gate_netlist, &library, &optimization_options)?
+            let optimized_netlist = if has_hierarchy {
+                // Hierarchical synthesis: optimize each module independently
+                info!(
+                    "Multi-module design detected ({} modules), using hierarchical synthesis",
+                    mir.modules.len()
+                );
+
+                // Lower entire MIR hierarchy
+                let hier_lir = skalp_lir::lower_mir_hierarchical(&mir);
+                info!(
+                    "Elaborated {} instances: top={}",
+                    hier_lir.instances.len(),
+                    hier_lir.top_module
+                );
+
+                // Map to hierarchical gate netlist
+                let hier_netlist = skalp_lir::map_hierarchical_to_gates(&hier_lir, &library);
+                info!(
+                    "Mapped to {} cells across {} instances",
+                    hier_netlist.total_cell_count(),
+                    hier_netlist.instance_count()
+                );
+
+                // Parallel per-instance synthesis optimization
+                if optimization_options.preset.is_some()
+                    || optimization_options.passes.is_some()
+                    || optimization_options.ml_guided
+                {
+                    info!("Running parallel hierarchical synthesis optimization...");
+                    let synth_config = build_synth_config(&optimization_options);
+                    let mut engine = skalp_lir::synth::SynthEngine::with_config(synth_config);
+                    let hier_result = engine.optimize_hierarchical(&hier_netlist, &library);
+
+                    info!(
+                        "Hierarchical optimization complete in {}ms",
+                        hier_result.total_time_ms
+                    );
+                    for (path, result) in &hier_result.instance_results {
+                        info!(
+                            "  {}: {} -> {} cells ({:.1}% reduction)",
+                            path,
+                            result.initial_and_count,
+                            result.netlist.cell_count(),
+                            result.gate_reduction() * 100.0
+                        );
+                    }
+
+                    // Flatten to single netlist with stitching
+                    hier_result.netlist.flatten()
+                } else {
+                    // No optimization, just flatten
+                    hier_netlist.flatten()
+                }
             } else {
-                gate_netlist
+                // Flat synthesis for single-module designs
+                let top_module = mir
+                    .modules
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("No modules found in MIR"))?;
+
+                // Lower MIR module to LIR
+                let lir_result = lower_mir_module_to_lir(top_module);
+
+                // Map to gate netlist with optimizations
+                let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
+                let gate_netlist = tech_result.netlist;
+
+                // Apply synthesis optimization if requested
+                if optimization_options.preset.is_some()
+                    || optimization_options.passes.is_some()
+                    || optimization_options.ml_guided
+                {
+                    info!("Running synthesis optimization...");
+                    apply_synthesis_optimization(&gate_netlist, &library, &optimization_options)?
+                } else {
+                    gate_netlist
+                }
             };
 
             // Generate Verilog from gate netlist
@@ -803,21 +862,11 @@ fn build_design(
     Ok(())
 }
 
-/// Apply synthesis optimization to a gate netlist
-fn apply_synthesis_optimization(
-    netlist: &skalp_lir::GateNetlist,
-    library: &skalp_lir::TechLibrary,
-    options: &OptimizationOptions,
-) -> Result<skalp_lir::GateNetlist> {
-    // Use ML-guided optimization if requested
-    if options.ml_guided {
-        return apply_ml_synthesis_optimization(netlist, library, options);
-    }
+/// Build a SynthConfig from optimization options
+fn build_synth_config(options: &OptimizationOptions) -> skalp_lir::synth::SynthConfig {
+    use skalp_lir::synth::{SynthConfig, SynthPreset};
 
-    use skalp_lir::synth::{SynthConfig, SynthEngine, SynthPreset};
-
-    // Create config based on preset
-    let config = match options.preset.as_deref() {
+    match options.preset.as_deref() {
         Some("quick") => {
             info!("Using quick optimization preset");
             SynthConfig::quick()
@@ -855,7 +904,8 @@ fn apply_synthesis_optimization(
                 ..Default::default()
             }
         }
-        Some("auto") => {
+        Some("auto") | Some(_) => {
+            // For auto or unknown presets, use Auto
             info!("Using auto optimization (parallel preset selection)");
             SynthConfig {
                 preset: SynthPreset::Auto,
@@ -863,13 +913,23 @@ fn apply_synthesis_optimization(
                 ..Default::default()
             }
         }
-        Some(other) => {
-            anyhow::bail!(
-                "Unknown optimization preset: '{}'. Use: quick, balanced, full, timing, area, resyn2, compress2, auto",
-                other
-            );
-        }
-    };
+    }
+}
+
+/// Apply synthesis optimization to a gate netlist
+fn apply_synthesis_optimization(
+    netlist: &skalp_lir::GateNetlist,
+    library: &skalp_lir::TechLibrary,
+    options: &OptimizationOptions,
+) -> Result<skalp_lir::GateNetlist> {
+    // Use ML-guided optimization if requested
+    if options.ml_guided {
+        return apply_ml_synthesis_optimization(netlist, library, options);
+    }
+
+    use skalp_lir::synth::SynthEngine;
+
+    let config = build_synth_config(options);
 
     // Create engine
     let mut engine = SynthEngine::with_config(config);
