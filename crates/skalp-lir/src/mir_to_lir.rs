@@ -1242,22 +1242,35 @@ pub enum PortConnectionInfo {
 /// creating a separate LIR for each instance. Each instance can be specialized
 /// based on its context (constant inputs, unused outputs).
 pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
-    // Build module lookup by ID
+    // Build module lookup by ID and by name (for fallback)
     let module_map: HashMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
+    let module_by_name: HashMap<&str, &Module> =
+        mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
     // Find modules that are instantiated (have parents)
     let mut instantiated_modules: HashSet<ModuleId> = HashSet::new();
+    let mut modules_with_instances: HashSet<ModuleId> = HashSet::new();
+
     for module in &mir.modules {
+        if !module.instances.is_empty() {
+            modules_with_instances.insert(module.id);
+        }
         for inst in &module.instances {
             instantiated_modules.insert(inst.module);
         }
     }
 
-    // Find top module (not instantiated by any other)
+    // Find top module: has instances but is not instantiated by others
+    // If no such module exists, fall back to first non-instantiated module
     let top_module = mir
         .modules
         .iter()
-        .find(|m| !instantiated_modules.contains(&m.id))
+        .find(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
+        .or_else(|| {
+            mir.modules
+                .iter()
+                .find(|m| !instantiated_modules.contains(&m.id))
+        })
         .unwrap_or_else(|| &mir.modules[0]);
 
     let mut result = HierarchicalMirToLirResult {
@@ -1269,6 +1282,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     // Recursively elaborate instances
     elaborate_instance(
         &module_map,
+        &module_by_name,
         top_module,
         "top",
         &HashMap::new(), // No constant inputs at top level
@@ -1281,6 +1295,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
 /// Recursively elaborate a module instance
 fn elaborate_instance(
     module_map: &HashMap<ModuleId, &Module>,
+    _module_by_name: &HashMap<&str, &Module>,
     module: &Module,
     instance_path: &str,
     parent_connections: &HashMap<String, PortConnectionInfo>,
@@ -1297,14 +1312,16 @@ fn elaborate_instance(
         let child_path = format!("{}.{}", instance_path, inst.name);
         children.push(child_path.clone());
 
-        if let Some(child_module) = module_map.get(&inst.module) {
+        // Find child module by ID
+        if let Some(child_mod) = module_map.get(&inst.module).copied() {
             // Extract connection info
             let child_connections = extract_connection_info(&inst.connections);
 
             // Recursively elaborate child
             elaborate_instance(
                 module_map,
-                child_module,
+                _module_by_name,
+                child_mod,
                 &child_path,
                 &child_connections,
                 result,

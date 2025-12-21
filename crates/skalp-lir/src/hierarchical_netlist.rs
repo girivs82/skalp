@@ -144,8 +144,12 @@ impl HierarchicalNetlist {
         self.stitch_all_ports(&mut result, &net_id_maps);
 
         // Phase 3: Cross-boundary cleanup
+        // Only propagate constants, skip dead cell removal for now
+        // TODO: Implement proper port stitching so dead cell removal works correctly
         result.propagate_constants();
-        result.remove_dead_cells();
+        // NOTE: Dead cell removal disabled because the port stitching doesn't
+        // properly connect child instance outputs to parent nets yet.
+        // result.remove_dead_cells();
 
         result.update_stats();
         result
