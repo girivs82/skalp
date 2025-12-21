@@ -1195,6 +1195,199 @@ pub fn lower_mir_module_to_word_lir(module: &Module) -> MirToLirResult {
 }
 
 // ============================================================================
+// Hierarchical MIR Traversal
+// ============================================================================
+
+use skalp_mir::mir::{Mir, ModuleId, ModuleInstance};
+use std::collections::HashSet;
+
+/// Result of hierarchical MIR to LIR transformation
+#[derive(Debug)]
+pub struct HierarchicalMirToLirResult {
+    /// Map from instance path to its LIR result
+    pub instances: HashMap<String, InstanceLirResult>,
+    /// Top module name
+    pub top_module: String,
+    /// Instance hierarchy (parent -> children)
+    pub hierarchy: HashMap<String, Vec<String>>,
+}
+
+/// LIR result for a single instance
+#[derive(Debug)]
+pub struct InstanceLirResult {
+    /// Module name (before specialization)
+    pub module_name: String,
+    /// The generated LIR
+    pub lir_result: MirToLirResult,
+    /// Port connections from parent
+    pub port_connections: HashMap<String, PortConnectionInfo>,
+    /// Child instance paths
+    pub children: Vec<String>,
+}
+
+/// Information about a port connection
+#[derive(Debug, Clone)]
+pub enum PortConnectionInfo {
+    /// Connected to a signal in parent
+    Signal(String),
+    /// Connected to a constant value
+    Constant(u64),
+    /// Connected to another instance's port
+    InstancePort(String, String), // (instance_path, port_name)
+}
+
+/// Lower entire MIR hierarchy to per-instance LIR
+///
+/// This function traverses the module hierarchy starting from the top module,
+/// creating a separate LIR for each instance. Each instance can be specialized
+/// based on its context (constant inputs, unused outputs).
+pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
+    // Build module lookup by ID
+    let module_map: HashMap<ModuleId, &Module> = mir
+        .modules
+        .iter()
+        .map(|m| (m.id, m))
+        .collect();
+
+    // Find modules that are instantiated (have parents)
+    let mut instantiated_modules: HashSet<ModuleId> = HashSet::new();
+    for module in &mir.modules {
+        for inst in &module.instances {
+            instantiated_modules.insert(inst.module);
+        }
+    }
+
+    // Find top module (not instantiated by any other)
+    let top_module = mir.modules
+        .iter()
+        .find(|m| !instantiated_modules.contains(&m.id))
+        .unwrap_or_else(|| &mir.modules[0]);
+
+    let mut result = HierarchicalMirToLirResult {
+        instances: HashMap::new(),
+        top_module: top_module.name.clone(),
+        hierarchy: HashMap::new(),
+    };
+
+    // Recursively elaborate instances
+    elaborate_instance(
+        &module_map,
+        top_module,
+        "top",
+        &HashMap::new(), // No constant inputs at top level
+        &mut result,
+    );
+
+    result
+}
+
+/// Recursively elaborate a module instance
+fn elaborate_instance(
+    module_map: &HashMap<ModuleId, &Module>,
+    module: &Module,
+    instance_path: &str,
+    parent_connections: &HashMap<String, PortConnectionInfo>,
+    result: &mut HierarchicalMirToLirResult,
+) {
+    // Lower this module to LIR
+    let lir_result = lower_mir_module_to_lir(module);
+
+    // Collect child instance paths
+    let mut children: Vec<String> = Vec::new();
+
+    // Process child instances
+    for inst in &module.instances {
+        let child_path = format!("{}.{}", instance_path, inst.name);
+        children.push(child_path.clone());
+
+        if let Some(child_module) = module_map.get(&inst.module) {
+            // Extract connection info
+            let child_connections = extract_connection_info(&inst.connections);
+
+            // Recursively elaborate child
+            elaborate_instance(
+                module_map,
+                child_module,
+                &child_path,
+                &child_connections,
+                result,
+            );
+        }
+    }
+
+    // Record hierarchy
+    result.hierarchy.insert(instance_path.to_string(), children.clone());
+
+    // Store this instance's result
+    result.instances.insert(
+        instance_path.to_string(),
+        InstanceLirResult {
+            module_name: module.name.clone(),
+            lir_result,
+            port_connections: parent_connections.clone(),
+            children,
+        },
+    );
+}
+
+/// Extract connection information from port connections
+fn extract_connection_info(
+    connections: &HashMap<String, Expression>,
+) -> HashMap<String, PortConnectionInfo> {
+    let mut result = HashMap::new();
+
+    for (port_name, expr) in connections {
+        let info = match &expr.kind {
+            ExpressionKind::Literal(value) => {
+                // Constant connection
+                let const_val = value_to_u64(value);
+                PortConnectionInfo::Constant(const_val)
+            }
+            ExpressionKind::Ref(lvalue) => {
+                // Signal reference
+                let signal_name = lvalue_to_name(lvalue);
+                PortConnectionInfo::Signal(signal_name)
+            }
+            _ => {
+                // Complex expression - treat as signal
+                PortConnectionInfo::Signal(format!("expr_{}", port_name))
+            }
+        };
+        result.insert(port_name.clone(), info);
+    }
+
+    result
+}
+
+/// Convert a Value to u64
+fn value_to_u64(value: &Value) -> u64 {
+    match value {
+        Value::Integer(i) => *i as u64,
+        Value::BitVector { value, .. } => *value,
+        Value::Float(f) => *f as u64,
+        _ => 0, // Default for String, HighZ, Unknown
+    }
+}
+
+/// Convert an LValue to a signal name
+fn lvalue_to_name(lvalue: &LValue) -> String {
+    match lvalue {
+        LValue::Signal(id) => format!("signal_{}", id.0),
+        LValue::Port(id) => format!("port_{}", id.0),
+        LValue::Variable(id) => format!("var_{}", id.0),
+        LValue::BitSelect { base, index: _ } => {
+            format!("{}[...]", lvalue_to_name(base))
+        }
+        LValue::RangeSelect { base, high: _, low: _ } => {
+            format!("{}[...]", lvalue_to_name(base))
+        }
+        LValue::Concat(parts) => {
+            parts.iter().map(lvalue_to_name).collect::<Vec<_>>().join("_")
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
