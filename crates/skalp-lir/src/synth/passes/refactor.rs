@@ -245,6 +245,75 @@ impl Refactor {
         }
     }
 
+    /// Evaluate a factored form to compute its truth table
+    /// Used to validate that factorization is correct
+    fn evaluate_factored_form(&self, form: &FactoredForm, num_inputs: usize) -> u64 {
+        if num_inputs > 6 {
+            return 0;
+        }
+
+        // Handle constants
+        if let Some(is_one) = form.is_constant {
+            let num_rows = 1usize << num_inputs;
+            let mask = if num_rows >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << num_rows) - 1
+            };
+            return if is_one { mask } else { 0 };
+        }
+
+        let num_rows = 1usize << num_inputs;
+        let mut tt = 0u64;
+
+        for row in 0..num_rows {
+            // Evaluate the factored form for this input assignment
+            let mut node_values = vec![false; num_inputs + form.gates.len()];
+
+            // Set input values based on the row's bit pattern
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..num_inputs {
+                node_values[i] = (row >> i) & 1 == 1;
+            }
+
+            // Evaluate gates in order
+            for (gate_idx, &(left, right)) in form.gates.iter().enumerate() {
+                let left_idx = (left / 2) as usize;
+                let left_inv = left & 1 == 1;
+                let right_idx = (right / 2) as usize;
+                let right_inv = right & 1 == 1;
+
+                let left_val = if left_idx < node_values.len() {
+                    node_values[left_idx] ^ left_inv
+                } else {
+                    false
+                };
+                let right_val = if right_idx < node_values.len() {
+                    node_values[right_idx] ^ right_inv
+                } else {
+                    false
+                };
+
+                node_values[num_inputs + gate_idx] = left_val && right_val;
+            }
+
+            // Get result
+            let result_idx = (form.result_lit / 2) as usize;
+            let result_inv = form.result_lit & 1 == 1;
+            let result = if result_idx < node_values.len() {
+                node_values[result_idx] ^ result_inv
+            } else {
+                false
+            };
+
+            if result {
+                tt |= 1u64 << row;
+            }
+        }
+
+        tt
+    }
+
     /// Factor a truth table using ISOP (Irredundant Sum of Products) decomposition
     /// Returns the factored form as a list of AIG gates and the result literal
     fn factor_truth_table(&self, tt: u64, num_inputs: usize) -> Option<FactoredForm> {
@@ -701,6 +770,21 @@ impl Refactor {
         // Factor the truth table
         let form = self.factor_truth_table(tt, cone.leaves.len())?;
 
+        // VALIDATION: Verify that the factored form produces the same truth table
+        let num_inputs = cone.leaves.len();
+        let num_rows = 1usize << num_inputs;
+        let mask = if num_rows >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << num_rows) - 1
+        };
+        let verified_tt = self.evaluate_factored_form(&form, num_inputs);
+        if (verified_tt & mask) != (tt & mask) {
+            // Factorization produced incorrect result - skip this cone
+            // This catches bugs in the factorization logic
+            return None;
+        }
+
         // Calculate savings: original gates - new gates
         let original_gates = cone.internal_nodes.len() as i32;
         let new_gates = form.gates.len() as i32;
@@ -762,11 +846,15 @@ fn compute_fanout_counts(aig: &Aig) -> HashMap<AigNodeId, usize> {
 
 /// Compute truth table for a single variable
 fn variable_truth_table(var: usize, num_inputs: usize) -> u64 {
+    if num_inputs > 6 {
+        // Can't handle more than 6 inputs in a 64-bit truth table
+        return 0;
+    }
     let num_rows = 1usize << num_inputs;
     let mut tt = 0u64;
     for row in 0..num_rows {
         if (row >> var) & 1 == 1 {
-            tt |= 1 << row;
+            tt |= 1u64 << row; // Use u64 literal to avoid overflow
         }
     }
     tt
@@ -774,6 +862,10 @@ fn variable_truth_table(var: usize, num_inputs: usize) -> u64 {
 
 /// Compute cofactors of a function with respect to a variable
 fn compute_cofactors(tt: u64, var: usize, num_inputs: usize) -> (u64, u64) {
+    if num_inputs > 6 {
+        // Can't handle more than 6 inputs in a 64-bit truth table
+        return (0, 0);
+    }
     let num_rows = 1usize << num_inputs;
     let mut cofactor_0 = 0u64;
     let mut cofactor_1 = 0u64;
@@ -782,14 +874,16 @@ fn compute_cofactors(tt: u64, var: usize, num_inputs: usize) -> (u64, u64) {
         let val = (tt >> row) & 1;
         let var_val = (row >> var) & 1;
 
-        // Row with variable set to 0
-        let row_0 = row & !(1 << var);
+        // Row with variable set to 0 (use usize for bit operations)
+        let row_0 = row & !(1usize << var);
         // Row with variable set to 1
-        let row_1 = row | (1 << var);
+        let row_1 = row | (1usize << var);
 
         if var_val == 0 {
             cofactor_0 |= val << row;
-            cofactor_0 |= val << row_1;
+            if row_1 < 64 {
+                cofactor_0 |= val << row_1;
+            }
         } else {
             cofactor_1 |= val << row;
             cofactor_1 |= val << row_0;

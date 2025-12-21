@@ -452,11 +452,11 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "resub".to_string(),
                 "balance".to_string(),
-                "refactor_z".to_string(), // Refactor after balance finds better structure
+                "refactor_z".to_string(),
                 "resub_z".to_string(),
                 "rewrite_z".to_string(),
                 "balance".to_string(),
-                "refactor_z".to_string(), // Another refactor after balance
+                "refactor_z".to_string(),
                 "resub_z".to_string(),
                 "fraig".to_string(),
                 "dce".to_string(),

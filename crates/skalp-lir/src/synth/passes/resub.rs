@@ -418,6 +418,62 @@ impl Resub {
     }
 }
 
+/// Compute the truth table for a resubstitution result
+fn compute_resub_truth_table_helper(
+    result: &ResubResult,
+    divisor_tts: &[(AigNodeId, u64)],
+    num_leaves: usize,
+) -> u64 {
+    let mask = if num_leaves >= 6 {
+        u64::MAX
+    } else {
+        (1u64 << (1usize << num_leaves)) - 1
+    };
+
+    // Find truth table for a divisor
+    let get_div_tt = |node: AigNodeId| -> u64 {
+        divisor_tts
+            .iter()
+            .find(|(n, _)| *n == node)
+            .map(|(_, tt)| *tt)
+            .unwrap_or(0)
+    };
+
+    match &result.kind {
+        ResubKind::Equal(d, inv) => {
+            let tt = get_div_tt(*d);
+            if *inv {
+                !tt & mask
+            } else {
+                tt & mask
+            }
+        }
+        ResubKind::And2(d1, inv1, d2, inv2) => {
+            let tt1 = get_div_tt(*d1);
+            let tt1 = if *inv1 { !tt1 & mask } else { tt1 & mask };
+            let tt2 = get_div_tt(*d2);
+            let tt2 = if *inv2 { !tt2 & mask } else { tt2 & mask };
+            (tt1 & tt2) & mask
+        }
+        ResubKind::Or2(d1, inv1, d2, inv2) => {
+            let tt1 = get_div_tt(*d1);
+            let tt1 = if *inv1 { !tt1 & mask } else { tt1 & mask };
+            let tt2 = get_div_tt(*d2);
+            let tt2 = if *inv2 { !tt2 & mask } else { tt2 & mask };
+            (tt1 | tt2) & mask
+        }
+        ResubKind::AndOr(d1, inv1, d2, inv2, d3, inv3) => {
+            let tt1 = get_div_tt(*d1);
+            let tt1 = if *inv1 { !tt1 & mask } else { tt1 & mask };
+            let tt2 = get_div_tt(*d2);
+            let tt2 = if *inv2 { !tt2 & mask } else { tt2 & mask };
+            let tt3 = get_div_tt(*d3);
+            let tt3 = if *inv3 { !tt3 & mask } else { tt3 & mask };
+            ((tt1 & tt2) | tt3) & mask
+        }
+    }
+}
+
 /// Result of resubstitution
 #[derive(Debug, Clone)]
 struct ResubResult {
@@ -537,7 +593,23 @@ impl Pass for Resub {
                     resub_result.gates_saved > 0
                 };
 
-                if accept || matches!(resub_result.kind, ResubKind::Equal(_, _)) {
+                // Only accept substitutions that actually save gates
+                if accept && resub_result.gates_saved > 0 {
+                    // Validate the substitution before applying
+                    // Compute the truth table of the proposed substitution
+                    let new_tt =
+                        compute_resub_truth_table_helper(&resub_result, &divisor_tts, leaves.len());
+                    let mask = if leaves.len() >= 6 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (1usize << leaves.len())) - 1
+                    };
+
+                    if (new_tt & mask) != (target_tt & mask) {
+                        // The substitution would change the function - skip it
+                        continue;
+                    }
+
                     let new_lit = self.build_resub(aig, &resub_result);
                     if new_lit.node != target {
                         substitutions.insert(target, new_lit);
