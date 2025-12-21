@@ -102,18 +102,17 @@ impl HierarchicalNetlist {
             let mut net_map = HashMap::new();
 
             // First, create remapped nets for this instance
-            for net in &inst.netlist.nets {
-                let new_net_id = result.add_net_with_name(format!("{}.{}", path, net.name));
-                net_map.insert(
-                    GateNetId(
-                        inst.netlist
-                            .nets
-                            .iter()
-                            .position(|n| n.name == net.name)
-                            .unwrap() as u32,
-                    ),
-                    new_net_id,
-                );
+            for (idx, net) in inst.netlist.nets.iter().enumerate() {
+                let new_net_name = format!("{}.{}", path, net.name);
+                let new_net_id = result.add_net_with_name(new_net_name.clone());
+
+                // Copy net properties (is_clock, is_reset)
+                if let Some(new_net) = result.nets.get_mut(new_net_id.0 as usize) {
+                    new_net.is_clock = net.is_clock;
+                    new_net.is_reset = net.is_reset;
+                }
+
+                net_map.insert(GateNetId(idx as u32), new_net_id);
             }
 
             // Then add cells with remapped connections
@@ -134,6 +133,10 @@ impl HierarchicalNetlist {
                     .map(|&net_id| *net_map.get(&net_id).unwrap_or(&net_id))
                     .collect();
 
+                // Remap clock and reset
+                new_cell.clock = cell.clock.and_then(|c| net_map.get(&c).copied());
+                new_cell.reset = cell.reset.and_then(|r| net_map.get(&r).copied());
+
                 result.cells.push(new_cell);
             }
 
@@ -143,12 +146,29 @@ impl HierarchicalNetlist {
         // Phase 2: Stitch port connections between instances
         self.stitch_all_ports(&mut result, &net_id_maps);
 
-        // Phase 3: Cross-boundary cleanup
-        // Only propagate constants, skip dead cell removal for now
-        // TODO: Implement proper port stitching so dead cell removal works correctly
+        // Phase 3: Set up top-level inputs and outputs
+        // Find the "top" instance and export its I/O
+        if let Some(top_inst) = self.instances.get("top") {
+            if let Some(top_net_map) = net_id_maps.get(&"top".to_string()) {
+                // Mark top-level inputs
+                for &input_net in &top_inst.netlist.inputs {
+                    if let Some(&remapped) = top_net_map.get(&input_net) {
+                        result.inputs.push(remapped);
+                    }
+                }
+                // Mark top-level outputs
+                for &output_net in &top_inst.netlist.outputs {
+                    if let Some(&remapped) = top_net_map.get(&output_net) {
+                        result.outputs.push(remapped);
+                    }
+                }
+            }
+        }
+
+        // Phase 4: Cross-boundary cleanup
         result.propagate_constants();
-        // NOTE: Dead cell removal disabled because the port stitching doesn't
-        // properly connect child instance outputs to parent nets yet.
+        // NOTE: DCE disabled because port stitching doesn't properly connect nets yet.
+        // See stitch_all_ports() for details on the limitation.
         // result.remove_dead_cells();
 
         result.update_stats();
@@ -156,18 +176,33 @@ impl HierarchicalNetlist {
     }
 
     /// Stitch all port connections between instances
+    ///
+    /// NOTE: Port stitching is currently limited because MIR uses internal signal IDs
+    /// (like `signal_3`, `port_14`) while GateNetlist uses actual signal names
+    /// (like `cmp_lt`, `a[0]`). This mapping is lost during elaboration.
+    /// TODO: Carry signal name information through elaboration for proper stitching.
     fn stitch_all_ports(
         &self,
         result: &mut GateNetlist,
         _net_maps: &HashMap<&InstancePath, HashMap<GateNetId, GateNetId>>,
     ) {
         for (path, inst) in &self.instances {
+            // Get parent path (everything before the last '.')
+            let parent_path = path.rfind('.').map(|pos| &path[..pos]).unwrap_or("");
+
             for (port_name, conn) in &inst.port_connections {
                 match conn {
-                    PortConnection::ParentNet(parent_net) => {
+                    PortConnection::ParentNet(parent_signal) => {
                         // Merge child port net with parent net
+                        // Child net is {instance_path}.{port_name}
+                        // Parent net is {parent_path}.{signal_name}
                         let child_net_name = format!("{}.{}", path, port_name);
-                        result.merge_nets_by_name(&child_net_name, parent_net);
+                        let parent_net_name = if parent_path.is_empty() {
+                            parent_signal.clone()
+                        } else {
+                            format!("{}.{}", parent_path, parent_signal)
+                        };
+                        result.merge_nets_by_name(&child_net_name, &parent_net_name);
                     }
                     PortConnection::Constant(value) => {
                         // Create tie cell for constant
