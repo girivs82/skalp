@@ -770,6 +770,140 @@ impl GateNetlist {
         output.push_str("endmodule\n");
         output
     }
+
+    // =========================================================================
+    // Hierarchical Synthesis Support
+    // =========================================================================
+
+    /// Add a net with a specific name and return its ID
+    pub fn add_net_with_name(&mut self, name: String) -> GateNetId {
+        // Check if net already exists
+        if let Some(&existing_id) = self.net_map.get(&name) {
+            return existing_id;
+        }
+
+        let id = GateNetId(self.nets.len() as u32);
+        let net = GateNet {
+            id,
+            name: name.clone(),
+            driver: None,
+            driver_pin: None,
+            fanout: Vec::new(),
+            is_input: false,
+            is_output: false,
+            is_clock: false,
+            is_reset: false,
+            is_detection: false,
+            detection_config: None,
+        };
+        self.net_map.insert(name, id);
+        self.nets.push(net);
+        id
+    }
+
+    /// Merge two nets by name (for stitching hierarchical boundaries)
+    /// All connections to net2 are redirected to net1
+    pub fn merge_nets_by_name(&mut self, net1_name: &str, net2_name: &str) {
+        let net1_id = match self.net_map.get(net1_name) {
+            Some(&id) => id,
+            None => return, // Net doesn't exist
+        };
+        let net2_id = match self.net_map.get(net2_name) {
+            Some(&id) => id,
+            None => return, // Net doesn't exist
+        };
+
+        if net1_id == net2_id {
+            return; // Same net, nothing to do
+        }
+
+        // Update all cells that reference net2 to use net1
+        for cell in &mut self.cells {
+            for input in &mut cell.inputs {
+                if *input == net2_id {
+                    *input = net1_id;
+                }
+            }
+            for output in &mut cell.outputs {
+                if *output == net2_id {
+                    *output = net1_id;
+                }
+            }
+            if cell.clock == Some(net2_id) {
+                cell.clock = Some(net1_id);
+            }
+            if cell.reset == Some(net2_id) {
+                cell.reset = Some(net1_id);
+            }
+        }
+
+        // Merge fanout from net2 into net1
+        let net2_fanout = self.nets[net2_id.0 as usize].fanout.clone();
+        self.nets[net1_id.0 as usize].fanout.extend(net2_fanout);
+
+        // If net2 has a driver, transfer it to net1 if net1 doesn't have one
+        if self.nets[net1_id.0 as usize].driver.is_none() {
+            self.nets[net1_id.0 as usize].driver = self.nets[net2_id.0 as usize].driver;
+            self.nets[net1_id.0 as usize].driver_pin = self.nets[net2_id.0 as usize].driver_pin;
+        }
+
+        // Mark net2 as merged (clear its connections)
+        self.nets[net2_id.0 as usize].fanout.clear();
+        self.nets[net2_id.0 as usize].driver = None;
+    }
+
+    /// Add a tie cell for a constant value
+    pub fn add_tie_cell(&mut self, net_name: &str, value: u64) {
+        let net_id = match self.net_map.get(net_name) {
+            Some(&id) => id,
+            None => self.add_net_with_name(net_name.to_string()),
+        };
+
+        let cell_type = if value == 0 {
+            "TIE0_X1".to_string()
+        } else {
+            "TIE1_X1".to_string()
+        };
+
+        let cell_id = CellId(self.cells.len() as u32);
+        let cell = Cell::new_comb(
+            cell_id,
+            cell_type,
+            self.library_name.clone(),
+            0.0, // Tie cells have negligible FIT
+            format!("tie_{}", net_name),
+            vec![],
+            vec![net_id],
+        );
+        self.cells.push(cell);
+
+        // Update net driver
+        self.nets[net_id.0 as usize].driver = Some(cell_id);
+        self.nets[net_id.0 as usize].driver_pin = Some(0);
+    }
+
+    /// Propagate constants through the netlist (lightweight optimization)
+    pub fn propagate_constants(&mut self) {
+        // Find tie cells and their driven nets
+        let mut constant_nets: HashMap<GateNetId, bool> = HashMap::new();
+
+        for cell in &self.cells {
+            if cell.cell_type.starts_with("TIE0") {
+                for &output in &cell.outputs {
+                    constant_nets.insert(output, false);
+                }
+            } else if cell.cell_type.starts_with("TIE1") {
+                for &output in &cell.outputs {
+                    constant_nets.insert(output, true);
+                }
+            }
+        }
+
+        // For now, just record constants - full propagation would require
+        // evaluating each cell type's truth table
+        // This is a placeholder for more sophisticated constant propagation
+        let _ = constant_nets;
+    }
 }
 
 /// Get input pin name for a cell type

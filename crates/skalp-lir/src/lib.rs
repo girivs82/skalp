@@ -28,6 +28,7 @@
 pub mod builtin_libraries;
 pub mod gate_netlist;
 pub mod gate_optimizer;
+pub mod hierarchical_netlist;
 pub mod lir;
 pub mod mir_to_lir;
 pub mod netlist;
@@ -87,6 +88,11 @@ pub use pattern_detector::{
 
 // Gate optimizer
 pub use gate_optimizer::{GateOptimizer, OptimizationStats, PassStats};
+
+// Hierarchical netlist (for per-entity synthesis)
+pub use hierarchical_netlist::{
+    HierarchicalNetlist, HierarchicalSynthResult, InstanceNetlist, InstancePath, PortConnection,
+};
 
 // Synthesis engine (AIG-based optimization)
 pub use synth::{Aig, AigBuilder, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats, AigWriter};

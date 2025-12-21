@@ -373,6 +373,69 @@ impl SynthEngine {
         best_result
     }
 
+    /// Optimize a hierarchical netlist with per-instance parallel synthesis
+    ///
+    /// Each instance in the hierarchy is optimized independently using the Auto
+    /// preset (which tries multiple strategies and picks the best). All instances
+    /// are processed in parallel using rayon.
+    pub fn optimize_hierarchical(
+        &mut self,
+        hier: &crate::hierarchical_netlist::HierarchicalNetlist,
+        library: &TechLibrary,
+    ) -> crate::hierarchical_netlist::HierarchicalSynthResult {
+        use crate::hierarchical_netlist::{HierarchicalNetlist, HierarchicalSynthResult};
+
+        let start = Instant::now();
+
+        eprintln!(
+            "[HIER] Optimizing {} instances in parallel...",
+            hier.instances.len()
+        );
+
+        // Optimize each instance in parallel using Auto preset
+        let optimized: std::collections::HashMap<String, SynthResult> = hier
+            .instances
+            .par_iter()
+            .map(|(path, inst)| {
+                eprintln!("[HIER] {} ({}) -> optimizing...", path, inst.module_name);
+                let mut engine = SynthEngine::with_preset(SynthPreset::Auto);
+                let result = engine.optimize(&inst.netlist, library);
+                eprintln!(
+                    "[HIER] {} -> {} cells (was {})",
+                    path,
+                    result.netlist.cell_count(),
+                    inst.netlist.cell_count()
+                );
+                (path.clone(), result)
+            })
+            .collect();
+
+        // Build optimized hierarchical netlist
+        let mut opt_hier = hier.clone();
+        for (path, result) in &optimized {
+            if let Some(inst) = opt_hier.instances.get_mut(path) {
+                inst.netlist = result.netlist.clone();
+            }
+        }
+
+        let total_time = start.elapsed().as_millis() as u64;
+
+        eprintln!(
+            "[HIER] Hierarchical synthesis complete: {} instances in {}ms",
+            hier.instances.len(),
+            total_time
+        );
+
+        // Copy results to self for consistency
+        self.total_time_ms = total_time;
+
+        HierarchicalSynthResult {
+            netlist: opt_hier,
+            instance_results: optimized,
+            total_time_ms: total_time,
+        }
+    }
+
     /// Optimize an AIG directly with optional library-aware mapping
     ///
     /// If a library is provided, technology mapping will use the library's
