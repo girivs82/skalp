@@ -766,6 +766,8 @@ impl<'a> AigBuilder<'a> {
         }
 
         // Unknown net - treat as primary input
+        // This can happen for nets that weren't explicitly added as inputs
+        // but are referenced by cells (e.g., internal nets without drivers)
         let id = self.aig.add_input(net.name.clone(), Some(net_id));
         let lit = AigLit::new(id);
         self.net_map[net_id.0 as usize] = Some(lit);

@@ -397,7 +397,13 @@ impl SynthEngine {
             .instances
             .par_iter()
             .map(|(path, inst)| {
-                eprintln!("[HIER] {} ({}) -> optimizing...", path, inst.module_name);
+                eprintln!(
+                    "[HIER] {} ({}) -> optimizing... ({} cells, {} outputs)",
+                    path,
+                    inst.module_name,
+                    inst.netlist.cell_count(),
+                    inst.netlist.outputs.len()
+                );
                 let mut engine = SynthEngine::with_preset(SynthPreset::Auto);
                 let result = engine.optimize(&inst.netlist, library);
                 eprintln!(

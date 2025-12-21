@@ -332,6 +332,92 @@ impl<'a> TechMapper<'a> {
             LirOp::Lt { width } => {
                 self.map_less_than(*width, &input_nets, &output_nets, &node.path);
             }
+            LirOp::Gt { width } => {
+                // a > b is equivalent to b < a (swap inputs)
+                if input_nets.len() >= 2 {
+                    let swapped_inputs = vec![input_nets[1].clone(), input_nets[0].clone()];
+                    self.map_less_than(*width, &swapped_inputs, &output_nets, &node.path);
+                } else {
+                    self.warnings.push(format!(
+                        "GreaterThan needs 2 inputs, got {}",
+                        input_nets.len()
+                    ));
+                }
+            }
+            LirOp::Le { width } => {
+                // a <= b is equivalent to !(a > b) = !(b < a)
+                if input_nets.len() >= 2 {
+                    // First compute b < a
+                    let swapped_inputs = vec![input_nets[1].clone(), input_nets[0].clone()];
+                    let gt_out = self.alloc_net_id();
+                    self.netlist
+                        .add_net(GateNet::new(gt_out, format!("{}.gt_temp", node.path)));
+                    self.map_less_than(
+                        *width,
+                        &swapped_inputs,
+                        &[gt_out],
+                        &format!("{}.gt", node.path),
+                    );
+                    // Then invert
+                    let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
+                    let y = output_nets.first().copied().unwrap_or(GateNetId(0));
+                    let inv_cell = Cell::new_comb(
+                        CellId(0),
+                        inv_info.name.clone(),
+                        self.library.name.clone(),
+                        inv_info.fit,
+                        format!("{}.le_inv", node.path),
+                        vec![gt_out],
+                        vec![y],
+                    );
+                    self.add_cell(inv_cell);
+                } else {
+                    self.warnings.push(format!(
+                        "LessOrEqual needs 2 inputs, got {}",
+                        input_nets.len()
+                    ));
+                }
+            }
+            LirOp::Ge { width } => {
+                // a >= b is equivalent to !(a < b)
+                if input_nets.len() >= 2 {
+                    // First compute a < b
+                    let lt_out = self.alloc_net_id();
+                    self.netlist
+                        .add_net(GateNet::new(lt_out, format!("{}.lt_temp", node.path)));
+                    self.map_less_than(
+                        *width,
+                        &input_nets,
+                        &[lt_out],
+                        &format!("{}.lt", node.path),
+                    );
+                    // Then invert
+                    let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
+                    let y = output_nets.first().copied().unwrap_or(GateNetId(0));
+                    let inv_cell = Cell::new_comb(
+                        CellId(0),
+                        inv_info.name.clone(),
+                        self.library.name.clone(),
+                        inv_info.fit,
+                        format!("{}.ge_inv", node.path),
+                        vec![lt_out],
+                        vec![y],
+                    );
+                    self.add_cell(inv_cell);
+                } else {
+                    self.warnings.push(format!(
+                        "GreaterOrEqual needs 2 inputs, got {}",
+                        input_nets.len()
+                    ));
+                }
+            }
+            LirOp::Slt { width } => {
+                // Signed less-than: compare as signed integers
+                // For now, treat same as unsigned - TODO: implement proper signed comparison
+                self.map_less_than(*width, &input_nets, &output_nets, &node.path);
+                self.warnings
+                    .push("Signed LessThan treated as unsigned - may be incorrect".to_string());
+            }
 
             // Register
             LirOp::Reg {
@@ -1093,6 +1179,10 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Map less-than comparator
+    /// a < b is implemented as: starting from MSB, first bit where a[i] != b[i] determines result
+    /// If a[i]=0 and b[i]=1, then a < b (result = 1)
+    /// If a[i]=1 and b[i]=0, then a >= b (result = 0)
+    /// Otherwise check next bit
     fn map_less_than(
         &mut self,
         width: u32,
@@ -1106,26 +1196,141 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        // Use subtractor and check borrow
-        // For now, simplified: just emit a warning and create placeholder
-        self.warnings
-            .push("LessThan comparator implementation is simplified".to_string());
-
-        // Create a placeholder cell
         let y = outputs.first().copied().unwrap_or(GateNetId(0));
-        let all_inputs: Vec<GateNetId> = inputs.iter().flatten().copied().collect();
+        let a = &inputs[0];
+        let b = &inputs[1];
 
-        let mut cell = Cell::new_comb(
-            CellId(0),
-            "LT_COMPARATOR".to_string(),
-            self.library.name.clone(),
-            0.5 * width as f64, // Estimate FIT
-            path.to_string(),
-            all_inputs,
-            vec![y],
-        );
-        cell.source_op = Some("LessThan".to_string());
-        self.add_cell(cell);
+        // Build a bit-serial comparator from MSB to LSB
+        // For each bit position i:
+        //   lt_i = (!a[i] & b[i]) | (a[i] == b[i]) & lt_{i-1}
+        // Where lt at bit -1 (after LSB) is 0 (not less if all bits equal)
+
+        // Get cell info
+        let and_info = self.get_cell_info(&CellFunction::And2, 0.1);
+        let or_info = self.get_cell_info(&CellFunction::Or2, 0.1);
+        let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
+        let xnor_info = self.get_cell_info(&CellFunction::Xnor2, 0.1);
+
+        // Start from MSB and work down
+        // prev_lt carries whether a < b based on higher bits
+        let mut prev_lt = None; // None means 0 (not less than so far)
+
+        for i in (0..width as usize).rev() {
+            let a_bit = a.get(i).copied().unwrap_or(a[0]);
+            let b_bit = b.get(i).copied().unwrap_or(b[0]);
+
+            // Compute a[i] == b[i] using XNOR
+            let eq_net = self
+                .netlist
+                .add_net(GateNet::new(GateNetId(0), format!("{}.eq_{}", path, i)));
+            let eq_cell = Cell::new_comb(
+                CellId(0),
+                xnor_info.name.clone(),
+                self.library.name.clone(),
+                xnor_info.fit,
+                format!("{}.eq_{}", path, i),
+                vec![a_bit, b_bit],
+                vec![eq_net],
+            );
+            self.add_cell(eq_cell);
+
+            // Compute !a[i] & b[i] (a[i] < b[i] at this bit)
+            let not_a_net = self
+                .netlist
+                .add_net(GateNet::new(GateNetId(0), format!("{}.not_a_{}", path, i)));
+            let inv_cell = Cell::new_comb(
+                CellId(0),
+                inv_info.name.clone(),
+                self.library.name.clone(),
+                inv_info.fit,
+                format!("{}.inv_a_{}", path, i),
+                vec![a_bit],
+                vec![not_a_net],
+            );
+            self.add_cell(inv_cell);
+
+            let lt_bit_net = self
+                .netlist
+                .add_net(GateNet::new(GateNetId(0), format!("{}.lt_bit_{}", path, i)));
+            let and_cell = Cell::new_comb(
+                CellId(0),
+                and_info.name.clone(),
+                self.library.name.clone(),
+                and_info.fit,
+                format!("{}.lt_bit_{}", path, i),
+                vec![not_a_net, b_bit],
+                vec![lt_bit_net],
+            );
+            self.add_cell(and_cell);
+
+            // Combine with previous result:
+            // lt_i = lt_bit_i | (eq_i & prev_lt)
+            // But if this is the MSB, prev_lt is 0 so lt_i = lt_bit_i
+            let lt_net = if i == width as usize - 1 {
+                // MSB: lt = lt_bit
+                lt_bit_net
+            } else if let Some(prev_lt_net) = prev_lt {
+                // Combine: lt = lt_bit | (eq & prev_lt)
+                let eq_and_prev = self.netlist.add_net(GateNet::new(
+                    GateNetId(0),
+                    format!("{}.eq_and_prev_{}", path, i),
+                ));
+                let and_cell = Cell::new_comb(
+                    CellId(0),
+                    and_info.name.clone(),
+                    self.library.name.clone(),
+                    and_info.fit,
+                    format!("{}.eq_and_prev_{}", path, i),
+                    vec![eq_net, prev_lt_net],
+                    vec![eq_and_prev],
+                );
+                self.add_cell(and_cell);
+
+                let combined = if i == 0 {
+                    y // Use output net for final result
+                } else {
+                    self.netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.lt_combined_{}", path, i),
+                    ))
+                };
+                let or_cell = Cell::new_comb(
+                    CellId(0),
+                    or_info.name.clone(),
+                    self.library.name.clone(),
+                    or_info.fit,
+                    format!("{}.lt_{}", path, i),
+                    vec![lt_bit_net, eq_and_prev],
+                    vec![combined],
+                );
+                self.add_cell(or_cell);
+                combined
+            } else {
+                // prev_lt is 0, so lt = lt_bit
+                lt_bit_net
+            };
+
+            prev_lt = Some(lt_net);
+        }
+
+        // Final result should be connected to output y
+        // If prev_lt is already y, we're done. Otherwise need to buffer.
+        if prev_lt != Some(y) {
+            if let Some(lt_result) = prev_lt {
+                // Create a buffer to connect to output
+                let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+                let buf_cell = Cell::new_comb(
+                    CellId(0),
+                    buf_info.name.clone(),
+                    self.library.name.clone(),
+                    buf_info.fit,
+                    format!("{}.out_buf", path),
+                    vec![lt_result],
+                    vec![y],
+                );
+                self.add_cell(buf_cell);
+            }
+        }
 
         self.stats.decomposed_mappings += 1;
     }
