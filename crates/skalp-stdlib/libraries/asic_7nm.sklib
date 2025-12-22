@@ -861,6 +861,74 @@ fault_type = "reset_path"
 mechanism = "reset_buffer_failure"
 
 # =============================================================================
+# Constant Tie Cells
+# =============================================================================
+
+# Tie High (constant 1)
+[[cells]]
+name = "TIE_HIGH"
+function = "tie_high"
+fit = 0.015
+area_um2 = 0.15
+transistor_count = 2
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 600
+timing_margin_voltage_mv = 680
+voltage_delay_coefficient = 0.0
+voltage_sensitivity = 1
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.0075
+fault_type = "stuck_at_0"
+mechanism = "pmos_failure"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.00375
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "weak_drive"
+fit = 0.00375
+fault_type = "delay"
+mechanism = "contact_resistance"
+
+# Tie Low (constant 0)
+[[cells]]
+name = "TIE_LOW"
+function = "tie_low"
+fit = 0.015
+area_um2 = 0.15
+transistor_count = 2
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 600
+timing_margin_voltage_mv = 680
+voltage_delay_coefficient = 0.0
+voltage_sensitivity = 1
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.0075
+fault_type = "stuck_at_1"
+mechanism = "nmos_failure"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.00375
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "weak_drive"
+fit = 0.00375
+fault_type = "delay"
+mechanism = "contact_resistance"
+
+# =============================================================================
 # Decomposition Rules
 # =============================================================================
 

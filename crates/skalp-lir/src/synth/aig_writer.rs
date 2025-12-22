@@ -129,7 +129,7 @@ impl AigWriterState<'_> {
         }
     }
 
-    /// Create nets for constants
+    /// Create nets for constants, using TIE cells from the library when available
     fn create_const_nets(&mut self, _aig: &Aig) {
         // Create constant 0 net
         let const0 = self
@@ -138,7 +138,40 @@ impl AigWriterState<'_> {
         self.node_to_net.insert(AigNodeId::FALSE, const0);
         self.lit_to_net.insert((AigNodeId::FALSE, false), const0);
 
-        // We'll create constant 1 (inverted const 0) lazily when needed
+        // If the library has a TIE_LOW cell, instantiate it to drive const_0
+        if let Some((tie_low_name, tie_low_fit)) = self.try_find_tie_low_cell() {
+            let cell = Cell::new_comb(
+                CellId(self.next_cell_id),
+                tie_low_name,
+                self.library.name.clone(),
+                tie_low_fit,
+                "tie_low_inst".to_string(),
+                vec![], // No inputs
+                vec![const0],
+            );
+            self.next_cell_id += 1;
+            self.netlist.add_cell(cell);
+        }
+
+        // Create constant 1 net and TIE_HIGH cell if available
+        let const1 = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), "const_1".to_string()));
+        self.lit_to_net.insert((AigNodeId::FALSE, true), const1);
+
+        if let Some((tie_high_name, tie_high_fit)) = self.try_find_tie_high_cell() {
+            let cell = Cell::new_comb(
+                CellId(self.next_cell_id),
+                tie_high_name,
+                self.library.name.clone(),
+                tie_high_fit,
+                "tie_high_inst".to_string(),
+                vec![], // No inputs
+                vec![const1],
+            );
+            self.next_cell_id += 1;
+            self.netlist.add_cell(cell);
+        }
     }
 
     /// Pre-create latch output nets before processing nodes
@@ -538,7 +571,11 @@ impl AigWriterState<'_> {
         // Handle constant
         if lit.node == AigNodeId::FALSE {
             if lit.inverted {
-                // Constant 1 - create if not exists
+                // Constant 1 - use pre-created net from create_const_nets
+                if let Some(&net) = self.lit_to_net.get(&(AigNodeId::FALSE, true)) {
+                    return net;
+                }
+                // Fallback: create if not exists (shouldn't happen if create_const_nets was called)
                 let const1 = self
                     .netlist
                     .add_net(GateNet::new(GateNetId(0), "const_1".to_string()));
@@ -832,6 +869,22 @@ impl AigWriterState<'_> {
         )
     }
 
+    /// Try to find a TIE_HIGH cell in the library (constant 1 driver)
+    /// Returns None if the library doesn't have this cell type
+    fn try_find_tie_high_cell(&self) -> Option<(String, f64)> {
+        self.library
+            .find_best_cell(&CellFunction::TieHigh)
+            .map(|cell| (cell.name.clone(), cell.fit))
+    }
+
+    /// Try to find a TIE_LOW cell in the library (constant 0 driver)
+    /// Returns None if the library doesn't have this cell type
+    fn try_find_tie_low_cell(&self) -> Option<(String, f64)> {
+        self.library
+            .find_best_cell(&CellFunction::TieLow)
+            .map(|cell| (cell.name.clone(), cell.fit))
+    }
+
     /// Detect MUX-style enable pattern in latch data input
     ///
     /// Pattern: D = (enable & new_value) | (~enable & Q)
@@ -1066,9 +1119,11 @@ impl AigWriterState<'_> {
                 let enable_net = enable
                     .map(|e| self.get_or_create_lit_net(aig, e))
                     .unwrap_or_else(|| {
-                        // Create a constant 1 net if no enable
-                        self.netlist
-                            .add_net(GateNet::new(GateNetId(0), "const_1".to_string()))
+                        // Use pre-created constant 1 net if no enable
+                        *self
+                            .lit_to_net
+                            .get(&(AigNodeId::FALSE, true))
+                            .expect("const_1 net should be pre-created")
                     });
                 let (name, fit) = self.find_isolation_and_cell();
                 (name, fit, vec![data_net, enable_net], false)
