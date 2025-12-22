@@ -4,6 +4,7 @@
 
 use crate::AsicError;
 use serde::{Deserialize, Serialize};
+use skalp_lir::CellFunction;
 
 /// Floorplan manager
 pub struct FloorplanManager {
@@ -250,6 +251,28 @@ pub enum IOPadType {
     Power,
     Ground,
     Analog,
+    /// Low-jitter clock input pad
+    Clock,
+    /// Power pad with integrated Low Dropout Regulator
+    PowerLdo,
+}
+
+impl IOPadType {
+    /// Convert from CellFunction to IOPadType
+    /// Returns None if the CellFunction is not an I/O pad type
+    pub fn from_cell_function(func: &CellFunction) -> Option<Self> {
+        match func {
+            CellFunction::InputPad => Some(IOPadType::Input),
+            CellFunction::OutputPad => Some(IOPadType::Output),
+            CellFunction::BidirPad => Some(IOPadType::Bidirectional),
+            CellFunction::ClockPad => Some(IOPadType::Clock),
+            CellFunction::PowerPad => Some(IOPadType::Power),
+            CellFunction::GroundPad => Some(IOPadType::Ground),
+            CellFunction::AnalogPad => Some(IOPadType::Analog),
+            CellFunction::PowerPadLdo => Some(IOPadType::PowerLdo),
+            _ => None,
+        }
+    }
 }
 
 /// Die sides

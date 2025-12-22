@@ -1158,6 +1158,45 @@ impl AigWriterState<'_> {
                 let (name, fit) = self.find_power_switch_footer_cell();
                 (name, fit, vec![data_net], false)
             }
+            // I/O Pad barriers
+            BarrierType::InputPad => {
+                let (name, fit) = self.find_input_pad_cell();
+                (name, fit, vec![data_net], false)
+            }
+            BarrierType::OutputPad => {
+                let enable_net = enable
+                    .map(|e| self.get_or_create_lit_net(aig, e))
+                    .unwrap_or_else(|| {
+                        // Use pre-created constant 1 (always enabled) if no OE
+                        *self
+                            .lit_to_net
+                            .get(&(AigNodeId::FALSE, true))
+                            .expect("const_1 net should be pre-created")
+                    });
+                let (name, fit) = self.find_output_pad_cell();
+                (name, fit, vec![data_net, enable_net], false)
+            }
+            BarrierType::BidirPad => {
+                let enable_net = enable
+                    .map(|e| self.get_or_create_lit_net(aig, e))
+                    .unwrap_or_else(|| {
+                        // Use pre-created constant 1 (output enabled) if no OE
+                        *self
+                            .lit_to_net
+                            .get(&(AigNodeId::FALSE, true))
+                            .expect("const_1 net should be pre-created")
+                    });
+                let (name, fit) = self.find_bidir_pad_cell();
+                (name, fit, vec![data_net, enable_net], false)
+            }
+            BarrierType::ClockPad => {
+                let (name, fit) = self.find_clock_pad_cell();
+                (name, fit, vec![data_net], false)
+            }
+            BarrierType::AnalogPad => {
+                let (name, fit) = self.find_analog_pad_cell();
+                (name, fit, vec![data_net], false)
+            }
         };
 
         // Create the cell
@@ -1364,6 +1403,89 @@ impl AigWriterState<'_> {
         panic!(
             "Technology library '{}' does not contain PowerSwitchFooter cell. \
              Cannot synthesize power switch barriers without this primitive.",
+            self.library.name
+        )
+    }
+
+    // ========================================================================
+    // I/O Pad Cell Finders
+    // ========================================================================
+
+    /// Find an input pad cell in the library
+    ///
+    /// Panics if the library doesn't contain an input pad cell.
+    fn find_input_pad_cell(&self) -> (String, f64) {
+        let cells = self.library.find_cells_by_function(&CellFunction::InputPad);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        panic!(
+            "Technology library '{}' does not contain InputPad cell. \
+             Cannot synthesize input pads without this primitive.",
+            self.library.name
+        )
+    }
+
+    /// Find an output pad cell in the library
+    ///
+    /// Panics if the library doesn't contain an output pad cell.
+    fn find_output_pad_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::OutputPad);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        panic!(
+            "Technology library '{}' does not contain OutputPad cell. \
+             Cannot synthesize output pads without this primitive.",
+            self.library.name
+        )
+    }
+
+    /// Find a bidirectional pad cell in the library
+    ///
+    /// Panics if the library doesn't contain a bidirectional pad cell.
+    fn find_bidir_pad_cell(&self) -> (String, f64) {
+        let cells = self.library.find_cells_by_function(&CellFunction::BidirPad);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        panic!(
+            "Technology library '{}' does not contain BidirPad cell. \
+             Cannot synthesize bidirectional pads without this primitive.",
+            self.library.name
+        )
+    }
+
+    /// Find a clock pad cell in the library
+    ///
+    /// Panics if the library doesn't contain a clock pad cell.
+    fn find_clock_pad_cell(&self) -> (String, f64) {
+        let cells = self.library.find_cells_by_function(&CellFunction::ClockPad);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        panic!(
+            "Technology library '{}' does not contain ClockPad cell. \
+             Cannot synthesize clock pads without this primitive.",
+            self.library.name
+        )
+    }
+
+    /// Find an analog pad cell in the library
+    ///
+    /// Panics if the library doesn't contain an analog pad cell.
+    fn find_analog_pad_cell(&self) -> (String, f64) {
+        let cells = self
+            .library
+            .find_cells_by_function(&CellFunction::AnalogPad);
+        if let Some(cell) = cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        panic!(
+            "Technology library '{}' does not contain AnalogPad cell. \
+             Cannot synthesize analog pads without this primitive.",
             self.library.name
         )
     }

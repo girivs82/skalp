@@ -181,6 +181,9 @@ mod tests {
             schmitt_trigger: None,
             bank: None,
             diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -204,6 +207,9 @@ mod tests {
             schmitt_trigger: None,
             bank: None,
             diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -230,6 +236,9 @@ mod tests {
             schmitt_trigger: None,
             bank: None,
             diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -267,6 +276,9 @@ mod tests {
             schmitt_trigger: None,
             bank: None,
             diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
         };
 
         let port_type = HirType::Array(Box::new(HirType::Bit(1)), 4);
@@ -293,6 +305,9 @@ mod tests {
             schmitt_trigger: None,
             bank: None,
             diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
         };
 
         let port_type = HirType::Array(Box::new(HirType::Bit(1)), 4);
@@ -319,6 +334,9 @@ mod tests {
             schmitt_trigger: None,
             bank: None,
             diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
         };
 
         let port_type = HirType::Bit(1);

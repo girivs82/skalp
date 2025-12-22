@@ -731,6 +731,41 @@ impl<'a> AigBuilder<'a> {
                 inputs.first().copied().unwrap_or(AigLit::false_lit())
             }
 
+            // I/O Pads - these are physical interface cells, pass through signal
+            // InputPad: pad → core (data flows from external to internal)
+            CellFunction::InputPad => {
+                // First input is the pad signal, output is core signal
+                inputs.first().copied().unwrap_or(AigLit::false_lit())
+            }
+            // OutputPad: core → pad (data flows from internal to external)
+            CellFunction::OutputPad => {
+                // First input is core signal, second is output enable
+                inputs.first().copied().unwrap_or(AigLit::false_lit())
+            }
+            // BidirPad: bidirectional with OE
+            CellFunction::BidirPad => {
+                // First input is core_out signal
+                inputs.first().copied().unwrap_or(AigLit::false_lit())
+            }
+            // ClockPad: low-jitter clock input
+            CellFunction::ClockPad => inputs.first().copied().unwrap_or(AigLit::false_lit()),
+            // PowerPad: VDD pad (no logic signal)
+            CellFunction::PowerPad => {
+                AigLit::true_lit() // Power is always "high"
+            }
+            // GroundPad: VSS pad (no logic signal)
+            CellFunction::GroundPad => {
+                AigLit::false_lit() // Ground is always "low"
+            }
+            // AnalogPad: analog pass-through
+            CellFunction::AnalogPad => inputs.first().copied().unwrap_or(AigLit::false_lit()),
+            // PowerPadLdo: LDO power pad with enable and power-good
+            CellFunction::PowerPadLdo => {
+                // First input is voltage input, second is enable
+                // Output would be the regulated voltage and pgood
+                inputs.first().copied().unwrap_or(AigLit::true_lit())
+            }
+
             CellFunction::Custom(_) => {
                 // Unknown cell - just pass through first input
                 inputs.first().copied().unwrap_or(AigLit::false_lit())
@@ -831,6 +866,55 @@ impl<'a> AigBuilder<'a> {
         if upper.starts_with("TIE_LOW") || upper.starts_with("TIELOW") || upper.starts_with("TIELO")
         {
             return CellFunction::TieLow;
+        }
+
+        // Check I/O pad cells
+        if upper.starts_with("IOPAD_IN")
+            || upper.starts_with("INPUT_PAD")
+            || upper.starts_with("IPAD")
+        {
+            return CellFunction::InputPad;
+        }
+        if upper.starts_with("IOPAD_OUT")
+            || upper.starts_with("OUTPUT_PAD")
+            || upper.starts_with("OPAD")
+        {
+            return CellFunction::OutputPad;
+        }
+        if upper.starts_with("IOPAD_BIDIR")
+            || upper.starts_with("BIDIR_PAD")
+            || upper.starts_with("IOPAD")
+        {
+            return CellFunction::BidirPad;
+        }
+        if upper.starts_with("IOPAD_CLK")
+            || upper.starts_with("CLOCK_PAD")
+            || upper.starts_with("CLKPAD")
+        {
+            return CellFunction::ClockPad;
+        }
+        if upper.starts_with("IOPAD_VDD")
+            || upper.starts_with("POWER_PAD")
+            || upper.starts_with("VDDPAD")
+        {
+            // Check for LDO variant first
+            if upper.contains("LDO") {
+                return CellFunction::PowerPadLdo;
+            }
+            return CellFunction::PowerPad;
+        }
+        if upper.starts_with("IOPAD_VSS")
+            || upper.starts_with("GROUND_PAD")
+            || upper.starts_with("VSSPAD")
+            || upper.starts_with("GNDPAD")
+        {
+            return CellFunction::GroundPad;
+        }
+        if upper.starts_with("IOPAD_ANALOG")
+            || upper.starts_with("ANALOG_PAD")
+            || upper.starts_with("APAD")
+        {
+            return CellFunction::AnalogPad;
         }
 
         // Normalize name (remove drive strength suffix like _X1, _X2)

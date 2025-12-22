@@ -428,6 +428,30 @@ pub enum CellFunction {
     /// Tie-low cell: outputs constant 0
     TieLow,
 
+    // I/O Pads - Digital
+    /// Input pad: external → core (with ESD protection)
+    InputPad,
+    /// Output pad: core → external (with ESD protection)
+    OutputPad,
+    /// Bidirectional pad: both directions with enable
+    BidirPad,
+    /// Clock input pad: low-jitter clock input with ESD
+    ClockPad,
+
+    // I/O Pads - Power
+    /// Power pad: VDD with ESD protection
+    PowerPad,
+    /// Ground pad: VSS with ESD protection
+    GroundPad,
+
+    // I/O Pads - Analog
+    /// Analog pad: analog pass-through with ESD
+    AnalogPad,
+
+    // I/O Pads - Integrated LDO
+    /// Power pad with integrated Low Dropout Regulator
+    PowerPadLdo,
+
     // Custom/vendor-specific
     Custom(String),
 }
@@ -540,6 +564,21 @@ impl CellFunction {
             CellFunction::AlwaysOnBuf => (vec!["a".into()], vec!["y".into()]),
             // Tie cells have no inputs, just output
             CellFunction::TieHigh | CellFunction::TieLow => (Vec::new(), vec!["y".into()]),
+            // I/O Pads
+            CellFunction::InputPad => (vec!["pad".into()], vec!["core".into()]),
+            CellFunction::OutputPad => (vec!["core".into(), "oe".into()], vec!["pad".into()]),
+            CellFunction::BidirPad => (
+                vec!["core_out".into(), "oe".into()],
+                vec!["pad".into(), "core_in".into()],
+            ),
+            CellFunction::ClockPad => (vec!["pad".into()], vec!["core_clk".into()]),
+            CellFunction::PowerPad => (vec!["pad_vdd".into()], vec!["core_vdd".into()]),
+            CellFunction::GroundPad => (vec!["pad_vss".into()], vec!["core_vss".into()]),
+            CellFunction::AnalogPad => (vec!["pad".into()], vec!["core".into()]),
+            CellFunction::PowerPadLdo => (
+                vec!["pad_vin".into(), "enable".into()],
+                vec!["core_vout".into(), "pgood".into()],
+            ),
             CellFunction::Custom(_) => (Vec::new(), Vec::new()),
         }
     }
@@ -574,6 +613,26 @@ impl CellFunction {
                 | CellFunction::PowerSwitchFooter
                 | CellFunction::AlwaysOnBuf
         )
+    }
+
+    /// Check if this is an I/O pad cell
+    pub fn is_io_pad(&self) -> bool {
+        matches!(
+            self,
+            CellFunction::InputPad
+                | CellFunction::OutputPad
+                | CellFunction::BidirPad
+                | CellFunction::ClockPad
+                | CellFunction::PowerPad
+                | CellFunction::GroundPad
+                | CellFunction::AnalogPad
+                | CellFunction::PowerPadLdo
+        )
+    }
+
+    /// Check if this is an LDO (Low Dropout Regulator) pad
+    pub fn is_ldo_pad(&self) -> bool {
+        matches!(self, CellFunction::PowerPadLdo)
     }
 }
 
@@ -1524,6 +1583,15 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "always_on_buf" | "aob" => Ok(CellFunction::AlwaysOnBuf),
         "tie_high" | "tieh" => Ok(CellFunction::TieHigh),
         "tie_low" | "tiel" => Ok(CellFunction::TieLow),
+        // I/O Pads
+        "input_pad" | "ipad" => Ok(CellFunction::InputPad),
+        "output_pad" | "opad" => Ok(CellFunction::OutputPad),
+        "bidir_pad" | "iopad" => Ok(CellFunction::BidirPad),
+        "clock_pad" | "clkpad" => Ok(CellFunction::ClockPad),
+        "power_pad" | "vddpad" => Ok(CellFunction::PowerPad),
+        "ground_pad" | "vsspad" | "gndpad" => Ok(CellFunction::GroundPad),
+        "analog_pad" | "apad" => Ok(CellFunction::AnalogPad),
+        "power_pad_ldo" | "vddpad_ldo" | "ldopad" => Ok(CellFunction::PowerPadLdo),
         _ => {
             // Check for adder with width
             if lower.starts_with("adder") {
@@ -1587,6 +1655,15 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::AlwaysOnBuf => "always_on_buf".to_string(),
         CellFunction::TieHigh => "tie_high".to_string(),
         CellFunction::TieLow => "tie_low".to_string(),
+        // I/O Pads
+        CellFunction::InputPad => "input_pad".to_string(),
+        CellFunction::OutputPad => "output_pad".to_string(),
+        CellFunction::BidirPad => "bidir_pad".to_string(),
+        CellFunction::ClockPad => "clock_pad".to_string(),
+        CellFunction::PowerPad => "power_pad".to_string(),
+        CellFunction::GroundPad => "ground_pad".to_string(),
+        CellFunction::AnalogPad => "analog_pad".to_string(),
+        CellFunction::PowerPadLdo => "power_pad_ldo".to_string(),
         CellFunction::Custom(s) => s.clone(),
     }
 }

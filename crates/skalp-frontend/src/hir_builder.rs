@@ -9440,6 +9440,9 @@ impl HirBuilderContext {
             schmitt_trigger: None,
             bank: None,
             diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
         };
 
         for pair in node
@@ -9581,6 +9584,58 @@ impl HirBuilderContext {
                     Some(SyntaxKind::FalseKw) => constraints.diff_term = Some(false),
                     _ => {}
                 },
+                "pad" | "pad_type" => {
+                    // Parse pad type: pad: input, pad: output, etc.
+                    let value_lower = value_text.to_lowercase();
+                    constraints.pad_type = match value_lower.as_str() {
+                        "input" => Some(PadType::Input),
+                        "output" => Some(PadType::Output),
+                        "bidirectional" | "bidir" | "inout" => Some(PadType::Bidirectional),
+                        "clock" | "clk" => Some(PadType::Clock),
+                        "power" | "vdd" => Some(PadType::Power),
+                        "ground" | "gnd" | "vss" => Some(PadType::Ground),
+                        "analog" => Some(PadType::Analog),
+                        "power_ldo" | "ldo" => Some(PadType::PowerLdo),
+                        _ => None,
+                    };
+                }
+                "pad_cell" => {
+                    // Specific pad cell name: pad_cell: "IOPAD_IN_X1"
+                    constraints.pad_cell = Some(value_text.trim_matches('"').to_string());
+                }
+                "ldo_vin" | "ldo_input_mv" => {
+                    // LDO input voltage: ldo_vin: 3300
+                    if let Ok(voltage) = value_text.parse::<u32>() {
+                        let ldo = constraints.ldo_config.get_or_insert(LdoConfig {
+                            input_voltage_mv: 0,
+                            output_voltage_mv: 0,
+                            max_current_ma: 0,
+                        });
+                        ldo.input_voltage_mv = voltage;
+                    }
+                }
+                "ldo_vout" | "ldo_output_mv" => {
+                    // LDO output voltage: ldo_vout: 1800
+                    if let Ok(voltage) = value_text.parse::<u32>() {
+                        let ldo = constraints.ldo_config.get_or_insert(LdoConfig {
+                            input_voltage_mv: 0,
+                            output_voltage_mv: 0,
+                            max_current_ma: 0,
+                        });
+                        ldo.output_voltage_mv = voltage;
+                    }
+                }
+                "ldo_current" | "ldo_max_ma" => {
+                    // LDO max current: ldo_current: 100
+                    if let Ok(current) = value_text.parse::<u32>() {
+                        let ldo = constraints.ldo_config.get_or_insert(LdoConfig {
+                            input_voltage_mv: 0,
+                            output_voltage_mv: 0,
+                            max_current_ma: 0,
+                        });
+                        ldo.max_current_ma = current;
+                    }
+                }
                 _ => {}
             }
         }

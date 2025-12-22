@@ -30,6 +30,7 @@ mod dc2;
 mod dce;
 mod dchoice;
 mod fraig;
+mod pad_insert;
 mod refactor;
 mod resub;
 mod retiming;
@@ -44,6 +45,9 @@ pub use dc2::Dc2;
 pub use dce::Dce;
 pub use dchoice::Dchoice;
 pub use fraig::{run_fraig, run_fraig_with_config, Fraig, FraigConfig, FraigStats};
+pub use pad_insert::{
+    run_pad_insertion, PadInsertConfig, PadInsertStats, PadInsertion, PadInsertionMode,
+};
 pub use refactor::Refactor;
 pub use resub::Resub;
 pub use retiming::{

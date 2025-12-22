@@ -33,6 +33,18 @@ pub enum BarrierType {
     PowerSwitchHeader,
     /// Power switch (footer type)
     PowerSwitchFooter,
+
+    // I/O Pad barriers - optimization boundaries at chip interface
+    /// Input pad: external → core (with ESD protection)
+    InputPad,
+    /// Output pad: core → external (with ESD protection)
+    OutputPad,
+    /// Bidirectional pad: both directions with enable
+    BidirPad,
+    /// Clock input pad: low-jitter clock input
+    ClockPad,
+    /// Analog pad: analog pass-through with ESD
+    AnalogPad,
 }
 
 /// Unique identifier for an AIG node

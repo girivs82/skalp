@@ -2762,6 +2762,12 @@ pub struct PhysicalConstraints {
     pub bank: Option<u32>,
     /// Differential termination (for LVDS, etc.)
     pub diff_term: Option<bool>,
+    /// I/O pad type for ASIC designs
+    pub pad_type: Option<PadType>,
+    /// Specific pad cell to use (overrides automatic selection)
+    pub pad_cell: Option<String>,
+    /// LDO configuration (only valid when pad_type is PowerLdo)
+    pub ldo_config: Option<LdoConfig>,
 }
 
 /// Pin location specification
@@ -2815,6 +2821,38 @@ pub enum Termination {
     PullDown,
     /// Keeper (weak latch)
     Keeper,
+}
+
+/// I/O Pad type specification for ASIC designs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PadType {
+    /// Input pad (external → core)
+    Input,
+    /// Output pad (core → external)
+    Output,
+    /// Bidirectional pad with output enable
+    Bidirectional,
+    /// Clock input pad with low-jitter characteristics
+    Clock,
+    /// Power pad (VDD) with ESD protection
+    Power,
+    /// Ground pad (VSS) with ESD protection
+    Ground,
+    /// Analog pass-through pad
+    Analog,
+    /// Power pad with integrated LDO voltage regulator
+    PowerLdo,
+}
+
+/// LDO (Low Dropout Regulator) configuration for integrated voltage regulation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LdoConfig {
+    /// Input voltage in millivolts
+    pub input_voltage_mv: u32,
+    /// Output (regulated) voltage in millivolts
+    pub output_voltage_mv: u32,
+    /// Maximum current capability in milliamps
+    pub max_current_ma: u32,
 }
 
 /// Global constraint for device-wide settings

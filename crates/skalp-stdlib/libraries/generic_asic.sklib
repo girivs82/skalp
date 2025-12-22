@@ -2627,6 +2627,332 @@ fault_type = "transient"
 mechanism = "power_domain_noise"
 
 # =============================================================================
+# I/O Pads - Digital
+# =============================================================================
+
+# Input Pad (external -> core with ESD protection)
+[[cells]]
+name = "IOPAD_IN_X1"
+function = "input_pad"
+fit = 2.0
+area_um2 = 2500.0
+transistor_count = 50
+drive_strength = 1
+inputs = ["pad"]
+outputs = ["core"]
+
+[[cells.failure_modes]]
+name = "esd_clamp_fail"
+fit = 0.6
+fault_type = "open"
+mechanism = "esd_clamp_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.5
+fault_type = "stuck_at_0"
+mechanism = "input_buffer_fail"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.3
+fault_type = "stuck_at_1"
+mechanism = "input_buffer_fail"
+
+[[cells.failure_modes]]
+name = "bond_wire_fail"
+fit = 0.4
+fault_type = "open"
+mechanism = "bond_wire_lift"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.2
+fault_type = "transient"
+mechanism = "external_noise"
+
+# Output Pad (core -> external with ESD protection)
+[[cells]]
+name = "IOPAD_OUT_X1"
+function = "output_pad"
+fit = 2.5
+area_um2 = 3000.0
+transistor_count = 80
+drive_strength = 1
+inputs = ["core", "oe"]
+outputs = ["pad"]
+
+[[cells.failure_modes]]
+name = "esd_clamp_fail"
+fit = 0.75
+fault_type = "open"
+mechanism = "esd_clamp_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.6
+fault_type = "stuck_at_0"
+mechanism = "output_driver_nmos_fail"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.4
+fault_type = "stuck_at_1"
+mechanism = "output_driver_pmos_fail"
+
+[[cells.failure_modes]]
+name = "bond_wire_fail"
+fit = 0.5
+fault_type = "open"
+mechanism = "bond_wire_lift"
+
+[[cells.failure_modes]]
+name = "oe_fail"
+fit = 0.25
+fault_type = "stuck_at_1"
+mechanism = "output_enable_fail"
+
+# Bidirectional Pad (both directions with enable)
+[[cells]]
+name = "IOPAD_BIDIR_X1"
+function = "bidir_pad"
+fit = 3.5
+area_um2 = 4500.0
+transistor_count = 120
+drive_strength = 1
+inputs = ["core_out", "oe"]
+outputs = ["pad", "core_in"]
+
+[[cells.failure_modes]]
+name = "esd_clamp_fail"
+fit = 1.0
+fault_type = "open"
+mechanism = "esd_clamp_breakdown"
+
+[[cells.failure_modes]]
+name = "contention"
+fit = 0.8
+fault_type = "bridge"
+mechanism = "io_bus_contention"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.6
+fault_type = "stuck_at_0"
+mechanism = "driver_fail"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.4
+fault_type = "stuck_at_1"
+mechanism = "driver_fail"
+
+[[cells.failure_modes]]
+name = "bond_wire_fail"
+fit = 0.5
+fault_type = "open"
+mechanism = "bond_wire_lift"
+
+[[cells.failure_modes]]
+name = "direction_fail"
+fit = 0.2
+fault_type = "stuck_at_0"
+mechanism = "direction_control_fail"
+
+# Clock Input Pad (low-jitter clock input with ESD)
+[[cells]]
+name = "IOPAD_CLK_X1"
+function = "clock_pad"
+fit = 3.0
+area_um2 = 4000.0
+transistor_count = 100
+drive_strength = 1
+inputs = ["pad"]
+outputs = ["core_clk"]
+
+[[cells.failure_modes]]
+name = "jitter_increase"
+fit = 0.9
+fault_type = "timing"
+mechanism = "clock_buffer_degradation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.6
+fault_type = "stuck_at_0"
+mechanism = "clock_buffer_fail"
+
+[[cells.failure_modes]]
+name = "esd_clamp_fail"
+fit = 0.6
+fault_type = "open"
+mechanism = "esd_clamp_breakdown"
+
+[[cells.failure_modes]]
+name = "duty_cycle_distortion"
+fit = 0.5
+fault_type = "timing"
+mechanism = "asymmetric_buffer"
+
+[[cells.failure_modes]]
+name = "bond_wire_fail"
+fit = 0.4
+fault_type = "open"
+mechanism = "bond_wire_lift"
+
+# =============================================================================
+# I/O Pads - Power
+# =============================================================================
+
+# Power Pad (VDD with ESD protection)
+[[cells]]
+name = "IOPAD_VDD_X1"
+function = "power_pad"
+fit = 1.5
+area_um2 = 5000.0
+transistor_count = 20
+drive_strength = 1
+inputs = ["pad_vdd"]
+outputs = ["core_vdd"]
+
+[[cells.failure_modes]]
+name = "electromigration"
+fit = 0.6
+fault_type = "open"
+mechanism = "power_rail_em"
+
+[[cells.failure_modes]]
+name = "bond_wire_lift"
+fit = 0.5
+fault_type = "open"
+mechanism = "bond_wire_fatigue"
+
+[[cells.failure_modes]]
+name = "esd_fail"
+fit = 0.4
+fault_type = "bridge"
+mechanism = "esd_clamp_short"
+
+# Ground Pad (VSS with ESD protection)
+[[cells]]
+name = "IOPAD_VSS_X1"
+function = "ground_pad"
+fit = 1.5
+area_um2 = 5000.0
+transistor_count = 20
+drive_strength = 1
+inputs = ["pad_vss"]
+outputs = ["core_vss"]
+
+[[cells.failure_modes]]
+name = "electromigration"
+fit = 0.6
+fault_type = "open"
+mechanism = "ground_rail_em"
+
+[[cells.failure_modes]]
+name = "ground_bounce"
+fit = 0.4
+fault_type = "transient"
+mechanism = "inductive_bounce"
+
+[[cells.failure_modes]]
+name = "bond_wire_lift"
+fit = 0.5
+fault_type = "open"
+mechanism = "bond_wire_fatigue"
+
+# =============================================================================
+# I/O Pads - Analog
+# =============================================================================
+
+# Analog Pad (analog pass-through with ESD)
+[[cells]]
+name = "IOPAD_ANALOG_X1"
+function = "analog_pad"
+fit = 2.0
+area_um2 = 3000.0
+transistor_count = 30
+drive_strength = 1
+inputs = ["pad"]
+outputs = ["core"]
+
+[[cells.failure_modes]]
+name = "esd_clamp_fail"
+fit = 0.8
+fault_type = "open"
+mechanism = "esd_clamp_breakdown"
+
+[[cells.failure_modes]]
+name = "linearity_degradation"
+fit = 0.5
+fault_type = "delay"
+mechanism = "transistor_aging"
+
+[[cells.failure_modes]]
+name = "bond_wire_fail"
+fit = 0.4
+fault_type = "open"
+mechanism = "bond_wire_lift"
+
+[[cells.failure_modes]]
+name = "noise_coupling"
+fit = 0.3
+fault_type = "transient"
+mechanism = "substrate_noise"
+
+# =============================================================================
+# I/O Pads - Integrated LDO
+# =============================================================================
+
+# Power Pad with integrated Low Dropout Regulator
+[[cells]]
+name = "IOPAD_VDD_LDO"
+function = "power_pad_ldo"
+fit = 8.0
+area_um2 = 25000.0
+transistor_count = 500
+drive_strength = 1
+inputs = ["pad_vin", "enable"]
+outputs = ["core_vout", "pgood"]
+
+[[cells.failure_modes]]
+name = "regulator_fail"
+fit = 2.5
+fault_type = "stuck_at_0"
+mechanism = "pass_transistor_fail"
+
+[[cells.failure_modes]]
+name = "pass_transistor_fail"
+fit = 2.7
+fault_type = "open"
+mechanism = "pmos_degradation"
+
+[[cells.failure_modes]]
+name = "feedback_loop_fail"
+fit = 1.2
+fault_type = "stuck_at_1"
+mechanism = "opamp_fail"
+
+[[cells.failure_modes]]
+name = "overvoltage"
+fit = 0.8
+fault_type = "bridge"
+mechanism = "regulation_loss"
+
+[[cells.failure_modes]]
+name = "pgood_fail"
+fit = 0.4
+fault_type = "stuck_at_1"
+mechanism = "comparator_fail"
+
+[[cells.failure_modes]]
+name = "startup_fail"
+fit = 0.4
+fault_type = "timing"
+mechanism = "softstart_circuit_fail"
+
+# =============================================================================
 # Decomposition Rules
 # =============================================================================
 
