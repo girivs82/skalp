@@ -146,21 +146,24 @@ impl Pass for Dce {
             Option<bool>,
         )> = Vec::new();
 
-        // Phase 1a: Process inputs and pre-create latches/barriers (only live ones)
+        // Phase 1a: Process inputs FIRST (must be in node_map before latches reference them)
         for (id, node) in aig.iter_nodes() {
             if !live.contains(&id) {
                 continue;
             }
+            if let AigNode::Input { name, source_net } = node {
+                let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
+                let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
+                node_map.insert(id, AigLit::new(new_id));
+            }
+        }
 
+        // Phase 1a': Pre-create latches and barriers (now clock/reset inputs are in node_map)
+        for (id, node) in aig.iter_nodes() {
+            if !live.contains(&id) {
+                continue;
+            }
             match node {
-                AigNode::Const => {
-                    // Already handled
-                }
-                AigNode::Input { name, source_net } => {
-                    let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                    let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
-                    node_map.insert(id, AigLit::new(new_id));
-                }
                 AigNode::Latch {
                     data,
                     init,
@@ -213,8 +216,8 @@ impl Pass for Dce {
                         *init,
                     ));
                 }
-                AigNode::And { .. } => {
-                    // Will process in phase 1b
+                _ => {
+                    // Const, Input, And handled elsewhere
                 }
             }
         }
