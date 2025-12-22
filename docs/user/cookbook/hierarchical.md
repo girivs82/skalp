@@ -694,12 +694,52 @@ let sub_output = tb.get_as::<u8>("my_instance.output").await;
 
 ---
 
+## Gate-Level Hierarchical Synthesis
+
+When targeting gate-level output (`--target gates`), SKALP automatically detects hierarchical designs and optimizes them with per-instance specialization.
+
+### How It Works
+
+1. **Auto-Detection**: Multi-module designs trigger hierarchical synthesis
+2. **Per-Instance Optimization**: Each instance is synthesized independently
+3. **Port Stitching**: All connection types are properly handled
+4. **Cross-Boundary Cleanup**: DCE and constant propagation after flattening
+
+### Supported Connection Types
+
+All connection patterns work with gate-level synthesis:
+
+```skalp
+let shifter = Shifter {
+    data: a,              // Signal connection
+    shift_amt: b[4:0],    // Range slice connection
+    shift_left: op[0],    // Bit-select connection
+    enable: 1,            // Constant connection
+    result: shift_out
+}
+```
+
+### Usage
+
+```bash
+# Build with gate-level target (hierarchical auto-detected)
+skalp build -s design.sk --target gates -o output/
+
+# Example output:
+# [STITCH] Instance 'top.shifter' has 4 port connections
+# [STITCH]   ✓ top.shifter.shift_left <-> top.op[0]
+# [STITCH]   ✓ top.shifter.shift_amt <-> top.b[4:0] (range: 5 bits)
+```
+
+---
+
 ## See Also
 
 - [Combinational Patterns](combinational.md) - Basic building blocks
 - [Sequential Patterns](sequential.md) - Registers and counters
 - [Memory Patterns](memories.md) - RAMs and FIFOs
 - [Syntax Reference](../reference/syntax.md) - Language syntax
+- [What's New](../../WHATS_NEW.md) - Latest features including hierarchical synthesis
 
 ---
 
@@ -709,3 +749,4 @@ let sub_output = tb.get_as::<u8>("my_instance.output").await;
 - Pass clocks and resets explicitly
 - Build complex systems from simple, reusable components
 - Use hierarchical design for maintainability and reusability
+- Gate-level synthesis fully supports all connection types including range slices and bit-selects

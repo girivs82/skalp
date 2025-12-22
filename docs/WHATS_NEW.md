@@ -1,6 +1,104 @@
 # What's New in SKALP
 
-**Last Updated:** 2025-12-19
+**Last Updated:** 2025-12-22
+
+---
+
+## 🏗️ Hierarchical Gate-Level Synthesis (NEW)
+
+**Status:** ✅ Complete
+**CLI Flags:** `--target gates`
+
+SKALP now supports hierarchical synthesis where multi-module designs are automatically detected and optimized with per-instance specialization.
+
+### Features
+
+- **Automatic Detection**: Multi-module designs are automatically routed to hierarchical synthesis
+- **Per-Instance Optimization**: Each module instance is synthesized independently with context-aware specialization
+- **Parallel Synthesis**: All instances are optimized concurrently using rayon
+- **Smart Port Stitching**: Handles all connection types between parent and child modules
+- **Cross-Boundary Cleanup**: DCE and constant propagation after flattening
+
+### Supported Port Connection Types
+
+| Connection Type | Example | Description |
+|----------------|---------|-------------|
+| Signal | `a: parent_sig` | Direct signal connection |
+| Constant | `en: 1` | Constant value tie-off |
+| Range Slice | `data: bus[7:0]` | Connect to bit range of parent signal |
+| Bit Select | `flag: ctrl[0]` | Connect to single bit of parent signal |
+| Child Port | Inter-instance | Direct connection between siblings |
+
+### Usage
+
+```bash
+# Hierarchical design is auto-detected
+skalp build -s design.sk --target gates
+
+# Example output for hierarchical_alu.sk:
+# [STITCH] Instance 'top.shifter' has 4 port connections
+# [STITCH]   ✓ top.shifter.shift_left <-> top.op[0]
+# [STITCH]   ✓ top.shifter.shift_amt <-> top.b[4:0] (range: 5 bits)
+# [STITCH]   ✓ top.shifter.result <-> top.shift_result (bit-level: 8 bits)
+# [STITCH]   ✓ top.shifter.data <-> top.a (bit-level: 8 bits)
+```
+
+### Example
+
+```skalp
+entity Shifter<const WIDTH: nat = 32> {
+    in data: bit[WIDTH]
+    in shift_amt: bit[5]
+    in shift_left: bit
+    out result: bit[WIDTH]
+}
+
+impl Shifter {
+    result = if shift_left { data << shift_amt } else { data >> shift_amt }
+}
+
+entity ALU<const WIDTH: nat = 32> {
+    in a: bit[WIDTH]
+    in b: bit[WIDTH]
+    in op: bit[3]
+    out result: bit[WIDTH]
+}
+
+impl ALU {
+    signal shift_result: bit[WIDTH]
+
+    // Shifter with range and bit-select connections
+    let shifter = Shifter<WIDTH> {
+        data: a,
+        shift_amt: b[4:0],      // Range connection
+        shift_left: op[0],      // Bit-select connection
+        result: shift_result
+    }
+
+    result = match op {
+        0b101 => shift_result,
+        _ => a + b
+    }
+}
+```
+
+### Architecture
+
+```
+MIR (with hierarchy)
+  ↓
+Hierarchical MIR→LIR (processes all modules + instances)
+  ↓
+Per-Instance Elaboration (propagate constants, mark unused outputs)
+  ↓
+Parallel Synthesis (rayon: optimize each instance)
+  ↓
+Flatten & Stitch (connect at boundaries)
+  ↓
+Cross-Boundary Cleanup (DCE, const prop)
+  ↓
+Final GateNetlist
+```
 
 ---
 
