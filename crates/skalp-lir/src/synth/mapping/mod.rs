@@ -256,7 +256,16 @@ impl CellMatcher {
             ]),
 
             // MUX: s ? b : a
-            CellFunction::Mux2 => Some(vec![(0xCA, vec!["A", "B", "S"])]),
+            // All 6 input permutations for proper matching regardless of leaf ordering
+            // The truth table depends on which input maps to index 0, 1, 2
+            CellFunction::Mux2 => Some(vec![
+                (0xCA, vec!["A", "B", "S"]), // inputs: (A=i0, B=i1, S=i2)
+                (0xD2, vec!["A", "S", "B"]), // inputs: (A=i0, S=i1, B=i2)
+                (0xAC, vec!["B", "A", "S"]), // inputs: (B=i0, A=i1, S=i2)
+                (0xB4, vec!["B", "S", "A"]), // inputs: (B=i0, S=i1, A=i2)
+                (0xE4, vec!["S", "A", "B"]), // inputs: (S=i0, A=i1, B=i2)
+                (0xD8, vec!["S", "B", "A"]), // inputs: (S=i0, B=i1, A=i2)
+            ]),
 
             // Sequential and other cells don't have truth tables
             _ => None,
@@ -314,10 +323,14 @@ impl CellMatcher {
         // NOR3: f = !(a | b | c)
         self.add_cell_match(0x01, "NOR3_X1", 2.0, 24.0, vec!["A", "B", "C"]);
 
-        // MUX (4-input for 3-input function): s ? b : a
-        // For 3 inputs: index_0 = a, index_1 = b, index_2 = s
-        // tt = 11001010 = 0xCA
+        // MUX (3-input function): s ? b : a
+        // All 6 input permutations for proper matching regardless of leaf ordering
         self.add_cell_match(0xCA, "MUX2_X1", 3.0, 30.0, vec!["A", "B", "S"]);
+        self.add_cell_match(0xD2, "MUX2_X1", 3.0, 30.0, vec!["A", "S", "B"]);
+        self.add_cell_match(0xAC, "MUX2_X1", 3.0, 30.0, vec!["B", "A", "S"]);
+        self.add_cell_match(0xB4, "MUX2_X1", 3.0, 30.0, vec!["B", "S", "A"]);
+        self.add_cell_match(0xE4, "MUX2_X1", 3.0, 30.0, vec!["S", "A", "B"]);
+        self.add_cell_match(0xD8, "MUX2_X1", 3.0, 30.0, vec!["S", "B", "A"]);
 
         // AOI21: !(a & b | c)
         self.add_cell_match(0x15, "AOI21_X1", 2.0, 20.0, vec!["A", "B", "C"]);
@@ -411,9 +424,14 @@ impl CellMatcher {
             self.add_cell_match(0x01, "NOR3_X1", 2.0, 24.0, vec!["A", "B", "C"]);
         }
 
-        // MUX
+        // MUX - all 6 input permutations
         if !covered.contains(&CellFunction::Mux2) {
             self.add_cell_match(0xCA, "MUX2_X1", 3.0, 30.0, vec!["A", "B", "S"]);
+            self.add_cell_match(0xD2, "MUX2_X1", 3.0, 30.0, vec!["A", "S", "B"]);
+            self.add_cell_match(0xAC, "MUX2_X1", 3.0, 30.0, vec!["B", "A", "S"]);
+            self.add_cell_match(0xB4, "MUX2_X1", 3.0, 30.0, vec!["B", "S", "A"]);
+            self.add_cell_match(0xE4, "MUX2_X1", 3.0, 30.0, vec!["S", "A", "B"]);
+            self.add_cell_match(0xD8, "MUX2_X1", 3.0, 30.0, vec!["S", "B", "A"]);
         }
 
         // AOI/OAI 21
@@ -678,5 +696,23 @@ mod tests {
             matches.iter().any(|m| m.cell_type.contains("AND")),
             "Library-aware matcher should find AND2 for truth table 0x8"
         );
+    }
+
+    #[test]
+    fn test_mux_all_permutations() {
+        let matcher = CellMatcher::new();
+
+        // All 6 MUX permutations should match MUX2_X1
+        let mux_truth_tables = [0xCA, 0xD2, 0xAC, 0xB4, 0xE4, 0xD8];
+
+        for tt in mux_truth_tables {
+            let matches = matcher.find_matches(tt, 3);
+            assert!(
+                matches.iter().any(|m| m.cell_type == "MUX2_X1"),
+                "Expected MUX2_X1 for truth table 0x{:02X}, got: {:?}",
+                tt,
+                matches.iter().map(|m| &m.cell_type).collect::<Vec<_>>()
+            );
+        }
     }
 }
