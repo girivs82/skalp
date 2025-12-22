@@ -147,7 +147,12 @@ struct CellMatch {
 }
 
 impl CellMatcher {
-    /// Create a new cell matcher with default/hardcoded cells
+    /// Create a new cell matcher with hardcoded cells for testing
+    ///
+    /// # Warning
+    /// This is intended for testing only. For production use,
+    /// use `from_library()` to ensure cells come from the target library.
+    #[cfg(test)]
     pub fn new() -> Self {
         let mut matcher = Self {
             cells: HashMap::new(),
@@ -159,22 +164,19 @@ impl CellMatcher {
 
     /// Create a cell matcher from a technology library
     ///
-    /// This is the preferred way to create a CellMatcher as it uses
-    /// the actual cells available in the library with their real costs.
+    /// This is the only way to create a CellMatcher for production use.
+    /// The matcher will only contain cells available in the library.
+    /// If the library is missing required cells, synthesis will fail
+    /// when attempting to use unavailable cells.
     pub fn from_library(library: &TechLibrary) -> Self {
         let mut matcher = Self {
             cells: HashMap::new(),
             tt_to_cell: HashMap::new(),
         };
 
-        // Track which functions are covered by the library
-        let mut covered_functions = std::collections::HashSet::new();
-
         // Add cells from the library based on their function
         for (name, cell) in library.iter_cells() {
             if let Some(tt_pin_pairs) = Self::function_to_truth_tables(&cell.function) {
-                covered_functions.insert(cell.function.clone());
-
                 // Use library cell costs - fit represents relative complexity
                 // Scale to reasonable area units (fit ~0.05-0.2 → area ~1-4)
                 let area = 1.0 + cell.fit * 15.0;
@@ -186,10 +188,6 @@ impl CellMatcher {
                 }
             }
         }
-
-        // Add hardcoded cells for functions NOT covered by the library
-        // This ensures we always have basic coverage even with incomplete libraries
-        matcher.init_basic_cells_for_missing(&covered_functions);
 
         matcher
     }
@@ -272,7 +270,8 @@ impl CellMatcher {
         }
     }
 
-    /// Initialize with basic combinational cells
+    /// Initialize with basic combinational cells (for testing only)
+    #[cfg(test)]
     fn init_basic_cells(&mut self) {
         // 2-input gates (truth table for 2 inputs: bits [0..3])
         // AND: f = a & b, tt = 1000 = 0x8
@@ -375,104 +374,6 @@ impl CellMatcher {
         self.add_cell_match(0x1F, "OAI21_X1", 2.0, 20.0, vec!["A", "B", "C"]); // !((a|b) & c)
         self.add_cell_match(0x2F, "OAI21_X1", 2.0, 20.0, vec!["A", "C", "B"]); // !((a|c) & b)
         self.add_cell_match(0x4F, "OAI21_X1", 2.0, 20.0, vec!["B", "C", "A"]); // !((b|c) & a)
-    }
-
-    /// Initialize hardcoded cells only for functions NOT already covered by the library
-    ///
-    /// This ensures we have baseline coverage for all common functions while
-    /// preferring library cells when available (since they have accurate costs).
-    fn init_basic_cells_for_missing(&mut self, covered: &std::collections::HashSet<CellFunction>) {
-        // 2-input gates
-        if !covered.contains(&CellFunction::And2) {
-            self.add_cell_match(0x8, "AND2_X1", 2.0, 25.0, vec!["A", "B"]);
-        }
-        if !covered.contains(&CellFunction::Or2) {
-            self.add_cell_match(0xE, "OR2_X1", 2.0, 22.0, vec!["A", "B"]);
-        }
-        if !covered.contains(&CellFunction::Nand2) {
-            self.add_cell_match(0x7, "NAND2_X1", 1.5, 18.0, vec!["A", "B"]);
-        }
-        if !covered.contains(&CellFunction::Nor2) {
-            self.add_cell_match(0x1, "NOR2_X1", 1.5, 20.0, vec!["A", "B"]);
-        }
-        if !covered.contains(&CellFunction::Xor2) {
-            self.add_cell_match(0x6, "XOR2_X1", 3.0, 35.0, vec!["A", "B"]);
-        }
-        if !covered.contains(&CellFunction::Xnor2) {
-            self.add_cell_match(0x9, "XNOR2_X1", 3.0, 35.0, vec!["A", "B"]);
-        }
-        if !covered.contains(&CellFunction::AndNot) {
-            self.add_cell_match(0x2, "ANDNOT_X1", 1.5, 20.0, vec!["A", "B"]);
-            self.add_cell_match(0x4, "ANDNOT_X1", 1.5, 20.0, vec!["B", "A"]);
-        }
-        if !covered.contains(&CellFunction::OrNot) {
-            self.add_cell_match(0xB, "ORNOT_X1", 1.5, 20.0, vec!["A", "B"]);
-            self.add_cell_match(0xD, "ORNOT_X1", 1.5, 20.0, vec!["B", "A"]);
-        }
-
-        // 3-input gates
-        if !covered.contains(&CellFunction::And3) {
-            self.add_cell_match(0x80, "AND3_X1", 2.5, 30.0, vec!["A", "B", "C"]);
-        }
-        if !covered.contains(&CellFunction::Or3) {
-            self.add_cell_match(0xFE, "OR3_X1", 2.5, 28.0, vec!["A", "B", "C"]);
-        }
-        if !covered.contains(&CellFunction::Nand3) {
-            self.add_cell_match(0x7F, "NAND3_X1", 2.0, 22.0, vec!["A", "B", "C"]);
-        }
-        if !covered.contains(&CellFunction::Nor3) {
-            self.add_cell_match(0x01, "NOR3_X1", 2.0, 24.0, vec!["A", "B", "C"]);
-        }
-
-        // MUX - all 6 input permutations
-        if !covered.contains(&CellFunction::Mux2) {
-            self.add_cell_match(0xCA, "MUX2_X1", 3.0, 30.0, vec!["A", "B", "S"]);
-            self.add_cell_match(0xD2, "MUX2_X1", 3.0, 30.0, vec!["A", "S", "B"]);
-            self.add_cell_match(0xAC, "MUX2_X1", 3.0, 30.0, vec!["B", "A", "S"]);
-            self.add_cell_match(0xB4, "MUX2_X1", 3.0, 30.0, vec!["B", "S", "A"]);
-            self.add_cell_match(0xE4, "MUX2_X1", 3.0, 30.0, vec!["S", "A", "B"]);
-            self.add_cell_match(0xD8, "MUX2_X1", 3.0, 30.0, vec!["S", "B", "A"]);
-        }
-
-        // AOI/OAI 21
-        if !covered.contains(&CellFunction::Aoi21) {
-            self.add_cell_match(0x15, "AOI21_X1", 2.0, 20.0, vec!["A", "B", "C"]);
-            self.add_cell_match(0x07, "AOI21_X1", 2.0, 20.0, vec!["A", "B", "C"]);
-            self.add_cell_match(0x23, "AOI21_X1", 2.0, 20.0, vec!["A", "C", "B"]);
-            self.add_cell_match(0x45, "AOI21_X1", 2.0, 20.0, vec!["B", "C", "A"]);
-        }
-        if !covered.contains(&CellFunction::Oai21) {
-            self.add_cell_match(0x57, "OAI21_X1", 2.0, 20.0, vec!["A", "B", "C"]);
-            self.add_cell_match(0x1F, "OAI21_X1", 2.0, 20.0, vec!["A", "B", "C"]);
-            self.add_cell_match(0x2F, "OAI21_X1", 2.0, 20.0, vec!["A", "C", "B"]);
-            self.add_cell_match(0x4F, "OAI21_X1", 2.0, 20.0, vec!["B", "C", "A"]);
-        }
-
-        // 4-input gates
-        if !covered.contains(&CellFunction::And4) {
-            self.add_cell_match(0x8000, "AND4_X1", 3.0, 35.0, vec!["A", "B", "C", "D"]);
-        }
-        if !covered.contains(&CellFunction::Or4) {
-            self.add_cell_match(0xFFFE, "OR4_X1", 3.0, 32.0, vec!["A", "B", "C", "D"]);
-        }
-        if !covered.contains(&CellFunction::Nand4) {
-            self.add_cell_match(0x7FFF, "NAND4_X1", 2.5, 25.0, vec!["A", "B", "C", "D"]);
-        }
-        if !covered.contains(&CellFunction::Nor4) {
-            self.add_cell_match(0x0001, "NOR4_X1", 2.5, 28.0, vec!["A", "B", "C", "D"]);
-        }
-
-        // AOI/OAI 22
-        if !covered.contains(&CellFunction::Aoi22) {
-            self.add_cell_match(0x0777, "AOI4_X1", 2.0, 22.0, vec!["A", "B", "C", "D"]);
-            self.add_cell_match(0x135F, "AOI4_X1", 2.0, 22.0, vec!["A", "C", "B", "D"]);
-            self.add_cell_match(0x153F, "AOI4_X1", 2.0, 22.0, vec!["A", "D", "B", "C"]);
-        }
-        if !covered.contains(&CellFunction::Oai22) {
-            self.add_cell_match(0x111F, "OAI4_X1", 2.0, 22.0, vec!["A", "B", "C", "D"]);
-            self.add_cell_match(0x0537, "OAI4_X1", 2.0, 22.0, vec!["A", "C", "B", "D"]);
-            self.add_cell_match(0x0357, "OAI4_X1", 2.0, 22.0, vec!["A", "D", "B", "C"]);
-        }
     }
 
     fn add_cell_match(
@@ -581,6 +482,7 @@ impl CellMatcher {
     }
 }
 
+#[cfg(test)]
 impl Default for CellMatcher {
     fn default() -> Self {
         Self::new()

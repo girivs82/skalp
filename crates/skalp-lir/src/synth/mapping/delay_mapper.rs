@@ -7,6 +7,7 @@ use super::{CellMatcher, CutMatch, MappedNode, MappingStats};
 use crate::synth::cuts::{CutEnumeration, CutParams};
 use crate::synth::timing::{NetTiming, TimePs};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, Cut};
+use crate::tech_library::TechLibrary;
 use std::collections::{HashMap, HashSet};
 
 /// Configuration for delay-optimal mapping
@@ -41,14 +42,29 @@ pub struct DelayMapper {
     config: DelayMappingConfig,
 }
 
-impl Default for DelayMapper {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl DelayMapper {
-    /// Create a new delay mapper with default config
+    /// Create a delay mapper from a technology library
+    ///
+    /// This is the only way to create a DelayMapper for production use.
+    /// The mapper will only use cells available in the library.
+    pub fn from_library(library: &TechLibrary) -> Self {
+        Self {
+            matcher: CellMatcher::from_library(library),
+            config: DelayMappingConfig::default(),
+        }
+    }
+
+    /// Create from library with specific configuration
+    pub fn from_library_with_config(library: &TechLibrary, config: DelayMappingConfig) -> Self {
+        Self {
+            matcher: CellMatcher::from_library(library),
+            config,
+        }
+    }
+
+    /// Create a new delay mapper with hardcoded cells for testing only
+    #[cfg(test)]
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             matcher: CellMatcher::new(),
@@ -56,7 +72,8 @@ impl DelayMapper {
         }
     }
 
-    /// Create with specific configuration
+    /// Create with specific configuration for testing only
+    #[cfg(test)]
     pub fn with_config(config: DelayMappingConfig) -> Self {
         Self {
             matcher: CellMatcher::new(),

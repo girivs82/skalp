@@ -458,16 +458,12 @@ impl SynthEngine {
             self.run_timing_analysis(aig);
         }
 
-        // Use library-aware mapping if library is provided
+        // Technology mapping requires a library
         if let Some(lib) = library {
             self.run_technology_mapping(aig, lib);
         } else {
-            // Use default mapping (without library)
-            let result = CutMapper::with_config(CutMapperConfig::quality()).map(aig);
-            if self.config.verbose {
-                eprintln!("Mapping: {}", result.stats.summary());
-            }
-            self.mapping_result = Some(result);
+            // No library provided - skip mapping (caller must handle this)
+            // The mapping will be done at a higher level with the appropriate library
         }
 
         self.pass_results.clone()
@@ -743,7 +739,7 @@ impl SynthEngine {
                     area_recovery: true,
                     ..Default::default()
                 };
-                let mapper = DelayMapper::with_config(config);
+                let mapper = DelayMapper::from_library_with_config(library, config);
                 let delay_result = mapper.map(aig);
                 MappingResult {
                     mapped_nodes: delay_result.mapped_nodes,

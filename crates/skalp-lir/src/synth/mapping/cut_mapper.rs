@@ -87,29 +87,11 @@ pub struct CutMapper {
     config: CutMapperConfig,
 }
 
-impl Default for CutMapper {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl CutMapper {
-    /// Create a new mapper with default settings
-    pub fn new() -> Self {
-        Self {
-            matcher: CellMatcher::new(),
-            cut_params: CutParams::default(),
-            objective: MappingObjective::Balanced,
-            area_weight: 1.0,
-            delay_weight: 1.0,
-            config: CutMapperConfig::default(),
-        }
-    }
-
     /// Create a mapper that uses cells from a technology library
     ///
-    /// This is the preferred constructor as it uses the actual cells
-    /// available in the library with their real costs and timing.
+    /// This is the only way to create a CutMapper for production use.
+    /// The mapper will only use cells available in the library.
     pub fn from_library(library: &TechLibrary) -> Self {
         Self {
             matcher: CellMatcher::from_library(library),
@@ -140,7 +122,34 @@ impl CutMapper {
         }
     }
 
-    /// Create mapper with specific objective
+    /// Create mapper from library with specific objective
+    pub fn from_library_with_objective(library: &TechLibrary, objective: MappingObjective) -> Self {
+        Self {
+            matcher: CellMatcher::from_library(library),
+            cut_params: CutParams::default(),
+            objective,
+            area_weight: 1.0,
+            delay_weight: 1.0,
+            config: CutMapperConfig::default(),
+        }
+    }
+
+    /// Create a new mapper with hardcoded cells for testing only
+    #[cfg(test)]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self {
+            matcher: CellMatcher::new(),
+            cut_params: CutParams::default(),
+            objective: MappingObjective::Balanced,
+            area_weight: 1.0,
+            delay_weight: 1.0,
+            config: CutMapperConfig::default(),
+        }
+    }
+
+    /// Create mapper with specific objective for testing only
+    #[cfg(test)]
     pub fn with_objective(objective: MappingObjective) -> Self {
         Self {
             matcher: CellMatcher::new(),
@@ -152,7 +161,8 @@ impl CutMapper {
         }
     }
 
-    /// Create mapper with specific configuration
+    /// Create mapper with specific configuration for testing only
+    #[cfg(test)]
     pub fn with_config(config: CutMapperConfig) -> Self {
         let cut_params = CutParams {
             k: config.cut_size,

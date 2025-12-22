@@ -43,15 +43,6 @@ impl LibraryCellInfo {
                 .collect(),
         }
     }
-
-    /// Create a default fallback when no library cell is found
-    fn fallback(name: String, fit: f64) -> Self {
-        Self {
-            name,
-            fit,
-            failure_modes: Vec::new(),
-        }
-    }
 }
 
 /// Convert a library failure mode to a cell failure mode
@@ -122,12 +113,21 @@ impl<'a> TechMapper<'a> {
         }
     }
 
-    /// Get library cell info for a function, with fallback
-    fn get_cell_info(&self, function: &CellFunction, default_fit: f64) -> LibraryCellInfo {
+    /// Get library cell info for a function
+    ///
+    /// # Panics
+    /// Panics if the library doesn't contain a cell for the requested function.
+    fn get_cell_info(&self, function: &CellFunction) -> LibraryCellInfo {
         self.library
             .find_best_cell(function)
             .map(LibraryCellInfo::from_library_cell)
-            .unwrap_or_else(|| LibraryCellInfo::fallback(format!("{:?}", function), default_fit))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Technology library '{}' does not contain cell for function {:?}. \
+                     Cannot synthesize without this cell type.",
+                    self.library.name, function
+                )
+            })
     }
 
     /// Map a Lir to a GateNetlist
@@ -356,7 +356,7 @@ impl<'a> TechMapper<'a> {
                         &format!("{}.gt", node.path),
                     );
                     // Then invert
-                    let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
+                    let inv_info = self.get_cell_info(&CellFunction::Inv);
                     let y = output_nets.first().copied().unwrap_or(GateNetId(0));
                     let inv_cell = Cell::new_comb(
                         CellId(0),
@@ -389,7 +389,7 @@ impl<'a> TechMapper<'a> {
                         &format!("{}.lt", node.path),
                     );
                     // Then invert
-                    let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
+                    let inv_info = self.get_cell_info(&CellFunction::Inv);
                     let y = output_nets.first().copied().unwrap_or(GateNetId(0));
                     let inv_cell = Cell::new_comb(
                         CellId(0),
@@ -541,7 +541,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let cell_info = self.get_cell_info(&function, 0.1);
+        let cell_info = self.get_cell_info(&function);
 
         for bit in 0..width as usize {
             let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
@@ -579,7 +579,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let cell_info = self.get_cell_info(&function, 0.05);
+        let cell_info = self.get_cell_info(&function);
 
         for bit in 0..width as usize {
             let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
@@ -641,8 +641,8 @@ impl<'a> TechMapper<'a> {
         }
 
         // Otherwise, decompose to half adder + full adders
-        let ha_info = self.get_cell_info(&CellFunction::HalfAdder, 0.2);
-        let fa_info = self.get_cell_info(&CellFunction::FullAdder, 0.3);
+        let ha_info = self.get_cell_info(&CellFunction::HalfAdder);
+        let fa_info = self.get_cell_info(&CellFunction::FullAdder);
 
         let mut carry_net: Option<GateNetId> = None;
 
@@ -708,8 +708,8 @@ impl<'a> TechMapper<'a> {
         }
 
         // Invert b, then add with carry_in=1
-        let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
-        let fa_info = self.get_cell_info(&CellFunction::FullAdder, 0.3);
+        let inv_info = self.get_cell_info(&CellFunction::Inv);
+        let fa_info = self.get_cell_info(&CellFunction::FullAdder);
 
         // Create inverted b nets
         let mut inv_b: Vec<GateNetId> = Vec::new();
@@ -788,7 +788,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let mux_info = self.get_cell_info(&CellFunction::Mux2, 0.15);
+        let mux_info = self.get_cell_info(&CellFunction::Mux2);
 
         let sel = inputs[0].first().copied().unwrap_or(GateNetId(0));
 
@@ -846,7 +846,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let mux_info = self.get_cell_info(&CellFunction::Mux2, 0.15);
+        let mux_info = self.get_cell_info(&CellFunction::Mux2);
 
         // Calculate number of shift stages (log2 of width)
         let shift_bits = (32 - (width - 1).leading_zeros()) as usize;
@@ -934,7 +934,7 @@ impl<'a> TechMapper<'a> {
                 let dst = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
                 // Use buffer to connect
-                let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+                let buf_info = self.get_cell_info(&CellFunction::Buf);
                 let mut cell = Cell::new_comb(
                     CellId(0),
                     buf_info.name.clone(),
@@ -974,7 +974,7 @@ impl<'a> TechMapper<'a> {
         let out_width = (high - low + 1) as usize;
 
         // Get buffer cell info for explicit wiring
-        let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+        let buf_info = self.get_cell_info(&CellFunction::Buf);
 
         for bit in 0..out_width {
             let src_bit = low as usize + bit;
@@ -1030,7 +1030,7 @@ impl<'a> TechMapper<'a> {
 
         // Build a MUX tree to select one bit based on index
         // For small inputs, we can use a cascade of MUXes
-        let mux_info = self.get_cell_info(&CellFunction::Mux2, 0.15);
+        let mux_info = self.get_cell_info(&CellFunction::Mux2);
 
         // Number of MUX stages = ceil(log2(data.len()))
         let num_bits = data.len();
@@ -1102,8 +1102,8 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let xnor_info = self.get_cell_info(&CellFunction::Xnor2, 0.1);
-        let and_info = self.get_cell_info(&CellFunction::And2, 0.1);
+        let xnor_info = self.get_cell_info(&CellFunction::Xnor2);
+        let and_info = self.get_cell_info(&CellFunction::And2);
 
         // XNOR each bit pair
         let mut xnor_outs: Vec<GateNetId> = Vec::new();
@@ -1137,7 +1137,7 @@ impl<'a> TechMapper<'a> {
 
         // Optionally invert for NotEqual
         if invert {
-            let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
+            let inv_info = self.get_cell_info(&CellFunction::Inv);
 
             let y = outputs.first().copied().unwrap_or(GateNetId(0));
             let mut cell = Cell::new_comb(
@@ -1156,7 +1156,7 @@ impl<'a> TechMapper<'a> {
             // Connect eq_out to output (add buffer if needed)
             let y = outputs.first().copied().unwrap_or(GateNetId(0));
             if eq_out != y {
-                let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+                let buf_info = self.get_cell_info(&CellFunction::Buf);
 
                 let mut cell = Cell::new_comb(
                     CellId(0),
@@ -1204,10 +1204,10 @@ impl<'a> TechMapper<'a> {
         // Where lt at bit -1 (after LSB) is 0 (not less if all bits equal)
 
         // Get cell info
-        let and_info = self.get_cell_info(&CellFunction::And2, 0.1);
-        let or_info = self.get_cell_info(&CellFunction::Or2, 0.1);
-        let inv_info = self.get_cell_info(&CellFunction::Inv, 0.05);
-        let xnor_info = self.get_cell_info(&CellFunction::Xnor2, 0.1);
+        let and_info = self.get_cell_info(&CellFunction::And2);
+        let or_info = self.get_cell_info(&CellFunction::Or2);
+        let inv_info = self.get_cell_info(&CellFunction::Inv);
+        let xnor_info = self.get_cell_info(&CellFunction::Xnor2);
 
         // Start from MSB and work down
         // prev_lt carries whether a < b based on higher bits
@@ -1316,7 +1316,7 @@ impl<'a> TechMapper<'a> {
         if prev_lt != Some(y) {
             if let Some(lt_result) = prev_lt {
                 // Create a buffer to connect to output
-                let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+                let buf_info = self.get_cell_info(&CellFunction::Buf);
                 let buf_cell = Cell::new_comb(
                     CellId(0),
                     buf_info.name.clone(),
@@ -1355,7 +1355,7 @@ impl<'a> TechMapper<'a> {
             CellFunction::Dff
         };
 
-        let dff_info = self.get_cell_info(&dff_func, 0.2);
+        let dff_info = self.get_cell_info(&dff_func);
 
         let clk = clock.unwrap_or(GateNetId(0));
 
@@ -1428,7 +1428,7 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let cell_info = self.get_cell_info(&function, 0.1);
+        let cell_info = self.get_cell_info(&function);
 
         // Get all input bits
         let input_bits: Vec<GateNetId> = inputs[0].iter().take(width as usize).copied().collect();
@@ -1439,7 +1439,7 @@ impl<'a> TechMapper<'a> {
         // Connect to output
         let y = outputs.first().copied().unwrap_or(GateNetId(0));
         if result != y {
-            let buf_info = self.get_cell_info(&CellFunction::Buf, 0.05);
+            let buf_info = self.get_cell_info(&CellFunction::Buf);
 
             let mut cell = Cell::new_comb(
                 CellId(0),

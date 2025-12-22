@@ -641,6 +641,8 @@ impl AigWriterState<'_> {
     }
 
     /// Find an AND2 cell in the library
+    ///
+    /// Panics if the library doesn't contain an AND2 or NAND2 cell.
     fn find_and2_cell(&self) -> (String, f64) {
         // First try to find an AND2
         let and2_cells = self.library.find_cells_by_function(&CellFunction::And2);
@@ -655,8 +657,11 @@ impl AigWriterState<'_> {
             return (cell.name.clone(), cell.fit);
         }
 
-        // Default
-        ("AND2_X1".to_string(), 0.1)
+        panic!(
+            "Technology library '{}' does not contain AND2 or NAND2 cells. \
+             Cannot synthesize combinational logic without these primitives.",
+            self.library.name
+        )
     }
 
     /// Try to find an ANDNOT cell in the library (computes A & ~B)
@@ -767,41 +772,64 @@ impl AigWriterState<'_> {
     }
 
     /// Find an inverter cell in the library
+    ///
+    /// Panics if the library doesn't contain an INV cell.
     fn find_inv_cell(&self) -> (String, f64) {
         let inv_cells = self.library.find_cells_by_function(&CellFunction::Inv);
         if let Some(cell) = inv_cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("INV_X1".to_string(), 0.05)
+        panic!(
+            "Technology library '{}' does not contain INV cell. \
+             Cannot synthesize without an inverter primitive.",
+            self.library.name
+        )
     }
 
     /// Find a DFF cell in the library
+    ///
+    /// Panics if the library doesn't contain a DFF cell.
     fn find_dff_cell(&self) -> (String, f64) {
         let dff_cells = self.library.find_cells_by_function(&CellFunction::Dff);
         if let Some(cell) = dff_cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("DFF_X1".to_string(), 0.2)
+        panic!(
+            "Technology library '{}' does not contain DFF cell. \
+             Cannot synthesize sequential logic without a flip-flop primitive.",
+            self.library.name
+        )
     }
 
     /// Find a DFFR cell in the library
+    ///
+    /// Panics if the library doesn't contain a DFFR cell.
     fn find_dffr_cell(&self) -> (String, f64) {
         let dffr_cells = self.library.find_cells_by_function(&CellFunction::DffR);
         if let Some(cell) = dffr_cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("DFFR_X1".to_string(), 0.25)
+        panic!(
+            "Technology library '{}' does not contain DFFR (DFF with reset) cell. \
+             Cannot synthesize latches with reset without this primitive.",
+            self.library.name
+        )
     }
 
-    /// Find a SDFFE cell (DFF with synchronous enable and reset) in the library
+    /// Find a SDFFE cell (DFF with synchronous enable) in the library
+    ///
+    /// Panics if the library doesn't contain a DFFE cell.
     fn find_sdffe_cell(&self) -> (String, f64) {
-        // Try to find SDFFE in library (DFF with synchronous enable and reset)
+        // Try to find DFFE in library (DFF with synchronous enable)
         let sdffe_cells = self.library.find_cells_by_function(&CellFunction::DffE);
         if let Some(cell) = sdffe_cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        // Fallback: use SDFFE_PP0P name format (positive edge, positive enable, reset to 0)
-        ("SDFFE_PP0P_X1".to_string(), 0.28)
+        panic!(
+            "Technology library '{}' does not contain DFFE (DFF with enable) cell. \
+             Cannot synthesize latches with enable pattern without this primitive.",
+            self.library.name
+        )
     }
 
     /// Detect MUX-style enable pattern in latch data input
@@ -1116,6 +1144,8 @@ impl AigWriterState<'_> {
     }
 
     /// Find a level shifter LH cell in the library
+    ///
+    /// Panics if the library doesn't contain a level shifter LH cell.
     fn find_level_shifter_lh_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1123,10 +1153,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("LVLSHIFT_LH_X1".to_string(), 0.15)
+        panic!(
+            "Technology library '{}' does not contain LevelShifterLH cell. \
+             Cannot synthesize level shifter barriers without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find a level shifter HL cell in the library
+    ///
+    /// Panics if the library doesn't contain a level shifter HL cell.
     fn find_level_shifter_hl_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1134,10 +1170,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("LVLSHIFT_HL_X1".to_string(), 0.15)
+        panic!(
+            "Technology library '{}' does not contain LevelShifterHL cell. \
+             Cannot synthesize level shifter barriers without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find an always-on buffer cell in the library
+    ///
+    /// Panics if the library doesn't contain an always-on buffer cell.
     fn find_always_on_buf_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1145,10 +1187,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("AON_BUF_X1".to_string(), 0.1)
+        panic!(
+            "Technology library '{}' does not contain AlwaysOnBuf cell. \
+             Cannot synthesize always-on buffers without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find an isolation AND cell in the library
+    ///
+    /// Panics if the library doesn't contain an isolation AND cell.
     fn find_isolation_and_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1156,10 +1204,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("ISO_AND_X1".to_string(), 0.12)
+        panic!(
+            "Technology library '{}' does not contain IsolationAnd cell. \
+             Cannot synthesize isolation barriers without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find an isolation OR cell in the library
+    ///
+    /// Panics if the library doesn't contain an isolation OR cell.
     fn find_isolation_or_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1167,10 +1221,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("ISO_OR_X1".to_string(), 0.12)
+        panic!(
+            "Technology library '{}' does not contain IsolationOr cell. \
+             Cannot synthesize isolation barriers without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find an isolation latch cell in the library
+    ///
+    /// Panics if the library doesn't contain an isolation latch cell.
     fn find_isolation_latch_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1178,10 +1238,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("ISO_LATCH_X1".to_string(), 0.2)
+        panic!(
+            "Technology library '{}' does not contain IsolationLatch cell. \
+             Cannot synthesize isolation latches without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find a retention DFF cell in the library
+    ///
+    /// Panics if the library doesn't contain a retention DFF cell.
     fn find_retention_dff_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1189,10 +1255,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("RTNDFF_X1".to_string(), 0.25)
+        panic!(
+            "Technology library '{}' does not contain RetentionDff cell. \
+             Cannot synthesize retention registers without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find a retention DFFR cell in the library
+    ///
+    /// Panics if the library doesn't contain a retention DFFR cell.
     fn find_retention_dffr_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1200,10 +1272,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("RTNDFFR_X1".to_string(), 0.28)
+        panic!(
+            "Technology library '{}' does not contain RetentionDffR cell. \
+             Cannot synthesize retention registers with reset without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find a power switch header cell in the library
+    ///
+    /// Panics if the library doesn't contain a power switch header cell.
     fn find_power_switch_header_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1211,10 +1289,16 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("PSW_HEADER_X1".to_string(), 0.1)
+        panic!(
+            "Technology library '{}' does not contain PowerSwitchHeader cell. \
+             Cannot synthesize power switch barriers without this primitive.",
+            self.library.name
+        )
     }
 
     /// Find a power switch footer cell in the library
+    ///
+    /// Panics if the library doesn't contain a power switch footer cell.
     fn find_power_switch_footer_cell(&self) -> (String, f64) {
         let cells = self
             .library
@@ -1222,7 +1306,11 @@ impl AigWriterState<'_> {
         if let Some(cell) = cells.first() {
             return (cell.name.clone(), cell.fit);
         }
-        ("PSW_FOOTER_X1".to_string(), 0.1)
+        panic!(
+            "Technology library '{}' does not contain PowerSwitchFooter cell. \
+             Cannot synthesize power switch barriers without this primitive.",
+            self.library.name
+        )
     }
 }
 
