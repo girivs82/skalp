@@ -7,8 +7,8 @@
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
-    builtin_libraries::builtin_generic_asic, gate_netlist::CellSafetyClassification,
-    lower_mir_module_to_word_lir, tech_mapper::TechMapper,
+    gate_netlist::CellSafetyClassification, get_stdlib_library, lower_mir_module_to_word_lir,
+    tech_mapper::TechMapper,
 };
 use skalp_mir::MirCompiler;
 
@@ -35,7 +35,7 @@ fn compile_to_gate_netlist(source: &str) -> Vec<skalp_lir::gate_netlist::GateNet
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
 
     mir.modules
         .iter()
@@ -555,7 +555,7 @@ fn test_comprehensive_pipeline_flow() {
 
     // Step 4: Technology Mapping to GateNetlist
     println!("\nStep 4: GateNetlist Technology Mapping");
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let mut mapper = TechMapper::new(&library);
     let gate_netlist = mapper.map(&word_lir_result.lir).netlist;
 

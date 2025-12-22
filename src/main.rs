@@ -731,7 +731,7 @@ fn build_design(
             output_path
         }
         "gates" => {
-            use skalp_lir::{builtin_libraries::builtin_generic_asic, lower_mir_module_to_lir};
+            use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir};
 
             info!("Generating optimized gate-level netlist...");
 
@@ -741,7 +741,8 @@ fn build_design(
                 skalp_lir::TechLibrary::load_from_file(path)
                     .context("Failed to load technology library")?
             } else {
-                builtin_generic_asic()
+                get_stdlib_library("generic_asic")
+                    .context("Failed to load default technology library")?
             };
 
             // Check if design has multiple modules/instances for hierarchical synthesis
@@ -1245,7 +1246,7 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
 /// Gate-level simulation: HIR → MIR → LIR → GateNetlist → SIR → Simulation
 fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::builtin_libraries::builtin_generic_asic;
+    use skalp_lir::get_stdlib_library;
     use skalp_sim::{convert_gate_netlist_to_sir, HwAccel, UnifiedSimConfig, UnifiedSimulator};
 
     println!("🔬 Gate-Level Simulation");
@@ -1265,7 +1266,8 @@ fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
         .compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
-    let library = builtin_generic_asic();
+    let library =
+        get_stdlib_library("generic_asic").context("Failed to load default technology library")?;
 
     // Check if design has hierarchy
     let has_hierarchy =
@@ -2306,7 +2308,7 @@ fn run_fi_driven_safety(
     dual_bist: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::{builtin_libraries::builtin_generic_asic, lower_mir_module_to_lir};
+    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir};
     use skalp_safety::asil::AsilLevel;
     use skalp_safety::fault_simulation::{
         CompareOp, CompareValue, ConditionTerm, EffectCondition, FailureEffectDef,
@@ -2362,7 +2364,8 @@ fn run_fi_driven_safety(
     // Lower to Lir and tech-map to GateNetlist
     println!("🔩 Converting to gate-level netlist...");
     let lir_result = lower_mir_module_to_lir(top_module);
-    let library = builtin_generic_asic();
+    let library =
+        get_stdlib_library("generic_asic").context("Failed to load default technology library")?;
 
     // Use optimized tech mapper (constant folding, DCE, boolean simp, buffer removal)
     let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);

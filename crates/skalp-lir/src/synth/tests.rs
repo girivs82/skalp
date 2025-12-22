@@ -3,10 +3,10 @@
 //! These tests verify round-trip conversion between GateNetlist and AIG.
 
 use super::*;
-use crate::builtin_libraries::builtin_generic_asic;
 use crate::gate_netlist::{
     Cell, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
+use crate::get_stdlib_library;
 
 /// Helper to create a simple AND circuit
 fn create_and_circuit() -> GateNetlist {
@@ -189,7 +189,7 @@ fn create_safety_classified_circuit() -> GateNetlist {
 
 #[test]
 fn test_and_round_trip() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_and_circuit();
 
     // Convert to AIG
@@ -211,7 +211,7 @@ fn test_and_round_trip() {
 
 #[test]
 fn test_nand_round_trip() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_nand_circuit();
 
     let builder = AigBuilder::new(&original);
@@ -229,7 +229,7 @@ fn test_nand_round_trip() {
 
 #[test]
 fn test_xor_round_trip() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_xor_circuit();
 
     let builder = AigBuilder::new(&original);
@@ -245,7 +245,7 @@ fn test_xor_round_trip() {
 
 #[test]
 fn test_dff_round_trip() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_dff_circuit();
 
     let builder = AigBuilder::new(&original);
@@ -262,7 +262,7 @@ fn test_dff_round_trip() {
 
 #[test]
 fn test_complex_round_trip() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_complex_circuit();
 
     let builder = AigBuilder::new(&original);
@@ -281,7 +281,7 @@ fn test_complex_round_trip() {
 
 #[test]
 fn test_safety_classification_preserved() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_safety_classified_circuit();
 
     let builder = AigBuilder::new(&original);
@@ -711,7 +711,7 @@ fn test_barrier_blocks_cut_expansion() {
 
 #[test]
 fn test_level_shifter_round_trip() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_level_shifter_circuit();
 
     // Convert to AIG
@@ -742,7 +742,7 @@ fn test_level_shifter_round_trip() {
 
 #[test]
 fn test_isolation_cell_round_trip() {
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let original = create_isolation_circuit();
 
     // Convert to AIG

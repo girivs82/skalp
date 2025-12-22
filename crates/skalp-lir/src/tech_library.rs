@@ -1108,6 +1108,7 @@ pub enum LibraryLoadError {
     ParseError(String),
     SerializeError(String),
     ValidationError(String),
+    NotFound(String),
 }
 
 impl std::fmt::Display for LibraryLoadError {
@@ -1117,8 +1118,84 @@ impl std::fmt::Display for LibraryLoadError {
             LibraryLoadError::ParseError(s) => write!(f, "Parse error: {}", s),
             LibraryLoadError::SerializeError(s) => write!(f, "Serialization error: {}", s),
             LibraryLoadError::ValidationError(s) => write!(f, "Validation error: {}", s),
+            LibraryLoadError::NotFound(s) => write!(f, "Library not found: {}", s),
         }
     }
+}
+
+// ============================================================================
+// Standard Library Access
+// ============================================================================
+
+// Embed standard library files at compile time for distribution
+const GENERIC_ASIC_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/generic_asic.sklib");
+const ASIC_7NM_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/asic_7nm.sklib");
+const ASIC_28NM_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/asic_28nm.sklib");
+const FPGA_LUT4_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lut4.sklib");
+const FPGA_LUT6_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lut6.sklib");
+
+/// List all available standard library names
+pub fn list_stdlib_libraries() -> Vec<&'static str> {
+    vec![
+        "generic_asic",
+        "asic_7nm",
+        "asic_28nm",
+        "fpga_lut4",
+        "fpga_lut6",
+    ]
+}
+
+/// Get a standard technology library by name
+///
+/// This function looks for libraries in two locations:
+/// 1. `$SKALP_STDLIB_PATH/libraries/{name}.sklib` - for custom/development libraries
+/// 2. Embedded libraries bundled with the binary - for distribution
+///
+/// Available libraries:
+/// - `generic_asic` (aliases: `generic`, `default`) - Generic 28nm ASIC
+/// - `asic_7nm` (alias: `7nm`) - 7nm process node
+/// - `asic_28nm` (alias: `28nm`) - 28nm process node
+/// - `fpga_lut4` (alias: `fpga`) - FPGA with 4-input LUTs
+/// - `fpga_lut6` - FPGA with 6-input LUTs
+pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
+    // Normalize name to canonical form
+    let canonical_name = match name {
+        "generic_asic" | "generic" | "default" => "generic_asic",
+        "asic_7nm" | "7nm" => "asic_7nm",
+        "asic_28nm" | "28nm" => "asic_28nm",
+        "fpga_lut4" | "fpga" => "fpga_lut4",
+        "fpga_lut6" => "fpga_lut6",
+        _ => {
+            return Err(LibraryLoadError::NotFound(format!(
+                "Unknown library '{}'. Available: {}",
+                name,
+                list_stdlib_libraries().join(", ")
+            )))
+        }
+    };
+
+    // Check for SKALP_STDLIB_PATH environment variable first
+    if let Ok(stdlib_path) = std::env::var("SKALP_STDLIB_PATH") {
+        let lib_path = std::path::Path::new(&stdlib_path)
+            .join("libraries")
+            .join(format!("{}.sklib", canonical_name));
+
+        if lib_path.exists() {
+            return TechLibrary::load_from_file(&lib_path);
+        }
+    }
+
+    // Fall back to embedded libraries
+    let content = match canonical_name {
+        "generic_asic" => GENERIC_ASIC_SKLIB,
+        "asic_7nm" => ASIC_7NM_SKLIB,
+        "asic_28nm" => ASIC_28NM_SKLIB,
+        "fpga_lut4" => FPGA_LUT4_SKLIB,
+        "fpga_lut6" => FPGA_LUT6_SKLIB,
+        _ => unreachable!(), // Already validated above
+    };
+
+    TechLibrary::from_toml(content)
 }
 
 impl std::error::Error for LibraryLoadError {}

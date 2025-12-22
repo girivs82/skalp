@@ -580,9 +580,9 @@ mod tests {
 
     #[test]
     fn test_library_aware_cell_matcher() {
-        use crate::builtin_libraries;
+        use crate::get_stdlib_library;
 
-        let lib = builtin_libraries::get_builtin_library("7nm").unwrap();
+        let lib = get_stdlib_library("asic_7nm").expect("Failed to load library");
         let matcher = CellMatcher::from_library(&lib);
 
         // The library should have ANDNOT cells

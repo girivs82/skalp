@@ -1324,8 +1324,8 @@ pub fn write_aig_to_gates(aig: &Aig, library: &TechLibrary) -> GateNetlist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin_libraries::builtin_generic_asic;
     use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+    use crate::get_stdlib_library;
     use crate::synth::AigBuilder;
 
     fn create_simple_netlist() -> GateNetlist {
@@ -1363,7 +1363,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_simple() {
-        let library = builtin_generic_asic();
+        let library = get_stdlib_library("generic_asic").expect("Failed to load library");
         let netlist = create_simple_netlist();
 
         // Build AIG
@@ -1383,7 +1383,7 @@ mod tests {
 
     #[test]
     fn test_inversion_handling() {
-        let library = builtin_generic_asic();
+        let library = get_stdlib_library("generic_asic").expect("Failed to load library");
         let mut netlist = GateNetlist::new("test".to_string(), "generic_asic".to_string());
 
         let a = netlist.add_input("a".to_string());

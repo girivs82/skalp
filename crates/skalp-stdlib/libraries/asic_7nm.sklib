@@ -1,0 +1,900 @@
+# 7nm ASIC Library
+# Optimized cells with lower area but higher soft error sensitivity.
+
+[library]
+name = "asic_7nm"
+version = "1.0.0"
+process_node_nm = 7
+reference_temperature_c = 85.0
+reference_voltage_v = 0.75
+
+# =============================================================================
+# Basic Gates
+# =============================================================================
+
+# Inverter
+[[cells]]
+name = "INV_X1"
+function = "inv"
+fit = 0.04
+area_um2 = 0.15
+transistor_count = 2
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.006
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.004
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0032
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0028
+fault_type = "delay"
+mechanism = "process_variation"
+
+# Buffer
+[[cells]]
+name = "BUF_X1"
+function = "buf"
+fit = 0.04
+area_um2 = 0.2
+transistor_count = 4
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.006
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.004
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0032
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0028
+fault_type = "delay"
+mechanism = "process_variation"
+
+# NAND2
+[[cells]]
+name = "NAND2_X1"
+function = "nand2"
+fit = 0.08
+area_um2 = 0.3
+transistor_count = 4
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.024
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.024
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.012
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.008
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0064
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0056
+fault_type = "delay"
+mechanism = "process_variation"
+
+# NOR2
+[[cells]]
+name = "NOR2_X1"
+function = "nor2"
+fit = 0.08
+area_um2 = 0.3
+transistor_count = 4
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.024
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.024
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.012
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.008
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0064
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0056
+fault_type = "delay"
+mechanism = "process_variation"
+
+# AND2
+[[cells]]
+name = "AND2_X1"
+function = "and2"
+fit = 0.10
+area_um2 = 0.4
+transistor_count = 6
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.03
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.03
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.015
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.01
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.008
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.007
+fault_type = "delay"
+mechanism = "process_variation"
+
+# OR2
+[[cells]]
+name = "OR2_X1"
+function = "or2"
+fit = 0.10
+area_um2 = 0.4
+transistor_count = 6
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.03
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.03
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.015
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.01
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.008
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.007
+fault_type = "delay"
+mechanism = "process_variation"
+
+# XOR2
+[[cells]]
+name = "XOR2_X1"
+function = "xor2"
+fit = 0.12
+area_um2 = 0.6
+transistor_count = 8
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.036
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.036
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.018
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.012
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0096
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0084
+fault_type = "delay"
+mechanism = "process_variation"
+
+# XNOR2
+[[cells]]
+name = "XNOR2_X1"
+function = "xnor2"
+fit = 0.12
+area_um2 = 0.6
+transistor_count = 8
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.036
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.036
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.018
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.012
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0096
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0084
+fault_type = "delay"
+mechanism = "process_variation"
+
+# ANDNOT
+[[cells]]
+name = "ANDNOT_X1"
+function = "andnot"
+fit = 0.08
+area_um2 = 0.3
+transistor_count = 4
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.024
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.024
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.012
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.008
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0064
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0056
+fault_type = "delay"
+mechanism = "process_variation"
+
+# ORNOT
+[[cells]]
+name = "ORNOT_X1"
+function = "ornot"
+fit = 0.08
+area_um2 = 0.3
+transistor_count = 4
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.024
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.024
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.012
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.008
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0064
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0056
+fault_type = "delay"
+mechanism = "process_variation"
+
+# =============================================================================
+# Multiplexers
+# =============================================================================
+
+# MUX2
+[[cells]]
+name = "MUX2_X1"
+function = "mux2"
+fit = 0.15
+area_um2 = 0.8
+transistor_count = 12
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.045
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.045
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.0225
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.015
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.012
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0105
+fault_type = "delay"
+mechanism = "process_variation"
+
+# =============================================================================
+# Arithmetic
+# =============================================================================
+
+# Half Adder
+[[cells]]
+name = "HA_X1"
+function = "half_adder"
+fit = 0.16
+area_um2 = 0.8
+transistor_count = 10
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.048
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.048
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.024
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.016
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0128
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0112
+fault_type = "delay"
+mechanism = "process_variation"
+
+# Full Adder
+[[cells]]
+name = "FA_X1"
+function = "full_adder"
+fit = 0.24
+area_um2 = 1.2
+transistor_count = 14
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 550
+timing_margin_voltage_mv = 650
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.072
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.072
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.036
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.024
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0192
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0168
+fault_type = "delay"
+mechanism = "process_variation"
+
+# =============================================================================
+# Sequential Elements (higher soft error rate in 7nm)
+# =============================================================================
+
+# DFF
+[[cells]]
+name = "DFF_X1"
+function = "dff"
+fit = 0.30
+area_um2 = 1.5
+transistor_count = 20
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 600
+timing_margin_voltage_mv = 700
+voltage_delay_coefficient = 0.18
+voltage_sensitivity = 3
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.06
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.06
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "setup_violation"
+fit = 0.03
+fault_type = "timing"
+mechanism = "setup_slack_violation"
+
+[[cells.failure_modes]]
+name = "hold_violation"
+fit = 0.03
+fault_type = "timing"
+mechanism = "hold_slack_violation"
+
+[[cells.failure_modes]]
+name = "clock_path"
+fit = 0.045
+fault_type = "clock_path"
+mechanism = "clock_buffer_failure"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.03
+fault_type = "data_retention"
+mechanism = "sram_bit_flip"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.024
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+[[cells.failure_modes]]
+name = "reset_path"
+fit = 0.021
+fault_type = "reset_path"
+mechanism = "reset_buffer_failure"
+
+# DFFR
+[[cells]]
+name = "DFFR_X1"
+function = "dffr"
+fit = 0.35
+area_um2 = 2.0
+transistor_count = 24
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 600
+timing_margin_voltage_mv = 700
+voltage_delay_coefficient = 0.18
+voltage_sensitivity = 3
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.07
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.07
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "setup_violation"
+fit = 0.035
+fault_type = "timing"
+mechanism = "setup_slack_violation"
+
+[[cells.failure_modes]]
+name = "hold_violation"
+fit = 0.035
+fault_type = "timing"
+mechanism = "hold_slack_violation"
+
+[[cells.failure_modes]]
+name = "clock_path"
+fit = 0.0525
+fault_type = "clock_path"
+mechanism = "clock_buffer_failure"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.035
+fault_type = "data_retention"
+mechanism = "sram_bit_flip"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.028
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+[[cells.failure_modes]]
+name = "reset_path"
+fit = 0.0245
+fault_type = "reset_path"
+mechanism = "reset_buffer_failure"
+
+# Latch
+[[cells]]
+name = "LATCH_X1"
+function = "latch"
+fit = 0.18
+area_um2 = 1.0
+transistor_count = 12
+drive_strength = 1
+nominal_voltage_mv = 750
+min_voltage_mv = 600
+timing_margin_voltage_mv = 700
+voltage_delay_coefficient = 0.18
+voltage_sensitivity = 3
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.036
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.036
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "setup_violation"
+fit = 0.018
+fault_type = "timing"
+mechanism = "setup_slack_violation"
+
+[[cells.failure_modes]]
+name = "hold_violation"
+fit = 0.018
+fault_type = "timing"
+mechanism = "hold_slack_violation"
+
+[[cells.failure_modes]]
+name = "clock_path"
+fit = 0.027
+fault_type = "clock_path"
+mechanism = "clock_buffer_failure"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.018
+fault_type = "data_retention"
+mechanism = "sram_bit_flip"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.0144
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+[[cells.failure_modes]]
+name = "reset_path"
+fit = 0.0126
+fault_type = "reset_path"
+mechanism = "reset_buffer_failure"
+
+# =============================================================================
+# Decomposition Rules
+# =============================================================================
+
+[[decomposition_rules]]
+name = "xor_to_nand"
+source = "xor"
+targets = ["nand2", "nand2", "nand2", "nand2"]
+connectivity = "xor_nand"
+fit_multiplier = 0.9
+
+[[decomposition_rules]]
+name = "and_to_nand_inv"
+source = "and"
+targets = ["nand2", "inv"]
+connectivity = "chain"
+fit_multiplier = 1.0
+
+[[decomposition_rules]]
+name = "or_to_nor_inv"
+source = "or"
+targets = ["nor2", "inv"]
+connectivity = "chain"
+fit_multiplier = 1.0
+
+[[decomposition_rules]]
+name = "add_to_fa_chain"
+source = "add"
+targets = ["half_adder", "full_adder"]
+connectivity = "ripple_carry"
+fit_multiplier = 1.0
+
+[[decomposition_rules]]
+name = "mux_to_aoi"
+source = "mux2"
+targets = ["inv", "and2", "and2", "or2"]
+connectivity = "mux_aoi"
+fit_multiplier = 0.95

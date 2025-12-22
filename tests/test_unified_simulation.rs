@@ -8,8 +8,7 @@
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
-    builtin_libraries::builtin_generic_asic, gate_netlist::GateNetlist, lower_mir_module_to_lir,
-    tech_mapper::TechMapper,
+    gate_netlist::GateNetlist, get_stdlib_library, lower_mir_module_to_lir, tech_mapper::TechMapper,
 };
 use skalp_mir::MirCompiler;
 use skalp_sim::convert_gate_netlist_to_sir;
@@ -36,7 +35,7 @@ fn compile_to_both(source: &str, module_name: &str) -> (skalp_sir::SirModule, Ga
     let behavioral_sir = convert_mir_to_sir_with_hierarchy(&mir_design, &mir_module);
 
     // Path 2: MIR → Lir → GateNetlist
-    let library = builtin_generic_asic();
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let lir_result = lower_mir_module_to_lir(&mir_module);
     let mut mapper = TechMapper::new(&library);
     let gate_netlist = mapper.map(&lir_result.lir).netlist;

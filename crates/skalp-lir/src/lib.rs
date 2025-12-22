@@ -16,16 +16,15 @@
 //! # Example
 //!
 //! ```ignore
-//! use skalp_lir::{lower_mir_module_to_lir, map_lir_to_gates, builtin_generic_asic};
+//! use skalp_lir::{lower_mir_module_to_lir, map_lir_to_gates, get_stdlib_library};
 //!
 //! let mir = compile_to_mir(source)?;
 //! let lir_result = lower_mir_module_to_lir(&mir.modules[0]);
-//! let library = builtin_generic_asic();
+//! let library = get_stdlib_library("generic_asic")?;
 //! let gate_netlist = map_lir_to_gates(&lir_result.lir, &library)?;
 //! println!("Cells: {}", gate_netlist.netlist.cells.len());
 //! ```
 
-pub mod builtin_libraries;
 pub mod gate_netlist;
 pub mod gate_optimizer;
 pub mod hierarchical_netlist;
@@ -67,9 +66,10 @@ pub use gate_netlist::{
 
 // Technology library
 pub use tech_library::{
-    arrhenius_acceleration_factor, process_corner_factor, voltage_acceleration_factor,
-    CellFunction, DecompConnectivity, DecompSource, DecompositionRule, DeratingFactors,
-    DeratingPreset, LibraryCell, LibraryDeratingSummary, LibraryFailureMode, OperatingConditions,
+    arrhenius_acceleration_factor, get_stdlib_library, list_stdlib_libraries,
+    process_corner_factor, voltage_acceleration_factor, CellFunction, DecompConnectivity,
+    DecompSource, DecompositionRule, DeratingFactors, DeratingPreset, LibraryCell,
+    LibraryDeratingSummary, LibraryFailureMode, LibraryLoadError, OperatingConditions,
     ProcessCorner, TechLibrary,
 };
 
@@ -77,12 +77,6 @@ pub use tech_library::{
 pub use tech_mapper::{
     map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized, map_word_lir_to_gates,
     TechMapResult, TechMapStats, TechMapper,
-};
-
-// Built-in technology libraries
-pub use builtin_libraries::{
-    builtin_asic_28nm, builtin_asic_7nm, builtin_fpga_lut4, builtin_fpga_lut6,
-    builtin_generic_asic, get_builtin_library, list_builtin_libraries,
 };
 
 // Structural pattern detection for safety mechanisms
