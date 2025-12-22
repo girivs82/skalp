@@ -1382,19 +1382,40 @@ impl HirBuilderContext {
             .map(|t| t.text().to_string())?;
 
         // Get the expression (everything after the colon)
-        let expr_node = node.children().find(|n| {
-            matches!(
-                n.kind(),
-                SyntaxKind::LiteralExpr
-                    | SyntaxKind::IdentExpr
-                    | SyntaxKind::BinaryExpr
-                    | SyntaxKind::UnaryExpr
-                    | SyntaxKind::FieldExpr
-                    | SyntaxKind::IndexExpr
-            )
-        })?;
+        // BUG FIX: The parser may create IdentExpr and IndexExpr as siblings (e.g., op[0] becomes
+        // [IdentExpr(op), IndexExpr([0])]). We should prefer IndexExpr/FieldExpr when both exist,
+        // as build_expression for IndexExpr will properly combine with the preceding IdentExpr.
+        let expr_children: Vec<_> = node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                )
+            })
+            .collect();
 
-        let expr = self.build_expression(&expr_node)?;
+        // Prefer IndexExpr/FieldExpr over IdentExpr when both exist (parser splits op[0] into two nodes)
+        let expr_node = if expr_children.len() > 1 {
+            expr_children
+                .iter()
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IndexExpr | SyntaxKind::FieldExpr | SyntaxKind::BinaryExpr
+                    )
+                })
+                .or(expr_children.first())
+        } else {
+            expr_children.first()
+        }?;
+
+        let expr = self.build_expression(expr_node)?;
 
         Some(HirConnection {
             port: port_name,

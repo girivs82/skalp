@@ -600,21 +600,42 @@ impl AigWriterState<'_> {
     /// Create output nets
     fn create_outputs(&mut self, aig: &Aig) {
         for (name, lit) in aig.outputs() {
-            let net = self.get_or_create_lit_net(aig, *lit);
+            // For constant outputs, create a dedicated net with a tie cell
+            // This ensures each output has its own net even if multiple outputs
+            // are tied to the same constant
+            if lit.node == AigNodeId::FALSE {
+                let is_one = lit.inverted;
+                // Create a dedicated net for this output
+                let output_net = self
+                    .netlist
+                    .add_net(GateNet::new(GateNetId(0), name.clone()));
 
-            // Mark this net as output
-            if let Some(gate_net) = self.netlist.get_net_mut(net) {
-                gate_net.is_output = true;
-            }
+                // Add tie cell to drive the net
+                self.netlist.add_tie_cell(name, if is_one { 1 } else { 0 });
 
-            // Add to outputs list if not already there
-            if !self.netlist.outputs.contains(&net) {
-                self.netlist.outputs.push(net);
-            }
+                // Mark as output
+                if let Some(gate_net) = self.netlist.get_net_mut(output_net) {
+                    gate_net.is_output = true;
+                }
+                self.netlist.outputs.push(output_net);
+            } else {
+                // Non-constant output - use the existing logic
+                let net = self.get_or_create_lit_net(aig, *lit);
 
-            // Rename net to match output name
-            if let Some(gate_net) = self.netlist.get_net_mut(net) {
-                gate_net.name = name.clone();
+                // Mark this net as output
+                if let Some(gate_net) = self.netlist.get_net_mut(net) {
+                    gate_net.is_output = true;
+                }
+
+                // Add to outputs list if not already there
+                if !self.netlist.outputs.contains(&net) {
+                    self.netlist.outputs.push(net);
+                }
+
+                // Rename net to match output name
+                if let Some(gate_net) = self.netlist.get_net_mut(net) {
+                    gate_net.name = name.clone();
+                }
             }
         }
     }

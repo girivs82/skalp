@@ -1608,6 +1608,12 @@ pub fn map_hierarchical_to_gates(
                 PortConnectionInfo::InstancePort(inst_path, inst_port) => {
                     PortConnection::ChildPort(inst_path.clone(), inst_port.clone())
                 }
+                PortConnectionInfo::Range(signal_name, high, low) => {
+                    PortConnection::ParentRange(signal_name.clone(), *high, *low)
+                }
+                PortConnectionInfo::BitSelect(signal_name, bit_idx) => {
+                    PortConnection::ParentBit(signal_name.clone(), *bit_idx)
+                }
             };
             inst_netlist.add_port_connection(port_name.clone(), port_conn);
         }

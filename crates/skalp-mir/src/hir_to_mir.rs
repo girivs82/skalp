@@ -1130,16 +1130,7 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Convert module instances
-                    eprintln!(
-                        "[INSTANCE_DEBUG] impl_block for '{}' has {} instances",
-                        entity.name,
-                        impl_block.instances.len()
-                    );
                     for hir_instance in &impl_block.instances {
-                        eprintln!(
-                            "[INSTANCE_DEBUG] Processing instance '{}' of entity {:?}",
-                            hir_instance.name, hir_instance.entity
-                        );
                         if let Some(instance) = self.convert_instance(hir_instance) {
                             module.instances.push(instance);
                         }
@@ -1497,9 +1488,18 @@ impl<'hir> HirToMir<'hir> {
                                 // Convert connections from the struct literal fields
                                 let mut connections = std::collections::HashMap::new();
                                 for field_init in &struct_lit.fields {
+                                    eprintln!(
+                                        "[HIER_CONN] Converting field '{}' <- HIR expr: {:?}",
+                                        field_init.name,
+                                        std::mem::discriminant(&field_init.value)
+                                    );
                                     if let Some(expr) =
                                         self.convert_expression(&field_init.value, 0)
                                     {
+                                        eprintln!(
+                                            "[HIER_CONN] Field '{}' <- MIR expr: {:?}",
+                                            field_init.name, expr.kind
+                                        );
                                         connections.insert(field_init.name.clone(), expr);
                                     }
                                 }

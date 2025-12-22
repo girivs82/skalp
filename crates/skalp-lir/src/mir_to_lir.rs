@@ -1234,6 +1234,10 @@ pub enum PortConnectionInfo {
     Constant(u64),
     /// Connected to another instance's port
     InstancePort(String, String), // (instance_path, port_name)
+    /// Connected to a range of a signal (signal_name, high_bit, low_bit)
+    Range(String, usize, usize),
+    /// Connected to a single bit of a signal (signal_name, bit_index)
+    BitSelect(String, usize),
 }
 
 /// Lower entire MIR hierarchy to per-instance LIR
@@ -1314,8 +1318,8 @@ fn elaborate_instance(
 
         // Find child module by ID
         if let Some(child_mod) = module_map.get(&inst.module).copied() {
-            // Extract connection info
-            let child_connections = extract_connection_info(&inst.connections);
+            // Extract connection info using parent module for name lookup
+            let child_connections = extract_connection_info(&inst.connections, module);
 
             // Recursively elaborate child
             elaborate_instance(
@@ -1347,8 +1351,10 @@ fn elaborate_instance(
 }
 
 /// Extract connection information from port connections
+/// Uses the parent module to look up actual signal/port names by ID
 fn extract_connection_info(
     connections: &HashMap<String, Expression>,
+    parent_module: &Module,
 ) -> HashMap<String, PortConnectionInfo> {
     let mut result = HashMap::new();
 
@@ -1360,9 +1366,27 @@ fn extract_connection_info(
                 PortConnectionInfo::Constant(const_val)
             }
             ExpressionKind::Ref(lvalue) => {
-                // Signal reference
-                let signal_name = lvalue_to_name(lvalue);
-                PortConnectionInfo::Signal(signal_name)
+                // Check for RangeSelect or BitSelect patterns
+                match lvalue {
+                    LValue::RangeSelect { base, high, low } => {
+                        // Range connection like b[4:0]
+                        let base_name = lvalue_to_name_with_module(base, parent_module);
+                        let high_val = extract_const_index(high).unwrap_or(0);
+                        let low_val = extract_const_index(low).unwrap_or(0);
+                        PortConnectionInfo::Range(base_name, high_val, low_val)
+                    }
+                    LValue::BitSelect { base, index } => {
+                        // Single bit connection like op[0]
+                        let base_name = lvalue_to_name_with_module(base, parent_module);
+                        let bit_idx = extract_const_index(index).unwrap_or(0);
+                        PortConnectionInfo::BitSelect(base_name, bit_idx)
+                    }
+                    _ => {
+                        // Simple signal reference
+                        let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
+                        PortConnectionInfo::Signal(signal_name)
+                    }
+                }
             }
             _ => {
                 // Complex expression - treat as signal
@@ -1375,6 +1399,15 @@ fn extract_connection_info(
     result
 }
 
+/// Extract a constant index value from an expression
+fn extract_const_index(expr: &Expression) -> Option<usize> {
+    match &expr.kind {
+        ExpressionKind::Literal(Value::Integer(v)) => Some(*v as usize),
+        ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value as usize),
+        _ => None,
+    }
+}
+
 /// Convert a Value to u64
 fn value_to_u64(value: &Value) -> u64 {
     match value {
@@ -1385,7 +1418,64 @@ fn value_to_u64(value: &Value) -> u64 {
     }
 }
 
-/// Convert an LValue to a signal name
+/// Convert an LValue to a signal name using the module to look up actual names
+fn lvalue_to_name_with_module(lvalue: &LValue, module: &Module) -> String {
+    match lvalue {
+        LValue::Signal(id) => {
+            // Look up signal by ID in the module
+            module
+                .signals
+                .iter()
+                .find(|s| s.id == *id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| format!("signal_{}", id.0))
+        }
+        LValue::Port(id) => {
+            // Look up port by ID in the module
+            module
+                .ports
+                .iter()
+                .find(|p| p.id == *id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| format!("port_{}", id.0))
+        }
+        LValue::Variable(id) => format!("var_{}", id.0),
+        LValue::BitSelect { base, index } => {
+            let base_name = lvalue_to_name_with_module(base, module);
+            // Try to get the index value if it's a literal
+            if let ExpressionKind::Literal(Value::Integer(idx)) = &index.kind {
+                format!("{}[{}]", base_name, idx)
+            } else if let ExpressionKind::Literal(Value::BitVector { value, .. }) = &index.kind {
+                format!("{}[{}]", base_name, value)
+            } else {
+                format!("{}[...]", base_name)
+            }
+        }
+        LValue::RangeSelect { base, high, low } => {
+            let base_name = lvalue_to_name_with_module(base, module);
+            // Try to extract integer values from high/low expressions
+            let high_str = match &high.kind {
+                ExpressionKind::Literal(Value::Integer(v)) => v.to_string(),
+                ExpressionKind::Literal(Value::BitVector { value, .. }) => value.to_string(),
+                _ => "?".to_string(),
+            };
+            let low_str = match &low.kind {
+                ExpressionKind::Literal(Value::Integer(v)) => v.to_string(),
+                ExpressionKind::Literal(Value::BitVector { value, .. }) => value.to_string(),
+                _ => "?".to_string(),
+            };
+            format!("{}[{}:{}]", base_name, high_str, low_str)
+        }
+        LValue::Concat(parts) => parts
+            .iter()
+            .map(|p| lvalue_to_name_with_module(p, module))
+            .collect::<Vec<_>>()
+            .join("_"),
+    }
+}
+
+/// Convert an LValue to a signal name (fallback without module context)
+#[allow(dead_code)]
 fn lvalue_to_name(lvalue: &LValue) -> String {
     match lvalue {
         LValue::Signal(id) => format!("signal_{}", id.0),

@@ -48,6 +48,10 @@ pub enum PortConnection {
     Constant(u64),
     /// Connected to another instance's port
     ChildPort(InstancePath, String),
+    /// Connected to a range of a parent net (base_signal, high_bit, low_bit)
+    ParentRange(String, usize, usize),
+    /// Connected to a single bit of a parent net (base_signal, bit_index)
+    ParentBit(String, usize),
 }
 
 /// Result of hierarchical synthesis
@@ -146,20 +150,41 @@ impl HierarchicalNetlist {
         // Phase 2: Stitch port connections between instances
         self.stitch_all_ports(&mut result, &net_id_maps);
 
+        // Phase 2.5: Rebuild net connectivity after stitching
+        // Stitching changes cell connections, so we need to rebuild driver/fanout info
+        result.rebuild_net_connectivity();
+
         // Phase 3: Set up top-level inputs and outputs
         // Find the "top" instance and export its I/O
+        // Note: After stitching, some "inputs" may actually be driven by child modules,
+        // so we only mark nets as inputs if they have no driver.
+        // IMPORTANT: We must look up nets by NAME after stitching, because
+        // merge_nets_by_name updates net_map to point to the merged net.
         if let Some(top_inst) = self.instances.get("top") {
-            if let Some(top_net_map) = net_id_maps.get(&"top".to_string()) {
-                // Mark top-level inputs
-                for &input_net in &top_inst.netlist.inputs {
-                    if let Some(&remapped) = top_net_map.get(&input_net) {
-                        result.inputs.push(remapped);
+            // Mark top-level inputs (only if no driver after stitching)
+            for &input_net in &top_inst.netlist.inputs {
+                // Get the original net name from the instance
+                if let Some(net) = top_inst.netlist.nets.get(input_net.0 as usize) {
+                    let full_name = format!("top.{}", net.name);
+                    // Look up by name to get the FINAL net ID after stitching
+                    if let Some(final_net_id) = result.get_net_id(&full_name) {
+                        // Check if this net has a driver
+                        if let Some(final_net) = result.nets.get(final_net_id.0 as usize) {
+                            if final_net.driver.is_none() {
+                                result.inputs.push(final_net_id);
+                            }
+                        } else {
+                            result.inputs.push(final_net_id);
+                        }
                     }
                 }
-                // Mark top-level outputs
-                for &output_net in &top_inst.netlist.outputs {
-                    if let Some(&remapped) = top_net_map.get(&output_net) {
-                        result.outputs.push(remapped);
+            }
+            // Mark top-level outputs
+            for &output_net in &top_inst.netlist.outputs {
+                if let Some(net) = top_inst.netlist.nets.get(output_net.0 as usize) {
+                    let full_name = format!("top.{}", net.name);
+                    if let Some(final_net_id) = result.get_net_id(&full_name) {
+                        result.outputs.push(final_net_id);
                     }
                 }
             }
@@ -167,28 +192,37 @@ impl HierarchicalNetlist {
 
         // Phase 4: Cross-boundary cleanup
         result.propagate_constants();
-        // NOTE: DCE disabled because port stitching doesn't properly connect nets yet.
-        // See stitch_all_ports() for details on the limitation.
-        // result.remove_dead_cells();
+        let removed = result.remove_dead_cells();
+        if removed > 0 {
+            eprintln!("[FLATTEN] Removed {} dead cells after stitching", removed);
+        }
 
         result.update_stats();
         result
     }
 
     /// Stitch all port connections between instances
-    ///
-    /// NOTE: Port stitching is currently limited because MIR uses internal signal IDs
-    /// (like `signal_3`, `port_14`) while GateNetlist uses actual signal names
-    /// (like `cmp_lt`, `a[0]`). This mapping is lost during elaboration.
-    /// TODO: Carry signal name information through elaboration for proper stitching.
     fn stitch_all_ports(
         &self,
         result: &mut GateNetlist,
         _net_maps: &HashMap<&InstancePath, HashMap<GateNetId, GateNetId>>,
     ) {
+        eprintln!(
+            "[STITCH] Starting port stitching for {} instances",
+            self.instances.len()
+        );
+
         for (path, inst) in &self.instances {
             // Get parent path (everything before the last '.')
             let parent_path = path.rfind('.').map(|pos| &path[..pos]).unwrap_or("");
+
+            if !inst.port_connections.is_empty() {
+                eprintln!(
+                    "[STITCH] Instance '{}' has {} port connections",
+                    path,
+                    inst.port_connections.len()
+                );
+            }
 
             for (port_name, conn) in &inst.port_connections {
                 match conn {
@@ -202,7 +236,54 @@ impl HierarchicalNetlist {
                         } else {
                             format!("{}.{}", parent_path, parent_signal)
                         };
-                        result.merge_nets_by_name(&child_net_name, &parent_net_name);
+
+                        // Check if direct merge will work
+                        let child_exists = result.get_net(&child_net_name).is_some();
+                        let parent_exists = result.get_net(&parent_net_name).is_some();
+
+                        if child_exists && parent_exists {
+                            // Direct single-net merge - parent first so its name survives
+                            eprintln!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_net_name);
+                            result.merge_nets_by_name(&parent_net_name, &child_net_name);
+                        } else {
+                            // Try bit-level stitching for multi-bit ports
+                            let child_bits = result.find_bit_indexed_nets(&child_net_name);
+                            let parent_bits = result.find_bit_indexed_nets(&parent_net_name);
+
+                            if !child_bits.is_empty() && !parent_bits.is_empty() {
+                                // Both have bit-indexed nets - stitch bit by bit
+                                // Parent first so its name survives
+                                let mut stitched = 0;
+                                for (idx, child_bit_net) in &child_bits {
+                                    // Find matching parent bit
+                                    if let Some((_, parent_bit_net)) =
+                                        parent_bits.iter().find(|(pidx, _)| pidx == idx)
+                                    {
+                                        result.merge_nets_by_name(parent_bit_net, child_bit_net);
+                                        stitched += 1;
+                                    }
+                                }
+                                eprintln!(
+                                    "[STITCH]   ✓ {} <-> {} (bit-level: {} bits)",
+                                    child_net_name, parent_net_name, stitched
+                                );
+                            } else if !child_bits.is_empty() || !parent_bits.is_empty() {
+                                // Mismatch: one is bit-indexed, the other isn't
+                                eprintln!(
+                                    "[STITCH]   ~ {} -> {} (child_bits={}, parent_bits={})",
+                                    child_net_name,
+                                    parent_net_name,
+                                    child_bits.len(),
+                                    parent_bits.len()
+                                );
+                            } else {
+                                // Neither exists at all - might be unused connection
+                                eprintln!(
+                                    "[STITCH]   ✗ {} -> {} (neither exists)",
+                                    child_net_name, parent_net_name
+                                );
+                            }
+                        }
                     }
                     PortConnection::Constant(value) => {
                         // Create tie cell for constant
@@ -213,7 +294,104 @@ impl HierarchicalNetlist {
                         // Direct connection between instances
                         let net1 = format!("{}.{}", path, port_name);
                         let net2 = format!("{}.{}", child_path, child_port);
-                        result.merge_nets_by_name(&net1, &net2);
+
+                        // Try direct merge first
+                        let net1_exists = result.get_net(&net1).is_some();
+                        let net2_exists = result.get_net(&net2).is_some();
+
+                        if net1_exists && net2_exists {
+                            result.merge_nets_by_name(&net1, &net2);
+                        } else {
+                            // Try bit-level stitching
+                            let bits1 = result.find_bit_indexed_nets(&net1);
+                            let bits2 = result.find_bit_indexed_nets(&net2);
+
+                            if !bits1.is_empty() && !bits2.is_empty() {
+                                for (idx, bit1_net) in &bits1 {
+                                    if let Some((_, bit2_net)) =
+                                        bits2.iter().find(|(idx2, _)| idx2 == idx)
+                                    {
+                                        result.merge_nets_by_name(bit1_net, bit2_net);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    PortConnection::ParentRange(parent_signal, high, low) => {
+                        // Range connection: child port connects to parent[high:low]
+                        // Child bit i connects to parent bit (low + i)
+                        let child_net_name = format!("{}.{}", path, port_name);
+                        let parent_base = if parent_path.is_empty() {
+                            parent_signal.clone()
+                        } else {
+                            format!("{}.{}", parent_path, parent_signal)
+                        };
+
+                        // Get child bits
+                        let child_bits = result.find_bit_indexed_nets(&child_net_name);
+
+                        if !child_bits.is_empty() {
+                            let mut stitched = 0;
+                            for (child_idx, child_bit_net) in &child_bits {
+                                // Child bit i maps to parent bit (low + i)
+                                let parent_bit_idx = low + child_idx;
+                                if parent_bit_idx <= *high {
+                                    let parent_bit_net =
+                                        format!("{}[{}]", parent_base, parent_bit_idx);
+                                    if result.get_net(&parent_bit_net).is_some() {
+                                        result.merge_nets_by_name(&parent_bit_net, child_bit_net);
+                                        stitched += 1;
+                                    }
+                                }
+                            }
+                            eprintln!(
+                                "[STITCH]   ✓ {} <-> {}[{}:{}] (range: {} bits)",
+                                child_net_name, parent_base, high, low, stitched
+                            );
+                        } else {
+                            eprintln!(
+                                "[STITCH]   ✗ {} -> {}[{}:{}] (no child bits found)",
+                                child_net_name, parent_base, high, low
+                            );
+                        }
+                    }
+                    PortConnection::ParentBit(parent_signal, bit_idx) => {
+                        // Single bit connection: child port connects to parent[bit_idx]
+                        let child_net_name = format!("{}.{}", path, port_name);
+                        let parent_base = if parent_path.is_empty() {
+                            parent_signal.clone()
+                        } else {
+                            format!("{}.{}", parent_path, parent_signal)
+                        };
+                        let parent_bit_net = format!("{}[{}]", parent_base, bit_idx);
+
+                        // Try direct merge first (child might be single-bit)
+                        if result.get_net(&child_net_name).is_some()
+                            && result.get_net(&parent_bit_net).is_some()
+                        {
+                            result.merge_nets_by_name(&parent_bit_net, &child_net_name);
+                            eprintln!(
+                                "[STITCH]   ✓ {} <-> {}",
+                                child_net_name, parent_bit_net
+                            );
+                        } else {
+                            // Try child bit 0 -> parent bit
+                            let child_bit0 = format!("{}[0]", child_net_name);
+                            if result.get_net(&child_bit0).is_some()
+                                && result.get_net(&parent_bit_net).is_some()
+                            {
+                                result.merge_nets_by_name(&parent_bit_net, &child_bit0);
+                                eprintln!(
+                                    "[STITCH]   ✓ {} <-> {}",
+                                    child_bit0, parent_bit_net
+                                );
+                            } else {
+                                eprintln!(
+                                    "[STITCH]   ✗ {} -> {} (nets not found)",
+                                    child_net_name, parent_bit_net
+                                );
+                            }
+                        }
                     }
                 }
             }

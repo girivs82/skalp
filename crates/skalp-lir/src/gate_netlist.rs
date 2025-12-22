@@ -563,6 +563,39 @@ impl GateNetlist {
         self.net_map.get(name).map(|id| &self.nets[id.0 as usize])
     }
 
+    /// Get a net ID by name
+    pub fn get_net_id(&self, name: &str) -> Option<GateNetId> {
+        self.net_map.get(name).copied()
+    }
+
+    /// Rebuild driver and fanout information from cells
+    /// Useful after net merging to ensure connectivity is accurate
+    pub fn rebuild_net_connectivity(&mut self) {
+        // Clear all existing driver/fanout info
+        for net in &mut self.nets {
+            net.driver = None;
+            net.driver_pin = None;
+            net.fanout.clear();
+        }
+
+        // Rebuild from cells
+        for cell in &self.cells {
+            // Update drivers
+            for (pin, &net_id) in cell.outputs.iter().enumerate() {
+                if let Some(net) = self.nets.get_mut(net_id.0 as usize) {
+                    net.driver = Some(cell.id);
+                    net.driver_pin = Some(pin);
+                }
+            }
+            // Update fanout
+            for (pin, &net_id) in cell.inputs.iter().enumerate() {
+                if let Some(net) = self.nets.get_mut(net_id.0 as usize) {
+                    net.fanout.push((cell.id, pin));
+                }
+            }
+        }
+    }
+
     /// Get a mutable net by ID
     pub fn get_net_mut(&mut self, id: GateNetId) -> Option<&mut GateNet> {
         self.nets.get_mut(id.0 as usize)
@@ -850,6 +883,10 @@ impl GateNetlist {
         // Mark net2 as merged (clear its connections)
         self.nets[net2_id.0 as usize].fanout.clear();
         self.nets[net2_id.0 as usize].driver = None;
+
+        // Update net_map so lookups for net2_name now resolve to net1
+        // This is important for correct I/O determination after stitching
+        self.net_map.insert(net2_name.to_string(), net1_id);
     }
 
     /// Add a tie cell for a constant value
@@ -880,6 +917,29 @@ impl GateNetlist {
         // Update net driver
         self.nets[net_id.0 as usize].driver = Some(cell_id);
         self.nets[net_id.0 as usize].driver_pin = Some(0);
+    }
+
+    /// Find all bit-indexed nets matching a prefix (e.g., "signal" matches "signal[0]", "signal[1]", etc.)
+    /// Returns a sorted list of (bit_index, net_name) pairs
+    pub fn find_bit_indexed_nets(&self, prefix: &str) -> Vec<(usize, String)> {
+        let mut result = Vec::new();
+
+        // Pattern: prefix[N] where N is a non-negative integer
+        for name in self.net_map.keys() {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                if let Some(inner) = rest.strip_prefix('[') {
+                    if let Some(idx_str) = inner.strip_suffix(']') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            result.push((idx, name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by bit index
+        result.sort_by_key(|(idx, _)| *idx);
+        result
     }
 
     /// Propagate constants through the netlist (lightweight optimization)
