@@ -380,6 +380,40 @@ impl GateLevelSimulator {
         }
     }
 
+    /// Debug: Dump all signals and their current values
+    #[allow(dead_code)]
+    pub fn debug_dump_state(&self) {
+        println!("=== Signal State ===");
+        for (&id, value) in &self.state.signals {
+            let name = self
+                .signal_id_to_name
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| format!("sig_{}", id));
+            println!("  [{}] {} = {:?}", id, name, value);
+        }
+        println!("  Total signals in state: {}", self.state.signals.len());
+        println!("  Total signal mappings: {}", self.signal_name_to_id.len());
+    }
+
+    /// Debug: Get the number of operations in the SIR
+    #[allow(dead_code)]
+    pub fn debug_operation_count(&self) -> usize {
+        self.sir
+            .top_module
+            .comb_blocks
+            .iter()
+            .map(|b| b.operations.len())
+            .sum::<usize>()
+            + self
+                .sir
+                .top_module
+                .seq_blocks
+                .iter()
+                .map(|b| b.operations.len())
+                .sum::<usize>()
+    }
+
     /// Set an input signal value from u64
     ///
     /// This handles both single signals (e.g., "a") and bit-indexed signals (e.g., "a[0]", "a[1]").
@@ -503,6 +537,22 @@ impl GateLevelSimulator {
                 .signals
                 .insert(signal.id.0, vec![false; signal.width]);
         }
+    }
+
+    /// Get names of all input ports
+    pub fn get_input_names(&self) -> Vec<String> {
+        self.input_ports
+            .iter()
+            .filter_map(|id| self.signal_id_to_name.get(&id.0).cloned())
+            .collect()
+    }
+
+    /// Get names of all output ports
+    pub fn get_output_names(&self) -> Vec<String> {
+        self.output_ports
+            .iter()
+            .filter_map(|id| self.signal_id_to_name.get(&id.0).cloned())
+            .collect()
     }
 
     /// Step simulation by one cycle

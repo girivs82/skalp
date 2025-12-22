@@ -103,8 +103,6 @@ pub struct TechMapper<'a> {
     warnings: Vec<String>,
     /// Next cell ID
     next_cell_id: u32,
-    /// Next net ID
-    next_net_id: u32,
     /// Module-level safety info (from Lir)
     /// Applied to all cells during mapping
     module_safety_info: Option<LirSafetyInfo>,
@@ -120,7 +118,6 @@ impl<'a> TechMapper<'a> {
             stats: TechMapStats::default(),
             warnings: Vec::new(),
             next_cell_id: 0,
-            next_net_id: 0,
             module_safety_info: None,
         }
     }
@@ -1114,9 +1111,10 @@ impl<'a> TechMapper<'a> {
             let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
             let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
 
-            let xnor_out = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(xnor_out, format!("{}.xnor{}", path, bit)));
+            // Use add_net's return value - it assigns the correct ID
+            let xnor_out = self
+                .netlist
+                .add_net(GateNet::new(GateNetId(0), format!("{}.xnor{}", path, bit)));
             self.stats.nets_created += 1;
 
             let mut cell = Cell::new_comb(
@@ -1528,10 +1526,11 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Allocate a new net ID
+    /// NOTE: This returns the NEXT ID that will be assigned by add_net.
+    /// The caller MUST call add_net immediately after this to keep IDs in sync.
     fn alloc_net_id(&mut self) -> GateNetId {
-        let id = GateNetId(self.next_net_id);
-        self.next_net_id += 1;
-        id
+        // Use nets.len() to stay in sync with add_net which assigns IDs from nets.len()
+        GateNetId(self.netlist.nets.len() as u32)
     }
 }
 

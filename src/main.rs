@@ -1242,27 +1242,169 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
     simulate_sir_behavioral(&sir, cycles, use_gpu)
 }
 
-/// Gate-level simulation: HIR → MIR → WordLir → GateNetlist → SIR
-/// NOTE: This path is being migrated to use GateNetlist instead of legacy LIR
-fn simulate_gate_level(source_file: &PathBuf, _cycles: u64, _use_gpu: bool) -> Result<()> {
+/// Gate-level simulation: HIR → MIR → LIR → GateNetlist → SIR → Simulation
+fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
+    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_lir::builtin_libraries::builtin_generic_asic;
+    use skalp_sim::{convert_gate_netlist_to_sir, HwAccel, UnifiedSimConfig, UnifiedSimulator};
+
     println!("🔬 Gate-Level Simulation");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Source: {:?}", source_file);
     println!();
-    println!("⚠️  Gate-level simulation is being migrated to use GateNetlist.");
-    println!("   Please use behavioral simulation (--mode behavioral) for now.");
-    println!("   The new flow: HIR → MIR → WordLir → TechMapper → GateNetlist → SIR");
-    anyhow::bail!("Gate-level simulation temporarily disabled during GateNetlist migration");
-}
 
-/// Gate-level simulation from MIR (stub - pending GateNetlist migration)
-#[allow(dead_code)]
-fn simulate_gate_level_from_mir_stub(
-    _mir: &skalp_mir::Mir,
-    _cycles: u64,
-    _use_gpu: bool,
-) -> Result<()> {
-    anyhow::bail!("Gate-level simulation temporarily disabled during GateNetlist migration")
+    // Parse and build HIR
+    println!("📖 Parsing design...");
+    let hir = parse_and_build_hir_from_file(source_file).context("Failed to parse source")?;
+
+    // Lower to MIR
+    println!("🔧 Lowering to MIR...");
+    let compiler =
+        skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+    let library = builtin_generic_asic();
+
+    // Check if design has hierarchy
+    let has_hierarchy =
+        mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
+
+    // Lower to LIR and tech-map to GateNetlist
+    println!("🔩 Converting to gate-level netlist...");
+
+    let netlist = if has_hierarchy {
+        println!(
+            "   Using hierarchical synthesis ({} modules)",
+            mir.modules.len()
+        );
+
+        // Lower entire MIR hierarchy
+        let hier_lir = skalp_lir::lower_mir_hierarchical(&mir);
+        println!(
+            "   Elaborated {} instances, top={}",
+            hier_lir.instances.len(),
+            hier_lir.top_module
+        );
+
+        // Map to hierarchical gate netlist
+        let hier_netlist = skalp_lir::map_hierarchical_to_gates(&hier_lir, &library);
+        println!(
+            "   Mapped {} cells across {} instances",
+            hier_netlist.total_cell_count(),
+            hier_netlist.instance_count()
+        );
+
+        // Flatten to single netlist with proper stitching
+        hier_netlist.flatten()
+    } else {
+        println!("   Using flat synthesis (single module)");
+
+        // Find the top module
+        let top_module = mir
+            .modules
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
+
+        // Lower to LIR and tech-map
+        let lir_result = skalp_lir::lower_mir_module_to_lir(top_module);
+        let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
+        tech_result.netlist
+    };
+
+    println!("\n📊 Gate-Level Design Statistics:");
+    println!("   Module: {}", netlist.name);
+    println!("   Gate cells: {}", netlist.cells.len());
+    println!("   Nets: {}", netlist.nets.len());
+
+    // Convert GateNetlist to SIR for simulation
+    println!("\n🔄 Converting to SIR for simulation...");
+    let sir_result = convert_gate_netlist_to_sir(&netlist);
+    println!("   SIR primitives: {}", sir_result.stats.primitives_created);
+    println!(
+        "   Inputs: {}",
+        sir_result
+            .sir
+            .top_module
+            .signals
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.signal_type,
+                    skalp_sim::sir::SirSignalType::Port {
+                        direction: skalp_sim::sir::SirPortDirection::Input
+                    }
+                )
+            })
+            .count()
+    );
+    println!(
+        "   Outputs: {}",
+        sir_result
+            .sir
+            .top_module
+            .signals
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.signal_type,
+                    skalp_sim::sir::SirSignalType::Port {
+                        direction: skalp_sim::sir::SirPortDirection::Output
+                    }
+                )
+            })
+            .count()
+    );
+
+    // Create unified simulator config
+    let config = UnifiedSimConfig {
+        level: skalp_sim::SimLevel::GateLevel,
+        hw_accel: if use_gpu { HwAccel::Gpu } else { HwAccel::Cpu },
+        max_cycles: cycles,
+        capture_waveforms: true,
+    };
+
+    // Create and initialize unified simulator
+    println!("\n🔧 Running gate-level simulation...");
+    let mut simulator = UnifiedSimulator::new(config)
+        .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+    simulator
+        .load_gate_level(&sir_result.sir)
+        .map_err(|e| anyhow::anyhow!("Failed to load design: {}", e))?;
+
+    println!("   Device: {}", simulator.device_info());
+    println!("   Inputs: {:?}", simulator.get_input_names());
+    println!("   Outputs: {:?}", simulator.get_output_names());
+
+    // Find clock signal if present
+    let input_names = simulator.get_input_names();
+    let clock_name = input_names
+        .iter()
+        .find(|n| n.contains("clk") || n.contains("clock"))
+        .cloned();
+
+    // Run simulation
+    let result = if let Some(clk) = clock_name {
+        println!("   Clock: {} (toggling)", clk);
+        simulator.run_clocked(cycles, &clk)
+    } else {
+        println!("   No clock detected, running {} steps", cycles);
+        simulator.run(cycles)
+    };
+
+    println!("\n📊 Simulation Results:");
+    println!("   Cycles: {}", result.cycles);
+    println!("   Used GPU: {}", result.used_gpu);
+    println!("   Final outputs:");
+    for (name, value) in &result.outputs {
+        println!("      {} = 0x{:x}", name, value);
+    }
+
+    println!("\n✅ Gate-level simulation complete!");
+
+    Ok(())
 }
 
 /// Run behavioral SIR simulation

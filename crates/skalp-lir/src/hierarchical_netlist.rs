@@ -169,12 +169,11 @@ impl HierarchicalNetlist {
                     // Look up by name to get the FINAL net ID after stitching
                     if let Some(final_net_id) = result.get_net_id(&full_name) {
                         // Check if this net has a driver
-                        if let Some(final_net) = result.nets.get(final_net_id.0 as usize) {
+                        if let Some(final_net) = result.nets.get_mut(final_net_id.0 as usize) {
                             if final_net.driver.is_none() {
+                                final_net.is_input = true;
                                 result.inputs.push(final_net_id);
                             }
-                        } else {
-                            result.inputs.push(final_net_id);
                         }
                     }
                 }
@@ -184,7 +183,10 @@ impl HierarchicalNetlist {
                 if let Some(net) = top_inst.netlist.nets.get(output_net.0 as usize) {
                     let full_name = format!("top.{}", net.name);
                     if let Some(final_net_id) = result.get_net_id(&full_name) {
-                        result.outputs.push(final_net_id);
+                        if let Some(final_net) = result.nets.get_mut(final_net_id.0 as usize) {
+                            final_net.is_output = true;
+                            result.outputs.push(final_net_id);
+                        }
                     }
                 }
             }
@@ -370,10 +372,7 @@ impl HierarchicalNetlist {
                             && result.get_net(&parent_bit_net).is_some()
                         {
                             result.merge_nets_by_name(&parent_bit_net, &child_net_name);
-                            eprintln!(
-                                "[STITCH]   ✓ {} <-> {}",
-                                child_net_name, parent_bit_net
-                            );
+                            eprintln!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_bit_net);
                         } else {
                             // Try child bit 0 -> parent bit
                             let child_bit0 = format!("{}[0]", child_net_name);
@@ -381,10 +380,7 @@ impl HierarchicalNetlist {
                                 && result.get_net(&parent_bit_net).is_some()
                             {
                                 result.merge_nets_by_name(&parent_bit_net, &child_bit0);
-                                eprintln!(
-                                    "[STITCH]   ✓ {} <-> {}",
-                                    child_bit0, parent_bit_net
-                                );
+                                eprintln!("[STITCH]   ✓ {} <-> {}", child_bit0, parent_bit_net);
                             } else {
                                 eprintln!(
                                     "[STITCH]   ✗ {} -> {} (nets not found)",

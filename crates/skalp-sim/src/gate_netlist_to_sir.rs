@@ -23,7 +23,7 @@ use crate::sir::{
 use skalp_frontend::hir::DetectionMode;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use skalp_lir::lir::{PrimitiveId, PrimitiveType};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 // ============================================================================
 // Converter
@@ -186,6 +186,16 @@ impl GateNetlistToSirConverter {
 
     /// Map library cell type name to PrimitiveType
     fn cell_type_to_primitive(&self, cell_type: &str) -> PrimitiveType {
+        let upper = cell_type.to_uppercase();
+
+        // Check for TIE cells first (before stripping suffix)
+        if upper.starts_with("TIE_HIGH") || upper.starts_with("TIEH") {
+            return PrimitiveType::Constant { value: true };
+        }
+        if upper.starts_with("TIE_LOW") || upper.starts_with("TIEL") {
+            return PrimitiveType::Constant { value: false };
+        }
+
         // Normalize cell type (remove drive strength suffix like "_X1", "_X2")
         let base_type = cell_type
             .split('_')
@@ -244,6 +254,14 @@ impl GateNetlistToSirConverter {
                 enable_active_high: true,
             },
 
+            // Tie cells (constant generators)
+            "TIE" | "TIEH" | "TIEHI" | "TIEHIGH" | "VCC" | "ONE" => {
+                PrimitiveType::Constant { value: true }
+            }
+            "TIEL" | "TIELO" | "TIELOW" | "GND" | "ZERO" => {
+                PrimitiveType::Constant { value: false }
+            }
+
             // Default to buffer for unknown types
             _ => {
                 eprintln!(
@@ -253,6 +271,79 @@ impl GateNetlistToSirConverter {
                 PrimitiveType::Buf // Use buffer as fallback
             }
         }
+    }
+
+    /// Compute topological order for operations using Kahn's algorithm
+    ///
+    /// Returns indices into the operations vector in evaluation order.
+    /// Operations with no dependencies come first.
+    fn compute_topological_order(ops: &[SirOperation]) -> Vec<usize> {
+        let n = ops.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        // Build dependency graph
+        // signal_producers: signal_id -> operation index that produces it
+        let mut signal_producers: HashMap<u32, usize> = HashMap::new();
+
+        // For each operation, record which signals it produces
+        for (idx, op) in ops.iter().enumerate() {
+            if let SirOperation::Primitive { outputs, .. } = op {
+                for out_sig in outputs {
+                    signal_producers.insert(out_sig.0, idx);
+                }
+            }
+        }
+
+        // Build dependency counts: how many operations must run before this one
+        let mut in_degree = vec![0usize; n];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+        for (idx, op) in ops.iter().enumerate() {
+            if let SirOperation::Primitive { inputs, .. } = op {
+                for in_sig in inputs {
+                    if let Some(&producer_idx) = signal_producers.get(&in_sig.0) {
+                        if producer_idx != idx {
+                            in_degree[idx] += 1;
+                            dependents[producer_idx].push(idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm
+        let mut result = Vec::with_capacity(n);
+        let mut queue: VecDeque<usize> = VecDeque::new();
+
+        // Start with operations that have no dependencies
+        for (idx, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 {
+                queue.push_back(idx);
+            }
+        }
+
+        while let Some(idx) = queue.pop_front() {
+            result.push(idx);
+
+            // Reduce in-degree of dependent operations
+            for &dep_idx in &dependents[idx] {
+                in_degree[dep_idx] -= 1;
+                if in_degree[dep_idx] == 0 {
+                    queue.push_back(dep_idx);
+                }
+            }
+        }
+
+        // If we didn't process all operations, there's a cycle (shouldn't happen for combinational)
+        if result.len() != n {
+            // Fall back to original order
+            eprintln!("Warning: Cycle detected in combinational logic, using original order");
+            return (0..n).collect();
+        }
+
+        result
     }
 
     /// Build combinational and sequential blocks from operations
@@ -292,6 +383,9 @@ impl GateNetlistToSirConverter {
             // Remove internal signals from inputs (signals driven by other ops)
             inputs.retain(|sig| !outputs.contains(sig));
 
+            // Compute topological order for correct evaluation
+            let eval_order = Self::compute_topological_order(&comb_ops);
+
             let comb_block = CombinationalBlock {
                 id: CombBlockId(0),
                 inputs,
@@ -300,7 +394,7 @@ impl GateNetlistToSirConverter {
                 workgroup_size_hint: Some(64),
                 structural_info: Some(StructuralBlockInfo {
                     is_structural: true,
-                    eval_order: None, // TODO: Compute topological order
+                    eval_order: Some(eval_order),
                     total_fit: self.total_fit,
                 }),
             };

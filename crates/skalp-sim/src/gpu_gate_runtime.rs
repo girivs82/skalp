@@ -918,6 +918,27 @@ kernel void eval_sequential(
         )
     }
 
+    /// Get device name
+    pub fn device_name(&self) -> String {
+        self.device.name().to_string()
+    }
+
+    /// Get names of all input ports
+    pub fn get_input_names(&self) -> Vec<String> {
+        self.input_ports
+            .iter()
+            .filter_map(|id| self.signal_id_to_name.get(&id.0).cloned())
+            .collect()
+    }
+
+    /// Get names of all output ports
+    pub fn get_output_names(&self) -> Vec<String> {
+        self.output_ports
+            .iter()
+            .filter_map(|id| self.signal_id_to_name.get(&id.0).cloned())
+            .collect()
+    }
+
     /// Dump all signals (for debugging)
     pub fn dump_signals(&self) -> Vec<(String, Vec<bool>)> {
         let mut result: Vec<_> = self
