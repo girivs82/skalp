@@ -127,8 +127,15 @@ impl Cut {
     }
 
     /// Check if this cut dominates another (is a subset)
+    ///
+    /// For technology mapping, we only consider cuts of the SAME SIZE as
+    /// potentially dominating each other. This preserves cuts of different
+    /// sizes so the mapper can choose between e.g. a 2-input AND vs a
+    /// 3-input MUX that covers the same logic with different trade-offs.
     pub fn dominates(&self, other: &Cut) -> bool {
-        if self.leaves.len() > other.leaves.len() {
+        // Only same-size cuts can dominate each other
+        // This preserves diverse cut sizes for technology mapping
+        if self.leaves.len() != other.leaves.len() {
             return false;
         }
         self.leaves.iter().all(|l| other.leaves.contains(l))
@@ -279,16 +286,38 @@ impl CutSet {
         if self.cuts.len() < max_cuts {
             self.cuts.push(cut);
         } else {
-            // Replace the largest cut if the new one is smaller
-            if let Some(largest_idx) = self
-                .cuts
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, c)| c.size())
-                .map(|(i, _)| i)
-            {
-                if cut.size() < self.cuts[largest_idx].size() {
-                    self.cuts[largest_idx] = cut;
+            // When full, preserve size diversity for technology mapping
+            let cut_size = cut.size();
+            let has_same_size = self.cuts.iter().any(|c| c.size() == cut_size);
+
+            if has_same_size {
+                // Replace an existing cut of the same size
+                let same_size_idx = self.cuts.iter().position(|c| c.size() == cut_size).unwrap();
+                self.cuts[same_size_idx] = cut;
+            } else {
+                // This is a NEW size not yet represented - ensure we keep it
+                // Find the size with the most cuts and replace one of those
+                let mut size_counts: std::collections::HashMap<usize, usize> =
+                    std::collections::HashMap::new();
+                for c in &self.cuts {
+                    *size_counts.entry(c.size()).or_insert(0) += 1;
+                }
+
+                // Find the size with the most representatives
+                if let Some((&over_represented_size, &count)) =
+                    size_counts.iter().max_by_key(|(_, &cnt)| cnt)
+                {
+                    if count > 1 {
+                        // Replace one of the over-represented cuts
+                        if let Some(idx) = self
+                            .cuts
+                            .iter()
+                            .position(|c| c.size() == over_represented_size)
+                        {
+                            self.cuts[idx] = cut;
+                        }
+                    }
+                    // If all sizes have exactly 1 cut, don't replace (max diversity)
                 }
             }
         }
@@ -321,16 +350,53 @@ impl CutSet {
         if self.cuts.len() < max_cuts {
             self.cuts.push(cut);
         } else {
-            // Replace the worst cut if the new one is better
-            if let Some((worst_idx, worst_score)) = self
-                .cuts
-                .iter()
-                .enumerate()
-                .map(|(i, c)| (i, c.priority_score(priority, delay_bound)))
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                if new_score < worst_score {
-                    self.cuts[worst_idx] = cut;
+            // When full, preserve size diversity for technology mapping
+            let cut_size = cut.size();
+            let has_same_size = self.cuts.iter().any(|c| c.size() == cut_size);
+
+            if has_same_size {
+                // Replace the worst cut of the same size if new one is better
+                if let Some((worst_idx, worst_score)) = self
+                    .cuts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.size() == cut_size)
+                    .map(|(i, c)| (i, c.priority_score(priority, delay_bound)))
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                {
+                    if new_score < worst_score {
+                        self.cuts[worst_idx] = cut;
+                    }
+                }
+            } else {
+                // This is a NEW size not yet represented - ensure we keep it
+                // Find the size with the most cuts and replace the worst of those
+                let mut size_counts: std::collections::HashMap<usize, usize> =
+                    std::collections::HashMap::new();
+                for c in &self.cuts {
+                    *size_counts.entry(c.size()).or_insert(0) += 1;
+                }
+
+                // Find the size with the most representatives
+                if let Some((&over_represented_size, &count)) =
+                    size_counts.iter().max_by_key(|(_, &cnt)| cnt)
+                {
+                    if count > 1 {
+                        // Replace the worst of the over-represented cuts
+                        if let Some((worst_idx, _)) = self
+                            .cuts
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| c.size() == over_represented_size)
+                            .map(|(i, c)| (i, c.priority_score(priority, delay_bound)))
+                            .max_by(|(_, a), (_, b)| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                        {
+                            self.cuts[worst_idx] = cut;
+                        }
+                    }
+                    // If all sizes have exactly 1 cut, don't replace (max diversity)
                 }
             }
         }
@@ -824,10 +890,16 @@ mod tests {
 
     #[test]
     fn test_cut_dominates() {
+        // Same-size cuts: identical leaves = dominates
         let cut1 = Cut::new(vec![AigNodeId(1), AigNodeId(2)]);
+        let cut1_copy = Cut::new(vec![AigNodeId(1), AigNodeId(2)]);
+        assert!(cut1.dominates(&cut1_copy));
+
+        // Different-size cuts never dominate each other
+        // This preserves diverse cut sizes for technology mapping
         let cut2 = Cut::new(vec![AigNodeId(1), AigNodeId(2), AigNodeId(3)]);
-        assert!(cut1.dominates(&cut2));
-        assert!(!cut2.dominates(&cut1));
+        assert!(!cut1.dominates(&cut2)); // 2-input doesn't dominate 3-input
+        assert!(!cut2.dominates(&cut1)); // 3-input doesn't dominate 2-input
     }
 
     #[test]
@@ -844,8 +916,21 @@ mod tests {
         cs.add(Cut::new(vec![AigNodeId(1), AigNodeId(2)]), 10);
         cs.add(Cut::new(vec![AigNodeId(1), AigNodeId(2), AigNodeId(3)]), 10);
 
-        // The larger cut should be filtered out as dominated
-        assert_eq!(cs.len(), 1);
+        // Both cuts are kept because dominance only applies to same-size cuts
+        // This preserves size diversity for technology mapping
+        assert_eq!(cs.len(), 2);
+
+        // Test same-size dominance: {1,2} should dominate {1,2} (identical)
+        let mut cs2 = CutSet::new();
+        cs2.add(Cut::new(vec![AigNodeId(1), AigNodeId(2)]), 10);
+        cs2.add(Cut::new(vec![AigNodeId(1), AigNodeId(2)]), 10);
+        assert_eq!(cs2.len(), 1);
+
+        // Test same-size dominance: {1} dominates another {1}
+        let mut cs3 = CutSet::new();
+        cs3.add(Cut::new(vec![AigNodeId(1)]), 10);
+        cs3.add(Cut::new(vec![AigNodeId(1)]), 10);
+        assert_eq!(cs3.len(), 1);
     }
 
     #[test]
