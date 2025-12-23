@@ -13,6 +13,7 @@
 //! MIR → Lir (word-level) → TechMapper → GateNetlist (gate-level)
 //! ```
 
+use crate::compiled_ip::CompiledIp;
 use crate::lir::{Lir, LirOp, LirSafetyInfo, LirSignalId, LirStats};
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
@@ -51,6 +52,10 @@ pub struct MirToLirResult {
     pub stats: LirStats,
     /// Warnings generated during transformation
     pub warnings: Vec<String>,
+    /// Path to compiled IP file (if this is a blackbox with pre-compiled netlist)
+    /// When set, the tech mapper should load the netlist from this file instead of synthesizing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiled_ip_path: Option<String>,
 }
 
 /// Backward-compatible type alias
@@ -137,6 +142,7 @@ impl MirToLirTransform {
             lir: self.lir.clone(),
             stats,
             warnings: std::mem::take(&mut self.warnings),
+            compiled_ip_path: None,
         }
     }
 
@@ -1240,6 +1246,135 @@ pub enum PortConnectionInfo {
     BitSelect(String, usize),
 }
 
+/// Load a compiled IP and create a minimal LIR for it
+///
+/// This creates a placeholder LIR with just the port interfaces.
+/// The actual gate netlist will be loaded during technology mapping.
+fn load_compiled_ip_as_lir(
+    config: &skalp_frontend::hir::CompiledIpConfig,
+    module: &Module,
+) -> Result<MirToLirResult, String> {
+    use std::path::Path;
+
+    eprintln!(
+        "📦 COMPILED_IP: Loading pre-compiled IP from '{}'",
+        config.skb_path
+    );
+
+    let skb_path = Path::new(&config.skb_path);
+
+    // Try to resolve the path relative to the current directory or absolute
+    let resolved_path = if skb_path.is_absolute() {
+        skb_path.to_path_buf()
+    } else {
+        // Try current directory first
+        let cwd_path = std::env::current_dir()
+            .map(|cwd| cwd.join(skb_path))
+            .unwrap_or_else(|_| skb_path.to_path_buf());
+
+        if cwd_path.exists() {
+            cwd_path
+        } else {
+            skb_path.to_path_buf()
+        }
+    };
+
+    // Verify the file exists
+    if !resolved_path.exists() {
+        return Err(format!(
+            "Compiled IP file not found: {} (resolved to {:?})",
+            config.skb_path, resolved_path
+        ));
+    }
+
+    // Load and verify the compiled IP
+    let key = if config.encrypted {
+        // Try to load encryption key from environment or key file
+        // For now, require SKALP_IP_KEY environment variable
+        if let Ok(key_hex) = std::env::var("SKALP_IP_KEY") {
+            let key_bytes: Result<Vec<u8>, _> = (0..key_hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&key_hex[i..i + 2], 16))
+                .collect();
+            match key_bytes {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&bytes);
+                    Some(key)
+                }
+                _ => return Err("Invalid SKALP_IP_KEY format (expected 64 hex chars)".to_string()),
+            }
+        } else if let Some(ref _key_id) = config.key_id {
+            return Err(format!(
+                "Encrypted compiled IP requires SKALP_IP_KEY environment variable (key_id: {:?})",
+                config.key_id
+            ));
+        } else {
+            return Err(
+                "Encrypted compiled IP requires SKALP_IP_KEY environment variable".to_string(),
+            );
+        }
+    } else {
+        None
+    };
+
+    // Load the compiled IP
+    let compiled_ip = CompiledIp::read_from_file(&resolved_path, key.as_ref())
+        .map_err(|e| format!("Failed to read compiled IP: {}", e))?;
+
+    // Verify port count matches (basic sanity check)
+    if compiled_ip.port_info.len() != module.ports.len() {
+        eprintln!(
+            "⚠️ COMPILED_IP: Port count mismatch - compiled IP has {} ports, module has {}",
+            compiled_ip.port_info.len(),
+            module.ports.len()
+        );
+    }
+
+    eprintln!(
+        "📦 COMPILED_IP: Loaded '{}' successfully ({} ports, {} cells)",
+        compiled_ip.header.library_name,
+        compiled_ip.port_info.len(),
+        compiled_ip.netlist.cells.len()
+    );
+
+    // Create a minimal LIR with just port interfaces
+    // The actual implementation will come from the pre-compiled netlist
+    let mut lir = Lir::new(module.name.clone());
+
+    // Add port signals
+    for port in &module.ports {
+        let width = MirToLirTransform::get_type_width(&port.port_type);
+        let is_input = matches!(port.direction, PortDirection::Input);
+
+        let signal_id = if is_input {
+            lir.add_input(port.name.clone(), width)
+        } else {
+            lir.add_output(port.name.clone(), width)
+        };
+
+        // Mark clock and reset signals
+        if port.name.contains("clk") || port.name.contains("clock") {
+            lir.clocks.push(signal_id);
+        }
+        if port.name.contains("rst") || port.name.contains("reset") {
+            lir.resets.push(signal_id);
+        }
+    }
+
+    let stats = LirStats::from_lir(&lir);
+
+    Ok(MirToLirResult {
+        lir,
+        stats,
+        warnings: vec![format!(
+            "Module '{}' uses pre-compiled IP from '{}'",
+            module.name, config.skb_path
+        )],
+        compiled_ip_path: Some(resolved_path.to_string_lossy().to_string()),
+    })
+}
+
 /// Lower entire MIR hierarchy to per-instance LIR
 ///
 /// This function traverses the module hierarchy starting from the top module,
@@ -1305,8 +1440,24 @@ fn elaborate_instance(
     parent_connections: &HashMap<String, PortConnectionInfo>,
     result: &mut HierarchicalMirToLirResult,
 ) {
-    // Lower this module to LIR
-    let lir_result = lower_mir_module_to_lir(module);
+    // Check if this module is a compiled IP (blackbox with pre-compiled netlist)
+    let lir_result = if let Some(ref config) = module.compiled_ip_config {
+        // Load the compiled IP from the .skb file
+        match load_compiled_ip_as_lir(config, module) {
+            Ok(lir_result) => lir_result,
+            Err(e) => {
+                eprintln!(
+                    "⚠️ COMPILED_IP: Failed to load '{}' for module '{}': {}",
+                    config.skb_path, module.name, e
+                );
+                eprintln!("⚠️ COMPILED_IP: Falling back to normal elaboration");
+                lower_mir_module_to_lir(module)
+            }
+        }
+    } else {
+        // Normal MIR to LIR transformation
+        lower_mir_module_to_lir(module)
+    };
 
     // Collect child instance paths
     let mut children: Vec<String> = Vec::new();
@@ -1565,6 +1716,7 @@ mod tests {
             span: None,
             pipeline_config: None,
             vendor_ip_config: None,
+            compiled_ip_config: None,
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,
@@ -1669,6 +1821,7 @@ mod tests {
             span: None,
             pipeline_config: None,
             vendor_ip_config: None,
+            compiled_ip_config: None,
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,
@@ -1772,6 +1925,7 @@ mod tests {
             span: None,
             pipeline_config: None,
             vendor_ip_config: None,
+            compiled_ip_config: None,
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,

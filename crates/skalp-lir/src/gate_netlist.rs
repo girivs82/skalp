@@ -352,7 +352,7 @@ pub struct GateNet {
     pub is_detection: bool,
     /// Detection signal configuration (temporal mode for safety analysis)
     /// Includes mode (continuous/boot/periodic) and optional interval
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Note: Not using skip_serializing_if because bincode uses positional encoding
     pub detection_config: Option<DetectionConfig>,
 }
 
@@ -470,9 +470,11 @@ pub struct GateNetlist {
     pub clocks: Vec<GateNetId>,
     /// Reset net IDs
     pub resets: Vec<GateNetId>,
-    /// Net name to ID mapping
+    /// Net name to ID mapping (skipped during serialization - rebuilt from nets)
+    #[serde(skip, default)]
     net_map: HashMap<String, GateNetId>,
-    /// Statistics
+    /// Statistics (skipped during serialization - rebuilt from cells/nets)
+    #[serde(skip, default)]
     pub stats: GateNetlistStats,
 }
 
@@ -491,6 +493,20 @@ impl GateNetlist {
             net_map: HashMap::new(),
             stats: GateNetlistStats::default(),
         }
+    }
+
+    /// Rebuild the net_map and stats after deserialization.
+    /// Must be called after deserializing a GateNetlist since these fields
+    /// are skipped during serialization for deterministic checksums.
+    pub fn rebuild_cache(&mut self) {
+        // Rebuild net_map from nets
+        self.net_map.clear();
+        for net in &self.nets {
+            self.net_map.insert(net.name.clone(), net.id);
+        }
+
+        // Rebuild stats
+        self.stats = GateNetlistStats::from_netlist(self);
     }
 
     /// Add a net and return its ID

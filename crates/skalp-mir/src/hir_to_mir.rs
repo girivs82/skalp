@@ -314,6 +314,18 @@ impl<'hir> HirToMir<'hir> {
                          config.ip_name, config.vendor, entity.name);
             }
 
+            // Propagate compiled IP configuration from HIR entity to MIR module
+            // When set, this module is a blackbox with pre-compiled netlist
+            if let Some(ref config) = entity.compiled_ip_config {
+                module.compiled_ip_config = Some(config.clone());
+                eprintln!(
+                    "📦 COMPILED_IP: Entity '{}' is a compiled IP from '{}'{}",
+                    entity.name,
+                    config.skb_path,
+                    if config.encrypted { " (encrypted)" } else { "" }
+                );
+            }
+
             // Propagate power domains from HIR entity to MIR module
             if !entity.power_domains.is_empty() {
                 module.power_domains = entity.power_domains.clone();

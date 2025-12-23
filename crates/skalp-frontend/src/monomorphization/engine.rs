@@ -311,6 +311,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             power_domain_config: entity.power_domain_config.clone(), // Preserve power domain config for CCF
             safety_mechanism_config: entity.safety_mechanism_config.clone(), // Preserve safety config
             seooc_config: entity.seooc_config.clone(), // Preserve SEooC config
+            compiled_ip_config: entity.compiled_ip_config.clone(), // Preserve compiled IP config
         };
 
         (specialized_entity, port_id_map)

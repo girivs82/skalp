@@ -180,6 +180,10 @@ pub struct HirEntity {
     /// Skalp will calculate required DC for external mechanisms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seooc_config: Option<SeoocConfig>,
+    /// Compiled IP configuration (from #[compiled_ip("path.skb")] attribute)
+    /// When present, this entity's implementation comes from a pre-compiled .skb file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiled_ip_config: Option<CompiledIpConfig>,
 }
 
 /// Safety mechanism configuration for entities (from #[safety_mechanism(...)] attribute)
@@ -1028,6 +1032,55 @@ impl VendorIpConfig {
             vendor: VendorType::Generic,
             black_box: true,
             ..Default::default()
+        }
+    }
+}
+
+// ============================================================================
+// Compiled IP Configuration
+// ============================================================================
+
+/// Configuration for compiled IP entities (from #[compiled_ip("path.skb")] attribute)
+///
+/// When present on an entity, indicates that the entity's implementation
+/// comes from a pre-compiled .skb file rather than SKALP source code.
+///
+/// # Example
+///
+/// ```skalp
+/// #[compiled_ip("lib/dsp_block.skb")]
+/// entity DspBlock {
+///     in  clk: clock,
+///     in  data_in: bit<32>,
+///     out data_out: bit<48>
+/// }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompiledIpConfig {
+    /// Path to the .skb file (relative to the .skh file location)
+    pub skb_path: String,
+    /// Whether the .skb file is encrypted
+    pub encrypted: bool,
+    /// Key ID for decryption (if encrypted, for key management)
+    pub key_id: Option<String>,
+}
+
+impl CompiledIpConfig {
+    /// Create a new compiled IP config
+    pub fn new(skb_path: impl Into<String>) -> Self {
+        Self {
+            skb_path: skb_path.into(),
+            encrypted: false,
+            key_id: None,
+        }
+    }
+
+    /// Create an encrypted compiled IP config
+    pub fn encrypted(skb_path: impl Into<String>, key_id: Option<String>) -> Self {
+        Self {
+            skb_path: skb_path.into(),
+            encrypted: true,
+            key_id,
         }
     }
 }

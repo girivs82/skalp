@@ -2,6 +2,9 @@
 //!
 //! Handles finding and loading SKALP modules based on import paths.
 //! Resolves `use` statements to actual file paths and loads dependencies.
+//!
+//! Supports both `.sk` source files and `.skh` header files for compiled IP.
+//! When resolving imports, `.sk` files take precedence over `.skh` files.
 
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -10,6 +13,24 @@ use std::path::{Path, PathBuf};
 use crate::hir::{Hir, HirImport, HirImportPath};
 use crate::hir_builder::HirBuilderContext;
 use crate::parse;
+
+/// Supported file extensions for SKALP modules
+/// `.sk` - Source files (full implementation)
+/// `.skh` - Header files (compiled IP declarations)
+const MODULE_EXTENSIONS: [&str; 2] = ["sk", "skh"];
+
+/// Try to find a module file with either `.sk` or `.skh` extension
+/// Returns the first existing file path, preferring `.sk` over `.skh`
+fn try_module_extensions(base_path: &Path) -> Option<PathBuf> {
+    for ext in MODULE_EXTENSIONS {
+        let mut path = base_path.to_path_buf();
+        path.set_extension(ext);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
 
 /// Module resolver handles finding and loading modules
 pub struct ModuleResolver {
@@ -204,15 +225,14 @@ impl ModuleResolver {
             // Skip the "crate" segment and resolve from root_dir
             let remaining_segments = &segments[1..];
 
-            // Try full path as module
+            // Try full path as module (.sk or .skh)
             let mut full_path = self.root_dir.clone();
             for segment in remaining_segments {
                 full_path.push(segment);
             }
-            full_path.set_extension("sk");
 
-            if full_path.exists() {
-                return Ok(full_path);
+            if let Some(resolved) = try_module_extensions(&full_path) {
+                return Ok(resolved);
             }
 
             // Try without last segment (last segment is symbol name)
@@ -221,22 +241,21 @@ impl ModuleResolver {
                 for segment in &remaining_segments[..remaining_segments.len() - 1] {
                     partial_path.push(segment);
                 }
-                partial_path.set_extension("sk");
 
-                if partial_path.exists() {
-                    return Ok(partial_path);
+                if let Some(resolved) = try_module_extensions(&partial_path) {
+                    return Ok(resolved);
                 }
             }
 
-            // Try with lib.sk (module directory with lib.sk file)
+            // Try with lib.sk or lib.skh (module directory with lib file)
             let mut lib_path = self.root_dir.clone();
             for segment in remaining_segments {
                 lib_path.push(segment);
             }
-            lib_path.push("lib.sk");
+            lib_path.push("lib");
 
-            if lib_path.exists() {
-                return Ok(lib_path);
+            if let Some(resolved) = try_module_extensions(&lib_path) {
+                return Ok(resolved);
             }
 
             bail!(
@@ -248,17 +267,17 @@ impl ModuleResolver {
         // Try to resolve the path
         // The last segment might be a symbol name or a module name
         // We try both: foo/bar/baz.sk and foo/bar.sk (where baz is a symbol)
+        // Also supports .skh files for compiled IP headers (with .sk taking precedence)
 
         for search_path in &self.search_paths {
-            // Try full path as module
+            // Try full path as module (.sk or .skh)
             let mut full_path = search_path.clone();
             for segment in segments {
                 full_path.push(segment);
             }
-            full_path.set_extension("sk");
 
-            if full_path.exists() {
-                return Ok(full_path);
+            if let Some(resolved) = try_module_extensions(&full_path) {
+                return Ok(resolved);
             }
 
             // Try without last segment (last segment is symbol name)
@@ -267,22 +286,21 @@ impl ModuleResolver {
                 for segment in &segments[..segments.len() - 1] {
                     partial_path.push(segment);
                 }
-                partial_path.set_extension("sk");
 
-                if partial_path.exists() {
-                    return Ok(partial_path);
+                if let Some(resolved) = try_module_extensions(&partial_path) {
+                    return Ok(resolved);
                 }
             }
 
-            // Try with lib.sk (module directory with lib.sk file)
+            // Try with lib.sk or lib.skh (module directory with lib file)
             let mut lib_path = search_path.clone();
             for segment in segments {
                 lib_path.push(segment);
             }
-            lib_path.push("lib.sk");
+            lib_path.push("lib");
 
-            if lib_path.exists() {
-                return Ok(lib_path);
+            if let Some(resolved) = try_module_extensions(&lib_path) {
+                return Ok(resolved);
             }
         }
 

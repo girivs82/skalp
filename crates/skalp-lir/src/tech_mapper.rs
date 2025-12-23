@@ -1583,6 +1583,7 @@ pub fn map_hierarchical_to_gates(
     hier_lir: &crate::mir_to_lir::HierarchicalMirToLirResult,
     library: &TechLibrary,
 ) -> crate::hierarchical_netlist::HierarchicalNetlist {
+    use crate::compiled_ip::CompiledIp;
     use crate::hierarchical_netlist::{HierarchicalNetlist, InstanceNetlist, PortConnection};
     use crate::mir_to_lir::PortConnectionInfo;
 
@@ -1590,7 +1591,42 @@ pub fn map_hierarchical_to_gates(
 
     // Map each instance's LIR to a GateNetlist
     for (path, inst_lir) in &hier_lir.instances {
-        let tech_result = map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library);
+        // Check if this is a compiled IP (pre-compiled netlist)
+        let tech_result = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
+            // Load the pre-compiled netlist directly
+            match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
+                Ok(compiled_ip) => {
+                    eprintln!(
+                        "📦 COMPILED_IP: Using pre-compiled netlist for '{}' from '{}'",
+                        inst_lir.module_name, compiled_ip_path
+                    );
+                    TechMapResult {
+                        netlist: compiled_ip.netlist.clone(),
+                        stats: TechMapStats {
+                            nodes_processed: 0,
+                            cells_created: compiled_ip.netlist.cells.len(),
+                            nets_created: compiled_ip.netlist.nets.len(),
+                            direct_mappings: 0,
+                            decomposed_mappings: 0,
+                        },
+                        warnings: vec![format!(
+                            "Loaded pre-compiled netlist from '{}'",
+                            compiled_ip_path
+                        )],
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "⚠️ COMPILED_IP: Failed to load '{}', falling back to synthesis: {}",
+                        compiled_ip_path, e
+                    );
+                    map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library)
+                }
+            }
+        } else {
+            // Normal synthesis path
+            map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library)
+        };
         let mut inst_netlist =
             InstanceNetlist::new(inst_lir.module_name.clone(), tech_result.netlist);
 

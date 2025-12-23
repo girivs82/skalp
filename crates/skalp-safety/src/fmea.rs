@@ -1178,6 +1178,7 @@ mod tests {
             power_domain_config: None,
             safety_mechanism_config: None,
             seooc_config: None,
+            compiled_ip_config: None,
         };
 
         let result = generator.generate_from_design(&[entity], &[], &[]);

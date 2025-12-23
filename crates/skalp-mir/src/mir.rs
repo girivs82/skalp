@@ -113,6 +113,10 @@ pub struct Module {
     /// Vendor IP configuration from `#[xilinx_ip]`, `#[intel_ip]`, etc. attributes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor_ip_config: Option<skalp_frontend::hir::VendorIpConfig>,
+    /// Compiled IP configuration from `#[compiled_ip("path.skb")]` attribute
+    /// When set, this module is a blackbox that will be loaded from a pre-compiled binary
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_ip_config: Option<skalp_frontend::hir::CompiledIpConfig>,
     /// Power domain declarations (mirrors clock_domains pattern)
     pub power_domains: Vec<skalp_frontend::hir::HirPowerDomain>,
     /// Power domain configuration for CCF analysis (from #[power_domain("name")] attribute)
@@ -1287,6 +1291,7 @@ impl Module {
             span: None,
             pipeline_config: None,
             vendor_ip_config: None,
+            compiled_ip_config: None,
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,

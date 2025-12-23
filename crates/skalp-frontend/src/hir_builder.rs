@@ -142,6 +142,10 @@ pub struct HirBuilderContext {
     /// Set when we see `#[xilinx_ip("...")]` or similar before an entity declaration
     pending_vendor_ip_config: Option<VendorIpConfig>,
 
+    /// Pending compiled IP config from most recent attribute
+    /// Set when we see `#[compiled_ip("path.skb")]` before an entity declaration
+    pending_compiled_ip_config: Option<CompiledIpConfig>,
+
     /// Pending breakpoint config from most recent attribute
     /// Set when we see `#[breakpoint]` or `#[breakpoint(condition="...")]` before a signal
     pending_breakpoint_config: Option<BreakpointConfig>,
@@ -292,6 +296,7 @@ impl HirBuilderContext {
             pending_trace_config: None,
             pending_cdc_config: None,
             pending_vendor_ip_config: None,
+            pending_compiled_ip_config: None,
             pending_breakpoint_config: None,
             pending_power_config: None,
             pending_safety_config: None,
@@ -937,6 +942,9 @@ impl HirBuilderContext {
             entity_power_domain_config
         };
 
+        // Consume pending compiled IP config (from #[compiled_ip("path.skb")] attribute)
+        let compiled_ip_config = self.pending_compiled_ip_config.take();
+
         Some(HirEntity {
             id,
             name,
@@ -953,6 +961,7 @@ impl HirBuilderContext {
             power_domain_config: entity_power_domain_config,
             safety_mechanism_config,
             seooc_config,
+            compiled_ip_config,
         })
     }
 
@@ -7216,6 +7225,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Try to extract compiled IP config (e.g., #[compiled_ip("path.skb")])
+            if let Some(config) = self.extract_compiled_ip_config_from_intent_value(&intent_value) {
+                self.pending_compiled_ip_config = Some(config);
+                return;
+            }
+
             // Try to extract breakpoint config (e.g., #[breakpoint] or #[breakpoint(condition="...")])
             if let Some(config) = self.extract_breakpoint_config_from_intent_value(&intent_value) {
                 self.pending_breakpoint_config = Some(config);
@@ -7921,6 +7936,97 @@ impl HirBuilderContext {
             version,
             black_box,
             parameters,
+        })
+    }
+
+    /// Extract compiled IP configuration from IntentValue
+    ///
+    /// Parses `#[compiled_ip("path.skb")]` or `#[compiled_ip("path.skb", encrypted = true)]`
+    fn extract_compiled_ip_config_from_intent_value(
+        &self,
+        intent_value: &SyntaxNode,
+    ) -> Option<CompiledIpConfig> {
+        // Recursively collect all tokens from the intent value and its children
+        fn collect_all_tokens(
+            node: &SyntaxNode,
+        ) -> Vec<rowan::SyntaxToken<crate::syntax::SkalplLanguage>> {
+            let mut tokens = Vec::new();
+            for elem in node.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(token) => tokens.push(token),
+                    rowan::NodeOrToken::Node(child) => tokens.extend(collect_all_tokens(&child)),
+                }
+            }
+            tokens
+        }
+
+        let tokens = collect_all_tokens(intent_value);
+
+        // Look for "compiled_ip" identifier
+        let has_compiled_ip = tokens
+            .iter()
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "compiled_ip");
+
+        if !has_compiled_ip {
+            return None;
+        }
+
+        // Parse the path and optional parameters
+        let mut skb_path: Option<String> = None;
+        let mut encrypted = false;
+        let mut key_id: Option<String> = None;
+        let mut current_key: Option<&str> = None;
+
+        for token in tokens.iter() {
+            // First string literal is the path
+            if token.kind() == SyntaxKind::StringLiteral && skb_path.is_none() {
+                let text = token.text();
+                skb_path = Some(text.trim_matches('"').to_string());
+                continue;
+            }
+
+            // Handle key names
+            if token.kind() == SyntaxKind::Ident {
+                match token.text() {
+                    "encrypted" => current_key = Some("encrypted"),
+                    "key_id" | "key" => current_key = Some("key_id"),
+                    "true" if current_key == Some("encrypted") => {
+                        encrypted = true;
+                        current_key = None;
+                    }
+                    "false" if current_key == Some("encrypted") => {
+                        encrypted = false;
+                        current_key = None;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Handle string values for key_id
+            if token.kind() == SyntaxKind::StringLiteral && current_key == Some("key_id") {
+                let text = token.text();
+                key_id = Some(text.trim_matches('"').to_string());
+                current_key = None;
+            }
+
+            // Handle bool keywords
+            if token.kind() == SyntaxKind::TrueKw && current_key == Some("encrypted") {
+                encrypted = true;
+                current_key = None;
+            }
+            if token.kind() == SyntaxKind::FalseKw && current_key == Some("encrypted") {
+                encrypted = false;
+                current_key = None;
+            }
+        }
+
+        // Path is required
+        let skb_path = skb_path?;
+
+        Some(CompiledIpConfig {
+            skb_path,
+            encrypted,
+            key_id,
         })
     }
 

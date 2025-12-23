@@ -12,6 +12,7 @@
 //! - [`LirOp`] - Word-level operations (Add, Mux2, Reg, etc.)
 //! - [`GateNetlist`] - Gate-level netlist from technology mapping
 //! - [`PrimitiveType`] - Type of gate primitive (AND, OR, DFF, MUX2, etc.)
+//! - [`CompiledIp`] - Precompiled IP binary format for distribution
 //!
 //! # Example
 //!
@@ -25,6 +26,7 @@
 //! println!("Cells: {}", gate_netlist.netlist.cells.len());
 //! ```
 
+pub mod compiled_ip;
 pub mod gate_netlist;
 pub mod gate_optimizer;
 pub mod hierarchical_netlist;
@@ -98,3 +100,9 @@ pub use synth::{Aig, AigBuilder, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigS
 
 // Other exports
 pub use netlist::Netlist;
+
+// Compiled IP format
+pub use compiled_ip::{
+    generate_header, CompiledIp, CompiledIpHeader, CompiledPortDirection, CompiledPortInfo,
+    GenericValue, SKB_MAGIC, SKB_VERSION,
+};

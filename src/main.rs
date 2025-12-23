@@ -354,6 +354,44 @@ enum Commands {
         #[arg(long, default_value = "standard")]
         mode: String,
     },
+
+    /// Compile a design to pre-compiled IP format (.skb)
+    ///
+    /// Creates a binary distribution file containing the synthesized gate netlist.
+    /// The compiled IP can be used as a blackbox by importing the generated header file (.skh).
+    Compile {
+        /// Source file (.sk)
+        #[arg(short, long)]
+        source: PathBuf,
+
+        /// Output file (.skb)
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Generate header file (.skh) for import
+        #[arg(long)]
+        header: Option<PathBuf>,
+
+        /// Entity name to compile (if not specified, uses the top-level entity)
+        #[arg(long)]
+        entity: Option<String>,
+
+        /// Encrypt the compiled IP
+        #[arg(long)]
+        encrypt: bool,
+
+        /// Path to AES-256 key file (32 bytes) for encryption
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+
+        /// Technology library (default: generic_asic)
+        #[arg(long, default_value = "generic_asic")]
+        library: String,
+
+        /// Optimization preset
+        #[arg(long)]
+        optimize: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -561,6 +599,28 @@ fn main() -> Result<()> {
             mode,
         } => {
             train_ml_model(&data, &output, epochs, learning_rate, batch_size, &mode)?;
+        }
+
+        Commands::Compile {
+            source,
+            output,
+            header,
+            entity,
+            encrypt,
+            key_file,
+            library,
+            optimize,
+        } => {
+            compile_to_ip(
+                &source,
+                &output,
+                header.as_deref(),
+                entity.as_deref(),
+                encrypt,
+                key_file.as_deref(),
+                &library,
+                optimize.as_deref(),
+            )?;
         }
     }
 
@@ -1128,6 +1188,173 @@ fn train_ml_model(
         stats.best_val_accuracy * 100.0,
         stats.best_epoch + 1
     );
+
+    Ok(())
+}
+
+/// Compile a design to pre-compiled IP format (.skb)
+///
+/// This function synthesizes the design to a gate netlist and packages it
+/// as a distributable binary file. Optionally generates a header file (.skh)
+/// for importing the compiled IP in other designs.
+#[allow(clippy::too_many_arguments)]
+fn compile_to_ip(
+    source: &Path,
+    output: &Path,
+    header: Option<&Path>,
+    entity_name: Option<&str>,
+    encrypt: bool,
+    key_file: Option<&Path>,
+    library_name: &str,
+    optimize: Option<&str>,
+) -> Result<()> {
+    use skalp_frontend::hir_builder::HirBuilderContext;
+    use skalp_frontend::parse;
+    use skalp_lir::{
+        compiled_ip::{generate_header, CompiledIp},
+        get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_optimized,
+    };
+    use skalp_mir::hir_to_mir::HirToMir;
+
+    println!("📦 Compiling to IP: {:?}", source);
+    println!("   Output: {:?}", output);
+    if let Some(h) = header {
+        println!("   Header: {:?}", h);
+    }
+    if encrypt {
+        println!("   Encryption: enabled");
+    }
+    println!();
+
+    // Read and parse source file
+    let source_code = fs::read_to_string(source)
+        .with_context(|| format!("Failed to read source file: {:?}", source))?;
+
+    let (syntax_tree, parse_errors) = parse::parse_with_errors(&source_code);
+    if !parse_errors.is_empty() {
+        for err in &parse_errors {
+            eprintln!("Parse error: {}", err.message);
+        }
+        anyhow::bail!("Parsing failed with {} errors", parse_errors.len());
+    }
+
+    // Build HIR
+    let mut builder = HirBuilderContext::new();
+    let hir = builder
+        .build(&syntax_tree)
+        .map_err(|errors| anyhow::anyhow!("HIR build failed: {:?}", errors.first()))?;
+
+    // Find entity to compile
+    let entity = if let Some(name) = entity_name {
+        hir.entities
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found", name))?
+    } else {
+        hir.entities
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No entities found in source file"))?
+    };
+
+    println!("   Entity: {}", entity.name);
+
+    // Convert to MIR
+    let mut hir_to_mir = HirToMir::new();
+    let mir = hir_to_mir.transform(&hir);
+
+    let module = mir
+        .modules
+        .iter()
+        .find(|m| m.name == entity.name)
+        .ok_or_else(|| anyhow::anyhow!("Module '{}' not found in MIR", entity.name))?;
+
+    // Convert to LIR
+    let lir_result = lower_mir_module_to_lir(module);
+    println!(
+        "   LIR: {} signals, {} nodes",
+        lir_result.lir.signals.len(),
+        lir_result.lir.nodes.len()
+    );
+
+    // Load technology library
+    let library = get_stdlib_library(library_name)
+        .map_err(|e| anyhow::anyhow!("Failed to load library '{}': {}", library_name, e))?;
+    println!("   Library: {}", library_name);
+
+    // Technology mapping
+    let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
+    let mut netlist = tech_result.netlist;
+    println!("   Cells: {} gates", netlist.cells.len());
+
+    // Apply optimization if requested
+    if let Some(preset) = optimize {
+        println!("   Optimizing with preset: {}", preset);
+        let opt_options = OptimizationOptions {
+            preset: Some(preset.to_string()),
+            ..Default::default()
+        };
+        netlist = apply_synthesis_optimization(&netlist, &library, &opt_options)?;
+        println!("   Optimized: {} gates", netlist.cells.len());
+    }
+
+    // Create CompiledIp
+    let compiled = CompiledIp::new(netlist, library_name);
+    println!(
+        "   Compiled IP: {} ports, {} cells",
+        compiled.port_info.len(),
+        compiled.netlist.cells.len()
+    );
+
+    // Handle encryption key
+    let key: Option<[u8; 32]> = if encrypt {
+        if let Some(key_path) = key_file {
+            // Read key from file
+            let key_bytes = fs::read(key_path)
+                .with_context(|| format!("Failed to read key file: {:?}", key_path))?;
+            if key_bytes.len() != 32 {
+                anyhow::bail!("Key file must be exactly 32 bytes (AES-256)");
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&key_bytes);
+            Some(key)
+        } else if let Ok(key_hex) = std::env::var("SKALP_IP_KEY") {
+            // Read key from environment variable
+            let key_bytes: Result<Vec<u8>, _> = (0..key_hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&key_hex[i..i + 2], 16))
+                .collect();
+            match key_bytes {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&bytes);
+                    Some(key)
+                }
+                _ => anyhow::bail!("Invalid SKALP_IP_KEY format (expected 64 hex chars)"),
+            }
+        } else {
+            anyhow::bail!("Encryption requires --key-file or SKALP_IP_KEY environment variable");
+        }
+    } else {
+        None
+    };
+
+    // Write compiled IP
+    compiled
+        .write_to_file(output, key.as_ref())
+        .map_err(|e| anyhow::anyhow!("Failed to write compiled IP: {}", e))?;
+    println!("\n✅ Compiled IP written to: {:?}", output);
+
+    // Generate header file if requested
+    if let Some(header_path) = header {
+        let skb_relative_path = output
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("compiled.skb");
+        let header_content = generate_header(&compiled, skb_relative_path);
+        fs::write(header_path, &header_content)
+            .with_context(|| format!("Failed to write header file: {:?}", header_path))?;
+        println!("✅ Header file written to: {:?}", header_path);
+    }
 
     Ok(())
 }
